@@ -1,0 +1,15 @@
+{
+  "default": {
+    "fala":      { "fonte": "CCDaveGibbonsLower W00 Regular.ttf", "force_upper": true },
+    "narracao":  { "fonte": "CCDaveGibbonsLower W00 Regular.ttf", "force_upper": true },
+    "sfx":       { "fonte": "CCDaveGibbonsLower W00 Regular.ttf", "force_upper": true },
+    "pensamento":{ "fonte": "CCDaveGibbonsLower W00 Regular.ttf", "force_upper": true }
+  },
+  "available": [
+    { "arquivo": "CCDaveGibbonsLower W00 Regular.ttf", "estilo": "comic-padrao",  "serif": false, "detector": true },
+    { "arquivo": "ComicNeue-Regular.ttf",              "estilo": "comic-alt",     "serif": false, "detector": true },
+    { "arquivo": "Newrotic.ttf",                       "estilo": "impacto",       "serif": false, "detector": true },
+    { "arquivo": "KOMIKAX_.ttf",                       "estilo": "acao",          "serif": false, "detector": true }
+  ],
+  "notes": "CCDaveGibbons é a fonte base. DK Full Blast e SINGLE FIGHTER removidas (OTF problemáticas)."
+}

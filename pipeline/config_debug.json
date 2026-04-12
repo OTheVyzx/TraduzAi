@@ -1,0 +1,10 @@
+{
+  "source_path": "d:\\mangatl\\exemplos\\exemploptbr\\ArinVale_Capítulo 1_0cd8e7.cbz",
+  "work_dir": "D:\\mangatl\\testes\\debug_pipeline",
+  "models_dir": "C:\\Users\\PICHAU\\AppData\\Roaming\\com.mangatl.app\\models",
+  "api_key": "test-key",
+  "enable_ocr": true,
+  "enable_translate": false,
+  "enable_inpaint": true,
+  "enable_typeset": true
+}

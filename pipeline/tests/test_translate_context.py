@@ -1,0 +1,136 @@
+import unittest
+from unittest.mock import patch
+
+from translator.translate import (
+    _build_context_hints,
+    _build_text_payload,
+    _lookup_memory_translation,
+    _postprocess,
+    _preprocess_text,
+    _prepare_source_text_for_translation,
+    _resolve_translation_backend,
+    _review_translation_grammar_semantics,
+)
+
+
+class TranslateContextTests(unittest.TestCase):
+    def test_sfx_preprocess_preserves_uppercase(self):
+        processed = _preprocess_text("BANG!!", tipo="sfx")
+        self.assertEqual(processed, "BANG!!")
+
+    def test_sfx_postprocess_keeps_uppercase(self):
+        processed = _postprocess("estrondo!!", was_upper=True, tipo="sfx")
+        self.assertEqual(processed, "ESTRONDO!!")
+
+    def test_build_text_payload_includes_local_context(self):
+        texts = [
+            {"text": "Who are you?", "tipo": "fala"},
+            {"text": "Martha...", "tipo": "fala"},
+            {"text": "Boom", "tipo": "sfx"},
+        ]
+        history = [{"source": "Who are you?", "translated": "Quem e voce?"}]
+
+        payload = _build_text_payload(texts, 1, history)
+
+        self.assertEqual(payload["tipo"], "fala")
+        self.assertEqual(payload["context_before"], "Who are you?")
+        self.assertEqual(payload["context_after"], "Boom")
+        self.assertEqual(payload["history_tail"][0]["translated"], "Quem e voce?")
+
+    def test_context_hints_include_new_structured_fields(self):
+        hints = _build_context_hints(
+            {
+                "aliases": ["Mercenario"],
+                "termos": ["Mana Core"],
+                "faccoes": ["Legiao Cinzenta"],
+                "relacoes": ["Ghislain -> Vanessa"],
+                "resumo_por_arco": ["Arco 1"],
+                "memoria_lexical": {"Mana Core": "Nucleo de Mana"},
+            },
+            {"Ghislain": "Ghislain"},
+        )
+        self.assertIn("ALIASES: Mercenario", hints)
+        self.assertIn("TERMOS: Mana Core", hints)
+        self.assertIn('"Mana Core": "Nucleo de Mana"', hints)
+
+    def test_lookup_memory_translation_prefers_structured_context(self):
+        translated = _lookup_memory_translation(
+            "Mana Core",
+            "fala",
+            {"memoria_lexical": {"Mana Core": "Nucleo de Mana"}},
+            {},
+        )
+        self.assertEqual(translated, "Nucleo de Mana")
+
+    def test_lookup_memory_translation_uses_corpus_memory_map(self):
+        translated = _lookup_memory_translation(
+            "Do you think",
+            "fala",
+            {"corpus_memoria_lexical": {"Do you think": "Voce acha que"}},
+            {},
+        )
+        self.assertEqual(translated, "Voce acha que")
+
+    def test_context_hints_include_corpus_candidates(self):
+        hints = _build_context_hints(
+            {
+                "corpus_memory_candidates": [
+                    {"source_text": "Do you think", "target_text": "Voce acha que"},
+                    {"source_text": "Knight", "target_text": "Cavaleiro"},
+                ]
+            },
+            {},
+        )
+        self.assertIn("MEMORIA_CORPUS:", hints)
+        self.assertIn("Do you think => Voce acha que", hints)
+
+    def test_prepare_source_text_for_translation_repairs_ocr_artifacts(self):
+        prepared = _prepare_source_text_for_translation("COYLD THAT LIGHTBES", tipo="fala")
+        self.assertEqual(prepared, "Could that light be...?!")
+
+    def test_review_translation_grammar_semantics_fixes_literal_combat_phrase(self):
+        reviewed = _review_translation_grammar_semantics(
+            source_text="YOU SAID YOU COULD SEE THROUGH ALL MY ATTACKS, RIGHT?",
+            translated_text="Vocę disse que podia ver através de todos os meus ataques, certo?",
+            tipo="fala",
+        )
+        self.assertEqual(reviewed, "Você disse que podia enxergar todos os meus golpes, certo?")
+
+    def test_postprocess_applies_source_aware_light_question_fix(self):
+        processed = _postprocess(
+            "PODE SER ESSA LUZ",
+            was_upper=True,
+            tipo="fala",
+            source_text="COYLD THAT LIGHTBES",
+        )
+        self.assertEqual(processed, "PODERIA SER AQUELA LUZ...?!")
+
+    def test_resolve_translation_backend_prefers_local_ollama_when_available(self):
+        with patch.dict("os.environ", {}, clear=False):
+            backend = _resolve_translation_backend(
+                google_ok=True,
+                ollama_status={
+                    "running": True,
+                    "models": ["mangatl-translator:latest"],
+                    "has_translator": True,
+                },
+            )
+
+        self.assertEqual(backend, "ollama")
+
+    def test_resolve_translation_backend_can_fall_back_to_google_when_local_preference_is_disabled(self):
+        with patch.dict("os.environ", {"TRADUZAI_PREFER_LOCAL_TRANSLATION": "0"}, clear=False):
+            backend = _resolve_translation_backend(
+                google_ok=True,
+                ollama_status={
+                    "running": True,
+                    "models": ["mangatl-translator:latest"],
+                    "has_translator": True,
+                },
+            )
+
+        self.assertEqual(backend, "google")
+
+
+if __name__ == "__main__":
+    unittest.main()

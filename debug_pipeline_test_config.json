@@ -1,0 +1,13 @@
+{
+  "source_path": "d:\\mangatl\\exemplos\\exemploen\\Chapter 8_c924ad.cbz",
+  "models_dir": "C:\\Users\\PICHAU\\AppData\\Roaming\\com.traduzai.app\\models",
+  "work_dir": "d:\\mangatl\\debug_pipeline_test",
+  "api_key": "dummy",
+  "obra": "Blue Archive",
+  "qualidade": "normal",
+  "contexto": {
+    "sinopse": "",
+    "genero": [],
+    "personagens": []
+  }
+}

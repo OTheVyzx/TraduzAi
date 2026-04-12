@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+pipeline/venv/
+pipeline/__pycache__/
+pipeline/**/__pycache__/
+.venv/
+
+# Build outputs
+dist/
+src-tauri/target/
+vision-worker/target/
+vision-worker/.toolvenv/
+
+# Python
+*.pyc
+*.pyo
+pipeline/models/
+pipeline/teste/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+.codex-skill-temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# App data
+*.log
+debug_runs/
+debug_pipeline_test/
+exemplos/
+pk/
+dek/
+testes/
+desempacotar .cbz/
+artifacts-e2e-*.png
+
+# Secrets
+.env
+.env.local
+api_key
