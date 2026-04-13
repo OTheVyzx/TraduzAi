@@ -30,6 +30,19 @@ class BalloonRefinerTests(unittest.TestCase):
 
         self.assertEqual(refined, cluster_bbox)
 
+    def test_expands_to_partial_balloon_that_is_cut_by_page_edge(self):
+        image = np.zeros((120, 260, 3), dtype=np.uint8)
+        image[:] = 20
+        cv2.ellipse(image, (130, 8), (90, 46), 0, 0, 360, (245, 245, 245), -1)
+
+        cluster_bbox = [98, 10, 162, 34]
+        refined = refine_balloon_bbox_from_image(image, cluster_bbox, "fala")
+
+        self.assertLessEqual(refined[0], 48)
+        self.assertEqual(refined[1], 0)
+        self.assertGreaterEqual(refined[2], 212)
+        self.assertGreaterEqual(refined[3], 46)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,10 +10,51 @@ from translator.translate import (
     _prepare_source_text_for_translation,
     _resolve_translation_backend,
     _review_translation_grammar_semantics,
+    translate_pages,
 )
 
 
 class TranslateContextTests(unittest.TestCase):
+    def test_translate_pages_repairs_empty_or_unchanged_ollama_outputs_with_google_when_available(self):
+        class _FakeGoogleTranslator:
+            def translate(self, text: str):
+                return "teste" if text == "test" else f"pt:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return [f"pt:{text}" for text in texts]
+
+        ocr_results = [
+            {
+                "texts": [
+                    {"text": "HELLO", "tipo": "fala"},
+                    {"text": "I'LL WIN.", "tipo": "fala"},
+                ]
+            }
+        ]
+
+        with patch("translator.translate._GoogleTranslator", return_value=_FakeGoogleTranslator()):
+            with patch(
+                "translator.translate._check_ollama",
+                return_value={"running": True, "models": ["mangatl-translator:latest"], "has_translator": True},
+            ):
+                with patch(
+                    "translator.translate._call_ollama",
+                    return_value=[
+                        {"id": "t1", "translated": ""},
+                        {"id": "t2", "translated": "I'LL WIN."},
+                    ],
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={},
+                        glossario={},
+                    )
+
+        texts = translated[0]["texts"]
+        self.assertEqual(texts[0]["translated"], "PT:HELLO")
+        self.assertEqual(texts[1]["translated"], "PT:I'LL WIN.")
+
     def test_sfx_preprocess_preserves_uppercase(self):
         processed = _preprocess_text("BANG!!", tipo="sfx")
         self.assertEqual(processed, "BANG!!")

@@ -1,12 +1,12 @@
 import { useNavigate } from "react-router-dom";
-import { Plus, FolderOpen, BookOpen, Clock, CheckCircle2, AlertCircle, X } from "lucide-react";
+import { Plus, FolderOpen, BookOpen, Clock, CheckCircle2, AlertCircle, X, Library } from "lucide-react";
 import { useAppStore } from "../lib/stores/appStore";
-import { loadProjectJson, loadSettings, openFiles, openProjectDialog, validateImport } from "../lib/tauri";
+import { loadProjectJson, loadSettings, openFiles, openMultipleSources, openProjectDialog, validateImport } from "../lib/tauri";
 import { useState } from "react";
 
 export function Home() {
   const navigate = useNavigate();
-  const { recentProjects, freeRemaining, credits, setProject, removeRecentProject } = useAppStore();
+  const { recentProjects, freeRemaining, credits, setProject, removeRecentProject, setBatchSources } = useAppStore();
   const free = freeRemaining();
   const [loading, setLoading] = useState(false);
 
@@ -51,6 +51,8 @@ export function Home() {
       const path = await openFiles();
       if (!path) return;
 
+      setBatchSources([]); // Limpa lote se for tradução única
+
       const validation = await validateImport(path);
       if (!validation.valid) {
         alert(`Arquivo inválido: ${validation.error}`);
@@ -87,6 +89,86 @@ export function Home() {
       navigate("/setup");
     } catch (err) {
       console.error("Erro ao abrir arquivo:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleBatchTranslation() {
+    setLoading(true);
+    try {
+      const paths = await openMultipleSources();
+      if (!paths || paths.length === 0) return;
+
+      if (paths.length === 1) {
+        setBatchSources([]);
+        const validation = await validateImport(paths[0]);
+        if (!validation.valid) {
+          alert(`Arquivo inválido: ${validation.error}`);
+          return;
+        }
+        const settings = await loadSettings();
+        setProject({
+          id: crypto.randomUUID(),
+          obra: "",
+          capitulo: 1,
+          idioma_origem: "en",
+          idioma_destino: settings.idioma_destino || "pt-BR",
+          qualidade: "normal",
+          contexto: {
+            sinopse: "",
+            genero: [],
+            personagens: [],
+            glossario: {},
+            aliases: [],
+            termos: [],
+            relacoes: [],
+            faccoes: [],
+            resumo_por_arco: [],
+            memoria_lexical: {},
+            fontes_usadas: [],
+          },
+          paginas: [],
+          status: "setup",
+          source_path: paths[0],
+          totalPages: validation.pages,
+        });
+        navigate("/setup");
+        return;
+      }
+
+      setBatchSources(paths);
+
+      const settings = await loadSettings();
+      setProject({
+        id: crypto.randomUUID(),
+        obra: "",
+        capitulo: 1,
+        idioma_origem: "en",
+        idioma_destino: settings.idioma_destino || "pt-BR",
+        qualidade: "normal",
+        contexto: {
+          sinopse: "",
+          genero: [],
+          personagens: [],
+          glossario: {},
+          aliases: [],
+          termos: [],
+          relacoes: [],
+          faccoes: [],
+          resumo_por_arco: [],
+          memoria_lexical: {},
+          fontes_usadas: [],
+        },
+        paginas: [],
+        status: "setup",
+        source_path: paths[0],
+        totalPages: 0,
+      });
+
+      navigate("/setup");
+    } catch (err) {
+      console.error("Erro ao abrir arquivos:", err);
     } finally {
       setLoading(false);
     }
@@ -150,22 +232,41 @@ export function Home() {
       </div>
 
       {/* Action buttons */}
-      <div className="grid grid-cols-2 gap-4 mb-10">
+      <div className="grid grid-cols-3 gap-4 mb-10">
         <button
           onClick={handleNewTranslation}
           disabled={loading}
-          className="group flex flex-col items-center justify-center gap-3 p-8 rounded-xl
+          className="group flex flex-col items-center justify-center gap-3 p-6 rounded-xl
             bg-bg-secondary border border-white/5 hover:border-accent-purple/40
             hover:bg-accent-purple/5 transition-smooth disabled:opacity-50"
         >
-          <div className="w-12 h-12 rounded-xl bg-accent-purple/10 flex items-center justify-center
+          <div className="w-10 h-10 rounded-lg bg-accent-purple/10 flex items-center justify-center
             group-hover:bg-accent-purple/20 transition-smooth">
-            <Plus size={24} className="text-accent-purple" />
+            <Plus size={22} className="text-accent-purple" />
           </div>
           <div className="text-center">
-            <p className="font-medium text-text-primary">Nova Tradução</p>
-            <p className="text-xs text-text-secondary mt-1">
-              Importar .zip, .cbz, imagem ou pasta
+            <p className="text-sm font-medium text-text-primary">Novo Capítulo</p>
+            <p className="text-[10px] text-text-secondary mt-1">
+              Traduzir um único arquivo
+            </p>
+          </div>
+        </button>
+
+        <button
+          onClick={handleBatchTranslation}
+          disabled={loading}
+          className="group flex flex-col items-center justify-center gap-3 p-6 rounded-xl
+            bg-bg-secondary border border-white/5 hover:border-accent-purple/40
+            hover:bg-accent-purple/5 transition-smooth disabled:opacity-50"
+        >
+          <div className="w-10 h-10 rounded-lg bg-accent-purple/10 flex items-center justify-center
+            group-hover:bg-accent-purple/20 transition-smooth">
+            <Library size={22} className="text-accent-purple" />
+          </div>
+          <div className="text-center">
+            <p className="text-sm font-medium text-text-primary">Tradução em Lote</p>
+            <p className="text-[10px] text-text-secondary mt-1">
+              Vários capítulos de uma vez
             </p>
           </div>
         </button>
@@ -173,18 +274,18 @@ export function Home() {
         <button
           onClick={handleOpenProject}
           disabled={loading}
-          className="group flex flex-col items-center justify-center gap-3 p-8 rounded-xl
+          className="group flex flex-col items-center justify-center gap-3 p-6 rounded-xl
             bg-bg-secondary border border-white/5 hover:border-accent-cyan/40
             hover:bg-accent-cyan/5 transition-smooth disabled:opacity-50"
         >
-          <div className="w-12 h-12 rounded-xl bg-accent-cyan/10 flex items-center justify-center
+          <div className="w-10 h-10 rounded-lg bg-accent-cyan/10 flex items-center justify-center
             group-hover:bg-accent-cyan/20 transition-smooth">
-            <FolderOpen size={24} className="text-accent-cyan" />
+            <FolderOpen size={22} className="text-accent-cyan" />
           </div>
           <div className="text-center">
-            <p className="font-medium text-text-primary">Abrir Projeto</p>
-            <p className="text-xs text-text-secondary mt-1">
-              Continuar tradução existente
+            <p className="text-sm font-medium text-text-primary">Abrir Projeto</p>
+            <p className="text-[10px] text-text-secondary mt-1">
+              Continuar tradução
             </p>
           </div>
         </button>
@@ -225,7 +326,7 @@ export function Home() {
                   </button>
                 </div>
                 <p className="text-sm font-medium text-text-primary truncate">
-                  {proj.obra}
+                   {proj.obra}
                 </p>
                 <div className="flex items-center gap-1 mt-2">
                   {proj.status === "done" ? (

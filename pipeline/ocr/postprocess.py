@@ -35,7 +35,10 @@ WATERMARK_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [
         r"LAGOONSCANS?\.COM",
+        r"ASURASCANS?\.COM",
         r"MEDIOCRESCAN\.COM",
+        r"\b[\w.-]*(?:SCAN|SCANS|SCANLATOR|SCANLATIONS)[\w.-]*\b",
+        r"\b[\w.-]*TOONS?[\w.-]*\b",
         r"mangabuddy",
         r"mangaflix",
         r"mangaball",
@@ -48,6 +51,15 @@ WATERMARK_PATTERNS = [
         r"MORE\s*CONTENT",
         r"LEIA\s*PRIMEIRO",
         r"DISCORD\.GG",
+    ]
+]
+
+EDITORIAL_CREDIT_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"^(?:QC|TS|PR|RD|RAW)\s+[A-Z]{2,}$",
+        r"\bORIGINAL\s+GOLD\s+LINE\s+ART\b",
+        r"\b(?:SCAN|SCANS|SCANLATOR|SCANLATIONS|TOON|TOONS)\b",
     ]
 ]
 
@@ -162,7 +174,7 @@ def _remove_stray_digits(words: list[str]) -> list[str]:
     return result
 
 
-def fix_ocr_errors(text: str) -> str:
+def fix_ocr_errors(text: str, idioma_origem: str = "en") -> str:
     if not text:
         return ""
 
@@ -173,7 +185,8 @@ def fix_ocr_errors(text: str) -> str:
     meaningful = re.sub(r"[\s\W]", "", text)
     if meaningful:
         korean_count = len(KOREAN_PATTERN.findall(text))
-        if 0 < korean_count / len(meaningful) < 0.5:
+        # Remove coreano apenas se não for o idioma de origem e parecer ruído (menos de 50%)
+        if idioma_origem != "ko" and 0 < korean_count / len(meaningful) < 0.5:
             text = KOREAN_PATTERN.sub("", text)
 
     # Pipe → I
@@ -192,6 +205,13 @@ def fix_ocr_errors(text: str) -> str:
 
 def is_watermark(text: str) -> bool:
     return any(pattern.search(text) for pattern in WATERMARK_PATTERNS)
+
+
+def is_editorial_credit(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return any(pattern.search(stripped) for pattern in EDITORIAL_CREDIT_PATTERNS)
 
 
 def is_non_english(text: str) -> bool:

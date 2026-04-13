@@ -30,7 +30,7 @@ class VisionStackOCRTests(unittest.TestCase):
         engine = OCREngine.__new__(OCREngine)
 
         class FakeModel:
-            def ocr(self, crop, cls=True):
+            def ocr(self, crop, det=True, rec=True, cls=True):
                 h, w = crop.shape[:2]
                 if h < 60:
                     return [[]]
@@ -48,7 +48,7 @@ class VisionStackOCRTests(unittest.TestCase):
         engine = OCREngine.__new__(OCREngine)
 
         class FakeModel:
-            def ocr(self, crop, cls=True):
+            def ocr(self, crop, det=True, rec=True, cls=True):
                 return [[]]
 
         engine._model = FakeModel()

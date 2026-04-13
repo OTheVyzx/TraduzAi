@@ -25,7 +25,9 @@ def enrich_page_layout(page_result: dict) -> dict:
     for text in texts:
         region = _find_region_for_text(text, regions)
         use_shared_layout = bool(region) and _region_supports_shared_layout(region, text.get("tipo", "fala"))
-        inferred_bbox = region["bbox"] if use_shared_layout and region else text.get("bbox", [0, 0, 0, 0])
+        shared_group_size = len(region["texts"]) if region else 1
+        use_region_bbox = bool(region) and use_shared_layout and shared_group_size > 1
+        inferred_bbox = region["bbox"] if use_region_bbox else text.get("bbox", [0, 0, 0, 0])
         balloon_bbox = (
             refine_balloon_bbox_from_image(page_image, inferred_bbox, text.get("tipo", "fala"))
             if page_image is not None
@@ -41,7 +43,7 @@ def enrich_page_layout(page_result: dict) -> dict:
         updated["balloon_bbox"] = balloon_bbox
         updated["layout_shape"] = layout_shape
         updated["layout_align"] = layout_align
-        updated["layout_group_size"] = len(region["texts"]) if use_shared_layout and region else 1
+        updated["layout_group_size"] = shared_group_size if use_shared_layout and region else 1
         subregion_key = (
             tuple(int(v) for v in inferred_bbox),
             tuple(int(v) for v in balloon_bbox),
@@ -184,67 +186,122 @@ def refine_balloon_bbox_from_image(
     height, width = image_bgr.shape[:2]
     box_w = max(1, x2 - x1)
     box_h = max(1, y2 - y1)
-    pad_x = max(18, int(box_w * 1.2))
-    pad_y = max(18, int(box_h * 1.3))
-    rx1 = max(0, x1 - pad_x)
-    ry1 = max(0, y1 - pad_y)
-    rx2 = min(width, x2 + pad_x)
-    ry2 = min(height, y2 + pad_y)
-
-    roi = image_bgr[ry1:ry2, rx1:rx2]
-    if roi.size == 0:
-        return cluster_bbox
-
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 205, 255, cv2.THRESH_BINARY)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    seed_x = min(rx2 - rx1 - 1, max(0, ((x1 + x2) // 2) - rx1))
-    seed_y = min(ry2 - ry1 - 1, max(0, ((y1 + y2) // 2) - ry1))
-    if thresh[seed_y, seed_x] == 0:
-        return cluster_bbox
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
     cluster_area = box_w * box_h
+    expand_scales = [1.2, 1.75, 2.35]
 
-    for label in range(1, num_labels):
-        left = int(stats[label, cv2.CC_STAT_LEFT])
-        top = int(stats[label, cv2.CC_STAT_TOP])
-        comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
-        comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        touches_edge = left <= 0 or top <= 0 or (left + comp_w) >= roi.shape[1] or (top + comp_h) >= roi.shape[0]
+    for scale_index, scale in enumerate(expand_scales):
+        pad_x = max(18, int(box_w * scale))
+        pad_y = max(18, int(box_h * (scale + 0.15)))
+        rx1 = max(0, x1 - pad_x)
+        ry1 = max(0, y1 - pad_y)
+        rx2 = min(width, x2 + pad_x)
+        ry2 = min(height, y2 + pad_y)
 
-        if labels[seed_y, seed_x] != label:
+        roi = image_bgr[ry1:ry2, rx1:rx2]
+        if roi.size == 0:
             continue
-        if touches_edge:
-            return cluster_bbox
-        if area < cluster_area * 1.4:
-            return cluster_bbox
-        if area > cluster_area * 30:
-            return cluster_bbox
-        max_width_factor = 4.8 if box_w <= 90 else 1.85
-        max_height_factor = 5.8 if box_h <= 40 else 2.25
-        if comp_w > int(box_w * max_width_factor) or comp_h > int(box_h * max_height_factor):
-            return cluster_bbox
 
-        refined = _expand_with_margin(
-            [rx1 + left, ry1 + top, rx1 + left + comp_w, ry1 + top + comp_h],
-            width,
-            height,
-            margin=3,
-        )
-        if not _contains_bbox(refined, cluster_bbox):
-            return cluster_bbox
-        return refined
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        thresh_val = int(max(205, min(232, np.percentile(blur, 76))))
+        _, thresh = cv2.threshold(blur, thresh_val, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        search_seed = np.zeros_like(thresh, dtype=np.uint8)
+        seed_pad_x = max(6, int(box_w * 0.10))
+        seed_pad_y = max(6, int(box_h * 0.18))
+        sx1 = max(0, x1 - rx1 - seed_pad_x)
+        sy1 = max(0, y1 - ry1 - seed_pad_y)
+        sx2 = min(thresh.shape[1], x2 - rx1 + seed_pad_x)
+        sy2 = min(thresh.shape[0], y2 - ry1 + seed_pad_y)
+        if sx2 <= sx1 or sy2 <= sy1:
+            continue
+        search_seed[sy1:sy2, sx1:sx2] = 255
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+        candidate_bbox = None
+        candidate_score = float("-inf")
+        should_retry_with_larger_roi = False
+
+        for label in range(1, num_labels):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < int(cluster_area * 1.12):
+                continue
+
+            left = int(stats[label, cv2.CC_STAT_LEFT])
+            top = int(stats[label, cv2.CC_STAT_TOP])
+            comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+            comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            component = labels == label
+            overlap = int(np.count_nonzero(search_seed[component]))
+            if overlap <= 0:
+                continue
+
+            global_bbox = [rx1 + left, ry1 + top, rx1 + left + comp_w, ry1 + top + comp_h]
+            touches_left = left <= 0
+            touches_top = top <= 0
+            touches_right = (left + comp_w) >= roi.shape[1]
+            touches_bottom = (top + comp_h) >= roi.shape[0]
+            touches_image_left = global_bbox[0] <= 0
+            touches_image_top = global_bbox[1] <= 0
+            touches_image_right = global_bbox[2] >= width
+            touches_image_bottom = global_bbox[3] >= height
+
+            if (
+                (touches_left and not touches_image_left)
+                or (touches_top and not touches_image_top)
+                or (touches_right and not touches_image_right)
+                or (touches_bottom and not touches_image_bottom)
+            ):
+                should_retry_with_larger_roi = True
+                continue
+
+            if area > cluster_area * 42:
+                continue
+            overlap_ratio = _bbox_overlap_ratio(global_bbox, cluster_bbox)
+            if overlap_ratio < 0.60:
+                continue
+
+            max_width_factor = 5.0 if box_w <= 90 else 2.2
+            max_height_factor = 6.0 if box_h <= 40 else 2.9
+            if comp_w > int(box_w * max_width_factor) and not (touches_image_left or touches_image_right):
+                continue
+            if comp_h > int(box_h * max_height_factor) and not (touches_image_top or touches_image_bottom):
+                continue
+
+            score = float(overlap * 8) + float(area * 0.02)
+            if touches_image_top or touches_image_bottom or touches_image_left or touches_image_right:
+                score += 40.0
+            if score > candidate_score:
+                candidate_bbox = global_bbox
+                candidate_score = score
+
+        if candidate_bbox is not None:
+            refined = _expand_with_margin(candidate_bbox, width, height, margin=3)
+            if _contains_bbox(refined, cluster_bbox) or _bbox_overlap_ratio(refined, cluster_bbox) >= 0.78:
+                return refined
+
+        if not should_retry_with_larger_roi or scale_index == len(expand_scales) - 1:
+            break
 
     return cluster_bbox
 
 
 def _contains_bbox(outer: list[int], inner: list[int]) -> bool:
     return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
+def _bbox_overlap_ratio(a: list[int], b: list[int]) -> float:
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = float((ix2 - ix1) * (iy2 - iy1))
+    area = float(max(1, (b[2] - b[0]) * (b[3] - b[1])))
+    return inter / area
 
 
 def _load_page_image(page_result: dict):
@@ -320,27 +377,22 @@ def _detect_connected_balloon_subregions(
     vertical_gap = max(0, int(b_bbox[1]) - int(a_bbox[3]))
     horizontal_gap = max(0, int(b_bbox[0]) - int(a_bbox[2]), int(a_bbox[0]) - int(b_bbox[2]))
 
-    is_vertical_stack = abs(first_cx - second_cx) < box_w * 0.28
-    is_horizontal_stack = abs(first_cy - second_cy) < box_h * 0.28
-    if is_vertical_stack and vertical_gap < max(22, int(box_h * 0.12)):
+    is_vertical_stack = abs(first_cx - second_cx) < box_w * 0.35
+    is_horizontal_stack = abs(first_cy - second_cy) < box_h * 0.35
+    if is_vertical_stack and vertical_gap < max(18, int(box_h * 0.08)):
         return []
-    if is_horizontal_stack and horizontal_gap < max(22, int(box_w * 0.12)):
+    if is_horizontal_stack and horizontal_gap < max(18, int(box_w * 0.08)):
         return []
     if not is_vertical_stack and not is_horizontal_stack:
         # Diagonal: exigir separação visível em pelo menos um eixo
-        if max(vertical_gap, horizontal_gap) < max(28, int(min(box_w, box_h) * 0.14)):
+        if max(vertical_gap, horizontal_gap) < max(22, int(min(box_w, box_h) * 0.10)):
             return []
 
-    subregions = [
-        _expand_text_group_to_subregion(group["bbox"], balloon_bbox)
-        for group in top_two
-    ]
-    subregions = sorted(subregions, key=lambda bbox: (bbox[1], bbox[0]))
-    if subregions[0][3] > subregions[1][1]:
-        seam_y = int((subregions[0][3] + subregions[1][1]) / 2)
-        subregions[0][3] = max(subregions[0][1] + 28, seam_y)
-        subregions[1][1] = min(subregions[1][3] - 28, seam_y)
-    if _bbox_iou(subregions[0], subregions[1]) > 0.32:
+    subregions = _build_balloon_subregions_from_groups(
+        [group["bbox"] for group in top_two],
+        balloon_bbox,
+    )
+    if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.32:
         return []
     return subregions
 
@@ -402,41 +454,47 @@ def _detect_connected_balloon_subregions_from_fill(
         return []
 
     min_dim = min(component.shape[:2])
-    if min_dim >= 140:
-        k = 11
-    elif min_dim >= 90:
-        k = 9
-    else:
-        k = 7
-    eroded = cv2.erode(
-        component,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)),
-        iterations=1,
-    )
+    base_k = 7
+    if min_dim >= 180:
+        base_k = 13
+    elif min_dim >= 120:
+        base_k = 11
+    elif min_dim >= 80:
+        base_k = 9
 
-    num2, labels2, stats2, _ = cv2.connectedComponentsWithStats((eroded > 0).astype(np.uint8), connectivity=8)
-    if num2 <= 2:
-        return []
-
-    min_area = max(800, int(fill_area * 0.12))
-    lobes: list[dict] = []
-    for label in range(1, num2):
-        area = int(stats2[label, cv2.CC_STAT_AREA])
-        if area < min_area:
-            continue
-        left = int(stats2[label, cv2.CC_STAT_LEFT])
-        top = int(stats2[label, cv2.CC_STAT_TOP])
-        comp_w = int(stats2[label, cv2.CC_STAT_WIDTH])
-        comp_h = int(stats2[label, cv2.CC_STAT_HEIGHT])
-        lobes.append(
-            {
+    # Tenta erosão progressiva para separar lobos conectados por "pescoços"
+    eroded_components = []
+    for iters in range(1, 4):
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_k, base_k))
+        eroded = cv2.erode(component, kernel, iterations=iters)
+        num2, labels2, stats2, _ = cv2.connectedComponentsWithStats((eroded > 0).astype(np.uint8), connectivity=8)
+        
+        # Filtra componentes significantes após erosão
+        current_lobes = []
+        min_lobe_area = max(600, int(fill_area * 0.08))
+        for label in range(1, num2):
+            area = int(stats2[label, cv2.CC_STAT_AREA])
+            if area < min_lobe_area:
+                continue
+            left = int(stats2[label, cv2.CC_STAT_LEFT])
+            top = int(stats2[label, cv2.CC_STAT_TOP])
+            comp_w = int(stats2[label, cv2.CC_STAT_WIDTH])
+            comp_h = int(stats2[label, cv2.CC_STAT_HEIGHT])
+            current_lobes.append({
                 "bbox": [bx1 + left, by1 + top, bx1 + left + comp_w, by1 + top + comp_h],
                 "area": area,
-            }
-        )
+            })
+        
+        if len(current_lobes) >= 2:
+            eroded_components = current_lobes
+            break
+        if float(np.count_nonzero(eroded)) < fill_area * 0.25:
+            break
 
-    if len(lobes) < 2:
+    if len(eroded_components) < 2:
         return []
+
+    lobes = eroded_components
 
     lobes.sort(key=lambda item: item["area"], reverse=True)
     top_two = lobes[:2]
@@ -449,17 +507,64 @@ def _detect_connected_balloon_subregions_from_fill(
     b = ordered[1]["bbox"]
     gap_y = max(0, int(b[1]) - int(a[3]))
     gap_x = max(0, int(b[0]) - int(a[2]), int(a[0]) - int(b[2]))
-    if max(gap_y, gap_x) < max(10, int(min(box_w, box_h) * 0.04)):
+    
+    # Gap check mais flexível para erosão profunda
+    if max(gap_y, gap_x) < max(6, int(min(box_w, box_h) * 0.02)):
         return []
 
-    subregions = [
-        _expand_balloon_lobe_to_subregion(lobe["bbox"], balloon_bbox)
-        for lobe in top_two
-    ]
-    subregions = sorted(subregions, key=lambda bbox: (bbox[1], bbox[0]))
-    if _bbox_iou(subregions[0], subregions[1]) > 0.35:
+    subregions = _build_balloon_subregions_from_groups(
+        [lobe["bbox"] for lobe in top_two],
+        balloon_bbox,
+    )
+    if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.35:
         return []
     return subregions
+
+
+def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon_bbox: list[int]) -> list[list[int]]:
+    if len(group_bboxes) < 2:
+        return []
+
+    ordered = [list(bbox) for bbox in group_bboxes[:2]]
+    bx1, by1, bx2, by2 = balloon_bbox
+    centers = [
+        ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0, bbox)
+        for bbox in ordered
+    ]
+    dx = abs(centers[0][0] - centers[1][0])
+    dy = abs(centers[0][1] - centers[1][1])
+
+    if dy >= dx * 1.1:
+        top_bbox, bottom_bbox = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
+        if top_bbox[3] < bottom_bbox[1]:
+            seam_y = int((top_bbox[3] + bottom_bbox[1]) / 2)
+        else:
+            seam_y = int((centers[0][1] + centers[1][1]) / 2.0)
+        seam_y = max(by1 + 32, min(by2 - 32, seam_y))
+        return [
+            [bx1, by1, bx2, seam_y],
+            [bx1, seam_y, bx2, by2],
+        ]
+
+    if dx >= dy * 1.1:
+        left_bbox, right_bbox = sorted(ordered, key=lambda bbox: (bbox[0], bbox[1]))
+        if left_bbox[2] < right_bbox[0]:
+            seam_x = int((left_bbox[2] + right_bbox[0]) / 2)
+        else:
+            seam_x = int((centers[0][0] + centers[1][0]) / 2.0)
+        seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
+        return [
+            [bx1, by1, seam_x, by2],
+            [seam_x, by1, bx2, by2],
+        ]
+
+    diagonals = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
+    expanded = [_expand_text_group_to_subregion(bbox, balloon_bbox) for bbox in diagonals]
+    if expanded[0][3] > expanded[1][1]:
+        seam_y = int((expanded[0][3] + expanded[1][1]) / 2)
+        expanded[0][3] = max(expanded[0][1] + 28, seam_y)
+        expanded[1][1] = min(expanded[1][3] - 28, seam_y)
+    return sorted(expanded, key=lambda bbox: (bbox[1], bbox[0]))
 
 
 def _expand_balloon_lobe_to_subregion(lobe_bbox: list[int], balloon_bbox: list[int]) -> list[int]:
@@ -488,6 +593,8 @@ def _extract_text_cluster_components(image_bgr: np.ndarray, text_bbox: list[int]
         return []
 
     crop = image_bgr[y1:y2, x1:x2]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     threshold = min(170, max(120, int(np.percentile(gray, 28))))
     dark = (gray <= threshold).astype(np.uint8) * 255
@@ -498,8 +605,6 @@ def _extract_text_cluster_components(image_bgr: np.ndarray, text_bbox: list[int]
         iterations=1,
     )
 
-    box_w = max(1, x2 - x1)
-    box_h = max(1, y2 - y1)
     close_w = max(13, min(25, ((box_w // 26) * 2) + 1))
     close_h = max(7, min(13, ((box_h // 26) * 2) + 1))
     merged = cv2.morphologyEx(
@@ -509,8 +614,42 @@ def _extract_text_cluster_components(image_bgr: np.ndarray, text_bbox: list[int]
         iterations=1,
     )
 
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((merged > 0).astype(np.uint8), 8)
     min_area = max(140, int((box_w * box_h) * 0.006))
+    components = _component_boxes_from_binary_mask(merged, x1, y1, min_area)
+    if _needs_text_component_blackhat_retry(components, box_w, box_h):
+        fallback = _extract_text_cluster_components_blackhat(gray, x1, y1, box_w, box_h)
+        if len(fallback) >= 2:
+            return fallback
+    return components
+
+
+def _merge_text_cluster_components(components: list[dict]) -> list[dict]:
+    groups = [dict(component) for component in components]
+    changed = True
+    while changed:
+        changed = False
+        new_groups: list[dict] = []
+        pending = groups[:]
+        while pending:
+            current = pending.pop(0)
+            index = 0
+            while index < len(pending):
+                other = pending[index]
+                if _should_merge_text_cluster_boxes(current["bbox"], other["bbox"]):
+                    current["bbox"] = _union_bbox(current["bbox"], other["bbox"])
+                    current["area"] += other["area"]
+                    pending.pop(index)
+                    changed = True
+                    index = 0
+                    continue
+                index += 1
+            new_groups.append(current)
+        groups = new_groups
+    return groups
+
+
+def _component_boxes_from_binary_mask(mask: np.ndarray, offset_x: int, offset_y: int, min_area: int) -> list[dict]:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
     components: list[dict] = []
     for label in range(1, num_labels):
         area = int(stats[label, cv2.CC_STAT_AREA])
@@ -522,26 +661,51 @@ def _extract_text_cluster_components(image_bgr: np.ndarray, text_bbox: list[int]
         comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
         components.append(
             {
-                "bbox": [x1 + left, y1 + top, x1 + left + comp_w, y1 + top + comp_h],
+                "bbox": [offset_x + left, offset_y + top, offset_x + left + comp_w, offset_y + top + comp_h],
                 "area": area,
             }
         )
     return components
 
 
-def _merge_text_cluster_components(components: list[dict]) -> list[dict]:
-    groups: list[dict] = []
-    for component in components:
-        merged = False
-        for group in groups:
-            if _should_merge_text_cluster_boxes(group["bbox"], component["bbox"]):
-                group["bbox"] = _union_bbox(group["bbox"], component["bbox"])
-                group["area"] += component["area"]
-                merged = True
-                break
-        if not merged:
-            groups.append(dict(component))
-    return groups
+def _needs_text_component_blackhat_retry(components: list[dict], box_w: int, box_h: int) -> bool:
+    if len(components) < 2:
+        return True
+    box_area = max(1, box_w * box_h)
+    dominant = max(component["area"] for component in components)
+    return dominant > int(box_area * 0.42)
+
+
+def _extract_text_cluster_components_blackhat(
+    gray: np.ndarray,
+    offset_x: int,
+    offset_y: int,
+    box_w: int,
+    box_h: int,
+) -> list[dict]:
+    kernel_w = max(21, min(45, ((box_w // 18) * 2) + 1))
+    kernel_h = max(17, min(31, ((box_h // 18) * 2) + 1))
+    blackhat = cv2.morphologyEx(
+        gray,
+        cv2.MORPH_BLACKHAT,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, kernel_h)),
+    )
+    threshold = max(18, int(np.percentile(blackhat, 88)))
+    candidate = (blackhat >= threshold).astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(
+        candidate,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    candidate = cv2.morphologyEx(
+        candidate,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 9)),
+        iterations=1,
+    )
+    min_area = max(90, int((box_w * box_h) * 0.0014))
+    return _component_boxes_from_binary_mask(candidate, offset_x, offset_y, min_area)
 
 
 def _should_merge_text_cluster_boxes(a: list[int], b: list[int]) -> bool:

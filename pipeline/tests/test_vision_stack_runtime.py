@@ -49,6 +49,18 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def _fixture_image_path(name: str) -> Path:
+        root = Path(__file__).resolve().parents[2]
+        candidates = [
+            root / "testes" / name,
+            root / "testes" / "debug_pipeline" / "originals" / name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(name)
+
     def test_profile_to_ocr_model_defaults_to_paddleocr(self):
         original = os.environ.pop("MANGATL_ENABLE_MANGA_OCR", None)
         try:
@@ -92,6 +104,23 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(page["_vision_blocks"][0]["bbox"], [30, 18, 78, 42])
         self.assertEqual(int(np.count_nonzero(page["_vision_blocks"][0]["mask"])), int(np.count_nonzero(mask)))
 
+    def test_build_page_result_skips_watermark_and_credit_noise(self):
+        blocks = [
+            SimpleNamespace(xyxy=(10, 10, 70, 30), mask=None, confidence=0.43),
+            SimpleNamespace(xyxy=(10, 40, 90, 62), mask=None, confidence=0.46),
+            SimpleNamespace(xyxy=(10, 64, 100, 86), mask=None, confidence=0.47),
+            SimpleNamespace(xyxy=(10, 70, 110, 110), mask=None, confidence=0.91),
+        ]
+
+        page = build_page_result(
+            image_path="page.jpg",
+            image_rgb=np.full((140, 140, 3), 255, dtype=np.uint8),
+            blocks=blocks,
+            texts=["ASURASCANS.COM", "QC MED", "NIGHTTOONS", "GET OUT OF HERE!"],
+        )
+
+        self.assertEqual([item["text"] for item in page["texts"]], ["GET OUT OF HERE!"])
+
     def test_build_page_result_skips_font_detector_by_default(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
@@ -110,17 +139,15 @@ class VisionStackRuntimeTests(unittest.TestCase):
         get_font_detector.assert_not_called()
         self.assertEqual(page["texts"][0]["text"], "HELLO")
 
-    def test_build_page_result_can_use_font_detector_when_enabled(self):
+    def test_build_page_result_keeps_textured_font_when_font_detection_is_enabled(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
             mask=None,
             confidence=0.88,
         )
-        fake_detector = SimpleNamespace(detect=lambda region, allow_default=True: "DK Full Blast.otf")
 
         with patch("vision_stack.runtime._should_use_base_white_balloon_font", return_value=False), patch(
             "vision_stack.runtime._get_font_detector",
-            return_value=fake_detector,
         ) as get_font_detector:
             page = build_page_result(
                 image_path="page.jpg",
@@ -130,17 +157,18 @@ class VisionStackRuntimeTests(unittest.TestCase):
                 enable_font_detection=True,
             )
 
-        get_font_detector.assert_called_once()
-        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "DK Full Blast.otf")
+        get_font_detector.assert_not_called()
+        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "Newrotic.ttf")
+        self.assertEqual(page["texts"][0]["estilo"].get("cor"), "#FFFFFF")
 
     def test_should_use_base_white_balloon_font_detects_real_012_bottom_balloon(self):
-        image_path = Path(__file__).resolve().parents[2] / "testes" / "012__001.jpg"
+        image_path = self._fixture_image_path("012__001.jpg")
         image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
 
         self.assertTrue(_should_use_base_white_balloon_font(image, [206, 2172, 610, 2301]))
         self.assertFalse(_should_use_base_white_balloon_font(image, [206, 1427, 580, 1550]))
 
-    def test_build_page_result_white_balloon_forces_davegibbons_uppercase_without_detector(self):
+    def test_build_page_result_white_balloon_uses_comicneue_uppercase_without_detector(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
             mask=None,
@@ -159,27 +187,19 @@ class VisionStackRuntimeTests(unittest.TestCase):
             )
 
         get_font_detector.assert_not_called()
-        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "CCDaveGibbonsLower W00 Regular.ttf")
+        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "ComicNeue-Bold.ttf")
         self.assertTrue(page["texts"][0]["estilo"].get("force_upper"))
 
-    def test_build_page_result_textured_balloon_uses_detector_without_default_fallback(self):
+    def test_build_page_result_textured_balloon_uses_fixed_font_without_detector(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
             mask=None,
             confidence=0.88,
         )
-        captured: dict[str, object] = {}
 
-        class FakeDetector:
-            def detect(self, region, allow_default=True):
-                captured["allow_default"] = allow_default
-                captured["shape"] = tuple(region.shape)
-                return "Libel Suit Suit Rg.otf"
-
-        with patch("vision_stack.runtime._is_white_balloon_region", return_value=False), patch(
+        with patch("vision_stack.runtime._should_use_base_white_balloon_font", return_value=False), patch(
             "vision_stack.runtime._get_font_detector",
-            return_value=FakeDetector(),
-        ):
+        ) as get_font_detector:
             page = build_page_result(
                 image_path="page.jpg",
                 image_rgb=np.full((80, 120, 3), 200, dtype=np.uint8),
@@ -188,9 +208,9 @@ class VisionStackRuntimeTests(unittest.TestCase):
                 enable_font_detection=True,
             )
 
-        self.assertFalse(bool(captured.get("allow_default", True)))
-        self.assertEqual(captured.get("shape"), (24, 64, 3))
-        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "Libel Suit Suit Rg.otf")
+        get_font_detector.assert_not_called()
+        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "Newrotic.ttf")
+        self.assertEqual(page["texts"][0]["estilo"].get("cor"), "#FFFFFF")
 
     def test_vision_blocks_to_mask_prefers_precise_mask_and_falls_back_to_bbox(self):
         precise = np.zeros((90, 140), dtype=np.uint8)
@@ -214,10 +234,10 @@ class VisionStackRuntimeTests(unittest.TestCase):
             {"bbox": [30, 20, 110, 50], "mask": None},
         ]
 
-        mask = vision_blocks_to_mask(image.shape, blocks, image_rgb=image)
+        mask = vision_blocks_to_mask(image.shape, blocks, image_rgb=image, expand_mask=False)
 
         self.assertGreater(int(mask[30, 60]), 0)
-        self.assertEqual(int(mask[24, 34]), 0)
+        self.assertEqual(int(mask[21, 34]), 0)
         self.assertEqual(int(mask[46, 106]), 0)
 
     def test_vision_blocks_to_mask_falls_back_to_full_bbox_without_image(self):
@@ -276,7 +296,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(int(mask[25, 35]), 0)
 
     def test_vision_blocks_to_mask_splits_real_009_white_balloon_mask_components(self):
-        image_path = Path(__file__).resolve().parents[2] / "testes" / "009__001.jpg"
+        image_path = self._fixture_image_path("009__001.jpg")
         image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
 
         mask = vision_blocks_to_mask(
@@ -298,8 +318,8 @@ class VisionStackRuntimeTests(unittest.TestCase):
         ) as get_detector, patch("vision_stack.runtime._get_ocr_engine") as get_ocr:
             get_detector.return_value.detect.return_value = [block]
             get_detector.return_value.crop.return_value = image[20:40, 10:50]
-            get_ocr.return_value.recognize_batch.return_value = ["HELLO"]
             get_ocr.return_value._backend = "paddleocr"
+            get_ocr.return_value.recognize_blocks_from_page.return_value = ["HELLO"]
 
             result = run_detect_ocr("page.jpg", profile="quality")
 
@@ -725,7 +745,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertLessEqual(sum(abs(a - b) for a, b in zip(boxes[2], [88, 120, 140, 128])), 4)
 
     def test_extract_white_balloon_text_boxes_splits_real_009_balloon_lines(self):
-        image_path = Path(__file__).resolve().parents[2] / "testes" / "009__001.jpg"
+        image_path = self._fixture_image_path("009__001.jpg")
         image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
 
         boxes = _extract_white_balloon_text_boxes(image, [113, 1514, 705, 1767])
@@ -868,7 +888,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(int(mask[30, 30]), 0)
 
     def test_extract_white_balloon_fill_mask_closes_internal_holes_on_real_010_balloon(self):
-        image_path = Path(__file__).resolve().parents[2] / "testes" / "010__001.jpg"
+        image_path = self._fixture_image_path("010__001.jpg")
         image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
 
         mask = _extract_white_balloon_fill_mask(image, [248, 165, 541, 269])

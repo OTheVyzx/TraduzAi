@@ -45,10 +45,16 @@ class SafeTextPathFont:
     def getbbox(self, text: str) -> tuple[int, int, int, int]:
         if text in self._bbox_cache:
             return self._bbox_cache[text]
-        # Estimativa sem FreeType — evita centenas de chamadas TextPath durante binary search
-        w = max(1, int(len(text) * self.size * 0.55))
-        h = max(1, int(self.size * 1.15))
-        bbox = (0, 0, w, h)
+        # Mede pela bitmap real da fonte; necessário para fontes estilizadas
+        # como Newrotic, cuja largura real é muito maior que a estimativa simples.
+        try:
+            bitmap = _render_text_with_fallback(self, text)
+            if bitmap.size > 0:
+                bbox = (0, 0, int(bitmap.shape[1]), int(bitmap.shape[0]))
+            else:
+                bbox = (0, 0, max(1, int(self.size * 0.5)), max(1, int(self.size * 1.15)))
+        except Exception:
+            bbox = (0, 0, max(1, int(len(text) * self.size * 0.55)), max(1, int(self.size * 1.15)))
         self._bbox_cache[text] = bbox
         return bbox
 
@@ -593,9 +599,9 @@ def _pick_subregion_for_text(text_bbox: list[int], subregions: list[list[int]]) 
     second_ratio = scored[1][0] if len(scored) >= 2 else 0.0
 
     # Só fixa em subregion quando está claramente dentro de um único balão.
-    if best_ratio >= 0.60 and (best_ratio - second_ratio) >= 0.18:
+    if best_ratio >= 0.55 and (best_ratio - second_ratio) >= 0.12:
         return best_bbox
-    if best_inside and best_ratio >= 0.42 and (best_ratio - second_ratio) >= 0.15:
+    if best_inside and best_ratio >= 0.38 and (best_ratio - second_ratio) >= 0.10:
         return best_bbox
     return None
 
@@ -816,7 +822,7 @@ def _split_text_for_connected_balloons(text: str, count: int) -> list[str]:
 
     sentence_parts = [
         part.strip()
-        for part in re.split(r"(?<=[.!?…])\s+", stripped)
+        for part in re.split(r"(?<=[.!?…])(?:\s+|\n+|$)", stripped)
         if part.strip()
     ]
     if len(sentence_parts) >= count:

@@ -32,12 +32,14 @@ class OCREngine:
         device: str = "cuda",
         half: bool = True,
         batch_size: int = 8,
+        lang: str = "en",
     ):
         self._requested_model = model
         self.model_name = model
         self.device = self._resolve_device(device)
         self.half = half and self.device.type == "cuda"
         self.batch_size = batch_size
+        self.lang = lang
         self._model = None
         self._processor = None
         self._load_model()
@@ -91,16 +93,28 @@ class OCREngine:
         os.environ["MKL_NUM_THREADS"] = "1"
         from paddleocr import PaddleOCR
         
+        # Mapeamento do TraduzAi (app) para o PaddleOCR
+        # en -> en
+        # ja -> japan
+        # ko -> korean
+        # zh -> ch
+        mapped_lang = {
+            "en": "en",
+            "ja": "japan",
+            "ko": "korean",
+            "zh": "ch",
+        }.get(self.lang, "en")
+        
         use_gpu = self.device.type == "cuda"
         self._model = PaddleOCR(
             use_angle_cls=True,
-            lang="en",
+            lang=mapped_lang,
             use_gpu=use_gpu,
             show_log=False,
             enable_mkldnn=not use_gpu,  # MKL-DNN acelera CPU
         )
         self._backend = "paddleocr"
-        logger.info(f"PaddleOCR carregado (gpu={use_gpu})")
+        logger.info(f"PaddleOCR carregado (lang={mapped_lang}, gpu={use_gpu})")
 
     # ------------------------------------------------------------------
     # API pública

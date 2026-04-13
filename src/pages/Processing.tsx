@@ -10,6 +10,7 @@ import {
   Flag,
   PauseCircle,
   PlayCircle,
+  Layers,
 } from "lucide-react";
 import { useAppStore, PipelineStep } from "../lib/stores/appStore";
 import {
@@ -31,10 +32,10 @@ import {
 } from "../lib/time-estimates";
 
 const STEPS: { key: PipelineStep; label: string; description: string }[] = [
-  { key: "extract", label: "Extracao", description: "Descompactando e validando arquivos" },
-  { key: "ocr", label: "OCR", description: "Detectando texto nos baloes" },
+  { key: "extract", label: "Extração", description: "Descompactando e validando arquivos" },
+  { key: "ocr", label: "OCR", description: "Detectando texto nos balões" },
   { key: "context", label: "Contexto", description: "Buscando sinopse e personagens" },
-  { key: "translate", label: "Traducao", description: "Traduzindo com contexto local" },
+  { key: "translate", label: "Tradução", description: "Traduzindo com contexto local" },
   { key: "inpaint", label: "Inpainting", description: "Removendo texto original" },
   { key: "typeset", label: "Typesetting", description: "Aplicando texto traduzido" },
 ];
@@ -49,6 +50,8 @@ export function Processing() {
     addRecentProject,
     setupEstimate,
     systemProfile,
+    batchSources,
+    setBatchSources,
   } = useAppStore();
   const startedRef = useRef(false);
   const [started, setStarted] = useState(false);
@@ -57,6 +60,10 @@ export function Processing() {
   const [pauseState, setPauseState] = useState<"running" | "pausing" | "paused" | "resuming">("running");
   const [pausedDurationMs, setPausedDurationMs] = useState(0);
   const pauseStartedAtRef = useRef<number | null>(null);
+
+  // Estados de Lote
+  const [batchIndex, setBatchIndex] = useState(0);
+  const [batchCompletedCount, setBatchCompletedCount] = useState(0);
 
   useEffect(() => {
     if (!startedAtMs) return;
@@ -69,72 +76,26 @@ export function Processing() {
   }, [startedAtMs]);
 
   useEffect(() => {
-    // Guard against StrictMode double-invoke: only start the pipeline once.
+    // Guard against StrictMode double-invoke
     if (startedRef.current) return;
     startedRef.current = true;
 
     let unlistenProgress: (() => void) | undefined;
     let unlistenComplete: (() => void) | undefined;
 
-    // Limpa progresso anterior
-    setPipeline(null);
-
-    async function setup() {
-      // 1. Registra listeners PRIMEIRO
-      unlistenProgress = (await onPipelineProgress((progress) => {
-        setPipeline(progress);
-      })) as unknown as () => void;
-
-      unlistenComplete = (await onPipelineComplete(async (result) => {
-        if (result.success) {
-          try {
-            // Load project.json and build paginas with absolute paths.
-            const raw = await loadProjectJson(result.output_path);
-            const outputDir = result.output_path.replace(/\\/g, "/");
-            const paginas: PageData[] = (raw.paginas ?? []).map((p) => ({
-              numero: p.numero,
-              arquivo_original: `${outputDir}/${p.arquivo_original}`.replace(/\\/g, "/"),
-              arquivo_traduzido: `${outputDir}/${p.arquivo_traduzido}`.replace(/\\/g, "/"),
-              inpaint_blocks: p.inpaint_blocks ?? [],
-              textos: p.textos ?? [],
-            }));
-            updateProject({
-              status: "done",
-              paginas,
-              output_path: outputDir,
-              obra: raw.obra || project?.obra || "",
-            });
-            addRecentProject({
-              id: project?.id || outputDir,
-              obra: raw.obra || project?.obra || "Projeto sem nome",
-              capitulo: raw.capitulo || project?.capitulo || 1,
-              pages: paginas.length,
-              date: new Date().toISOString(),
-              status: "done",
-            });
-          } catch (e) {
-            console.error("Erro ao carregar project.json:", e);
-            updateProject({ status: "done" });
-          }
-          navigate("/preview");
-        } else {
-          updateProject({ status: "error" });
-          alert(`Erro no processamento: ${result.error}`);
-          navigate("/");
-        }
-      })) as unknown as () => void;
-
-      // 2. So inicia o pipeline depois dos listeners prontos
+    async function processChapter(index: number) {
       if (!project) return;
-      try {
-        const startedAt = Date.now();
-        setStartedAtMs(startedAt);
-        setNowMs(startedAt);
+      const isBatch = batchSources.length > 0;
+      const currentPath = isBatch ? batchSources[index] : project.source_path;
+      const currentChapter = project.capitulo + (isBatch ? index : 0);
 
+      try {
+        setPipeline(null);
         await startPipeline({
-          source_path: project.source_path,
+          source_path: currentPath,
           obra: project.obra,
-          capitulo: project.capitulo,
+          capitulo: currentChapter,
+          idioma_origem: project.idioma_origem,
           idioma_destino: project.idioma_destino,
           qualidade: project.qualidade,
           glossario: project.contexto.glossario,
@@ -153,13 +114,84 @@ export function Processing() {
         });
         setStarted(true);
       } catch (err) {
-        setStartedAtMs(null);
-        alert(`Erro ao iniciar pipeline: ${err}`);
+        alert(`Erro ao iniciar capítulo ${currentChapter}: ${err}`);
         navigate("/");
       }
     }
 
+    async function setup() {
+      // 1. Registra listeners PRIMEIRO
+      unlistenProgress = (await onPipelineProgress((progress) => {
+        setPipeline(progress);
+      })) as unknown as () => void;
+
+      unlistenComplete = (await onPipelineComplete(async (result) => {
+        if (result.success) {
+          try {
+            const raw = await loadProjectJson(result.output_path);
+            const outputDir = result.output_path.replace(/\\/g, "/");
+            const paginas: PageData[] = (raw.paginas ?? []).map((p) => ({
+              numero: p.numero,
+              arquivo_original: `${outputDir}/${p.arquivo_original}`.replace(/\\/g, "/"),
+              arquivo_traduzido: `${outputDir}/${p.arquivo_traduzido}`.replace(/\\/g, "/"),
+              inpaint_blocks: p.inpaint_blocks ?? [],
+              textos: p.textos ?? [],
+            }));
+
+            const chapterNum = raw.capitulo || project?.capitulo || 1;
+
+            addRecentProject({
+              id: crypto.randomUUID(),
+              obra: raw.obra || project?.obra || "Projeto sem nome",
+              capitulo: chapterNum,
+              pages: paginas.length,
+              date: new Date().toISOString(),
+              status: "done",
+            });
+
+            const isBatch = batchSources.length > 0;
+            const currentBatchIndex = indexRef.current; // Usamos ref para ler o valor atual
+
+            if (isBatch && currentBatchIndex + 1 < batchSources.length) {
+              // Avança para o próximo capítulo
+              indexRef.current += 1;
+              setBatchIndex(indexRef.current);
+              setBatchCompletedCount((prev) => prev + 1);
+              setTimeout(() => processChapter(indexRef.current), 1000);
+            } else {
+              // Finalizou tudo
+              updateProject({
+                status: "done",
+                paginas,
+                output_path: outputDir,
+                obra: raw.obra || project?.obra || "",
+                capitulo: chapterNum,
+              });
+              setBatchSources([]);
+              navigate("/preview");
+            }
+          } catch (e) {
+            console.error("Erro no lifecycle de conclusão:", e);
+            updateProject({ status: "done" });
+            navigate("/preview");
+          }
+        } else {
+          alert(`Erro no processamento: ${result.error}`);
+          updateProject({ status: "error" });
+          navigate("/");
+        }
+      })) as unknown as () => void;
+
+      // 2. Inicia o primeiro
+      const startedAt = Date.now();
+      setStartedAtMs(startedAt);
+      setNowMs(startedAt);
+      processChapter(0);
+    }
+
+    const indexRef = { current: 0 }; // Ref local para controle sequencial
     setup();
+
     return () => {
       unlistenProgress?.();
       unlistenComplete?.();
@@ -167,7 +199,7 @@ export function Processing() {
   }, []);
 
   async function handleCancel() {
-    if (confirm("Cancelar traducao em andamento?")) {
+    if (confirm("Cancelar tradução em andamento?")) {
       await cancelPipeline();
       updateProject({ status: "idle" });
       navigate("/");
@@ -233,19 +265,47 @@ export function Processing() {
   const isPaused = pauseState === "paused" || pauseState === "pausing";
   const pauseButtonLabel =
     pauseState === "paused"
-      ? "Continuar traducao"
+      ? "Continuar tradução"
       : pauseState === "pausing"
       ? "Pausando..."
       : pauseState === "resuming"
       ? "Continuando..."
-      : "Pausar traducao";
+      : "Pausar tradução";
+
+  const isBatch = batchSources.length > 1;
 
   return (
     <div className="p-8 max-w-2xl mx-auto">
-      <h2 className="text-xl font-bold mb-1">Traduzindo...</h2>
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-xl font-bold">Traduzindo...</h2>
+        {isBatch && (
+          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-accent-purple/10 text-accent-purple text-xs font-medium">
+            <Layers size={14} />
+            Lote: {batchIndex + 1} de {batchSources.length}
+          </div>
+        )}
+      </div>
       <p className="text-sm text-text-secondary mb-8">
-        {project?.obra} - Capitulo {project?.capitulo}
+        {project?.obra} - Capítulo {project?.capitulo ? project.capitulo + batchIndex : ""}
       </p>
+
+      {/* Batch progress summary */}
+      {isBatch && (
+        <div className="mb-8 grid grid-cols-2 gap-4">
+            <div className="bg-bg-secondary border border-white/5 rounded-xl p-3">
+              <p className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">Status do Lote</p>
+              <p className="text-sm text-text-primary">
+                {batchCompletedCount} concluídos
+              </p>
+            </div>
+            <div className="bg-bg-secondary border border-white/5 rounded-xl p-3">
+              <p className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">Atual</p>
+              <p className="text-sm text-accent-purple truncate">
+                {batchSources[batchIndex]?.split(/[/\\]/).pop()}
+              </p>
+            </div>
+        </div>
+      )}
 
       {/* Overall progress bar */}
       <div className="mb-6">
@@ -276,7 +336,7 @@ export function Processing() {
         </div>
         {pipeline && (
           <p className="text-xs text-text-secondary mt-2">
-            Pagina {pipeline.current_page}/{pipeline.total_pages}
+            Página {pipeline.current_page}/{pipeline.total_pages}
             {isPaused ? " - processamento pausado em ponto seguro" : ""}
           </p>
         )}
@@ -307,7 +367,7 @@ export function Processing() {
         <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3">
           <p className="text-[11px] uppercase tracking-wide text-text-secondary/70 flex items-center gap-1.5">
             <Flag size={12} />
-            Termino previsto
+            Término previsto
           </p>
           <p className="text-lg font-semibold text-text-primary mt-1">
             {finishAtLabel}
@@ -318,8 +378,8 @@ export function Processing() {
       <div className="rounded-xl border border-white/5 bg-bg-secondary/60 px-4 py-3 mb-8">
         <p className="text-xs text-text-secondary">
           {initialEstimate
-            ? `Base inicial: ~${formatDuration(initialEstimate.total_seconds)} para ${initialEstimate.total_pages} paginas.`
-            : "Detectando o hardware para montar a previsao inicial."}
+            ? `Base inicial: ~${formatDuration(initialEstimate.total_seconds)} para ${initialEstimate.total_pages} páginas.`
+            : "Detectando o hardware para montar a previsão inicial."}
         </p>
         <p className="text-xs text-text-secondary/70 mt-1">
           {hardwareSummary}
@@ -400,7 +460,7 @@ export function Processing() {
           className="flex items-center gap-2 text-sm text-text-secondary hover:text-status-error transition-smooth"
         >
           <XCircle size={16} />
-          Cancelar traducao
+          Cancelar tradução
         </button>
       </div>
     </div>

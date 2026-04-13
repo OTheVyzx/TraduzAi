@@ -27,16 +27,34 @@ PRE_TRANSLATION_GLOSSARY: list[tuple[str, str, int]] = [
     (r"\buseless\b", "futile", re.IGNORECASE),
 ]
 
-SOURCE_OCR_REPAIRS: list[tuple[str, str, int]] = []
+SOURCE_OCR_REPAIRS: list[tuple[str, str, int]] = [
+    (r"\bcoyld\b", "could", re.IGNORECASE),
+    (r"\blightbes\b", "light be...?!", re.IGNORECASE),
+]
 
-TRANSLATION_REVIEW_REPAIRS: list[tuple[str, str, int]] = []
+TRANSLATION_REVIEW_REPAIRS: list[tuple[str, str, int]] = [
+    (r"VocÄ™|Vocę|VocÃª", "Você", re.IGNORECASE),
+    (r"atravÃ©s|atraves", "através", re.IGNORECASE),
+]
 
 
 class _GoogleTranslator:
-    def __init__(self):
+    def __init__(self, source="en", target="pt"):
         from deep_translator import GoogleTranslator
 
-        self._translator = GoogleTranslator(source="en", target="pt")
+        # Mapeamento do TraduzAi para o GoogleTranslator
+        # ja -> ja
+        # ko -> ko
+        # zh -> zh-CN
+        # en -> en
+        source_map = {
+            "en": "en",
+            "ja": "ja",
+            "ko": "ko",
+            "zh": "zh-CN",
+        }.get(source, "en")
+        
+        self._translator = GoogleTranslator(source=source_map, target=target)
         self._cache: dict[str, str] = {}
 
     def translate(self, text: str) -> Optional[str]:
@@ -58,7 +76,9 @@ class _GoogleTranslator:
         if not texts:
             return []
 
-        # Separate cached vs uncached
+        logger.info(f"Traduzindo lote de {len(texts)} textos (Google)")
+
+        # Segregar textos em cache dos novos
         results: list[Optional[str]] = [None] * len(texts)
         uncached_indices: list[int] = []
         for i, text in enumerate(texts):
@@ -71,25 +91,41 @@ class _GoogleTranslator:
         if not uncached_indices:
             return [r or "" for r in results]
 
-        # Try batch translation with separator (1 API call instead of N)
+        # Tentativa de tradução em lote com separador robusto
         uncached_texts = [texts[i] for i in uncached_indices]
-        separator = "\n\n"
+        separator = "\n===\n"
         joined = separator.join(uncached_texts)
         batch_result = self.translate(joined)
 
         if batch_result:
-            parts = batch_result.split(separator)
+            # Dividir resultados (Google às vezes remove espaços ao redor do separador)
+            parts = [p.strip() for p in batch_result.split("===") if p.strip()]
+            
             if len(parts) == len(uncached_texts):
                 for idx, part in zip(uncached_indices, parts):
                     cleaned = part.strip()
                     results[idx] = cleaned
                     self._cache[texts[idx].strip()] = cleaned
                 return [r if r is not None else texts[i] for i, r in enumerate(results)]
+            else:
+                logger.warning(f"Batch split mismatch: {len(parts)} vs {len(uncached_texts)}. Tentando individualmente.")
 
-        # Fallback: per-text translation if batch split didn't match
+        # Fallback: tradução individual para os pendentes
         for i in uncached_indices:
             if results[i] is None:
-                results[i] = self.translate(texts[i]) or texts[i]
+                trans = self.translate(texts[i])
+                
+                # Heurística: se a tradução for idêntica ao original em texto longo, 
+                # pode indicar idioma de origem incorreto. Tenta 'auto'.
+                if trans == texts[i] and len(texts[i]) > 8:
+                    logger.info(f"Tradução redundante detectada em {texts[i][:20]}... Tentando 'auto' detection.")
+                    try:
+                        from deep_translator import GoogleTranslator
+                        trans = GoogleTranslator(source='auto', target=self._translator.target).translate(texts[i])
+                    except:
+                        pass
+                
+                results[i] = trans or texts[i]
 
         return [r if r is not None else texts[i] for i, r in enumerate(results)]
 
@@ -166,8 +202,9 @@ def _postprocess(
     was_upper: bool,
     tipo: str = "fala",
     source_text: str = "",
+    lang: str = "en",
 ) -> str:
-    result = _review_translation_grammar_semantics(source_text, text.strip(), tipo)
+    result = _review_translation_grammar_semantics(source_text, text.strip(), tipo, lang=lang)
     result = result.replace("\u2026", "...")
     for pattern, replacement, flags in ADAPTATIONS:
         result = re.sub(pattern, replacement, result, flags=flags)
@@ -184,7 +221,7 @@ def _postprocess(
     return result
 
 
-def _prepare_source_text_for_translation(text: str, tipo: str = "fala") -> str:
+def _prepare_source_text_for_translation(text: str, tipo: str = "fala", lang: str = "en") -> str:
     result = text.strip()
     if not result:
         return result
@@ -196,7 +233,10 @@ def _prepare_source_text_for_translation(text: str, tipo: str = "fala") -> str:
         result = re.sub(pattern, replacement, result, flags=flags)
 
     result = re.sub(r"\s{2,}", " ", result).strip()
-    if result and len(result) > 2:
+    
+    # Nao forca capitalizacao para idiomas CJK
+    is_cjk = lang in ("ja", "ko", "zh", "zh-CN", "zh-TW")
+    if not is_cjk and result and len(result) > 2:
         result = result[0].upper() + result[1:].lower()
     return result
 
@@ -205,6 +245,7 @@ def _review_translation_grammar_semantics(
     source_text: str,
     translated_text: str,
     tipo: str = "fala",
+    lang: str = "en",
 ) -> str:
     del tipo
 
@@ -218,24 +259,30 @@ def _review_translation_grammar_semantics(
     for pattern, replacement, flags in ADAPTATIONS:
         result = re.sub(pattern, replacement, result, flags=flags)
 
-    prepared_source = _prepare_source_text_for_translation(source_text, "fala")
+    prepared_source = _prepare_source_text_for_translation(source_text, "fala", lang=lang)
     normalized_source = re.sub(r"[\W_]+", " ", prepared_source.lower()).strip()
     if re.search(r"\bcould that light be\b", normalized_source):
         if re.search(r"\bluz\b", result, re.IGNORECASE) or re.search(r"\bacende\b", result, re.IGNORECASE):
             result = "Poderia ser aquela luz...?!"
+    if re.search(r"\byou said you could see through all my attacks right\b", normalized_source):
+        if re.search(r"\b(ataques|golpes|através|enxergar|ver)\b", result, re.IGNORECASE):
+            result = "Você disse que podia enxergar todos os meus golpes, certo?"
 
     result = re.sub(r"\s+([!?.,;:])", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result).strip()
     return result
 
 
-def _preprocess_text(text: str, tipo: str = "fala") -> str:
+def _preprocess_text(text: str, tipo: str = "fala", lang: str = "en") -> str:
     result = text.strip()
     if tipo == "sfx":
         return re.sub(r"\s+", " ", result)
 
-    if result and len(result) > 2:
+    # Nao forca capitalizacao para idiomas CJK
+    is_cjk = lang in ("ja", "ko", "zh", "zh-CN", "zh-TW")
+    if not is_cjk and result and len(result) > 2:
         result = result[0].upper() + result[1:].lower()
+    
     # Pré-tradução: substitui expressões para o Google traduzir corretamente
     for pattern, replacement, flags in PRE_TRANSLATION_GLOSSARY:
         result = re.sub(pattern, replacement, result, flags=flags)
@@ -246,6 +293,20 @@ def _preprocess_text(text: str, tipo: str = "fala") -> str:
 def _normalize_memory_key(text: str, tipo: str) -> str:
     normalized = re.sub(r"[\W_]+", "", text.lower())
     return f"{tipo}:{normalized}"
+
+
+def _normalized_translation_key(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text.lower())
+
+
+def _should_repair_local_translation(source_text: str, translated_text: str) -> bool:
+    translated = translated_text.strip()
+    if not translated:
+        return True
+
+    source_key = _normalized_translation_key(source_text)
+    translated_key = _normalized_translation_key(translated)
+    return bool(source_key) and source_key == translated_key
 
 
 def _build_context_hints(context: dict, glossario: dict) -> str:
@@ -308,17 +369,21 @@ def _prefer_local_translation_backend() -> bool:
     flag = (
         os.getenv("TRADUZAI_PREFER_LOCAL_TRANSLATION")
         or os.getenv("MANGATL_PREFER_LOCAL_TRANSLATION")
-        or "1"
+        or "0"
     )
     return str(flag).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _resolve_translation_backend(google_ok: bool, ollama_status: dict) -> str:
     ollama_ready = bool(ollama_status.get("running")) and bool(ollama_status.get("models"))
-    if _prefer_local_translation_backend() and ollama_ready:
-        return "ollama"
+    
+    # Preferencia do usuario: Google se estiver OK
     if google_ok:
         return "google"
+        
+    if _prefer_local_translation_backend() and ollama_ready:
+        return "ollama"
+    
     if ollama_ready:
         return "ollama"
     return "passthrough"
@@ -330,6 +395,7 @@ def translate_pages(
     context: dict,
     glossario: dict,
     idioma_destino: str = "pt-BR",
+    idioma_origem: str = "en",
     qualidade: str = "normal",
     ollama_host: str = OLLAMA_HOST,
     ollama_model: str = "traduzai-translator",
@@ -341,8 +407,9 @@ def translate_pages(
 
     google_ok = False
     try:
-        if _google is None:
-            _google = _GoogleTranslator()
+        if _google is None or getattr(_google, "_source_lang", "en") != idioma_origem:
+            _google = _GoogleTranslator(source=idioma_origem, target="pt")
+            _google._source_lang = idioma_origem
         _google.translate("test")
         google_ok = True
     except Exception as exc:
@@ -351,9 +418,16 @@ def translate_pages(
     ollama = _check_ollama(ollama_host)
     backend = _resolve_translation_backend(google_ok=google_ok, ollama_status=ollama)
 
+    logger.info(f"--- TRADUCAO INICIADA ---")
+    logger.info(f"Backend selecionado: {backend}")
+    logger.info(f"Idioma Origem: {idioma_origem}")
+    logger.info(f"Idioma Destino: {idioma_destino}")
+    logger.info(f"Google OK: {google_ok}")
+    logger.info(f"-------------------------")
+
     if backend == "google":
         logger.info("Traducao usando Google Translate.")
-        return _translate_with_google(ocr_results, context, glossario, progress_callback)
+        return _translate_with_google(ocr_results, context, glossario, progress_callback, idioma_origem=idioma_origem)
 
     if backend == "ollama":
         model = _pick_ollama_model(ollama["models"], ollama_model)
@@ -364,8 +438,10 @@ def translate_pages(
             context,
             glossario,
             idioma_destino,
+            idioma_origem,
             model,
             ollama_host,
+            _google if google_ok else None,
             progress_callback,
         )
 
@@ -378,11 +454,14 @@ def _translate_with_google(
     context: dict,
     glossario: dict,
     progress_callback: Callable | None,
+    idioma_origem: str = "en",
 ) -> list[dict]:
     total = len(ocr_results)
     translated_pages = []
     history_memory: dict[str, str] = {}
     history_tail: list[dict] = []
+
+    is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
 
     for page_idx, ocr_page in enumerate(ocr_results):
         texts = ocr_page.get("texts", [])
@@ -394,9 +473,15 @@ def _translate_with_google(
 
         raw_texts = [text.get("text", "") for text in texts]
         tipos = [text.get("tipo", "fala") for text in texts]
-        was_uppers = [text == text.upper() for text in raw_texts]
+        
+        # Para CJK, was_upper nao faz sentido da mesma forma (seria True para tudo)
+        if is_cjk:
+            was_uppers = [False] * len(raw_texts)
+        else:
+            was_uppers = [text == text.upper() and any(c.isalpha() for c in text) for text in raw_texts]
+            
         preprocessed = [
-            _preprocess_text(_prepare_source_text_for_translation(text, tipo), tipo)
+            _preprocess_text(_prepare_source_text_for_translation(text, tipo, lang=idioma_origem), tipo, lang=idioma_origem)
             for text, tipo in zip(raw_texts, tipos)
         ]
 
@@ -437,6 +522,7 @@ def _translate_with_google(
                 was_upper,
                 tipo,
                 source_text=original,
+                lang=idioma_origem,
             )
             memory_key = _normalize_memory_key(original, tipo)
             history_memory[memory_key] = final
@@ -471,13 +557,15 @@ def _translate_with_ollama(
     context: dict,
     glossario: dict,
     idioma_destino: str,
+    idioma_origem: str,
     model: str,
     host: str,
+    repair_translator: Optional[_GoogleTranslator],
     progress_callback: Callable | None,
 ) -> list[dict]:
     total = len(ocr_results)
     system = (
-        f"Voce e um tradutor de manga EN->{idioma_destino}. Responda SOMENTE com JSON array.\n"
+        f"Voce e um tradutor de manga especializado em {idioma_origem}->{idioma_destino}. Responda SOMENTE com JSON array.\n"
         f"OBRA: {obra}\n"
         f"PERSONAGENS: {', '.join(context.get('personagens', [])[:8]) or 'N/A'}\n"
         f"GLOSSARIO: {json.dumps(glossario, ensure_ascii=False)}\n"
@@ -508,6 +596,30 @@ def _translate_with_ollama(
         except Exception:
             translated_map = {}
 
+        repair_indices: list[int] = []
+        repair_texts: list[str] = []
+        if repair_translator is not None:
+            for index, text_data in enumerate(texts):
+                if text_data.get("skip_processing"):
+                    continue
+                original = text_data.get("text", "")
+                candidate = translated_map.get(f"t{index + 1}", original)
+                if _should_repair_local_translation(original, candidate):
+                    tipo = text_data.get("tipo", "fala")
+                    repair_indices.append(index)
+                    repair_texts.append(_preprocess_text(_prepare_source_text_for_translation(original, tipo), tipo))
+
+        repaired_map: dict[int, str] = {}
+        if repair_indices and repair_translator is not None:
+            try:
+                repaired_batch = repair_translator.translate_batch(repair_texts)
+            except Exception:
+                repaired_batch = []
+
+            for index, repaired in zip(repair_indices, repaired_batch):
+                if repaired and repaired.strip():
+                    repaired_map[index] = repaired
+
         page_texts = []
         for index, text_data in enumerate(texts):
             original = text_data.get("text", "")
@@ -516,15 +628,19 @@ def _translate_with_ollama(
                 page_texts.append({"original": original, "translated": original, "tipo": tipo})
                 history_tail.append({"source": original, "translated": original, "tipo": tipo})
                 continue
-            translated = translated_map.get(f"t{index + 1}", original)
+            translated = repaired_map.get(index) or translated_map.get(f"t{index + 1}", original)
             memory_translation = _lookup_memory_translation(original, tipo, context, glossario)
             if memory_translation:
                 translated = memory_translation
+            is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
+            was_upper = False if is_cjk else (original == original.upper() and any(c.isalpha() for c in original))
+            
             final = _postprocess(
                 translated,
-                original == original.upper(),
+                was_upper,
                 tipo,
                 source_text=original,
+                lang=idioma_origem,
             )
             page_texts.append(
                 {

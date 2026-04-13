@@ -108,12 +108,14 @@ def run_ocr(
     image_path: str,
     models_dir: str = "",
     profile: str = "quality",
+    idioma_origem: str = "en",
 ) -> dict:
     """
     Roda OCR em uma pagina e devolve leituras ja revisadas.
     """
-    del models_dir
+    del models_dir, idioma_origem  # idioma_origem not yet used in legacy path
     resolved_profile = QUALITY_TO_PROFILE.get(profile, "quality")
+    ocr_mode = "easyocr"  # Legacy path uses EasyOCR
 
     reader = _get_reader()
     img_cv = cv2.imread(image_path)

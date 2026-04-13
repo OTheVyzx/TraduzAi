@@ -13,7 +13,7 @@ const DEFAULT_QUALITY = "alta" as const;
 
 export function Setup() {
   const navigate = useNavigate();
-  const { project, updateProject, canTranslate, systemProfile, setSetupEstimate } = useAppStore();
+  const { project, updateProject, canTranslate, systemProfile, setSetupEstimate, batchSources, setBatchSources } = useAppStore();
 
   const [obraSearch, setObraSearch] = useState(project?.obra || "");
   const [searching, setSearching] = useState(false);
@@ -101,6 +101,12 @@ export function Setup() {
 
   function handleStart() {
     if (!project) return;
+    if (batchSources.length > 0) {
+      // No modo lote, a validação de créditos é feita por capítulo no Processing
+      updateProject({ qualidade: DEFAULT_QUALITY, status: "processing" });
+      navigate("/processing");
+      return;
+    }
     if (!canTranslate(totalPages)) {
       alert("Créditos insuficientes para traduzir este capítulo.");
       return;
@@ -253,18 +259,72 @@ export function Setup() {
         </div>
       )}
 
-      {/* Chapter number */}
-      <div className="mb-4">
-        <label className="text-sm text-text-secondary mb-2 block">Capítulo</label>
-        <input
-          type="number"
-          value={project.capitulo}
-          onChange={(e) => updateProject({ capitulo: parseInt(e.target.value) || 1 })}
-          min={1}
-          className="w-24 px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
-            text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
-        />
-      </div>
+      {/* Chapter list if batch */}
+      {batchSources.length > 1 ? (
+        <div className="mb-6">
+          <label className="text-sm text-text-secondary mb-2 block">
+            Capítulos selecionados ({batchSources.length})
+          </label>
+          <div className="bg-bg-secondary border border-white/5 rounded-xl overflow-hidden">
+            <div className="max-h-48 overflow-y-auto">
+              {batchSources.map((path, index) => (
+                <div key={path} className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 last:border-0 group">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-[10px] font-mono text-text-secondary w-4">
+                      {index + 1}
+                    </span>
+                    <span className="text-sm text-text-primary truncate">
+                      {path.split(/[/\\]/).pop()}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setBatchSources(batchSources.filter(p => p !== path))}
+                    className="p-1 text-text-secondary/30 hover:text-status-error opacity-0 group-hover:opacity-100 transition-smooth"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="px-4 py-2 bg-white/5 flex items-center justify-between">
+              <span className="text-[11px] text-text-secondary italic">
+                Capítulo inicial: {project.capitulo} (será incrementado automaticamente)
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-4 mb-4">
+          <div className="flex-1">
+            <label className="text-sm text-text-secondary mb-2 block flex items-center gap-2">
+              <Globe size={14} className="text-accent-purple" />
+              Idioma de Origem
+            </label>
+            <select
+              value={project.idioma_origem}
+              onChange={(e) => updateProject({ idioma_origem: e.target.value })}
+              className="w-full px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
+                text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
+            >
+              <option value="en">Inglês (Detecta SFX)</option>
+              <option value="ja">Japonês</option>
+              <option value="ko">Coreano</option>
+              <option value="zh">Chinês</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-sm text-text-secondary mb-2 block">Capítulo</label>
+            <input
+              type="number"
+              value={project.capitulo}
+              onChange={(e) => updateProject({ capitulo: parseInt(e.target.value) || 1 })}
+              min={1}
+              className="w-24 px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
+                text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Time estimate */}
       <div className="mb-6">

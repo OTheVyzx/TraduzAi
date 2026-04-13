@@ -243,6 +243,10 @@ export async function openFiles(): Promise<string | null> {
   return invoke("open_source_dialog");
 }
 
+export async function openMultipleSources(): Promise<string[]> {
+  return invoke("open_multiple_sources_dialog");
+}
+
 export async function openProjectDialog(): Promise<string | null> {
   return invoke("open_project_dialog");
 }
@@ -288,6 +292,7 @@ export async function startPipeline(config: {
   source_path: string;
   obra: string;
   capitulo: number;
+  idioma_origem: string;
   idioma_destino: string;
   qualidade: "rapida" | "normal" | "alta";
   glossario: Record<string, string>;
@@ -370,15 +375,16 @@ export async function stopLab(): Promise<void> {
 }
 
 export async function approveLabProposal(proposalId: string): Promise<LabProposal> {
-  return invoke("approve_lab_proposal", { proposal_id: proposalId });
+  // Tauri uses camelCase for multi-word command args.
+  return invoke("approve_lab_proposal", { proposalId });
 }
 
 export async function rejectLabProposal(proposalId: string): Promise<LabProposal> {
-  return invoke("reject_lab_proposal", { proposal_id: proposalId });
+  return invoke("reject_lab_proposal", { proposalId });
 }
 
 export async function approveLabBatch(batchId: string): Promise<LabProposal[]> {
-  return invoke("approve_lab_batch", { batch_id: batchId });
+  return invoke("approve_lab_batch", { batchId });
 }
 
 export async function getLabReferencePreview(

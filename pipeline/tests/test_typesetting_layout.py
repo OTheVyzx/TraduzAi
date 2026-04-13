@@ -3,6 +3,7 @@ import unittest
 from PIL import Image
 
 from typesetter.renderer import (
+    _build_textpath_mask,
     _resolve_text_layout,
     _split_text_for_connected_balloons,
     build_render_blocks,
@@ -172,6 +173,34 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertLess(layout["height_ratio"], 0.78)
         self.assertLess(abs(block_cx - cx), 8.0)
         self.assertLess(abs(block_cy - cy), 8.0)
+
+    def test_resolve_text_layout_keeps_textured_balloon_lines_inside_real_width(self):
+        text_data = {
+            "translated": "EMBORA ALGUNS DUVIDAS DA VERACIDADE DA PUNICAO, ENFATIZAMOS O POSSIVEL.",
+            "bbox": [70, 20, 330, 170],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 40,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+            "balloon_bbox": [70, 20, 330, 170],
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        plan = plan_text_layout(text_data)
+        layout = _resolve_text_layout(text_data, plan)
+        real_widths = [
+            _build_textpath_mask(layout["font"], line, padding=0).shape[1]
+            for line in layout["lines"]
+        ]
+
+        self.assertTrue(real_widths)
+        self.assertLessEqual(max(real_widths), plan["max_width"])
 
     def test_split_text_for_connected_balloons_prefers_sentence_boundaries(self):
         chunks = _split_text_for_connected_balloons(

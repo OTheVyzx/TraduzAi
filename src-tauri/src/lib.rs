@@ -27,6 +27,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::project::open_file_dialog,
             commands::project::open_source_dialog,
+            commands::project::open_multiple_sources_dialog,
             commands::project::open_project_dialog,
             commands::project::save_file_dialog,
             commands::project::validate_import,

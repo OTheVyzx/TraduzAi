@@ -18,7 +18,17 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from ocr.postprocess import analyze_style, classify_text_type, fix_ocr_errors, is_non_english, is_watermark, _find_hf_model
+from ocr.postprocess import (
+    _find_hf_model,
+    analyze_style,
+    classify_text_type,
+    fix_ocr_errors,
+    is_editorial_credit,
+    is_non_english,
+    is_watermark,
+    looks_suspicious,
+)
+from ocr.semantic_reviewer import semantic_refine_text
 
 logger = logging.getLogger(__name__)
 
@@ -429,17 +439,20 @@ def _get_detector(profile: str = "quality"):
     return _detector
 
 
-def _get_ocr_engine(profile: str = "quality"):
+def _get_ocr_engine(profile: str = "quality", lang: str = "en"):
     global _ocr_engine
     desired_model = _profile_to_ocr_model(profile)
     current_request = getattr(_ocr_engine, "_requested_model", getattr(_ocr_engine, "model_name", ""))
-    if _ocr_engine is None or current_request != desired_model:
+    current_lang = getattr(_ocr_engine, "lang", "en")
+    
+    if _ocr_engine is None or current_request != desired_model or current_lang != lang:
         from vision_stack.ocr import OCREngine
 
         _ocr_engine = OCREngine(
             model=desired_model,
             device=_profile_to_device(profile),
             half=True,
+            lang=lang,
         )
     return _ocr_engine
 
@@ -2973,6 +2986,7 @@ def build_page_result(
     ocr_backend: str = "vision",
     enable_font_detection: bool = False,
     progress_callback=None,
+    idioma_origem: str = "en",
 ) -> dict:
     height, width = image_rgb.shape[:2]
     page_texts = []
@@ -2990,18 +3004,28 @@ def build_page_result(
         if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
             continue
 
-        cleaned = fix_ocr_errors(str(raw_text or "").strip())
+        confidence = round(float(getattr(block, "confidence", 0.0)), 3)
+        cleaned = fix_ocr_errors(str(raw_text or "").strip(), idioma_origem=idioma_origem)
         if not cleaned:
             continue
 
         if is_watermark(cleaned):
             continue
 
-        # Ignorar textos não-inglês (SFX coreano, japonês, etc.) — sem tradução e sem inpainting
-        if is_non_english(cleaned):
+        if is_editorial_credit(cleaned):
+            continue
+
+        # Ignorar textos não-latinos apenas se a origem for inglês.
+        # Se a origem for CJK, devemos manter o texto para tradução.
+        if idioma_origem == "en" and is_non_english(cleaned):
             continue
 
         tipo = classify_text_type(cleaned, bbox, width)
+        cleaned = semantic_refine_text(cleaned, tipo=tipo, confidence=confidence)
+        if is_editorial_credit(cleaned):
+            continue
+        if looks_suspicious(cleaned, confidence) and confidence < 0.6:
+            continue
         estilo = analyze_style(image_rgb, bbox)
         if _should_use_base_white_balloon_font(image_rgb, bbox):
             estilo["fonte"] = "ComicNeue-Bold.ttf"
@@ -3013,7 +3037,7 @@ def build_page_result(
             {
                 "text": cleaned,
                 "bbox": bbox,
-                "confidence": round(float(getattr(block, "confidence", 0.0)), 3),
+                "confidence": confidence,
                 "tipo": tipo,
                 "estilo": estilo,
                 "ocr_source": f"vision-{ocr_backend}",
@@ -3042,11 +3066,12 @@ def _run_detect_ocr_on_image(
     image_label: str,
     profile: str = "quality",
     progress_callback=None,
+    idioma_origem: str = "en",
 ) -> dict:
     _emit_stage_progress(progress_callback, "load_detector", 0.08, "Carregando detector de texto")
     detector = _get_detector(profile)
     _emit_stage_progress(progress_callback, "load_ocr_engine", 0.18, "Carregando motor de OCR")
-    ocr = _get_ocr_engine(profile)
+    ocr = _get_ocr_engine(profile, lang=idioma_origem)
     _emit_stage_progress(progress_callback, "detect_text", 0.38, "Detectando regioes de texto")
     blocks = detector.detect(image_rgb, conf_threshold=_profile_to_detection_threshold(profile))
     backend_name = getattr(ocr, "_backend", getattr(ocr, "model_name", "vision"))
@@ -3083,6 +3108,7 @@ def _run_detect_ocr_on_image(
         ocr_backend=backend_name,
         enable_font_detection=True,
         progress_callback=progress_callback,
+        idioma_origem=idioma_origem,
     )
 
 
@@ -3217,6 +3243,7 @@ def run_detect_ocr(
     profile: str = "quality",
     vision_worker_path: str = "",
     progress_callback=None,
+    idioma_origem: str = "en",
 ) -> dict:
 
     _configure_model_roots(models_dir)
@@ -3259,6 +3286,7 @@ def run_detect_ocr(
                 image_path,
                 profile=profile,
                 progress_callback=progress_callback,
+                idioma_origem=idioma_origem,
             )
     else:
         page_result = _run_detect_ocr_on_image(
@@ -3266,6 +3294,7 @@ def run_detect_ocr(
             image_path,
             profile=profile,
             progress_callback=progress_callback,
+            idioma_origem=idioma_origem,
         )
     # Cache image for downstream use (layout enrichment) to avoid re-reading from disk
     page_result["_cached_image_bgr"] = image_bgr

@@ -37,6 +37,35 @@ pub async fn open_source_dialog(app: tauri::AppHandle) -> Result<Option<String>,
 }
 
 #[tauri::command]
+pub async fn open_multiple_sources_dialog(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let mut results = Vec::new();
+
+    // Primeiro tenta arquivos múltiplos
+    if let Some(files) = app
+        .dialog()
+        .file()
+        .add_filter("Mangá", &["zip", "cbz", "jpg", "jpeg", "png", "webp"])
+        .blocking_pick_files()
+    {
+        for f in files {
+            results.push(f.to_string());
+        }
+    }
+
+    // Se não pegou arquivos, tenta pastas (infelizmente o pick_folders não é tão comum, mas vamos tentar se o usuário quiser selecionar várias subpastas de uma vez)
+    if results.is_empty() {
+        // Nota: Tauri v2 dialog pick_folders() existe se o plugin suportar.
+        if let Some(folders) = app.dialog().file().blocking_pick_folders() {
+            for f in folders {
+                results.push(f.to_string());
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
 pub async fn open_project_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let folder = app.dialog().file().blocking_pick_folder();
     Ok(folder.map(|f| f.to_string()))

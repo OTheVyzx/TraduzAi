@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Clock3,
   FlaskConical,
+  FolderOpen,
   GitBranch,
   Pause,
   Play,
@@ -35,6 +36,7 @@ import {
   onLabReviewRequested,
   onLabReviewResult,
   onLabState,
+  openFiles,
   pauseLab,
   rejectLabProposal,
   resumeLab,
@@ -205,6 +207,7 @@ export function Lab() {
   const [rangeStart, setRangeStart] = useState<number | null>(null);
   const [rangeEnd, setRangeEnd] = useState<number | null>(null);
   const [gpuPolicy, setGpuPolicy] = useState<LabGpuPolicy>("require_gpu");
+  const [selectedLabFile, setSelectedLabFile] = useState<string | null>(null);
 
   const pathParts = location.pathname.split("/").filter(Boolean);
   const allowedSections: LabSection[] = ["home", "run", "reviews", "decisions", "benchmarks", "history"];
@@ -452,6 +455,18 @@ export function Lab() {
     });
   }
 
+  async function handleOpenFileForLab() {
+    try {
+      const path = await openFiles();
+      if (path) {
+        setSelectedLabFile(path);
+        setPageError(null);
+      }
+    } catch (error) {
+      setPageError(extractErrorMessage(error));
+    }
+  }
+
   async function handlePauseLab() {
     await runAction("pause", async () => {
       await pauseLab();
@@ -522,6 +537,14 @@ export function Lab() {
           </div>
 
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleOpenFileForLab}
+              disabled={running || busyAction !== null}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl border border-accent-cyan/25 bg-accent-cyan/10 text-accent-cyan text-sm font-medium hover:bg-accent-cyan/15 transition-smooth disabled:opacity-40"
+            >
+              <FolderOpen size={15} />
+              Abrir arquivo
+            </button>
             <button
               onClick={handleStartLab}
               disabled={running || snapshot?.status === "stopping" || busyAction !== null || catalogChapterPairs.length === 0}
@@ -804,6 +827,12 @@ export function Lab() {
 
         {(activeSection === "home" || activeSection === "run") && (
           <section className="grid xl:grid-cols-[1.1fr_0.9fr] gap-6">
+            {selectedLabFile && (
+              <div className="rounded-2xl border border-accent-cyan/25 bg-accent-cyan/10 px-4 py-3">
+                <p className="text-xs uppercase tracking-[0.24em] text-accent-cyan">Arquivo selecionado para Lab</p>
+                <p className="text-sm text-text-primary mt-2 break-all">{selectedLabFile}</p>
+              </div>
+            )}
             <div className="rounded-3xl border border-white/6 bg-white/4 p-5 space-y-4">
               <div className="flex items-center justify-between gap-3">
                 <div>

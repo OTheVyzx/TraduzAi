@@ -1,0 +1,16 @@
+{
+  "source_path": "d:\\TraduzAi\\debug_pipeline_test\\originals\\001.jpg",
+  "models_dir": "C:\\Users\\PICHAU\\AppData\\Roaming\\com.traduzai.app\\models",
+  "work_dir": "d:\\TraduzAi\\debug_pipeline_test_cjk_zh",
+  "api_key": "dummy",
+  "obra": "Test Manga CJK Chinese",
+  "qualidade": "normal",
+  "idioma_origem": "zh",
+  "idioma_destino": "pt-BR",
+  "contexto": {
+    "sinopse": "Teste de tradução from Chinese",
+    "genero": ["test"],
+    "personagens": []
+  },
+  "glossario": {}
+}

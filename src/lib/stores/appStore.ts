@@ -175,6 +175,7 @@ interface AppState {
   ollamaRunning: boolean;
   ollamaModels: string[];
   ollamaHasTranslator: boolean;
+  batchSources: string[];
 
   setProject: (project: Project | null) => void;
   updateProject: (updates: Partial<Project>) => void;
@@ -187,6 +188,7 @@ interface AppState {
   setGpu: (available: boolean, name: string) => void;
   setModelsReady: (ready: boolean) => void;
   setOllamaStatus: (running: boolean, models: string[], hasTranslator: boolean) => void;
+  setBatchSources: (sources: string[]) => void;
   addRecentProject: (p: RecentProject) => void;
   removeRecentProject: (id: string) => void;
 
@@ -221,6 +223,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ollamaRunning: false,
   ollamaModels: [],
   ollamaHasTranslator: false,
+  batchSources: [],
 
   setProject: (project) => set({ project, pipeline: null, setupEstimate: null }),
   updateProject: (updates) =>
@@ -247,6 +250,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setModelsReady: (ready) => set({ modelsReady: ready }),
   setOllamaStatus: (ollamaRunning, ollamaModels, ollamaHasTranslator) =>
     set({ ollamaRunning, ollamaModels, ollamaHasTranslator }),
+  setBatchSources: (batchSources) => set({ batchSources }),
   addRecentProject: (p) => {
     const updated = sanitizeRecentProjects([p, ...get().recentProjects]);
     persistRecentProjects(updated);

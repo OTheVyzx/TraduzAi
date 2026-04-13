@@ -1,0 +1,15 @@
+Para testar adequadamente o suporte a idiomas CJK, precisamos de:
+
+1. Uma imagem de mangá/webtoon COREANO com diálogos em hangul (한글)
+2. Uma imagem de mangá JAPONÊS com diálogos em kanji/hiragana
+3. Uma imagem de manhua CHINÊS com diálogos em caracteres tradicionais/simplificados
+
+A imagem que você enviou mostra uma página com muito texto coreano.
+Se salvarmos essa imagem como teste, o OCR vai detectar e traduzir corretamente.
+
+Você pode:
+A) Fornecer um arquivo .cbz ou .zip de um webtoon coreano
+B) Salvar a imagem que mostrou e testar com ela
+C) Usar exemplos de projectos existentes que tenham CJK
+
+Qual você prefere?

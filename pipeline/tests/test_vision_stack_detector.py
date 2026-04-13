@@ -63,8 +63,12 @@ class VisionStackDetectorTests(unittest.TestCase):
                 "weights": {"layer.weight": torch.ones(1)},
             }
         }
+        existing_paths = {str(detector._model_path)}
 
-        with patch("vision_stack.detector.torch.load", return_value=checkpoint), patch.object(
+        with patch("pathlib.Path.exists", autospec=True, side_effect=lambda path: str(path) in existing_paths), patch(
+            "vision_stack.detector.torch.load",
+            return_value=checkpoint,
+        ), patch.object(
             TextDetector,
             "_import_yolov5_runtime",
             return_value=(FakeModel, object(), object(), object()),
@@ -157,8 +161,18 @@ class VisionStackDetectorTests(unittest.TestCase):
         checkpoint = {"blk_det": {"cfg": {"nc": 2, "ch": 3}, "weights": {"from_pt": torch.ones(1)}}}
         yolo_weights = {"from_safetensor": torch.zeros(1)}
         seg_weights = {"seg_safetensor": torch.ones(1)}
+        yolo_path = Path(r"T:\mangatl\pk\huggingface\mayocream\comic-text-detector\yolo-v5.safetensors")
+        unet_path = Path(r"T:\mangatl\pk\huggingface\mayocream\comic-text-detector\unet.safetensors")
+        existing_paths = {
+            str(detector._model_path),
+            str(yolo_path),
+            str(unet_path),
+        }
 
-        with patch("vision_stack.detector.torch.load", return_value=checkpoint), patch.object(
+        with patch("pathlib.Path.exists", autospec=True, side_effect=lambda path: str(path) in existing_paths), patch(
+            "vision_stack.detector.torch.load",
+            return_value=checkpoint,
+        ), patch.object(
             TextDetector,
             "_import_yolov5_runtime",
             return_value=(FakeModel, object(), object(), object()),
@@ -170,8 +184,8 @@ class VisionStackDetectorTests(unittest.TestCase):
             TextDetector,
             "_get_comic_text_safetensor_paths",
             return_value={
-                "yolo": Path(r"T:\mangatl\pk\huggingface\mayocream\comic-text-detector\yolo-v5.safetensors"),
-                "unet": Path(r"T:\mangatl\pk\huggingface\mayocream\comic-text-detector\unet.safetensors"),
+                "yolo": yolo_path,
+                "unet": unet_path,
             },
         ), patch.object(
             TextDetector,

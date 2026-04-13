@@ -220,6 +220,7 @@ def main():
                 min(0.92, max(0.02, float(progress) * 0.92)),
                 message,
             ),
+            idioma_origem=config.get("idioma_origem", "en"),
         )
         emit_ocr_page_progress(0.96, "Revisando coerencia textual")
         page_result = contextual_review_page(
@@ -297,6 +298,7 @@ def main():
             context=context,
             glossario=config.get("glossario", {}),
             idioma_destino=config.get("idioma_destino", "pt-BR"),
+            idioma_origem=config.get("idioma_origem", "en"),
             qualidade="alta",
             ollama_host=config.get("ollama_host", "http://localhost:11434"),
             ollama_model=config.get("ollama_model", "traduzai-translator"),

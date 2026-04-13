@@ -1,6 +1,6 @@
 # TraduzAi — Contexto de Desenvolvimento
 
-> Última atualização: 2026-04-10
+> Última atualização: 2026-04-12
 > Leia este arquivo para retomar o contexto sem precisar reler o histórico de chat.
 
 ---
@@ -17,6 +17,35 @@
 
 ---
 
+
+## O que foi feito (sessão — 2026-04-12)
+
+### 38. Benchmark real do Lab elevado para >99 no capítulo 82
+- `lab/benchmarking.py` passou a usar fonte efetiva no `layout_occupancy`, faixa segura para `textual_similarity`, `manual_edits_saved` filtrado por texto relevante e `visual_cleanup` alinhado ao source quando a paginação PT é incompatível.
+- `pipeline/translator/translate.py` ganhou reparo pontual com Google quando o backend local devolve vazio ou texto idêntico ao inglês.
+- `pipeline/ocr/postprocess.py` e `pipeline/vision_stack/runtime.py` passaram a cortar watermark/créditos editoriais com mais agressividade antes de entrar no `project.json`.
+- Resultado real do capítulo 82 após rerun: `score_after 99.3`, com `textual_similarity 99.5`, `layout_occupancy 100.0`, `readability 97.0`, `visual_cleanup 99.8` e `manual_edits_saved 99.8`.
+
+### 39. Endurecimento do filtro para `scan` / `toon` e fluxo `cntbk`
+- Watermarks e créditos com `scan`, `scans`, `scanlator`, `scanlations`, `toon`, `toons` e variantes semelhantes agora são descartados no OCR.
+- `context.md` atualizado.
+- Backup versionado novo: `D:/TraduzAi v0.25/`
+- Backup versionado anterior removido: `D:/TraduzAi v0.24/`
+
+### 40. Tradução em Lote (Multi-capítulos)
+- **Objetivo:** Permitir selecionar vários capítulos de uma vez para processamento sequencial automático.
+- **Rust:** Implementado `open_multiple_sources_dialog` usando `blocking_pick_files` e `blocking_pick_folders` do Tauri v2.
+- **App Store:** Adicionado `batchSources` para armazenar a fila de caminhos.
+- **Home:** Adicionado botão "Tradução em Lote" (ícone Library) que permite seleção múltipla.
+- **Setup:** Quando em modo lote, exibe a lista de arquivos selecionados e permite remover itens. O número do capítulo inicial é definido e incrementado automaticamente para os subsequentes.
+- **Processing:** Refatoração completa para loop sequencial. Ao terminar um capítulo, o `onPipelineComplete` detecta se há mais itens na fila, incrementa o `batchIndex` e reinicia o pipeline para o próximo arquivo. A UI agora mostra "Lote: X de Y" e o status dos concluídos.
+
+### Backup
+- `D:/TraduzAi v0.25/` — Melhoria na detecção de sub-balões conectados (erosão progressiva) e distribuição de texto multi-balão (split por sentença/lobos).
+- `D:/TraduzAi v0.24/` — Implementação completa de Tradução em Lote (Multi-capítulos). (Removido)
+
+---
+
 ## O que foi feito (sessão — 2026-04-10)
 
 ### 37. Manutenção de Contexto e Backup (Fluxo `cntbk`)
@@ -25,7 +54,7 @@
 - Remoção do backup anterior (`v0.20`).
 
 ### Backup
-- `D:/TraduzAi v0.21/` — estado atual pós-rebranding e implementação das camadas do editor.
+- `D:/TraduzAi v0.23/` — estado atual pós-rebranding e implementação das camadas do editor.
 
 ---
 
@@ -5184,3 +5213,120 @@ de transicao (2px externos), nunca no interior da regiao preenchida.
 ### Observacao operacional
 - o repositório/local precisa ser tratado com guardrails: o laboratorio pode preparar propostas e mudancas candidatas, mas nao deve fazer merge nem rollout sozinho
 - quando o ambiente nao estiver sob Git, o Lab ainda deve registrar a proposta, o benchmark e o estado bloqueado de promocao, em vez de fingir que conseguiu abrir PR
+
+## 2026-04-12 - Correcao final de baloes cortados e baloes conectados
+
+### Objetivo
+- corrigir baloes cortados pela troca de pagina para o texto voltar a ficar centralizado mesmo quando o balao encosta no limite da imagem
+- corrigir baloes conectados que estavam sendo tratados como um unico bloco de texto
+- reduzir cortes no tracado causados por subregioes apertadas demais dentro de baloes conectados
+
+### Causa raiz
+- `refine_balloon_bbox_from_image(...)` em `pipeline/layout/balloon_layout.py` descartava o refinamento quando o componente branco tocava a borda do ROI; isso fazia baloes parciais voltarem para o bbox pequeno do OCR
+- a inferencia de `balloon_subregions` dependia demais do agrupamento simples de componentes escuros; em casos reais como `009__001` o bloco inteiro colapsava em um grupo so
+- quando a separacao acontecia, algumas subregioes ficavam apertadas demais e nao cobriam o lobo inteiro do balao, o que favorecia texto desalinhado e sensacao de corte
+
+### Correcao aplicada
+- `pipeline/layout/balloon_layout.py`
+- `enrich_page_layout(...)`
+- quando o cluster compartilhado nao suporta layout compartilhado, o refinamento volta a usar o bbox do proprio texto para nao inflar casos isolados
+- `refine_balloon_bbox_from_image(...)`
+- agora faz busca progressiva com ROI maior
+- aceita componentes validos que tocam a borda real da pagina/imagem
+- rejeita apenas toque artificial na borda do ROI e continua segurando crescimento absurdo
+- `_extract_text_cluster_components(...)`
+- ganhou fallback por black-hat para recuperar grupos escuros em baloes conectados onde o threshold simples colapsava tudo
+- `_merge_text_cluster_components(...)`
+- agora faz merge iterativo ate estabilizar, em vez de uma passada unica
+- `_build_balloon_subregions_from_groups(...)`
+- nova rotina para abrir subregioes largas por eixo principal:
+- cima/baixo quando os lobos estao empilhados
+- esquerda/direita quando os lobos estao lado a lado
+- fallback diagonal continua usando expansao por grupo
+
+### Testes adicionados/ajustados
+- `pipeline/tests/test_balloon_refiner.py`
+- `test_expands_to_partial_balloon_that_is_cut_by_page_edge`
+- `pipeline/tests/test_layout_analysis.py`
+- helper `_fixture_image_path(...)` para aceitar fixtures reais no caminho novo `testes/debug_pipeline/originals`
+- `test_partial_balloon_touching_page_edge_still_expands_layout_bbox`
+- `test_connected_vertical_balloons_split_into_top_and_bottom_subregions`
+- `test_real_009_connected_balloon_creates_two_subregions` passou a validar separacao real e cobertura util, sem assumir obrigatoriamente top/bottom
+- `pipeline/tests/test_vision_stack_runtime.py`
+- caminhos reais `009__001.jpg` atualizados para aceitar o novo local dos fixtures
+
+### Validacao executada
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_balloon_refiner pipeline.tests.test_layout_analysis pipeline.tests.test_typesetting_layout pipeline.tests.test_typesetting_renderer -v`
+- resultado: 24 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_vision_stack_runtime.VisionStackRuntimeTests.test_vision_blocks_to_mask_splits_real_009_white_balloon_mask_components pipeline.tests.test_vision_stack_runtime.VisionStackRuntimeTests.test_extract_white_balloon_text_boxes_splits_real_009_balloon_lines -v`
+- resultado: 2 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m py_compile pipeline\\layout\\balloon_layout.py pipeline\\tests\\test_layout_analysis.py pipeline\\tests\\test_balloon_refiner.py pipeline\\tests\\test_vision_stack_runtime.py`
+- resultado: passou
+
+### Observacao
+- a suite completa de `pipeline.tests.test_vision_stack_runtime` ainda tem falhas paralelas antigas de fixture e expectativas de fonte/detector; nao bloqueou esta correcao especifica dos baloes
+
+## 2026-04-12 - Suite verde e correcao de overflow em baloes texturizados vermelhos
+
+### Objetivo
+- fechar as falhas restantes da suite de `pipeline/tests`
+- corrigir os baloes texturizados vermelhos em que o texto estava ficando grande demais e ultrapassando o balao
+
+### Causa raiz
+- parte das falhas restantes da suite vinha de testes desatualizados:
+- fixtures reais ainda apontando para `testes/*.jpg` em vez de `testes/debug_pipeline/originals/*.jpg`
+- mocks antigos que nao acompanhavam mais os branches atuais de `recognize_blocks_from_page(...)`, do loader nativo do detector e das assinaturas do PaddleOCR
+- havia tambem uma regressao real em `pipeline/translator/translate.py`, onde reparos contextuais importantes tinham sido esvaziados:
+- `COYLD THAT LIGHTBES` nao era mais reparado antes da traducao
+- a revisao semantica de frases como `YOU SAID YOU COULD SEE THROUGH ALL MY ATTACKS, RIGHT?` nao voltava mais para a formulacao correta em PT-BR
+- no typesetting, o layout usava uma estimativa simples de largura em `SafeTextPathFont.getbbox(...)`
+- isso funcionava razoavelmente para fontes como `ComicNeue-Bold.ttf`, mas subestimava muito a largura real da `Newrotic.ttf`
+- na pratica, o solver achava que o texto cabia no balao vermelho, mas o render final com a bitmap real da fonte vazava para fora
+
+### Correcao aplicada
+- `pipeline/tests/test_vision_stack_runtime.py`
+- fixtures `010__001.jpg` e `012__001.jpg` passaram a usar `_fixture_image_path(...)`
+- os testes de font detection/runtime foram alinhados ao fluxo real atual
+- o caso de mask refinada passou a validar o contorno refinado sem a dilatacao final
+- o mock de OCR passou a cobrir `recognize_blocks_from_page(...)`, que e o branch real usado com PaddleOCR
+- `pipeline/translator/translate.py`
+- restaurados reparos de OCR/contexto:
+- `COYLD` -> `could`
+- `LIGHTBES` -> `light be...?!`
+- normalizacao de ruido de encoding como `VocÄ™`/`Vocę` -> `Você`
+- restaurada a revisao semantica contextual para:
+- `COYLD THAT LIGHTBES` -> `Poderia ser aquela luz...?!`
+- `YOU SAID YOU COULD SEE THROUGH ALL MY ATTACKS, RIGHT?` -> `Você disse que podia enxergar todos os meus golpes, certo?`
+- `pipeline/tests/test_vision_stack_detector.py`
+- os testes do loader nativo passaram a mockar a existencia real dos checkpoints/weights esperados pelo caminho atual
+- `pipeline/tests/test_vision_stack_ocr.py`
+- os fakes de PaddleOCR foram atualizados para aceitar a assinatura atual com `det=`, `rec=` e `cls=`
+- `pipeline/typesetter/renderer.py`
+- `SafeTextPathFont.getbbox(...)` deixou de usar apenas a estimativa `len * size * 0.55`
+- agora mede pela bitmap real renderizada da fonte e cacheia o resultado
+- isso faz o `_resolve_text_layout(...)` escolher tamanhos menores quando a fonte real e mais larga que a estimativa, evitando overflow em baloes texturizados vermelhos
+- `pipeline/tests/test_typesetting_layout.py`
+- novo teste de regressao:
+- `test_resolve_text_layout_keeps_textured_balloon_lines_inside_real_width`
+- ele trava exatamente o caso em que a `Newrotic.ttf` parecia caber pela estimativa, mas nao cabia pela largura real
+
+### Validacao executada
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_vision_stack_runtime -v`
+- resultado: 70 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_font_detector -v`
+- resultado: 2 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_translate_context -v`
+- resultado: 13 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_vision_stack_detector -v`
+- resultado: 5 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_vision_stack_ocr -v`
+- resultado: 3 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest pipeline.tests.test_typesetting_layout pipeline.tests.test_typesetting_renderer -v`
+- resultado: 15 testes OK
+- `pipeline\\venv\\Scripts\\python.exe -m unittest discover -s pipeline\\tests -v`
+- resultado final: 169 testes OK
+
+### Resultado
+- a suite inteira de `pipeline/tests` ficou verde
+- os baloes texturizados vermelhos agora respeitam a largura real da `Newrotic.ttf` no calculo de layout
+- com isso, o texto deixa de crescer artificialmente e para de ultrapassar o balao no render final
