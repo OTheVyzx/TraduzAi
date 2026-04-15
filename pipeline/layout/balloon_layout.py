@@ -70,29 +70,47 @@ def enrich_page_layout(page_result: dict) -> dict:
 
 
 def _apply_geometric_fallback_subregions(texts: list[dict]) -> None:
-    """Fallback: para grupos multi-texto em balão largo sem subregions, infere split pelas posições dos textos."""
+    """Fallback: para balões largos sem subregions, infere split geométrico.
+
+    Funciona em dois modos:
+      A) Multi-texto (group_size > 1): agrupa textos pelo balloon_bbox e usa
+         a distribuição dos centros X para refinar o ponto de corte.
+      B) Texto único (group_size == 1): se o balão é largo o suficiente
+         (aspect >= 2.0), divide no centro — o renderer faz o split semântico.
+    """
     groups: dict[tuple, list[dict]] = {}
     for text in texts:
         balloon = text.get("balloon_bbox")
         if not balloon or text.get("balloon_subregions"):
             continue
-        if int(text.get("layout_group_size", 1)) <= 1:
+        tipo = text.get("tipo", "fala")
+        if tipo not in {"fala", "pensamento"}:
             continue
-        key = (text.get("tipo", "fala"), tuple(int(v) for v in balloon))
+        key = (tipo, tuple(int(v) for v in balloon))
         groups.setdefault(key, []).append(text)
 
     for (tipo, bbox_tuple), group in groups.items():
-        if len(group) < 2 or tipo not in {"fala", "pensamento"}:
-            continue
         balloon = list(bbox_tuple)
         bw = max(1, balloon[2] - balloon[0])
         bh = max(1, balloon[3] - balloon[1])
         aspect = bw / float(bh)
-        if aspect < 1.8:
+
+        if len(group) >= 2 and int(group[0].get("layout_group_size", 1)) > 1:
+            # Modo A: multi-texto — precisa de aspect >= 1.8
+            if aspect < 1.8:
+                continue
+            text_bboxes = [t.get("bbox", [0, 0, 0, 0]) for t in group]
+            subregions = _geometric_fallback_subregions(text_bboxes, balloon)
+        elif len(group) == 1 and aspect >= 2.0 and min(bw, bh) >= 200 and max(bw, bh) >= 500:
+            # Modo B: texto único em balão muito largo E grande — provável balão conectado
+            # Requer aspect >= 2.0, dimensão menor >= 200px, maior >= 500px
+            # para evitar falsos positivos em balões simples que são apenas largos
+            subregions = _geometric_fallback_subregions(
+                [group[0].get("bbox", [0, 0, 0, 0])], balloon
+            )
+        else:
             continue
 
-        text_bboxes = [t.get("bbox", [0, 0, 0, 0]) for t in group]
-        subregions = _geometric_fallback_subregions(text_bboxes, balloon)
         if len(subregions) >= 2:
             for text in group:
                 text["balloon_subregions"] = subregions

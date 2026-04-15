@@ -842,9 +842,9 @@ def plan_text_layout(text_data: dict) -> dict:
     # since the text was split to fit each lobe individually.
     if text_data.get("_is_lobe_subregion"):
         balloon_geo = "lobe"
-        width_ratio = 0.95
-        padding_y = max(3, int(box_height * 0.03))
-        line_spacing = 0.20
+        width_ratio = 0.88
+        padding_y = max(6, int(box_height * 0.06))
+        line_spacing = 0.05
 
     width_ratio, target_size_delta, outline_boost = _apply_corpus_layout_hints(
         width_ratio=width_ratio,
@@ -1099,11 +1099,11 @@ def _score_layout_candidate(
     height_ratio = block_height / float(max(1, box_height))
 
     if balloon_geo == "lobe":
-        # Lobe subregion — fill aggressively, seam edge is flat.
-        # High targets + generous overflow = prefer largest font that fills the lobe.
-        target_width = 0.92
-        target_height = 0.65
-        overflow_w, overflow_h = 0.98, 0.96
+        # Lobe subregion — fill well but leave breathing room for pro quality.
+        # Target ~82% width and ~75% height for centered, professional look.
+        target_width = 0.82
+        target_height = 0.75
+        overflow_w, overflow_h = 0.93, 0.90
     elif balloon_geo == "rect":
         # Retangular (narração/sfx) — pode usar mais espaço
         target_width = {"wide": 0.78, "square": 0.72, "tall": 0.60}.get(layout_shape, 0.72)
@@ -1450,14 +1450,14 @@ def _render_connected_subregions(
             lo = mid + 1
         else:
             hi = mid - 1
-    # Render each child at the uniform size with bolder outline for readability
+    # Render each child at the uniform size with appropriate outline
     for child, plan in zip(children, plans):
         child_text = child.get("translated", "")
         if not child_text:
             continue
         plan["target_size"] = min(plan["target_size"], uniform)
-        # Boost outline for lobe readability (thicker border makes text pop)
-        plan["outline_px"] = max(plan["outline_px"], 3)
+        # Scale outline to font size: 2px for small text, 3px for large
+        plan["outline_px"] = max(plan["outline_px"], 2 if uniform <= 22 else 3)
         _render_single_text_block(img, child, plan)
 
 
