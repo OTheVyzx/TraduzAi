@@ -885,18 +885,18 @@ def plan_text_layout(text_data: dict) -> dict:
         lobe_aspect = box_width / float(max(1, box_height))
         if lobe_aspect >= 1.4:
             # Wide lobe (horizontal split) — can use most of the width
-            width_ratio = 0.88
-            padding_y = max(6, int(box_height * 0.08))
+            width_ratio = 0.90
+            padding_y = max(6, int(box_height * 0.07))
         elif lobe_aspect <= 0.7:
             # Tall lobe (vertical split or diagonal quadrant) — less width,
             # more vertical breathing room
-            width_ratio = 0.82
-            padding_y = max(8, int(box_height * 0.06))
+            width_ratio = 0.86
+            padding_y = max(6, int(box_height * 0.05))
         else:
             # Square-ish lobe (diagonal quadrant) — balanced
-            width_ratio = 0.85
-            padding_y = max(6, int(box_height * 0.07))
-        line_spacing = 0.05
+            width_ratio = 0.89
+            padding_y = max(6, int(box_height * 0.06))
+        line_spacing = 0.04
 
     width_ratio, target_size_delta, outline_boost = _apply_corpus_layout_hints(
         width_ratio=width_ratio,
@@ -1535,30 +1535,38 @@ def _render_connected_subregions(
             child["translated"] = child["translated"].upper()
 
     plans = [ensure_legible_plan(img, plan_text_layout(c)) for c in children]
-    hi = min(p["target_size"] for p in plans) if plans else 8
-    hi = min(hi, max(8, min(p["max_height"] for p in plans) - 4)) if plans else 8
-    lo = 8
-    uniform = lo
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        all_fit = all(
-            _fits_in_box(c["translated"], p["font_name"], mid, p["max_width"], p["max_height"], p["line_spacing_ratio"])
-            for c, p in zip(children, plans)
-        )
-        if all_fit:
-            uniform = mid
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    # Render each child at the uniform size with appropriate outline
+    resolved_children = []
     for child, plan in zip(children, plans):
+        local_plan = dict(plan)
+        local_plan["target_size"] = _compute_font_search_upper_bound(local_plan, child.get("translated", ""))
+        resolved_children.append(_resolve_text_layout(child, local_plan))
+
+    fitted_sizes = [resolved["font_size"] for resolved in resolved_children if resolved]
+    if not fitted_sizes:
+        child = dict(text_data)
+        child["balloon_subregions"] = []
+        render_text_block(img, child)
+        return
+
+    min_fit = min(fitted_sizes)
+    max_fit = max(fitted_sizes)
+    if max_fit - min_fit <= 2:
+        final_sizes = [min_fit for _ in fitted_sizes]
+    else:
+        # Soft uniformity: keep lobes visually close, but don't let the narrowest
+        # lobe completely collapse all other text.
+        final_sizes = [max(min_fit, min(size, min_fit + 2)) for size in fitted_sizes]
+
+    # Render each child with soft-uniform sizing and appropriate outline.
+    for child, plan, final_size in zip(children, plans, final_sizes):
         child_text = child.get("translated", "")
         if not child_text:
             continue
-        plan["target_size"] = min(plan["target_size"], uniform)
+        local_plan = dict(plan)
+        local_plan["target_size"] = final_size
         # Scale outline to font size: 2px for small text, 3px for large
-        plan["outline_px"] = max(plan["outline_px"], 2 if uniform <= 22 else 3)
-        _render_single_text_block(img, child, plan)
+        local_plan["outline_px"] = max(local_plan["outline_px"], 2 if final_size <= 22 else 3)
+        _render_single_text_block(img, child, local_plan)
 
 
 def _render_single_text_block(
