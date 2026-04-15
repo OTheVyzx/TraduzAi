@@ -854,18 +854,19 @@ def plan_text_layout(text_data: dict) -> dict:
         padding_y = 6
         line_spacing = 0.05
     elif balloon_geo == "ellipse":
-        # Elíptico (fala/pensamento) — inscreve retângulo na elipse (~1/√2 ≈ 0.71)
+        # Speech balloons were being under-used, which forced too many line breaks
+        # and collapsed the font size. Be less conservative here.
         if layout_shape == "tall":
-            width_ratio = 0.65
-            padding_y = max(8, int(box_height * 0.15))
-        elif layout_shape == "wide":
-            width_ratio = 0.75
-            padding_y = max(8, int(box_height * 0.18))
-        else:
             width_ratio = 0.70
-            padding_y = max(8, int(box_height * 0.16))
+            padding_y = max(8, int(box_height * 0.13))
+        elif layout_shape == "wide":
+            width_ratio = 0.80
+            padding_y = max(8, int(box_height * 0.15))
+        else:
+            width_ratio = 0.76
+            padding_y = max(8, int(box_height * 0.14))
         vertical_anchor = "center"
-        line_spacing = 0.1
+        line_spacing = 0.08
     else:
         # Retangular texturizado — margem de segurança para não ultrapassar
         width_ratio = 0.72
@@ -874,7 +875,8 @@ def plan_text_layout(text_data: dict) -> dict:
         line_spacing = 0.1
 
     if group_size > 1 and tipo == "fala":
-        width_ratio -= 0.04
+        # Connected-balloon content already gets split; avoid over-shrinking width.
+        width_ratio -= 0.02
 
     # Lobe subregions have a flat seam edge — use "lobe" geometry with
     # scoring targets adapted to the lobe's own aspect ratio.
@@ -1162,10 +1164,11 @@ def _score_layout_candidate(
         target_height = {"wide": 0.40, "square": 0.50, "tall": 0.62}.get(layout_shape, 0.50)
         overflow_w, overflow_h = 0.92, 0.88
     else:
-        # Elíptico (fala/pensamento) — área inscrita menor
-        target_width = {"wide": 0.62, "square": 0.56, "tall": 0.48}.get(layout_shape, 0.56)
-        target_height = {"wide": 0.32, "square": 0.42, "tall": 0.54}.get(layout_shape, 0.42)
-        overflow_w, overflow_h = 0.78, 0.72
+        # Ellipse was too conservative and favored tiny type. Relax targets so
+        # simple speech balloons can actually be filled in a human-looking way.
+        target_width = {"wide": 0.68, "square": 0.62, "tall": 0.54}.get(layout_shape, 0.62)
+        target_height = {"wide": 0.38, "square": 0.46, "tall": 0.56}.get(layout_shape, 0.46)
+        overflow_w, overflow_h = 0.84, 0.78
 
     min_width = {"wide": 0.42, "square": 0.40, "tall": 0.34}.get(layout_shape, 0.40)
     min_height = {"wide": 0.18, "square": 0.22, "tall": 0.30}.get(layout_shape, 0.22)
@@ -1195,12 +1198,47 @@ def _fits_in_box(text: str, font_name: str, size: int, max_width: int, max_heigh
     return block_width <= max_width and total_height <= max_height
 
 
+def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
+    """Allow the renderer to grow beyond OCR seed size when the balloon has room.
+
+    The old logic treated target_size as a hard cap, which is the main reason
+    small OCR-estimated sizes stayed tiny even inside large clean balloons.
+    """
+    x1, y1, x2, y2 = plan["target_bbox"]
+    box_width = max(1, x2 - x1)
+    box_height = max(1, y2 - y1)
+    seed = int(plan.get("target_size", 16) or 16)
+    max_height = int(plan.get("max_height", box_height) or box_height)
+    text_len = len(re.sub(r"\s+", "", text or ""))
+    geo = plan.get("balloon_geo", "ellipse")
+
+    if geo == "lobe":
+        growth = max(12, int(box_height * 0.20))
+    elif geo == "ellipse":
+        growth = max(10, int(box_height * 0.18))
+    else:
+        growth = max(8, int(box_height * 0.14))
+
+    if text_len <= 18:
+        growth += 12
+    elif text_len <= 32:
+        growth += 8
+    elif text_len <= 50:
+        growth += 4
+
+    hi = max(seed + 4, seed + growth)
+    hi = min(hi, max(12, int(box_height * 0.56)))
+    hi = min(hi, max(12, max_height))
+    hi = min(hi, 96)
+    return max(8, hi)
+
+
 def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     text = text_data.get("translated", "")
     x1, y1, x2, y2 = plan["target_bbox"]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
-    font_size = min(plan["target_size"], max(8, box_height - 4))
+    font_size = min(_compute_font_search_upper_bound(plan, text), max(8, box_height - 4))
     best_candidate = None
 
     # Binary search: achar o maior tamanho que cabe
@@ -1214,9 +1252,19 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         else:
             hi = mid - 1
 
-    # Refinar: testar best_fit e vizinhos (±1) para scoring
+    # Refinar: testar best_fit e vizinhos (±2, ±1, melhor) para scoring
     candidate_sizes = sorted(
-        {size for size in (best_fit + 1, best_fit, best_fit - 1) if 8 <= size <= font_size},
+        {
+            size
+            for size in (
+                best_fit + 2,
+                best_fit + 1,
+                best_fit,
+                best_fit - 1,
+                best_fit - 2,
+            )
+            if 8 <= size <= font_size
+        },
         reverse=True,
     )
     if not candidate_sizes:
