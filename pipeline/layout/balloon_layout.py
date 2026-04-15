@@ -845,29 +845,27 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
             [seam_x, by1, bx2, by2],
         ]
 
-    # Diagonal connected balloon: use the full balloon more aggressively instead
-    # of just expanding the OCR group box. This leaves each lobe with a larger,
-    # more editorial text area and avoids the left lobe becoming too narrow.
-    top_bbox, bottom_bbox = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
-    top_cx = (top_bbox[0] + top_bbox[2]) / 2.0
-    top_cy = (top_bbox[1] + top_bbox[3]) / 2.0
-    bottom_cx = (bottom_bbox[0] + bottom_bbox[2]) / 2.0
-    bottom_cy = (bottom_bbox[1] + bottom_bbox[3]) / 2.0
-    seam_x = int((top_bbox[2] + bottom_bbox[0]) / 2) if top_bbox[2] < bottom_bbox[0] else int((top_cx + bottom_cx) / 2.0)
-    seam_y = int((top_bbox[3] + bottom_bbox[1]) / 2) if top_bbox[3] < bottom_bbox[1] else int((top_cy + bottom_cy) / 2.0)
+    diagonals = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
+    first, second = diagonals[0], diagonals[1]
+    first_center = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
+    second_center = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
+    seam_x = int((first_center[0] + second_center[0]) / 2.0)
+    seam_y = int((first_center[1] + second_center[1]) / 2.0)
     seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
     seam_y = max(by1 + 28, min(by2 - 28, seam_y))
-    overlap_x = max(18, int((bx2 - bx1) * 0.08))
-    overlap_y = max(14, int((by2 - by1) * 0.07))
+    grow_x = max(28, int((bx2 - bx1) * 0.14))
+    grow_y = max(22, int((by2 - by1) * 0.10))
 
-    if top_cx <= bottom_cx:
-        first = [bx1, by1, min(bx2, seam_x + overlap_x), min(by2, seam_y + overlap_y)]
-        second = [max(bx1, seam_x - overlap_x), max(by1, seam_y - overlap_y), bx2, by2]
-    else:
-        first = [max(bx1, seam_x - overlap_x), by1, bx2, min(by2, seam_y + overlap_y)]
-        second = [bx1, max(by1, seam_y - overlap_y), min(bx2, seam_x + overlap_x), by2]
+    if first_center[0] <= second_center[0]:
+        return [
+            [bx1, by1, min(bx2, seam_x + grow_x), min(by2, seam_y + grow_y)],
+            [max(bx1, seam_x - grow_x), max(by1, seam_y - grow_y), bx2, by2],
+        ]
 
-    return sorted([first, second], key=lambda bbox: (bbox[1], bbox[0]))
+    return [
+        [max(bx1, seam_x - grow_x), by1, bx2, min(by2, seam_y + grow_y)],
+        [bx1, max(by1, seam_y - grow_y), min(bx2, seam_x + grow_x), by2],
+    ]
 
 
 def _expand_balloon_lobe_to_subregion(lobe_bbox: list[int], balloon_bbox: list[int]) -> list[int]:

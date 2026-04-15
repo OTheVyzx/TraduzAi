@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,13 @@ DEFAULT_FONTS = {
     "pensamento": "CCDaveGibbonsLower W00 Regular.ttf",
 }
 
+SAFE_PATH_FORCE_KEYWORDS = (
+    "newrotic",
+    "wildwords",
+    "blambot",
+)
+
+_PUNCT_REPLACEMENTS = {"…": "...", "⋯": "...", "‥": "..", "\u201c": "\"", "\u201d": "\"", "\u2018": "'", "\u2019": "'", "\u2014": "-", "\u2013": "-", "\u2015": "-", "□": ".", "■": ".", "▪": ".", "•": ".", "·": "."}
 _font_cache: dict[tuple[str, int], object] = {}
 
 
@@ -416,6 +424,96 @@ def find_font(font_name: str) -> str | None:
     return None
 
 
+def _should_force_safe_text_path(font_name: str) -> bool:
+    lowered = Path(str(font_name or "")).name.lower()
+    return any(keyword in lowered for keyword in SAFE_PATH_FORCE_KEYWORDS)
+
+
+def _normalize_render_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for source, target in _PUNCT_REPLACEMENTS.items():
+        normalized = normalized.replace(source, target)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    only_marks = re.sub(r"\s+", "", normalized)
+    if only_marks and re.fullmatch(r"[.\-]+", only_marks):
+        return only_marks
+    return normalized.strip()
+
+
+def _rebalance_wrapped_lines(
+    lines: list[str],
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+) -> list[str]:
+    if len(lines) < 2:
+        return lines
+
+    def _score(candidate: list[str]) -> float:
+        widths = [measure_text_width(font, line) for line in candidate if line.strip()]
+        if not widths:
+            return float("inf")
+        mean = sum(widths) / float(len(widths))
+        variance = sum(abs(width - mean) for width in widths) / float(len(widths))
+        orphan_penalty = sum(18.0 for line in candidate if len(line.split()) == 1 and len(candidate) > 2)
+        return variance + orphan_penalty
+
+    best = list(lines)
+    best_score = _score(best)
+
+    for _ in range(3):
+        changed = False
+        for index in range(len(best) - 1):
+            left_words = best[index].split()
+            right_words = best[index + 1].split()
+            candidates = []
+
+            if len(left_words) >= 2:
+                moved = left_words[-1]
+                cand_left = " ".join(left_words[:-1]).strip()
+                cand_right = " ".join([moved] + right_words).strip()
+                if cand_left and measure_text_width(font, cand_left) <= max_width and measure_text_width(font, cand_right) <= max_width:
+                    candidate = list(best)
+                    candidate[index] = cand_left
+                    candidate[index + 1] = cand_right
+                    candidates.append(candidate)
+
+            if len(right_words) >= 2:
+                moved = right_words[0]
+                cand_left = " ".join(left_words + [moved]).strip()
+                cand_right = " ".join(right_words[1:]).strip()
+                if cand_right and measure_text_width(font, cand_left) <= max_width and measure_text_width(font, cand_right) <= max_width:
+                    candidate = list(best)
+                    candidate[index] = cand_left
+                    candidate[index + 1] = cand_right
+                    candidates.append(candidate)
+
+            for candidate in candidates:
+                score = _score(candidate)
+                if score + 1.0 < best_score:
+                    best = candidate
+                    best_score = score
+                    changed = True
+                    break
+        if not changed:
+            break
+    return best
+
+
+def _dedupe_render_blocks(blocks: list[dict]) -> list[dict]:
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for block in blocks:
+        bbox = tuple(int(v) for v in (block.get("balloon_bbox") or block.get("bbox") or []))
+        text = re.sub(r"\s+", " ", str(block.get("translated", "")).strip())
+        key = (block.get("tipo", "fala"), bbox, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(block)
+    return deduped
+
+
 def get_font(font_name: str, size: int):
     key = (font_name, size)
     if key in _font_cache:
@@ -774,7 +872,7 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             combined["balloon_subregions"] = []
         blocks.append(combined)
 
-    return blocks
+    return _dedupe_render_blocks(blocks)
 
 
 def merge_group_style(group: list[dict]) -> dict:
@@ -1226,7 +1324,10 @@ def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
     elif text_len <= 50:
         growth += 4
 
+    explicit_cap = int(plan.get("_font_search_cap", 0) or 0)
     hi = max(seed + 4, seed + growth)
+    if explicit_cap > 0:
+        hi = min(hi, explicit_cap)
     hi = min(hi, max(12, int(box_height * 0.56)))
     hi = min(hi, max(12, max_height))
     hi = min(hi, 96)
@@ -1482,6 +1583,70 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
     return adjusted
 
 
+def _expand_connected_subregions_for_render(subregions: list[list[int]]) -> list[list[int]]:
+    if len(subregions) < 2:
+        return [list(subregions[0])] if subregions else []
+
+    boxes = [list(s) for s in subregions]
+    bx1 = min(s[0] for s in boxes)
+    by1 = min(s[1] for s in boxes)
+    bx2 = max(s[2] for s in boxes)
+    by2 = max(s[3] for s in boxes)
+    bw = max(1, bx2 - bx1)
+    bh = max(1, by2 - by1)
+    centers = [((s[0] + s[2]) / 2.0, (s[1] + s[3]) / 2.0) for s in boxes]
+    dx = abs(centers[0][0] - centers[1][0])
+    dy = abs(centers[0][1] - centers[1][1])
+
+    if dx >= dy * 1.15:
+        grow = max(14, int(bw * 0.07))
+        boxes = sorted(boxes, key=lambda s: (s[0], s[1]))
+        boxes[0][2] = min(bx2, boxes[0][2] + grow)
+        boxes[1][0] = max(bx1, boxes[1][0] - grow)
+        return boxes
+
+    if dy >= dx * 1.15:
+        grow = max(12, int(bh * 0.06))
+        boxes = sorted(boxes, key=lambda s: (s[1], s[0]))
+        boxes[0][3] = min(by2, boxes[0][3] + grow)
+        boxes[1][1] = max(by1, boxes[1][1] - grow)
+        return boxes
+
+    grow_x = max(16, int(bw * 0.09))
+    grow_y = max(12, int(bh * 0.07))
+    ordered = sorted(boxes, key=lambda s: (s[1], s[0]))
+    first, second = ordered[0], ordered[1]
+    first_center = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
+    second_center = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
+
+    if first_center[0] <= second_center[0]:
+        first[2] = min(bx2, first[2] + grow_x)
+        first[3] = min(by2, first[3] + grow_y)
+        second[0] = max(bx1, second[0] - grow_x)
+        second[1] = max(by1, second[1] - grow_y)
+    else:
+        first[0] = max(bx1, first[0] - grow_x)
+        first[3] = min(by2, first[3] + grow_y)
+        second[2] = min(bx2, second[2] + grow_x)
+        second[1] = max(by1, second[1] - grow_y)
+    return ordered
+
+
+def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> list[int]:
+    if not children or not plans:
+        return []
+    resolved = [_resolve_text_layout(child, plan) for child, plan in zip(children, plans)]
+    sizes = [int(item["font_size"]) for item in resolved]
+    min_size = min(sizes)
+    max_size = max(sizes)
+    if max_size - min_size <= 2:
+        return [min_size for _ in sizes]
+    soft_sizes = []
+    for size in sizes:
+        soft_sizes.append(max(min_size, size - 1))
+    return soft_sizes
+
+
 def _render_connected_subregions(
     img: Image.Image,
     text_data: dict,
@@ -1500,6 +1665,7 @@ def _render_connected_subregions(
     Each subregion child gets `_is_lobe_subregion=True` so plan_text_layout
     uses a wider width_ratio (the cut seam is a flat edge, not a curve).
     """
+    subregions = _expand_connected_subregions_for_render(subregions)
     # Area weights for proportional text splitting
     areas = [max(1, (s[2] - s[0]) * (s[3] - s[1])) for s in subregions]
     total_area = max(1, sum(areas))
@@ -1535,38 +1701,18 @@ def _render_connected_subregions(
             child["translated"] = child["translated"].upper()
 
     plans = [ensure_legible_plan(img, plan_text_layout(c)) for c in children]
-    resolved_children = []
-    for child, plan in zip(children, plans):
-        local_plan = dict(plan)
-        local_plan["target_size"] = _compute_font_search_upper_bound(local_plan, child.get("translated", ""))
-        resolved_children.append(_resolve_text_layout(child, local_plan))
-
-    fitted_sizes = [resolved["font_size"] for resolved in resolved_children if resolved]
-    if not fitted_sizes:
-        child = dict(text_data)
-        child["balloon_subregions"] = []
-        render_text_block(img, child)
-        return
-
-    min_fit = min(fitted_sizes)
-    max_fit = max(fitted_sizes)
-    if max_fit - min_fit <= 2:
-        final_sizes = [min_fit for _ in fitted_sizes]
-    else:
-        # Soft uniformity: keep lobes visually close, but don't let the narrowest
-        # lobe completely collapse all other text.
-        final_sizes = [max(min_fit, min(size, min_fit + 2)) for size in fitted_sizes]
-
-    # Render each child with soft-uniform sizing and appropriate outline.
-    for child, plan, final_size in zip(children, plans, final_sizes):
+    target_sizes = _resolve_connected_target_sizes(children, plans)
+    for child, plan, target_size in zip(children, plans, target_sizes):
         child_text = child.get("translated", "")
         if not child_text:
             continue
-        local_plan = dict(plan)
-        local_plan["target_size"] = final_size
-        # Scale outline to font size: 2px for small text, 3px for large
-        local_plan["outline_px"] = max(local_plan["outline_px"], 2 if final_size <= 22 else 3)
-        _render_single_text_block(img, child, local_plan)
+        plan = dict(plan)
+        plan["target_size"] = max(8, int(target_size))
+        plan["_font_search_cap"] = max(8, int(target_size))
+        plan["max_width"] = max(plan["max_width"], int((plan["target_bbox"][2] - plan["target_bbox"][0]) * 0.84))
+        plan["max_height"] = max(plan["max_height"], int((plan["target_bbox"][3] - plan["target_bbox"][1]) * 0.60))
+        plan["outline_px"] = max(plan["outline_px"], 2 if target_size <= 22 else 3)
+        _render_single_text_block(img, child, plan)
 
 
 def _render_single_text_block(
@@ -1748,6 +1894,7 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
     text = text_data.get("translated", "")
     if not text:
         return
+    text = _normalize_render_text(text)
 
     subregions = [
         [int(v) for v in bbox]
@@ -1755,6 +1902,8 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
     if len(subregions) >= 2:
+        text_data = dict(text_data)
+        text_data["translated"] = text
         _render_connected_subregions(img, text_data, text, subregions)
         return
 
@@ -1786,7 +1935,8 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[s
 
     if current_line:
         lines.append(current_line)
-    return lines or [text]
+    balanced = _rebalance_wrapped_lines(lines or [text], font, max_width)
+    return balanced or [text]
 
 
 def get_line_height(font: ImageFont.FreeTypeFont, font_size: int, spacing_ratio: float) -> int:
