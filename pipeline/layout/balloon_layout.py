@@ -120,73 +120,86 @@ def _geometric_fallback_subregions(
     text_bboxes: list[list[int]],
     balloon_bbox: list[int],
 ) -> list[list[int]]:
-    """Divide balão baseado no aspect ratio do balão e posições dos textos.
+    """Divide balão em 2 subregions baseado na geometria e posições dos textos.
 
-    Regra principal: o ASPECT RATIO do balão dita a direção do corte.
-      - Balão largo (aspect >= 1.4) → corte VERTICAL (esquerda/direita)
-      - Balão alto  (aspect <  1.4) → corte HORIZONTAL (cima/baixo)
+    Estratégia com 2+ textos:
+      1. Calcula dx e dy entre os dois centros de texto mais distantes
+      2. Se predominantemente horizontal (dx > dy*1.2) → corte vertical
+      3. Se predominantemente vertical (dy > dx*1.2) → corte horizontal
+      4. Se diagonal (nenhum predomina) → corte diagonal via quadrantes
 
-    O ponto de corte é o centro geométrico do balão. Isso garante que
-    balões conectados lado-a-lado (manhwa/manhwa duplo) sejam divididos
-    corretamente mesmo quando o OCR detecta os textos espalhados por
-    ambos os lobos.
+    Estratégia com 1 texto:
+      - Aspect ratio do balão decide: largo → vertical, alto → horizontal
+
+    Reject com 2+ textos:
+      - Se os centros estão muito próximos (< 25% da dimensão principal),
+        retorna [] — é um balão único, não conectado.
     """
     bx1, by1, bx2, by2 = balloon_bbox
     bw = max(1, bx2 - bx1)
     bh = max(1, by2 - by1)
+
+    if len(text_bboxes) >= 2:
+        # Encontrar os 2 centros mais distantes
+        centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in text_bboxes]
+        best_pair = (0, 1)
+        best_sep = 0.0
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                sep = ((centers[i][0] - centers[j][0]) ** 2 + (centers[i][1] - centers[j][1]) ** 2) ** 0.5
+                if sep > best_sep:
+                    best_sep = sep
+                    best_pair = (i, j)
+
+        c0, c1 = centers[best_pair[0]], centers[best_pair[1]]
+        dx = abs(c0[0] - c1[0])
+        dy = abs(c0[1] - c1[1])
+
+        # Reject: centros muito próximos → balão único
+        if dx < bw * 0.25 and dy < bh * 0.25:
+            return []
+
+        if dx > dy * 1.2:
+            # Predominantemente horizontal → corte vertical
+            seam_x = int((c0[0] + c1[0]) / 2)
+            seam_x = max(bx1 + 24, min(bx2 - 24, seam_x))
+            return [[bx1, by1, seam_x, by2], [seam_x, by1, bx2, by2]]
+        elif dy > dx * 1.2:
+            # Predominantemente vertical → corte horizontal
+            seam_y = int((c0[1] + c1[1]) / 2)
+            seam_y = max(by1 + 24, min(by2 - 24, seam_y))
+            return [[bx1, by1, bx2, seam_y], [bx1, seam_y, bx2, by2]]
+        else:
+            # Diagonal: dividir em quadrantes opostos (top-left / bottom-right
+            # ou top-right / bottom-left) baseado nos centros de texto.
+            seam_x = int((c0[0] + c1[0]) / 2)
+            seam_y = int((c0[1] + c1[1]) / 2)
+            seam_x = max(bx1 + 24, min(bx2 - 24, seam_x))
+            seam_y = max(by1 + 24, min(by2 - 24, seam_y))
+            # Qual par de quadrantes? O que contém os centros dos textos.
+            if (c0[0] < c1[0]) == (c0[1] < c1[1]):
+                # top-left + bottom-right (diagonal \)
+                return [
+                    [bx1, by1, seam_x, seam_y],
+                    [seam_x, seam_y, bx2, by2],
+                ]
+            else:
+                # top-right + bottom-left (diagonal /)
+                return [
+                    [seam_x, by1, bx2, seam_y],
+                    [bx1, seam_y, seam_x, by2],
+                ]
+
+    # 1 texto — usar aspect ratio do balão
     aspect = bw / float(bh)
-
     if aspect >= 1.4:
-        # Balão largo → dividir esquerda/direita no centro horizontal
-        # Mas primeiro: verificar se os textos REALMENTE ocupam ambas
-        # metades.  Se todos os centros X estão numa faixa estreita
-        # (< 35% da largura do balão), é um balão único com texto
-        # empilhado, NÃO um balão duplo conectado.
-        if len(text_bboxes) >= 2:
-            centers_x = [(b[0] + b[2]) / 2.0 for b in text_bboxes]
-            x_spread = max(centers_x) - min(centers_x)
-            if x_spread < bw * 0.25:
-                return []  # textos não espalham — balão único
-
         seam_x = bx1 + bw // 2
-        # Refinar pela distribuição dos textos se tiver 2+ blocos
-        if len(text_bboxes) >= 2:
-            centers_x_sorted = sorted((b[0] + b[2]) / 2.0 for b in text_bboxes)
-            # Encontrar maior gap horizontal entre centros consecutivos
-            best_gap = 0
-            best_seam = seam_x
-            for i in range(len(centers_x_sorted) - 1):
-                gap = centers_x_sorted[i + 1] - centers_x_sorted[i]
-                if gap > best_gap:
-                    best_gap = gap
-                    best_seam = int((centers_x_sorted[i] + centers_x_sorted[i + 1]) / 2)
-            # Aceitar refinamento apenas se o gap for significativo
-            if best_gap > bw * 0.10:
-                seam_x = best_seam
         seam_x = max(bx1 + 24, min(bx2 - 24, seam_x))
-        return [
-            [bx1, by1, seam_x, by2],
-            [seam_x, by1, bx2, by2],
-        ]
+        return [[bx1, by1, seam_x, by2], [seam_x, by1, bx2, by2]]
     else:
-        # Balão alto → dividir cima/baixo no centro vertical
         seam_y = by1 + bh // 2
-        if len(text_bboxes) >= 2:
-            centers_y = sorted((b[1] + b[3]) / 2.0 for b in text_bboxes)
-            best_gap = 0
-            best_seam = seam_y
-            for i in range(len(centers_y) - 1):
-                gap = centers_y[i + 1] - centers_y[i]
-                if gap > best_gap:
-                    best_gap = gap
-                    best_seam = int((centers_y[i] + centers_y[i + 1]) / 2)
-            if best_gap > bh * 0.10:
-                seam_y = best_seam
         seam_y = max(by1 + 24, min(by2 - 24, seam_y))
-        return [
-            [bx1, by1, bx2, seam_y],
-            [bx1, seam_y, bx2, by2],
-        ]
+        return [[bx1, by1, bx2, seam_y], [bx1, seam_y, bx2, by2]]
 
 
 def classify_layout_shape(bbox: list[int], tipo: str, region: dict | None = None) -> str:
@@ -765,18 +778,17 @@ def _detect_lobes_via_distance_transform(
     h, w = component.shape[:2]
     lobe_masks = [np.zeros((h, w), dtype=np.uint8), np.zeros((h, w), dtype=np.uint8)]
 
-    if dx >= dy * 0.8:
-        left_peak_idx = 0 if top_peaks[0]["cx"] <= top_peaks[1]["cx"] else 1
-        split_col = int(mid_x)
-        split_col = max(16, min(w - 16, split_col))
-        lobe_masks[0][:, :split_col] = component[:, :split_col]
-        lobe_masks[1][:, split_col:] = component[:, split_col:]
-    else:
-        top_peak_idx = 0 if top_peaks[0]["cy"] <= top_peaks[1]["cy"] else 1
-        split_row = int(mid_y)
-        split_row = max(16, min(h - 16, split_row))
-        lobe_masks[0][:split_row, :] = component[:split_row, :]
-        lobe_masks[1][split_row:, :] = component[split_row:, :]
+    # Partição por proximidade (Voronoi entre os 2 peaks).
+    # Cada pixel do componente vai para o lobo cujo peak está mais perto.
+    # Funciona para splits horizontais, verticais e diagonais sem
+    # assumir um eixo dominante.
+    ys, xs = np.where(component > 0)
+    if len(xs) > 0:
+        d0 = (xs - p0_cx) ** 2 + (ys - p0_cy) ** 2
+        d1 = (xs - p1_cx) ** 2 + (ys - p1_cy) ** 2
+        mask0 = d0 <= d1
+        lobe_masks[0][ys[mask0], xs[mask0]] = 255
+        lobe_masks[1][ys[~mask0], xs[~mask0]] = 255
 
     lobes = []
     for mask in lobe_masks:

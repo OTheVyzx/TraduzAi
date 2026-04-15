@@ -3,6 +3,7 @@ import unittest
 from PIL import Image
 
 from typesetter.renderer import (
+    _assign_texts_to_subregions,
     _build_textpath_mask,
     _resolve_text_layout,
     _split_text_for_connected_balloons,
@@ -326,6 +327,56 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertIn("Texto B", combined_text)
         self.assertIn("Texto C", combined_text)
 
+
+    def test_diagonal_assignment_matches_text_to_nearest_subregion(self):
+        """Texto TL vai para sub TL, texto BR vai para sub BR (diagonal)."""
+        subregions = [[0, 0, 400, 400], [400, 400, 800, 800]]  # TL, BR quadrants
+        texts = [
+            {
+                "translated": "Texto top-left",
+                "bbox": [100, 100, 300, 300],  # center at (200, 200) → near sub[0]
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [0, 0, 800, 800],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+            },
+            {
+                "translated": "Texto bottom-right",
+                "bbox": [500, 500, 700, 700],  # center at (600, 600) → near sub[1]
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [0, 0, 800, 800],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 2)
+        tl_block = sorted(blocks, key=lambda b: b["balloon_bbox"][0] + b["balloon_bbox"][1])[0]
+        br_block = sorted(blocks, key=lambda b: b["balloon_bbox"][0] + b["balloon_bbox"][1])[1]
+        self.assertIn("top-left", tl_block["translated"])
+        self.assertIn("bottom-right", br_block["translated"])
+
+    def test_assign_texts_to_subregions_greedy_distance(self):
+        """Greedy matching atribui corretamente mesmo com textos fora de ordem."""
+        subregions = [[0, 0, 200, 200], [400, 400, 600, 600]]
+        texts = [
+            {"translated": "Far", "bbox": [420, 420, 580, 580]},   # near sub[1]
+            {"translated": "Close", "bbox": [20, 20, 180, 180]},   # near sub[0]
+        ]
+        assignments = _assign_texts_to_subregions(texts, subregions)
+        self.assertEqual(len(assignments), 2)
+        # "Close" → sub[0], "Far" → sub[1]
+        assigned_map = {a[0]["translated"]: a[1] for a in assignments}
+        self.assertEqual(assigned_map["Close"], [0, 0, 200, 200])
+        self.assertEqual(assigned_map["Far"], [400, 400, 600, 600])
 
     def test_area_weighted_split_gives_more_text_to_larger_subregion(self):
         """Text split should allocate proportionally more words to larger subregions."""

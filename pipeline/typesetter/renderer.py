@@ -610,13 +610,52 @@ def _assign_texts_to_subregions(
     texts: list[dict],
     subregions: list[list[int]],
 ) -> list[tuple[dict, list[int]]]:
-    """Emparelha textos com subregions pela posição (y, x)."""
-    sorted_texts = sorted(
-        texts,
-        key=lambda t: (t.get("bbox", [0, 0, 0, 0])[1], t.get("bbox", [0, 0, 0, 0])[0]),
-    )
-    sorted_subs = sorted(subregions, key=lambda s: (s[1], s[0]))
-    return list(zip(sorted_texts, [list(s) for s in sorted_subs]))
+    """Emparelha textos com subregions por menor distância centro-a-centro.
+
+    Usa matching guloso: para cada texto, calcula a distância euclidiana
+    do centro do texto ao centro de cada subregion disponível e atribui
+    a mais próxima. Isso funciona para splits horizontais, verticais e
+    diagonais sem assumir ordenação fixa.
+    """
+    if not texts or not subregions:
+        return []
+
+    def _center(bbox: list[int]) -> tuple[float, float]:
+        return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+
+    sub_centers = [_center(s) for s in subregions]
+    text_items = [(t, _center(t.get("bbox", [0, 0, 0, 0]))) for t in texts]
+
+    # Matching guloso: atribuir cada texto à subregion mais próxima não usada
+    used_subs: set[int] = set()
+    assignments: list[tuple[dict, list[int]]] = []
+
+    # Ordenar textos por distância mínima a qualquer sub (atribuir os mais
+    # "óbvios" primeiro para evitar que um texto ambíguo roube a sub de outro)
+    def _min_dist(item: tuple) -> float:
+        _, tc = item
+        return min(
+            ((tc[0] - sc[0]) ** 2 + (tc[1] - sc[1]) ** 2) ** 0.5
+            for sc in sub_centers
+        )
+
+    text_items.sort(key=_min_dist)
+
+    for text, tc in text_items:
+        best_idx = -1
+        best_dist = float("inf")
+        for si, sc in enumerate(sub_centers):
+            if si in used_subs:
+                continue
+            d = ((tc[0] - sc[0]) ** 2 + (tc[1] - sc[1]) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist = d
+                best_idx = si
+        if best_idx >= 0:
+            used_subs.add(best_idx)
+            assignments.append((text, list(subregions[best_idx])))
+
+    return assignments
 
 
 def build_render_blocks(texts: list[dict]) -> list[dict]:
@@ -837,13 +876,24 @@ def plan_text_layout(text_data: dict) -> dict:
     if group_size > 1 and tipo == "fala":
         width_ratio -= 0.04
 
-    # Lobe subregions have a flat seam edge — they're half-ellipses, basically
-    # rectangular. Use "lobe" geometry which has aggressive scoring targets
-    # since the text was split to fit each lobe individually.
+    # Lobe subregions have a flat seam edge — use "lobe" geometry with
+    # scoring targets adapted to the lobe's own aspect ratio.
     if text_data.get("_is_lobe_subregion"):
         balloon_geo = "lobe"
-        width_ratio = 0.88
-        padding_y = max(6, int(box_height * 0.06))
+        lobe_aspect = box_width / float(max(1, box_height))
+        if lobe_aspect >= 1.4:
+            # Wide lobe (horizontal split) — can use most of the width
+            width_ratio = 0.88
+            padding_y = max(6, int(box_height * 0.08))
+        elif lobe_aspect <= 0.7:
+            # Tall lobe (vertical split or diagonal quadrant) — less width,
+            # more vertical breathing room
+            width_ratio = 0.82
+            padding_y = max(8, int(box_height * 0.06))
+        else:
+            # Square-ish lobe (diagonal quadrant) — balanced
+            width_ratio = 0.85
+            padding_y = max(6, int(box_height * 0.07))
         line_spacing = 0.05
 
     width_ratio, target_size_delta, outline_boost = _apply_corpus_layout_hints(
@@ -1099,11 +1149,13 @@ def _score_layout_candidate(
     height_ratio = block_height / float(max(1, box_height))
 
     if balloon_geo == "lobe":
-        # Lobe subregion — fill well but leave breathing room for pro quality.
-        # Target ~82% width and ~75% height for centered, professional look.
-        target_width = 0.82
-        target_height = 0.75
-        overflow_w, overflow_h = 0.93, 0.90
+        # Lobe subregion — adapt targets to lobe shape.
+        # Wide lobes (horizontal split) can fill more width.
+        # Tall/square lobes (diagonal/vertical split) need less width pressure.
+        target_width = {"wide": 0.84, "square": 0.78, "tall": 0.72}.get(layout_shape, 0.78)
+        target_height = {"wide": 0.75, "square": 0.72, "tall": 0.68}.get(layout_shape, 0.72)
+        overflow_w = {"wide": 0.93, "square": 0.90, "tall": 0.88}.get(layout_shape, 0.90)
+        overflow_h = 0.90
     elif balloon_geo == "rect":
         # Retangular (narração/sfx) — pode usar mais espaço
         target_width = {"wide": 0.78, "square": 0.72, "tall": 0.60}.get(layout_shape, 0.72)

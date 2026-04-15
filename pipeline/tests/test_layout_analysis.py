@@ -7,6 +7,7 @@ import numpy as np
 from layout.balloon_layout import (
     _detect_connected_balloon_subregions_from_fill,
     _detect_lobes_via_distance_transform,
+    _geometric_fallback_subregions,
     _score_subregion_quality,
     enrich_page_layout,
 )
@@ -330,6 +331,73 @@ class SubregionConfidenceTests(unittest.TestCase):
     def test_empty_subregions_return_zero(self):
         self.assertEqual(_score_subregion_quality([], [0, 0, 400, 200]), 0.0)
         self.assertEqual(_score_subregion_quality([[0, 0, 100, 100]], [0, 0, 400, 200]), 0.0)
+
+
+class GeometricFallbackSubregionsTests(unittest.TestCase):
+    """Testes para _geometric_fallback_subregions com splits horizontal, vertical e diagonal."""
+
+    def test_horizontal_texts_produce_vertical_cut(self):
+        """Textos lado-a-lado → corte vertical (L/R split)."""
+        balloon = [0, 0, 800, 400]
+        texts = [[50, 100, 250, 300], [550, 100, 750, 300]]  # left, right
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(len(subs), 2)
+        # Left sub should be to the left of right sub
+        self.assertLess(subs[0][2], subs[1][0] + 50)
+
+    def test_vertical_texts_produce_horizontal_cut(self):
+        """Textos empilhados → corte horizontal (T/B split)."""
+        balloon = [0, 0, 400, 800]
+        texts = [[100, 50, 300, 250], [100, 550, 300, 750]]  # top, bottom
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(len(subs), 2)
+        # Top sub should be above bottom sub
+        self.assertLess(subs[0][3], subs[1][1] + 50)
+
+    def test_diagonal_backslash_texts_produce_quadrant_split(self):
+        r"""Texto top-left + bottom-right → quadrantes diagonal \ ."""
+        balloon = [0, 0, 800, 800]
+        texts = [[50, 50, 250, 250], [550, 550, 750, 750]]  # TL, BR
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(len(subs), 2)
+        # One sub covers top-left quadrant, other bottom-right
+        tl = min(subs, key=lambda s: s[0] + s[1])
+        br = max(subs, key=lambda s: s[0] + s[1])
+        self.assertLess(tl[2], balloon[2])  # TL doesn't span full width
+        self.assertGreater(br[0], balloon[0])  # BR doesn't start at left edge
+
+    def test_diagonal_slash_texts_produce_quadrant_split(self):
+        """Texto top-right + bottom-left → quadrantes diagonal / ."""
+        balloon = [0, 0, 800, 800]
+        texts = [[550, 50, 750, 250], [50, 550, 250, 750]]  # TR, BL
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(len(subs), 2)
+        # One sub covers top-right, other bottom-left
+        tr = min(subs, key=lambda s: s[1])  # lower y = top
+        bl = max(subs, key=lambda s: s[1])  # higher y = bottom
+        self.assertGreater(tr[0], balloon[0])  # TR starts past left
+        self.assertLess(bl[2], balloon[2])  # BL doesn't reach right
+
+    def test_close_centers_rejected(self):
+        """Textos com centros muito próximos → retorna [] (balão único)."""
+        balloon = [0, 0, 800, 400]
+        texts = [[300, 150, 400, 200], [350, 160, 450, 210]]  # very close
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(subs, [])
+
+    def test_single_text_wide_balloon_splits_vertically(self):
+        """1 texto + balão largo → split L/R."""
+        balloon = [0, 0, 800, 300]
+        texts = [[200, 80, 600, 220]]
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(len(subs), 2)
+
+    def test_single_text_tall_balloon_splits_horizontally(self):
+        """1 texto + balão alto → split T/B."""
+        balloon = [0, 0, 300, 800]
+        texts = [[50, 200, 250, 600]]
+        subs = _geometric_fallback_subregions(texts, balloon)
+        self.assertEqual(len(subs), 2)
 
     def test_enriched_text_has_subregion_confidence(self):
         """enrich_page_layout should attach subregion_confidence to texts."""
