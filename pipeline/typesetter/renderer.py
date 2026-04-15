@@ -982,17 +982,16 @@ def plan_text_layout(text_data: dict) -> dict:
         balloon_geo = "lobe"
         lobe_aspect = box_width / float(max(1, box_height))
         if lobe_aspect >= 1.4:
-            # Wide lobe (horizontal split) — can use most of the width
-            width_ratio = 0.90
+            # Wide lobe
+            width_ratio = 0.92
             padding_y = max(6, int(box_height * 0.07))
         elif lobe_aspect <= 0.7:
-            # Tall lobe (vertical split or diagonal quadrant) — less width,
-            # more vertical breathing room
-            width_ratio = 0.86
+            # Tall lobe 
+            width_ratio = 0.88
             padding_y = max(6, int(box_height * 0.05))
         else:
-            # Square-ish lobe (diagonal quadrant) — balanced
-            width_ratio = 0.89
+            # Square-ish lobe
+            width_ratio = 0.91
             padding_y = max(6, int(box_height * 0.06))
         line_spacing = 0.04
 

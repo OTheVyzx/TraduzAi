@@ -828,9 +828,10 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
         else:
             seam_y = int((centers[0][1] + centers[1][1]) / 2.0)
         seam_y = max(by1 + 32, min(by2 - 32, seam_y))
+        gap_y = max(4, int((by2 - by1) * 0.03))
         return [
-            [bx1, by1, bx2, seam_y],
-            [bx1, seam_y, bx2, by2],
+            [bx1, by1, bx2, seam_y - gap_y],
+            [bx1, seam_y + gap_y, bx2, by2],
         ]
 
     if dx >= dy * 1.1:
@@ -840,9 +841,10 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
         else:
             seam_x = int((centers[0][0] + centers[1][0]) / 2.0)
         seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
+        gap_x = max(6, int((bx2 - bx1) * 0.04))
         return [
-            [bx1, by1, seam_x, by2],
-            [seam_x, by1, bx2, by2],
+            [bx1, by1, seam_x - gap_x, by2],
+            [seam_x + gap_x, by1, bx2, by2],
         ]
 
     diagonals = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
@@ -853,18 +855,20 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
     seam_y = int((first_center[1] + second_center[1]) / 2.0)
     seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
     seam_y = max(by1 + 28, min(by2 - 28, seam_y))
-    grow_x = max(20, int((bx2 - bx1) * 0.10))
-    grow_y = max(16, int((by2 - by1) * 0.08))
-
+    
+    # Em vez de expandir em direção ao centro (overlap), forçamos um GAP no miolo
+    gap_x = max(14, int((bx2 - bx1) * 0.06))
+    overlap_y = max(8, int((by2 - by1) * 0.04)) # Pequeno overlap vertical ajuda na fluidez diagonal, mas sem invadir de lado
+    
     if first_center[0] <= second_center[0]:
         return [
-            [bx1, by1, min(bx2, seam_x + grow_x), min(by2, seam_y + grow_y)],
-            [max(bx1, seam_x - grow_x), max(by1, seam_y - grow_y), bx2, by2],
+            [bx1, by1, min(bx2, seam_x - gap_x), min(by2, seam_y + overlap_y)],
+            [max(bx1, seam_x + gap_x), max(by1, seam_y - overlap_y), bx2, by2],
         ]
 
     return [
-        [max(bx1, seam_x - grow_x), by1, bx2, min(by2, seam_y + grow_y)],
-        [bx1, max(by1, seam_y - grow_y), min(bx2, seam_x + grow_x), by2],
+        [max(bx1, seam_x + gap_x), by1, bx2, min(by2, seam_y + overlap_y)],
+        [bx1, max(by1, seam_y - overlap_y), min(bx2, seam_x - gap_x), by2],
     ]
 
 
