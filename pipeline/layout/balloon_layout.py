@@ -853,8 +853,8 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
     seam_y = int((first_center[1] + second_center[1]) / 2.0)
     seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
     seam_y = max(by1 + 28, min(by2 - 28, seam_y))
-    grow_x = max(28, int((bx2 - bx1) * 0.14))
-    grow_y = max(22, int((by2 - by1) * 0.10))
+    grow_x = max(20, int((bx2 - bx1) * 0.10))
+    grow_y = max(16, int((by2 - by1) * 0.08))
 
     if first_center[0] <= second_center[0]:
         return [

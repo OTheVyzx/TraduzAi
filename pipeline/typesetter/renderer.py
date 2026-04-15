@@ -1583,55 +1583,6 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
     return adjusted
 
 
-def _expand_connected_subregions_for_render(subregions: list[list[int]]) -> list[list[int]]:
-    if len(subregions) < 2:
-        return [list(subregions[0])] if subregions else []
-
-    boxes = [list(s) for s in subregions]
-    bx1 = min(s[0] for s in boxes)
-    by1 = min(s[1] for s in boxes)
-    bx2 = max(s[2] for s in boxes)
-    by2 = max(s[3] for s in boxes)
-    bw = max(1, bx2 - bx1)
-    bh = max(1, by2 - by1)
-    centers = [((s[0] + s[2]) / 2.0, (s[1] + s[3]) / 2.0) for s in boxes]
-    dx = abs(centers[0][0] - centers[1][0])
-    dy = abs(centers[0][1] - centers[1][1])
-
-    if dx >= dy * 1.15:
-        grow = max(14, int(bw * 0.07))
-        boxes = sorted(boxes, key=lambda s: (s[0], s[1]))
-        boxes[0][2] = min(bx2, boxes[0][2] + grow)
-        boxes[1][0] = max(bx1, boxes[1][0] - grow)
-        return boxes
-
-    if dy >= dx * 1.15:
-        grow = max(12, int(bh * 0.06))
-        boxes = sorted(boxes, key=lambda s: (s[1], s[0]))
-        boxes[0][3] = min(by2, boxes[0][3] + grow)
-        boxes[1][1] = max(by1, boxes[1][1] - grow)
-        return boxes
-
-    grow_x = max(16, int(bw * 0.09))
-    grow_y = max(12, int(bh * 0.07))
-    ordered = sorted(boxes, key=lambda s: (s[1], s[0]))
-    first, second = ordered[0], ordered[1]
-    first_center = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
-    second_center = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
-
-    if first_center[0] <= second_center[0]:
-        first[2] = min(bx2, first[2] + grow_x)
-        first[3] = min(by2, first[3] + grow_y)
-        second[0] = max(bx1, second[0] - grow_x)
-        second[1] = max(by1, second[1] - grow_y)
-    else:
-        first[0] = max(bx1, first[0] - grow_x)
-        first[3] = min(by2, first[3] + grow_y)
-        second[2] = min(bx2, second[2] + grow_x)
-        second[1] = max(by1, second[1] - grow_y)
-    return ordered
-
-
 def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> list[int]:
     if not children or not plans:
         return []
@@ -1665,7 +1616,6 @@ def _render_connected_subregions(
     Each subregion child gets `_is_lobe_subregion=True` so plan_text_layout
     uses a wider width_ratio (the cut seam is a flat edge, not a curve).
     """
-    subregions = _expand_connected_subregions_for_render(subregions)
     # Area weights for proportional text splitting
     areas = [max(1, (s[2] - s[0]) * (s[3] - s[1])) for s in subregions]
     total_area = max(1, sum(areas))
@@ -1709,8 +1659,6 @@ def _render_connected_subregions(
         plan = dict(plan)
         plan["target_size"] = max(8, int(target_size))
         plan["_font_search_cap"] = max(8, int(target_size))
-        plan["max_width"] = max(plan["max_width"], int((plan["target_bbox"][2] - plan["target_bbox"][0]) * 0.84))
-        plan["max_height"] = max(plan["max_height"], int((plan["target_bbox"][3] - plan["target_bbox"][1]) * 0.60))
         plan["outline_px"] = max(plan["outline_px"], 2 if target_size <= 22 else 3)
         _render_single_text_block(img, child, plan)
 
