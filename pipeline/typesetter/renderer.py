@@ -606,16 +606,91 @@ def _pick_subregion_for_text(text_bbox: list[int], subregions: list[list[int]]) 
     return None
 
 
+def _assign_texts_to_subregions(
+    texts: list[dict],
+    subregions: list[list[int]],
+) -> list[tuple[dict, list[int]]]:
+    """Emparelha textos com subregions pela posição (y, x)."""
+    sorted_texts = sorted(
+        texts,
+        key=lambda t: (t.get("bbox", [0, 0, 0, 0])[1], t.get("bbox", [0, 0, 0, 0])[0]),
+    )
+    sorted_subs = sorted(subregions, key=lambda s: (s[1], s[0]))
+    return list(zip(sorted_texts, [list(s) for s in sorted_subs]))
+
+
 def build_render_blocks(texts: list[dict]) -> list[dict]:
     grouped: dict[tuple[str, tuple[int, int, int, int]], list[dict]] = {}
     passthrough: list[dict] = []
 
+    # Fase 1: Pré-agrupar textos multi-texto que compartilham subregions
+    multi_sub_groups: dict[tuple[str, tuple], list[dict]] = {}
     for text in texts:
+        balloon_bbox = text.get("balloon_bbox")
+        tipo = text.get("tipo", "fala")
+        subregions = _normalize_balloon_subregions(text.get("balloon_subregions", []))
+        if len(subregions) >= 2 and balloon_bbox and int(text.get("layout_group_size", 1)) > 1:
+            key = (tipo, tuple(int(v) for v in balloon_bbox))
+            multi_sub_groups.setdefault(key, []).append(text)
+
+    # Fase 2: Atribuir textos a subregions quando as contagens casam.
+    # Se as contagens NÃO casam (ex: 6 textos OCR para 2 subregions), mescla
+    # todos em 1 bloco consolidado e mantém balloon_subregions para o renderer
+    # dividir semanticamente.
+    assigned_ids: set[int] = set()
+    for key, group_texts in multi_sub_groups.items():
+        if len(group_texts) < 2:
+            continue
+        subregions = _normalize_balloon_subregions(group_texts[0].get("balloon_subregions", []))
+        if len(group_texts) == len(subregions):
+            # 1:1 – atribuição direta de cada texto a uma subregion
+            assignments = _assign_texts_to_subregions(group_texts, subregions)
+            for text, assigned_sub in assignments:
+                modified = dict(text)
+                modified["balloon_bbox"] = assigned_sub
+                modified["balloon_subregions"] = []
+                modified["layout_shape"] = _infer_layout_shape_from_bbox(assigned_sub, modified.get("tipo", "fala"))
+                modified["layout_align"] = "top" if modified.get("tipo") == "narracao" else "center"
+                modified["layout_group_size"] = 1
+                modified["_assigned_to_subregion"] = True
+                passthrough.append(modified)
+                assigned_ids.add(id(text))
+        else:
+            # N:M – mescla todos em 1 bloco; o renderer divide o texto pelas subregions
+            ordered = sorted(
+                group_texts,
+                key=lambda t: (t.get("bbox", [0, 0, 0, 0])[1], t.get("bbox", [0, 0, 0, 0])[0]),
+            )
+            merged = dict(ordered[0])
+            merged["translated"] = " ".join(
+                t.get("translated", "").strip()
+                for t in ordered
+                if t.get("translated", "").strip()
+            )
+            merged["estilo"] = merge_group_style(ordered)
+            merged["balloon_bbox"] = list(key[1])
+            merged["balloon_subregions"] = subregions
+            merged["layout_group_size"] = len(ordered)
+            merged["source_text_count"] = len(ordered)
+            passthrough.append(merged)
+            for text in group_texts:
+                assigned_ids.add(id(text))
+
+    # Fase 3: Processar textos restantes normalmente
+    for text in texts:
+        if id(text) in assigned_ids:
+            continue
+
         balloon_bbox = text.get("balloon_bbox")
         tipo = text.get("tipo", "fala")
 
         subregions = _normalize_balloon_subregions(text.get("balloon_subregions", []))
-        if balloon_bbox and len(subregions) >= 2:
+
+        if len(subregions) >= 2:
+            passthrough.append(text)
+            continue
+
+        if balloon_bbox and len(subregions) == 1:
             chosen = _pick_subregion_for_text(text.get("bbox", [0, 0, 0, 0]), subregions)
             if chosen:
                 text = dict(text)
@@ -762,6 +837,15 @@ def plan_text_layout(text_data: dict) -> dict:
     if group_size > 1 and tipo == "fala":
         width_ratio -= 0.04
 
+    # Lobe subregions have a flat seam edge — they're half-ellipses, basically
+    # rectangular. Use "lobe" geometry which has aggressive scoring targets
+    # since the text was split to fit each lobe individually.
+    if text_data.get("_is_lobe_subregion"):
+        balloon_geo = "lobe"
+        width_ratio = 0.95
+        padding_y = max(3, int(box_height * 0.03))
+        line_spacing = 0.20
+
     width_ratio, target_size_delta, outline_boost = _apply_corpus_layout_hints(
         width_ratio=width_ratio,
         tipo=tipo,
@@ -811,49 +895,188 @@ def _infer_layout_shape_from_bbox(bbox: list[int], tipo: str) -> str:
     return "square"
 
 
-def _split_text_for_connected_balloons(text: str, count: int) -> list[str]:
+def _split_text_for_connected_balloons(
+    text: str,
+    count: int,
+    area_weights: list[float] | None = None,
+) -> list[str]:
+    """Split text into `count` chunks for connected balloon subregions.
+
+    Splitting priority:
+      1. Explicit newlines (\\n)
+      2. Best semantic boundary (sentence → clause) scored by balance + coherence
+      3. Word-level split as last resort when no semantic boundary is close enough
+
+    For step 2, all possible split points at clause boundaries are tried and
+    scored. The best semantic split (minimum imbalance vs area weights) is used
+    as long as it has deviation ≤ 0.25. This avoids blindly breaking in the
+    middle of sentences while still getting a reasonable visual balance.
+
+    When `area_weights` is provided (one float per subregion, summing to ~1.0),
+    larger subregions receive proportionally more text.
+    """
     stripped = text.strip()
     if count <= 1 or not stripped:
         return [stripped]
 
+    # 1. Explicit newlines
     newline_parts = [part.strip() for part in re.split(r"\n+", stripped) if part.strip()]
     if len(newline_parts) >= count:
-        return _merge_chunks_to_target_count(newline_parts, count)
+        return _merge_chunks_to_target_count(newline_parts, count, area_weights)
 
-    sentence_parts = [
+    # 2. Semantic split: collect clause segments (sentence ends + comma clauses)
+    #    then try ALL possible k-way groupings and pick the most balanced one.
+    clause_parts = [
         part.strip()
-        for part in re.split(r"(?<=[.!?…])(?:\s+|\n+|$)", stripped)
+        for part in re.split(r"(?<=[.!?…,;])(?:\s+)", stripped)
         if part.strip()
     ]
-    if len(sentence_parts) >= count:
-        return _merge_chunks_to_target_count(sentence_parts, count)
+    if len(clause_parts) >= count:
+        best = _best_semantic_split(clause_parts, count, area_weights)
+        if best is not None:
+            return best
 
-    return _split_words_evenly(stripped, count)
+    # 3. Word-level split as final fallback
+    return _split_words_weighted(stripped, count, area_weights)
 
 
-def _merge_chunks_to_target_count(chunks: list[str], count: int) -> list[str]:
+def _best_semantic_split(
+    parts: list[str],
+    count: int,
+    area_weights: list[float] | None,
+) -> list[str] | None:
+    """Try all consecutive groupings of `parts` into `count` chunks.
+
+    Scores each candidate by its imbalance vs `area_weights`.
+    Returns the grouping with the lowest imbalance if it is ≤ 0.25,
+    otherwise returns None (caller should fall through to word split).
+
+    Semantic coherence bonus: prefer splits that end at sentence boundaries
+    (., !, ?) over those that end at clause boundaries (, ;).
+    """
+    words_per_part = [len(p.split()) for p in parts]
+    total_words = max(1, sum(words_per_part))
+    weights = area_weights if (area_weights and len(area_weights) == count) else None
+    uniform_w = 1.0 / count
+
+    best_candidate: list[str] | None = None
+    best_score = float("inf")
+
+    # For count=2: try every split point k in [1, N-1].
+    # For count>2: enumerate via recursive partition (bounded by N choose count).
+    # In practice count is always 2 for connected balloons.
+    n = len(parts)
+
+    def _try_partition(start: int, slots_left: int, current: list[list[str]]) -> None:
+        nonlocal best_candidate, best_score
+        if slots_left == 1:
+            group = parts[start:]
+            if not group:
+                return
+            candidate = [" ".join(g) for g in current + [group]]
+            # Score: sum of |ratio_i - weight_i| across all slots
+            chunk_words = [len(c.split()) for c in candidate]
+            ratios = [wc / float(total_words) for wc in chunk_words]
+            target = [weights[i] if weights else uniform_w for i in range(count)]
+            imbalance = max(abs(r - t) for r, t in zip(ratios, target))
+            # Semantic coherence bonus: reward splits where each group ends at . ! ?
+            coherence_penalty = 0.0
+            for g in current:
+                last_part = g[-1] if g else ""
+                if not re.search(r"[.!?…]$", last_part):
+                    coherence_penalty += 0.04  # mild penalty for comma/semicolon break
+            total = imbalance + coherence_penalty
+            if total < best_score:
+                best_score = total
+                best_candidate = candidate
+            return
+        for k in range(start + 1, n - slots_left + 2):
+            _try_partition(k, slots_left - 1, current + [parts[start:k]])
+
+    _try_partition(0, count, [])
+
+    # Accept if best semantic split has imbalance ≤ 0.25
+    if best_candidate is not None and best_score <= 0.25:
+        return best_candidate
+    return None
+
+
+def _merge_chunks_to_target_count(
+    chunks: list[str],
+    count: int,
+    area_weights: list[float] | None = None,
+) -> list[str]:
     if len(chunks) <= count:
-        return chunks[:count]
+        padded = list(chunks)
+        while len(padded) < count:
+            padded.append("")
+        return padded[:count]
 
     merged = [chunk.strip() for chunk in chunks if chunk.strip()]
+
+    if area_weights and len(area_weights) == count:
+        # Distribute chunks proportionally to area weights
+        total_words = sum(len(c.split()) for c in merged)
+        targets = [max(1, int(w * total_words + 0.5)) for w in area_weights]
+        result: list[str] = []
+        cursor = 0
+        for slot_idx in range(count):
+            target_wc = targets[slot_idx]
+            slot_parts: list[str] = []
+            slot_wc = 0
+            while cursor < len(merged):
+                part_wc = len(merged[cursor].split())
+                # Always take at least one chunk per slot
+                if slot_wc > 0 and slot_wc + part_wc > target_wc * 1.3 and slot_idx < count - 1:
+                    break
+                slot_parts.append(merged[cursor])
+                slot_wc += part_wc
+                cursor += 1
+            result.append(" ".join(slot_parts).strip())
+        # Dump remaining into last slot
+        if cursor < len(merged):
+            remainder = " ".join(merged[cursor:]).strip()
+            if result:
+                result[-1] = f"{result[-1]} {remainder}".strip()
+            else:
+                result.append(remainder)
+        return [r for r in result if r] or [stripped for stripped in [text.strip()] if stripped]
+
+    # Fallback: merge smallest adjacent pair until we reach target count
     while len(merged) > count:
         smallest_index = min(range(len(merged) - 1), key=lambda idx: len(merged[idx].split()))
         merged[smallest_index] = f"{merged[smallest_index]} {merged.pop(smallest_index + 1)}".strip()
     return merged
 
 
-def _split_words_evenly(text: str, count: int) -> list[str]:
+def _split_words_weighted(
+    text: str,
+    count: int,
+    area_weights: list[float] | None = None,
+) -> list[str]:
+    """Split text by words, distributing proportionally to area weights."""
     words = text.split()
     if not words:
         return [text.strip()]
 
     total_words = len(words)
-    base = total_words // count
-    remainder = total_words % count
+
+    if area_weights and len(area_weights) == count:
+        # Proportional word distribution
+        targets = [max(1, round(w * total_words)) for w in area_weights]
+        # Adjust so targets sum to total_words
+        diff = total_words - sum(targets)
+        if diff != 0:
+            idx = max(range(count), key=lambda i: targets[i])
+            targets[idx] += diff
+    else:
+        base = total_words // count
+        remainder = total_words % count
+        targets = [base + (1 if i < remainder else 0) for i in range(count)]
+
     chunks = []
     cursor = 0
-    for idx in range(count):
-        take = base + (1 if idx < remainder else 0)
+    for take in targets:
         if take <= 0:
             continue
         chunk_words = words[cursor:cursor + take]
@@ -875,7 +1098,13 @@ def _score_layout_candidate(
     width_ratio = block_width / float(max(1, box_width))
     height_ratio = block_height / float(max(1, box_height))
 
-    if balloon_geo == "rect":
+    if balloon_geo == "lobe":
+        # Lobe subregion — fill aggressively, seam edge is flat.
+        # High targets + generous overflow = prefer largest font that fills the lobe.
+        target_width = 0.92
+        target_height = 0.65
+        overflow_w, overflow_h = 0.98, 0.96
+    elif balloon_geo == "rect":
         # Retangular (narração/sfx) — pode usar mais espaço
         target_width = {"wide": 0.78, "square": 0.72, "tall": 0.60}.get(layout_shape, 0.72)
         target_height = {"wide": 0.40, "square": 0.50, "tall": 0.62}.get(layout_shape, 0.50)
@@ -1153,6 +1382,196 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
     return adjusted
 
 
+def _render_connected_subregions(
+    img: Image.Image,
+    text_data: dict,
+    text: str,
+    subregions: list[list[int]],
+) -> None:
+    """Render text split across connected balloon subregions with uniform font size.
+
+    Steps:
+      1. Compute area weights from subregion dimensions
+      2. Split text proportionally using area weights
+      3. Resolve layout for each chunk independently to find fitting font sizes
+      4. Use the MINIMUM font size across all chunks for visual consistency
+      5. Re-resolve and render each chunk at the uniform size
+
+    Each subregion child gets `_is_lobe_subregion=True` so plan_text_layout
+    uses a wider width_ratio (the cut seam is a flat edge, not a curve).
+    """
+    # Area weights for proportional text splitting
+    areas = [max(1, (s[2] - s[0]) * (s[3] - s[1])) for s in subregions]
+    total_area = max(1, sum(areas))
+    area_weights = [a / float(total_area) for a in areas]
+
+    chunks = _split_text_for_connected_balloons(text, len(subregions), area_weights)
+    if len(chunks) != len(subregions):
+        # Fallback: render as single block in full balloon_bbox
+        child = dict(text_data)
+        child["balloon_subregions"] = []
+        render_text_block(img, child)
+        return
+
+    # Build child text_data for each chunk/subregion pair
+    children = []
+    for chunk, subregion in zip(chunks, subregions):
+        child = dict(text_data)
+        child["translated"] = chunk
+        child["bbox"] = subregion
+        child["balloon_bbox"] = subregion
+        child["balloon_subregions"] = []
+        child["layout_group_size"] = 1
+        child["layout_shape"] = _infer_layout_shape_from_bbox(subregion, child.get("tipo", "fala"))
+        child["layout_align"] = "top" if child.get("tipo") == "narracao" else "center"
+        child["_is_lobe_subregion"] = True
+        children.append(child)
+
+    # Find the max font size that fits ALL lobes (uniform sizing).
+    # Binary search: find the largest sz where every child fits.
+    for child in children:
+        estilo = child.get("estilo", {})
+        if estilo.get("force_upper") or estilo.get("fonte") == "CCDaveGibbonsLower W00 Regular.ttf":
+            child["translated"] = child["translated"].upper()
+
+    plans = [ensure_legible_plan(img, plan_text_layout(c)) for c in children]
+    hi = min(p["target_size"] for p in plans) if plans else 8
+    hi = min(hi, max(8, min(p["max_height"] for p in plans) - 4)) if plans else 8
+    lo = 8
+    uniform = lo
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        all_fit = all(
+            _fits_in_box(c["translated"], p["font_name"], mid, p["max_width"], p["max_height"], p["line_spacing_ratio"])
+            for c, p in zip(children, plans)
+        )
+        if all_fit:
+            uniform = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    # Render each child at the uniform size with bolder outline for readability
+    for child, plan in zip(children, plans):
+        child_text = child.get("translated", "")
+        if not child_text:
+            continue
+        plan["target_size"] = min(plan["target_size"], uniform)
+        # Boost outline for lobe readability (thicker border makes text pop)
+        plan["outline_px"] = max(plan["outline_px"], 3)
+        _render_single_text_block(img, child, plan)
+
+
+def _render_single_text_block(
+    img: Image.Image, text_data: dict, plan: dict,
+) -> None:
+    """Core rendering logic for a single text block (no subregion recursion)."""
+    text = text_data.get("translated", "")
+    if not text:
+        return
+
+    x1, y1, x2, y2 = plan["target_bbox"]
+    box_width = max(1, x2 - x1)
+    box_height = max(1, y2 - y1)
+    if box_width < 10 or box_height < 10:
+        return
+
+    resolved = _resolve_text_layout(text_data, plan)
+    best_font = resolved["font"]
+    best_lines = resolved["lines"]
+    best_size = resolved["font_size"]
+    line_height = resolved["line_height"]
+    total_text_height = resolved["total_text_height"]
+    start_y = resolved["start_y"]
+    positions = resolved["positions"]
+
+    outline_color = plan["outline_color"]
+    outline_px = int(plan["outline_px"])
+
+    if isinstance(best_font, SafeTextPathFont):
+        image_np = np.array(img)
+        center_x = x1 + (box_width // 2)
+
+        corrected_positions = []
+        for line, (lx, ly) in zip(best_lines, positions):
+            mask = _build_textpath_mask(best_font, line, padding=0)
+            real_width = mask.shape[1] if mask.size > 1 else 0
+            new_lx = center_x - (real_width // 2)
+            corrected_positions.append((new_lx, ly))
+        positions = corrected_positions
+
+        total_real_height = line_height * len(best_lines)
+        if plan["vertical_anchor"] != "top" and positions:
+            current_top = positions[0][1]
+            ideal_top = y1 + max(plan["padding_y"], (box_height - total_real_height) // 2)
+            if current_top != ideal_top:
+                dy = ideal_top - current_top
+                positions = [(lx, ly + dy) for lx, ly in positions]
+
+        if plan["sombra"] and plan["sombra_cor"]:
+            dx, dy = plan["sombra_offset"]
+            shadow_positions = [(lx + int(dx), ly + int(dy)) for lx, ly in positions]
+            _render_safe_text_layer(
+                image_np, best_lines, best_font, shadow_positions,
+                fill_color=plan["sombra_cor"],
+            )
+
+        if plan["glow"] and plan["glow_cor"] and int(plan["glow_px"]) > 0:
+            _apply_safe_glow(
+                image_np, best_lines, best_font, positions,
+                plan["glow_cor"], int(plan["glow_px"]),
+            )
+
+        gradient = plan["cor_gradiente"]
+        if gradient and len(gradient) >= 2:
+            _apply_safe_gradient_text(
+                image_np, best_lines, best_font, positions,
+                gradient[0], gradient[1],
+                outline_color, outline_px,
+                start_y, total_text_height,
+            )
+        else:
+            _render_safe_text_layer(
+                image_np, best_lines, best_font, positions,
+                fill_color=plan["text_color"],
+                outline_color=outline_color,
+                outline_px=outline_px,
+            )
+        img.paste(Image.fromarray(image_np))
+        return
+
+    # PIL path (system fallback fonts)
+    if plan["sombra"] and plan["sombra_cor"]:
+        draw = ImageDraw.Draw(img)
+        dx, dy = plan["sombra_offset"]
+        for line, (lx, ly) in zip(best_lines, positions):
+            draw.text((lx + dx, ly + dy), line, font=best_font, fill=plan["sombra_cor"])
+
+    if plan["glow"] and plan["glow_cor"] and plan["glow_px"] > 0:
+        _apply_glow(img, best_lines, best_font, positions, plan["glow_cor"], plan["glow_px"])
+
+    if outline_color and outline_px > 0:
+        draw = ImageDraw.Draw(img)
+        for line, (lx, ly) in zip(best_lines, positions):
+            for dx in range(-outline_px, outline_px + 1):
+                for dy in range(-outline_px, outline_px + 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    draw.text((lx + dx, ly + dy), line, font=best_font, fill=outline_color)
+
+    gradient = plan["cor_gradiente"]
+    if gradient and len(gradient) >= 2:
+        _apply_gradient_text(
+            img, best_lines, best_font, positions,
+            gradient[0], gradient[1],
+            outline_color, outline_px,
+            start_y, total_text_height,
+        )
+    else:
+        draw = ImageDraw.Draw(img)
+        for line, (lx, ly) in zip(best_lines, positions):
+            draw.text((lx, ly), line, font=best_font, fill=plan["text_color"])
+
+
 def _apply_glow(
     img: Image.Image,
     lines: list,
@@ -1228,19 +1647,8 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
     if len(subregions) >= 2:
-        chunks = _split_text_for_connected_balloons(text, len(subregions))
-        if len(chunks) == len(subregions):
-            for chunk, subregion in zip(chunks, subregions):
-                child = dict(text_data)
-                child["translated"] = chunk
-                child["bbox"] = subregion
-                child["balloon_bbox"] = subregion
-                child["balloon_subregions"] = []
-                child["layout_group_size"] = 1
-                child["layout_shape"] = _infer_layout_shape_from_bbox(subregion, child.get("tipo", "fala"))
-                child["layout_align"] = "top" if child.get("tipo") == "narracao" else "center"
-                render_text_block(img, child)
-            return
+        _render_connected_subregions(img, text_data, text, subregions)
+        return
 
     estilo = text_data.get("estilo", {})
     if estilo.get("force_upper") or estilo.get("fonte") == "CCDaveGibbonsLower W00 Regular.ttf":
@@ -1249,128 +1657,7 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
         text_data["translated"] = text
 
     plan = ensure_legible_plan(img, plan_text_layout(text_data))
-    x1, y1, x2, y2 = plan["target_bbox"]
-    box_width = max(1, x2 - x1)
-    box_height = max(1, y2 - y1)
-    if box_width < 10 or box_height < 10:
-        return
-
-    resolved = _resolve_text_layout(text_data, plan)
-    best_font = resolved["font"]
-    best_lines = resolved["lines"]
-    best_size = resolved["font_size"]
-    line_height = resolved["line_height"]
-    total_text_height = resolved["total_text_height"]
-    start_y = resolved["start_y"]
-    positions = resolved["positions"]
-
-    outline_color = plan["outline_color"]
-    outline_px = int(plan["outline_px"])
-
-    if isinstance(best_font, SafeTextPathFont):
-        image_np = np.array(img)
-        center_x = x1 + (box_width // 2)
-
-        # Re-centralizar linhas baseado na largura real do mask (não da estimativa)
-        corrected_positions = []
-        for line, (lx, ly) in zip(best_lines, positions):
-            mask = _build_textpath_mask(best_font, line, padding=0)
-            real_width = mask.shape[1] if mask.size > 1 else 0
-            new_lx = center_x - (real_width // 2)
-            corrected_positions.append((new_lx, ly))
-        positions = corrected_positions
-
-        # Re-centralizar verticalmente com altura real
-        total_real_height = line_height * len(best_lines)
-        if plan["vertical_anchor"] != "top" and positions:
-            current_top = positions[0][1]
-            ideal_top = y1 + max(plan["padding_y"], (box_height - total_real_height) // 2)
-            if current_top != ideal_top:
-                dy = ideal_top - current_top
-                positions = [(lx, ly + dy) for lx, ly in positions]
-
-        if plan["sombra"] and plan["sombra_cor"]:
-            dx, dy = plan["sombra_offset"]
-            shadow_positions = [(lx + int(dx), ly + int(dy)) for lx, ly in positions]
-            _render_safe_text_layer(
-                image_np,
-                best_lines,
-                best_font,
-                shadow_positions,
-                fill_color=plan["sombra_cor"],
-            )
-
-        if plan["glow"] and plan["glow_cor"] and int(plan["glow_px"]) > 0:
-            _apply_safe_glow(
-                image_np,
-                best_lines,
-                best_font,
-                positions,
-                plan["glow_cor"],
-                int(plan["glow_px"]),
-            )
-
-        gradient = plan["cor_gradiente"]
-        if gradient and len(gradient) >= 2:
-            _apply_safe_gradient_text(
-                image_np,
-                best_lines,
-                best_font,
-                positions,
-                gradient[0],
-                gradient[1],
-                outline_color,
-                outline_px,
-                start_y,
-                total_text_height,
-            )
-        else:
-            _render_safe_text_layer(
-                image_np,
-                best_lines,
-                best_font,
-                positions,
-                fill_color=plan["text_color"],
-                outline_color=outline_color,
-                outline_px=outline_px,
-            )
-        img.paste(Image.fromarray(image_np))
-        return
-
-    # ── 1. Shadow ─────────────────────────────────────────────────────────
-    if plan["sombra"] and plan["sombra_cor"]:
-        draw = ImageDraw.Draw(img)
-        dx, dy = plan["sombra_offset"]
-        for line, (lx, ly) in zip(best_lines, positions):
-            draw.text((lx + dx, ly + dy), line, font=best_font, fill=plan["sombra_cor"])
-
-    # ── 2. Glow ───────────────────────────────────────────────────────────
-    if plan["glow"] and plan["glow_cor"] and plan["glow_px"] > 0:
-        _apply_glow(img, best_lines, best_font, positions, plan["glow_cor"], plan["glow_px"])
-
-    # ── 3. Outline ────────────────────────────────────────────────────────
-    if outline_color and outline_px > 0:
-        draw = ImageDraw.Draw(img)
-        for line, (lx, ly) in zip(best_lines, positions):
-            for dx in range(-outline_px, outline_px + 1):
-                for dy in range(-outline_px, outline_px + 1):
-                    if dx == 0 and dy == 0:
-                        continue
-                    draw.text((lx + dx, ly + dy), line, font=best_font, fill=outline_color)
-
-    # ── 4. Text fill (gradient or solid) ──────────────────────────────────
-    gradient = plan["cor_gradiente"]
-    if gradient and len(gradient) >= 2:
-        _apply_gradient_text(
-            img, best_lines, best_font, positions,
-            gradient[0], gradient[1],
-            outline_color, outline_px,
-            start_y, total_text_height,
-        )
-    else:
-        draw = ImageDraw.Draw(img)
-        for line, (lx, ly) in zip(best_lines, positions):
-            draw.text((lx, ly), line, font=best_font, fill=plan["text_color"])
+    _render_single_text_block(img, text_data, plan)
 
 
 def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:

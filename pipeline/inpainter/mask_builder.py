@@ -54,6 +54,31 @@ def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> 
                 }
             )
 
+    # Second pass: merge clusters that now overlap after growth.
+    # The greedy single-pass above is order-dependent — a block arriving
+    # before its eventual neighbours can start its own cluster that never
+    # gets re-checked.  This convergence loop fixes that.
+    changed = True
+    while changed:
+        changed = False
+        new_clusters: list[dict] = []
+        skip: set[int] = set()
+        for i in range(len(clusters)):
+            if i in skip:
+                continue
+            current = clusters[i]
+            for j in range(i + 1, len(clusters)):
+                if j in skip:
+                    continue
+                if should_merge(current["bbox"], clusters[j]["bbox"]):
+                    current["bbox"] = union_bbox(current["bbox"], clusters[j]["bbox"])
+                    current["texts"].extend(clusters[j]["texts"])
+                    current["tipos"].extend(clusters[j]["tipos"])
+                    skip.add(j)
+                    changed = True
+            new_clusters.append(current)
+        clusters = new_clusters
+
     regions = []
     for cluster in clusters:
         regions.append(

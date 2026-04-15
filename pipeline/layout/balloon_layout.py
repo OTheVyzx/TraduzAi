@@ -56,13 +56,119 @@ def enrich_page_layout(page_result: dict) -> dict:
                 balloon_bbox,
                 text.get("tipo", "fala"),
             )
-        updated["balloon_subregions"] = subregion_cache[subregion_key]
+        subs = subregion_cache[subregion_key]
+        updated["balloon_subregions"] = subs
+        updated["subregion_confidence"] = _score_subregion_quality(subs, balloon_bbox) if subs else 0.0
         enriched_texts.append(updated)
+
+    _apply_geometric_fallback_subregions(enriched_texts)
 
     updated_page = dict(page_result)
     updated_page["texts"] = enriched_texts
     updated_page.pop("_cached_image_bgr", None)
     return updated_page
+
+
+def _apply_geometric_fallback_subregions(texts: list[dict]) -> None:
+    """Fallback: para grupos multi-texto em balão largo sem subregions, infere split pelas posições dos textos."""
+    groups: dict[tuple, list[dict]] = {}
+    for text in texts:
+        balloon = text.get("balloon_bbox")
+        if not balloon or text.get("balloon_subregions"):
+            continue
+        if int(text.get("layout_group_size", 1)) <= 1:
+            continue
+        key = (text.get("tipo", "fala"), tuple(int(v) for v in balloon))
+        groups.setdefault(key, []).append(text)
+
+    for (tipo, bbox_tuple), group in groups.items():
+        if len(group) < 2 or tipo not in {"fala", "pensamento"}:
+            continue
+        balloon = list(bbox_tuple)
+        bw = max(1, balloon[2] - balloon[0])
+        bh = max(1, balloon[3] - balloon[1])
+        aspect = bw / float(bh)
+        if aspect < 1.8:
+            continue
+
+        text_bboxes = [t.get("bbox", [0, 0, 0, 0]) for t in group]
+        subregions = _geometric_fallback_subregions(text_bboxes, balloon)
+        if len(subregions) >= 2:
+            for text in group:
+                text["balloon_subregions"] = subregions
+
+
+def _geometric_fallback_subregions(
+    text_bboxes: list[list[int]],
+    balloon_bbox: list[int],
+) -> list[list[int]]:
+    """Divide balão baseado no aspect ratio do balão e posições dos textos.
+
+    Regra principal: o ASPECT RATIO do balão dita a direção do corte.
+      - Balão largo (aspect >= 1.4) → corte VERTICAL (esquerda/direita)
+      - Balão alto  (aspect <  1.4) → corte HORIZONTAL (cima/baixo)
+
+    O ponto de corte é o centro geométrico do balão. Isso garante que
+    balões conectados lado-a-lado (manhwa/manhwa duplo) sejam divididos
+    corretamente mesmo quando o OCR detecta os textos espalhados por
+    ambos os lobos.
+    """
+    bx1, by1, bx2, by2 = balloon_bbox
+    bw = max(1, bx2 - bx1)
+    bh = max(1, by2 - by1)
+    aspect = bw / float(bh)
+
+    if aspect >= 1.4:
+        # Balão largo → dividir esquerda/direita no centro horizontal
+        # Mas primeiro: verificar se os textos REALMENTE ocupam ambas
+        # metades.  Se todos os centros X estão numa faixa estreita
+        # (< 35% da largura do balão), é um balão único com texto
+        # empilhado, NÃO um balão duplo conectado.
+        if len(text_bboxes) >= 2:
+            centers_x = [(b[0] + b[2]) / 2.0 for b in text_bboxes]
+            x_spread = max(centers_x) - min(centers_x)
+            if x_spread < bw * 0.25:
+                return []  # textos não espalham — balão único
+
+        seam_x = bx1 + bw // 2
+        # Refinar pela distribuição dos textos se tiver 2+ blocos
+        if len(text_bboxes) >= 2:
+            centers_x_sorted = sorted((b[0] + b[2]) / 2.0 for b in text_bboxes)
+            # Encontrar maior gap horizontal entre centros consecutivos
+            best_gap = 0
+            best_seam = seam_x
+            for i in range(len(centers_x_sorted) - 1):
+                gap = centers_x_sorted[i + 1] - centers_x_sorted[i]
+                if gap > best_gap:
+                    best_gap = gap
+                    best_seam = int((centers_x_sorted[i] + centers_x_sorted[i + 1]) / 2)
+            # Aceitar refinamento apenas se o gap for significativo
+            if best_gap > bw * 0.10:
+                seam_x = best_seam
+        seam_x = max(bx1 + 24, min(bx2 - 24, seam_x))
+        return [
+            [bx1, by1, seam_x, by2],
+            [seam_x, by1, bx2, by2],
+        ]
+    else:
+        # Balão alto → dividir cima/baixo no centro vertical
+        seam_y = by1 + bh // 2
+        if len(text_bboxes) >= 2:
+            centers_y = sorted((b[1] + b[3]) / 2.0 for b in text_bboxes)
+            best_gap = 0
+            best_seam = seam_y
+            for i in range(len(centers_y) - 1):
+                gap = centers_y[i + 1] - centers_y[i]
+                if gap > best_gap:
+                    best_gap = gap
+                    best_seam = int((centers_y[i] + centers_y[i + 1]) / 2)
+            if best_gap > bh * 0.10:
+                seam_y = best_seam
+        seam_y = max(by1 + 24, min(by2 - 24, seam_y))
+        return [
+            [bx1, by1, bx2, seam_y],
+            [bx1, seam_y, bx2, by2],
+        ]
 
 
 def classify_layout_shape(bbox: list[int], tipo: str, region: dict | None = None) -> str:
@@ -337,13 +443,13 @@ def _detect_connected_balloon_subregions(
     if image_bgr is None or tipo not in {"fala", "pensamento"}:
         return []
 
-    fill_subregions = _detect_connected_balloon_subregions_from_fill(
+    fill_result = _detect_connected_balloon_subregions_from_fill(
         image_bgr,
         text_bbox,
         balloon_bbox,
     )
-    if len(fill_subregions) >= 2:
-        return fill_subregions
+    if len(fill_result) >= 2:
+        return fill_result
 
     components = _extract_text_cluster_components(image_bgr, text_bbox)
     if len(components) < 2:
@@ -384,7 +490,6 @@ def _detect_connected_balloon_subregions(
     if is_horizontal_stack and horizontal_gap < max(18, int(box_w * 0.08)):
         return []
     if not is_vertical_stack and not is_horizontal_stack:
-        # Diagonal: exigir separação visível em pelo menos um eixo
         if max(vertical_gap, horizontal_gap) < max(22, int(min(box_w, box_h) * 0.10)):
             return []
 
@@ -395,6 +500,39 @@ def _detect_connected_balloon_subregions(
     if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.32:
         return []
     return subregions
+
+
+def _score_subregion_quality(subregions: list[list[int]], balloon_bbox: list[int]) -> float:
+    """Score how good a subregion split is (0.0 = bad, 1.0 = excellent).
+
+    Factors:
+      - Coverage: subregions should cover most of the balloon area
+      - Balance: subregion areas shouldn't be wildly different (max 4:1 ratio)
+      - Overlap: subregions shouldn't overlap significantly
+    """
+    if len(subregions) < 2:
+        return 0.0
+
+    bx1, by1, bx2, by2 = balloon_bbox
+    balloon_area = max(1, (bx2 - bx1) * (by2 - by1))
+    sub_areas = [max(1, (s[2] - s[0]) * (s[3] - s[1])) for s in subregions]
+    total_sub_area = sum(sub_areas)
+
+    # Coverage: how much of the balloon is covered by subregions
+    coverage = min(1.0, total_sub_area / float(balloon_area))
+    coverage_score = min(1.0, coverage / 0.85)  # 85%+ coverage → full score
+
+    # Balance: ratio between smallest and largest subregion
+    min_area = min(sub_areas)
+    max_area = max(sub_areas)
+    ratio = min_area / float(max_area)
+    balance_score = min(1.0, ratio / 0.25)  # 25%+ ratio → full score
+
+    # Overlap: penalize overlapping subregions
+    overlap = _bbox_iou(subregions[0], subregions[1]) if len(subregions) >= 2 else 0.0
+    overlap_penalty = max(0.0, 1.0 - overlap * 5.0)
+
+    return round(coverage_score * 0.4 + balance_score * 0.3 + overlap_penalty * 0.3, 3)
 
 
 def _detect_connected_balloon_subregions_from_fill(
@@ -492,7 +630,21 @@ def _detect_connected_balloon_subregions_from_fill(
             break
 
     if len(eroded_components) < 2:
-        return []
+        # Fallback: distance transform para pescoços largos que erosão não quebra
+        dt_lobes = _detect_lobes_via_distance_transform(
+            component, [bx1, by1, bx2, by2], fill_area,
+        )
+        if len(dt_lobes) < 2:
+            return []
+        dt_lobes.sort(key=lambda item: item["area"], reverse=True)
+        top_two_dt = dt_lobes[:2]
+        subregions = _build_balloon_subregions_from_groups(
+            [lobe["bbox"] for lobe in top_two_dt],
+            balloon_bbox,
+        )
+        if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.35:
+            return []
+        return subregions
 
     lobes = eroded_components
 
@@ -507,7 +659,7 @@ def _detect_connected_balloon_subregions_from_fill(
     b = ordered[1]["bbox"]
     gap_y = max(0, int(b[1]) - int(a[3]))
     gap_x = max(0, int(b[0]) - int(a[2]), int(a[0]) - int(b[2]))
-    
+
     # Gap check mais flexível para erosão profunda
     if max(gap_y, gap_x) < max(6, int(min(box_w, box_h) * 0.02)):
         return []
@@ -519,6 +671,111 @@ def _detect_connected_balloon_subregions_from_fill(
     if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.35:
         return []
     return subregions
+
+
+def _detect_lobes_via_distance_transform(
+    component: np.ndarray,
+    balloon_bbox: list[int],
+    fill_area: int,
+) -> list[dict]:
+    """Detecta lobos de balão conectado via distance transform.
+
+    Fallback para quando a erosão progressiva não consegue separar os lobos
+    (ex.: pescoço largo entre dois lobos).
+    """
+    # Preenche buracos internos (ex.: pixels de texto escuro) antes do DT
+    # Sem isso, retângulos de texto criam peaks falsos nas laterais
+    contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled_component = np.zeros_like(component)
+    if contours:
+        cv2.drawContours(filled_component, contours, -1, 255, -1)
+    else:
+        filled_component = component.copy()
+
+    dist = cv2.distanceTransform(filled_component, cv2.DIST_L2, 5)
+    max_val = float(dist.max())
+    if max_val < 3.0:
+        return []
+
+    k_size = max(5, (min(filled_component.shape[:2]) // 8) | 1)
+    blurred = cv2.GaussianBlur(dist, (k_size, k_size), 0)
+
+    peak_thresh = 0.45 * max_val
+    _, peak_mask = cv2.threshold(blurred, peak_thresh, 255, cv2.THRESH_BINARY)
+    peak_mask = peak_mask.astype(np.uint8)
+
+    num_peaks, peak_labels, peak_stats, peak_centroids = cv2.connectedComponentsWithStats(
+        peak_mask, connectivity=8,
+    )
+    if num_peaks < 3:
+        return []
+
+    bx1, by1, bx2, by2 = balloon_bbox
+    bw = max(1, bx2 - bx1)
+    bh = max(1, by2 - by1)
+    min_peak_val = 0.3 * max_val
+    min_lobe_area = max(600, int(fill_area * 0.08))
+
+    peaks = []
+    for label in range(1, num_peaks):
+        area = int(peak_stats[label, cv2.CC_STAT_AREA])
+        if area < 4:
+            continue
+        cy, cx = float(peak_centroids[label][1]), float(peak_centroids[label][0])
+        val = float(blurred[int(cy), int(cx)])
+        if val < min_peak_val:
+            continue
+        peaks.append({"cx": cx, "cy": cy, "val": val, "area": area})
+
+    if len(peaks) < 2:
+        return []
+
+    peaks.sort(key=lambda p: p["val"], reverse=True)
+    top_peaks = peaks[:2]
+
+    sep = ((top_peaks[0]["cx"] - top_peaks[1]["cx"]) ** 2 + (top_peaks[0]["cy"] - top_peaks[1]["cy"]) ** 2) ** 0.5
+    if sep < min(bw, bh) * 0.25:
+        return []
+
+    p0_cx, p0_cy = top_peaks[0]["cx"], top_peaks[0]["cy"]
+    p1_cx, p1_cy = top_peaks[1]["cx"], top_peaks[1]["cy"]
+    mid_x = (p0_cx + p1_cx) / 2.0
+    mid_y = (p0_cy + p1_cy) / 2.0
+    dx = abs(p0_cx - p1_cx)
+    dy = abs(p0_cy - p1_cy)
+
+    h, w = component.shape[:2]
+    lobe_masks = [np.zeros((h, w), dtype=np.uint8), np.zeros((h, w), dtype=np.uint8)]
+
+    if dx >= dy * 0.8:
+        left_peak_idx = 0 if top_peaks[0]["cx"] <= top_peaks[1]["cx"] else 1
+        split_col = int(mid_x)
+        split_col = max(16, min(w - 16, split_col))
+        lobe_masks[0][:, :split_col] = component[:, :split_col]
+        lobe_masks[1][:, split_col:] = component[:, split_col:]
+    else:
+        top_peak_idx = 0 if top_peaks[0]["cy"] <= top_peaks[1]["cy"] else 1
+        split_row = int(mid_y)
+        split_row = max(16, min(h - 16, split_row))
+        lobe_masks[0][:split_row, :] = component[:split_row, :]
+        lobe_masks[1][split_row:, :] = component[split_row:, :]
+
+    lobes = []
+    for mask in lobe_masks:
+        area = int(np.count_nonzero(mask))
+        if area < min_lobe_area:
+            continue
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            continue
+        lx1, ly1 = int(xs.min()), int(ys.min())
+        lx2, ly2 = int(xs.max()) + 1, int(ys.max()) + 1
+        lobes.append({
+            "bbox": [bx1 + lx1, by1 + ly1, bx1 + lx2, by1 + ly2],
+            "area": area,
+        })
+
+    return lobes
 
 
 def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon_bbox: list[int]) -> list[list[int]]:

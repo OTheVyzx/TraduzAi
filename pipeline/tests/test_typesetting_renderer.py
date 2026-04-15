@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from typesetter.renderer import SafeTextPathFont, _build_textpath_mask, render_text_block
+from typesetter.renderer import SafeTextPathFont, _build_textpath_mask, build_render_blocks, render_text_block
 
 
 class TypesettingRendererTests(unittest.TestCase):
@@ -156,6 +156,101 @@ class TypesettingRendererTests(unittest.TestCase):
         br = np.any(arr[130:220, 190:390] < 200)
         self.assertTrue(tl)
         self.assertTrue(br)
+
+    def test_two_texts_with_subregions_no_double_render(self):
+        """2 textos no mesmo balão com subregions → cada texto vai para seu lobo, sem duplicação."""
+        subregions = [[30, 40, 200, 220], [220, 40, 400, 220]]
+        base_style = {
+            "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+            "tamanho": 24,
+            "cor": "#111111",
+            "contorno": "#FFFFFF",
+            "contorno_px": 2,
+            "alinhamento": "center",
+            "sombra": False,
+            "sombra_cor": "",
+            "sombra_offset": [0, 0],
+            "glow": False,
+            "cor_gradiente": [],
+        }
+        texts = [
+            {
+                "translated": "LEFT LOBE TEXT",
+                "bbox": [50, 80, 180, 180],
+                "tipo": "fala",
+                "estilo": dict(base_style),
+                "balloon_bbox": [30, 40, 400, 220],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+            },
+            {
+                "translated": "RIGHT LOBE TEXT",
+                "bbox": [240, 80, 380, 180],
+                "tipo": "fala",
+                "estilo": dict(base_style),
+                "balloon_bbox": [30, 40, 400, 220],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+        self.assertEqual(len(blocks), 2, "Deve gerar 2 blocos, um por lobo")
+
+        img = Image.new("RGB", (430, 260), (255, 255, 255))
+        for block in blocks:
+            render_text_block(img, block)
+
+        arr = np.array(img)
+        left_has_text = np.any(arr[40:220, 30:200] < 200)
+        right_has_text = np.any(arr[40:220, 220:400] < 200)
+        self.assertTrue(left_has_text, "Lobo esquerdo deve ter texto")
+        self.assertTrue(right_has_text, "Lobo direito deve ter texto")
+
+
+    def test_connected_subregions_render_with_uniform_font_size(self):
+        """Both lobes of a connected balloon should use the same font size."""
+        img = Image.new("RGB", (500, 300), (255, 255, 255))
+        # Left subregion is smaller → would need a smaller font if independent.
+        # With uniform sizing, both should match the smaller one.
+        text_data = {
+            "translated": "SHORT. THIS IS A MUCH LONGER SENTENCE WITH MANY MORE WORDS THAT NEEDS SPACE.",
+            "bbox": [20, 20, 480, 280],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+                "tamanho": 40,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+                "sombra": False,
+                "sombra_cor": "",
+                "sombra_offset": [0, 0],
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "balloon_bbox": [20, 20, 480, 280],
+            "balloon_subregions": [
+                [20, 20, 160, 280],   # narrow left lobe
+                [160, 20, 480, 280],  # wide right lobe
+            ],
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        render_text_block(img, text_data)
+
+        arr = np.array(img)
+        # Both halves should have visible text
+        left_has_text = np.any(arr[20:280, 20:160] < 200)
+        right_has_text = np.any(arr[20:280, 160:480] < 200)
+        self.assertTrue(left_has_text, "Left lobe should have text")
+        self.assertTrue(right_has_text, "Right lobe should have text")
 
 
 if __name__ == "__main__":

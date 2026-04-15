@@ -529,6 +529,7 @@ def _translate_with_google(
             payload = _build_text_payload(texts, index, history_tail)
             page_texts.append(
                 {
+                    **texts[index],
                     "original": original,
                     "translated": final,
                     "tipo": tipo,
@@ -625,7 +626,7 @@ def _translate_with_ollama(
             original = text_data.get("text", "")
             tipo = text_data.get("tipo", "fala")
             if text_data.get("skip_processing"):
-                page_texts.append({"original": original, "translated": original, "tipo": tipo})
+                page_texts.append({**text_data, "original": original, "translated": original, "tipo": tipo})
                 history_tail.append({"source": original, "translated": original, "tipo": tipo})
                 continue
             translated = repaired_map.get(index) or translated_map.get(f"t{index + 1}", original)
@@ -634,7 +635,7 @@ def _translate_with_ollama(
                 translated = memory_translation
             is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
             was_upper = False if is_cjk else (original == original.upper() and any(c.isalpha() for c in original))
-            
+
             final = _postprocess(
                 translated,
                 was_upper,
@@ -644,6 +645,7 @@ def _translate_with_ollama(
             )
             page_texts.append(
                 {
+                    **text_data,
                     "original": original,
                     "translated": final,
                     "tipo": tipo,
@@ -667,6 +669,7 @@ def _passthrough(ocr_results: list[dict], progress_callback: Callable | None) ->
             {
                 "texts": [
                     {
+                        **text,
                         "original": text.get("text", ""),
                         "translated": text.get("text", ""),
                         "tipo": text.get("tipo", "fala"),

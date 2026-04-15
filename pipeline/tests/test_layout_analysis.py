@@ -1,7 +1,15 @@
 import unittest
 from pathlib import Path
 
-from layout.balloon_layout import enrich_page_layout
+import cv2
+import numpy as np
+
+from layout.balloon_layout import (
+    _detect_connected_balloon_subregions_from_fill,
+    _detect_lobes_via_distance_transform,
+    _score_subregion_quality,
+    enrich_page_layout,
+)
 
 
 def _fixture_image_path(name: str) -> Path:
@@ -202,6 +210,151 @@ def _intersection_area(a: list[int], b: list[int]) -> int:
     if ix2 <= ix1 or iy2 <= iy1:
         return 0
     return int((ix2 - ix1) * (iy2 - iy1))
+
+
+def _make_connected_balloon_image(w: int, h: int, lobe1_center, lobe1_r, lobe2_center, lobe2_r, neck_rect=None):
+    """Cria imagem sintética com dois lobos brancos conectados por um pescoço."""
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    cv2.circle(img, lobe1_center, lobe1_r, (255, 255, 255), -1)
+    cv2.circle(img, lobe2_center, lobe2_r, (255, 255, 255), -1)
+    if neck_rect:
+        nx1, ny1, nx2, ny2 = neck_rect
+        cv2.rectangle(img, (nx1, ny1), (nx2, ny2), (255, 255, 255), -1)
+    cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 0), 2)
+    return img
+
+
+class ConnectedBalloonDetectionTests(unittest.TestCase):
+    def test_distance_transform_detects_wide_neck_balloon(self):
+        """Dois lobos conectados por pescoço largo — erosão falha, distance transform detecta."""
+        img = _make_connected_balloon_image(
+            400, 200,
+            lobe1_center=(100, 100), lobe1_r=70,
+            lobe2_center=(300, 100), lobe2_r=70,
+            neck_rect=(80, 70, 320, 130),
+        )
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, component = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+
+        lobes = _detect_lobes_via_distance_transform(
+            component, [0, 0, 400, 200], fill_area=int(np.count_nonzero(component)),
+        )
+
+        self.assertGreaterEqual(len(lobes), 2)
+        centers = [(l["bbox"][0] + l["bbox"][2]) / 2 for l in lobes]
+        self.assertTrue(any(c < 200 for c in centers))
+        self.assertTrue(any(c > 200 for c in centers))
+
+    def test_distance_transform_returns_empty_for_single_lobe(self):
+        """Balão único sem pescoço — distance transform NÃO deve retornar lobos."""
+        img = np.zeros((200, 200, 3), dtype=np.uint8)
+        cv2.circle(img, (100, 100), 80, (255, 255, 255), -1)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, component = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+
+        lobes = _detect_lobes_via_distance_transform(
+            component, [0, 0, 200, 200], fill_area=int(np.count_nonzero(component)),
+        )
+
+        self.assertEqual(len(lobes), 0)
+
+    def test_fill_based_detection_uses_distance_transform_fallback(self):
+        """_detect_connected_balloon_subregions_from_fill retorna 2 subregions via DT fallback."""
+        img = _make_connected_balloon_image(
+            500, 220,
+            lobe1_center=(120, 110), lobe1_r=80,
+            lobe2_center=(380, 110), lobe2_r=80,
+            neck_rect=(100, 75, 400, 145),
+        )
+
+        subregions = _detect_connected_balloon_subregions_from_fill(
+            img, [80, 40, 420, 180], [0, 0, 500, 220],
+        )
+
+        self.assertGreaterEqual(len(subregions), 2)
+
+    def test_geometric_fallback_splits_wide_balloon_with_two_texts(self):
+        """Fallback geométrico: balão largo sem imagem + 2 textos próximos → subregions inferidas."""
+        # Textos com gap de 20px (< 25.5px threshold) → serão mesclados numa região
+        page = {
+            "width": 600,
+            "height": 200,
+            "image": None,
+            "texts": [
+                {"text": "Hello", "bbox": [20, 50, 240, 150], "tipo": "fala", "confidence": 0.9},
+                {"text": "World", "bbox": [260, 50, 480, 150], "tipo": "fala", "confidence": 0.9},
+            ],
+        }
+
+        enriched = enrich_page_layout(page)
+        texts = enriched["texts"]
+
+        has_subregions = any(len(t.get("balloon_subregions", [])) >= 2 for t in texts)
+        self.assertTrue(has_subregions, "Fallback geométrico deveria ter inferido subregions")
+
+    def test_geometric_fallback_skips_single_text_wide_balloon(self):
+        """1 texto em balão largo → sem subregions pelo fallback."""
+        page = {
+            "width": 500,
+            "height": 200,
+            "image": None,
+            "texts": [
+                {"text": "Hello World", "bbox": [30, 50, 470, 150], "tipo": "fala", "confidence": 0.9},
+            ],
+        }
+
+        enriched = enrich_page_layout(page)
+        texts = enriched["texts"]
+
+        for t in texts:
+            self.assertFalse(t.get("balloon_subregions"), "Texto único não deve ter subregions")
+
+
+class SubregionConfidenceTests(unittest.TestCase):
+    def test_good_split_has_high_confidence(self):
+        """Two equal halves covering the balloon → high confidence."""
+        balloon = [0, 0, 400, 200]
+        subregions = [[0, 0, 200, 200], [200, 0, 400, 200]]
+        score = _score_subregion_quality(subregions, balloon)
+        self.assertGreater(score, 0.7)
+
+    def test_overlapping_subregions_have_lower_confidence(self):
+        """Overlapping subregions should score lower."""
+        balloon = [0, 0, 400, 200]
+        good = [[0, 0, 200, 200], [200, 0, 400, 200]]
+        bad = [[0, 0, 300, 200], [100, 0, 400, 200]]  # heavy overlap
+        good_score = _score_subregion_quality(good, balloon)
+        bad_score = _score_subregion_quality(bad, balloon)
+        self.assertGreater(good_score, bad_score)
+
+    def test_empty_subregions_return_zero(self):
+        self.assertEqual(_score_subregion_quality([], [0, 0, 400, 200]), 0.0)
+        self.assertEqual(_score_subregion_quality([[0, 0, 100, 100]], [0, 0, 400, 200]), 0.0)
+
+    def test_enriched_text_has_subregion_confidence(self):
+        """enrich_page_layout should attach subregion_confidence to texts."""
+        image = np.full((320, 380, 3), 230, dtype=np.uint8)
+        cv2.ellipse(image, (190, 95), (120, 70), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(image, (200, 210), (125, 72), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(image, (195, 152), (26, 22), 0, 0, 360, (248, 248, 248), -1)
+        page = {
+            "width": 380,
+            "height": 320,
+            "_cached_image_bgr": image,
+            "texts": [
+                {
+                    "text": "A. B.",
+                    "bbox": [70, 45, 305, 245],
+                    "tipo": "fala",
+                    "confidence": 0.95,
+                }
+            ],
+        }
+        enriched = enrich_page_layout(page)
+        text = enriched["texts"][0]
+        self.assertIn("subregion_confidence", text)
+        if text.get("balloon_subregions"):
+            self.assertGreater(text["subregion_confidence"], 0.0)
 
 
 if __name__ == "__main__":
