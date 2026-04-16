@@ -846,7 +846,7 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
         else:
             seam_x = int((centers[0][0] + centers[1][0]) / 2.0)
         seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
-        gap_x = max(8, int(bw * 0.04))
+        gap_x = max(4, int(bw * 0.01))
         subs = [
             [bx1, by1, seam_x - gap_x, by2],
             [seam_x + gap_x, by1, bx2, by2],
@@ -870,7 +870,7 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
 
     seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
     seam_y = max(by1 + 28, min(by2 - 28, seam_y))
-    gap_x = max(8, int(bw * 0.04))
+    gap_x = max(6, int(bw * 0.02))
     overlap_y = max(6, int(bh * 0.03))
 
     if fc[0] <= sc[0]:

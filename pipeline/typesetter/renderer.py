@@ -982,16 +982,16 @@ def plan_text_layout(text_data: dict) -> dict:
         balloon_geo = "lobe"
         lobe_aspect = box_width / float(max(1, box_height))
         if lobe_aspect >= 1.4:
-            # Wide lobe
-            width_ratio = 0.92
+            # Wide lobe — seam edge is flat, text can extend closer to it
+            width_ratio = 0.95
             padding_y = max(6, int(box_height * 0.07))
         elif lobe_aspect <= 0.7:
-            # Tall lobe 
-            width_ratio = 0.88
+            # Tall lobe
+            width_ratio = 0.92
             padding_y = max(6, int(box_height * 0.05))
         else:
-            # Square-ish lobe
-            width_ratio = 0.91
+            # Square-ish lobe — one edge flat (seam), allows wider text
+            width_ratio = 0.95
             padding_y = max(6, int(box_height * 0.06))
         line_spacing = 0.04
 
@@ -1355,6 +1355,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             hi = mid - 1
 
     # Refinar: testar best_fit e vizinhos (±2, ±1, melhor) para scoring
+    floor_bound = int(plan.get("_font_search_floor", 8) or 8)
     candidate_sizes = sorted(
         {
             size
@@ -1365,12 +1366,14 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 best_fit - 1,
                 best_fit - 2,
             )
-            if 8 <= size <= font_size
+            if floor_bound <= size <= font_size
         },
         reverse=True,
     )
     if not candidate_sizes:
-        candidate_sizes = [8]
+        # floor > best_fit means text doesn't fit at the target size; use the
+        # largest actually-fitting size rather than falling back to 8.
+        candidate_sizes = [max(8, best_fit)]
 
     for attempt_size in candidate_sizes:
         font = get_font(plan["font_name"], attempt_size)
@@ -1604,14 +1607,21 @@ def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> 
     min_size = min(sizes)
     max_size = max(sizes)
 
+    import sys as _sys
+    print(f"[SIZES_DBG] sizes={sizes} min={min_size} max={max_size}", file=_sys.stderr)
+
     if max_size - min_size <= 4:
         candidate = min_size
     else:
         floor = min_size
         candidate = min(max(floor, min(size, floor + 2)) for size in sizes)
 
-    # Quality gate: reduce candidate until every lobe has avg ≥ 1.5 words/line.
-    MIN_AVG_WORDS_PER_LINE = 1.5
+    print(f"[SIZES_DBG] candidate={candidate}", file=_sys.stderr)
+
+    # Quality gate: reduce candidate until every lobe has avg ≥ 1.8 words/line.
+    # 1.8 forces a denser layout (≥2 words/line on average) before accepting
+    # the size, preventing single-word-line layouts.
+    MIN_AVG_WORDS_PER_LINE = 1.8
     quality = candidate
     for child, plan in zip(children, plans):
         text = child.get("translated", "")
@@ -1628,10 +1638,12 @@ def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> 
             if not wrapped:
                 continue
             avg_wpl = n_words / float(len(wrapped))
+            print(f"[SIZES_DBG]   '{text[:35]}' sz={check_size} max_w={max_width} lines={len(wrapped)} avg={avg_wpl:.2f} → {wrapped}", file=_sys.stderr)
             if avg_wpl >= MIN_AVG_WORDS_PER_LINE:
                 quality = min(quality, check_size)
                 break
 
+    print(f"[SIZES_DBG] quality={quality}", file=_sys.stderr)
     return [quality for _ in sizes]
 
 
@@ -1688,16 +1700,20 @@ def _render_connected_subregions(
             child["translated"] = child["translated"].upper()
 
     plans = [ensure_legible_plan(img, plan_text_layout(c)) for c in children]
+    import sys as _sys
+    for ci, (ch, pl) in enumerate(zip(children, plans)):
+        print(f"[LOBE_DBG] child[{ci}]: font={pl.get('font_name')} bbox={pl.get('target_bbox')} max_w={pl.get('max_width')} max_h={pl.get('max_height')} w_ratio={pl.get('max_width',0)/max(1,pl.get('target_bbox',[0,0,1,0])[2]-pl.get('target_bbox',[0,0,0,0])[0]):.3f} text={ch.get('translated','')[:40]!r}", file=_sys.stderr)
     target_sizes = _resolve_connected_target_sizes(children, plans)
     for child, plan, target_size in zip(children, plans, target_sizes):
         child_text = child.get("translated", "")
         if not child_text:
             continue
         plan = dict(plan)
-        # Set target_size to the resolved uniform size but do NOT set
-        # _font_search_cap — let _compute_font_search_upper_bound add its
-        # normal growth room so the binary search can explore upward.
+        # Cap AND floor the binary search at target_size so _resolve_text_layout
+        # uses exactly the quality-checked uniform size (no scoring escape below floor).
         plan["target_size"] = max(8, int(target_size))
+        plan["_font_search_cap"] = max(8, int(target_size))
+        plan["_font_search_floor"] = max(8, int(target_size))
         plan["outline_px"] = max(plan["outline_px"], 2 if target_size <= 22 else 3)
         _render_single_text_block(img, child, plan)
 
