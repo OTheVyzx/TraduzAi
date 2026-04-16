@@ -1129,11 +1129,13 @@ def _best_semantic_split(
             target = [weights[i] if weights else uniform_w for i in range(count)]
             imbalance = max(abs(r - t) for r, t in zip(ratios, target))
             # Semantic coherence bonus: reward splits where each group ends at . ! ?
+            # Also check the final group so we don't split mid-sentence anywhere.
             coherence_penalty = 0.0
-            for g in current:
+            all_groups = list(current) + [group]
+            for g in all_groups:
                 last_part = g[-1] if g else ""
                 if not re.search(r"[.!?…]$", last_part):
-                    coherence_penalty += 0.04  # mild penalty for comma/semicolon break
+                    coherence_penalty += 0.10  # stronger penalty for comma/semicolon break
             total = imbalance + coherence_penalty
             if total < best_score:
                 best_score = total
@@ -1585,12 +1587,15 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
 def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> list[int]:
     """Resolve font sizes for connected balloon lobes with smart tolerance.
 
-    Instead of forcing the strict minimum across all lobes (which crushes
-    text when one lobe is slightly smaller), uses a tolerance window:
-    - If the gap between min and max resolved sizes is ≤ 4px, use the min
-      (negligible visual difference, keeps uniformity)
-    - Otherwise, allow each lobe to keep up to min+2 of its own resolved
-      size (so a bad lobe doesn't drag all others down to 8px)
+    Steps:
+    1. Binary-search each lobe independently to find max fitting font.
+    2. Unify: if gap ≤ 4px → strict min; otherwise allow up to min+2.
+    3. Quality gate: for each lobe, if the unified size produces
+       avg_words_per_line < 1.5 (single-word lines look bad), reduce
+       the candidate until all lobes have decent multi-word lines.
+       This prevents the binary search from picking a font that is the
+       "largest that fits height-wise" when the constraint is actually
+       a single long word monopolizing each line.
     """
     if not children or not plans:
         return []
@@ -1600,15 +1605,34 @@ def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> 
     max_size = max(sizes)
 
     if max_size - min_size <= 4:
-        # Small gap — strict uniform for visual consistency
-        return [min_size for _ in sizes]
+        candidate = min_size
+    else:
+        floor = min_size
+        candidate = min(max(floor, min(size, floor + 2)) for size in sizes)
 
-    # Larger gap — use a floor that doesn't crush the bigger lobe.
-    floor = min_size
-    result = []
-    for size in sizes:
-        result.append(max(floor, min(size, floor + 2)))
-    return result
+    # Quality gate: reduce candidate until every lobe has avg ≥ 1.5 words/line.
+    MIN_AVG_WORDS_PER_LINE = 1.5
+    quality = candidate
+    for child, plan in zip(children, plans):
+        text = child.get("translated", "")
+        if not text:
+            continue
+        n_words = len(text.split())
+        if n_words < 3:
+            continue  # very short texts — don't shrink for them
+        max_width = plan.get("max_width", 9999)
+        font_name = plan.get("font_name", "")
+        for check_size in range(candidate, max(7, candidate - 8), -1):
+            font = get_font(font_name, check_size)
+            wrapped = wrap_text(text, font, max_width)
+            if not wrapped:
+                continue
+            avg_wpl = n_words / float(len(wrapped))
+            if avg_wpl >= MIN_AVG_WORDS_PER_LINE:
+                quality = min(quality, check_size)
+                break
+
+    return [quality for _ in sizes]
 
 
 def _render_connected_subregions(
