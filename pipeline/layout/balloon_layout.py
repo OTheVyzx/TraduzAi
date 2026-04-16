@@ -57,7 +57,9 @@ def enrich_page_layout(page_result: dict) -> dict:
                 text.get("tipo", "fala"),
             )
         subs = subregion_cache[subregion_key]
-        updated["balloon_subregions"] = subs
+        connected_plan = _analyze_connected_subregions(subs, balloon_bbox) if subs else {}
+        updated["balloon_subregions"] = connected_plan.get("ordered_subregions", subs)
+        updated["connected_balloon_orientation"] = connected_plan.get("orientation", "")
         updated["subregion_confidence"] = _score_subregion_quality(subs, balloon_bbox) if subs else 0.0
         enriched_texts.append(updated)
 
@@ -112,8 +114,64 @@ def _apply_geometric_fallback_subregions(texts: list[dict]) -> None:
             continue
 
         if len(subregions) >= 2:
+            connected_plan = _analyze_connected_subregions(subregions, balloon)
             for text in group:
-                text["balloon_subregions"] = subregions
+                text["balloon_subregions"] = connected_plan.get("ordered_subregions", subregions)
+                text["connected_balloon_orientation"] = connected_plan.get("orientation", "")
+
+
+def _analyze_connected_subregions(
+    subregions: list[list[int]],
+    balloon_bbox: list[int],
+) -> dict:
+    normalized = []
+    for bbox in subregions or []:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+        except Exception:
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        normalized.append([x1, y1, x2, y2])
+
+    if len(normalized) < 2:
+        return {
+            "orientation": "",
+            "ordered_subregions": normalized,
+            "balloon_bbox": [int(v) for v in balloon_bbox] if balloon_bbox else [],
+        }
+
+    centers = [
+        ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+        for bbox in normalized
+    ]
+    dx = abs(centers[0][0] - centers[1][0])
+    dy = abs(centers[0][1] - centers[1][1])
+
+    if dx >= dy * 1.1:
+        orientation = "left-right"
+        ordered = sorted(normalized, key=lambda b: (((b[0] + b[2]) / 2.0), ((b[1] + b[3]) / 2.0)))
+    elif dy >= dx * 1.1:
+        orientation = "top-bottom"
+        ordered = sorted(normalized, key=lambda b: (((b[1] + b[3]) / 2.0), ((b[0] + b[2]) / 2.0)))
+    else:
+        orientation = "diagonal"
+        ordered = sorted(
+            normalized,
+            key=lambda b: (
+                ((b[1] + b[3]) / 2.0) + ((b[0] + b[2]) / 2.0),
+                ((b[1] + b[3]) / 2.0),
+                ((b[0] + b[2]) / 2.0),
+            ),
+        )
+
+    return {
+        "orientation": orientation,
+        "ordered_subregions": ordered,
+        "balloon_bbox": [int(v) for v in balloon_bbox] if balloon_bbox else [],
+    }
 
 
 def _geometric_fallback_subregions(

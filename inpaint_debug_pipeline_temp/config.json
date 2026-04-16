@@ -1,0 +1,18 @@
+{
+  "source_path": "d:\\TraduzAi\\debug_pipeline_test_cjk\\originals\\001.jpg",
+  "work_dir": "d:\\TraduzAi\\inpaint_debug_pipeline_temp",
+  "models_dir": "C:\\Users\\PICHAU\\AppData\\Roaming\\com.traduzai.app\\models",
+  "api_key": "dummy",
+  "obra": "Test Manga CJK",
+  "qualidade": "normal",
+  "idioma_origem": "ja",
+  "idioma_destino": "pt-BR",
+  "contexto": {
+    "sinopse": "Teste de traduÃ§Ã£o from Japanese",
+    "genero": [
+      "test"
+    ],
+    "personagens": []
+  },
+  "glossario": {}
+}

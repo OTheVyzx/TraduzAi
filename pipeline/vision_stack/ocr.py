@@ -54,6 +54,8 @@ class OCREngine:
             self._load_manga_ocr()
         elif self.model_name == "paddleocr":
             self._load_paddle_ocr()
+        elif self.model_name == "easyocr":
+            self._load_easyocr()
         else:
             raise ValueError(f"OCR backend '{self.model_name}' não suportado")
 
@@ -91,7 +93,13 @@ class OCREngine:
         os.environ["OMP_NUM_THREADS"] = "1"
         os.environ["OPENBLAS_NUM_THREADS"] = "1"
         os.environ["MKL_NUM_THREADS"] = "1"
-        from paddleocr import PaddleOCR
+        try:
+            from paddleocr import PaddleOCR
+        except Exception as exc:
+            logger.warning("PaddleOCR nÃ£o carregou (%s); usando EasyOCR como fallback", exc)
+            self.model_name = "easyocr"
+            self._load_easyocr()
+            return
         
         # Mapeamento do TraduzAi (app) para o PaddleOCR
         # en -> en
@@ -115,6 +123,21 @@ class OCREngine:
         )
         self._backend = "paddleocr"
         logger.info(f"PaddleOCR carregado (lang={mapped_lang}, gpu={use_gpu})")
+
+    def _load_easyocr(self):
+        import easyocr
+
+        languages = {
+            "en": ["en"],
+            "ja": ["ja", "en"],
+            "ko": ["ko", "en"],
+            "zh": ["ch_sim", "en"],
+        }.get(self.lang, ["en"])
+
+        use_gpu = self.device.type == "cuda"
+        self._model = easyocr.Reader(languages, gpu=use_gpu, verbose=False)
+        self._backend = "easyocr"
+        logger.info(f"EasyOCR carregado (lang={languages}, gpu={use_gpu})")
 
     # ------------------------------------------------------------------
     # API pública
@@ -194,8 +217,33 @@ class OCREngine:
     def _recognize_batch_impl(self, crops: list[np.ndarray]) -> list[str]:
         if self._backend == "manga-ocr":
             return self._manga_ocr_batch(crops)
+        if self._backend == "easyocr":
+            return self._easyocr_batch(crops)
         else:
             return self._paddle_ocr_batch(crops)
+
+    def _easyocr_batch(self, crops: list[np.ndarray]) -> list[str]:
+        texts = []
+        for crop in crops:
+            if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+                texts.append("")
+                continue
+            try:
+                results = self._model.readtext(
+                    crop,
+                    text_threshold=0.35,
+                    low_text=0.25,
+                    canvas_size=2048,
+                    paragraph=False,
+                )
+            except Exception as exc:
+                logger.warning(f"EasyOCR error: {exc}")
+                texts.append("")
+                continue
+
+            lines = [str(item[1]).strip() for item in results if item and len(item) >= 2 and str(item[1]).strip()]
+            texts.append(" ".join(lines).strip())
+        return texts
 
     def _manga_ocr_batch(self, crops: list[np.ndarray]) -> list[str]:
         """Inferência batched com manga-ocr."""

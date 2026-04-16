@@ -1,0 +1,873 @@
+{
+  "image": "D:\\TraduzAi\\debug_pipeline_test\\debug_test.jpg",
+  "width": 800,
+  "height": 2600,
+  "texts": [
+    {
+      "text": "you MEAN THE",
+      "bbox": [
+        302,
+        1098,
+        523,
+        1136
+      ],
+      "confidence": 0.877,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 26,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary-inverted",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        190,
+        1078,
+        632,
+        1259
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 4,
+      "balloon_subregions": [
+        [
+          190,
+          1078,
+          632,
+          1167
+        ],
+        [
+          190,
+          1167,
+          632,
+          1259
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "POWER HE FORCED",
+      "bbox": [
+        267,
+        1130,
+        568,
+        1170
+      ],
+      "confidence": 0.879,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 28,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "fallback-threshold",
+      "ocr_reviewed": true,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        190,
+        1078,
+        632,
+        1259
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 4,
+      "balloon_subregions": [
+        [
+          190,
+          1078,
+          632,
+          1167
+        ],
+        [
+          190,
+          1167,
+          632,
+          1259
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "Qut THROUGH A DEAL",
+      "bbox": [
+        242,
+        1164,
+        580,
+        1203
+      ],
+      "confidence": 0.589,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 27,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary-inverted",
+      "ocr_reviewed": true,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": true,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        190,
+        1078,
+        632,
+        1259
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 4,
+      "balloon_subregions": [
+        [
+          190,
+          1078,
+          632,
+          1167
+        ],
+        [
+          190,
+          1167,
+          632,
+          1259
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "WITH 'THEM'",
+      "bbox": [
+        315,
+        1196,
+        505,
+        1238
+      ],
+      "confidence": 0.933,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 29,
+        "cor": "#FFFFFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        190,
+        1078,
+        632,
+        1259
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 4,
+      "balloon_subregions": [
+        [
+          190,
+          1078,
+          632,
+          1167
+        ],
+        [
+          190,
+          1167,
+          632,
+          1259
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "IT MAY BE NOTHING",
+      "bbox": [
+        168,
+        1514,
+        433,
+        1548
+      ],
+      "confidence": 0.856,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 23,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "fallback-upscale",
+      "ocr_reviewed": true,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "MORE THAN A HALF-FINISHED",
+      "bbox": [
+        110,
+        1542,
+        492,
+        1579
+      ],
+      "confidence": 0.953,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 25,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "CULTIVATION METHOD, But",
+      "bbox": [
+        118,
+        1573,
+        484,
+        1612
+      ],
+      "confidence": 0.835,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 27,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#F6F6F6",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#F6F6F6",
+        "glow_px": 4,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary-inverted",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": true,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "It's Effects ARE MORE",
+      "bbox": [
+        140,
+        1604,
+        472,
+        1638
+      ],
+      "confidence": 0.825,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 23,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": true,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "THAN Enough",
+      "bbox": [
+        202,
+        1634,
+        398,
+        1668
+      ],
+      "confidence": 0.684,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 23,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 6,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "fallback-threshold",
+      "ocr_reviewed": true,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": true,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "A POWER THAT Let's you",
+      "bbox": [
+        330,
+        1676,
+        683,
+        1713
+      ],
+      "confidence": 0.761,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 25,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 4,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary-inverted",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": true,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "Sukpass youk OWN Limits",
+      "bbox": [
+        314,
+        1708,
+        695,
+        1741
+      ],
+      "confidence": 0.58,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 23,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 6,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "fallback-upscale",
+      "ocr_reviewed": true,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": true,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "IN AN INSTANT",
+      "bbox": [
+        408,
+        1738,
+        602,
+        1772
+      ],
+      "confidence": 0.977,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "tamanho": 23,
+        "cor": "#FEFEFE",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#FEFEFE",
+        "glow_px": 5,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "primary",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "balloon_bbox": [
+        56,
+        1495,
+        753,
+        1791
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 8,
+      "balloon_subregions": [
+        [
+          56,
+          1495,
+          402,
+          1643
+        ],
+        [
+          402,
+          1643,
+          753,
+          1791
+        ]
+      ],
+      "subregion_confidence": 0.0
+    }
+  ],
+  "_vision_blocks": [
+    {
+      "bbox": [
+        302,
+        1098,
+        523,
+        1136
+      ],
+      "confidence": 0.877
+    },
+    {
+      "bbox": [
+        267,
+        1130,
+        568,
+        1170
+      ],
+      "confidence": 0.879
+    },
+    {
+      "bbox": [
+        242,
+        1164,
+        580,
+        1203
+      ],
+      "confidence": 0.589
+    },
+    {
+      "bbox": [
+        315,
+        1196,
+        505,
+        1238
+      ],
+      "confidence": 0.933
+    },
+    {
+      "bbox": [
+        168,
+        1514,
+        433,
+        1548
+      ],
+      "confidence": 0.856
+    },
+    {
+      "bbox": [
+        110,
+        1542,
+        492,
+        1579
+      ],
+      "confidence": 0.953
+    },
+    {
+      "bbox": [
+        118,
+        1573,
+        484,
+        1612
+      ],
+      "confidence": 0.835
+    },
+    {
+      "bbox": [
+        140,
+        1604,
+        472,
+        1638
+      ],
+      "confidence": 0.825
+    },
+    {
+      "bbox": [
+        202,
+        1634,
+        398,
+        1668
+      ],
+      "confidence": 0.684
+    },
+    {
+      "bbox": [
+        330,
+        1676,
+        683,
+        1713
+      ],
+      "confidence": 0.761
+    },
+    {
+      "bbox": [
+        314,
+        1708,
+        695,
+        1741
+      ],
+      "confidence": 0.58
+    },
+    {
+      "bbox": [
+        408,
+        1738,
+        602,
+        1772
+      ],
+      "confidence": 0.977
+    }
+  ]
+}

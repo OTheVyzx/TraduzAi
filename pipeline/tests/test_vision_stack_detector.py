@@ -1,7 +1,8 @@
 import unittest
+import builtins
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -252,6 +253,114 @@ class VisionStackDetectorTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 1)
         self.assertIsNone(blocks[0].mask)
+
+    def test_load_comic_text_detector_native_falls_back_to_checkpoint_when_safetensors_missing(self):
+        class FakeModel:
+            def __init__(self, cfg, ch=3, nc=2):
+                self.loaded = None
+
+            def load_state_dict(self, weights, strict=False):
+                self.loaded = weights
+                return SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+            def half(self):
+                return self
+
+        class FakeSegHead:
+            def __init__(self):
+                self.loaded = None
+
+            def load_state_dict(self, weights, strict=True):
+                self.loaded = weights
+                return SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+            def half(self):
+                return self
+
+        detector = TextDetector.__new__(TextDetector)
+        detector.device = torch.device("cpu")
+        detector.half = False
+        detector._model = None
+        detector._model_type = "comic-text-detector"
+        detector._model_path = Path(r"T:\mangatl\pipeline\models\comic-text-detector.pt")
+
+        checkpoint = {
+            "blk_det": {
+                "cfg": {"nc": 2, "ch": 3},
+                "weights": {"from_checkpoint": torch.ones(1)},
+            },
+            "text_seg": {"seg_from_checkpoint": torch.ones(1)},
+        }
+        yolo_path = Path(r"T:\mangatl\pk\huggingface\mayocream\comic-text-detector\yolo-v5.safetensors")
+        unet_path = Path(r"T:\mangatl\pk\huggingface\mayocream\comic-text-detector\unet.safetensors")
+        existing_paths = {
+            str(detector._model_path),
+            str(yolo_path),
+            str(unet_path),
+        }
+
+        with patch("pathlib.Path.exists", autospec=True, side_effect=lambda path: str(path) in existing_paths), patch(
+            "vision_stack.detector.torch.load",
+            return_value=checkpoint,
+        ), patch.object(
+            TextDetector,
+            "_import_yolov5_runtime",
+            return_value=(FakeModel, object(), object(), object()),
+        ), patch.object(
+            TextDetector,
+            "_make_comic_text_seg_head",
+            return_value=FakeSegHead(),
+        ), patch.object(
+            TextDetector,
+            "_get_comic_text_safetensor_paths",
+            return_value={"yolo": yolo_path, "unet": unet_path},
+        ), patch.object(
+            TextDetector,
+            "_load_safetensor_state_dict",
+            side_effect=ImportError("sem safetensors"),
+        ):
+            loaded = detector._load_comic_text_detector_native()
+
+        self.assertTrue(loaded)
+        self.assertEqual(detector._ctd_weight_source, "checkpoint")
+        self.assertEqual(detector._model.loaded, checkpoint["blk_det"]["weights"])
+        self.assertEqual(detector._ctd_seg_head.loaded, checkpoint["text_seg"])
+
+    def test_load_model_falls_back_to_contour_detector_when_optional_backends_are_missing(self):
+        detector = TextDetector.__new__(TextDetector)
+        detector.device = torch.device("cpu")
+        detector.half = False
+        detector._model = None
+        detector._model_type = "comic-text-detector"
+        detector._model_path = Path(r"T:\mangatl\pipeline\models\comic-text-detector.pt")
+        detector._load_comic_text_detector_native = MagicMock(return_value=False)
+
+        fake_ultralytics = MagicMock()
+        fake_ultralytics.YOLO.side_effect = RuntimeError("checkpoint incompatível")
+        original_import = builtins.__import__
+
+        with patch.dict("sys.modules", {"ultralytics": fake_ultralytics}, clear=False), patch(
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError(name))
+            if name == "paddleocr"
+            else original_import(name, *args, **kwargs),
+        ):
+            TextDetector._load_model(detector)
+
+        self.assertEqual(detector._backend, "contour-fallback")
+        self.assertIsNone(detector._model)
 
 
 if __name__ == "__main__":

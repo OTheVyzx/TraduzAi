@@ -1,4 +1,6 @@
 import unittest
+import builtins
+import types
 from unittest.mock import patch
 
 import numpy as np
@@ -16,10 +18,31 @@ class VisionStackOCRTests(unittest.TestCase):
         engine.batch_size = 8
         engine._model = None
         engine._processor = None
+        original_import = builtins.__import__
+
+        transformers_stub = types.ModuleType("transformers")
+
+        class _BrokenAutoFeatureExtractor:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                del args, kwargs
+                raise ValueError("broken hf metadata")
+
+        class _UnusedModel:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("nao deveria chegar aqui")
+
+        transformers_stub.AutoFeatureExtractor = _BrokenAutoFeatureExtractor
+        transformers_stub.VisionEncoderDecoderModel = _UnusedModel
+        transformers_stub.AutoTokenizer = _UnusedModel
 
         with patch("vision_stack.ocr.OCREngine._load_paddle_ocr") as load_paddle, patch(
-            "transformers.AutoFeatureExtractor.from_pretrained",
-            side_effect=ValueError("broken hf metadata"),
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: transformers_stub
+            if name == "transformers"
+            else original_import(name, *args, **kwargs),
         ):
             OCREngine._load_manga_ocr(engine)
 
@@ -59,6 +82,28 @@ class VisionStackOCRTests(unittest.TestCase):
         texts = OCREngine._paddle_ocr_batch(engine, [crop])
 
         self.assertEqual(texts, ["......"])
+
+    def test_load_paddle_ocr_falls_back_to_easyocr_when_paddle_is_unavailable(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine.model_name = "paddleocr"
+        engine.lang = "en"
+        engine.device = type("Device", (), {"type": "cpu"})()
+        engine.half = False
+        engine.batch_size = 8
+        engine._model = None
+        engine._processor = None
+        original_import = builtins.__import__
+
+        with patch("vision_stack.ocr.OCREngine._load_easyocr") as load_easyocr, patch(
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError(name))
+            if name == "paddleocr"
+            else original_import(name, *args, **kwargs),
+        ):
+            OCREngine._load_paddle_ocr(engine)
+
+        self.assertEqual(engine.model_name, "easyocr")
+        load_easyocr.assert_called_once()
 
 
 if __name__ == "__main__":

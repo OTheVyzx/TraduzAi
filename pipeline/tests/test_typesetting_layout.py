@@ -4,9 +4,13 @@ from PIL import Image
 
 from typesetter.renderer import (
     _assign_texts_to_subregions,
+    _build_connected_children_candidates,
     _build_textpath_mask,
+    _measure_safe_text_block_bbox,
+    _recenter_safe_text_positions,
     _resolve_connected_target_sizes,
     _resolve_text_layout,
+    _score_connected_group_candidate,
     _split_text_for_connected_balloons,
     build_render_blocks,
     ensure_legible_plan,
@@ -244,15 +248,18 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         blocks = build_render_blocks(texts)
 
-        self.assertEqual(len(blocks), 2)
-        left_block = sorted(blocks, key=lambda b: b["balloon_bbox"][0])[0]
-        right_block = sorted(blocks, key=lambda b: b["balloon_bbox"][0])[1]
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertEqual(block["balloon_subregions"], [[30, 40, 200, 220], [220, 40, 400, 220]])
+        self.assertEqual(len(block.get("connected_children", [])), 2)
+        left_block = block["connected_children"][0]
+        right_block = block["connected_children"][1]
         self.assertEqual(left_block["balloon_bbox"], [30, 40, 200, 220])
         self.assertEqual(right_block["balloon_bbox"], [220, 40, 400, 220])
         self.assertIn("esquerdo", left_block["translated"])
         self.assertIn("direito", right_block["translated"])
-        self.assertEqual(left_block["balloon_subregions"], [])
-        self.assertEqual(right_block["balloon_subregions"], [])
+        self.assertTrue(left_block["_is_lobe_subregion"])
+        self.assertTrue(right_block["_is_lobe_subregion"])
 
     def test_single_text_connected_balloon_still_splits(self):
         """Regressão: 1 texto + 2 subregions → passthrough com subregions intactas."""
@@ -276,7 +283,8 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(len(blocks[0].get("balloon_subregions", [])), 2)
 
-    def test_three_texts_two_subregions_merges_then_splits(self):
+    @unittest.skip("Compositor novo agrupa fragmentos OCR por lobo quando a atribuicao e clara.")
+    def test_three_texts_two_subregions_merges_then_splits_legacy(self):
         """3 textos + 2 subregions → contagens não casam → merge normal com subregions."""
         subregions = [[30, 40, 200, 220], [220, 40, 400, 220]]
         texts = [
@@ -359,9 +367,10 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         blocks = build_render_blocks(texts)
 
-        self.assertEqual(len(blocks), 2)
-        tl_block = sorted(blocks, key=lambda b: b["balloon_bbox"][0] + b["balloon_bbox"][1])[0]
-        br_block = sorted(blocks, key=lambda b: b["balloon_bbox"][0] + b["balloon_bbox"][1])[1]
+        self.assertEqual(len(blocks), 1)
+        connected_children = blocks[0]["connected_children"]
+        tl_block = sorted(connected_children, key=lambda b: b["balloon_bbox"][0] + b["balloon_bbox"][1])[0]
+        br_block = sorted(connected_children, key=lambda b: b["balloon_bbox"][0] + b["balloon_bbox"][1])[1]
         self.assertIn("top-left", tl_block["translated"])
         self.assertIn("bottom-right", br_block["translated"])
 
@@ -423,6 +432,49 @@ class TypesettingLayoutTests(unittest.TestCase):
         lobe_plan = plan_text_layout(lobe)
         self.assertGreater(lobe_plan["max_width"], normal_plan["max_width"])
 
+    def test_recenter_safe_text_positions_uses_real_glyph_block_for_vertical_centering(self):
+        text_data = {
+            "translated": "PODE SER NADA MAIS DO QUE",
+            "bbox": [0, 0, 240, 150],
+            "balloon_bbox": [0, 0, 240, 150],
+            "tipo": "fala",
+            "estilo": {"tamanho": 28, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+        bbox_before = _measure_safe_text_block_bbox(
+            resolved["font"],
+            resolved["lines"],
+            resolved["positions"],
+        )
+        self.assertIsNotNone(bbox_before)
+
+        recentered = _recenter_safe_text_positions(
+            resolved["font"],
+            resolved["lines"],
+            resolved["positions"],
+            target_bbox=plan["target_bbox"],
+            padding_y=plan["padding_y"],
+            vertical_anchor=plan["vertical_anchor"],
+        )
+        bbox_after = _measure_safe_text_block_bbox(
+            resolved["font"],
+            resolved["lines"],
+            recentered,
+        )
+        self.assertIsNotNone(bbox_after)
+
+        balloon_cy = (plan["target_bbox"][1] + plan["target_bbox"][3]) / 2.0
+        before_cy = (bbox_before[1] + bbox_before[3]) / 2.0
+        after_cy = (bbox_after[1] + bbox_after[3]) / 2.0
+
+        self.assertLess(abs(after_cy - balloon_cy), abs(before_cy - balloon_cy))
+        self.assertLess(abs(after_cy - balloon_cy), 6.0)
+
     def test_connected_target_sizes_difference_bounded(self):
         """Diferença de font size entre lobos nunca passa de 2px."""
         child_a = {
@@ -464,6 +516,228 @@ class TypesettingLayoutTests(unittest.TestCase):
         sizes = _resolve_connected_target_sizes([child_a, child_b], plans)
         self.assertEqual(len(sizes), 2)
         self.assertLessEqual(abs(sizes[0] - sizes[1]), 2)
+
+    def test_connected_one_to_one_stays_grouped_for_joint_composition(self):
+        """Quando OCR ja separa um texto por lobo, o grupo deve continuar unido."""
+        texts = [
+            {
+                "translated": "LEFT SIDE TEXT",
+                "bbox": [40, 90, 180, 210],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                "balloon_bbox": [0, 0, 420, 240],
+                "balloon_subregions": [[0, 0, 200, 240], [220, 0, 420, 240]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+            },
+            {
+                "translated": "RIGHT SIDE TEXT",
+                "bbox": [250, 80, 390, 205],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                "balloon_bbox": [0, 0, 420, 240],
+                "balloon_subregions": [[0, 0, 200, 240], [220, 0, 420, 240]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("connected_children", blocks[0])
+        self.assertEqual(len(blocks[0]["connected_children"]), 2)
+        self.assertEqual(blocks[0]["balloon_subregions"], [[0, 0, 200, 240], [220, 0, 420, 240]])
+
+    def test_connected_target_sizes_keep_small_variation_when_it_helps_density(self):
+        """Lobos conectados nao devem forcar tamanho identico quando 2px melhora a composicao."""
+        child_a = {
+            "translated": "AB CD",
+            "bbox": [0, 0, 200, 200],
+            "balloon_bbox": [0, 0, 200, 200],
+            "tipo": "fala",
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+        }
+        child_b = dict(child_a)
+        child_b["translated"] = "EF GH IJ"
+        child_b["bbox"] = [200, 0, 400, 200]
+        child_b["balloon_bbox"] = [200, 0, 400, 200]
+        plans = [plan_text_layout(child_a), plan_text_layout(child_b)]
+
+        sizes = _resolve_connected_target_sizes([child_a, child_b], plans)
+
+        self.assertEqual(len(sizes), 2)
+        self.assertLessEqual(abs(sizes[0] - sizes[1]), 2)
+        self.assertGreater(sizes[0], sizes[1])
+
+    def test_connected_candidate_scoring_prefers_sentence_boundary_over_word_balance(self):
+        text_data = {
+            "translated": (
+                "PODE SER NADA MAIS DO QUE UM METODO DE CULTIVO INACABADO, "
+                "MAS SEUS EFEITOS JA SAO MAIS DO QUE SUFICIENTES. "
+                "UM PODER QUE PERMITE SUPERAR SEUS PROPRIOS LIMITES EM UM INSTANTE."
+            ),
+            "bbox": [0, 0, 720, 300],
+            "balloon_bbox": [0, 0, 720, 300],
+            "balloon_subregions": [[0, 0, 340, 300], [360, 0, 720, 300]],
+            "connected_balloon_orientation": "left-right",
+            "tipo": "fala",
+            "estilo": {"tamanho": 28, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+        image = Image.new("RGB", (720, 300), color="white")
+        candidates = _build_connected_children_candidates(
+            text_data,
+            text_data["translated"],
+            text_data["balloon_subregions"],
+        )
+
+        best_chunks = None
+        best_score = float("-inf")
+        for candidate in candidates:
+            children = candidate["children"]
+            plans = [ensure_legible_plan(image, plan_text_layout(child)) for child in children]
+            sizes = _resolve_connected_target_sizes(children, plans)
+            resolved = []
+            final_plans = []
+            for child, plan, size in zip(children, plans, sizes):
+                fixed_plan = dict(plan)
+                fixed_plan["target_size"] = int(size)
+                fixed_plan["_font_search_cap"] = int(size)
+                fixed_plan["_font_search_floor"] = int(size)
+                resolved.append(_resolve_text_layout(child, fixed_plan))
+                final_plans.append(fixed_plan)
+            score = _score_connected_group_candidate(
+                resolved,
+                children,
+                final_plans,
+                semantic_bonus=float(candidate.get("semantic_bonus", 0.0)),
+            )
+            if score > best_score:
+                best_score = score
+                best_chunks = [child["translated"] for child in children]
+
+        self.assertIsNotNone(best_chunks)
+        self.assertTrue(best_chunks[0].rstrip().endswith("."))
+        self.assertTrue(best_chunks[1].startswith("UM PODER"))
+
+    def test_many_fragments_two_subregions_group_into_connected_children(self):
+        """Quando varios fragmentos OCR pertencem claramente a cada lobo, agrupa por lobo."""
+        subregions = [[56, 1495, 402, 1643], [402, 1643, 753, 1791]]
+        texts = [
+            {
+                "translated": "IT MAY BE NOTHING",
+                "bbox": [168, 1514, 433, 1548],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "MORE THAN A HALF-FINISHED",
+                "bbox": [110, 1542, 492, 1579],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "CULTIVATION METHOD, BUT",
+                "bbox": [118, 1573, 484, 1612],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "IT'S EFFECTS ARE MORE",
+                "bbox": [140, 1604, 472, 1638],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "THAN ENOUGH",
+                "bbox": [202, 1634, 398, 1668],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "A POWER THAT LET'S YOU",
+                "bbox": [330, 1676, 683, 1713],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "SURPASS YOUR OWN LIMITS",
+                "bbox": [314, 1708, 695, 1741],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "IN AN INSTANT",
+                "bbox": [408, 1738, 602, 1772],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [56, 1495, 753, 1791],
+                "balloon_subregions": subregions,
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 8,
+                "connected_balloon_orientation": "left-right",
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        connected = blocks[0]
+        self.assertEqual(len(connected.get("connected_children", [])), 2)
+        self.assertIn("IT MAY BE NOTHING", connected["connected_children"][0]["translated"])
+        self.assertIn("THAN ENOUGH", connected["connected_children"][0]["translated"])
+        self.assertIn("A POWER THAT LET'S YOU", connected["connected_children"][1]["translated"])
+        self.assertIn("IN AN INSTANT", connected["connected_children"][1]["translated"])
 
 
 if __name__ == "__main__":

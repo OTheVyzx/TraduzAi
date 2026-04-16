@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from layout.balloon_layout import (
+    _analyze_connected_subregions,
     _build_balloon_subregions_from_groups,
     _detect_connected_balloon_subregions_from_fill,
     _detect_lobes_via_distance_transform,
@@ -486,6 +487,26 @@ class EnforceMinLobeSizeTests(unittest.TestCase):
             sw = s[2] - s[0]
             self.assertGreaterEqual(sw / float(bw), 0.25,
                 f"Lobo {s} muito estreito: {sw}px de {bw}px")
+
+    def test_analyze_connected_subregions_detects_horizontal_reading_order(self):
+        """Subregions horizontais devem ser ordenadas da esquerda para a direita."""
+        plan = _analyze_connected_subregions(
+            [[220, 0, 420, 240], [0, 0, 200, 240]],
+            [0, 0, 420, 240],
+        )
+
+        self.assertEqual(plan["orientation"], "left-right")
+        self.assertEqual(plan["ordered_subregions"][0], [0, 0, 200, 240])
+
+    def test_analyze_connected_subregions_detects_vertical_reading_order(self):
+        """Subregions verticais devem ser ordenadas de cima para baixo."""
+        plan = _analyze_connected_subregions(
+            [[0, 220, 240, 420], [0, 0, 240, 200]],
+            [0, 0, 240, 420],
+        )
+
+        self.assertEqual(plan["orientation"], "top-bottom")
+        self.assertEqual(plan["ordered_subregions"][0], [0, 0, 240, 200])
 
 
 if __name__ == "__main__":
