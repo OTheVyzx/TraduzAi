@@ -1,6 +1,6 @@
 # TraduzAi — Contexto de Desenvolvimento
 
-> Última atualização: 2026-04-12
+> Última atualização: 2026-04-15
 > Leia este arquivo para retomar o contexto sem precisar reler o histórico de chat.
 
 ---
@@ -17,6 +17,17 @@
 
 ---
 
+## O que foi feito (sessão — 2026-04-15)
+
+### 41. Fix de Regressão em Balões Conectados (Connected Balloons)
+- **Problema:** Ao mesclar blocos de texto no renderizador, ocorria uma colisão drástica (overlap) no 'miolo' dos balões conectados e uma deformidade nas quebras de linha que esmagava o texto.
+- **Deduplicação Inteligente:** Adicionado `_dedupe_render_blocks` em `renderer.py` para ignorar a renderização duplicada de textos nas sub-regiões secundárias (eliminando prints fantasmas na separação e normalização do texto).
+- **Divisão Simétrica Real baseada no OCR:** As antigas costuras (`seam_x`/`seam_y`) forçavam um corte pelo centro geométrico da união dos balões. Isso distorcia severamente os balões quando um lado continha muito mais texto que o outro. Foi substituído para encontrar *estritamente o ponto médio do espaço em branco real* entre os blocos detectados pelo OCR.
+- **Abandono do Double-Expansion e Overlap Artificial:** Zerado o crescimento excessivo na interseção que cruzava os lobos e trocado por uma abordagem de Gaps. Garantido gap forte (6-8%) em conexões horizontais, verticais e diagonais no `balloon_layout.py`.
+- **Ajuste de Preenchimento nos Lobos:** O renderizador foi calibrado com `width_ratio` maior (0.88-0.92) para lobos para usarem perfeitamente o volume do recorte sem estourar o centro e sem necessitarem das sobreposições fixas problemáticas de `max_width/height` que causavam clipping vertical.
+- **Estabilidade:** O projeto foi estabilizado sem comprometer diagonais nem as fontes TTF em Windows que deram Exception Access Violation `0xC0000005` (Voltaram a usar `SafeTextPathFont` compulsoriamente).
+
+---
 
 ## O que foi feito (sessão — 2026-04-12)
 
