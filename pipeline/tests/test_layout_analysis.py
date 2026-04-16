@@ -5,8 +5,10 @@ import cv2
 import numpy as np
 
 from layout.balloon_layout import (
+    _build_balloon_subregions_from_groups,
     _detect_connected_balloon_subregions_from_fill,
     _detect_lobes_via_distance_transform,
+    _enforce_min_lobe_size,
     _geometric_fallback_subregions,
     _score_subregion_quality,
     enrich_page_layout,
@@ -423,6 +425,67 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
         self.assertIn("subregion_confidence", text)
         if text.get("balloon_subregions"):
             self.assertGreater(text["subregion_confidence"], 0.0)
+
+
+class EnforceMinLobeSizeTests(unittest.TestCase):
+    """Testes para _enforce_min_lobe_size e _build_balloon_subregions_from_groups."""
+
+    def test_enforce_min_lobe_size_expands_narrow_right_lobe(self):
+        """Lobo direito muito estreito → expandido para 30% mínimo."""
+        balloon = [0, 0, 800, 400]
+        subs = [[0, 0, 700, 400], [700, 0, 800, 400]]
+        fixed = _enforce_min_lobe_size(subs, balloon)
+        right_w = fixed[1][2] - fixed[1][0]
+        self.assertGreaterEqual(right_w / 800.0, 0.29)
+
+    def test_enforce_min_lobe_size_expands_narrow_left_lobe(self):
+        """Lobo esquerdo muito estreito → expandido para 30% mínimo."""
+        balloon = [0, 0, 800, 400]
+        subs = [[0, 0, 100, 400], [100, 0, 800, 400]]
+        fixed = _enforce_min_lobe_size(subs, balloon)
+        left_w = fixed[0][2] - fixed[0][0]
+        self.assertGreaterEqual(left_w / 800.0, 0.29)
+
+    def test_enforce_min_lobe_size_keeps_balanced_split(self):
+        """Split já balanceado → sem mudança."""
+        balloon = [0, 0, 800, 400]
+        subs = [[0, 0, 400, 400], [400, 0, 800, 400]]
+        fixed = _enforce_min_lobe_size(subs, balloon)
+        self.assertEqual(fixed[0], [0, 0, 400, 400])
+        self.assertEqual(fixed[1], [400, 0, 800, 400])
+
+    def test_build_subregions_horizontal_creates_gap(self):
+        """Split horizontal deve ter gap entre os lobos."""
+        left_bbox = [50, 100, 350, 300]
+        right_bbox = [450, 100, 750, 300]
+        balloon = [0, 0, 800, 400]
+        subs = _build_balloon_subregions_from_groups([left_bbox, right_bbox], balloon)
+        self.assertEqual(len(subs), 2)
+        gap = subs[1][0] - subs[0][2]
+        self.assertGreater(gap, 0, "Deve haver gap entre os lobos")
+
+    def test_build_subregions_vertical_creates_gap(self):
+        """Split vertical deve ter gap entre os lobos."""
+        top_bbox = [100, 50, 300, 180]
+        bottom_bbox = [100, 250, 300, 380]
+        balloon = [0, 0, 400, 400]
+        subs = _build_balloon_subregions_from_groups([top_bbox, bottom_bbox], balloon)
+        self.assertEqual(len(subs), 2)
+        gap = subs[1][1] - subs[0][3]
+        self.assertGreater(gap, 0, "Deve haver gap vertical entre os lobos")
+
+    def test_build_subregions_neither_lobe_too_narrow(self):
+        """Nenhum lobo deve ter menos que 30% da dimensão principal."""
+        left_bbox = [50, 100, 150, 300]
+        right_bbox = [600, 100, 750, 300]
+        balloon = [0, 0, 800, 400]
+        subs = _build_balloon_subregions_from_groups([left_bbox, right_bbox], balloon)
+        self.assertEqual(len(subs), 2)
+        bw = 800
+        for s in subs:
+            sw = s[2] - s[0]
+            self.assertGreaterEqual(sw / float(bw), 0.25,
+                f"Lobo {s} muito estreito: {sw}px de {bw}px")
 
 
 if __name__ == "__main__":

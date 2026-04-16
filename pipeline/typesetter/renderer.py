@@ -1583,18 +1583,32 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
 
 
 def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> list[int]:
+    """Resolve font sizes for connected balloon lobes with smart tolerance.
+
+    Instead of forcing the strict minimum across all lobes (which crushes
+    text when one lobe is slightly smaller), uses a tolerance window:
+    - If the gap between min and max resolved sizes is ≤ 4px, use the min
+      (negligible visual difference, keeps uniformity)
+    - Otherwise, allow each lobe to keep up to min+2 of its own resolved
+      size (so a bad lobe doesn't drag all others down to 8px)
+    """
     if not children or not plans:
         return []
     resolved = [_resolve_text_layout(child, plan) for child, plan in zip(children, plans)]
     sizes = [int(item["font_size"]) for item in resolved]
     min_size = min(sizes)
     max_size = max(sizes)
-    if max_size - min_size <= 2:
+
+    if max_size - min_size <= 4:
+        # Small gap — strict uniform for visual consistency
         return [min_size for _ in sizes]
-    soft_sizes = []
+
+    # Larger gap — use a floor that doesn't crush the bigger lobe.
+    floor = min_size
+    result = []
     for size in sizes:
-        soft_sizes.append(max(min_size, size - 1))
-    return soft_sizes
+        result.append(max(floor, min(size, floor + 2)))
+    return result
 
 
 def _render_connected_subregions(
@@ -1656,8 +1670,10 @@ def _render_connected_subregions(
         if not child_text:
             continue
         plan = dict(plan)
+        # Set target_size to the resolved uniform size but do NOT set
+        # _font_search_cap — let _compute_font_search_upper_bound add its
+        # normal growth room so the binary search can explore upward.
         plan["target_size"] = max(8, int(target_size))
-        plan["_font_search_cap"] = max(8, int(target_size))
         plan["outline_px"] = max(plan["outline_px"], 2 if target_size <= 22 else 3)
         _render_single_text_block(img, child, plan)
 

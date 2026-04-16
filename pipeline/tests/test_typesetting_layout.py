@@ -5,6 +5,7 @@ from PIL import Image
 from typesetter.renderer import (
     _assign_texts_to_subregions,
     _build_textpath_mask,
+    _resolve_connected_target_sizes,
     _resolve_text_layout,
     _split_text_for_connected_balloons,
     build_render_blocks,
@@ -421,6 +422,48 @@ class TypesettingLayoutTests(unittest.TestCase):
         lobe["_is_lobe_subregion"] = True
         lobe_plan = plan_text_layout(lobe)
         self.assertGreater(lobe_plan["max_width"], normal_plan["max_width"])
+
+    def test_connected_target_sizes_difference_bounded(self):
+        """Diferença de font size entre lobos nunca passa de 2px."""
+        child_a = {
+            "translated": "AB CD",
+            "bbox": [0, 0, 200, 200],
+            "balloon_bbox": [0, 0, 200, 200],
+            "tipo": "fala",
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+        }
+        child_b = dict(child_a)
+        child_b["translated"] = "EF GH IJ"
+        child_b["bbox"] = [200, 0, 400, 200]
+        child_b["balloon_bbox"] = [200, 0, 400, 200]
+        plans = [plan_text_layout(child_a), plan_text_layout(child_b)]
+        sizes = _resolve_connected_target_sizes([child_a, child_b], plans)
+        self.assertEqual(len(sizes), 2)
+        self.assertLessEqual(abs(sizes[0] - sizes[1]), 2)
+
+    def test_connected_target_sizes_large_gap_tolerant(self):
+        """Gap > 4px → lobo maior pode ficar até 2px acima do menor."""
+        child_a = {
+            "translated": "AB",
+            "bbox": [0, 0, 400, 400],
+            "balloon_bbox": [0, 0, 400, 400],
+            "tipo": "fala",
+            "estilo": {"tamanho": 40, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+        }
+        child_b = dict(child_a)
+        child_b["translated"] = "CD EF GH IJ KL MN OP QR ST UV WX YZ"
+        child_b["bbox"] = [400, 0, 600, 200]
+        child_b["balloon_bbox"] = [400, 0, 600, 200]
+        plans = [plan_text_layout(child_a), plan_text_layout(child_b)]
+        sizes = _resolve_connected_target_sizes([child_a, child_b], plans)
+        self.assertEqual(len(sizes), 2)
+        self.assertLessEqual(abs(sizes[0] - sizes[1]), 2)
 
 
 if __name__ == "__main__":

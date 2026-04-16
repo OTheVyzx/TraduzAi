@@ -814,74 +814,127 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
 
     ordered = [list(bbox) for bbox in group_bboxes[:2]]
     bx1, by1, bx2, by2 = balloon_bbox
+    bw = max(1, bx2 - bx1)
+    bh = max(1, by2 - by1)
     centers = [
-        ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0, bbox)
+        ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
         for bbox in ordered
     ]
     dx = abs(centers[0][0] - centers[1][0])
     dy = abs(centers[0][1] - centers[1][1])
 
     if dy >= dx * 1.1:
-        top_bbox, bottom_bbox = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
+        # Vertical split (T/B)
+        top_bbox, bottom_bbox = sorted(ordered, key=lambda b: (b[1], b[0]))
         if top_bbox[3] < bottom_bbox[1]:
             seam_y = int((top_bbox[3] + bottom_bbox[1]) / 2.0)
         else:
-            seam_y = int((top_bbox[1] + top_bbox[3] + bottom_bbox[1] + bottom_bbox[3]) / 4.0)
+            seam_y = int((centers[0][1] + centers[1][1]) / 2.0)
         seam_y = max(by1 + 32, min(by2 - 32, seam_y))
-        gap_y = max(4, int((by2 - by1) * 0.03))
-        return [
+        gap_y = max(4, int(bh * 0.03))
+        subs = [
             [bx1, by1, bx2, seam_y - gap_y],
             [bx1, seam_y + gap_y, bx2, by2],
         ]
+        return _enforce_min_lobe_size(subs, balloon_bbox)
 
     if dx >= dy * 1.1:
-        left_bbox, right_bbox = sorted(ordered, key=lambda bbox: (bbox[0], bbox[1]))
+        # Horizontal split (L/R)
+        left_bbox, right_bbox = sorted(ordered, key=lambda b: (b[0], b[1]))
         if left_bbox[2] < right_bbox[0]:
             seam_x = int((left_bbox[2] + right_bbox[0]) / 2.0)
         else:
-            seam_x = int((left_bbox[0] + left_bbox[2] + right_bbox[0] + right_bbox[2]) / 4.0)
-            
+            seam_x = int((centers[0][0] + centers[1][0]) / 2.0)
         seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
-        gap_x = max(12, int((bx2 - bx1) * 0.06))
-        return [
+        gap_x = max(8, int(bw * 0.04))
+        subs = [
             [bx1, by1, seam_x - gap_x, by2],
             [seam_x + gap_x, by1, bx2, by2],
         ]
+        return _enforce_min_lobe_size(subs, balloon_bbox)
 
-    diagonals = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
+    # Diagonal split
+    diagonals = sorted(ordered, key=lambda b: (b[1], b[0]))
     first, second = diagonals[0], diagonals[1]
-    first_center = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
-    second_center = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
-    
-    # Calcular costuras baseadas na distância real entre as bordas dos blocos OCR (o "gap" original do texto)
-    # Em vez de focar apenas no centro geométrico, procuramos o meio do espaço em branco entre as duas falas.
+    fc = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
+    sc = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
+
     if first[2] < second[0]:
         seam_x = int((first[2] + second[0]) / 2.0)
     else:
-        seam_x = int((first_center[0] + second_center[0]) / 2.0)
-        
+        seam_x = int((fc[0] + sc[0]) / 2.0)
     if first[3] < second[1]:
         seam_y = int((first[3] + second[1]) / 2.0)
     else:
-        seam_y = int((first_center[1] + second_center[1]) / 2.0)
-        
+        seam_y = int((fc[1] + sc[1]) / 2.0)
+
     seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
     seam_y = max(by1 + 28, min(by2 - 28, seam_y))
-    
-    # Gap reforçado e proporcional no miolo
-    gap_x = max(16, int((bx2 - bx1) * 0.07))
-    overlap_y = max(8, int((by2 - by1) * 0.04)) 
-    
-    if first_center[0] <= second_center[0]:
-        return [
+    gap_x = max(8, int(bw * 0.04))
+    overlap_y = max(6, int(bh * 0.03))
+
+    if fc[0] <= sc[0]:
+        subs = [
             [bx1, by1, min(bx2, seam_x - gap_x), min(by2, seam_y + overlap_y)],
             [max(bx1, seam_x + gap_x), max(by1, seam_y - overlap_y), bx2, by2],
         ]
+    else:
+        subs = [
+            [max(bx1, seam_x + gap_x), by1, bx2, min(by2, seam_y + overlap_y)],
+            [bx1, max(by1, seam_y - overlap_y), min(bx2, seam_x - gap_x), by2],
+        ]
+    return _enforce_min_lobe_size(subs, balloon_bbox)
 
-    return [
-        [max(bx1, seam_x + gap_x), by1, bx2, min(by2, seam_y + overlap_y)],
-        [bx1, max(by1, seam_y - overlap_y), min(bx2, seam_x - gap_x), by2],
-    ]
+
+def _enforce_min_lobe_size(
+    subs: list[list[int]], balloon_bbox: list[int],
+) -> list[list[int]]:
+    """Garante que cada lobo tem pelo menos 30% da dimensão principal do balão.
+
+    Quando um lobo fica estreito demais (ex: seam muito perto de uma borda),
+    recentraliza o seam para dar espaço suficiente.
+    """
+    bx1, by1, bx2, by2 = balloon_bbox
+    MIN_RATIO = 0.30
+
+    result = []
+    for s in subs:
+        result.append([max(s[0], bx1), max(s[1], by1), min(s[2], bx2), min(s[3], by2)])
+
+    if len(result) != 2:
+        return result
+
+    a, b = result
+    aw = a[2] - a[0]
+    bw_sub = b[2] - b[0]
+    ah = a[3] - a[1]
+    bh_sub = b[3] - b[1]
+
+    # Checar largura (para splits horizontais e diagonais)
+    if aw > 0 and bw_sub > 0:
+        total_w = aw + bw_sub
+        if aw / float(total_w) < MIN_RATIO:
+            needed = int(total_w * MIN_RATIO) - aw
+            a[2] = min(bx2, a[2] + needed)
+            b[0] = a[2]
+        elif bw_sub / float(total_w) < MIN_RATIO:
+            needed = int(total_w * MIN_RATIO) - bw_sub
+            b[0] = max(bx1, b[0] - needed)
+            a[2] = b[0]
+
+    # Checar altura (para splits verticais e diagonais)
+    if ah > 0 and bh_sub > 0:
+        total_h = ah + bh_sub
+        if ah / float(total_h) < MIN_RATIO:
+            needed = int(total_h * MIN_RATIO) - ah
+            a[3] = min(by2, a[3] + needed)
+            b[1] = a[3]
+        elif bh_sub / float(total_h) < MIN_RATIO:
+            needed = int(total_h * MIN_RATIO) - bh_sub
+            b[1] = max(by1, b[1] - needed)
+            a[3] = b[1]
+
+    return result
 
 
 def _expand_balloon_lobe_to_subregion(lobe_bbox: list[int], balloon_bbox: list[int]) -> list[int]:
