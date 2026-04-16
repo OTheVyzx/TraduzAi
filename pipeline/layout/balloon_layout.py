@@ -824,9 +824,9 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
     if dy >= dx * 1.1:
         top_bbox, bottom_bbox = sorted(ordered, key=lambda bbox: (bbox[1], bbox[0]))
         if top_bbox[3] < bottom_bbox[1]:
-            seam_y = int((top_bbox[3] + bottom_bbox[1]) / 2)
+            seam_y = int((top_bbox[3] + bottom_bbox[1]) / 2.0)
         else:
-            seam_y = int((centers[0][1] + centers[1][1]) / 2.0)
+            seam_y = int((top_bbox[1] + top_bbox[3] + bottom_bbox[1] + bottom_bbox[3]) / 4.0)
         seam_y = max(by1 + 32, min(by2 - 32, seam_y))
         gap_y = max(4, int((by2 - by1) * 0.03))
         return [
@@ -836,14 +836,10 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
 
     if dx >= dy * 1.1:
         left_bbox, right_bbox = sorted(ordered, key=lambda bbox: (bbox[0], bbox[1]))
-        balloon_center_x = (bx1 + bx2) / 2.0
-        ocr_center_x = (left_bbox[0] + left_bbox[2] + right_bbox[0] + right_bbox[2]) / 4.0
-        
-        # Ponderar a costura 70% pelo balão e só 30% pelos blocos de OCR para forçar simetria
         if left_bbox[2] < right_bbox[0]:
-            seam_x = int(balloon_center_x * 0.7 + ((left_bbox[2] + right_bbox[0]) / 2.0) * 0.3)
+            seam_x = int((left_bbox[2] + right_bbox[0]) / 2.0)
         else:
-            seam_x = int(balloon_center_x * 0.7 + ocr_center_x * 0.3)
+            seam_x = int((left_bbox[0] + left_bbox[2] + right_bbox[0] + right_bbox[2]) / 4.0)
             
         seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
         gap_x = max(12, int((bx2 - bx1) * 0.06))
@@ -857,20 +853,24 @@ def _build_balloon_subregions_from_groups(group_bboxes: list[list[int]], balloon
     first_center = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
     second_center = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
     
-    # Para evitar que um grupo largo de OCR distorça a simetria (ex: lobo esquerdo
-    # inflando para a direita e esmagando o direito), usar um centro geométrico
-    # ponderado: 70% da geometria total do balão e 30% do miolo dos grupos.
-    balloon_center_x = (bx1 + bx2) / 2.0
-    balloon_center_y = (by1 + by2) / 2.0
-    
-    seam_x = int(balloon_center_x * 0.7 + ((first_center[0] + second_center[0]) / 2.0) * 0.3)
-    seam_y = int(balloon_center_y * 0.6 + ((first_center[1] + second_center[1]) / 2.0) * 0.4)
+    # Calcular costuras baseadas na distância real entre as bordas dos blocos OCR (o "gap" original do texto)
+    # Em vez de focar apenas no centro geométrico, procuramos o meio do espaço em branco entre as duas falas.
+    if first[2] < second[0]:
+        seam_x = int((first[2] + second[0]) / 2.0)
+    else:
+        seam_x = int((first_center[0] + second_center[0]) / 2.0)
+        
+    if first[3] < second[1]:
+        seam_y = int((first[3] + second[1]) / 2.0)
+    else:
+        seam_y = int((first_center[1] + second_center[1]) / 2.0)
+        
     seam_x = max(bx1 + 32, min(bx2 - 32, seam_x))
     seam_y = max(by1 + 28, min(by2 - 28, seam_y))
     
-    # Gap mais forte (8%) para garantir que o texto não chegue perto do miolo
-    gap_x = max(24, int((bx2 - bx1) * 0.08))
-    overlap_y = max(8, int((by2 - by1) * 0.04)) # Pequeno overlap vertical ajuda na fluidez diagonal, mas sem invadir de lado
+    # Gap reforçado e proporcional no miolo
+    gap_x = max(16, int((bx2 - bx1) * 0.07))
+    overlap_y = max(8, int((by2 - by1) * 0.04)) 
     
     if first_center[0] <= second_center[0]:
         return [
