@@ -6,6 +6,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::DialogExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -40,6 +41,16 @@ pub struct LabChapterScope {
     pub start_chapter: Option<u32>,
     #[serde(default)]
     pub end_chapter: Option<u32>,
+    #[serde(default)]
+    pub chapter_numbers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LabPreferences {
+    #[serde(default)]
+    pub last_source_dir: String,
+    #[serde(default)]
+    pub last_reference_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -69,7 +80,9 @@ pub struct LabAgentStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LabReviewFinding {
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub body: String,
     #[serde(default)]
     pub severity: String,
@@ -142,6 +155,51 @@ pub struct LabProposal {
     pub git_available: bool,
     #[serde(default)]
     pub created_at_ms: u64,
+    // Campos do Planner (backwards-compat via serde(default))
+    #[serde(default)]
+    pub motivation: String,
+    #[serde(default)]
+    pub target_file: String,
+    #[serde(default)]
+    pub target_anchor: String,
+    #[serde(default)]
+    pub change_kind: String,
+    #[serde(default)]
+    pub needs_coder: bool,
+    #[serde(default)]
+    pub priority_score: f64,
+    #[serde(default)]
+    pub issue_type: String,
+    #[serde(default)]
+    pub local_patch_hint: serde_json::Value,
+    #[serde(default)]
+    pub expected_metric_gain: serde_json::Value,
+    // Preenchido apos coder gerar patch
+    #[serde(default)]
+    pub patch_proposal: Option<LabPatchProposal>,
+}
+
+/// Resultado do coder — unified diff + metadados. Dry-run sempre.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LabPatchProposal {
+    pub proposal_id: String,
+    pub patch_unified_diff: String,
+    #[serde(default)]
+    pub files_affected: Vec<String>,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub model_used: String,
+    #[serde(default)]
+    pub generated_at_iso: String,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -421,6 +479,24 @@ fn apply_chapter_scope(
                 .cloned()
                 .collect())
         }
+        "explicit" => {
+            if scope.chapter_numbers.is_empty() {
+                return Err("Selecione ao menos um capitulo para rodar no modo explicito.".into());
+            }
+            let wanted: BTreeSet<u32> = scope.chapter_numbers.iter().copied().collect();
+            let selected: Vec<LabChapterPair> = chapter_pairs
+                .iter()
+                .filter(|pair| wanted.contains(&pair.chapter_number))
+                .cloned()
+                .collect();
+            if selected.is_empty() {
+                return Err(
+                    "Nenhum dos capitulos informados esta disponivel no corpus pareado do Lab."
+                        .into(),
+                );
+            }
+            Ok(selected)
+        }
         other => Err(format!("Modo de selecao de capitulos nao suportado: {other}")),
     }
 }
@@ -459,9 +535,53 @@ fn should_preserve_runner_error(snapshot: &LabSnapshot) -> bool {
 
 fn default_lab_dirs() -> Result<(PathBuf, PathBuf, PathBuf, bool), String> {
     let root = project_root()?;
-    let source_dir = root.join("exemplos").join("exemploen");
-    let reference_dir = root.join("exemplos").join("exemploptbr");
-    Ok((root.clone(), source_dir, reference_dir, git_available(&root)))
+    let has_git = git_available(&root);
+    let (source_dir, reference_dir) = resolve_preferred_lab_dirs(&root);
+    Ok((root, source_dir, reference_dir, has_git))
+}
+
+fn resolve_preferred_lab_dirs(root: &Path) -> (PathBuf, PathBuf) {
+    let fallback_source = root.join("exemplos").join("exemploen");
+    let fallback_reference = root.join("exemplos").join("exemploptbr");
+
+    let prefs = load_lab_preferences().unwrap_or_default();
+    let source = if !prefs.last_source_dir.trim().is_empty()
+        && Path::new(&prefs.last_source_dir).exists()
+    {
+        PathBuf::from(prefs.last_source_dir)
+    } else {
+        fallback_source
+    };
+    let reference = if !prefs.last_reference_dir.trim().is_empty()
+        && Path::new(&prefs.last_reference_dir).exists()
+    {
+        PathBuf::from(prefs.last_reference_dir)
+    } else {
+        fallback_reference
+    };
+    (source, reference)
+}
+
+fn lab_preferences_path() -> PathBuf {
+    data_root().join("lab_preferences.json")
+}
+
+fn load_lab_preferences() -> Option<LabPreferences> {
+    let path = lab_preferences_path();
+    if !path.exists() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<LabPreferences>(&raw).ok()
+}
+
+fn persist_lab_preferences(prefs: &LabPreferences) -> Result<(), String> {
+    let path = lab_preferences_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let payload = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
+    std::fs::write(path, payload).map_err(|e| e.to_string())
 }
 
 fn data_root() -> PathBuf {
@@ -1561,6 +1681,645 @@ pub async fn get_lab_reference_preview(
     })
 }
 
+#[tauri::command]
+pub async fn pick_lab_source_dir(app: AppHandle) -> Result<Option<String>, String> {
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|value| value.to_string()))
+}
+
+#[tauri::command]
+pub async fn pick_lab_reference_dir(app: AppHandle) -> Result<Option<String>, String> {
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|value| value.to_string()))
+}
+
+#[tauri::command]
+pub async fn pick_lab_source_files(app: AppHandle) -> Result<Vec<String>, String> {
+    let files = app
+        .dialog()
+        .file()
+        .add_filter("CBZ/ZIP", &["cbz", "zip"])
+        .blocking_pick_files()
+        .unwrap_or_default();
+    Ok(files.into_iter().map(|file| file.to_string()).collect())
+}
+
+#[tauri::command]
+pub async fn pick_lab_reference_files(app: AppHandle) -> Result<Vec<String>, String> {
+    let files = app
+        .dialog()
+        .file()
+        .add_filter("CBZ/ZIP", &["cbz", "zip"])
+        .blocking_pick_files()
+        .unwrap_or_default();
+    Ok(files.into_iter().map(|file| file.to_string()).collect())
+}
+
+#[tauri::command]
+pub async fn set_lab_dirs(
+    source_dir: String,
+    reference_dir: String,
+) -> Result<LabSnapshot, String> {
+    let source_path = crate::commands::project::normalize_path(&source_dir);
+    let reference_path = crate::commands::project::normalize_path(&reference_dir);
+
+    if !source_path.exists() {
+        return Err(format!(
+            "Pasta de origem (EN) nao encontrada: {}",
+            source_path.to_string_lossy()
+        ));
+    }
+    if !reference_path.exists() {
+        return Err(format!(
+            "Pasta de referencia (PT-BR) nao encontrada: {}",
+            reference_path.to_string_lossy()
+        ));
+    }
+
+    let chapter_pairs = discover_reference_pairs(&source_path, &reference_path)?;
+
+    let prefs = LabPreferences {
+        last_source_dir: source_path.to_string_lossy().to_string(),
+        last_reference_dir: reference_path.to_string_lossy().to_string(),
+    };
+    persist_lab_preferences(&prefs)?;
+
+    let mut snapshot = LAB_SNAPSHOT.lock().await;
+    snapshot.source_dir = source_path.to_string_lossy().to_string();
+    snapshot.reference_dir = reference_path.to_string_lossy().to_string();
+    snapshot.chapter_pairs = chapter_pairs.clone();
+    snapshot.available_chapter_pairs = chapter_pairs.clone();
+    snapshot.total_pairs = chapter_pairs.len() as u32;
+    snapshot.scope_label =
+        describe_chapter_scope(&snapshot.available_chapter_pairs, &snapshot.chapter_pairs);
+    if snapshot.status.is_empty() {
+        snapshot.status = "idle".into();
+    }
+    if snapshot.current_stage.is_empty() {
+        snapshot.current_stage = "aguardando".into();
+    }
+    if snapshot.message.is_empty() || snapshot.message == "Inicializando Improvement Lab" {
+        snapshot.message = "Corpus do Lab atualizado".into();
+    }
+    snapshot.updated_at_ms = now_ms();
+    let _ = persist_snapshot(&snapshot);
+    Ok(snapshot.clone())
+}
+
+// ---------------------------------------------------------------------------
+// propose_lab_patch — invoca coder Python para gerar diff de uma proposta
+// ---------------------------------------------------------------------------
+
+/// Pequeno script Python inlined que carrega o coder certo e devolve o
+/// PatchProposal como JSON para o Rust.
+const PATCH_BRIDGE_SCRIPT: &str = r#"
+import sys, json
+from pathlib import Path
+
+args = json.loads(sys.argv[1])
+proposal = args["proposal"]
+coder_strategy = args.get("coder_strategy", "local")
+repo_root = Path(args.get("repo_root", ".")).resolve()
+
+if coder_strategy == "ollama":
+    from lab.coders.ollama_coder import OllamaCoder
+    coder = OllamaCoder(host=args.get("ollama_host", "http://localhost:11434"))
+elif coder_strategy == "claude_code":
+    from lab.coders.claude_code_coder import ClaudeCodeCoder
+    coder = ClaudeCodeCoder()
+elif coder_strategy == "claude_sdk":
+    from lab.agents.coder_agent import ClaudeSDKCoder
+    coder = ClaudeSDKCoder()
+else:
+    # "local" — apenas build_local_patch_from_hint, sem LLM
+    from lab.coders.base import build_local_patch_from_hint, PatchProposal
+    result = build_local_patch_from_hint(proposal, repo_root)
+    if result is None:
+        result = PatchProposal(
+            proposal_id=proposal.get("proposal_id","?"),
+            patch_unified_diff="",
+            error="change_kind nao suportado por patch local; use coder ollama ou claude_code.",
+        )
+    print(json.dumps(result.to_dict(), ensure_ascii=False))
+    sys.exit(0)
+
+result = coder.propose_patch(proposal, repo_root)
+print(json.dumps(result.to_dict(), ensure_ascii=False))
+"#;
+
+fn find_proposals_json(run_dir: &Path) -> Option<Vec<serde_json::Value>> {
+    let path = run_dir.join("proposals.json");
+    if path.exists() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(arr) = obj.get("proposals").and_then(|v| v.as_array()) {
+                    return Some(arr.clone());
+                }
+            }
+        }
+    }
+    // Fallback: proposal.json singular
+    let single = run_dir.join("proposal.json");
+    if single.exists() {
+        if let Ok(text) = std::fs::read_to_string(&single) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                return Some(vec![val]);
+            }
+        }
+    }
+    None
+}
+
+fn find_run_dir_for_proposal(proposal_id: &str) -> Option<PathBuf> {
+    let lab_root = PathBuf::from("D:/traduzai_data/lab");
+    let runs_dir = lab_root.join("runs");
+    if !runs_dir.exists() {
+        return None;
+    }
+    // Percorre runs mais recentes primeiro (sort desc por nome)
+    let mut run_dirs: Vec<PathBuf> = std::fs::read_dir(&runs_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    run_dirs.sort_by(|a, b| b.cmp(a));
+
+    for run_dir in run_dirs {
+        if let Some(proposals) = find_proposals_json(&run_dir) {
+            for p in &proposals {
+                if p.get("proposal_id").and_then(|v| v.as_str()) == Some(proposal_id) {
+                    return Some(run_dir);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub async fn propose_lab_patch(
+    proposal_id: String,
+    coder_strategy: Option<String>,
+    ollama_host: Option<String>,
+) -> Result<LabPatchProposal, String> {
+    let strategy = coder_strategy.unwrap_or_else(|| "local".to_string());
+    let host = ollama_host.unwrap_or_else(|| "http://localhost:11434".to_string());
+
+    // Localiza a proposta no disco
+    let run_dir = find_run_dir_for_proposal(&proposal_id)
+        .ok_or_else(|| format!("Proposta '{}' nao encontrada em nenhuma rodada do Lab.", proposal_id))?;
+
+    let proposals = find_proposals_json(&run_dir)
+        .ok_or_else(|| format!("proposals.json nao encontrado em {:?}", run_dir))?;
+
+    let proposal_val = proposals
+        .into_iter()
+        .find(|p| p.get("proposal_id").and_then(|v| v.as_str()) == Some(&proposal_id))
+        .ok_or_else(|| format!("proposal_id '{}' nao encontrado.", proposal_id))?;
+
+    let root = project_root()?;
+
+    // Monta args para o script bridge
+    let bridge_args = serde_json::json!({
+        "proposal": proposal_val,
+        "coder_strategy": strategy,
+        "repo_root": root.to_string_lossy(),
+        "ollama_host": host,
+    });
+    let args_json = serde_json::to_string(&bridge_args).map_err(|e| e.to_string())?;
+
+    let sidecar = get_lab_sidecar_info()?;
+
+    // Escreve script em arquivo temp (evita problemas com quotes no Windows)
+    let script_path = std::env::temp_dir().join(format!("lab_patch_bridge_{}.py", now_ms()));
+    std::fs::write(&script_path, PATCH_BRIDGE_SCRIPT).map_err(|e| e.to_string())?;
+
+    let output = tokio::process::Command::new(&sidecar.program)
+        .arg(script_path.to_string_lossy().as_ref())
+        .arg(&args_json)
+        .current_dir(&sidecar.cwd)
+        .output()
+        .await
+        .map_err(|e| format!("Falha ao iniciar coder: {e}"))?;
+
+    let _ = std::fs::remove_file(&script_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Coder falhou (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            &stderr[stderr.len().saturating_sub(800)..],
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let patch: LabPatchProposal = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("Resposta invalida do coder: {e}\n---\n{}", &stdout[..stdout.len().min(500)]))?;
+
+    // Salva patch no disco para referencia futura
+    let patch_path = run_dir.join(format!("patch_{}.json", proposal_id));
+    if let Ok(patch_json) = serde_json::to_string_pretty(&patch) {
+        let _ = std::fs::write(&patch_path, patch_json.as_bytes());
+    }
+
+    // Actualiza proposta no snapshot em memoria
+    {
+        let mut snapshot = LAB_SNAPSHOT.lock().await;
+        for proposal_entry in snapshot.proposals.iter_mut() {
+            if proposal_entry.proposal_id == proposal_id {
+                proposal_entry.patch_proposal = Some(patch.clone());
+                break;
+            }
+        }
+        snapshot.updated_at_ms = now_ms();
+        let _ = persist_snapshot(&snapshot);
+    }
+
+    Ok(patch)
+}
+
+// ---------------------------------------------------------------------------
+// apply_lab_patch — aplica o unified diff via git apply e cria branch/commit
+// ---------------------------------------------------------------------------
+
+/// Resultado da aplicacao de um patch.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LabPatchApplyResult {
+    pub proposal_id: String,
+    /// true se o patch foi aplicado com sucesso
+    pub applied: bool,
+    /// Nome da branch criada (vazio se create_branch=false ou git indisponivel)
+    pub branch_created: String,
+    /// SHA do commit criado (vazio se sem commit ou git indisponivel)
+    pub commit_sha: String,
+    /// Mensagem de erro (vazio se sucesso)
+    pub error: String,
+    /// Arquivos tocados (extraido do diff)
+    pub files_patched: Vec<String>,
+}
+
+/// Extrai os caminhos dos arquivos afetados de um unified diff.
+/// Linhas `+++ b/<path>` indicam o arquivo destino.
+fn extract_files_from_diff(diff: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            let path = rest.trim().to_string();
+            if !path.is_empty() && path != "/dev/null" && !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Sanitiza uma string para uso como nome de branch git (sem chars invalidos).
+fn sanitize_branch_name(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Gera nome de branch para a proposta: `lab/proposal-{id_curto}`.
+pub fn branch_name_for_proposal(proposal_id: &str) -> String {
+    // proposal_id tipico: "proposal-abcd1234-00"
+    // Produz: "lab/proposal-abcd1234-00"
+    let safe = sanitize_branch_name(proposal_id);
+    format!("lab/{safe}")
+}
+
+async fn run_git(args: &[&str], cwd: &Path) -> Result<String, String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .map_err(|e| format!("git nao encontrado: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn apply_lab_patch(
+    proposal_id: String,
+    patch_unified_diff: String,
+    create_branch: bool,
+    commit: bool,
+    commit_message: Option<String>,
+) -> Result<LabPatchApplyResult, String> {
+    if patch_unified_diff.trim().is_empty() {
+        return Ok(LabPatchApplyResult {
+            proposal_id,
+            error: "Nenhum diff fornecido.".into(),
+            ..Default::default()
+        });
+    }
+
+    let root = project_root()?;
+    let is_git = git_available(&root);
+    let files_patched = extract_files_from_diff(&patch_unified_diff);
+
+    // Sem git: escreve os arquivos diretamente aplicando o diff linha por linha
+    if !is_git {
+        match apply_diff_without_git(&patch_unified_diff, &root) {
+            Ok(()) => {
+                return Ok(LabPatchApplyResult {
+                    proposal_id,
+                    applied: true,
+                    files_patched,
+                    ..Default::default()
+                });
+            }
+            Err(e) => {
+                return Ok(LabPatchApplyResult {
+                    proposal_id,
+                    error: format!("Aplicacao manual do diff falhou: {e}"),
+                    files_patched,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // Com git disponivel
+    // 1. Verifica se ha mudancas nao comitadas que conflitariam
+    let status_out = run_git(&["status", "--porcelain"], &root).await.unwrap_or_default();
+    let _has_unstaged = status_out.lines().any(|l| l.starts_with(" M") || l.starts_with("??"));
+
+    // 2. Cria branch se solicitado
+    let mut branch_created = String::new();
+    if create_branch {
+        let branch = branch_name_for_proposal(&proposal_id);
+        match run_git(&["checkout", "-b", &branch], &root).await {
+            Ok(_) => branch_created = branch,
+            Err(e) => {
+                // Branch ja existe? Tenta usar sem criar
+                if e.contains("already exists") {
+                    if let Ok(_) = run_git(&["checkout", &branch], &root).await {
+                        branch_created = branch;
+                    } else {
+                        return Ok(LabPatchApplyResult {
+                            proposal_id,
+                            error: format!("Nao foi possivel criar ou acessar branch: {e}"),
+                            files_patched,
+                            ..Default::default()
+                        });
+                    }
+                } else {
+                    return Ok(LabPatchApplyResult {
+                        proposal_id,
+                        error: format!("git checkout -b falhou: {e}"),
+                        files_patched,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
+    // 3. Escreve diff em arquivo temp e aplica
+    let patch_tmp = std::env::temp_dir().join(format!("lab_patch_{}.diff", now_ms()));
+    std::fs::write(&patch_tmp, patch_unified_diff.as_bytes())
+        .map_err(|e| format!("Falha ao escrever patch temp: {e}"))?;
+
+    // git apply --check primeiro (valida sem modificar)
+    let check_result = run_git(
+        &["apply", "--check", patch_tmp.to_string_lossy().as_ref()],
+        &root,
+    )
+    .await;
+
+    if let Err(e) = check_result {
+        let _ = std::fs::remove_file(&patch_tmp);
+        // Desfaz branch se criamos
+        if !branch_created.is_empty() {
+            let _ = run_git(&["checkout", "-"], &root).await;
+            let _ = run_git(&["branch", "-D", &branch_created], &root).await;
+        }
+        return Ok(LabPatchApplyResult {
+            proposal_id,
+            branch_created,
+            error: format!("git apply --check falhou (diff invalido ou conflito): {e}"),
+            files_patched,
+            ..Default::default()
+        });
+    }
+
+    // Aplica de verdade
+    let apply_result = run_git(
+        &["apply", patch_tmp.to_string_lossy().as_ref()],
+        &root,
+    )
+    .await;
+    let _ = std::fs::remove_file(&patch_tmp);
+
+    if let Err(e) = apply_result {
+        if !branch_created.is_empty() {
+            let _ = run_git(&["checkout", "-"], &root).await;
+            let _ = run_git(&["branch", "-D", &branch_created], &root).await;
+        }
+        return Ok(LabPatchApplyResult {
+            proposal_id,
+            branch_created,
+            error: format!("git apply falhou: {e}"),
+            files_patched,
+            ..Default::default()
+        });
+    }
+
+    // 4. Commit opcional
+    let mut commit_sha = String::new();
+    if commit {
+        // Stage os arquivos tocados
+        let _ = run_git(&["add", "--all"], &root).await;
+
+        let msg = commit_message.unwrap_or_else(|| {
+            format!(
+                "Lab: patch automatico para {}\n\nGerado por TraduzAi Lab (dry-run aprovado pelo usuario).",
+                proposal_id
+            )
+        });
+        match run_git(&["commit", "-m", &msg], &root).await {
+            Ok(_) => {
+                commit_sha = run_git(&["rev-parse", "--short", "HEAD"], &root)
+                    .await
+                    .unwrap_or_default();
+            }
+            Err(e) => {
+                // Patch ja aplicado mas commit falhou — nao e fatal
+                return Ok(LabPatchApplyResult {
+                    proposal_id,
+                    applied: true,
+                    branch_created,
+                    error: format!("Patch aplicado mas commit falhou: {e}"),
+                    files_patched,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // 5. Atualiza snapshot em memoria
+    {
+        let mut snapshot = LAB_SNAPSHOT.lock().await;
+        for p in snapshot.proposals.iter_mut() {
+            if p.proposal_id == proposal_id {
+                p.proposal_status = "patch_applied".into();
+                if let Some(ref mut pp) = p.patch_proposal {
+                    pp.dry_run = false;
+                }
+                break;
+            }
+        }
+        snapshot.updated_at_ms = now_ms();
+        let _ = persist_snapshot(&snapshot);
+    }
+
+    Ok(LabPatchApplyResult {
+        proposal_id,
+        applied: true,
+        branch_created,
+        commit_sha,
+        files_patched,
+        ..Default::default()
+    })
+}
+
+/// Aplica um unified diff manualmente (sem git) lendo e reescrevendo cada arquivo.
+/// Suporta apenas diffs simples (sem fuzzy matching). Retorna Err se qualquer
+/// hunk falhar.
+fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
+    let mut current_file: Option<PathBuf> = None;
+    let mut in_hunk = false;
+
+    // Primeiro passo: coleta arquivos e seus conteudos originais
+    struct FilePatch {
+        path: PathBuf,
+        hunks: Vec<(usize, Vec<String>, Vec<String>)>, // (orig_start, removes, adds)
+    }
+
+    let mut file_patches: Vec<FilePatch> = Vec::new();
+    let mut cur_removes: Vec<String> = Vec::new();
+    let mut cur_adds: Vec<String> = Vec::new();
+    let mut cur_hunk_start: usize = 0;
+
+    for line in diff.lines() {
+        if line.starts_with("+++ b/") {
+            // Novo arquivo
+            if let Some(ref path) = current_file {
+                if !cur_removes.is_empty() || !cur_adds.is_empty() {
+                    if let Some(fp) = file_patches.iter_mut().find(|f| &f.path == path) {
+                        fp.hunks.push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
+                    }
+                    cur_removes.clear();
+                    cur_adds.clear();
+                }
+            }
+            let rel = line.trim_start_matches("+++ b/").trim();
+            let abs_path = repo_root.join(rel);
+            current_file = Some(abs_path.clone());
+            file_patches.push(FilePatch { path: abs_path, hunks: Vec::new() });
+            in_hunk = false;
+        } else if line.starts_with("@@ ") {
+            // Flush hunk anterior
+            if !cur_removes.is_empty() || !cur_adds.is_empty() {
+                if let Some(ref path) = current_file {
+                    if let Some(fp) = file_patches.iter_mut().find(|f| &f.path == path) {
+                        fp.hunks.push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
+                    }
+                }
+                cur_removes.clear();
+                cur_adds.clear();
+            }
+            // Parse "@@ -L,N +L,N @@"
+            let parts: Vec<&str> = line.splitn(5, ' ').collect();
+            if parts.len() >= 2 {
+                let orig_part = parts[1].trim_start_matches('-');
+                cur_hunk_start = orig_part.split(',').next()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .saturating_sub(1); // converte para 0-indexed
+            }
+            in_hunk = true;
+        } else if in_hunk {
+            if line.starts_with('-') && !line.starts_with("---") {
+                cur_removes.push(line[1..].to_string());
+            } else if line.starts_with('+') && !line.starts_with("+++") {
+                cur_adds.push(line[1..].to_string());
+            }
+        }
+    }
+    // Flush ultimo hunk
+    if !cur_removes.is_empty() || !cur_adds.is_empty() {
+        if let Some(ref path) = current_file {
+            if let Some(fp) = file_patches.iter_mut().find(|f| &f.path == path) {
+                fp.hunks.push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
+            }
+        }
+    }
+
+    // Segundo passo: aplica hunks em cada arquivo
+    for fp in file_patches {
+        if !fp.path.exists() {
+            return Err(format!("Arquivo nao encontrado: {}", fp.path.display()));
+        }
+        let original = std::fs::read_to_string(&fp.path)
+            .map_err(|e| format!("Falha ao ler {}: {e}", fp.path.display()))?;
+        let mut file_lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
+
+        // Aplica hunks de tras pra frente para preservar indices
+        let mut hunks_sorted = fp.hunks;
+        hunks_sorted.sort_by(|a, b| b.0.cmp(&a.0));
+
+        for (start, removes, adds) in hunks_sorted {
+            let end = start + removes.len();
+            if end > file_lines.len() {
+                return Err(format!(
+                    "Hunk fora dos limites em {} (linha {end} > {})",
+                    fp.path.display(), file_lines.len()
+                ));
+            }
+            // Verifica contexto
+            let existing = &file_lines[start..end];
+            for (i, (exp, got)) in removes.iter().zip(existing.iter()).enumerate() {
+                if exp != got {
+                    return Err(format!(
+                        "Contexto nao bate em {} linha {}: esperado {:?}, encontrado {:?}",
+                        fp.path.display(), start + i + 1, exp, got
+                    ));
+                }
+            }
+            file_lines.splice(start..end, adds.into_iter());
+        }
+
+        let new_content = file_lines.join("\n") + "\n";
+        std::fs::write(&fp.path, new_content.as_bytes())
+            .map_err(|e| format!("Falha ao escrever {}: {e}", fp.path.display()))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1632,6 +2391,80 @@ mod tests {
             vec![1, 2]
         );
         assert_eq!(describe_chapter_scope(&pairs, &scoped), "Capitulos 1-2");
+    }
+
+    #[test]
+    fn chapter_scope_explicit_selects_arbitrary_chapters() {
+        let pairs = vec![
+            LabChapterPair {
+                chapter_number: 1,
+                ..LabChapterPair::default()
+            },
+            LabChapterPair {
+                chapter_number: 5,
+                ..LabChapterPair::default()
+            },
+            LabChapterPair {
+                chapter_number: 23,
+                ..LabChapterPair::default()
+            },
+            LabChapterPair {
+                chapter_number: 80,
+                ..LabChapterPair::default()
+            },
+        ];
+
+        let scoped = apply_chapter_scope(
+            &pairs,
+            &LabChapterScope {
+                mode: "explicit".into(),
+                chapter_numbers: vec![5, 23, 999],
+                ..LabChapterScope::default()
+            },
+        )
+        .expect("scope explicit");
+
+        assert_eq!(
+            scoped.iter().map(|pair| pair.chapter_number).collect::<Vec<_>>(),
+            vec![5, 23]
+        );
+    }
+
+    #[test]
+    fn chapter_scope_explicit_requires_numbers() {
+        let pairs = vec![LabChapterPair {
+            chapter_number: 1,
+            ..LabChapterPair::default()
+        }];
+
+        let result = apply_chapter_scope(
+            &pairs,
+            &LabChapterScope {
+                mode: "explicit".into(),
+                ..LabChapterScope::default()
+            },
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chapter_scope_explicit_errors_when_no_match() {
+        let pairs = vec![LabChapterPair {
+            chapter_number: 1,
+            ..LabChapterPair::default()
+        }];
+
+        let result = apply_chapter_scope(
+            &pairs,
+            &LabChapterScope {
+                mode: "explicit".into(),
+                chapter_numbers: vec![999],
+                ..LabChapterScope::default()
+            },
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1869,5 +2702,88 @@ mod tests {
             extract_reference_group("WorldScan_Capítulo 80_e73190.cbz"),
             "WorldScan"
         );
+    }
+
+    // --- apply_lab_patch helpers ---
+
+    #[test]
+    fn branch_name_uses_proposal_id() {
+        assert_eq!(
+            branch_name_for_proposal("proposal-abcd1234-00"),
+            "lab/proposal-abcd1234-00"
+        );
+    }
+
+    #[test]
+    fn branch_name_sanitizes_special_chars() {
+        let branch = branch_name_for_proposal("proposal/abc def@2!");
+        assert!(!branch.contains(' '));
+        assert!(!branch.contains('@'));
+        assert!(branch.starts_with("lab/"));
+    }
+
+    #[test]
+    fn extract_files_from_diff_parses_plus_plus_lines() {
+        let diff = "\
+--- a/pipeline/ocr/postprocess.py\n\
++++ b/pipeline/ocr/postprocess.py\n\
+@@ -1,3 +1,3 @@\n\
+ x = 1\n\
+-y = 2\n\
++y = 99\n";
+        let files = extract_files_from_diff(diff);
+        assert_eq!(files, vec!["pipeline/ocr/postprocess.py"]);
+    }
+
+    #[test]
+    fn extract_files_from_diff_deduplicates() {
+        let diff = "\
++++ b/pipeline/a.py\n\
++++ b/pipeline/a.py\n\
++++ b/pipeline/b.py\n";
+        let files = extract_files_from_diff(diff);
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&"pipeline/a.py".to_string()));
+        assert!(files.contains(&"pipeline/b.py".to_string()));
+    }
+
+    #[test]
+    fn extract_files_ignores_dev_null() {
+        let diff = "+++ /dev/null\n+++ b/real/file.py\n";
+        let files = extract_files_from_diff(diff);
+        assert_eq!(files, vec!["real/file.py"]);
+    }
+
+    #[test]
+    fn sanitize_branch_name_strips_leading_trailing_dashes() {
+        let result = sanitize_branch_name("--my-branch--");
+        assert!(!result.starts_with('-'));
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn apply_diff_without_git_patches_simple_file() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("lab_test_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("f.py");
+        fs::write(&file_path, "a = 1\nb = 2\nc = 3\n").unwrap();
+
+        let diff = format!(
+            "--- a/f.py\n+++ b/f.py\n@@ -2,1 +2,1 @@\n-b = 2\n+b = 99\n"
+        );
+        apply_diff_without_git(&diff, &dir).unwrap();
+        let result = fs::read_to_string(&file_path).unwrap();
+        assert!(result.contains("b = 99"), "esperava b = 99, obteve: {result}");
+        assert!(!result.contains("b = 2"), "nao deveria conter b = 2");
+    }
+
+    #[test]
+    fn patch_apply_result_default_is_not_applied() {
+        let result = LabPatchApplyResult::default();
+        assert!(!result.applied);
+        assert!(result.branch_created.is_empty());
+        assert!(result.commit_sha.is_empty());
     }
 }

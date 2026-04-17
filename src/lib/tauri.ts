@@ -63,7 +63,7 @@ export interface LabChapterPair {
   reference_group: string;
 }
 
-export type LabChapterScopeMode = "all" | "first_n" | "range";
+export type LabChapterScopeMode = "all" | "first_n" | "range" | "explicit";
 export type LabGpuPolicy = "prefer_gpu" | "require_gpu";
 
 export interface LabChapterScope {
@@ -71,6 +71,7 @@ export interface LabChapterScope {
   first_n?: number;
   start_chapter?: number;
   end_chapter?: number;
+  chapter_numbers?: number[];
 }
 
 export interface StartLabRequest {
@@ -130,6 +131,30 @@ export interface LabBenchmarkResult {
   generated_at_ms: number;
 }
 
+export interface LabPatchProposal {
+  proposal_id: string;
+  patch_unified_diff: string;
+  files_affected: string[];
+  rationale: string;
+  author: string;
+  confidence: number;
+  model_used: string;
+  generated_at_iso: string;
+  dry_run: boolean;
+  error: string;
+}
+
+export interface LabPatchApplyResult {
+  proposal_id: string;
+  applied: boolean;
+  branch_created: string;
+  commit_sha: string;
+  error: string;
+  files_patched: string[];
+}
+
+export type LabCoderStrategy = "local" | "ollama" | "claude_code" | "claude_sdk";
+
 export interface LabProposal {
   proposal_id: string;
   batch_id: string;
@@ -146,6 +171,18 @@ export interface LabProposal {
   pr_status: string;
   git_available: boolean;
   created_at_ms: number;
+  // Campos do Planner
+  motivation?: string;
+  target_file?: string;
+  target_anchor?: string;
+  change_kind?: string;
+  needs_coder?: boolean;
+  priority_score?: number;
+  issue_type?: string;
+  local_patch_hint?: Record<string, unknown>;
+  expected_metric_gain?: Record<string, number>;
+  // Preenchido apos coder gerar patch
+  patch_proposal?: LabPatchProposal;
 }
 
 export interface LabRunSummary {
@@ -397,6 +434,57 @@ export async function getLabReferencePreview(
   });
 }
 
+export async function pickLabSourceDir(): Promise<string | null> {
+  return invoke("pick_lab_source_dir");
+}
+
+export async function pickLabReferenceDir(): Promise<string | null> {
+  return invoke("pick_lab_reference_dir");
+}
+
+export async function pickLabSourceFiles(): Promise<string[]> {
+  return invoke("pick_lab_source_files");
+}
+
+export async function pickLabReferenceFiles(): Promise<string[]> {
+  return invoke("pick_lab_reference_files");
+}
+
+export async function setLabDirs(
+  sourceDir: string,
+  referenceDir: string
+): Promise<LabSnapshot> {
+  return invoke("set_lab_dirs", { sourceDir, referenceDir });
+}
+
+export async function proposeLabPatch(
+  proposalId: string,
+  coderStrategy: LabCoderStrategy = "local",
+  ollamaHost?: string
+): Promise<LabPatchProposal> {
+  return invoke("propose_lab_patch", {
+    proposalId,
+    coderStrategy,
+    ollamaHost: ollamaHost ?? null,
+  });
+}
+
+export async function applyLabPatch(
+  proposalId: string,
+  patchUnifiedDiff: string,
+  createBranch: boolean,
+  commit: boolean,
+  commitMessage?: string
+): Promise<LabPatchApplyResult> {
+  return invoke("apply_lab_patch", {
+    proposalId,
+    patchUnifiedDiff,
+    createBranch,
+    commit,
+    commitMessage: commitMessage ?? null,
+  });
+}
+
 export async function onLabState(
   callback: (snapshot: LabSnapshot) => void
 ) {
@@ -467,7 +555,14 @@ export async function getCredits(): Promise<{ credits: number; weekly_used: numb
 export interface AppSettings {
   ollama_model: string;
   ollama_host: string;
+  idioma_origem: string;
   idioma_destino: string;
+}
+
+export interface SupportedLanguage {
+  code: string;
+  label: string;
+  ocr_strategy: "dedicated" | "best_effort";
 }
 
 export async function saveSettings(settings: AppSettings): Promise<void> {
@@ -476,6 +571,10 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
 
 export async function loadSettings(): Promise<AppSettings> {
   return invoke("load_settings");
+}
+
+export async function loadSupportedLanguages(): Promise<SupportedLanguage[]> {
+  return invoke("load_supported_languages");
 }
 
 // Ollama
