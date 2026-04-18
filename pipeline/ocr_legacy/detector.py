@@ -113,7 +113,7 @@ def run_ocr(
     """
     Roda OCR em uma pagina e devolve leituras ja revisadas.
     """
-    del models_dir, idioma_origem  # idioma_origem not yet used in legacy path
+    del models_dir
     resolved_profile = QUALITY_TO_PROFILE.get(profile, "quality")
     ocr_mode = "easyocr"  # Legacy path uses EasyOCR
 
@@ -143,7 +143,7 @@ def run_ocr(
         bbox_scale = 1.0 if str(region.get("source", "")).startswith("primary-paddle") else scale
         bbox = normalize_bbox(region["bbox_pts"], bbox_scale, orig_w, orig_h)
         primary_candidate = {
-            "text": fix_ocr_errors(raw_text),
+            "text": fix_ocr_errors(raw_text, idioma_origem=idioma_origem),
             "confidence": round(confidence, 3),
             "source": region.get("source", "primary"),
         }
@@ -179,7 +179,7 @@ def run_ocr(
             continue
 
         tipo = classify_text_type(final_text, bbox, orig_w)
-        skip = is_non_english(final_text)
+        skip = idioma_origem == "en" and is_non_english(final_text)
         estilo = analyze_style(img_rgb, bbox)
         if not skip:
             fd = _get_font_detector_legacy()

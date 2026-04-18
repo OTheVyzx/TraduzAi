@@ -155,11 +155,11 @@ pub struct EnrichedWorkContext {
 }
 
 /// Resolved paths for spawning the Python pipeline.
-struct SidecarInfo {
+pub(crate) struct SidecarInfo {
     /// The executable to run (venv python or system python or bundled binary).
-    program: String,
+    pub(crate) program: String,
     /// Optional script path (used when program is Python interpreter).
-    script: Option<String>,
+    pub(crate) script: Option<String>,
 }
 
 fn build_http_client() -> Result<reqwest::Client, String> {
@@ -533,7 +533,7 @@ async fn search_anilist_internal(query: &str) -> Result<serde_json::Value, Strin
     }))
 }
 
-fn get_sidecar_info(app: &AppHandle) -> Result<SidecarInfo, String> {
+pub(crate) fn get_sidecar_info(app: &AppHandle) -> Result<SidecarInfo, String> {
     if cfg!(debug_assertions) {
         // Dev mode: find pipeline/main.py relative to the project root.
         // The Rust process runs from src-tauri/, so parent() = project root.
@@ -946,7 +946,7 @@ pub(crate) fn get_vision_worker_path(app: &AppHandle) -> Result<String, String> 
     }
 }
 
-fn apply_sidecar_env(cmd: &mut Command, program: &str) -> Result<(), String> {
+pub(crate) fn apply_sidecar_env(cmd: &mut Command, program: &str) -> Result<(), String> {
     for (key, value) in sidecar_env_overrides(program) {
         cmd.env(key, value);
     }

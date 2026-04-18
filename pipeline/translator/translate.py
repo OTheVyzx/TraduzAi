@@ -19,6 +19,39 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = "http://localhost:11434"
 
+GOOGLE_LANGUAGE_ALIASES = {
+    "pt-br": "pt",
+    "pt_br": "pt",
+    "pt-pt": "pt",
+    "pt_pt": "pt",
+    "en-gb": "en",
+    "en-us": "en",
+    "en_us": "en",
+    "zh": "zh-CN",
+    "zh-cn": "zh-CN",
+    "zh_cn": "zh-CN",
+    "zh-hans": "zh-CN",
+    "zh_hans": "zh-CN",
+    "zh-tw": "zh-TW",
+    "zh_tw": "zh-TW",
+    "zh-hant": "zh-TW",
+    "zh_hant": "zh-TW",
+}
+
+OCR_DEDICATED_GOOGLE_CODES = {
+    "en",
+    "es",
+    "fr",
+    "de",
+    "it",
+    "pt",
+    "ru",
+    "ja",
+    "ko",
+    "zh-CN",
+    "zh-TW",
+}
+
 ADAPTATIONS: list[tuple[str, str, int]] = []
 
 PRE_TRANSLATION_GLOSSARY: list[tuple[str, str, int]] = [
@@ -38,24 +71,53 @@ TRANSLATION_REVIEW_REPAIRS: list[tuple[str, str, int]] = [
 ]
 
 
+def normalize_google_language_code(language_code: str) -> str:
+    code = (language_code or "").strip()
+    if not code:
+        return "en"
+
+    normalized = code.replace("_", "-")
+    lowered = normalized.lower()
+    if lowered in GOOGLE_LANGUAGE_ALIASES:
+        return GOOGLE_LANGUAGE_ALIASES[lowered]
+
+    base = lowered.split("-", 1)[0]
+    if base in GOOGLE_LANGUAGE_ALIASES:
+        return GOOGLE_LANGUAGE_ALIASES[base]
+
+    return base if "-" in normalized else lowered
+
+
+def list_supported_google_languages() -> list[dict[str, str]]:
+    from deep_translator import GoogleTranslator
+
+    languages = GoogleTranslator.get_supported_languages(as_dict=True)
+    items = []
+    for label, code in sorted(languages.items(), key=lambda item: item[0].lower()):
+        normalized_code = normalize_google_language_code(str(code))
+        items.append(
+            {
+                "code": str(code),
+                "label": str(label).strip().capitalize(),
+                "ocr_strategy": "dedicated"
+                if normalized_code in OCR_DEDICATED_GOOGLE_CODES
+                else "best_effort",
+            }
+        )
+    return items
+
+
 class _GoogleTranslator:
     def __init__(self, source="en", target="pt"):
         from deep_translator import GoogleTranslator
 
-        # Mapeamento do TraduzAi para o GoogleTranslator
-        # ja -> ja
-        # ko -> ko
-        # zh -> zh-CN
-        # en -> en
-        source_map = {
-            "en": "en",
-            "ja": "ja",
-            "ko": "ko",
-            "zh": "zh-CN",
-        }.get(source, "en")
-        
-        self._translator = GoogleTranslator(source=source_map, target=target)
+        source_code = normalize_google_language_code(source)
+        target_code = normalize_google_language_code(target)
+        self._translator = GoogleTranslator(source=source_code, target=target_code)
         self._cache: dict[str, str] = {}
+        self.target = target_code
+        self._source_lang = source_code
+        self._target_lang = target_code
 
     def translate(self, text: str) -> Optional[str]:
         key = text.strip()
@@ -404,12 +466,19 @@ def translate_pages(
     del qualidade
 
     global _google
+    idioma_origem = normalize_google_language_code(idioma_origem)
+    idioma_destino = normalize_google_language_code(idioma_destino)
 
     google_ok = False
     try:
-        if _google is None or getattr(_google, "_source_lang", "en") != idioma_origem:
-            _google = _GoogleTranslator(source=idioma_origem, target="pt")
+        if (
+            _google is None
+            or getattr(_google, "_source_lang", "en") != idioma_origem
+            or getattr(_google, "_target_lang", "pt") != idioma_destino
+        ):
+            _google = _GoogleTranslator(source=idioma_origem, target=idioma_destino)
             _google._source_lang = idioma_origem
+            _google._target_lang = idioma_destino
         _google.translate("test")
         google_ok = True
     except Exception as exc:

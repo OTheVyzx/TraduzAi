@@ -10,11 +10,72 @@ from translator.translate import (
     _prepare_source_text_for_translation,
     _resolve_translation_backend,
     _review_translation_grammar_semantics,
+    list_supported_google_languages,
+    normalize_google_language_code,
     translate_pages,
 )
 
 
 class TranslateContextTests(unittest.TestCase):
+    def test_list_supported_google_languages_returns_sorted_metadata(self):
+        class _FakeGoogleTranslator:
+            @staticmethod
+            def get_supported_languages(as_dict=False):  # noqa: FBT002
+                self.assertTrue(as_dict)
+                return {
+                    "spanish": "es",
+                    "english": "en",
+                    "portuguese": "pt",
+                    "russian": "ru",
+                }
+
+        with patch("deep_translator.GoogleTranslator", _FakeGoogleTranslator):
+            languages = list_supported_google_languages()
+
+        self.assertEqual([item["code"] for item in languages], ["en", "pt", "ru", "es"])
+        self.assertEqual(languages[0]["label"], "English")
+        self.assertEqual(languages[2]["ocr_strategy"], "dedicated")
+
+    def test_normalize_google_language_code_handles_aliases_and_regions(self):
+        self.assertEqual(normalize_google_language_code("pt-BR"), "pt")
+        self.assertEqual(normalize_google_language_code("en-GB"), "en")
+        self.assertEqual(normalize_google_language_code("zh"), "zh-CN")
+        self.assertEqual(normalize_google_language_code("zh-Hant"), "zh-TW")
+        self.assertEqual(normalize_google_language_code("ES"), "es")
+
+    def test_translate_pages_normalizes_source_and_target_language_codes(self):
+        created = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                created.append((source, target))
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "test" else f"{self.target}:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return [f"{self.target}:{text}" for text in texts]
+
+        ocr_results = [{"texts": [{"text": "Hello there", "tipo": "fala"}]}]
+
+        with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+            with patch(
+                "translator.translate._check_ollama",
+                return_value={"running": False, "models": [], "has_translator": False},
+            ):
+                translated = translate_pages(
+                    ocr_results=ocr_results,
+                    obra="obra-teste",
+                    context={},
+                    glossario={},
+                    idioma_origem="en-GB",
+                    idioma_destino="pt-BR",
+                )
+
+        self.assertEqual(created[0], ("en", "pt"))
+        self.assertTrue(translated[0]["texts"][0]["translated"].lower().startswith("pt:"))
+
     def test_translate_pages_repairs_empty_or_unchanged_ollama_outputs_with_google_when_available(self):
         class _FakeGoogleTranslator:
             def translate(self, text: str):

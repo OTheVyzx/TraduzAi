@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -11,6 +12,7 @@ from layout.balloon_layout import (
     _detect_lobes_via_distance_transform,
     _enforce_min_lobe_size,
     _geometric_fallback_subregions,
+    _refine_connected_position_bboxes_with_ollama,
     _score_subregion_quality,
     enrich_page_layout,
 )
@@ -29,6 +31,126 @@ def _fixture_image_path(name: str) -> Path:
 
 
 class LayoutAnalysisTests(unittest.TestCase):
+    def test_connected_reasoner_accepts_valid_ollama_position_boxes(self):
+        image = np.full((240, 420, 3), 245, dtype=np.uint8)
+        settings = {
+            "provider": "ollama",
+            "host": "http://localhost:11434",
+            "model": "gemma4",
+            "enabled": True,
+        }
+        text_groups = [[52, 44, 182, 136], [222, 118, 360, 214]]
+        lobes = [[30, 24, 210, 182], [198, 86, 392, 232]]
+        heuristic = [[40, 34, 178, 146], [230, 102, 372, 222]]
+
+        with patch(
+            "layout.balloon_layout._check_ollama",
+            return_value={"running": True, "models": ["gemma4:e4b"], "has_translator": False},
+        ):
+            with patch(
+                "layout.balloon_layout._call_ollama_json",
+                return_value={
+                    "position_bboxes": [[46, 36, 184, 144], [236, 112, 378, 228]],
+                    "confidence": 0.91,
+                    "notes": "left lobe top-left, right lobe lower-right",
+                },
+            ):
+                refined = _refine_connected_position_bboxes_with_ollama(
+                    image,
+                    [30, 24, 392, 232],
+                    [30, 24, 392, 232],
+                    text_groups,
+                    lobes,
+                    heuristic,
+                    "left-right",
+                    settings,
+                )
+
+        self.assertIsNotNone(refined)
+        self.assertEqual(refined["position_bboxes"], [[46, 36, 184, 144], [236, 112, 378, 228]])
+        self.assertEqual(refined["source"], "ollama")
+        self.assertEqual(refined["model"], "gemma4:e4b")
+        self.assertGreaterEqual(float(refined["confidence"]), 0.9)
+
+    def test_connected_reasoner_rejects_invalid_ollama_boxes_and_falls_back(self):
+        image = np.full((240, 420, 3), 245, dtype=np.uint8)
+        settings = {
+            "provider": "ollama",
+            "host": "http://localhost:11434",
+            "model": "gemma4",
+            "enabled": True,
+        }
+        text_groups = [[52, 44, 182, 136], [222, 118, 360, 214]]
+        lobes = [[30, 24, 210, 182], [198, 86, 392, 232]]
+        heuristic = [[40, 34, 178, 146], [230, 102, 372, 222]]
+
+        with patch(
+            "layout.balloon_layout._check_ollama",
+            return_value={"running": True, "models": ["gemma4:e4b"], "has_translator": False},
+        ):
+            with patch(
+                "layout.balloon_layout._call_ollama_json",
+                return_value={
+                    "position_bboxes": [[8, 8, 404, 210], [16, 16, 408, 220]],
+                    "confidence": 0.97,
+                    "notes": "invalid because boxes escape the lobes",
+                },
+            ):
+                refined = _refine_connected_position_bboxes_with_ollama(
+                    image,
+                    [30, 24, 392, 232],
+                    [30, 24, 392, 232],
+                    text_groups,
+                    lobes,
+                    heuristic,
+                    "left-right",
+                    settings,
+                )
+
+        self.assertIsNone(refined)
+
+    def test_connected_reasoner_accepts_anchor_label_selection(self):
+        image = np.full((240, 420, 3), 245, dtype=np.uint8)
+        settings = {
+            "provider": "ollama",
+            "host": "http://localhost:11434",
+            "model": "qwen2.5",
+            "enabled": True,
+        }
+        text_groups = [[52, 44, 182, 136], [222, 118, 360, 214]]
+        lobes = [[30, 24, 210, 182], [198, 86, 392, 232]]
+        heuristic = [[40, 34, 178, 146], [230, 102, 372, 222]]
+
+        with patch(
+            "layout.balloon_layout._check_ollama",
+            return_value={"running": True, "models": ["qwen2.5:3b"], "has_translator": False},
+        ):
+            with patch(
+                "layout.balloon_layout._call_ollama_json",
+                return_value={
+                    "selected_anchor_labels": ["outer-upper", "outer-lower"],
+                    "confidence": 0.87,
+                    "notes": "picked diagonal-biased anchors",
+                },
+            ):
+                refined = _refine_connected_position_bboxes_with_ollama(
+                    image,
+                    [30, 24, 392, 232],
+                    [30, 24, 392, 232],
+                    text_groups,
+                    lobes,
+                    heuristic,
+                    "left-right",
+                    settings,
+                )
+
+        self.assertIsNotNone(refined)
+        left_box, right_box = refined["position_bboxes"]
+        left_heuristic, right_heuristic = heuristic
+        self.assertLess((left_box[0] + left_box[2]) / 2.0, (left_heuristic[0] + left_heuristic[2]) / 2.0)
+        self.assertGreater((right_box[1] + right_box[3]) / 2.0, (right_heuristic[1] + right_heuristic[3]) / 2.0)
+        self.assertEqual(refined["source"], "ollama")
+
     def test_assigns_shared_balloon_bbox_for_clustered_dialogue(self):
         page = {
             "width": 800,
@@ -80,6 +202,12 @@ class LayoutAnalysisTests(unittest.TestCase):
         text = enriched["texts"][0]
 
         self.assertEqual(len(text.get("balloon_subregions", [])), 2)
+        self.assertEqual(text.get("ocr_text_bbox"), [113, 1514, 705, 1767])
+        self.assertEqual(text.get("connected_lobe_bboxes"), text.get("balloon_subregions"))
+        self.assertEqual(text.get("connected_position_bboxes"), text.get("connected_focus_bboxes"))
+        self.assertEqual(len(text.get("connected_text_groups", [])), 2)
+        self.assertEqual(len(text.get("connected_lobe_bboxes", [])), 2)
+        self.assertEqual(len(text.get("connected_position_bboxes", [])), 2)
         self.assertNotEqual(text["balloon_subregions"][0], text["balloon_subregions"][1])
         self.assertLess(_intersection_area(text["balloon_subregions"][0], text["balloon_subregions"][1]), 12)
         balloon_area = max(
@@ -91,6 +219,33 @@ class LayoutAnalysisTests(unittest.TestCase):
             for bbox in text.get("balloon_subregions", [])
         )
         self.assertGreater(covered_area / float(balloon_area), 0.55)
+        self.assertEqual(len(text.get("connected_focus_bboxes", [])), 2)
+        self.assertGreater(float(text.get("connected_detection_confidence", 0.0) or 0.0), 0.5)
+        self.assertGreater(float(text.get("connected_group_confidence", 0.0) or 0.0), 0.5)
+        self.assertGreater(float(text.get("connected_position_confidence", 0.0) or 0.0), 0.5)
+        left_group, right_group = text["connected_text_groups"]
+        left_focus, right_focus = text["connected_focus_bboxes"]
+        left_sub, right_sub = text["balloon_subregions"]
+        left_group_cx = (left_group[0] + left_group[2]) / 2.0
+        left_group_cy = (left_group[1] + left_group[3]) / 2.0
+        right_group_cx = (right_group[0] + right_group[2]) / 2.0
+        right_group_cy = (right_group[1] + right_group[3]) / 2.0
+        left_focus_cx = (left_focus[0] + left_focus[2]) / 2.0
+        left_focus_cy = (left_focus[1] + left_focus[3]) / 2.0
+        right_focus_cx = (right_focus[0] + right_focus[2]) / 2.0
+        right_focus_cy = (right_focus[1] + right_focus[3]) / 2.0
+        left_sub_cx = (left_sub[0] + left_sub[2]) / 2.0
+        left_sub_cy = (left_sub[1] + left_sub[3]) / 2.0
+        right_sub_cx = (right_sub[0] + right_sub[2]) / 2.0
+        right_sub_cy = (right_sub[1] + right_sub[3]) / 2.0
+        self.assertLess(left_group_cx, left_sub_cx)
+        self.assertLess(left_group_cy, left_sub_cy)
+        self.assertGreater(right_group_cx, right_sub_cx)
+        self.assertGreater(right_group_cy, right_sub_cy)
+        self.assertLess(left_focus_cx, left_sub_cx)
+        self.assertLess(left_focus_cy, left_sub_cy)
+        self.assertGreater(right_focus_cx, right_sub_cx)
+        self.assertGreater(right_focus_cy, right_sub_cy)
 
     def test_real_009_single_balloon_keeps_single_region(self):
         page = {

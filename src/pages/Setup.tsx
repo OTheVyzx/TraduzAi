@@ -1,8 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, Plus, X, Rocket, ArrowLeft, BookOpen, Sparkles, Globe, Gauge, Cpu } from "lucide-react";
+import { LanguageSelectField } from "../components/ui";
 import { useAppStore } from "../lib/stores/appStore";
-import { enrichWorkContext, searchWork, type WorkSearchCandidate } from "../lib/tauri";
+import {
+  enrichWorkContext,
+  loadSupportedLanguages,
+  searchWork,
+  type WorkSearchCandidate,
+} from "../lib/tauri";
+import {
+  getLanguageOptions,
+  normalizeLanguageCodeForSelection,
+} from "../lib/languages";
 import {
   buildPipelineTimeEstimate,
   formatDuration,
@@ -13,7 +23,15 @@ const DEFAULT_QUALITY = "alta" as const;
 
 export function Setup() {
   const navigate = useNavigate();
-  const { project, updateProject, canTranslate, systemProfile, setSetupEstimate, batchSources, setBatchSources } = useAppStore();
+  const {
+    project,
+    updateProject,
+    canTranslate,
+    systemProfile,
+    setSetupEstimate,
+    batchSources,
+    setBatchSources,
+  } = useAppStore();
 
   const [obraSearch, setObraSearch] = useState(project?.obra || "");
   const [searching, setSearching] = useState(false);
@@ -21,9 +39,36 @@ export function Setup() {
   const [candidates, setCandidates] = useState<WorkSearchCandidate[]>([]);
   const [searchError, setSearchError] = useState("");
   const [loadingCandidateId, setLoadingCandidateId] = useState<string | null>(null);
+  const [supportedLanguages, setSupportedLanguages] = useState(getLanguageOptions(null));
 
   const totalPages = project?.totalPages ?? 0;
   const estimate = buildPipelineTimeEstimate(systemProfile, totalPages, DEFAULT_QUALITY);
+
+  useEffect(() => {
+    let active = true;
+
+    loadSupportedLanguages()
+      .then((languages) => {
+        if (!active) return;
+        const options = getLanguageOptions(languages);
+        setSupportedLanguages(options);
+        if (!project) return;
+
+        const idioma_origem = normalizeLanguageCodeForSelection(project.idioma_origem, options, "en");
+        const idioma_destino = normalizeLanguageCodeForSelection(project.idioma_destino, options, "pt");
+        if (idioma_origem !== project.idioma_origem || idioma_destino !== project.idioma_destino) {
+          updateProject({ idioma_origem, idioma_destino });
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setSupportedLanguages(getLanguageOptions(null));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [project?.id, updateProject]);
 
   async function handleSearchObra() {
     if (!obraSearch.trim()) return;
@@ -33,11 +78,11 @@ export function Setup() {
       const result = await searchWork(obraSearch);
       setCandidates(result.candidates);
       if (result.candidates.length === 0) {
-        setSearchError("Nenhuma obra compatível encontrada em AniList, Webnovel ou Fandom.");
+        setSearchError("Nenhuma obra compativel encontrada em AniList, Webnovel ou Fandom.");
       }
     } catch (err) {
       console.error("Erro ao buscar obra:", err);
-      setSearchError("Não foi possível buscar a obra agora.");
+      setSearchError("Nao foi possivel buscar a obra agora.");
     } finally {
       setSearching(false);
     }
@@ -73,7 +118,7 @@ export function Setup() {
       setCandidates([]);
     } catch (err) {
       console.error("Erro ao enriquecer contexto:", err);
-      setSearchError("Não foi possível carregar o contexto dessa obra.");
+      setSearchError("Nao foi possivel carregar o contexto dessa obra.");
     } finally {
       setLoadingCandidateId(null);
     }
@@ -102,13 +147,12 @@ export function Setup() {
   function handleStart() {
     if (!project) return;
     if (batchSources.length > 0) {
-      // No modo lote, a validação de créditos é feita por capítulo no Processing
       updateProject({ qualidade: DEFAULT_QUALITY, status: "processing" });
       navigate("/processing");
       return;
     }
     if (!canTranslate(totalPages)) {
-      alert("Créditos insuficientes para traduzir este capítulo.");
+      alert("Creditos insuficientes para traduzir este capitulo.");
       return;
     }
     setSetupEstimate(estimate);
@@ -122,10 +166,11 @@ export function Setup() {
   }
 
   const hasEnoughCredits = canTranslate(totalPages);
+  const sourceValue = normalizeLanguageCodeForSelection(project.idioma_origem, supportedLanguages, "en");
+  const targetValue = normalizeLanguageCodeForSelection(project.idioma_destino, supportedLanguages, "pt");
 
   return (
     <div className="p-8 max-w-2xl mx-auto">
-      {/* Header */}
       <button
         onClick={() => navigate("/")}
         className="flex items-center gap-2 text-sm text-text-secondary hover:text-text-primary mb-6 transition-smooth"
@@ -134,9 +179,8 @@ export function Setup() {
         Voltar
       </button>
 
-      <h2 className="text-xl font-bold mb-6">Configurar tradução</h2>
+      <h2 className="text-xl font-bold mb-6">Configurar traducao</h2>
 
-      {/* Obra search */}
       <div className="mb-4">
         <label className="text-sm text-text-secondary mb-2 block">Nome da obra <span className="text-text-secondary/40">(opcional)</span></label>
         <div className="flex gap-2">
@@ -213,7 +257,6 @@ export function Setup() {
         </div>
       )}
 
-      {/* Context info */}
       {project.contexto.sinopse && (
         <div className="bg-bg-secondary border border-white/5 rounded-xl p-4 mb-4">
           <div className="flex items-center gap-2 mb-2">
@@ -259,11 +302,44 @@ export function Setup() {
         </div>
       )}
 
-      {/* Chapter list if batch */}
+      <div className="mb-4 rounded-2xl border border-white/5 bg-bg-secondary/70 p-4">
+        <div className="mb-4 flex items-start gap-3">
+          <div className="rounded-xl bg-accent-purple/10 p-2 text-accent-purple">
+            <Globe size={16} />
+          </div>
+          <div>
+            <p className="text-sm font-medium text-text-primary">Idiomas da traducao</p>
+            <p className="text-xs text-text-secondary mt-1">
+              Lista dinamica com todos os idiomas que o Google Translate expor no momento.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <LanguageSelectField
+            label="Idioma de origem"
+            value={sourceValue}
+            languages={supportedLanguages}
+            fallbackCode="en"
+            sourceMode
+            helperText="Use a busca para localizar rapido por nome ou codigo."
+            onChange={(code) => updateProject({ idioma_origem: code })}
+          />
+          <LanguageSelectField
+            label="Idioma de destino"
+            value={targetValue}
+            languages={supportedLanguages}
+            fallbackCode="pt"
+            helperText="Voce pode traduzir para qualquer idioma suportado pela API."
+            onChange={(code) => updateProject({ idioma_destino: code })}
+          />
+        </div>
+      </div>
+
       {batchSources.length > 1 ? (
         <div className="mb-6">
           <label className="text-sm text-text-secondary mb-2 block">
-            Capítulos selecionados ({batchSources.length})
+            Capitulos selecionados ({batchSources.length})
           </label>
           <div className="bg-bg-secondary border border-white/5 rounded-xl overflow-hidden">
             <div className="max-h-48 overflow-y-auto">
@@ -278,7 +354,7 @@ export function Setup() {
                     </span>
                   </div>
                   <button
-                    onClick={() => setBatchSources(batchSources.filter(p => p !== path))}
+                    onClick={() => setBatchSources(batchSources.filter((p) => p !== path))}
                     className="p-1 text-text-secondary/30 hover:text-status-error opacity-0 group-hover:opacity-100 transition-smooth"
                   >
                     <X size={14} />
@@ -288,45 +364,25 @@ export function Setup() {
             </div>
             <div className="px-4 py-2 bg-white/5 flex items-center justify-between">
               <span className="text-[11px] text-text-secondary italic">
-                Capítulo inicial: {project.capitulo} (será incrementado automaticamente)
+                Capitulo inicial: {project.capitulo} (sera incrementado automaticamente)
               </span>
             </div>
           </div>
         </div>
       ) : (
-        <div className="flex gap-4 mb-4">
-          <div className="flex-1">
-            <label className="text-sm text-text-secondary mb-2 block flex items-center gap-2">
-              <Globe size={14} className="text-accent-purple" />
-              Idioma de Origem
-            </label>
-            <select
-              value={project.idioma_origem}
-              onChange={(e) => updateProject({ idioma_origem: e.target.value })}
-              className="w-full px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
-                text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
-            >
-              <option value="en">Inglês (Detecta SFX)</option>
-              <option value="ja">Japonês</option>
-              <option value="ko">Coreano</option>
-              <option value="zh">Chinês</option>
-            </select>
-          </div>
-          <div>
-            <label className="text-sm text-text-secondary mb-2 block">Capítulo</label>
-            <input
-              type="number"
-              value={project.capitulo}
-              onChange={(e) => updateProject({ capitulo: parseInt(e.target.value) || 1 })}
-              min={1}
-              className="w-24 px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
-                text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
-            />
-          </div>
+        <div className="mb-4">
+          <label className="text-sm text-text-secondary mb-2 block">Capitulo</label>
+          <input
+            type="number"
+            value={project.capitulo}
+            onChange={(e) => updateProject({ capitulo: parseInt(e.target.value) || 1 })}
+            min={1}
+            className="w-24 px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
+              text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
+          />
         </div>
       )}
 
-      {/* Time estimate */}
       <div className="mb-6">
         <label className="text-sm text-text-secondary mb-2 block">Tempo estimado</label>
         <div className="bg-bg-secondary border border-white/5 rounded-xl p-4">
@@ -349,7 +405,7 @@ export function Setup() {
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-lg bg-bg-tertiary/60 border border-white/5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-text-secondary/70">Ritmo base</p>
-                  <p className="text-sm text-text-primary mt-0.5">~{estimate.seconds_per_page.toFixed(1)}s / página</p>
+                  <p className="text-sm text-text-primary mt-0.5">~{estimate.seconds_per_page.toFixed(1)}s / pagina</p>
                 </div>
                 <div className="rounded-lg bg-bg-tertiary/60 border border-white/5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-text-secondary/70">Aquecimento</p>
@@ -372,17 +428,16 @@ export function Setup() {
             <div>
               <p className="text-sm text-text-primary">Detectando hardware do PC...</p>
               <p className="text-xs text-text-secondary mt-0.5">
-                Assim que CPU, RAM e aceleração local forem identificadas, a previsão aparece aqui.
+                Assim que CPU, RAM e aceleracao local forem identificadas, a previsao aparece aqui.
               </p>
             </div>
           )}
         </div>
       </div>
 
-      {/* Glossary */}
       <div className="mb-6">
         <label className="text-sm text-text-secondary mb-2 block">
-          Glossário (termos consistentes)
+          Glossario (termos consistentes)
         </label>
         <div className="bg-bg-secondary border border-white/5 rounded-xl p-3">
           {Object.entries(project.contexto.glossario).map(([key, value]) => (
@@ -399,13 +454,12 @@ export function Setup() {
             </div>
           ))}
 
-          {/* Add new term */}
           <div className="flex items-center gap-2 pt-2">
             <input
               type="text"
               value={newTerm.key}
               onChange={(e) => setNewTerm({ ...newTerm, key: e.target.value })}
-              placeholder="Termo EN"
+              placeholder="Termo origem"
               className="flex-1 px-2.5 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
                 text-text-primary placeholder:text-text-secondary/40 focus:outline-none focus:border-accent-purple/30"
             />
@@ -414,7 +468,7 @@ export function Setup() {
               type="text"
               value={newTerm.value}
               onChange={(e) => setNewTerm({ ...newTerm, value: e.target.value })}
-              placeholder="Tradução PT"
+              placeholder="Traducao"
               onKeyDown={(e) => e.key === "Enter" && addGlossaryTerm()}
               className="flex-1 px-2.5 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
                 text-text-primary placeholder:text-text-secondary/40 focus:outline-none focus:border-accent-purple/30"
@@ -429,17 +483,16 @@ export function Setup() {
         </div>
       </div>
 
-      {/* Start button */}
       <div className="border-t border-white/5 pt-5">
         <div className="flex items-center justify-between mb-3">
           <div className="text-sm text-text-secondary">
-            <span className="text-text-primary font-medium">{totalPages}</span> páginas detectadas
+            <span className="text-text-primary font-medium">{totalPages}</span> paginas detectadas
           </div>
           <div className="text-sm">
             {hasEnoughCredits ? (
-              <span className="text-status-success">Créditos suficientes</span>
+              <span className="text-status-success">Creditos suficientes</span>
             ) : (
-              <span className="text-status-error">Créditos insuficientes</span>
+              <span className="text-status-error">Creditos insuficientes</span>
             )}
           </div>
         </div>

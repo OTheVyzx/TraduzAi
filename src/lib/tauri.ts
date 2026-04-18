@@ -546,6 +546,13 @@ export async function openExportDialog(format: "zip_full" | "jpg_only" | "cbz"):
   return invoke("save_file_dialog", { format });
 }
 
+export async function openLabPatchJsonDialog(proposalId: string): Promise<string | null> {
+  return invoke("save_file_dialog", {
+    format: "lab_patch_json",
+    suggestedName: `lab-patch-${proposalId}.json`,
+  });
+}
+
 // Credits
 export async function getCredits(): Promise<{ credits: number; weekly_used: number }> {
   return invoke("get_credits");

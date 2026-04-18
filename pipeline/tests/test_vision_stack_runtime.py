@@ -139,6 +139,23 @@ class VisionStackRuntimeTests(unittest.TestCase):
         get_font_detector.assert_not_called()
         self.assertEqual(page["texts"][0]["text"], "HELLO")
 
+    def test_build_page_result_treats_english_regions_as_english_for_non_latin_filter(self):
+        block = SimpleNamespace(
+            xyxy=(20, 16, 84, 40),
+            mask=None,
+            confidence=0.88,
+        )
+
+        page = build_page_result(
+            image_path="page.jpg",
+            image_rgb=np.full((80, 120, 3), 255, dtype=np.uint8),
+            blocks=[block],
+            texts=["Привет"],
+            idioma_origem="en-GB",
+        )
+
+        self.assertEqual(page["texts"], [])
+
     def test_build_page_result_keeps_textured_font_when_font_detection_is_enabled(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
@@ -1303,6 +1320,59 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertGreater(int(result[90, 90, 0]), 220)
         self.assertGreater(int(result[105, 90, 0]), 220)
+
+    def test_run_inpaint_pages_can_disable_white_balloon_whitening_temporarily(self):
+        image = np.full((180, 180, 3), 255, dtype=np.uint8)
+        ocr_data = {
+            "texts": [
+                {"bbox": [65, 72, 120, 80], "skip_processing": False},
+            ],
+            "_vision_blocks": [
+                {"bbox": [65, 72, 120, 80], "mask": None},
+            ],
+        }
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, batch_size=4):
+                result = image_np.copy()
+                cy = image_np.shape[0] // 2
+                cx = image_np.shape[1] // 2
+                result[cy, cx] = [77, 77, 77]
+                return result
+
+        def fake_line_artifact_cleanup(original_rgb, cleaned_rgb, texts):
+            result = cleaned_rgb.copy()
+            result[0, 0] = [111, 111, 111]
+            return result
+
+        def fake_micro_cleanup(original_rgb, cleaned_rgb, texts):
+            result = cleaned_rgb.copy()
+            result[0, 0] = [123, 123, 123]
+            return result
+
+        with TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "page.jpg"
+            output_dir = Path(tmpdir) / "out"
+            Image.fromarray(image).save(image_path)
+            with patch.dict(os.environ, {"MANGATL_DISABLE_WHITE_BALLOON_WHITENING": "1"}), patch(
+                "vision_stack.runtime._get_inpainter",
+                return_value=FakeInpainter(),
+            ), patch(
+                "vision_stack.runtime._apply_white_balloon_line_artifact_cleanup",
+                side_effect=fake_line_artifact_cleanup,
+            ), patch(
+                "vision_stack.runtime._apply_white_balloon_text_box_cleanup",
+                side_effect=AssertionError("text box cleanup nao deveria rodar"),
+            ), patch(
+                "vision_stack.runtime._apply_white_balloon_micro_artifact_cleanup",
+                side_effect=fake_micro_cleanup,
+            ):
+                outputs = run_inpaint_pages([image_path], [ocr_data], str(output_dir))
+
+            result = np.array(Image.open(outputs[0]).convert("RGB"))
+
+        self.assertGreater(int(result[0, 0, 0]), 105)
+        self.assertLess(int(result[0, 0, 0]), 145)
 
     def test_apply_inpainting_round_applies_white_balloon_cleanup_stack_after_lama(self):
         image = np.full((120, 160, 3), 230, dtype=np.uint8)

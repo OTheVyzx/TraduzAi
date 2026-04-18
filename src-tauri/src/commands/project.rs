@@ -75,19 +75,25 @@ pub async fn open_project_dialog(app: tauri::AppHandle) -> Result<Option<String>
 pub async fn save_file_dialog(
     app: tauri::AppHandle,
     format: Option<String>,
+    suggested_name: Option<String>,
 ) -> Result<Option<String>, String> {
     let format = format.unwrap_or_else(|| "zip_full".to_string());
     let (filter_name, filter_exts, default_name): (&str, &[&str], &str) = match format.as_str() {
         "cbz" => ("CBZ", &["cbz"], "traduzido.cbz"),
         "jpg_only" => ("ZIP", &["zip"], "paginas-traduzidas.zip"),
+        "lab_patch_json" => ("JSON", &["json"], "lab-patch.json"),
         _ => ("ZIP", &["zip"], "traduzido.zip"),
     };
+    let file_name = suggested_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(default_name);
 
     let file = app
         .dialog()
         .file()
         .add_filter(filter_name, filter_exts)
-        .set_file_name(default_name)
+        .set_file_name(file_name)
         .blocking_save_file();
 
     Ok(file.map(|f| f.to_string()))

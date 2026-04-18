@@ -14,6 +14,90 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+PADDLE_DIRECT_LANGUAGE_CODES = {"ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka"}
+PADDLE_LATIN_LANGUAGE_CODES = {
+    "af", "az", "bs", "cs", "cy", "da", "de", "es", "et", "fr", "ga", "hr", "hu",
+    "id", "is", "it", "ku", "la", "lt", "lv", "mi", "ms", "mt", "nl", "no", "oc",
+    "pi", "pl", "pt", "ro", "rs_latin", "sk", "sl", "sq", "sv", "sw", "tl", "tr",
+    "uz", "vi", "french", "german",
+}
+PADDLE_ARABIC_LANGUAGE_CODES = {"ar", "fa", "ug", "ur"}
+PADDLE_CYRILLIC_LANGUAGE_CODES = {
+    "ru", "rs_cyrillic", "be", "bg", "uk", "mn", "abq", "ady", "kbd", "ava", "dar",
+    "inh", "che", "lbe", "lez", "tab",
+}
+PADDLE_DEVANAGARI_LANGUAGE_CODES = {
+    "hi", "mr", "ne", "bh", "mai", "ang", "bho", "mah", "sck", "new", "gom", "sa", "bgc",
+}
+
+PADDLE_LANGUAGE_ALIASES = {
+    "en-gb": "en",
+    "en-us": "en",
+    "pt-br": "pt",
+    "pt-pt": "pt",
+    "zh": "ch",
+    "zh-cn": "ch",
+    "zh-hans": "ch",
+    "zh-tw": "chinese_cht",
+    "zh-hant": "chinese_cht",
+    "ja": "japan",
+    "ko": "korean",
+}
+
+EASYOCR_LANGUAGE_ALIASES = {
+    "en-gb": ["en"],
+    "en-us": ["en"],
+    "pt-br": ["pt", "en"],
+    "pt-pt": ["pt", "en"],
+    "zh": ["ch_sim", "en"],
+    "zh-cn": ["ch_sim", "en"],
+    "zh-hans": ["ch_sim", "en"],
+    "zh-tw": ["ch_tra", "en"],
+    "zh-hant": ["ch_tra", "en"],
+    "ja": ["ja", "en"],
+    "ko": ["ko", "en"],
+    "ru": ["ru", "en"],
+    "ar": ["ar", "en"],
+}
+
+
+def normalize_paddleocr_language(lang: str) -> str:
+    normalized = (lang or "en").strip().replace("_", "-").lower()
+    if normalized in PADDLE_LANGUAGE_ALIASES:
+        return PADDLE_LANGUAGE_ALIASES[normalized]
+
+    base = normalized.split("-", 1)[0]
+    if base in PADDLE_LANGUAGE_ALIASES:
+        return PADDLE_LANGUAGE_ALIASES[base]
+    if base in PADDLE_DIRECT_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_LATIN_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_ARABIC_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_CYRILLIC_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_DEVANAGARI_LANGUAGE_CODES:
+        return base
+
+    return "latin"
+
+
+def normalize_easyocr_languages(lang: str) -> list[str]:
+    normalized = (lang or "en").strip().replace("_", "-").lower()
+    if normalized in EASYOCR_LANGUAGE_ALIASES:
+        return EASYOCR_LANGUAGE_ALIASES[normalized]
+
+    base = normalized.split("-", 1)[0]
+    if base in EASYOCR_LANGUAGE_ALIASES:
+        return EASYOCR_LANGUAGE_ALIASES[base]
+    if base in {"es", "de", "fr", "it", "pt", "nl"}:
+        return [base, "en"]
+    if base == "en":
+        return ["en"]
+
+    return ["en"]
+
 
 class OCREngine:
     """
@@ -101,17 +185,7 @@ class OCREngine:
             self._load_easyocr()
             return
         
-        # Mapeamento do TraduzAi (app) para o PaddleOCR
-        # en -> en
-        # ja -> japan
-        # ko -> korean
-        # zh -> ch
-        mapped_lang = {
-            "en": "en",
-            "ja": "japan",
-            "ko": "korean",
-            "zh": "ch",
-        }.get(self.lang, "en")
+        mapped_lang = normalize_paddleocr_language(self.lang)
         
         use_gpu = self.device.type == "cuda"
         self._model = PaddleOCR(
@@ -127,12 +201,7 @@ class OCREngine:
     def _load_easyocr(self):
         import easyocr
 
-        languages = {
-            "en": ["en"],
-            "ja": ["ja", "en"],
-            "ko": ["ko", "en"],
-            "zh": ["ch_sim", "en"],
-        }.get(self.lang, ["en"])
+        languages = normalize_easyocr_languages(self.lang)
 
         use_gpu = self.device.type == "cuda"
         self._model = easyocr.Reader(languages, gpu=use_gpu, verbose=False)

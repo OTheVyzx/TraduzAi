@@ -10,6 +10,7 @@ import math
 import re
 import sys
 import unicodedata
+from itertools import product
 from pathlib import Path
 from typing import Callable
 
@@ -341,6 +342,7 @@ def _recenter_safe_text_positions(
     target_bbox: list[int],
     padding_y: int,
     vertical_anchor: str,
+    vertical_bias_px: int = 0,
 ) -> list[tuple[int, int]]:
     corrected = list(positions)
     if vertical_anchor == "top" or not corrected:
@@ -356,7 +358,7 @@ def _recenter_safe_text_positions(
     glyph_height = max(1, glyph_bottom - glyph_top)
     safe_padding_y = max(0, int(padding_y))
 
-    ideal_top = y1 + ((box_height - glyph_height) // 2)
+    ideal_top = y1 + ((box_height - glyph_height) // 2) + int(vertical_bias_px)
     min_top = y1 + safe_padding_y
     max_top = y2 - safe_padding_y - glyph_height
     if max_top >= min_top:
@@ -780,6 +782,196 @@ def _order_connected_subregions(
     return ordered
 
 
+def _merge_bbox_list(texts: list[dict]) -> list[int] | None:
+    boxes = [
+        [int(v) for v in (text.get("bbox") or [])]
+        for text in texts
+        if isinstance(text.get("bbox"), (list, tuple)) and len(text.get("bbox", [])) == 4
+    ]
+    if not boxes:
+        return None
+    return [
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    ]
+
+
+def _compute_connected_vertical_bias_ratio(
+    source_bbox: list[int] | None,
+    subregion: list[int],
+) -> float:
+    if not source_bbox or len(source_bbox) != 4:
+        return 0.0
+    try:
+        _, sy1, _, sy2 = [int(v) for v in subregion]
+        _, by1, _, by2 = [int(v) for v in source_bbox]
+    except Exception:
+        return 0.0
+    sub_height = max(1, sy2 - sy1)
+    source_cy = (by1 + by2) / 2.0
+    sub_cy = (sy1 + sy2) / 2.0
+    raw = (source_cy - sub_cy) / float(sub_height)
+    return float(max(-0.22, min(0.22, raw)))
+
+
+def _default_connected_vertical_bias_ratio(
+    slot_index: int,
+    slot_count: int,
+    orientation: str,
+) -> float:
+    if orientation != "left-right" or slot_count != 2:
+        return 0.0
+    return -0.12 if int(slot_index) == 0 else 0.12
+
+
+def _resolve_connected_area_weights(text_data: dict, ordered_subregions: list[list[int]]) -> list[float]:
+    text_groups = [
+        [int(v) for v in bbox]
+        for bbox in (text_data.get("connected_text_groups") or [])
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+    ]
+    if len(text_groups) == len(ordered_subregions):
+        areas = [max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) for bbox in text_groups]
+    else:
+        focus_bboxes = [
+            [int(v) for v in bbox]
+            for bbox in ((text_data.get("connected_position_bboxes") or []) or (text_data.get("connected_focus_bboxes") or []))
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+        ]
+        if len(focus_bboxes) == len(ordered_subregions):
+            areas = [max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) for bbox in focus_bboxes]
+        else:
+            areas = [max(1, (sub[2] - sub[0]) * (sub[3] - sub[1])) for sub in ordered_subregions]
+    total_area = max(1, sum(areas))
+    return [area / float(total_area) for area in areas]
+
+
+def _resolve_connected_position_bbox(text_data: dict, target_bbox: list[int]) -> list[int]:
+    if not text_data.get("_is_lobe_subregion"):
+        return list(target_bbox)
+
+    orientation = str(text_data.get("connected_balloon_orientation", "") or "")
+    raw_slot_index = text_data.get("_connected_slot_index", -1)
+    raw_slot_count = text_data.get("_connected_slot_count", 0)
+    slot_index = int(-1 if raw_slot_index is None else raw_slot_index)
+    slot_count = int(0 if raw_slot_count is None else raw_slot_count)
+    if orientation != "left-right" or slot_count != 2 or slot_index not in (0, 1):
+        return list(target_bbox)
+
+    explicit_position_bboxes = [
+        [int(v) for v in bbox]
+        for bbox in ((text_data.get("connected_position_bboxes") or []) or (text_data.get("connected_focus_bboxes") or []))
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+    ]
+    if len(explicit_position_bboxes) == slot_count:
+        px1, py1, px2, py2 = explicit_position_bboxes[slot_index]
+        tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+        clamped = [
+            max(tx1, min(tx2, px1)),
+            max(ty1, min(ty2, py1)),
+            max(tx1, min(tx2, px2)),
+            max(ty1, min(ty2, py2)),
+        ]
+        if clamped[2] > clamped[0] and clamped[3] > clamped[1]:
+            return clamped
+
+    def _build_border_driven_bbox() -> list[int]:
+        x1, y1, x2, y2 = [int(v) for v in target_bbox]
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        pad_x = max(6, int(width * 0.05))
+        pad_y = max(6, int(height * 0.05))
+        seam_margin = max(10, int(width * 0.14))
+        top_focus = max(10, int(height * 0.16))
+        bottom_focus = max(10, int(height * 0.18))
+
+        if slot_index == 0:
+            pos = [
+                x1 + pad_x,
+                y1 + pad_y,
+                x2 - seam_margin,
+                y2 - bottom_focus,
+            ]
+        else:
+            pos = [
+                x1 + seam_margin,
+                y1 + top_focus,
+                x2 - pad_x,
+                y2 - max(4, pad_y // 2),
+            ]
+
+        if pos[2] <= pos[0]:
+            pos[0], pos[2] = x1, x2
+        if pos[3] <= pos[1]:
+            pos[1], pos[3] = y1, y2
+        return [int(v) for v in pos]
+
+    def _shift_bbox_inside_target(
+        bbox: list[int],
+        desired_center_x: float,
+        desired_center_y: float,
+    ) -> list[int]:
+        tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+        bw = max(1, int(bbox[2] - bbox[0]))
+        bh = max(1, int(bbox[3] - bbox[1]))
+
+        x1 = int(round(desired_center_x - (bw / 2.0)))
+        y1 = int(round(desired_center_y - (bh / 2.0)))
+        x2 = x1 + bw
+        y2 = y1 + bh
+
+        if x1 < tx1:
+            x2 += tx1 - x1
+            x1 = tx1
+        if x2 > tx2:
+            x1 -= x2 - tx2
+            x2 = tx2
+        if y1 < ty1:
+            y2 += ty1 - y1
+            y1 = ty1
+        if y2 > ty2:
+            y1 -= y2 - ty2
+            y2 = ty2
+
+        x1 = max(tx1, x1)
+        y1 = max(ty1, y1)
+        x2 = min(tx2, x2)
+        y2 = min(ty2, y2)
+        if x2 <= x1:
+            x1, x2 = tx1, tx2
+        if y2 <= y1:
+            y1, y2 = ty1, ty2
+        return [int(x1), int(y1), int(x2), int(y2)]
+
+    base_bbox = _build_border_driven_bbox()
+    text_groups = [
+        [int(v) for v in bbox]
+        for bbox in (text_data.get("connected_text_groups") or [])
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+    ]
+    if len(text_groups) == slot_count:
+        gx1, gy1, gx2, gy2 = text_groups[slot_index]
+        focus_center_x = (gx1 + gx2) / 2.0
+        focus_center_y = (gy1 + gy2) / 2.0
+        base_center_x = (base_bbox[0] + base_bbox[2]) / 2.0
+        base_center_y = (base_bbox[1] + base_bbox[3]) / 2.0
+
+        if slot_index == 0:
+            desired_center_x = min(base_center_x, focus_center_x)
+            desired_center_y = min(base_center_y, focus_center_y)
+        else:
+            desired_center_x = max(base_center_x, focus_center_x)
+            desired_center_y = max(base_center_y, focus_center_y)
+
+        shifted = _shift_bbox_inside_target(base_bbox, desired_center_x, desired_center_y)
+        if shifted[2] > shifted[0] and shifted[3] > shifted[1]:
+            return shifted
+
+    return base_bbox
+
+
 def _build_connected_group_block(
     group_texts: list[dict],
     ordered_subregions: list[list[int]],
@@ -807,6 +999,11 @@ def _build_connected_group_block(
         child["layout_group_size"] = 1
         child["_is_lobe_subregion"] = True
         child["_connected_slot_index"] = index
+        child["_connected_slot_count"] = len(ordered_subregions)
+        child["connected_balloon_orientation"] = orientation
+        source_bbox = [int(v) for v in (text.get("bbox") or assigned_sub)]
+        child["_connected_source_bbox"] = source_bbox
+        child["_connected_vertical_bias_ratio"] = _compute_connected_vertical_bias_ratio(source_bbox, assigned_sub)
         ordered_children.append(child)
 
     parent = dict(group_texts[0])
@@ -853,7 +1050,12 @@ def _build_connected_group_block_from_fragment_groups(
         child["layout_group_size"] = 1
         child["_is_lobe_subregion"] = True
         child["_connected_slot_index"] = index
+        child["_connected_slot_count"] = len(ordered_subregions)
+        child["connected_balloon_orientation"] = orientation
         child["source_text_count"] = len(texts_for_subregion)
+        source_bbox = _merge_bbox_list(texts_for_subregion) or list(subregion)
+        child["_connected_source_bbox"] = source_bbox
+        child["_connected_vertical_bias_ratio"] = _compute_connected_vertical_bias_ratio(source_bbox, subregion)
         ordered_children.append(child)
 
     parent = dict(flattened[0])
@@ -1202,9 +1404,13 @@ def _detect_balloon_geometry(text_data: dict) -> str:
 
 def plan_text_layout(text_data: dict) -> dict:
     target_bbox = text_data.get("balloon_bbox") or text_data.get("bbox") or [0, 0, 0, 0]
+    position_bbox = _resolve_connected_position_bbox(text_data, target_bbox)
     x1, y1, x2, y2 = target_bbox
+    px1, py1, px2, py2 = [int(v) for v in position_bbox]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
+    position_width = max(1, px2 - px1)
+    position_height = max(1, py2 - py1)
 
     tipo = text_data.get("tipo", "fala")
     layout_shape = text_data.get("layout_shape", "square")
@@ -1281,8 +1487,23 @@ def plan_text_layout(text_data: dict) -> dict:
 
     target_size = max(10, int(estilo.get("tamanho", 16)) + target_size_delta)
     outline_px = max(int(estilo.get("contorno_px", 2)), outline_boost)
+    raw_vertical_bias_ratio = float(text_data.get("_connected_vertical_bias_ratio", 0.0) or 0.0)
+    connected_orientation = str(text_data.get("connected_balloon_orientation", "") or "")
+    raw_slot_index = text_data.get("_connected_slot_index", -1)
+    slot_index = int(-1 if raw_slot_index is None else raw_slot_index)
+    vertical_bias_px = 0
+    if text_data.get("_is_lobe_subregion") and raw_vertical_bias_ratio:
+        max_bias_px = max(10, int(box_height * 0.22))
+        vertical_bias_px = int(round(box_height * raw_vertical_bias_ratio))
+        vertical_bias_px = max(-max_bias_px, min(max_bias_px, vertical_bias_px))
+    if text_data.get("_is_lobe_subregion") and connected_orientation == "left-right":
+        if slot_index == 0:
+            vertical_bias_px += max(24, int(box_height * 0.095))
+        elif slot_index == 1:
+            vertical_bias_px += max(10, int(box_height * 0.04))
     return {
         "target_bbox": target_bbox,
+        "position_bbox": position_bbox,
         "layout_shape": layout_shape,
         "balloon_geo": balloon_geo,
         "max_width": max(40, int(box_width * width_ratio)),
@@ -1303,6 +1524,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "sombra_cor": estilo.get("sombra_cor", ""),
         "sombra_offset": estilo.get("sombra_offset", [0, 0]),
         "line_spacing_ratio": line_spacing,
+        "vertical_bias_px": vertical_bias_px,
     }
 
 
@@ -1593,9 +1815,9 @@ def _enumerate_connected_text_candidates(
         for score, chunks in best_local[:4]:
             _register(chunks, base_bonus - score, label)
 
-    _register_partitioned(explicit_parts, 1.4, "newline")
-    _register_partitioned(sentence_parts, 1.25, "sentence")
-    _register_partitioned(clause_parts, 1.05, "clause")
+    _register_partitioned(explicit_parts, 1.8, "newline")
+    _register_partitioned(sentence_parts, 2.2, "sentence")
+    _register_partitioned(clause_parts, 1.0, "clause")
 
     candidates = sorted(
         candidate_map.values(),
@@ -1707,8 +1929,11 @@ def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
 def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     text = text_data.get("translated", "")
     x1, y1, x2, y2 = plan["target_bbox"]
+    px1, py1, px2, py2 = [int(v) for v in plan.get("position_bbox", plan["target_bbox"])]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
+    position_width = max(1, px2 - px1)
+    position_height = max(1, py2 - py1)
     font_size = min(_compute_font_search_upper_bound(plan, text), max(8, box_height - 4))
     best_candidate = None
 
@@ -1754,11 +1979,18 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         if block_width > plan["max_width"] or total_text_height > plan["max_height"]:
             continue
         start_y = (
-            y1 + plan["padding_y"]
+            py1 + plan["padding_y"]
             if plan["vertical_anchor"] == "top"
-            else y1 + max(plan["padding_y"], (box_height - total_text_height) // 2)
+            else py1 + max(plan["padding_y"], (position_height - total_text_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
         )
-        center_x = x1 + (box_width // 2)
+        if plan["vertical_anchor"] != "top":
+            min_start_y = py1 + int(plan["padding_y"])
+            max_start_y = py2 - int(plan["padding_y"]) - total_text_height
+            if max_start_y >= min_start_y:
+                start_y = min(max(start_y, min_start_y), max_start_y)
+            else:
+                start_y = min_start_y
+        center_x = px1 + (position_width // 2)
         inner_x1 = center_x - (plan["max_width"] // 2)
         inner_x2 = center_x + (plan["max_width"] // 2)
         positions = [
@@ -1815,11 +2047,18 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
     fallback_total_height = fallback_line_height * len(fallback_lines)
     start_y = (
-        y1 + plan["padding_y"]
+        py1 + plan["padding_y"]
         if plan["vertical_anchor"] == "top"
-        else y1 + max(plan["padding_y"], (box_height - fallback_total_height) // 2)
+        else py1 + max(plan["padding_y"], (position_height - fallback_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
     )
-    center_x = x1 + (box_width // 2)
+    if plan["vertical_anchor"] != "top":
+        min_start_y = py1 + int(plan["padding_y"])
+        max_start_y = py2 - int(plan["padding_y"]) - fallback_total_height
+        if max_start_y >= min_start_y:
+            start_y = min(max(start_y, min_start_y), max_start_y)
+        else:
+            start_y = min_start_y
+    center_x = px1 + (position_width // 2)
     fallback_widths = [measure_text_width(fallback_font, line, fallback_size) for line in fallback_lines]
     positions = [
         (center_x - (width // 2), start_y + index * fallback_line_height)
@@ -1957,48 +2196,154 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
 
 
 def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> list[int]:
-    """Resolve near-uniform font sizes for connected balloon lobes.
+    """Resolve human-looking font sizes for connected balloon lobes.
 
-    Keeps a small 0-2px variation when it improves density, instead of forcing
-    exact equality and shrinking both sides unnecessarily.
+    Instead of picking the largest size that merely fits, search a narrow band
+    of near-uniform sizes and choose the combination that yields a cleaner comic
+    layout: fewer stacked lines, healthier occupancy, and only a tiny lobe-to-
+    lobe size variation.
     """
     if not children or not plans:
         return []
-    resolved = [_resolve_text_layout(child, plan) for child, plan in zip(children, plans)]
-    sizes = [int(item["font_size"]) for item in resolved]
-    min_size = min(sizes)
-    max_size = max(sizes)
+    raw_resolved = [_resolve_text_layout(child, plan) for child, plan in zip(children, plans)]
+    raw_sizes = [int(item["font_size"]) for item in raw_resolved]
+    common_floor = max(8, min(raw_sizes) - 10)
 
-    if max_size - min_size <= 2:
-        candidate_sizes = list(sizes)
-    else:
-        candidate_sizes = [max(min_size, min(size, min_size + 2)) for size in sizes]
+    preferred_caps: list[int] = []
+    for child, plan, raw_size in zip(children, plans, raw_sizes):
+        text = str(child.get("translated", "") or "").strip()
+        word_count = len(text.split())
+        if word_count >= 14:
+            ideal_max_lines = 5
+        elif word_count >= 9:
+            ideal_max_lines = 4
+        else:
+            ideal_max_lines = 3
 
-    quality_sizes: list[int] = []
-    for child, plan, seed_size in zip(children, plans, candidate_sizes):
-        text = child.get("translated", "")
-        n_words = len(text.split())
-        chosen = int(seed_size)
-        if n_words >= 3:
-            max_width = plan.get("max_width", 9999)
-            font_name = plan.get("font_name", "")
-            for check_size in range(seed_size, max(7, seed_size - 8), -1):
-                font = get_font(font_name, check_size)
-                wrapped = wrap_text(text, font, max_width)
-                if not wrapped:
+        cap = int(raw_size)
+        for size in range(int(raw_size), common_floor - 1, -1):
+            fixed_plan = dict(plan)
+            fixed_plan["target_size"] = int(size)
+            fixed_plan["_font_search_cap"] = int(size)
+            fixed_plan["_font_search_floor"] = int(size)
+            resolved = _resolve_text_layout(child, fixed_plan)
+            line_count = len(resolved.get("lines", []))
+            width_ratio = float(resolved.get("width_ratio", 0.0))
+            if line_count <= ideal_max_lines and width_ratio <= 0.90:
+                cap = int(size)
+                break
+        preferred_caps.append(cap)
+
+    def _score_child(child: dict, plan: dict, resolved: dict, raw_size: int) -> float:
+        text = str(child.get("translated", "") or "").strip()
+        word_count = len(text.split())
+        line_count = len(resolved.get("lines", []))
+        width_ratio = float(resolved.get("width_ratio", 0.0))
+        height_ratio = float(resolved.get("height_ratio", 0.0))
+        size = int(resolved.get("font_size", 0) or 0)
+
+        if word_count >= 14:
+            ideal_min_lines, ideal_max_lines = 4, 5
+        elif word_count >= 9:
+            ideal_min_lines, ideal_max_lines = 3, 4
+        else:
+            ideal_min_lines, ideal_max_lines = 2, 3
+
+        score = 0.0
+        score -= abs(width_ratio - 0.80) * 10.0
+        score -= abs(height_ratio - 0.52) * 13.0
+        if line_count < ideal_min_lines:
+            score -= (ideal_min_lines - line_count) * 2.4
+        if line_count > ideal_max_lines:
+            score -= (line_count - ideal_max_lines) * 12.0
+            if word_count >= 9:
+                score -= 18.0
+        if height_ratio > 0.68:
+            score -= (height_ratio - 0.68) * 34.0
+        if height_ratio < 0.30:
+            score -= (0.30 - height_ratio) * 16.0
+        if width_ratio < 0.62:
+            score -= (0.62 - width_ratio) * 15.0
+        if width_ratio > 0.90:
+            score -= (width_ratio - 0.90) * 24.0
+
+        lines = resolved.get("lines", [])
+        single_word_lines = sum(1 for line in lines if len(line.split()) <= 1)
+        short_lines = sum(1 for line in lines if len(line.split()) <= 2)
+        score -= single_word_lines * 3.0
+        if line_count >= 4:
+            score -= max(0, short_lines - 1) * 1.4
+
+        # Allow shrinking away from the raw max-fit size when it produces a
+        # cleaner comic shape, but avoid collapsing excessively.
+        if size < raw_size:
+            score -= (raw_size - size) * 0.10
+        return score
+
+    candidate_ranges: list[list[int]] = []
+    for raw_size, preferred_cap in zip(raw_sizes, preferred_caps):
+        upper = min(int(raw_size), int(preferred_cap) + 1)
+        lower = max(common_floor, upper - 10)
+        candidate_ranges.append(list(range(upper, lower - 1, -1)))
+
+    best_sizes = list(raw_sizes)
+    best_score = float("-inf")
+    found_valid_combo = False
+    tried: set[tuple[int, ...]] = set()
+    for combo in product(*candidate_ranges):
+        combo_key = tuple(int(v) for v in combo)
+        if combo_key in tried:
+            continue
+        tried.add(combo_key)
+        if max(combo_key) - min(combo_key) > 2:
+            continue
+        found_valid_combo = True
+
+        combo_score = 0.0
+        for child, plan, raw_size, size in zip(children, plans, raw_sizes, combo_key):
+            fixed_plan = dict(plan)
+            fixed_plan["target_size"] = int(size)
+            fixed_plan["_font_search_cap"] = int(size)
+            fixed_plan["_font_search_floor"] = int(size)
+            resolved = _resolve_text_layout(child, fixed_plan)
+            combo_score += _score_child(child, fixed_plan, resolved, raw_size)
+
+        combo_score -= (max(combo_key) - min(combo_key)) * 1.6
+        if combo_score > best_score:
+            best_score = combo_score
+            best_sizes = list(combo_key)
+
+    if not found_valid_combo:
+        floor = min(preferred_caps) if preferred_caps else min(raw_sizes)
+        best_sizes = [max(floor, min(int(size), floor + 2)) for size in preferred_caps or raw_sizes]
+
+    if len(best_sizes) >= 2 and max(best_sizes) == min(best_sizes):
+        word_counts = [len(str(child.get("translated", "") or "").split()) for child in children]
+        boost_order = sorted(range(len(best_sizes)), key=lambda idx: (word_counts[idx], idx))
+        for idx in boost_order:
+            upper_cap = min(int(raw_sizes[idx]), int(preferred_caps[idx]) + 1)
+            current_plan = dict(plans[idx])
+            current_plan["target_size"] = int(best_sizes[idx])
+            current_plan["_font_search_cap"] = int(best_sizes[idx])
+            current_plan["_font_search_floor"] = int(best_sizes[idx])
+            current_lines = len(_resolve_text_layout(children[idx], current_plan).get("lines", []))
+            for extra in (1,):
+                candidate = list(best_sizes)
+                candidate[idx] = min(upper_cap, candidate[idx] + extra)
+                if max(candidate) - min(candidate) > 2:
                     continue
-                avg_wpl = n_words / float(max(1, len(wrapped)))
-                single_word_lines = sum(1 for line in wrapped if len(line.split()) <= 1)
-                if avg_wpl >= 1.8 and single_word_lines <= 1:
-                    chosen = check_size
+                fixed_plan = dict(plans[idx])
+                fixed_plan["target_size"] = int(candidate[idx])
+                fixed_plan["_font_search_cap"] = int(candidate[idx])
+                fixed_plan["_font_search_floor"] = int(candidate[idx])
+                resolved = _resolve_text_layout(children[idx], fixed_plan)
+                if len(resolved.get("lines", [])) <= current_lines:
+                    best_sizes = candidate
                     break
-        quality_sizes.append(chosen)
+            if max(best_sizes) != min(best_sizes):
+                break
 
-    if max(quality_sizes) - min(quality_sizes) > 2:
-        floor = min(quality_sizes)
-        quality_sizes = [max(floor, min(size, floor + 2)) for size in quality_sizes]
-
-    return quality_sizes
+    return best_sizes
 
 
 def _score_connected_group_candidate(
@@ -2037,6 +2382,27 @@ def _score_connected_group_candidate(
         if child.get("translated") and re.search(r"[.!?…]$", child.get("translated", "").strip()):
             score += 0.2
 
+        block_bbox = item.get("block_bbox") or []
+        position_bbox = plan.get("position_bbox") or []
+        if (
+            isinstance(block_bbox, (list, tuple))
+            and len(block_bbox) == 4
+            and isinstance(position_bbox, (list, tuple))
+            and len(position_bbox) == 4
+        ):
+            bx1, by1, bx2, by2 = [int(v) for v in block_bbox]
+            px1, py1, px2, py2 = [int(v) for v in position_bbox]
+            block_cx = (bx1 + bx2) / 2.0
+            block_cy = (by1 + by2) / 2.0
+            pos_cx = (px1 + px2) / 2.0
+            pos_cy = (py1 + py2) / 2.0
+            pos_w = max(1.0, float(px2 - px1))
+            pos_h = max(1.0, float(py2 - py1))
+            drift_x = abs(block_cx - pos_cx) / pos_w
+            drift_y = abs(block_cy - pos_cy) / pos_h
+            score -= drift_x * 6.0
+            score -= drift_y * 8.0
+
     for child in children[:-1]:
         boundary_text = str(child.get("translated", "") or "").strip()
         if not boundary_text:
@@ -2058,14 +2424,18 @@ def _build_connected_children_candidates(
     text: str,
     subregions: list[list[int]],
 ) -> list[dict]:
-    ordered_subregions = _order_connected_subregions(
+    orientation = _infer_connected_orientation_from_subregions(
         subregions,
         str(text_data.get("connected_balloon_orientation", "") or ""),
+    )
+    ordered_subregions = _order_connected_subregions(
+        subregions,
+        orientation,
     )
     connected_children = text_data.get("connected_children") or []
     if connected_children and len(connected_children) == len(ordered_subregions):
         children = []
-        for subregion, source_child in zip(ordered_subregions, connected_children):
+        for index, (subregion, source_child) in enumerate(zip(ordered_subregions, connected_children)):
             child = dict(source_child)
             child["bbox"] = list(subregion)
             child["balloon_bbox"] = list(subregion)
@@ -2074,16 +2444,23 @@ def _build_connected_children_candidates(
             child["layout_shape"] = _infer_layout_shape_from_bbox(subregion, child.get("tipo", "fala"))
             child["layout_align"] = "top" if child.get("tipo") == "narracao" else "center"
             child["_is_lobe_subregion"] = True
+            child["_connected_slot_index"] = index
+            child["_connected_slot_count"] = len(ordered_subregions)
+            child["connected_balloon_orientation"] = orientation
+            if not float(child.get("_connected_vertical_bias_ratio", 0.0) or 0.0):
+                child["_connected_vertical_bias_ratio"] = _default_connected_vertical_bias_ratio(
+                    index,
+                    len(ordered_subregions),
+                    orientation,
+                )
             children.append(child)
         return [{"children": children, "semantic_bonus": 1.5, "label": "assigned"}]
 
-    areas = [max(1, (sub[2] - sub[0]) * (sub[3] - sub[1])) for sub in ordered_subregions]
-    total_area = max(1, sum(areas))
-    area_weights = [area / float(total_area) for area in areas]
+    area_weights = _resolve_connected_area_weights(text_data, ordered_subregions)
     candidates = []
     for option in _enumerate_connected_text_candidates(text, len(ordered_subregions), area_weights):
         children = []
-        for chunk, subregion in zip(option["chunks"], ordered_subregions):
+        for index, (chunk, subregion) in enumerate(zip(option["chunks"], ordered_subregions)):
             child = dict(text_data)
             child["translated"] = chunk
             child["bbox"] = list(subregion)
@@ -2093,6 +2470,14 @@ def _build_connected_children_candidates(
             child["layout_shape"] = _infer_layout_shape_from_bbox(subregion, child.get("tipo", "fala"))
             child["layout_align"] = "top" if child.get("tipo") == "narracao" else "center"
             child["_is_lobe_subregion"] = True
+            child["_connected_slot_index"] = index
+            child["_connected_slot_count"] = len(ordered_subregions)
+            child["connected_balloon_orientation"] = orientation
+            child["_connected_vertical_bias_ratio"] = _default_connected_vertical_bias_ratio(
+                index,
+                len(ordered_subregions),
+                orientation,
+            )
             children.append(child)
         candidates.append(
             {
@@ -2205,9 +2590,10 @@ def _render_single_text_block(
             best_font,
             best_lines,
             corrected_positions,
-            target_bbox=plan["target_bbox"],
+            target_bbox=plan.get("position_bbox", plan["target_bbox"]),
             padding_y=int(plan["padding_y"]),
             vertical_anchor=str(plan["vertical_anchor"]),
+            vertical_bias_px=int(plan.get("vertical_bias_px", 0) or 0),
         )
 
         if plan["sombra"] and plan["sombra_cor"]:

@@ -8,6 +8,7 @@ from typesetter.renderer import (
     _build_textpath_mask,
     _measure_safe_text_block_bbox,
     _recenter_safe_text_positions,
+    _resolve_connected_area_weights,
     _resolve_connected_target_sizes,
     _resolve_text_layout,
     _score_connected_group_candidate,
@@ -432,6 +433,187 @@ class TypesettingLayoutTests(unittest.TestCase):
         lobe_plan = plan_text_layout(lobe)
         self.assertGreater(lobe_plan["max_width"], normal_plan["max_width"])
 
+    def test_connected_lobe_uses_border_driven_position_bbox(self):
+        left = {
+            "translated": "LEFT",
+            "bbox": [113, 1513, 402, 1767],
+            "balloon_bbox": [113, 1513, 402, 1767],
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+            "_connected_slot_index": 0,
+            "_connected_slot_count": 2,
+            "connected_balloon_orientation": "left-right",
+        }
+        right = dict(left)
+        right["bbox"] = [402, 1513, 705, 1767]
+        right["balloon_bbox"] = [402, 1513, 705, 1767]
+        right["_connected_slot_index"] = 1
+
+        left_plan = plan_text_layout(left)
+        right_plan = plan_text_layout(right)
+
+        left_target = left_plan["target_bbox"]
+        left_position = left_plan["position_bbox"]
+        right_target = right_plan["target_bbox"]
+        right_position = right_plan["position_bbox"]
+
+        left_target_center = ((left_target[0] + left_target[2]) / 2.0, (left_target[1] + left_target[3]) / 2.0)
+        left_position_center = ((left_position[0] + left_position[2]) / 2.0, (left_position[1] + left_position[3]) / 2.0)
+        right_target_center = ((right_target[0] + right_target[2]) / 2.0, (right_target[1] + right_target[3]) / 2.0)
+        right_position_center = ((right_position[0] + right_position[2]) / 2.0, (right_position[1] + right_position[3]) / 2.0)
+
+        self.assertLess(left_position_center[0], left_target_center[0])
+        self.assertLess(left_position_center[1], left_target_center[1])
+        self.assertGreater(right_position_center[0], right_target_center[0])
+        self.assertGreater(right_position_center[1], right_target_center[1])
+        self.assertLess(left_plan["max_width"], left_target[2] - left_target[0])
+        self.assertLess(right_plan["max_width"], right_target[2] - right_target[0])
+
+    def test_connected_lobe_prefers_detected_focus_bbox_when_available(self):
+        left = {
+            "translated": "LEFT",
+            "bbox": [113, 1513, 395, 1767],
+            "balloon_bbox": [113, 1513, 395, 1767],
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+            "_connected_slot_index": 0,
+            "_connected_slot_count": 2,
+            "connected_balloon_orientation": "left-right",
+            "connected_position_bboxes": [[150, 1550, 320, 1670], [470, 1610, 650, 1735]],
+        }
+        right = dict(left)
+        right["bbox"] = [409, 1513, 705, 1767]
+        right["balloon_bbox"] = [409, 1513, 705, 1767]
+        right["_connected_slot_index"] = 1
+
+        left_plan = plan_text_layout(left)
+        right_plan = plan_text_layout(right)
+
+        left_target_center = (
+            (left_plan["target_bbox"][0] + left_plan["target_bbox"][2]) / 2.0,
+            (left_plan["target_bbox"][1] + left_plan["target_bbox"][3]) / 2.0,
+        )
+        right_target_center = (
+            (right_plan["target_bbox"][0] + right_plan["target_bbox"][2]) / 2.0,
+            (right_plan["target_bbox"][1] + right_plan["target_bbox"][3]) / 2.0,
+        )
+        left_focus_center = (
+            (left["connected_position_bboxes"][0][0] + left["connected_position_bboxes"][0][2]) / 2.0,
+            (left["connected_position_bboxes"][0][1] + left["connected_position_bboxes"][0][3]) / 2.0,
+        )
+        right_focus_center = (
+            (left["connected_position_bboxes"][1][0] + left["connected_position_bboxes"][1][2]) / 2.0,
+            (left["connected_position_bboxes"][1][1] + left["connected_position_bboxes"][1][3]) / 2.0,
+        )
+        left_position_center = (
+            (left_plan["position_bbox"][0] + left_plan["position_bbox"][2]) / 2.0,
+            (left_plan["position_bbox"][1] + left_plan["position_bbox"][3]) / 2.0,
+        )
+        right_position_center = (
+            (right_plan["position_bbox"][0] + right_plan["position_bbox"][2]) / 2.0,
+            (right_plan["position_bbox"][1] + right_plan["position_bbox"][3]) / 2.0,
+        )
+
+        self.assertLess(left_position_center[0], left_target_center[0])
+        self.assertLess(left_position_center[1], left_target_center[1])
+        self.assertGreater(right_position_center[0], right_target_center[0])
+        self.assertGreater(right_position_center[1], right_target_center[1])
+        self.assertLess(abs(left_position_center[0] - left_focus_center[0]), abs(left_target_center[0] - left_focus_center[0]))
+        self.assertLess(abs(left_position_center[1] - left_focus_center[1]), abs(left_target_center[1] - left_focus_center[1]))
+        self.assertLess(abs(right_position_center[1] - right_focus_center[1]), abs(right_target_center[1] - right_focus_center[1]))
+
+    def test_connected_focus_bbox_repositions_without_shrinking_text_budget(self):
+        base = {
+            "translated": "LEFT SIDE TEXT",
+            "bbox": [113, 1513, 395, 1767],
+            "balloon_bbox": [113, 1513, 395, 1767],
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "_is_lobe_subregion": True,
+            "_connected_slot_index": 0,
+            "_connected_slot_count": 2,
+            "connected_balloon_orientation": "left-right",
+        }
+
+        focused = dict(base)
+        focused["connected_position_bboxes"] = [[150, 1550, 320, 1670], [470, 1610, 650, 1735]]
+
+        base_plan = plan_text_layout(base)
+        focused_plan = plan_text_layout(focused)
+
+        self.assertEqual(focused_plan["target_size"], base_plan["target_size"])
+        self.assertEqual(focused_plan["max_width"], base_plan["max_width"])
+        self.assertEqual(focused_plan["max_height"], base_plan["max_height"])
+        self.assertNotEqual(focused_plan["position_bbox"], base_plan["position_bbox"])
+
+    def test_connected_candidate_score_prefers_block_centered_in_position_box(self):
+        centered_items = [
+            {
+                "score": 10.0,
+                "font_size": 20,
+                "lines": ["A", "B"],
+                "width_ratio": 0.72,
+                "height_ratio": 0.40,
+                "block_bbox": [120, 120, 220, 200],
+            }
+        ]
+        off_center_items = [
+            {
+                "score": 10.0,
+                "font_size": 20,
+                "lines": ["A", "B"],
+                "width_ratio": 0.72,
+                "height_ratio": 0.40,
+                "block_bbox": [120, 150, 220, 230],
+            }
+        ]
+        children = [{"translated": "A. B."}]
+        plans = [
+            {
+                "target_size": 20,
+                "position_bbox": [100, 100, 240, 220],
+            }
+        ]
+
+        centered_score = _score_connected_group_candidate(centered_items, children, plans, semantic_bonus=0.0)
+        off_center_score = _score_connected_group_candidate(off_center_items, children, plans, semantic_bonus=0.0)
+
+        self.assertGreater(centered_score, off_center_score)
+
+    def test_connected_area_weights_prefer_text_groups_before_position_boxes(self):
+        text_data = {
+            "connected_text_groups": [[100, 100, 360, 250], [460, 170, 560, 240]],
+            "connected_position_bboxes": [[90, 90, 340, 270], [430, 140, 590, 260]],
+            "connected_lobe_bboxes": [[80, 80, 380, 280], [400, 80, 680, 280]],
+        }
+        ordered_subregions = [[80, 80, 380, 280], [400, 80, 680, 280]]
+
+        weights = _resolve_connected_area_weights(text_data, ordered_subregions)
+
+        self.assertEqual(len(weights), 2)
+        self.assertGreater(weights[0], weights[1])
+        self.assertAlmostEqual(sum(weights), 1.0, places=4)
+
+    def test_connected_area_weights_use_focus_bboxes_when_available(self):
+        text_data = {
+            "connected_focus_bboxes": [[100, 100, 320, 260], [430, 150, 560, 240]],
+        }
+        ordered_subregions = [[80, 80, 360, 280], [400, 80, 680, 280]]
+
+        weights = _resolve_connected_area_weights(text_data, ordered_subregions)
+
+        self.assertEqual(len(weights), 2)
+        self.assertGreater(weights[0], weights[1])
+        self.assertAlmostEqual(sum(weights), 1.0, places=4)
+
     def test_recenter_safe_text_positions_uses_real_glyph_block_for_vertical_centering(self):
         text_data = {
             "translated": "PODE SER NADA MAIS DO QUE",
@@ -457,7 +639,7 @@ class TypesettingLayoutTests(unittest.TestCase):
             resolved["font"],
             resolved["lines"],
             resolved["positions"],
-            target_bbox=plan["target_bbox"],
+            target_bbox=plan["position_bbox"],
             padding_y=plan["padding_y"],
             vertical_anchor=plan["vertical_anchor"],
         )
@@ -468,7 +650,7 @@ class TypesettingLayoutTests(unittest.TestCase):
         )
         self.assertIsNotNone(bbox_after)
 
-        balloon_cy = (plan["target_bbox"][1] + plan["target_bbox"][3]) / 2.0
+        balloon_cy = (plan["position_bbox"][1] + plan["position_bbox"][3]) / 2.0
         before_cy = (bbox_before[1] + bbox_before[3]) / 2.0
         after_cy = (bbox_after[1] + bbox_after[3]) / 2.0
 
@@ -551,6 +733,177 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(len(blocks[0]["connected_children"]), 2)
         self.assertEqual(blocks[0]["balloon_subregions"], [[0, 0, 200, 240], [220, 0, 420, 240]])
 
+    def test_connected_fragment_groups_preserve_diagonal_vertical_bias(self):
+        texts = [
+            {
+                "translated": "LEFT UPPER",
+                "bbox": [36, 24, 174, 62],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                "balloon_bbox": [0, 0, 420, 240],
+                "balloon_subregions": [[0, 0, 200, 240], [220, 0, 420, 240]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 4,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "LEFT MID",
+                "bbox": [28, 68, 182, 108],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                "balloon_bbox": [0, 0, 420, 240],
+                "balloon_subregions": [[0, 0, 200, 240], [220, 0, 420, 240]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 4,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "RIGHT MID",
+                "bbox": [246, 118, 388, 156],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                "balloon_bbox": [0, 0, 420, 240],
+                "balloon_subregions": [[0, 0, 200, 240], [220, 0, 420, 240]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 4,
+                "connected_balloon_orientation": "left-right",
+            },
+            {
+                "translated": "RIGHT LOWER",
+                "bbox": [238, 160, 396, 206],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                "balloon_bbox": [0, 0, 420, 240],
+                "balloon_subregions": [[0, 0, 200, 240], [220, 0, 420, 240]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 4,
+                "connected_balloon_orientation": "left-right",
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        children = blocks[0]["connected_children"]
+        self.assertLess(children[0].get("_connected_vertical_bias_ratio", 0.0), -0.05)
+        self.assertGreater(children[1].get("_connected_vertical_bias_ratio", 0.0), 0.05)
+
+    def test_connected_children_candidates_keep_diagonal_stagger_from_child_bias(self):
+        text_data = {
+            "translated": (
+                "PODE SER NADA MAIS DO QUE UM METODO DE CULTIVO INACABADO, "
+                "MAS SEUS EFEITOS SAO MAIS QUE SUFICIENTE. "
+                "ESSE PODER PERMITE SUPERAR SEUS PROPRIOS LIMITES EM UM INSTANTE."
+            ),
+            "bbox": [113, 1513, 705, 1767],
+            "balloon_bbox": [113, 1513, 705, 1767],
+            "balloon_subregions": [[113, 1513, 402, 1767], [402, 1513, 705, 1767]],
+            "connected_balloon_orientation": "left-right",
+            "connected_children": [
+                {
+                    "translated": "PODE SER NADA MAIS DO QUE UM METODO DE CULTIVO INACABADO, MAS SEUS EFEITOS SAO MAIS QUE SUFICIENTE.",
+                    "bbox": [140, 1530, 360, 1644],
+                    "tipo": "fala",
+                    "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                    "layout_shape": "wide",
+                    "layout_align": "center",
+                    "_connected_vertical_bias_ratio": -0.16,
+                },
+                {
+                    "translated": "ESSE PODER PERMITE SUPERAR SEUS PROPRIOS LIMITES EM UM INSTANTE.",
+                    "bbox": [430, 1628, 660, 1750],
+                    "tipo": "fala",
+                    "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+                    "layout_shape": "wide",
+                    "layout_align": "center",
+                    "_connected_vertical_bias_ratio": 0.16,
+                },
+            ],
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        image = Image.new("RGB", (800, 2600), color="white")
+        candidate = _build_connected_children_candidates(
+            text_data,
+            text_data["translated"],
+            text_data["balloon_subregions"],
+        )[0]
+        children = candidate["children"]
+        plans = [ensure_legible_plan(image, plan_text_layout(child)) for child in children]
+        sizes = _resolve_connected_target_sizes(children, plans)
+
+        resolved_items = []
+        for child, plan, size in zip(children, plans, sizes):
+            fixed_plan = dict(plan)
+            fixed_plan["target_size"] = int(size)
+            fixed_plan["_font_search_cap"] = int(size)
+            fixed_plan["_font_search_floor"] = int(size)
+            resolved_items.append(_resolve_text_layout(child, fixed_plan))
+
+        left_box = resolved_items[0]["block_bbox"]
+        right_box = resolved_items[1]["block_bbox"]
+        left_center_y = (left_box[1] + left_box[3]) / 2.0
+        right_center_y = (right_box[1] + right_box[3]) / 2.0
+        avg_center_y = (left_center_y + right_center_y) / 2.0
+        balloon_center_y = (text_data["balloon_bbox"][1] + text_data["balloon_bbox"][3]) / 2.0
+
+        self.assertLess(left_center_y, right_center_y - 12.0)
+        self.assertGreater(avg_center_y, balloon_center_y + 10.0)
+
+    def test_semantic_connected_split_defaults_to_diagonal_stagger_for_left_right_balloon(self):
+        text_data = {
+            "translated": (
+                "PODE SER NADA MAIS DO QUE UM METODO DE CULTIVO INACABADO, "
+                "MAS SEUS EFEITOS SAO MAIS QUE SUFICIENTE. "
+                "ESSE PODER PERMITE SUPERAR SEUS PROPRIOS LIMITES EM UM INSTANTE."
+            ),
+            "bbox": [113, 1513, 705, 1767],
+            "balloon_bbox": [113, 1513, 705, 1767],
+            "balloon_subregions": [[113, 1513, 402, 1767], [402, 1513, 705, 1767]],
+            "connected_balloon_orientation": "left-right",
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        image = Image.new("RGB", (800, 2600), color="white")
+        candidate = _build_connected_children_candidates(
+            text_data,
+            text_data["translated"],
+            text_data["balloon_subregions"],
+        )[0]
+        children = candidate["children"]
+        self.assertLess(children[0].get("_connected_vertical_bias_ratio", 0.0), -0.05)
+        self.assertGreater(children[1].get("_connected_vertical_bias_ratio", 0.0), 0.05)
+
+        plans = [ensure_legible_plan(image, plan_text_layout(child)) for child in children]
+        sizes = _resolve_connected_target_sizes(children, plans)
+        resolved_items = []
+        for child, plan, size in zip(children, plans, sizes):
+            fixed_plan = dict(plan)
+            fixed_plan["target_size"] = int(size)
+            fixed_plan["_font_search_cap"] = int(size)
+            fixed_plan["_font_search_floor"] = int(size)
+            resolved_items.append(_resolve_text_layout(child, fixed_plan))
+
+        left_box = resolved_items[0]["block_bbox"]
+        right_box = resolved_items[1]["block_bbox"]
+        left_center_y = (left_box[1] + left_box[3]) / 2.0
+        right_center_y = (right_box[1] + right_box[3]) / 2.0
+        avg_center_y = (left_center_y + right_center_y) / 2.0
+        balloon_center_y = (text_data["balloon_bbox"][1] + text_data["balloon_bbox"][3]) / 2.0
+
+        self.assertLess(left_center_y, right_center_y - 12.0)
+        self.assertGreater(avg_center_y, balloon_center_y + 10.0)
+
     def test_connected_target_sizes_keep_small_variation_when_it_helps_density(self):
         """Lobos conectados nao devem forcar tamanho identico quando 2px melhora a composicao."""
         child_a = {
@@ -626,6 +979,65 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertIsNotNone(best_chunks)
         self.assertTrue(best_chunks[0].rstrip().endswith("."))
         self.assertTrue(best_chunks[1].startswith("UM PODER"))
+
+    def test_connected_layout_prefers_human_balanced_lobe_shapes_for_reference_sample(self):
+        text_data = {
+            "translated": (
+                "PODE SER NADA MAIS DO QUE UM METODO DE CULTIVO INACABADO, "
+                "MAS SEUS EFEITOS SAO MAIS QUE SUFICIENTE. "
+                "ESSE PODER PERMITE SUPERAR SEUS PROPRIOS LIMITES EM UM INSTANTE."
+            ),
+            "bbox": [113, 1513, 705, 1767],
+            "balloon_bbox": [113, 1513, 705, 1767],
+            "balloon_subregions": [[113, 1513, 402, 1767], [402, 1513, 705, 1767]],
+            "connected_balloon_orientation": "left-right",
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+        image = Image.new("RGB", (800, 2600), color="white")
+        candidates = _build_connected_children_candidates(
+            text_data,
+            text_data["translated"],
+            text_data["balloon_subregions"],
+        )
+
+        best_children = None
+        best_resolved = None
+        best_score = float("-inf")
+        for candidate in candidates:
+            children = candidate["children"]
+            plans = [ensure_legible_plan(image, plan_text_layout(child)) for child in children]
+            sizes = _resolve_connected_target_sizes(children, plans)
+            resolved = []
+            final_plans = []
+            for child, plan, size in zip(children, plans, sizes):
+                fixed_plan = dict(plan)
+                fixed_plan["target_size"] = int(size)
+                fixed_plan["_font_search_cap"] = int(size)
+                fixed_plan["_font_search_floor"] = int(size)
+                resolved.append(_resolve_text_layout(child, fixed_plan))
+                final_plans.append(fixed_plan)
+            score = _score_connected_group_candidate(
+                resolved,
+                children,
+                final_plans,
+                semantic_bonus=float(candidate.get("semantic_bonus", 0.0)),
+            )
+            if score > best_score:
+                best_score = score
+                best_children = children
+                best_resolved = resolved
+
+        self.assertIsNotNone(best_children)
+        self.assertIsNotNone(best_resolved)
+        self.assertIn("SUFICIENTE.", best_children[0]["translated"])
+        self.assertTrue(best_children[1]["translated"].startswith("ESSE PODER"))
+        self.assertLessEqual(len(best_resolved[0]["lines"]), 5)
+        self.assertLessEqual(len(best_resolved[1]["lines"]), 4)
+        self.assertLessEqual(best_resolved[0]["font_size"], 25)
+        self.assertLessEqual(best_resolved[1]["font_size"], 25)
 
     def test_many_fragments_two_subregions_group_into_connected_children(self):
         """Quando varios fragmentos OCR pertencem claramente a cada lobo, agrupa por lobo."""

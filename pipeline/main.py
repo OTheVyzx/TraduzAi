@@ -17,7 +17,7 @@ from layout.balloon_layout import enrich_page_layout
 from ocr.contextual_reviewer import contextual_review_page
 from ocr.detector import run_ocr
 from translator.context import fetch_context, merge_context
-from translator.translate import translate_pages
+from translator.translate import list_supported_google_languages, translate_pages
 from typesetter.renderer import run_typesetting
 from vision_stack.runtime import warmup_visual_stack
 
@@ -102,6 +102,10 @@ def main():
 
         warmup_visual_stack(models_dir=models_dir, profile=profile)
         emit("complete", output_path="")
+        return
+
+    if sys.argv[1] == "--list-supported-languages":
+        print(json.dumps(list_supported_google_languages(), ensure_ascii=False), flush=True)
         return
 
     if sys.argv[1] == "--retypeset" and len(sys.argv) >= 4:
@@ -229,6 +233,15 @@ def main():
             expected_terms=corpus_expected_terms,
         )
         emit_ocr_page_progress(0.99, "Ajustando layout dos baloes")
+        page_result["_connected_balloon_reasoner"] = {
+            "provider": config.get("connected_balloon_reasoner", "ollama"),
+            "enabled": config.get("connected_balloon_reasoner_enabled", True),
+            "host": config.get("connected_balloon_ollama_host", config.get("ollama_host", "http://localhost:11434")),
+            "model": config.get("connected_balloon_ollama_model", "qwen2.5"),
+            "use_image": config.get("connected_balloon_ollama_use_image", True),
+            "timeout_sec": config.get("connected_balloon_ollama_timeout_sec", 120),
+            "temperature": config.get("connected_balloon_ollama_temperature", 0.1),
+        }
         page_result = enrich_page_layout(page_result)
         ocr_results.append(page_result)
         ocr_history.append(page_result)

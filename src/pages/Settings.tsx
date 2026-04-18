@@ -3,11 +3,16 @@ import {
   Cpu, Zap, HardDrive, Globe, Save, CheckCircle2,
   RefreshCw, AlertTriangle, Bot, Download, ExternalLink,
 } from "lucide-react";
+import { LanguageSelectField } from "../components/ui";
 import { useAppStore } from "../lib/stores/appStore";
 import {
   saveSettings, loadSettings, checkOllama, createTranslatorModel,
-  downloadModels, onModelsProgress, onModelsReady, checkModels,
+  downloadModels, onModelsProgress, onModelsReady, checkModels, loadSupportedLanguages,
 } from "../lib/tauri";
+import {
+  getLanguageOptions,
+  normalizeLanguageCodeForSelection,
+} from "../lib/languages";
 
 export function Settings() {
   const {
@@ -18,7 +23,9 @@ export function Settings() {
 
   const [ollamaModel, setOllamaModel] = useState("traduzai-translator");
   const [ollamaHost, setOllamaHost] = useState("http://localhost:11434");
+  const [defaultSourceLang, setDefaultSourceLang] = useState("en");
   const [defaultLang, setDefaultLang] = useState("pt-BR");
+  const [supportedLanguages, setSupportedLanguages] = useState(getLanguageOptions(null));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [creatingModel, setCreatingModel] = useState(false);
@@ -30,11 +37,20 @@ export function Settings() {
   const gpuDetecting = gpuName.toLowerCase().includes("verificando");
 
   useEffect(() => {
-    loadSettings().then((s) => {
-      setOllamaModel(s.ollama_model || "traduzai-translator");
-      setOllamaHost(s.ollama_host || "http://localhost:11434");
-      setDefaultLang(s.idioma_destino || "pt-BR");
-    });
+    Promise.all([loadSettings(), loadSupportedLanguages().catch(() => getLanguageOptions(null))]).then(
+      ([s, languages]) => {
+        const options = getLanguageOptions(languages);
+        setSupportedLanguages(options);
+        setOllamaModel(s.ollama_model || "traduzai-translator");
+        setOllamaHost(s.ollama_host || "http://localhost:11434");
+        setDefaultSourceLang(
+          normalizeLanguageCodeForSelection(s.idioma_origem || "en", options, "en")
+        );
+        setDefaultLang(
+          normalizeLanguageCodeForSelection(s.idioma_destino || "pt-BR", options, "pt")
+        );
+      }
+    );
 
     let unlistenProgress: (() => void) | null = null;
     let unlistenReady: (() => void) | null = null;
@@ -54,7 +70,7 @@ export function Settings() {
       unlistenProgress?.();
       unlistenReady?.();
     };
-  }, []);
+  }, [setModelsReady]);
 
   async function handleDownloadModels() {
     setDownloading(true);
@@ -101,6 +117,7 @@ export function Settings() {
       await saveSettings({
         ollama_model: ollamaModel,
         ollama_host: ollamaHost,
+        idioma_origem: defaultSourceLang,
         idioma_destino: defaultLang,
       });
       setSaved(true);
@@ -112,14 +129,11 @@ export function Settings() {
 
   return (
     <div className="p-8 max-w-2xl mx-auto">
-      <h2 className="text-xl font-bold mb-6">Configurações</h2>
+      <h2 className="text-xl font-bold mb-6">Configuracoes</h2>
 
-      {/* LLM Local — Ollama */}
       <section className="mb-8">
-        <h3 className="text-sm font-medium text-text-secondary mb-3">Tradução Local (Ollama)</h3>
+        <h3 className="text-sm font-medium text-text-secondary mb-3">Traducao local (Ollama)</h3>
         <div className="bg-bg-secondary border border-white/5 rounded-xl p-4 space-y-4">
-
-          {/* Status */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Bot
@@ -132,8 +146,8 @@ export function Settings() {
                 </p>
                 <p className="text-xs text-text-secondary">
                   {ollamaRunning
-                    ? `${ollamaModels.length} modelo(s) disponível(is)`
-                    : "Instale o Ollama para tradução gratuita"}
+                    ? `${ollamaModels.length} modelo(s) disponivel(is)`
+                    : "Instale o Ollama para traducao local gratuita"}
                 </p>
               </div>
             </div>
@@ -147,14 +161,13 @@ export function Settings() {
             </button>
           </div>
 
-          {/* Not installed */}
           {!ollamaRunning && (
             <div className="flex items-start gap-3 p-3 bg-status-warning/5 border border-status-warning/20 rounded-lg">
               <AlertTriangle size={16} className="text-status-warning mt-0.5 flex-shrink-0" />
               <div>
-                <p className="text-sm text-status-warning font-medium">Ollama não detectado</p>
+                <p className="text-sm text-status-warning font-medium">Ollama nao detectado</p>
                 <p className="text-xs text-text-secondary mt-1">
-                  Ollama é necessário para tradução local gratuita.
+                  Ollama e necessario para traducao local gratuita.
                   Baixe, instale e inicie o Ollama, depois clique em atualizar.
                 </p>
                 <a
@@ -170,10 +183,8 @@ export function Settings() {
             </div>
           )}
 
-          {/* Model setup */}
           {ollamaRunning && (
             <>
-              {/* traduzai-translator status */}
               <div className="flex items-center justify-between p-3 bg-bg-tertiary rounded-lg">
                 <div className="flex items-center gap-2">
                   {ollamaHasTranslator ? (
@@ -186,7 +197,7 @@ export function Settings() {
                     <p className="text-xs text-text-secondary">
                       {ollamaHasTranslator
                         ? "Modelo especializado instalado"
-                        : "Não instalado — recomendado para melhor qualidade"}
+                        : "Nao instalado - recomendado para melhor qualidade"}
                     </p>
                   </div>
                 </div>
@@ -205,16 +216,15 @@ export function Settings() {
                 )}
               </div>
 
-              {/* Confirmation preview */}
               {confirmCreate && !ollamaHasTranslator && (
                 <div className="p-3 bg-status-warning/5 border border-status-warning/20 rounded-lg space-y-2">
-                  <p className="text-xs text-status-warning font-medium">Isso abrirá um terminal PowerShell com:</p>
+                  <p className="text-xs text-status-warning font-medium">Isso abrira um terminal PowerShell com:</p>
                   <pre className="text-xs text-text-secondary bg-bg-primary rounded p-2 font-mono">
 {`ollama pull qwen2.5:3b
 ollama create traduzai-translator -f ...Modelfile`}
                   </pre>
                   <p className="text-xs text-text-secondary">
-                    Download ~1,9 GB. Após fechar o terminal, clique em <strong>Atualizar</strong> para detectar o modelo.
+                    Download ~1,9 GB. Apos fechar o terminal, clique em <strong>Atualizar</strong> para detectar o modelo.
                   </p>
                   <button
                     onClick={() => setConfirmCreate(false)}
@@ -231,7 +241,6 @@ ollama create traduzai-translator -f ...Modelfile`}
                 </pre>
               )}
 
-              {/* Model selector */}
               <div>
                 <label className="text-xs text-text-secondary block mb-1.5">
                   Modelo ativo
@@ -244,7 +253,7 @@ ollama create traduzai-translator -f ...Modelfile`}
                 >
                   {ollamaHasTranslator && (
                     <option value="traduzai-translator">
-                      traduzai-translator ⭐ (recomendado)
+                      traduzai-translator * (recomendado)
                     </option>
                   )}
                   {ollamaModels
@@ -255,10 +264,9 @@ ollama create traduzai-translator -f ...Modelfile`}
                 </select>
               </div>
 
-              {/* Ollama host */}
               <div>
                 <label className="text-xs text-text-secondary block mb-1.5">
-                  Endereço Ollama
+                  Endereco Ollama
                 </label>
                 <input
                   type="text"
@@ -273,7 +281,6 @@ ollama create traduzai-translator -f ...Modelfile`}
         </div>
       </section>
 
-      {/* System status */}
       <section className="mb-8">
         <h3 className="text-sm font-medium text-text-secondary mb-3">Sistema</h3>
         <div className="bg-bg-secondary border border-white/5 rounded-xl divide-y divide-white/5">
@@ -296,7 +303,7 @@ ollama create traduzai-translator -f ...Modelfile`}
                 <HardDrive size={16} className={modelsReady ? "text-status-success" : "text-status-info"} />
                 <div>
                   <p className="text-sm">Modelos OCR</p>
-                  <p className="text-xs text-text-secondary">EasyOCR + inpainting local (primeira execução pode baixar modelos)</p>
+                  <p className="text-xs text-text-secondary">EasyOCR + inpainting local (primeira execucao pode baixar modelos)</p>
                 </div>
               </div>
               {modelsReady ? (
@@ -324,8 +331,8 @@ ollama create traduzai-translator -f ...Modelfile`}
             <div className="flex items-center gap-3">
               <Cpu size={16} className="text-status-info" />
               <div>
-                <p className="text-sm">Créditos</p>
-                <p className="text-xs text-text-secondary">{credits} disponíveis</p>
+                <p className="text-sm">Creditos</p>
+                <p className="text-xs text-text-secondary">{credits} disponiveis</p>
               </div>
             </div>
             <button className="text-xs px-3 py-1 rounded bg-accent-purple/10 text-accent-purple hover:bg-accent-purple/20 transition-smooth">
@@ -335,24 +342,43 @@ ollama create traduzai-translator -f ...Modelfile`}
         </div>
       </section>
 
-      {/* Language + Save */}
       <section className="mb-8">
-        <h3 className="text-sm font-medium text-text-secondary mb-3">Idioma padrão</h3>
+        <h3 className="text-sm font-medium text-text-secondary mb-3">Idiomas padrao</h3>
         <div className="bg-bg-secondary border border-white/5 rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Globe size={14} className="text-text-secondary" />
-            <p className="text-sm">Idioma de destino</p>
+          <div className="flex items-start gap-3 mb-4">
+            <div className="rounded-xl bg-accent-purple/10 p-2 text-accent-purple">
+              <Globe size={16} />
+            </div>
+            <div>
+              <p className="text-sm text-text-primary">Origem e destino</p>
+              <p className="text-xs text-text-secondary mt-1">
+                Lista puxada direto do backend do Google Translate usado pelo app.
+              </p>
+            </div>
           </div>
-          <select
-            value={defaultLang}
-            onChange={(e) => setDefaultLang(e.target.value)}
-            className="w-full px-3 py-2 bg-bg-tertiary border border-white/5 rounded-lg text-sm
-              text-text-primary focus:outline-none focus:border-accent-purple/30 transition-smooth mb-4"
-          >
-            <option value="pt-BR">Português (Brasil)</option>
-            <option value="es">Español</option>
-            <option value="en">English</option>
-          </select>
+          <div className="grid grid-cols-1 gap-4 mb-4 md:grid-cols-2">
+            <LanguageSelectField
+              label="Idioma de origem"
+              value={defaultSourceLang}
+              languages={supportedLanguages}
+              fallbackCode="en"
+              sourceMode
+              helperText="Idiomas com OCR experimental ainda funcionam em melhor esforco."
+              onChange={setDefaultSourceLang}
+            />
+            <LanguageSelectField
+              label="Idioma de destino"
+              value={defaultLang}
+              languages={supportedLanguages}
+              fallbackCode="pt"
+              helperText="Esses valores viram o padrao para novos projetos."
+              onChange={setDefaultLang}
+            />
+          </div>
+
+          <p className="text-xs text-text-secondary mb-4">
+            Idiomas marcados como OCR experimental usam melhor esforco no reconhecimento.
+          </p>
 
           <button
             onClick={handleSave}
@@ -367,8 +393,8 @@ ollama create traduzai-translator -f ...Modelfile`}
 
       <section>
         <div className="text-center text-xs text-text-secondary/50 space-y-1">
-          <p>TraduzAi v0.1.0 — Custo de tradução: R$0,00</p>
-          <p>100% local — nenhum arquivo ou texto enviado a servidores</p>
+          <p>TraduzAi v0.1.0 - Custo de traducao: R$0,00</p>
+          <p>100% local - nenhum arquivo ou texto enviado a servidores</p>
         </div>
       </section>
     </div>

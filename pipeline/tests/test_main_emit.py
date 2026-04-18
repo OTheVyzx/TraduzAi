@@ -25,6 +25,16 @@ class MainEmitTests(unittest.TestCase):
         self.assertIn("Falha ao emitir evento JSON no stdout", log_output)
         self.assertEqual(log_output.count("Falha ao emitir evento JSON no stdout"), 1)
 
+    def test_main_lists_supported_languages_in_cli_mode(self) -> None:
+        stdout = io.StringIO()
+
+        with patch.object(main.sys, "argv", ["main.py", "--list-supported-languages"]):
+            with patch("main.list_supported_google_languages", return_value=[{"code": "en", "label": "English"}]):
+                with patch.object(main.sys, "stdout", stdout):
+                    main.main()
+
+        self.assertEqual(stdout.getvalue().strip(), '[{"code": "en", "label": "English"}]')
+
 
 if __name__ == "__main__":
     unittest.main()

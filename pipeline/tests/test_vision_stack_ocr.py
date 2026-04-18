@@ -6,10 +6,28 @@ from unittest.mock import patch
 import numpy as np
 import cv2
 
-from vision_stack.ocr import OCREngine
+from vision_stack.ocr import (
+    OCREngine,
+    normalize_easyocr_languages,
+    normalize_paddleocr_language,
+)
 
 
 class VisionStackOCRTests(unittest.TestCase):
+    def test_normalize_paddleocr_language_handles_regions_and_common_languages(self):
+        self.assertEqual(normalize_paddleocr_language("en-GB"), "en")
+        self.assertEqual(normalize_paddleocr_language("pt-BR"), "pt")
+        self.assertEqual(normalize_paddleocr_language("zh-TW"), "chinese_cht")
+        self.assertEqual(normalize_paddleocr_language("ja"), "japan")
+        self.assertEqual(normalize_paddleocr_language("ko"), "korean")
+        self.assertEqual(normalize_paddleocr_language("ru"), "ru")
+
+    def test_normalize_easyocr_languages_handles_regions_and_fallbacks(self):
+        self.assertEqual(normalize_easyocr_languages("en-GB"), ["en"])
+        self.assertEqual(normalize_easyocr_languages("pt-BR"), ["pt", "en"])
+        self.assertEqual(normalize_easyocr_languages("zh-TW"), ["ch_tra", "en"])
+        self.assertEqual(normalize_easyocr_languages("ru"), ["ru", "en"])
+
     def test_manga_ocr_falls_back_to_paddle_when_model_load_breaks(self):
         engine = OCREngine.__new__(OCREngine)
         engine.model_name = "manga-ocr"

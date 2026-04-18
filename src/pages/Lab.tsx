@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { readFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
@@ -14,6 +14,7 @@ import {
   FolderOpen,
   FolderSearch,
   GitBranch,
+  Share2,
   Pause,
   Play,
   RefreshCw,
@@ -42,6 +43,7 @@ import {
   onLabProposalPromoted,
   onLabReviewRequested,
   onLabReviewResult,
+  openLabPatchJsonDialog,
   onLabState,
   openFiles,
   pauseLab,
@@ -631,6 +633,60 @@ export function Lab() {
       setApplyResult(result);
       setApplyConfirm(false);
       if (result.applied) await refreshSnapshot();
+    });
+  }
+
+  async function handleExportPatchJson(proposalId: string, patch: LabPatchProposal) {
+    await runAction(`export:${proposalId}`, async () => {
+      const outputPath = await openLabPatchJsonDialog(proposalId);
+      if (!outputPath) return;
+
+      const proposal = snapshot?.proposals.find((item) => item.proposal_id === proposalId) ?? null;
+      const reviews = snapshot?.reviews.filter((review) => review.proposal_id === proposalId) ?? [];
+      const benchmark = snapshot?.benchmarks.find((entry) => entry.proposal_id === proposalId) ?? null;
+
+      const payload = {
+        schema_version: "traduzai_lab_patch_v1",
+        exported_at_iso: new Date().toISOString(),
+        exported_from: "TraduzAi Lab",
+        proposal_id: proposalId,
+        run_id: snapshot?.run_id ?? "",
+        intent:
+          "Pacote para enviar ao Codex ou Claude Code e pedir implementacao manual do patch.",
+        proposal_context: proposal
+          ? {
+              title: proposal.title,
+              summary: proposal.summary,
+              risk: proposal.risk,
+              touched_domains: proposal.touched_domains,
+              target_file: proposal.target_file ?? "",
+              target_anchor: proposal.target_anchor ?? "",
+              issue_type: proposal.issue_type ?? "",
+            }
+          : null,
+        review_context: reviews.map((review) => ({
+          reviewer_id: review.reviewer_id,
+          reviewer_label: review.reviewer_label,
+          verdict: review.verdict,
+          findings: review.findings,
+        })),
+        benchmark_context: benchmark
+          ? {
+              green: benchmark.green,
+              summary: benchmark.summary,
+              score_before: benchmark.score_before,
+              score_after: benchmark.score_after,
+              metrics: benchmark.metrics,
+            }
+          : null,
+        patch,
+        usage_hint:
+          "Cole este JSON no prompt e peca para aplicar patch_unified_diff no repositorio alvo, validando conflitos e testes.",
+      };
+
+      await writeTextFile(outputPath, JSON.stringify(payload, null, 2));
+      setPageError(null);
+      setLiveSignal(`Patch JSON exportado em ${outputPath}`);
     });
   }
 
@@ -1418,6 +1474,15 @@ export function Lab() {
                       >
                         {busyAction === `patch:${proposal.proposal_id}` ? "Gerando…" : "Gerar patch"}
                       </button>
+                      {proposal.patch_proposal && (
+                        <button
+                          onClick={() => handleExportPatchJson(proposal.proposal_id, proposal.patch_proposal!)}
+                          disabled={busyAction !== null}
+                          className="px-3 py-2 rounded-xl bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-xs font-medium hover:bg-accent-cyan/15 transition-smooth disabled:opacity-40"
+                        >
+                          {busyAction === `export:${proposal.proposal_id}` ? "Exportando…" : "Exportar JSON"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1695,15 +1760,25 @@ export function Lab() {
                     Dry-run — aplique manualmente via{" "}
                     <code className="text-accent-cyan">git apply</code> ou use o botão abaixo.
                   </p>
-                  {patchModal?.patch.patch_unified_diff && !patchModal.patch.error && (
+                  <div className="flex items-center gap-2">
                     <button
-                      onClick={() => setApplyConfirm(true)}
+                      onClick={() => handleExportPatchJson(patchModal.proposalId, patchModal.patch)}
                       disabled={busyAction !== null}
-                      className="shrink-0 px-3 py-1.5 rounded-xl bg-status-success/12 border border-status-success/20 text-status-success text-[11px] font-medium hover:bg-status-success/18 disabled:opacity-40 transition-smooth"
+                      className="shrink-0 px-3 py-1.5 rounded-xl bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-[11px] font-medium hover:bg-accent-cyan/15 disabled:opacity-40 transition-smooth inline-flex items-center gap-1.5"
                     >
-                      Aplicar patch ↗
+                      <Share2 size={13} />
+                      {busyAction === `export:${patchModal.proposalId}` ? "Exportando…" : "Exportar .json"}
                     </button>
-                  )}
+                    {patchModal?.patch.patch_unified_diff && !patchModal.patch.error && (
+                      <button
+                        onClick={() => setApplyConfirm(true)}
+                        disabled={busyAction !== null}
+                        className="shrink-0 px-3 py-1.5 rounded-xl bg-status-success/12 border border-status-success/20 text-status-success text-[11px] font-medium hover:bg-status-success/18 disabled:opacity-40 transition-smooth"
+                      >
+                        Aplicar patch ↗
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

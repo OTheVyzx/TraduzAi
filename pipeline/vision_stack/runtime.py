@@ -29,10 +29,20 @@ from ocr.postprocess import (
     looks_suspicious,
 )
 from ocr.semantic_reviewer import semantic_refine_text
+from vision_stack.ocr import normalize_paddleocr_language
 
 logger = logging.getLogger(__name__)
 
 _font_detector = None
+
+
+def _white_balloon_whitening_enabled() -> bool:
+    return os.getenv("MANGATL_DISABLE_WHITE_BALLOON_WHITENING", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _get_font_detector():
@@ -938,6 +948,8 @@ def _extract_koharu_balloon_masks(image_rgb: np.ndarray, text_mask: np.ndarray) 
 
 
 def _try_koharu_balloon_fill(image_rgb: np.ndarray, text_mask: np.ndarray) -> np.ndarray | None:
+    if not _white_balloon_whitening_enabled():
+        return None
     masks = _extract_koharu_balloon_masks(image_rgb, text_mask)
     if masks is None:
         return None
@@ -1398,6 +1410,8 @@ def _extract_white_balloon_mask_legacy(image_rgb: np.ndarray, bbox: list[int]) -
 
 
 def _apply_white_text_overlay(image_rgb: np.ndarray, bbox: list[int]) -> np.ndarray:
+    if not _white_balloon_whitening_enabled():
+        return image_rgb.copy()
     result = image_rgb.copy()
     height, width = result.shape[:2]
     x1, y1, x2, y2 = [int(v) for v in bbox]
@@ -1423,6 +1437,8 @@ def _apply_white_text_overlay(image_rgb: np.ndarray, bbox: list[int]) -> np.ndar
 
 
 def _apply_letter_white_boxes(image_rgb: np.ndarray, text_item: dict) -> np.ndarray:
+    if not _white_balloon_whitening_enabled():
+        return image_rgb.copy()
     result = image_rgb.copy()
     bbox = text_item.get("bbox") or [0, 0, 0, 0]
     text = str(text_item.get("text", "") or "")
@@ -1523,6 +1539,8 @@ def _build_rounded_rect_mask(height: int, width: int, radius: int) -> np.ndarray
 
 
 def _apply_white_balloon_fill(image_rgb: np.ndarray, bbox: list[int]) -> np.ndarray:
+    if not _white_balloon_whitening_enabled():
+        return image_rgb.copy()
     result = image_rgb.copy()
     balloon_mask = _extract_white_balloon_fill_mask(image_rgb, bbox)
     ellipse_mask = _build_balloon_ellipse_mask(result.shape, bbox)
@@ -2587,6 +2605,12 @@ def _apply_post_inpaint_cleanup(
         final,
         texts,
     )
+    if not _white_balloon_whitening_enabled():
+        return _apply_white_balloon_micro_artifact_cleanup(
+            original_rgb,
+            final,
+            texts,
+        )
     final = _apply_white_balloon_text_box_cleanup(
         original_rgb,
         final,
@@ -2829,6 +2853,11 @@ def _apply_inpainting_round(
         if debug is not None:
             return result
         if isinstance(result, dict):
+            return _apply_post_inpaint_cleanup(
+                image_np,
+                result["final_output"],
+                list(ocr_data.get("texts", [])),
+            )
             final = result["final_output"]
 
             # Restaurar bordas de balões texturizados — evita mancha branca do inpainter
@@ -2992,6 +3021,7 @@ def build_page_result(
     page_texts = []
     vision_blocks = []
     total_blocks = max(1, len(blocks))
+    normalized_source_lang = normalize_paddleocr_language(idioma_origem)
 
     _emit_stage_progress(progress_callback, "build_blocks", 0.74, "Montando blocos OCR")
 
@@ -3017,7 +3047,7 @@ def build_page_result(
 
         # Ignorar textos não-latinos apenas se a origem for inglês.
         # Se a origem for CJK, devemos manter o texto para tradução.
-        if idioma_origem == "en" and is_non_english(cleaned):
+        if normalized_source_lang == "en" and is_non_english(cleaned):
             continue
 
         tipo = classify_text_type(cleaned, bbox, width)
