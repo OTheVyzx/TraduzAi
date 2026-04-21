@@ -3,22 +3,24 @@ import json
 import shutil
 import os
 from pathlib import Path
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'
+)
 
 ROOT = Path("D:/TraduzAi")
 PIPELINE_DIR = ROOT / "pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
-# Use the project's venv if available to get better OCR/Inpaint, 
-# but if we are already in a python process, we just try to import.
-try:
-    from ocr.detector import run_ocr
-    from inpainter.lama import run_inpainting
-    from layout.balloon_layout import enrich_page_layout
-    from translator.translate import translate_pages
-    from typesetter.renderer import run_typesetting
-except ImportError:
-    print("[ERROR] Could not import pipeline modules. Make sure you are running with the correct python.")
-    sys.exit(1)
+# Os módulos abaixo estão em pipeline/ e são resolvidos via sys.path.insert acima.
+# O linter não consegue localizá-los estaticamente — os type: ignore são esperados.
+from ocr.detector import run_ocr  # type: ignore[import-untyped]
+from inpainter.lama import run_inpainting  # type: ignore[import-untyped]
+from layout.balloon_layout import enrich_page_layout  # type: ignore[import-untyped]
+from translator.translate import translate_pages  # type: ignore[import-untyped]
+from typesetter.renderer import run_typesetting  # type: ignore[import-untyped]
 
 import cv2
 import numpy as np
@@ -32,7 +34,7 @@ def draw_ocr_boxes(img_path, ocr_result, out_path):
     cv2.imwrite(str(out_path), img)
 
 def main():
-    img_path = ROOT / "debug_pipeline_test" / "debug_test.jpg"
+    img_path = Path("D:/traduzai_data/projects/aa66aa60-255f-406e-806b-169abecd5d49/originals/003.webp")
     out_dir = ROOT / "testdebug_output"
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -118,8 +120,8 @@ def main():
     # Save final result to easy to find location
     final_img = typeset_dir / img_path.name
     if final_img.exists():
-        shutil.copy2(final_img, ROOT / "resultado_final.jpg")
-        print(f"\n[+] SUCCESS! Final image saved as: D:\\TraduzAi\\resultado_final.jpg")
+        shutil.copy2(final_img, ROOT / "tst2.jpg")
+        print(f"\n[+] SUCCESS! Final image saved as: D:\\TraduzAi\\tst2.jpg")
     
     print(f"\n[+] Script completed. Intermediate steps in: {out_dir}")
 

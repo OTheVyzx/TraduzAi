@@ -5,13 +5,121 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from typesetter.renderer import SafeTextPathFont, _build_textpath_mask, build_render_blocks, render_text_block
+from typesetter.renderer import (
+    SafeTextPathFont,
+    _build_textpath_mask,
+    _category_font_bounds,
+    _normalize_render_text,
+    _resolve_text_layout,
+    build_render_blocks,
+    plan_text_layout,
+    render_text_block,
+)
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_render_text_block_anchors_to_text_pixel_bbox_instead_of_balloon_center(self):
+        img = Image.new("RGB", (420, 320), (255, 255, 255))
+        text_data = {
+            "translated": "ANCORA",
+            "bbox": [40, 40, 380, 260],
+            "source_bbox": [70, 84, 190, 128],
+            "text_pixel_bbox": [76, 90, 184, 122],
+            "balloon_bbox": [40, 40, 380, 260],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 28,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "left",
+                "sombra": False,
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        render_text_block(img, text_data)
+
+        arr = np.array(img)
+        ink = np.any(arr < 245, axis=2)
+        ys, xs = np.where(ink)
+        self.assertGreater(xs.size, 0)
+        ink_center_x = float(xs.mean())
+        ink_center_y = float(ys.mean())
+        anchor = text_data["text_pixel_bbox"]
+        anchor_center_x = (anchor[0] + anchor[2]) / 2.0
+        anchor_center_y = (anchor[1] + anchor[3]) / 2.0
+        balloon = text_data["balloon_bbox"]
+        balloon_center_x = (balloon[0] + balloon[2]) / 2.0
+        balloon_center_y = (balloon[1] + balloon[3]) / 2.0
+
+        self.assertLess(abs(ink_center_x - anchor_center_x), abs(ink_center_x - balloon_center_x))
+        self.assertLess(abs(ink_center_y - anchor_center_y), abs(ink_center_y - balloon_center_y))
+
+    def test_resolve_text_layout_clamps_font_size_for_white_balloon_bounds(self):
+        text_data = {
+            "translated": "TESTE",
+            "bbox": [40, 40, 360, 260],
+            "text_pixel_bbox": [120, 120, 188, 138],
+            "balloon_bbox": [40, 40, 360, 260],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 40,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        bounds = _category_font_bounds(text_data)
+        self.assertGreaterEqual(resolved["font_size"], bounds[0])
+        self.assertLessEqual(resolved["font_size"], bounds[1])
+
+    def test_resolve_text_layout_clamps_font_size_for_textured_balloon_bounds(self):
+        text_data = {
+            "translated": "TESTE",
+            "bbox": [40, 40, 360, 260],
+            "text_pixel_bbox": [120, 120, 184, 136],
+            "balloon_bbox": [40, 40, 360, 260],
+            "balloon_type": "textured",
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 40,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        bounds = _category_font_bounds(text_data)
+        self.assertGreaterEqual(resolved["font_size"], bounds[0])
+        self.assertLessEqual(resolved["font_size"], bounds[1])
+
+    def test_normalize_render_text_replaces_katakana_middle_dot(self):
+        self.assertEqual(_normalize_render_text("・・・・・"), ".....")
+
     def test_build_textpath_mask_renders_project_font(self):
         fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
-        font = SafeTextPathFont(fonts_dir / "CCDaveGibbonsLower W00 Regular.ttf", 28)
+        font = SafeTextPathFont(fonts_dir / "ComicNeue-Bold.ttf", 28)
 
         mask = _build_textpath_mask(font, "TEST 123?!", padding=2)
 
@@ -22,7 +130,7 @@ class TypesettingRendererTests(unittest.TestCase):
 
     def test_build_textpath_mask_preserves_glyph_holes(self):
         fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
-        font = SafeTextPathFont(fonts_dir / "CCDaveGibbonsLower W00 Regular.ttf", 64)
+        font = SafeTextPathFont(fonts_dir / "ComicNeue-Bold.ttf", 64)
 
         mask = _build_textpath_mask(font, "O", padding=0)
 
@@ -39,7 +147,7 @@ class TypesettingRendererTests(unittest.TestCase):
             "bbox": [40, 40, 280, 140],
             "tipo": "fala",
             "estilo": {
-                "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+                "fonte": "ComicNeue-Bold.ttf",
                 "tamanho": 28,
                 "cor": "#111111",
                 "contorno": "#FFFFFF",
@@ -56,6 +164,35 @@ class TypesettingRendererTests(unittest.TestCase):
         with patch("typesetter.renderer.ImageDraw.Draw", side_effect=AssertionError("nao deve usar PIL text")):
             render_text_block(img, text_data)
 
+        arr = np.array(img)
+        self.assertLess(int(arr.min()), 245)
+
+    def test_render_text_block_does_not_split_simple_balloon_only_because_subregions_exist(self):
+        img = Image.new("RGB", (420, 320), (255, 255, 255))
+        text_data = {
+            "translated": "CONHECI ALGUNS QUE USAM ESSE PODER.",
+            "bbox": [40, 60, 380, 220],
+            "balloon_bbox": [40, 60, 380, 220],
+            "balloon_subregions": [[40, 60, 210, 220], [210, 60, 380, 220]],
+            "layout_group_size": 1,
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 24,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+                "sombra": False,
+                "glow": False,
+                "cor_gradiente": [],
+            },
+        }
+
+        with patch("typesetter.renderer._render_connected_subregions") as connected_mock:
+            render_text_block(img, text_data)
+
+        connected_mock.assert_not_called()
         arr = np.array(img)
         self.assertLess(int(arr.min()), 245)
 
@@ -94,7 +231,7 @@ class TypesettingRendererTests(unittest.TestCase):
             "bbox": [40, 40, 320, 180],
             "tipo": "fala",
             "estilo": {
-                "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+                "fonte": "ComicNeue-Bold.ttf",
                 "tamanho": 48,
                 "cor": "#FFFFFF",
                 "contorno": "#222222",
@@ -128,7 +265,7 @@ class TypesettingRendererTests(unittest.TestCase):
             "bbox": [30, 40, 390, 220],
             "tipo": "fala",
             "estilo": {
-                "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+                "fonte": "ComicNeue-Bold.ttf",
                 "tamanho": 34,
                 "cor": "#111111",
                 "contorno": "#FFFFFF",
@@ -157,11 +294,90 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertTrue(tl)
         self.assertTrue(br)
 
+    def test_render_text_block_splits_single_text_connected_balloon(self):
+        img = Image.new("RGB", (500, 320), (255, 255, 255))
+        text_data = {
+            "translated": (
+                "MESMO SENDO UM METODO INCOMPLETO DE CIRCULACAO DE MANA, O EFEITO E MAIS DO QUE SUFICIENTE. "
+                "ESSE PODER PERMITE ULTRAPASSAR INSTANTANEAMENTE OS PROPRIOS LIMITES."
+            ),
+            "bbox": [20, 20, 480, 280],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 34,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+                "sombra": False,
+                "sombra_cor": "",
+                "sombra_offset": [0, 0],
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "balloon_bbox": [20, 20, 480, 280],
+            "balloon_subregions": [
+                [20, 20, 230, 280],
+                [250, 110, 480, 280],
+            ],
+            "connected_balloon_orientation": "diagonal",
+            "connected_detection_confidence": 0.95,
+            "connected_group_confidence": 0.92,
+            "connected_position_confidence": 0.94,
+            "subregion_confidence": 0.95,
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "layout_group_size": 1,
+        }
+
+        render_text_block(img, text_data)
+
+        arr = np.array(img)
+        left_has_text = np.any(arr[40:220, 20:240] < 200)
+        right_has_text = np.any(arr[120:280, 240:480] < 200)
+        self.assertTrue(left_has_text)
+        self.assertTrue(right_has_text)
+
+    def test_render_text_block_wraps_long_text_to_multiple_rows(self):
+        img = Image.new("RGB", (420, 260), (255, 255, 255))
+        text_data = {
+            "translated": "ESTE BLOCO DEVE CONTINUAR EM UMA LINHA SO",
+            "bbox": [30, 40, 390, 220],
+            "source_bbox": [48, 112, 332, 154],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 30,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+                "sombra": False,
+                "sombra_cor": "",
+                "sombra_offset": [0, 0],
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "balloon_bbox": [30, 40, 390, 220],
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        render_text_block(img, text_data)
+
+        arr = np.array(img)
+        row_activity = np.count_nonzero(np.any(arr < 240, axis=2), axis=1)
+        active_rows = np.where(row_activity > 0)[0]
+
+        self.assertGreater(active_rows.size, 0)
+        self.assertGreater(active_rows[-1] - active_rows[0], 24)
+
     def test_two_texts_with_subregions_no_double_render(self):
-        """2 textos no mesmo balão com subregions → cada texto vai para seu lobo, sem duplicação."""
+        """2 textos no mesmo balão com subregions → 1 bloco consolidado, sem duplicação visual."""
         subregions = [[30, 40, 200, 220], [220, 40, 400, 220]]
         base_style = {
-            "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+            "fonte": "ComicNeue-Bold.ttf",
             "tamanho": 24,
             "cor": "#111111",
             "contorno": "#FFFFFF",
@@ -199,7 +415,8 @@ class TypesettingRendererTests(unittest.TestCase):
         ]
 
         blocks = build_render_blocks(texts)
-        self.assertEqual(len(blocks), 2, "Deve gerar 2 blocos, um por lobo")
+        self.assertEqual(len(blocks), 1, "Deve consolidar em 1 bloco com connected_children")
+        self.assertEqual(len(blocks[0].get("connected_children", [])), 2)
 
         img = Image.new("RGB", (430, 260), (255, 255, 255))
         for block in blocks:
@@ -222,7 +439,7 @@ class TypesettingRendererTests(unittest.TestCase):
             "bbox": [20, 20, 480, 280],
             "tipo": "fala",
             "estilo": {
-                "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+                "fonte": "ComicNeue-Bold.ttf",
                 "tamanho": 40,
                 "cor": "#111111",
                 "contorno": "#FFFFFF",

@@ -19,7 +19,6 @@ import json
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from lab.coders.base import PatchProposal, build_local_patch_from_hint
@@ -37,6 +36,68 @@ CLAUDE_CLI_TIMEOUT = 300  # segundos — Claude Code nao tem limite de contexto 
 def _find_claude_cli() -> str | None:
     """Retorna o path do CLI `claude` ou None se nao encontrado."""
     return shutil.which("claude")
+
+
+def _resolve_claude_invocation(claude_path: str) -> list[str]:
+    """Resolve a melhor forma de invocar o Claude Code CLI.
+
+    No Windows, `npm install -g` gera um shim `.cmd` que executa via `cmd.exe`,
+    herdando o limite de 8191 chars para linha de comando. Passar o prompt como
+    argv quebra em prompts grandes (erro "Linha de comando muito longa").
+
+    Solucao: se o path apontar para um `.cmd`/`.bat`, procura o binario nativo
+    `claude.exe` empacotado em `node_modules/@anthropic-ai/claude-code/bin/` e
+    invoca ele direto — isso usa `CreateProcess` (limite ~32k chars) sem passar
+    por cmd.exe. Fallback: executar o `.cmd` como antes.
+    """
+    path = Path(claude_path)
+    suffix = path.suffix.lower()
+    if suffix not in {".cmd", ".bat"}:
+        return [claude_path]
+
+    candidate_dirs: list[Path] = [path.parent]
+    # Pergunta ao npm onde fica o root global.
+    try:
+        npm_root = subprocess.run(
+            ["npm", "root", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=True,
+        )
+        if npm_root.returncode == 0 and npm_root.stdout.strip():
+            candidate_dirs.append(Path(npm_root.stdout.strip()).parent)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    import os as _os
+    for env_key in ("APPDATA", "LOCALAPPDATA", "ProgramFiles"):
+        env_val = _os.environ.get(env_key)
+        if env_val:
+            candidate_dirs.append(Path(env_val) / "npm")
+            candidate_dirs.append(Path(env_val) / "nodejs")
+
+    seen: set[Path] = set()
+    for base in candidate_dirs:
+        try:
+            base_resolved = base.resolve()
+        except OSError:
+            continue
+        if base_resolved in seen or not base_resolved.exists():
+            continue
+        seen.add(base_resolved)
+        exe_candidate = (
+            base_resolved
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+            / "bin"
+            / "claude.exe"
+        )
+        if exe_candidate.exists():
+            return [str(exe_candidate)]
+
+    return [claude_path]
 
 
 def _build_claude_prompt(proposal: dict, file_content: str) -> str:
@@ -111,25 +172,24 @@ class ClaudeCodeCoder:
 
         full_prompt = _build_claude_prompt(proposal, file_content)
 
-        # Escreve prompt em arquivo temp para evitar limite de args no Windows
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as prompt_file:
-            prompt_file.write(full_prompt)
-            prompt_path = Path(prompt_file.name)
-
+        # Invoca direto via `node cli.js` quando disponivel, para evitar o shim
+        # `.cmd` do npm que herda o limite de 8191 chars do cmd.exe no Windows.
+        invocation = _resolve_claude_invocation(claude_path)
+        cli_args = invocation + [
+            "-p",
+            full_prompt,
+            "--output-format",
+            "json",
+            "--model",
+            self.model,
+            "--permission-mode",
+            "bypassPermissions",
+        ]
         try:
             result = subprocess.run(
-                [
-                    claude_path,
-                    "-p",
-                    full_prompt,
-                    "--output-format",
-                    "json",
-                    "--model",
-                    self.model,
-                ],
+                cli_args,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -162,11 +222,35 @@ class ClaudeCodeCoder:
                 dry_run=True,
                 error=f"Erro ao invocar Claude Code CLI: {exc}",
             )
-        finally:
-            prompt_path.unlink(missing_ok=True)
 
         if result.returncode != 0:
-            stderr_snippet = (result.stderr or "")[-500:]
+            import os as _os
+            stderr_snippet = (result.stderr or "")[:600].strip()
+            stdout_snippet = (result.stdout or "")[:600].strip()
+            # Se stdout parece JSON, tenta extrair campos relevantes (is_error, error, subtype).
+            parsed_hint = ""
+            if stdout_snippet.startswith("{"):
+                try:
+                    data = json.loads(result.stdout)
+                    if isinstance(data, dict):
+                        is_err = data.get("is_error")
+                        err_status = data.get("api_error_status")
+                        subtype = data.get("subtype")
+                        res_field = data.get("result", "")
+                        parsed_hint = (
+                            f"is_error={is_err} subtype={subtype} "
+                            f"api_status={err_status} result={str(res_field)[:200]}"
+                        )
+                except (ValueError, TypeError):
+                    pass
+            detail = parsed_hint or stderr_snippet or stdout_snippet or "(sem saida)"
+            invocation_label = Path(invocation[0]).name if invocation else "claude"
+            env_probe = (
+                f"USERPROFILE={_os.environ.get('USERPROFILE', '?')}, "
+                f"APPDATA={_os.environ.get('APPDATA', '?')[:50]}, "
+                f"HOME={_os.environ.get('HOME', '?')}"
+            )
+            detail = f"[via {invocation_label}, prompt={len(full_prompt)} chars, env: {env_probe}] {detail}"
             return PatchProposal(
                 proposal_id=proposal_id,
                 patch_unified_diff="",
@@ -177,7 +261,7 @@ class ClaudeCodeCoder:
                 model_used=self.model,
                 generated_at_iso=generated_at,
                 dry_run=True,
-                error=f"claude CLI retornou exit {result.returncode}: {stderr_snippet}",
+                error=f"claude CLI retornou exit {result.returncode}: {detail}",
             )
 
         # Tenta parsear saida JSON do Claude Code CLI

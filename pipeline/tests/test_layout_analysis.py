@@ -7,6 +7,7 @@ import numpy as np
 
 from layout.balloon_layout import (
     _analyze_connected_subregions,
+    _apply_geometric_fallback_subregions,
     _build_balloon_subregions_from_groups,
     _detect_connected_balloon_subregions_from_fill,
     _detect_lobes_via_distance_transform,
@@ -167,6 +168,25 @@ class LayoutAnalysisTests(unittest.TestCase):
         self.assertEqual(texts[0]["balloon_bbox"], texts[1]["balloon_bbox"])
         self.assertEqual(texts[0]["layout_shape"], "tall")
         self.assertEqual(texts[0]["layout_group_size"], 2)
+
+    def test_prefers_detected_bubble_region_for_single_dialogue(self):
+        page = {
+            "width": 800,
+            "height": 1200,
+            "_bubble_regions": [
+                {"bbox": [150, 150, 450, 390], "confidence": 0.97},
+                {"bbox": [520, 180, 720, 340], "confidence": 0.91},
+            ],
+            "texts": [
+                {"text": "Who are you?", "bbox": [220, 218, 382, 286], "tipo": "fala", "confidence": 0.93},
+            ],
+        }
+
+        enriched = enrich_page_layout(page)
+        text = enriched["texts"][0]
+
+        self.assertEqual(text["balloon_bbox"], [150, 150, 450, 390])
+        self.assertEqual(text["ocr_text_bbox"], [220, 218, 382, 286])
 
     def test_narration_prefers_wide_layout(self):
         page = {
@@ -468,6 +488,33 @@ class ConnectedBalloonDetectionTests(unittest.TestCase):
         for t in texts:
             self.assertFalse(t.get("balloon_subregions"), "Texto único não deve ter subregions")
 
+    def test_geometric_fallback_handles_koharu_loose_bbox_aspect_below_two(self):
+        """Regressão: bubble_bbox solto do koharu (aspect ~1.97) deve ativar Modo B.
+
+        Na app real, o koharu devolve uma bbox maior do que o balão real; se o
+        pipeline confia nela e a bbox tem aspect < 2.0, o Mode B antigo
+        (aspect >= 2.0) desligava o split e o balão conectado saía como um
+        bloco único sobrescrevendo os dois lobos.
+        """
+        # balloon [29,1455,789,1841]: bw=760, bh=386, aspect≈1.97
+        # min(bw,bh)=386 >= 180, max(bw,bh)=760 >= 450
+        balloon = [29, 1455, 789, 1841]
+        # single-text scenario (group_size==1), so Mode B is the path that must fire
+        group_text = {
+            "balloon_bbox": balloon,
+            "balloon_subregions": [],
+            "layout_group_size": 1,
+            "tipo": "fala",
+            "bbox": [113, 1514, 705, 1765],
+        }
+        from layout.balloon_layout import _apply_geometric_fallback_subregions
+        _apply_geometric_fallback_subregions([group_text])
+        self.assertEqual(
+            len(group_text.get("balloon_subregions", [])),
+            2,
+            "Mode B deveria emitir 2 subregions para balão com aspect ~1.97",
+        )
+
 
 class SubregionConfidenceTests(unittest.TestCase):
     def test_good_split_has_high_confidence(self):
@@ -556,6 +603,78 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
         texts = [[50, 200, 250, 600]]
         subs = _geometric_fallback_subregions(texts, balloon)
         self.assertEqual(len(subs), 2)
+
+    def test_geometric_fallback_accepts_aspect_1_75_with_min_dims_160_420(self):
+        """Balão 420×240 (aspect=1.75, min=160, max=420) + texto central → 2 subregions."""
+        # bbox [0, 0, 420, 240]: w=420, h=240 → aspect=1.75, min(w,h)=240≥160, max(w,h)=420≥420
+        text_entry = {
+            "text": "Texto de teste",
+            "bbox": [105, 60, 315, 180],  # centrado no balão
+            "tipo": "fala",
+            "confidence": 0.9,
+            "balloon_bbox": [0, 0, 420, 240],
+            "layout_group_size": 1,
+        }
+        texts = [text_entry]
+        _apply_geometric_fallback_subregions(texts)
+        subs = texts[0].get("balloon_subregions", [])
+        self.assertEqual(len(subs), 2, f"Esperado 2 subregions, obteve {len(subs)}: {subs}")
+
+    def test_text_pixel_gap_fallback_splits_tall_connected_balloon(self):
+        """Quando há um grande gap vertical entre text_pixel_bbox, devemos dividir top/bottom."""
+        texts = [
+            {
+                "text": "Parte superior",
+                "bbox": [80, 60, 220, 120],
+                "text_pixel_bbox": [92, 70, 208, 116],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [0, 0, 300, 600],
+                "layout_group_size": 2,
+            },
+            {
+                "text": "Parte inferior",
+                "bbox": [76, 360, 224, 424],
+                "text_pixel_bbox": [88, 372, 212, 418],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [0, 0, 300, 600],
+                "layout_group_size": 2,
+            },
+        ]
+
+        _apply_geometric_fallback_subregions(texts)
+
+        subs = texts[0].get("balloon_subregions", [])
+        self.assertEqual(len(subs), 2, f"Esperado 2 subregions, obteve {len(subs)}: {subs}")
+        ordered = sorted(subs, key=lambda item: (item[1], item[0]))
+        self.assertLess(ordered[0][3], ordered[1][1] + 40)
+
+    def test_fill_area_1500_still_accepted(self):
+        """Verifica no código-fonte que fill_area_min é 1500 (não 2500)."""
+        import inspect
+        import layout.balloon_layout as _mod
+        src = inspect.getsource(_mod._detect_connected_balloon_subregions_from_fill)
+        self.assertIn("fill_area < 1500", src, "Threshold deveria ser 1500, não 2500")
+        self.assertNotIn("fill_area < 2500", src, "Threshold antigo 2500 ainda presente")
+
+    def test_erosion_ratio_relaxed_to_20_percent(self):
+        """Verifica no código-fonte que o corte de erosão foi relaxado para 20%."""
+        import inspect
+        import layout.balloon_layout as _mod
+
+        src = inspect.getsource(_mod._detect_connected_balloon_subregions_from_fill)
+        self.assertIn("fill_area * 0.20", src, "Threshold de erosão deveria ser 20%")
+        self.assertNotIn("fill_area * 0.25", src, "Threshold antigo de 25% ainda presente")
+
+    def test_gap_threshold_relaxed_to_1_point_5_percent(self):
+        """Verifica no código-fonte que o gap mínimo foi relaxado para 1.5%."""
+        import inspect
+        import layout.balloon_layout as _mod
+
+        src = inspect.getsource(_mod._detect_connected_balloon_subregions_from_fill)
+        self.assertIn("0.015", src, "Threshold de gap deveria ser 1.5%")
+        self.assertNotIn("0.02", src, "Threshold antigo de gap 2% ainda presente")
 
     def test_enriched_text_has_subregion_confidence(self):
         """enrich_page_layout should attach subregion_confidence to texts."""

@@ -1,0 +1,1020 @@
+{
+  "versao": "2.0",
+  "app": "traduzai",
+  "obra": "",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "contexto": {
+    "aliases": [],
+    "faccoes": [],
+    "fontes_usadas": [],
+    "genero": [],
+    "memoria_lexical": {},
+    "personagens": [],
+    "relacoes": [],
+    "resumo_por_arco": [],
+    "sinopse": "",
+    "termos": []
+  },
+  "paginas": [
+    {
+      "numero": 1,
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "originals/006.webp",
+          "visible": true,
+          "locked": true
+        },
+        "mask": {
+          "key": "mask",
+          "path": "layers/mask/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "images/006.webp",
+          "visible": false,
+          "locked": true
+        },
+        "brush": {
+          "key": "brush",
+          "path": "layers/brush/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "translated/006.webp",
+          "visible": true,
+          "locked": true
+        }
+      },
+      "inpaint_blocks": [
+        {
+          "bbox": [
+            152,
+            1954,
+            484,
+            2140
+          ],
+          "confidence": 0.63818359375
+        },
+        {
+          "bbox": [
+            83,
+            4123,
+            523,
+            4324
+          ],
+          "confidence": 0.60693359375
+        },
+        {
+          "bbox": [
+            281,
+            5331,
+            626,
+            5527
+          ],
+          "confidence": 0.91650390625
+        },
+        {
+          "bbox": [
+            171,
+            6818,
+            489,
+            7043
+          ],
+          "confidence": 0.8740234375
+        },
+        {
+          "bbox": [
+            76,
+            7493,
+            450,
+            7748
+          ],
+          "confidence": 0.58740234375
+        },
+        {
+          "bbox": [
+            345,
+            7806,
+            621,
+            7914
+          ],
+          "confidence": 0.72900390625
+        }
+      ],
+      "text_layers": [
+        {
+          "id": "tl_001_001",
+          "kind": "text",
+          "source_bbox": [
+            152,
+            1954,
+            484,
+            2140
+          ],
+          "layout_bbox": [
+            152,
+            1954,
+            484,
+            2140
+          ],
+          "render_bbox": [
+            162,
+            1957,
+            474,
+            2136
+          ],
+          "bbox": [
+            152,
+            1954,
+            484,
+            2140
+          ],
+          "tipo": "fala",
+          "original": "ABOVE ALL, MASTERPERMITTED IT, SO SAYING IT WAS SOLDISINCORRECT.",
+          "translated": "ACIMA DE TUDO, O MESTRE PERMITIU, ENTÃO DIZER QUE FOI VENDIDO É INCORRETO.",
+          "text": "ABOVE ALL, MASTERPERMITTED IT, SO SAYING IT WAS SOLDISINCORRECT.",
+          "ocr_confidence": 0.638,
+          "style": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1E1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFC",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#E5E4E5",
+            "glow_px": 2,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1E1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFC",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#E5E4E5",
+            "glow_px": 2,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 0,
+          "render_preview_path": "layers/text-preview/001/tl_001_001.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            152,
+            1954,
+            484,
+            2140
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_002",
+          "kind": "text",
+          "source_bbox": [
+            83,
+            4123,
+            523,
+            4324
+          ],
+          "layout_bbox": [
+            83,
+            4123,
+            523,
+            4324
+          ],
+          "render_bbox": [
+            95,
+            4133,
+            512,
+            4316
+          ],
+          "bbox": [
+            83,
+            4123,
+            523,
+            4324
+          ],
+          "tipo": "fala",
+          "original": "THERE WAS NO PRINCIPLEIN THE HUNWON MIRROR ABOUT DRAWING DOWN THUNDER LIKE THAT!!",
+          "translated": "NÃO HAVIA NENHUM PRINCÍPIO NO ESPELHO HUNWON SOBRE ATRAIR TROVÕES DAQUELE JEITO!!",
+          "text": "THERE WAS NO PRINCIPLEIN THE HUNWON MIRROR ABOUT DRAWING DOWN THUNDER LIKE THAT!!",
+          "ocr_confidence": 0.607,
+          "style": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#161616",
+            "cor_gradiente": [],
+            "contorno": "#EBEBEB",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#DADADA",
+            "glow_px": 2,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#161616",
+            "cor_gradiente": [],
+            "contorno": "#EBEBEB",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#DADADA",
+            "glow_px": 2,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 1,
+          "render_preview_path": "layers/text-preview/001/tl_001_002.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            83,
+            4123,
+            523,
+            4324
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_003",
+          "kind": "text",
+          "source_bbox": [
+            281,
+            5331,
+            626,
+            5527
+          ],
+          "layout_bbox": [
+            281,
+            5331,
+            626,
+            5527
+          ],
+          "render_bbox": [
+            293,
+            5347,
+            614,
+            5511
+          ],
+          "bbox": [
+            281,
+            5331,
+            626,
+            5527
+          ],
+          "tipo": "fala",
+          "original": "I WATCHED THAT MARTIAL ART FOR JENTY YEARS-DO YOL THINK IWOULDN'T KNOW?!",
+          "translated": "EU ASSISTI ESSA ARTE MARCIAL POR VINTE ANOS - VOCÊ ACHA QUE EU NÃO SABERIA?!",
+          "text": "I WATCHED THAT MARTIAL ART FOR JENTY YEARS-DO YOL THINK IWOULDN'T KNOW?!",
+          "ocr_confidence": 0.917,
+          "style": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#161616",
+            "cor_gradiente": [],
+            "contorno": "#E7E7E7",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#161616",
+            "cor_gradiente": [],
+            "contorno": "#E7E7E7",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 2,
+          "render_preview_path": "layers/text-preview/001/tl_001_003.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            281,
+            5331,
+            626,
+            5527
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_004",
+          "kind": "text",
+          "source_bbox": [
+            171,
+            6818,
+            489,
+            7043
+          ],
+          "layout_bbox": [
+            171,
+            6818,
+            489,
+            7043
+          ],
+          "render_bbox": [
+            172,
+            6847,
+            488,
+            7014
+          ],
+          "bbox": [
+            171,
+            6818,
+            489,
+            7043
+          ],
+          "tipo": "fala",
+          "original": "I'M THE ONE WHO PRACTICED IT FOR TWENTY YEARS YETYOUCLAIM TO KNOW IT BETTER.",
+          "translated": "FUI EU QUE PRATIQUEI ISSO DURANTE VINTE ANOS, MAS VOCÊ AFIRMA CONHECÊ-LO MELHOR.",
+          "text": "I'M THE ONE WHO PRACTICED IT FOR TWENTY YEARS YETYOUCLAIM TO KNOW IT BETTER.",
+          "ocr_confidence": 0.874,
+          "style": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1E1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#E4E4E4",
+            "glow_px": 2,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              -2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1E1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#E4E4E4",
+            "glow_px": 2,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              -2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 3,
+          "render_preview_path": "layers/text-preview/001/tl_001_004.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            171,
+            6818,
+            489,
+            7043
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_005",
+          "kind": "text",
+          "source_bbox": [
+            76,
+            7493,
+            450,
+            7748
+          ],
+          "layout_bbox": [
+            76,
+            7493,
+            450,
+            7748
+          ],
+          "render_bbox": [
+            89,
+            7499,
+            438,
+            7744
+          ],
+          "bbox": [
+            76,
+            7493,
+            450,
+            7748
+          ],
+          "tipo": "fala",
+          "original": "BEFORE LEAVING WEREN'T YOU FOCUSING MORE ONTHEOTHER MARTIAL ARTS MASTER MIXEDIN RATHER THAN AONLADTZ",
+          "translated": "ANTES DE PARTIR, VOCÊ NÃO ESTAVA SE CONCENTRANDO MAIS NO OUTRO MESTRE DE ARTES MARCIAIS MISTURADO EM VEZ DE EM AONLADTZ?",
+          "text": "BEFORE LEAVING WEREN'T YOU FOCUSING MORE ONTHEOTHER MARTIAL ARTS MASTER MIXEDIN RATHER THAN AONLADTZ",
+          "ocr_confidence": 0.587,
+          "style": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1C1C1C",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": true,
+            "glow_cor": "#E7E7E7",
+            "glow_px": 3,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1C1C1C",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": true,
+            "glow_cor": "#E7E7E7",
+            "glow_px": 3,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 4,
+          "render_preview_path": "layers/text-preview/001/tl_001_005.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            76,
+            7493,
+            450,
+            7748
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_006",
+          "kind": "text",
+          "source_bbox": [
+            345,
+            7806,
+            621,
+            7914
+          ],
+          "layout_bbox": [
+            345,
+            7806,
+            621,
+            7914
+          ],
+          "render_bbox": null,
+          "bbox": [
+            345,
+            7806,
+            621,
+            7914
+          ],
+          "tipo": "narracao",
+          "original": "AND NOW EVEN THOSESEEMMIXED USOAAETUINIG",
+          "translated": "E AGORA ATÉ AQUELES PARECEM MISTURADOS, USOAAETUINIG",
+          "text": "AND NOW EVEN THOSESEEMMIXED USOAAETUINIG",
+          "ocr_confidence": 0.729,
+          "style": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#1B1B1B",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#1B1B1B",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "visible": true,
+          "locked": false,
+          "order": 5,
+          "render_preview_path": "layers/text-preview/001/tl_001_006.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            345,
+            7806,
+            621,
+            7914
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        }
+      ],
+      "arquivo_original": "originals/006.webp",
+      "arquivo_traduzido": "translated/006.webp",
+      "textos": [
+        {
+          "id": "tl_001_001",
+          "bbox": [
+            152,
+            1954,
+            484,
+            2140
+          ],
+          "tipo": "fala",
+          "original": "ABOVE ALL, MASTERPERMITTED IT, SO SAYING IT WAS SOLDISINCORRECT.",
+          "traduzido": "ACIMA DE TUDO, O MESTRE PERMITIU, ENTÃO DIZER QUE FOI VENDIDO É INCORRETO.",
+          "confianca_ocr": 0.638,
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1E1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFC",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#E5E4E5",
+            "glow_px": 2,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_002",
+          "bbox": [
+            83,
+            4123,
+            523,
+            4324
+          ],
+          "tipo": "fala",
+          "original": "THERE WAS NO PRINCIPLEIN THE HUNWON MIRROR ABOUT DRAWING DOWN THUNDER LIKE THAT!!",
+          "traduzido": "NÃO HAVIA NENHUM PRINCÍPIO NO ESPELHO HUNWON SOBRE ATRAIR TROVÕES DAQUELE JEITO!!",
+          "confianca_ocr": 0.607,
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#161616",
+            "cor_gradiente": [],
+            "contorno": "#EBEBEB",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#DADADA",
+            "glow_px": 2,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_003",
+          "bbox": [
+            281,
+            5331,
+            626,
+            5527
+          ],
+          "tipo": "fala",
+          "original": "I WATCHED THAT MARTIAL ART FOR JENTY YEARS-DO YOL THINK IWOULDN'T KNOW?!",
+          "traduzido": "EU ASSISTI ESSA ARTE MARCIAL POR VINTE ANOS - VOCÊ ACHA QUE EU NÃO SABERIA?!",
+          "confianca_ocr": 0.917,
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#161616",
+            "cor_gradiente": [],
+            "contorno": "#E7E7E7",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_004",
+          "bbox": [
+            171,
+            6818,
+            489,
+            7043
+          ],
+          "tipo": "fala",
+          "original": "I'M THE ONE WHO PRACTICED IT FOR TWENTY YEARS YETYOUCLAIM TO KNOW IT BETTER.",
+          "traduzido": "FUI EU QUE PRATIQUEI ISSO DURANTE VINTE ANOS, MAS VOCÊ AFIRMA CONHECÊ-LO MELHOR.",
+          "confianca_ocr": 0.874,
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1E1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#E4E4E4",
+            "glow_px": 2,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              -2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_005",
+          "bbox": [
+            76,
+            7493,
+            450,
+            7748
+          ],
+          "tipo": "fala",
+          "original": "BEFORE LEAVING WEREN'T YOU FOCUSING MORE ONTHEOTHER MARTIAL ARTS MASTER MIXEDIN RATHER THAN AONLADTZ",
+          "traduzido": "ANTES DE PARTIR, VOCÊ NÃO ESTAVA SE CONCENTRANDO MAIS NO OUTRO MESTRE DE ARTES MARCIAIS MISTURADO EM VEZ DE EM AONLADTZ?",
+          "confianca_ocr": 0.587,
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1C1C1C",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": true,
+            "glow_cor": "#E7E7E7",
+            "glow_px": 3,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_006",
+          "bbox": [
+            345,
+            7806,
+            621,
+            7914
+          ],
+          "tipo": "narracao",
+          "original": "AND NOW EVEN THOSESEEMMIXED USOAAETUINIG",
+          "traduzido": "E AGORA ATÉ AQUELES PARECEM MISTURADOS, USOAAETUINIG",
+          "confianca_ocr": 0.729,
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#1B1B1B",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          }
+        }
+      ]
+    }
+  ],
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 6,
+    "tempo_processamento_seg": 57.3,
+    "data_criacao": "2026-04-21T02:35:25Z"
+  }
+}

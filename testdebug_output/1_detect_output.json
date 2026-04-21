@@ -1,28 +1,28 @@
 {
-  "image": "D:\\TraduzAi\\debug_pipeline_test\\debug_test.jpg",
-  "width": 800,
-  "height": 2600,
+  "image": "D:\\traduzai_data\\projects\\aa66aa60-255f-406e-806b-169abecd5d49\\originals\\003.webp",
+  "width": 720,
+  "height": 10017,
   "texts": [
     {
-      "text": "you MEAN THE",
+      "text": "THE LIGHTNNG OF thE HUNWON MRROR WAS SIMILAR TO THE SHMADHI TRuE fie OF DRAGON-SUBDUING PHLM; YET DIFFERENT;",
       "bbox": [
-        302,
-        1098,
-        523,
-        1136
+        181,
+        927,
+        543,
+        1131
       ],
-      "confidence": 0.877,
+      "confidence": 0.891,
       "tipo": "fala",
       "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 26,
-        "cor": "#FEFEFE",
+        "fonte": "DK Full Blast.otf",
+        "tamanho": 48,
+        "cor": "#202020",
         "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
+        "contorno": "",
+        "contorno_px": 0,
         "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
+        "glow_cor": "#DEDEDE",
+        "glow_px": 3,
         "sombra": false,
         "sombra_cor": "",
         "sombra_offset": [
@@ -30,62 +30,73 @@
           0
         ],
         "bold": true,
-        "italico": true,
+        "italico": false,
         "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
+        "alinhamento": "center"
       },
-      "ocr_source": "primary-inverted",
+      "ocr_source": "vision-easyocr",
       "ocr_reviewed": false,
       "ocr_profile": "max",
       "ocr_semantic_reviewed": false,
       "ocr_mode": "easyocr",
       "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        181,
+        950,
+        543,
+        1131
+      ],
+      "balloon_type": "white",
       "balloon_bbox": [
-        190,
-        1078,
-        632,
-        1259
+        181,
+        927,
+        543,
+        1131
       ],
       "layout_shape": "wide",
       "layout_align": "center",
-      "layout_group_size": 4,
-      "balloon_subregions": [
-        [
-          190,
-          1078,
-          632,
-          1167
-        ],
-        [
-          190,
-          1167,
-          632,
-          1259
-        ]
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        181,
+        927,
+        543,
+        1131
       ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
       "subregion_confidence": 0.0
     },
     {
-      "text": "POWER HE FORCED",
+      "text": "Both DIVIDE INNER ENERGY INTO YIN AND YANG,",
       "bbox": [
-        267,
-        1130,
-        568,
-        1170
+        73,
+        2316,
+        386,
+        2424
       ],
-      "confidence": 0.879,
-      "tipo": "fala",
+      "confidence": 0.676,
+      "tipo": "narracao",
       "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 28,
-        "cor": "#FEFEFE",
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#1C1C1C",
         "cor_gradiente": [],
-        "contorno": "#FEFEFE",
+        "contorno": "#FDFDFD",
         "contorno_px": 4,
         "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
+        "glow_cor": "#E8E8E8",
+        "glow_px": 3,
         "sombra": false,
         "sombra_cor": "",
         "sombra_offset": [
@@ -98,57 +109,69 @@
         "alinhamento": "center",
         "force_upper": true
       },
-      "ocr_source": "fallback-threshold",
-      "ocr_reviewed": true,
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
       "ocr_profile": "max",
       "ocr_semantic_reviewed": false,
       "ocr_mode": "easyocr",
       "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        79,
+        2333,
+        374,
+        2422
+      ],
+      "balloon_type": "white",
       "balloon_bbox": [
-        190,
-        1078,
-        632,
-        1259
+        73,
+        2316,
+        386,
+        2424
       ],
       "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 4,
-      "balloon_subregions": [
-        [
-          190,
-          1078,
-          632,
-          1167
-        ],
-        [
-          190,
-          1167,
-          632,
-          1259
-        ]
+      "layout_align": "top",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        73,
+        2316,
+        386,
+        2424
       ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
       "subregion_confidence": 0.0
     },
     {
-      "text": "Qut THROUGH A DEAL",
+      "text": "BuT NLIKE DRAGON-SUBDUINE PALM; IHErE the TIO FORCES SPIN FIERCELY",
       "bbox": [
-        242,
-        1164,
-        580,
-        1203
+        198,
+        2952,
+        494,
+        3152
       ],
-      "confidence": 0.589,
+      "confidence": 0.903,
       "tipo": "fala",
       "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 27,
-        "cor": "#FEFEFE",
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#1C1C1C",
         "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
+        "contorno": "",
+        "contorno_px": 0,
+        "glow": false,
+        "glow_cor": "",
+        "glow_px": 0,
         "sombra": false,
         "sombra_cor": "",
         "sombra_offset": [
@@ -161,57 +184,69 @@
         "alinhamento": "center",
         "force_upper": true
       },
-      "ocr_source": "primary-inverted",
-      "ocr_reviewed": true,
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
       "ocr_profile": "max",
-      "ocr_semantic_reviewed": true,
+      "ocr_semantic_reviewed": false,
       "ocr_mode": "easyocr",
       "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        205,
+        2961,
+        485,
+        3152
+      ],
+      "balloon_type": "textured",
       "balloon_bbox": [
-        190,
-        1078,
-        632,
-        1259
+        51,
+        2921,
+        546,
+        3310
       ],
-      "layout_shape": "wide",
+      "layout_shape": "square",
       "layout_align": "center",
-      "layout_group_size": 4,
-      "balloon_subregions": [
-        [
-          190,
-          1078,
-          632,
-          1167
-        ],
-        [
-          190,
-          1167,
-          632,
-          1259
-        ]
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        198,
+        2952,
+        494,
+        3152
       ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
       "subregion_confidence": 0.0
     },
     {
-      "text": "WITH 'THEM'",
+      "text": "THIS HUNWON THUNDER; At THE MOMENT THE INNER ENERGY REACHES A CERTHIN POINT,",
       "bbox": [
-        315,
-        1196,
-        505,
-        1238
+        179,
+        5082,
+        548,
+        5248
       ],
-      "confidence": 0.933,
+      "confidence": 0.751,
       "tipo": "fala",
       "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 29,
-        "cor": "#FFFFFE",
+        "fonte": "DK Full Blast.otf",
+        "tamanho": 48,
+        "cor": "#1D1E1E",
         "cor_gradiente": [],
-        "contorno": "#FEFEFE",
+        "contorno": "#FBFCFD",
         "contorno_px": 4,
         "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
+        "glow_cor": "#DFE1E1",
+        "glow_px": 3,
         "sombra": false,
         "sombra_cor": "",
         "sombra_offset": [
@@ -221,191 +256,79 @@
         "bold": true,
         "italico": false,
         "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
+        "alinhamento": "center"
       },
-      "ocr_source": "primary",
+      "ocr_source": "vision-easyocr",
       "ocr_reviewed": false,
       "ocr_profile": "max",
       "ocr_semantic_reviewed": false,
       "ocr_mode": "easyocr",
       "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        181,
+        5104,
+        536,
+        5243
+      ],
+      "balloon_type": "white",
       "balloon_bbox": [
-        190,
-        1078,
-        632,
-        1259
+        179,
+        5082,
+        548,
+        5248
       ],
       "layout_shape": "wide",
       "layout_align": "center",
-      "layout_group_size": 4,
-      "balloon_subregions": [
-        [
-          190,
-          1078,
-          632,
-          1167
-        ],
-        [
-          190,
-          1167,
-          632,
-          1259
-        ]
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        179,
+        5082,
+        548,
+        5248
       ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
       "subregion_confidence": 0.0
     },
     {
-      "text": "IT MAY BE NOTHING",
+      "text": "STOPS ALL MOHEMEHT AND TRANSFORMS IHTO A SINGLE BOLT OF LIGHTHNG ThaT UNLEASHES EXPLOSHIE POIER:",
       "bbox": [
-        168,
-        1514,
-        433,
-        1548
+        73,
+        6769,
+        631,
+        7092
       ],
-      "confidence": 0.856,
+      "confidence": 0.937,
       "tipo": "fala",
       "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 23,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#E8E8E8",
+        "cor_gradiente": [
+          "#CBCBCB",
+          "#9A9B9C"
+        ],
+        "contorno": "#000203",
         "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
-        "sombra": false,
-        "sombra_cor": "",
+        "glow": false,
+        "glow_cor": "",
+        "glow_px": 0,
+        "sombra": true,
+        "sombra_cor": "#000000",
         "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "fallback-upscale",
-      "ocr_reviewed": true,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": false,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "MORE THAN A HALF-FINISHED",
-      "bbox": [
-        110,
-        1542,
-        492,
-        1579
-      ],
-      "confidence": 0.953,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 25,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "primary",
-      "ocr_reviewed": false,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": false,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "CULTIVATION METHOD, But",
-      "bbox": [
-        118,
-        1573,
-        484,
-        1612
-      ],
-      "confidence": 0.835,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 27,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#F6F6F6",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#F6F6F6",
-        "glow_px": 4,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
+          2,
+          2
         ],
         "bold": true,
         "italico": false,
@@ -413,461 +336,185 @@
         "alinhamento": "center",
         "force_upper": true
       },
-      "ocr_source": "primary-inverted",
-      "ocr_reviewed": false,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": true,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "It's Effects ARE MORE",
-      "bbox": [
-        140,
-        1604,
-        472,
-        1638
-      ],
-      "confidence": 0.825,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 23,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "primary",
-      "ocr_reviewed": false,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": true,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "THAN Enough",
-      "bbox": [
-        202,
-        1634,
-        398,
-        1668
-      ],
-      "confidence": 0.684,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 23,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 6,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "fallback-threshold",
-      "ocr_reviewed": true,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": true,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "A POWER THAT Let's you",
-      "bbox": [
-        330,
-        1676,
-        683,
-        1713
-      ],
-      "confidence": 0.761,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 25,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 4,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "primary-inverted",
-      "ocr_reviewed": false,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": true,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "Sukpass youk OWN Limits",
-      "bbox": [
-        314,
-        1708,
-        695,
-        1741
-      ],
-      "confidence": 0.58,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 23,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 6,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "fallback-upscale",
-      "ocr_reviewed": true,
-      "ocr_profile": "max",
-      "ocr_semantic_reviewed": true,
-      "ocr_mode": "easyocr",
-      "skip_processing": false,
-      "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
-      ],
-      "layout_shape": "wide",
-      "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
-      ],
-      "subregion_confidence": 0.0
-    },
-    {
-      "text": "IN AN INSTANT",
-      "bbox": [
-        408,
-        1738,
-        602,
-        1772
-      ],
-      "confidence": 0.977,
-      "tipo": "fala",
-      "estilo": {
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
-        "tamanho": 23,
-        "cor": "#FEFEFE",
-        "cor_gradiente": [],
-        "contorno": "#FEFEFE",
-        "contorno_px": 4,
-        "glow": true,
-        "glow_cor": "#FEFEFE",
-        "glow_px": 5,
-        "sombra": false,
-        "sombra_cor": "",
-        "sombra_offset": [
-          0,
-          0
-        ],
-        "bold": true,
-        "italico": true,
-        "rotacao": 0,
-        "alinhamento": "center",
-        "force_upper": true
-      },
-      "ocr_source": "primary",
+      "ocr_source": "vision-easyocr",
       "ocr_reviewed": false,
       "ocr_profile": "max",
       "ocr_semantic_reviewed": false,
       "ocr_mode": "easyocr",
       "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        89,
+        6796,
+        626,
+        7069
+      ],
+      "balloon_type": "textured",
       "balloon_bbox": [
-        56,
-        1495,
-        753,
-        1791
+        73,
+        6769,
+        631,
+        7092
       ],
       "layout_shape": "wide",
       "layout_align": "center",
-      "layout_group_size": 8,
-      "balloon_subregions": [
-        [
-          56,
-          1495,
-          402,
-          1643
-        ],
-        [
-          402,
-          1643,
-          753,
-          1791
-        ]
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        73,
+        6769,
+        631,
+        7092
       ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "ONGE That FORGE IS Released,",
+      "bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "confidence": 0.801,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#141414",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#E6E6E6",
+        "glow_px": 3,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        171,
+        9793,
+        547,
+        9965
+      ],
+      "balloon_type": "textured",
+      "balloon_bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
       "subregion_confidence": 0.0
     }
   ],
   "_vision_blocks": [
     {
       "bbox": [
-        302,
-        1098,
-        523,
-        1136
+        181,
+        927,
+        543,
+        1131
       ],
-      "confidence": 0.877
+      "mask": null,
+      "confidence": 0.890625
     },
     {
       "bbox": [
-        267,
-        1130,
-        568,
-        1170
+        73,
+        2316,
+        386,
+        2424
       ],
-      "confidence": 0.879
+      "mask": null,
+      "confidence": 0.67626953125
     },
     {
       "bbox": [
-        242,
-        1164,
-        580,
-        1203
+        198,
+        2952,
+        494,
+        3152
       ],
-      "confidence": 0.589
+      "mask": null,
+      "confidence": 0.9033203125
     },
     {
       "bbox": [
-        315,
-        1196,
-        505,
-        1238
+        179,
+        5082,
+        548,
+        5248
       ],
-      "confidence": 0.933
+      "mask": null,
+      "confidence": 0.7509765625
     },
     {
       "bbox": [
-        168,
-        1514,
-        433,
-        1548
+        73,
+        6769,
+        631,
+        7092
       ],
-      "confidence": 0.856
+      "mask": null,
+      "confidence": 0.93701171875
     },
     {
       "bbox": [
-        110,
-        1542,
-        492,
-        1579
+        161,
+        9772,
+        553,
+        9968
       ],
-      "confidence": 0.953
-    },
-    {
-      "bbox": [
-        118,
-        1573,
-        484,
-        1612
-      ],
-      "confidence": 0.835
-    },
-    {
-      "bbox": [
-        140,
-        1604,
-        472,
-        1638
-      ],
-      "confidence": 0.825
-    },
-    {
-      "bbox": [
-        202,
-        1634,
-        398,
-        1668
-      ],
-      "confidence": 0.684
-    },
-    {
-      "bbox": [
-        330,
-        1676,
-        683,
-        1713
-      ],
-      "confidence": 0.761
-    },
-    {
-      "bbox": [
-        314,
-        1708,
-        695,
-        1741
-      ],
-      "confidence": 0.58
-    },
-    {
-      "bbox": [
-        408,
-        1738,
-        602,
-        1772
-      ],
-      "confidence": 0.977
+      "mask": null,
+      "confidence": 0.80078125
     }
   ]
 }

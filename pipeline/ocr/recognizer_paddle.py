@@ -34,8 +34,6 @@ def get_paddle_reader(use_gpu: bool = False):
         _paddle_reader = PaddleOCR(
             use_angle_cls=False,
             lang="en",
-            use_gpu=use_gpu,
-            show_log=False,
         )
         logger.info("PaddleOCR pronto.")
     return _paddle_reader
@@ -67,6 +65,6 @@ def normalize_paddle_results(raw_results) -> list[dict]:
 
 
 def run_paddle_primary_recognition(image_bgr, use_gpu: bool = False) -> list[dict]:
-    reader = get_paddle_reader(use_gpu=use_gpu)
+    reader = get_paddle_reader()
     raw_results = reader.ocr(image_bgr, det=True, rec=True, cls=False)
     return normalize_paddle_results(raw_results)

@@ -188,7 +188,7 @@ def run_ocr(
                 region = img_rgb[y1:y2, x1:x2]
                 detected_font = fd.detect(region)
                 estilo["fonte"] = detected_font
-                if detected_font == "CCDaveGibbonsLower W00 Regular.ttf":
+                if detected_font == "ComicNeue-Bold.ttf":
                     estilo["force_upper"] = True
         texts.append(
             {

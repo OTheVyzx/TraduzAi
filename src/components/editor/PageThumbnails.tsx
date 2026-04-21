@@ -110,16 +110,18 @@ export function PageThumbnails() {
           {project.paginas.map((page, index) => {
             const thumbPath =
               viewMode === "translated"
-                ? page.arquivo_traduzido || page.arquivo_original
-                : page.arquivo_original;
+                ? page.image_layers?.rendered?.path || page.arquivo_traduzido || page.arquivo_original
+                : viewMode === "inpainted"
+                  ? page.image_layers?.inpaint?.path || page.arquivo_original
+                  : page.image_layers?.base?.path || page.arquivo_original;
             return (
               <Thumbnail
                 key={`${page.numero}-${thumbPath}`}
                 numero={page.numero}
                 path={thumbPath}
-                blocks={page.textos.length}
+                blocks={(page.text_layers ?? page.textos).length}
                 isActive={index === currentPageIndex}
-                onClick={() => setCurrentPage(index)}
+                onClick={() => void setCurrentPage(index)}
               />
             );
           })}

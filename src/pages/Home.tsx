@@ -1,4 +1,31 @@
+import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+
+function useDynamicStyle<T extends HTMLElement>(styleObj: Record<string, string | number>, deps: any[]) {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    if (ref.current) {
+      for (const [key, value] of Object.entries(styleObj)) {
+        if (value === undefined || value === null) {
+          ref.current.style.removeProperty(key);
+        } else {
+          ref.current.style.setProperty(key, String(value));
+        }
+      }
+    }
+  }, deps);
+  return ref;
+}
+
+function ProgressBar({ progress }: { progress: number }) {
+  const ref = useDynamicStyle<HTMLDivElement>({ "--progress": `${progress}%` }, [progress]);
+  return (
+    <div
+      ref={ref}
+      className="h-full bg-gradient-to-r from-brand to-accent-cyan rounded-pill transition-all duration-320 dynamic-progress"
+    />
+  );
+}
 import {
   Plus,
   FolderOpen,
@@ -20,7 +47,6 @@ import {
   openProjectDialog,
   validateImport,
 } from "../lib/tauri";
-import { useState } from "react";
 import { Card, Badge } from "../components/ui";
 
 export function Home() {
@@ -61,20 +87,24 @@ export function Home() {
         memoria_lexical: raw.contexto?.memoria_lexical || {},
         fontes_usadas: raw.contexto?.fontes_usadas || [],
       },
-      paginas: (raw.paginas ?? []).map((page) => ({
-        ...page,
-        arquivo_original: `${outputDir}/${page.arquivo_original}`.replace(/\\/g, "/"),
-        arquivo_traduzido: `${outputDir}/${page.arquivo_traduzido}`.replace(/\\/g, "/"),
-        inpaint_blocks: page.inpaint_blocks ?? [],
-      })),
+      paginas: raw.paginas ?? [],
       status: "done" as const,
       source_path: outputDir,
       output_path: outputDir,
       totalPages: raw.paginas?.length ?? 0,
+      mode: "auto" as const,
     };
   }
 
   async function handleNewTranslation() {
+    await startProject("auto");
+  }
+
+  async function handleManualTranslation() {
+    await startProject("manual");
+  }
+
+  async function startProject(mode: "auto" | "manual") {
     setLoading(true);
     try {
       const path = await openFiles();
@@ -110,6 +140,7 @@ export function Home() {
         status: "setup",
         source_path: path,
         totalPages: validation.pages,
+        mode,
       });
       navigate("/setup");
     } catch (err) {
@@ -135,6 +166,7 @@ export function Home() {
         const settings = await loadSettings();
         setProject({
           id: crypto.randomUUID(),
+          mode: "auto" as const,
           obra: "",
           capitulo: 1,
           idioma_origem: settings.idioma_origem || "en",
@@ -166,6 +198,7 @@ export function Home() {
       const settings = await loadSettings();
       setProject({
         id: crypto.randomUUID(),
+        mode: "auto" as const,
         obra: "",
         capitulo: 1,
         idioma_origem: settings.idioma_origem || "en",
@@ -259,10 +292,7 @@ export function Home() {
                   : "Limite semanal atingido — compre créditos para continuar"}
               </p>
               <div className="h-1.5 bg-white/5 rounded-pill overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-brand to-accent-cyan rounded-pill transition-all duration-320"
-                  style={{ width: `${progressPercent}%` }}
-                />
+                <ProgressBar progress={progressPercent} />
               </div>
               {credits > 0 && (
                 <p className="text-xs text-text-secondary mt-3">
@@ -281,8 +311,8 @@ export function Home() {
           </div>
         </Card>
 
-        {/* Primary action */}
-        <section className="mb-8">
+        {/* Primary actions */}
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
           <button
             onClick={handleNewTranslation}
             disabled={loading}
@@ -301,12 +331,39 @@ export function Home() {
               <div className="flex-1 min-w-0">
                 <p className="text-lg font-semibold text-white">Novo capítulo</p>
                 <p className="text-sm text-white/70 mt-0.5">
-                  Importe um CBZ, ZIP ou pasta com imagens
+                  Automático: OCR + Tradução IA
                 </p>
               </div>
               <ArrowRight
                 size={20}
                 className="text-white/70 group-hover:text-white group-hover:translate-x-1 transition-all duration-240"
+              />
+            </div>
+          </button>
+
+          <button
+            onClick={handleManualTranslation}
+            disabled={loading}
+            className="group relative w-full overflow-hidden rounded-xl p-6 text-left
+              bg-bg-secondary border border-white/10 hover:border-accent-purple/40 hover:bg-white/[0.02]
+              transition-all duration-240 ease-out-expo
+              disabled:opacity-50 disabled:cursor-not-allowed
+              focus-visible:ring-2 focus-visible:ring-accent-purple/30 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-primary"
+          >
+            <div className="relative flex items-center gap-5">
+              <div className="w-12 h-12 rounded-lg bg-accent-purple/10 flex items-center justify-center shrink-0
+                group-hover:scale-105 transition-transform duration-240 border border-accent-purple/20">
+                <Plus size={24} className="text-accent-purple" strokeWidth={2.5} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-lg font-semibold text-text-primary">Tradução Manual</p>
+                <p className="text-sm text-text-secondary mt-0.5">
+                  Apenas extração: Controle total
+                </p>
+              </div>
+              <ArrowRight
+                size={20}
+                className="text-text-muted group-hover:text-text-primary group-hover:translate-x-1 transition-all duration-240"
               />
             </div>
           </button>

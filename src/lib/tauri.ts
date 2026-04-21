@@ -2,19 +2,156 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ContextSourceRef,
+  ImageLayer,
+  ImageLayerKey,
   PageData,
   PipelineProgress,
   ProjectContext,
+  TextEntry,
   SystemProfile,
 } from "./stores/appStore";
 
 export interface ProjectJson {
+  versao?: string;
+  app?: string;
   obra?: string;
   capitulo?: number;
   idioma_origem?: string;
   idioma_destino?: string;
   contexto?: Partial<ProjectContext>;
   paginas?: PageData[];
+  estatisticas?: {
+    total_paginas?: number;
+    total_textos?: number;
+    tempo_processamento_seg?: number;
+    data_criacao?: string;
+  };
+}
+
+export interface EditorPagePayload {
+  project_file: string;
+  project_dir: string;
+  page_index: number;
+  total_pages: number;
+  page: PageData;
+}
+
+const IMAGE_LAYER_KEYS: ImageLayerKey[] = ["base", "mask", "inpaint", "brush", "rendered"];
+
+function isAbsolutePath(path: string) {
+  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/");
+}
+
+function projectBaseDir(baseDir: string) {
+  return baseDir.replace(/\\/g, "/").replace(/\/project\.json$/i, "");
+}
+
+function joinProjectPath(baseDir: string, maybeRelative?: string | null) {
+  if (!maybeRelative) return null;
+  if (isAbsolutePath(maybeRelative)) return maybeRelative.replace(/\\/g, "/");
+  return `${projectBaseDir(baseDir)}/${maybeRelative}`.replace(/\\/g, "/");
+}
+
+function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry {
+  const style = (layer.style ?? layer.estilo ?? {
+    fonte: "CCDaveGibbonsLower W00 Regular.ttf",
+    tamanho: 28,
+    cor: "#FFFFFF",
+    cor_gradiente: [],
+    contorno: "#000000",
+    contorno_px: 2,
+    glow: false,
+    glow_cor: "",
+    glow_px: 0,
+    sombra: false,
+    sombra_cor: "",
+    sombra_offset: [0, 0],
+    bold: false,
+    italico: false,
+    rotacao: 0,
+    alinhamento: "center",
+    force_upper: false,
+  }) as TextEntry["estilo"];
+  const bbox =
+    layer.layout_bbox ?? layer.bbox ?? layer.source_bbox ?? layer.balloon_bbox ?? [0, 0, 32, 32];
+
+  return {
+    ...layer,
+    kind: "text",
+    id: layer.id ?? crypto.randomUUID(),
+    bbox,
+    source_bbox: layer.source_bbox ?? layer.bbox ?? bbox,
+    layout_bbox: layer.layout_bbox ?? bbox,
+    render_bbox: layer.render_bbox ?? null,
+    tipo: (layer.tipo ?? "fala") as TextEntry["tipo"],
+    original: layer.original ?? "",
+    traduzido: layer.traduzido ?? layer.translated ?? "",
+    translated: layer.translated ?? layer.traduzido ?? "",
+    confianca_ocr: layer.confianca_ocr ?? layer.ocr_confidence ?? 0,
+    ocr_confidence: layer.ocr_confidence ?? layer.confianca_ocr ?? 0,
+    estilo: style,
+    style,
+    visible: layer.visible ?? true,
+    locked: layer.locked ?? false,
+    order: layer.order ?? 0,
+    render_preview_path: joinProjectPath(baseDir, layer.render_preview_path ?? null),
+    detector: layer.detector ?? null,
+    line_polygons: layer.line_polygons ?? null,
+    source_direction: layer.source_direction ?? null,
+    rendered_direction: layer.rendered_direction ?? null,
+    source_language: layer.source_language ?? null,
+    rotation_deg: layer.rotation_deg ?? 0,
+    detected_font_size_px: layer.detected_font_size_px ?? null,
+    balloon_bbox: layer.balloon_bbox ?? bbox,
+    balloon_subregions: layer.balloon_subregions ?? [],
+    layout_group_size: layer.layout_group_size ?? 1,
+  };
+}
+
+export function hydratePageData(page: Partial<PageData>, baseDir: string): PageData {
+  const imageLayers = Object.fromEntries(
+    IMAGE_LAYER_KEYS.map((key) => {
+      const layer = page.image_layers?.[key];
+      const fallbackPath =
+        key === "base"
+          ? page.arquivo_original
+          : key === "rendered"
+            ? page.arquivo_traduzido
+            : layer?.path ?? null;
+      return [
+        key,
+        {
+          key,
+          path: joinProjectPath(baseDir, layer?.path ?? fallbackPath ?? null),
+          visible: layer?.visible ?? (key === "base" || key === "rendered"),
+          locked: layer?.locked ?? (key === "base" || key === "rendered"),
+        } satisfies ImageLayer,
+      ];
+    }),
+  ) as Partial<Record<ImageLayerKey, ImageLayer>>;
+
+  const rawLayers = (page.text_layers?.length ? page.text_layers : page.textos) ?? [];
+  const textLayers = rawLayers.map((layer) => hydrateTextLayer(layer, baseDir));
+
+  return {
+    ...page,
+    numero: page.numero ?? 1,
+    arquivo_original:
+      imageLayers.base?.path ?? joinProjectPath(baseDir, page.arquivo_original) ?? "",
+    arquivo_traduzido:
+      imageLayers.rendered?.path ?? joinProjectPath(baseDir, page.arquivo_traduzido) ?? "",
+    image_layers: imageLayers,
+    inpaint_blocks: page.inpaint_blocks ?? [],
+    text_layers: [...textLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+    textos: [...textLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+  };
+}
+
+export function hydrateProjectJson(raw: ProjectJson, projectDir: string): ProjectJson {
+  return {
+    ...raw,
+    paginas: (raw.paginas ?? []).map((page) => hydratePageData(page, projectDir)),
+  };
 }
 
 export interface WorkSearchCandidate {
@@ -298,11 +435,87 @@ export async function validateImport(path: string): Promise<{
 }
 
 export async function loadProjectJson(path: string): Promise<ProjectJson> {
-  return invoke("load_project_json", { path });
+  const project = await invoke<ProjectJson>("load_project_json", { path });
+  return hydrateProjectJson(project, path);
 }
 
 export async function saveProjectJson(config: { project_path: string; project_json: any }): Promise<void> {
   return invoke("save_project_json", { config });
+}
+
+export async function loadEditorPage(config: {
+  project_path: string;
+  page_index: number;
+}): Promise<EditorPagePayload> {
+  const payload = await invoke<EditorPagePayload>("load_editor_page", { config });
+  return {
+    ...payload,
+    page: hydratePageData(payload.page, payload.project_dir),
+  };
+}
+
+export async function createEditorTextLayer(config: {
+  project_path: string;
+  page_index: number;
+  layout_bbox: [number, number, number, number];
+}): Promise<TextEntry> {
+  const layer = await invoke<Partial<TextEntry>>("create_text_layer", { config });
+  return hydrateTextLayer(layer, config.project_path);
+}
+
+export async function patchEditorTextLayer(config: {
+  project_path: string;
+  page_index: number;
+  layer_id: string;
+  patch: Record<string, unknown>;
+}): Promise<TextEntry> {
+  const layer = await invoke<Partial<TextEntry>>("patch_text_layer", { config });
+  return hydrateTextLayer(layer, config.project_path);
+}
+
+export async function deleteEditorTextLayer(config: {
+  project_path: string;
+  page_index: number;
+  layer_id: string;
+}): Promise<void> {
+  return invoke("delete_text_layer", { config });
+}
+
+export async function setEditorLayerVisibility(config: {
+  project_path: string;
+  page_index: number;
+  layer_kind: "image" | "text";
+  layer_key?: string | null;
+  layer_id?: string | null;
+  visible: boolean;
+}): Promise<void> {
+  return invoke("set_layer_visibility", { config });
+}
+
+export async function updateMaskRegion(config: {
+  project_path: string;
+  page_index: number;
+  width: number;
+  height: number;
+  brush_size: number;
+  clear?: boolean;
+  erase?: boolean;
+  strokes: [number, number][][];
+}): Promise<string> {
+  return invoke("update_mask_region", { config });
+}
+
+export async function updateBrushRegion(config: {
+  project_path: string;
+  page_index: number;
+  width: number;
+  height: number;
+  brush_size: number;
+  clear?: boolean;
+  erase?: boolean;
+  strokes: [number, number][][];
+}): Promise<string> {
+  return invoke("update_brush_region", { config });
 }
 
 // Context lookup
@@ -355,6 +568,15 @@ export async function retypesetPage(config: { project_path: string; page_index: 
 
 export async function reinpaintPage(config: { project_path: string; page_index: number }): Promise<string> {
   return invoke("reinpaint_page", { config });
+}
+
+export async function processBlock(config: {
+  project_path: string;
+  page_index: number;
+  block_id: string;
+  mode: "ocr" | "translate";
+}): Promise<string> {
+  return invoke("process_block", { config });
 }
 
 export async function cancelPipeline(): Promise<void> {
@@ -536,14 +758,25 @@ export async function onLabProposalPromoted(
 // Export
 export async function exportProject(config: {
   project_path: string;
-  format: "zip_full" | "jpg_only" | "cbz";
+  format: "zip_full" | "jpg_only" | "cbz" | "psd";
   output_path: string;
 }): Promise<{ path: string }> {
   return invoke("export_project", { config });
 }
 
-export async function openExportDialog(format: "zip_full" | "jpg_only" | "cbz"): Promise<string | null> {
+export async function openExportDialog(format: "zip_full" | "jpg_only" | "cbz" | "psd"): Promise<string | null> {
   return invoke("save_file_dialog", { format });
+}
+
+export async function openLogSaveDialog(suggestedName?: string): Promise<string | null> {
+  return invoke("save_file_dialog", {
+    format: "log",
+    suggestedName: suggestedName ?? null,
+  });
+}
+
+export async function exportTextFile(outputPath: string, content: string): Promise<string> {
+  return invoke("export_text_file", { outputPath, content });
 }
 
 export async function openLabPatchJsonDialog(proposalId: string): Promise<string | null> {
@@ -551,6 +784,10 @@ export async function openLabPatchJsonDialog(proposalId: string): Promise<string
     format: "lab_patch_json",
     suggestedName: `lab-patch-${proposalId}.json`,
   });
+}
+
+export async function exportLabPatchJson(outputPath: string, content: string): Promise<string> {
+  return invoke("export_lab_patch_json", { outputPath, content });
 }
 
 // Credits

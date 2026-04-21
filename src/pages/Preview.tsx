@@ -7,17 +7,20 @@ import {
   Eye,
   EyeOff,
   ChevronLeft,
+  FileText,
 } from "lucide-react";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAppStore } from "../lib/stores/appStore";
-import { exportProject, openExportDialog } from "../lib/tauri";
+import { exportProject, openExportDialog, openLogSaveDialog, exportTextFile } from "../lib/tauri";
+import { createPsdFromLayers } from "../lib/psd";
+import { writeFile } from "@tauri-apps/plugin-fs";
 
 export function Preview() {
   const navigate = useNavigate();
   const { project } = useAppStore();
   const [currentPage, setCurrentPage] = useState(0);
   const [showOriginal, setShowOriginal] = useState(false);
-  const [exportFormat, setExportFormat] = useState<"zip_full" | "jpg_only" | "cbz">("zip_full");
+  const [exportFormat, setExportFormat] = useState<"zip_full" | "jpg_only" | "cbz" | "psd">("zip_full");
   const [exporting, setExporting] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
@@ -80,11 +83,34 @@ export function Preview() {
       const outputPath = await openExportDialog(exportFormat);
       if (!outputPath) return;
 
-      await exportProject({
-        project_path: project.output_path ?? project.source_path,
-        format: exportFormat,
-        output_path: outputPath,
-      });
+      if (exportFormat === "psd") {
+        // Lógica de exportação PSD por página (mais robusta)
+        for (let i = 0; i < project.paginas.length; i++) {
+          const pg = project.paginas[i];
+          const inpaintPath = pg.arquivo_traduzido.replace("/translated/", "/images/");
+          
+          // Criar canvas de texto fictício para agora (v0.50 Alpha)
+          // Em v0.51 faremos a renderização real do canvas de texto aqui
+          const dummyCanvas = document.createElement('canvas');
+          dummyCanvas.width = 100; dummyCanvas.height = 100; 
+
+          const psdData = await createPsdFromLayers(
+            pg.arquivo_original,
+            inpaintPath,
+            dummyCanvas, // Futuro: Canvas com os textos renderizados
+            100, 100     // Futuro: Dimensões reais da página
+          );
+
+          const fileName = pg.arquivo_original.split(/[/\\]/).pop()?.replace(/\.\w+$/, ".psd") || `pg-${pg.numero}.psd`;
+          await writeFile(`${outputPath}/${fileName}`, psdData);
+        }
+      } else {
+        await exportProject({
+          project_path: project.output_path ?? project.source_path,
+          format: exportFormat,
+          output_path: outputPath,
+        });
+      }
 
       alert("Exportação concluída!");
     } catch (err) {
@@ -95,6 +121,24 @@ export function Preview() {
     }
   }
 
+  async function handleExportLog() {
+    if (!project || !project.output_path) return;
+    try {
+      const logPath = `${project.output_path}/pipeline.log`.replace(/\\/g, "/");
+      const contents = await readFile(logPath);
+      const text = new TextDecoder().decode(contents);
+      
+      const savePath = await openLogSaveDialog(`log-${project.obra}-${project.capitulo}.log`);
+      if (!savePath) return;
+
+      await exportTextFile(savePath, text);
+      alert("Log exportado com sucesso!");
+    } catch (err) {
+      console.error("Erro ao exportar log:", err);
+      alert("O arquivo de log ainda não foi gerado ou não pôde ser lido.");
+    }
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* Top bar */}
@@ -102,6 +146,7 @@ export function Preview() {
         <div className="flex items-center gap-3">
           <button
             onClick={() => navigate("/")}
+            title="Voltar para o início"
             className="p-1.5 text-text-secondary hover:text-text-primary transition-smooth"
           >
             <ChevronLeft size={18} />
@@ -179,6 +224,7 @@ export function Preview() {
                   { value: "zip_full", label: "ZIP completo", desc: "Originais + traduzidas + project.json" },
                   { value: "jpg_only", label: "Somente traduzidas", desc: "Apenas as imagens traduzidas" },
                   { value: "cbz", label: "CBZ", desc: "Formato de leitor de mangá" },
+                  { value: "psd", label: "Photoshop (PSD)", desc: "Camadas separadas: Original, Inpaint, Texto" },
                 ] as const
               ).map((opt) => (
                 <button
@@ -196,14 +242,26 @@ export function Preview() {
               ))}
             </div>
 
-            <button
-              onClick={handleExport}
-              disabled={exporting}
-              className="w-full py-2.5 bg-accent-purple hover:bg-accent-purple-dark text-white
-                text-sm font-medium rounded-lg transition-smooth disabled:opacity-50"
-            >
-              {exporting ? "Exportando..." : "Salvar arquivo"}
-            </button>
+            <div className="pt-2 space-y-2">
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className="w-full py-2.5 bg-accent-purple hover:bg-accent-purple-dark text-white
+                  text-sm font-medium rounded-lg transition-smooth disabled:opacity-50"
+              >
+                {exporting ? "Exportando..." : "Salvar arquivo"}
+              </button>
+
+              <button
+                onClick={handleExportLog}
+                className="w-full py-2 flex items-center justify-center gap-2 bg-bg-tertiary 
+                  hover:bg-white/5 text-text-secondary hover:text-text-primary text-xs font-medium 
+                  rounded-lg border border-white/5 transition-smooth"
+              >
+                <FileText size={14} />
+                Exportar Log do Pipeline
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -213,6 +271,7 @@ export function Preview() {
         <button
           onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
           disabled={currentPage === 0}
+          title="Página anterior"
           className="p-2 rounded-lg bg-bg-tertiary text-text-secondary hover:text-text-primary
             transition-smooth disabled:opacity-30"
         >
@@ -226,6 +285,7 @@ export function Preview() {
         <button
           onClick={() => setCurrentPage(Math.min(totalPages - 1, currentPage + 1))}
           disabled={currentPage >= totalPages - 1}
+          title="Próxima página"
           className="p-2 rounded-lg bg-bg-tertiary text-text-secondary hover:text-text-primary
             transition-smooth disabled:opacity-30"
         >

@@ -215,6 +215,9 @@ class TextDetector:
         os.environ["MKL_NUM_THREADS"] = "1"
         try:
             from paddleocr import PaddleOCR
+            import paddle.base.libpaddle as libpaddle
+            if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
+                libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
         except Exception as exc:
             logger.warning("PaddleOCR indisponivel para deteccao; seguindo com fallback local: %s", exc)
             return False
@@ -223,8 +226,6 @@ class TextDetector:
         self._model = PaddleOCR(
             use_angle_cls=False,
             lang="en",
-            use_gpu=use_gpu,
-            show_log=False,
         )
         self._backend = "paddle-det"
         logger.info("Detector carregado via paddle-det (gpu=%s)", use_gpu)
@@ -237,7 +238,10 @@ class TextDetector:
             return False
 
         try:
-            checkpoint = torch.load(str(self._model_path), map_location="cpu")
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=FutureWarning)
+                checkpoint = torch.load(str(self._model_path), map_location="cpu", weights_only=False)
             blk_det = checkpoint.get("blk_det") if isinstance(checkpoint, dict) else None
             if not isinstance(blk_det, dict):
                 return False
@@ -438,7 +442,10 @@ class TextDetector:
         return self._dedupe_blocks(blocks)
 
     def _detect_comic_text_native(self, img_rgb: np.ndarray, conf_threshold: float = 0.5) -> list[TextBlock]:
-        input_size = int(getattr(self, "_ctd_input_size", 1024))
+        orig_h, orig_w = img_rgb.shape[:2]
+        target_size = self._get_inference_size(orig_h, orig_w)
+        input_size = max(target_size)
+        
         letterbox = self._ctd_letterbox
         nms = self._ctd_nms
         img_in, ratio, (dw, dh) = letterbox(img_rgb, new_shape=(input_size, input_size), auto=False, stride=64)
@@ -584,7 +591,11 @@ class TextDetector:
         return inter / max(1.0, area_a + area_b - inter)
 
     def _get_inference_size(self, h: int, w: int) -> tuple[int, int]:
+        # Para strips verticais, aumentamos o limite para manter detalhes dos balões
         max_size = 1024
+        if h > w * 2: # Strip vertical
+            max_size = 2048 if h < 4000 else 3072
+        
         scale = min(max_size / max(h, w), 1.0)
         new_h = int(h * scale / 32) * 32
         new_w = int(w * scale / 32) * 32

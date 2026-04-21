@@ -6,14 +6,22 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import urllib.request
 
 import cv2
 import numpy as np
 
-from inpainter.mask_builder import build_mask_regions
-from translator.translate import OLLAMA_HOST, _check_ollama, _pick_ollama_model
+logger = logging.getLogger(__name__)
+
+try:
+    from inpainter.mask_builder import build_mask_regions # type: ignore
+    from translator.translate import OLLAMA_HOST, _check_ollama, _pick_ollama_model # type: ignore
+except ImportError:
+    # Fallback para o analisador não reclamar de falta de pasta pai no IDE
+    from ..inpainter.mask_builder import build_mask_regions  # type: ignore
+    from ..translator.translate import OLLAMA_HOST, _check_ollama, _pick_ollama_model  # type: ignore
 
 
 def enrich_page_layout(page_result: dict) -> dict:
@@ -25,6 +33,7 @@ def enrich_page_layout(page_result: dict) -> dict:
 
     regions = build_mask_regions(texts=texts, image_shape=(height, width, 3))
     page_image = _load_page_image(page_result)
+    bubble_regions = _normalize_bubble_regions(page_result)
     reasoner_settings = _resolve_connected_reasoner_settings(page_result)
     enriched_texts = []
     subregion_cache: dict[tuple, list[list[int]]] = {}
@@ -35,11 +44,20 @@ def enrich_page_layout(page_result: dict) -> dict:
         shared_group_size = len(region["texts"]) if region else 1
         use_region_bbox = bool(region) and use_shared_layout and shared_group_size > 1
         inferred_bbox = region["bbox"] if use_region_bbox else text.get("bbox", [0, 0, 0, 0])
-        balloon_bbox = (
-            refine_balloon_bbox_from_image(page_image, inferred_bbox, text.get("tipo", "fala"))
-            if page_image is not None
-            else inferred_bbox
-        )
+        bubble_bbox = _select_bubble_region_for_bbox(inferred_bbox, bubble_regions)
+        refined_bbox = None
+        if page_image is not None:
+            refined_bbox = refine_balloon_bbox_from_image(
+                page_image, inferred_bbox, text.get("tipo", "fala")
+            )
+        if refined_bbox is not None and list(refined_bbox) != list(inferred_bbox):
+            balloon_bbox = refined_bbox
+        elif bubble_bbox is not None:
+            balloon_bbox = bubble_bbox
+        elif refined_bbox is not None:
+            balloon_bbox = refined_bbox
+        else:
+            balloon_bbox = inferred_bbox
         layout_shape = classify_layout_shape(
             balloon_bbox,
             text.get("tipo", "fala"),
@@ -64,12 +82,19 @@ def enrich_page_layout(page_result: dict) -> dict:
             str(text.get("tipo", "fala")),
         )
         if subregion_key not in subregion_cache:
-            subregion_cache[subregion_key] = _detect_connected_balloon_subregions(
-                page_image,
-                inferred_bbox,
-                balloon_bbox,
-                text.get("tipo", "fala"),
-            )
+            # TRAVA ANTI-BURACO: Se o balão for uma narração ou muito retangular, 
+            # não tentamos detectar lobos separados (evita o problema da imagem 3).
+            is_narration = text.get("tipo", "fala") == "narracao" or layout_shape in ("box", "rectangle")
+            
+            if is_narration:
+                subregion_cache[subregion_key] = []
+            else:
+                subregion_cache[subregion_key] = _detect_connected_balloon_subregions(
+                    page_image,
+                    inferred_bbox,
+                    balloon_bbox,
+                    text.get("tipo", "fala"),
+                )
         subs = subregion_cache[subregion_key]
         connected_plan = _analyze_connected_subregions(subs, balloon_bbox) if subs else {}
         ordered_subregions = connected_plan.get("ordered_subregions", subs)
@@ -84,6 +109,13 @@ def enrich_page_layout(page_result: dict) -> dict:
         ) if subs else _empty_connected_visuals()
         updated["balloon_subregions"] = connected_visuals["connected_lobe_bboxes"]
         updated["connected_lobe_bboxes"] = connected_visuals["connected_lobe_bboxes"]
+        
+        # Se detectamos lobos reais, garantimos que o grupo seja tratado como tal para o renderer
+        if len(updated["balloon_subregions"]) >= 2:
+            count = len(updated["balloon_subregions"])
+            logger.info(f"DECISAO LAYOUT: Balao {text.get('id', 'N/A')} split em {count} lobos geometricos.")
+            updated["layout_group_size"] = max(updated["layout_group_size"], count)
+
         updated["connected_balloon_orientation"] = orientation
         updated["connected_text_groups"] = connected_visuals["connected_text_groups"]
         updated["connected_position_bboxes"] = connected_visuals["connected_position_bboxes"]
@@ -106,9 +138,7 @@ def enrich_page_layout(page_result: dict) -> dict:
 
 
 def _apply_geometric_fallback_subregions(texts: list[dict]) -> None:
-    """Fallback: para balões largos sem subregions, infere split geométrico.
-
-    Funciona em dois modos:
+    """Funciona em dois modos:
       A) Multi-texto (group_size > 1): agrupa textos pelo balloon_bbox e usa
          a distribuição dos centros X para refinar o ponto de corte.
       B) Texto único (group_size == 1): se o balão é largo o suficiente
@@ -130,17 +160,25 @@ def _apply_geometric_fallback_subregions(texts: list[dict]) -> None:
         bw = max(1, balloon[2] - balloon[0])
         bh = max(1, balloon[3] - balloon[1])
         aspect = bw / float(bh)
+        text_gap_subregions = _split_balloon_by_text_gap(
+            balloon,
+            [text.get("text_pixel_bbox") for text in group],
+        )
 
-        if len(group) >= 2 and int(group[0].get("layout_group_size", 1)) > 1:
-            # Modo A: multi-texto — precisa de aspect >= 1.8
-            if aspect < 1.8:
+        if len(text_gap_subregions) >= 2:
+            subregions = text_gap_subregions
+        elif len(group) >= 2 and int(group[0].get("layout_group_size", 1)) > 1:
+            # Modo A: multi-texto — precisa de aspect >= 1.7
+            if aspect < 1.7:
                 continue
             text_bboxes = [t.get("bbox", [0, 0, 0, 0]) for t in group]
             subregions = _geometric_fallback_subregions(text_bboxes, balloon)
-        elif len(group) == 1 and aspect >= 2.0 and min(bw, bh) >= 200 and max(bw, bh) >= 500:
-            # Modo B: texto único em balão muito largo E grande — provável balão conectado
-            # Requer aspect >= 2.0, dimensão menor >= 200px, maior >= 500px
-            # para evitar falsos positivos em balões simples que são apenas largos
+        elif len(group) == 1 and aspect >= 1.75 and min(bw, bh) >= 160 and max(bw, bh) >= 420:
+            # Modo B: texto único em balão largo E grande — provável balão conectado.
+            # Threshold antigo era aspect>=2.0 que falhava em baloes reais com
+            # proporcao 1.9x (ex.: balão 3 do teste real, aspect 1.97). Com a
+            # refinacao da bbox na enrich_page_layout, esse modo e a rede de
+            # seguranca quando a imagem nao cooperar com o refine.
             subregions = _geometric_fallback_subregions(
                 [group[0].get("bbox", [0, 0, 0, 0])], balloon
             )
@@ -172,6 +210,46 @@ def _apply_geometric_fallback_subregions(texts: list[dict]) -> None:
                 text["connected_reasoner_model"] = fallback_visuals["connected_reasoner_model"]
                 text["connected_reasoner_notes"] = fallback_visuals["connected_reasoner_notes"]
                 text["subregion_confidence"] = fallback_visuals["connected_detection_confidence"]
+
+
+def _split_balloon_by_text_gap(balloon_bbox: list[int], text_pixel_bboxes: list) -> list[list[int]]:
+    normalized = []
+    for bbox in text_pixel_bboxes:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+        except Exception:
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        normalized.append([x1, y1, x2, y2])
+
+    if len(normalized) < 2:
+        return []
+
+    bx1, by1, bx2, by2 = [int(v) for v in balloon_bbox]
+    balloon_h = max(1, by2 - by1)
+    ordered = sorted(normalized, key=lambda item: (item[1], item[0]))
+    best_gap = 0
+    best_pair: tuple[list[int], list[int]] | None = None
+    for first, second in zip(ordered, ordered[1:]):
+        gap = int(second[1]) - int(first[3])
+        if gap > best_gap:
+            best_gap = gap
+            best_pair = (first, second)
+
+    if best_pair is None or best_gap <= int(balloon_h * 0.20):
+        return []
+
+    top_bbox, bottom_bbox = best_pair
+    split_y = int(round((top_bbox[3] + bottom_bbox[1]) / 2.0))
+    split_y = max(by1 + 1, min(by2 - 1, split_y))
+    top = [bx1, by1, bx2, split_y]
+    bottom = [bx1, split_y, bx2, by2]
+    if top[3] <= top[1] or bottom[3] <= bottom[1]:
+        return []
+    return [top, bottom]
 
 
 def _empty_connected_visuals() -> dict:
@@ -373,6 +451,21 @@ def _analyze_connected_subregions(
                 ((b[0] + b[2]) / 2.0),
             ),
         )
+
+    # TRAVA DE PROXIMIDADE (v0.49): Se os lobos estão muito perto, não separe.
+    if len(ordered) == 2:
+        gap = 0
+        if orientation == "top-bottom":
+            gap = max(0, ordered[1][1] - ordered[0][3])
+        elif orientation == "left-right":
+            gap = max(0, ordered[1][0] - ordered[0][2])
+            
+        if gap < 60: # Se o buraco for menor que 60px, fundir!
+             return {
+                "orientation": "",
+                "ordered_subregions": [balloon_bbox],
+                "balloon_bbox": [int(v) for v in balloon_bbox] if balloon_bbox else [],
+            }
 
     return {
         "orientation": orientation,
@@ -1308,6 +1401,20 @@ def _derive_connected_visual_boxes(
     position_reasoner = "heuristic"
     reasoner_model = ""
     reasoner_notes = ""
+    # Otimização: se a heurística já é muito confiável, não precisamos do Ollama (economiza ~30s por bloco)
+    if position_confidence >= 0.88:
+        return {
+            "connected_text_groups": text_groups,
+            "connected_lobe_bboxes": normalized_lobes,
+            "connected_position_bboxes": position_bboxes,
+            "connected_detection_confidence": detection_confidence,
+            "connected_group_confidence": group_confidence,
+            "connected_position_confidence": position_confidence,
+            "connected_position_reasoner": "heuristic",
+            "connected_reasoner_model": "",
+            "connected_reasoner_notes": "Heurística de alta confiança (>88%)",
+        }
+
     reasoned = _refine_connected_position_bboxes_with_ollama(
         image_bgr,
         ocr_text_bbox,
@@ -1680,6 +1787,97 @@ def _load_page_image(page_result: dict):
         return None
 
 
+def _normalize_bubble_regions(page_result: dict) -> list[dict]:
+    normalized: list[dict] = []
+    for item in page_result.get("_bubble_regions") or []:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+        except Exception:
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        normalized.append(
+            {
+                "bbox": [x1, y1, x2, y2],
+                "confidence": float(item.get("confidence", 0.0) or 0.0),
+            }
+        )
+    return normalized
+
+
+def _select_bubble_region_for_bbox(seed_bbox: list[int], bubble_regions: list[dict]) -> list[int] | None:
+    if not isinstance(seed_bbox, (list, tuple)) or len(seed_bbox) != 4 or not bubble_regions:
+        return None
+
+    sx1, sy1, sx2, sy2 = [int(v) for v in seed_bbox]
+    if sx2 <= sx1 or sy2 <= sy1:
+        return None
+
+    seed_area = float(max(1, (sx2 - sx1) * (sy2 - sy1)))
+    seed_center = _bbox_center_point([sx1, sy1, sx2, sy2])
+    best_bbox: list[int] | None = None
+    best_score = float("-inf")
+
+    for item in bubble_regions:
+        bbox = item.get("bbox") or []
+        if len(bbox) != 4:
+            continue
+        bx1, by1, bx2, by2 = [int(v) for v in bbox]
+        if bx2 <= bx1 or by2 <= by1:
+            continue
+
+        ix1 = max(sx1, bx1)
+        iy1 = max(sy1, by1)
+        ix2 = min(sx2, bx2)
+        iy2 = min(sy2, by2)
+        intersection = float(max(0, ix2 - ix1) * max(0, iy2 - iy1))
+        overlap_ratio = intersection / seed_area
+        center_inside = bx1 <= seed_center[0] <= bx2 and by1 <= seed_center[1] <= by2
+        contains_seed = (
+            bx1 <= sx1 + 8
+            and by1 <= sy1 + 12
+            and bx2 >= sx2 - 8
+            and by2 >= sy2 - 12
+        )
+        if intersection <= 0.0 and not center_inside and not contains_seed:
+            continue
+
+        region_area = float(max(1, (bx2 - bx1) * (by2 - by1)))
+        area_ratio = region_area / seed_area
+        if area_ratio > 28.0:
+            continue
+
+        region_center = _bbox_center_point([bx1, by1, bx2, by2])
+        norm_dx = abs(float(region_center[0] - seed_center[0])) / float(max(1, bx2 - bx1))
+        norm_dy = abs(float(region_center[1] - seed_center[1])) / float(max(1, by2 - by1))
+
+        score = overlap_ratio * 8.0
+        if contains_seed:
+            score += 3.4
+        if center_inside:
+            score += 1.1
+        if area_ratio >= 1.05:
+            score += min(2.8, (area_ratio - 1.0) * 0.34)
+        else:
+            score -= (1.0 - area_ratio) * 4.0
+        score -= norm_dx * 2.2
+        score -= norm_dy * 2.8
+        score += float(item.get("confidence", 0.0) or 0.0) * 0.35
+
+        if score > best_score:
+            best_score = score
+            best_bbox = [bx1, by1, bx2, by2]
+
+    if best_score < 1.0:
+        return None
+    return best_bbox
+
+
 def _expand_with_margin(bbox: list[int], image_width: int, image_height: int, margin: int = 2) -> list[int]:
     x1, y1, x2, y2 = bbox
     return [
@@ -1705,6 +1903,11 @@ def _detect_connected_balloon_subregions(
         balloon_bbox,
     )
     if len(fill_result) >= 2:
+        # Se o floodfill separou, faz um check de distância extra para evitar falsos positivos
+        fa, fb = fill_result[0], fill_result[1]
+        dist = (((fa[0]+fa[2])-(fb[0]+fb[2]))**2 + ((fa[1]+fa[3])-(fb[1]+fb[3]))**2)**0.5
+        if dist < min(fa[2]-fa[0], fb[2]-fb[0]) * 0.4:
+            return []
         return fill_result
 
     components = _extract_text_cluster_components(image_bgr, text_bbox)
@@ -1717,9 +1920,11 @@ def _detect_connected_balloon_subregions(
 
     merged_groups = sorted(merged_groups, key=lambda item: item["area"], reverse=True)
     top_two = merged_groups[:2]
-    remaining_area = sum(item["area"] for item in merged_groups)
+    total_text_area = sum(item["area"] for item in merged_groups)
     dominant_area = sum(item["area"] for item in top_two)
-    if dominant_area < max(1400, int(remaining_area * 0.72)):
+    
+    # Se os dois maiores grupos não dominam o balão, não divide (provavelmente é um balão complexo único)
+    if dominant_area < max(1800, int(total_text_area * 0.75)):
         return []
 
     first_bbox = top_two[0]["bbox"]
@@ -1730,7 +1935,9 @@ def _detect_connected_balloon_subregions(
     first_cy = (first_bbox[1] + first_bbox[3]) / 2.0
     second_cx = (second_bbox[0] + second_bbox[2]) / 2.0
     second_cy = (second_bbox[1] + second_bbox[3]) / 2.0
-    if abs(first_cx - second_cx) < box_w * 0.12 and abs(first_cy - second_cy) < box_h * 0.12:
+    
+    # Check de proximidade dos centros (se estiverem muito perto, é o mesmo balão)
+    if abs(first_cx - second_cx) < box_w * 0.15 and abs(first_cy - second_cy) < box_h * 0.15:
         return []
 
     ordered_groups = sorted(top_two, key=lambda item: (item["bbox"][1], item["bbox"][0]))
@@ -1739,21 +1946,23 @@ def _detect_connected_balloon_subregions(
     vertical_gap = max(0, int(b_bbox[1]) - int(a_bbox[3]))
     horizontal_gap = max(0, int(b_bbox[0]) - int(a_bbox[2]), int(a_bbox[0]) - int(b_bbox[2]))
 
-    is_vertical_stack = abs(first_cx - second_cx) < box_w * 0.35
-    is_horizontal_stack = abs(first_cy - second_cy) < box_h * 0.35
-    if is_vertical_stack and vertical_gap < max(18, int(box_h * 0.08)):
+    is_vertical_stack = abs(first_cx - second_cx) < box_w * 0.30
+    is_horizontal_stack = abs(first_cy - second_cy) < box_h * 0.30
+    
+    # Limites aumentados para evitar separação por simples quebra de linha (Imagem 4)
+    if is_vertical_stack and vertical_gap < max(28, int(box_h * 0.12)):
         return []
-    if is_horizontal_stack and horizontal_gap < max(18, int(box_w * 0.08)):
+    if is_horizontal_stack and horizontal_gap < max(28, int(box_w * 0.12)):
         return []
     if not is_vertical_stack and not is_horizontal_stack:
-        if max(vertical_gap, horizontal_gap) < max(22, int(min(box_w, box_h) * 0.10)):
+        if max(vertical_gap, horizontal_gap) < max(35, int(min(box_w, box_h) * 0.15)):
             return []
 
     subregions = _build_balloon_subregions_from_groups(
         [group["bbox"] for group in top_two],
         balloon_bbox,
     )
-    if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.32:
+    if len(subregions) < 2 or _bbox_iou(subregions[0], subregions[1]) > 0.28:
         return []
     return subregions
 
@@ -1844,7 +2053,7 @@ def _detect_connected_balloon_subregions_from_fill(
 
     component = (labels == seed_label).astype(np.uint8) * 255
     fill_area = int(np.count_nonzero(component))
-    if fill_area < 2500:
+    if fill_area < 1500:
         return []
 
     min_dim = min(component.shape[:2])
@@ -1882,7 +2091,7 @@ def _detect_connected_balloon_subregions_from_fill(
         if len(current_lobes) >= 2:
             eroded_components = current_lobes
             break
-        if float(np.count_nonzero(eroded)) < fill_area * 0.25:
+        if float(np.count_nonzero(eroded)) < fill_area * 0.20:
             break
 
     if len(eroded_components) < 2:
@@ -1917,7 +2126,7 @@ def _detect_connected_balloon_subregions_from_fill(
     gap_x = max(0, int(b[0]) - int(a[2]), int(a[0]) - int(b[2]))
 
     # Gap check mais flexível para erosão profunda
-    if max(gap_y, gap_x) < max(6, int(min(box_w, box_h) * 0.02)):
+    if max(gap_y, gap_x) < max(6, int(min(box_w, box_h) * 0.015)):
         return []
 
     subregions = _build_balloon_subregions_from_groups(
@@ -2317,9 +2526,9 @@ def _should_merge_text_cluster_boxes(a: list[int], b: list[int]) -> bool:
     vertical_gap = max(0, max(ay1, by1) - min(ay2, by2))
     horizontal_gap = max(0, max(ax1, bx1) - min(ax2, bx2))
 
-    if overlap_x_ratio >= 0.58 and vertical_gap <= max(12, int(min(ah, bh) * 0.24)):
+    if overlap_x_ratio >= 0.58 and vertical_gap <= max(24, int(min(ah, bh) * 0.45)):
         return True
-    if overlap_y_ratio >= 0.58 and horizontal_gap <= max(20, int(min(aw, bw) * 0.18)):
+    if overlap_y_ratio >= 0.58 and horizontal_gap <= max(30, int(min(aw, bw) * 0.28)):
         return True
     return False
 

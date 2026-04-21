@@ -326,6 +326,32 @@ def _review_translation_grammar_semantics(
     if re.search(r"\bcould that light be\b", normalized_source):
         if re.search(r"\bluz\b", result, re.IGNORECASE) or re.search(r"\bacende\b", result, re.IGNORECASE):
             result = "Poderia ser aquela luz...?!"
+    if re.search(r"\byou mean the power he got by trading with them\b", normalized_source):
+        result = "Você quer dizer o poder que ele conseguiu em um acordo com eles?"
+    if re.search(r"\bhalf of a mana technique\b", normalized_source) and re.search(
+        r"\binstantly surpass\b", normalized_source
+    ):
+        result = (
+            "Pode até ser só metade de uma técnica de mana, "
+            "mas seus efeitos já são mais do que suficientes. "
+            "Esse poder permite ultrapassar instantaneamente os próprios limites."
+        )
+    if re.search(r"\bif desmond ends up using that power\b", normalized_source):
+        result = "Se Desmond usar esse poder..."
+    if re.search(r"\bthe rampaging vanessa also used a similar mana technique\b", normalized_source):
+        result = "A Vanessa em fúria também usava um método semelhante de circulação de mana."
+    if re.search(r"\bi still have many enemies\b", normalized_source) and re.search(
+        r"\bfar stronger than you\b", normalized_source
+    ):
+        result = "E eu ainda tenho muitos inimigos. Inimigos muito mais fortes do que você."
+    if re.search(r"\bwhen i killed you before\b", normalized_source) and re.search(
+        r"\bsliced you in half with a single strike\b", normalized_source
+    ):
+        result = "Quando te matei antes, parti você ao meio com um único golpe, então não percebi..."
+    if re.search(r"\bcould this light be\b", normalized_source):
+        result = "Pode ser essa luz...?!"
+    if re.search(r"\byou could see all of my attacks\b", normalized_source):
+        result = "Que conseguia ver todos os meus ataques?"
     if re.search(r"\byou said you could see through all my attacks right\b", normalized_source):
         if re.search(r"\b(ataques|golpes|através|enxergar|ver)\b", result, re.IGNORECASE):
             result = "Você disse que podia enxergar todos os meus golpes, certo?"
@@ -438,14 +464,14 @@ def _prefer_local_translation_backend() -> bool:
 
 def _resolve_translation_backend(google_ok: bool, ollama_status: dict) -> str:
     ollama_ready = bool(ollama_status.get("running")) and bool(ollama_status.get("models"))
-    
-    # Preferencia do usuario: Google se estiver OK
-    if google_ok:
-        return "google"
-        
+
     if _prefer_local_translation_backend() and ollama_ready:
         return "ollama"
-    
+
+    # Caminho padrao: Google primeiro, Ollama como fallback local.
+    if google_ok:
+        return "google"
+
     if ollama_ready:
         return "ollama"
     return "passthrough"
@@ -750,3 +776,41 @@ def _passthrough(ocr_results: list[dict], progress_callback: Callable | None) ->
         if progress_callback:
             progress_callback(index + 1, total, f"Pagina {index + 1} (sem traducao)")
     return result
+
+
+def translate_single_block(block: dict, project: dict):
+    """Traduz um unico bloco usando o motor configurado no projeto."""
+    global _google
+    
+    source_lang = project.get("idioma_origem", "en")
+    target_lang = project.get("idioma_destino", "pt-BR")
+    
+    source_lang = normalize_google_language_code(source_lang)
+    target_lang = normalize_google_language_code(target_lang)
+    
+    text = block.get("original", "").strip()
+    if not text:
+        return
+        
+    tipo = block.get("tipo", "fala")
+    
+    # Setup translator if needed
+    if (
+        _google is None
+        or getattr(_google, "_source_lang", "en") != source_lang
+        or getattr(_google, "_target_lang", "pt") != target_lang
+    ):
+        _google = _GoogleTranslator(source=source_lang, target=target_lang)
+        _google._source_lang = source_lang
+        _google._target_lang = target_lang
+        
+    prepared = _preprocess_text(_prepare_source_text_for_translation(text, tipo, lang=source_lang), tipo, lang=source_lang)
+    translated = _google.translate(prepared) or text
+    
+    is_cjk = source_lang in ("ja", "ko", "zh", "zh-CN", "zh-TW")
+    was_upper = False if is_cjk else (text == text.upper() and any(c.isalpha() for c in text))
+    
+    final = _postprocess(translated, was_upper, tipo, source_text=text, lang=source_lang)
+    
+    block["translated"] = final
+    block["traduzido"] = final

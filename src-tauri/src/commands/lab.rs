@@ -1303,9 +1303,36 @@ pub async fn start_lab(
     snapshot.pr_ready = false;
     snapshot.active_batch_id = format!("batch-{}", &run_id[..8]);
     snapshot.agents.clear();
-    snapshot.proposals.clear();
-    snapshot.reviews.clear();
-    snapshot.benchmarks.clear();
+    // Preserva propostas ainda nao decididas pelo operador (e seus reviews/benchmarks).
+    // Propostas ja aceitas/rejeitadas/aplicadas sao descartadas.
+    let pending_proposals: Vec<LabProposal> = snapshot
+        .proposals
+        .drain(..)
+        .filter(|p| {
+            !matches!(
+                p.proposal_status.as_str(),
+                "approved" | "rejected" | "patch_applied" | "closed" | "dismissed"
+            )
+        })
+        .collect();
+    let pending_ids: BTreeSet<String> = pending_proposals
+        .iter()
+        .map(|p| p.proposal_id.clone())
+        .collect();
+    let preserved_reviews: Vec<LabReviewResult> = snapshot
+        .reviews
+        .drain(..)
+        .filter(|r| pending_ids.contains(&r.proposal_id))
+        .collect();
+    let preserved_benchmarks: Vec<LabBenchmarkResult> = snapshot
+        .benchmarks
+        .drain(..)
+        .filter(|b| pending_ids.contains(&b.proposal_id))
+        .collect();
+    snapshot.proposals = pending_proposals;
+    snapshot.reviews = preserved_reviews;
+    snapshot.benchmarks = preserved_benchmarks;
+    recompute_pending_proposals(&mut snapshot);
     snapshot.updated_at_ms = now_ms();
     snapshot.history.push(LabRunSummary {
         run_id: run_id.clone(),
@@ -1561,11 +1588,24 @@ pub async fn reject_lab_proposal(
 
     snapshot.proposals[proposal_index].proposal_status = "rejected".into();
     snapshot.proposals[proposal_index].pr_status = "not_applicable".into();
+    let mut rejected_proposal = snapshot.proposals[proposal_index].clone();
+    rejected_proposal.proposal_status = "rejected".into();
+    rejected_proposal.pr_status = "not_applicable".into();
+
+    // Remove a proposta e artefatos associados do snapshot ativo — o operador
+    // rejeitou, entao nao deve mais aparecer na UI.
+    snapshot.proposals.remove(proposal_index);
+    snapshot
+        .reviews
+        .retain(|review| review.proposal_id != proposal_id);
+    snapshot
+        .benchmarks
+        .retain(|benchmark| benchmark.proposal_id != proposal_id);
+
     snapshot.message = format!("Proposta {} rejeitada", proposal_id);
     recompute_pending_proposals(&mut snapshot);
     snapshot.updated_at_ms = now_ms();
     let _ = persist_snapshot(&snapshot);
-    let rejected_proposal = snapshot.proposals[proposal_index].clone();
     let summary = snapshot.message.clone();
     app.emit(
         "proposal_promoted",
@@ -1786,6 +1826,7 @@ args = json.loads(sys.argv[1])
 proposal = args["proposal"]
 coder_strategy = args.get("coder_strategy", "local")
 repo_root = Path(args.get("repo_root", ".")).resolve()
+sys.path.insert(0, str(repo_root))
 
 if coder_strategy == "ollama":
     from lab.coders.ollama_coder import OllamaCoder
@@ -2017,6 +2058,23 @@ async fn run_git(args: &[&str], cwd: &Path) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(stderr.trim().to_string())
     }
+}
+
+#[tauri::command]
+pub async fn export_lab_patch_json(
+    output_path: String,
+    content: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(&output_path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Falha ao criar pasta de destino: {e}"))?;
+        }
+    }
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("Falha ao gravar {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]

@@ -1,5 +1,8 @@
+use crate::commands::project_schema;
+use image::{GrayImage, ImageBuffer, ImageReader, Luma};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use tauri_plugin_dialog::DialogExt;
 
 #[derive(Debug, Serialize)]
@@ -82,6 +85,7 @@ pub async fn save_file_dialog(
         "cbz" => ("CBZ", &["cbz"], "traduzido.cbz"),
         "jpg_only" => ("ZIP", &["zip"], "paginas-traduzidas.zip"),
         "lab_patch_json" => ("JSON", &["json"], "lab-patch.json"),
+        "log" => ("Log", &["log", "txt"], "traduzai-log.log"),
         _ => ("ZIP", &["zip"], "traduzido.zip"),
     };
     let file_name = suggested_name
@@ -97,6 +101,20 @@ pub async fn save_file_dialog(
         .blocking_save_file();
 
     Ok(file.map(|f| f.to_string()))
+}
+
+#[tauri::command]
+pub async fn export_text_file(output_path: String, content: String) -> Result<String, String> {
+    let path = PathBuf::from(&output_path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Falha ao criar pasta de destino: {e}"))?;
+        }
+    }
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("Falha ao gravar {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -233,48 +251,289 @@ fn validate_directory(path: &PathBuf) -> Result<ValidationResult, String> {
 }
 
 #[tauri::command]
-pub async fn load_project_json(path: String) -> Result<serde_json::Value, String> {
+pub async fn load_project_json(path: String) -> Result<Value, String> {
     let normalized = normalize_path(&path);
-    let project_path = if normalized
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("project.json"))
-    {
-        normalized
-    } else {
-        normalized.join("project.json")
-    };
-    let content = std::fs::read_to_string(&project_path)
-        .map_err(|e| format!("Erro ao ler project.json: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("JSON inválido: {}", e))
+    let project_path = project_schema::resolve_project_file(&normalized);
+    project_schema::load_project_value(&project_path)
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SaveProjectConfig {
     pub project_path: String,
-    pub project_json: serde_json::Value,
+    pub project_json: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoadEditorPageConfig {
+    pub project_path: String,
+    pub page_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTextLayerConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub layout_bbox: [i64; 4],
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchTextLayerConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub layer_id: String,
+    pub patch: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteTextLayerConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub layer_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetLayerVisibilityConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub layer_kind: String,
+    pub layer_key: Option<String>,
+    pub layer_id: Option<String>,
+    pub visible: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BitmapLayerUpdateConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub brush_size: u32,
+    #[serde(default)]
+    pub clear: bool,
+    #[serde(default)]
+    pub erase: bool,
+    #[serde(default)]
+    pub strokes: Vec<Vec<[i32; 2]>>,
 }
 
 #[tauri::command]
 pub async fn save_project_json(config: SaveProjectConfig) -> Result<(), String> {
     let base_path = normalize_path(&config.project_path);
-    let project_file = if base_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("project.json"))
-    {
-        base_path
-    } else {
-        base_path.join("project.json")
-    };
-
-    let content = serde_json::to_string_pretty(&config.project_json)
-        .map_err(|e| format!("Erro ao serializar JSON: {}", e))?;
-
-    std::fs::write(&project_file, content)
-        .map_err(|e| format!("Erro ao salvar project.json: {}", e))?;
-
+    let project_file = project_schema::resolve_project_file(&base_path);
+    let mut project_json = config.project_json;
+    project_schema::save_project_value(&project_file, &mut project_json)?;
     Ok(())
+}
+
+fn load_project_for_editing(project_path: &str) -> Result<(PathBuf, Value), String> {
+    let base_path = normalize_path(project_path);
+    let project_file = project_schema::resolve_project_file(&base_path);
+    let project = project_schema::load_project_value(&project_file)?;
+    Ok((project_file, project))
+}
+
+fn save_project_after_edit(project_file: &Path, project: &mut Value) -> Result<(), String> {
+    project_schema::save_project_value(project_file, project)
+}
+
+#[tauri::command]
+pub async fn load_editor_page(config: LoadEditorPageConfig) -> Result<Value, String> {
+    let (project_file, project) = load_project_for_editing(&config.project_path)?;
+    let pages = project
+        .get("paginas")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Projeto sem páginas".to_string())?;
+    let page = pages
+        .get(config.page_index)
+        .cloned()
+        .ok_or_else(|| "Página inválida".to_string())?;
+
+    Ok(json!({
+        "project_file": project_file.to_string_lossy(),
+        "project_dir": project_file.parent().unwrap_or_else(|| Path::new("")).to_string_lossy(),
+        "page_index": config.page_index,
+        "total_pages": pages.len(),
+        "page": page,
+    }))
+}
+
+#[tauri::command]
+pub async fn create_text_layer(config: CreateTextLayerConfig) -> Result<Value, String> {
+    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+    let layer =
+        project_schema::create_text_layer(&mut project, config.page_index, config.layout_bbox)?;
+    save_project_after_edit(&project_file, &mut project)?;
+    Ok(layer)
+}
+
+#[tauri::command]
+pub async fn patch_text_layer(config: PatchTextLayerConfig) -> Result<Value, String> {
+    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+    let layer = project_schema::patch_text_layer(
+        &mut project,
+        config.page_index,
+        &config.layer_id,
+        &config.patch,
+    )?;
+    save_project_after_edit(&project_file, &mut project)?;
+    Ok(layer)
+}
+
+#[tauri::command]
+pub async fn delete_text_layer(config: DeleteTextLayerConfig) -> Result<(), String> {
+    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+    project_schema::delete_text_layer(&mut project, config.page_index, &config.layer_id)?;
+    save_project_after_edit(&project_file, &mut project)
+}
+
+#[tauri::command]
+pub async fn set_layer_visibility(config: SetLayerVisibilityConfig) -> Result<(), String> {
+    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+    project_schema::set_layer_visibility(
+        &mut project,
+        config.page_index,
+        &config.layer_kind,
+        config.layer_key.as_deref(),
+        config.layer_id.as_deref(),
+        config.visible,
+    )?;
+    save_project_after_edit(&project_file, &mut project)
+}
+
+fn paint_circle(bitmap: &mut GrayImage, center_x: i32, center_y: i32, radius: i32, value: u8) {
+    let radius_sq = radius * radius;
+    for y in (center_y - radius)..=(center_y + radius) {
+        if y < 0 || y >= bitmap.height() as i32 {
+            continue;
+        }
+        for x in (center_x - radius)..=(center_x + radius) {
+            if x < 0 || x >= bitmap.width() as i32 {
+                continue;
+            }
+            let dx = x - center_x;
+            let dy = y - center_y;
+            if dx * dx + dy * dy <= radius_sq {
+                bitmap.put_pixel(x as u32, y as u32, Luma([value]));
+            }
+        }
+    }
+}
+
+fn paint_stroke(bitmap: &mut GrayImage, stroke: &[[i32; 2]], radius: i32, value: u8) {
+    if stroke.is_empty() {
+        return;
+    }
+    if stroke.len() == 1 {
+        paint_circle(bitmap, stroke[0][0], stroke[0][1], radius, value);
+        return;
+    }
+
+    for window in stroke.windows(2) {
+        let [x1, y1] = window[0];
+        let [x2, y2] = window[1];
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let steps = dx.abs().max(dy.abs()).max(1);
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let x = x1 as f32 + dx as f32 * t;
+            let y = y1 as f32 + dy as f32 * t;
+            paint_circle(bitmap, x.round() as i32, y.round() as i32, radius, value);
+        }
+    }
+}
+
+fn load_or_create_bitmap_layer(
+    path: &Path,
+    width: u32,
+    height: u32,
+    clear: bool,
+) -> Result<GrayImage, String> {
+    if !clear && path.exists() {
+        let existing = ImageReader::open(path)
+            .map_err(|e| format!("Erro ao abrir bitmap da layer: {e}"))?
+            .decode()
+            .map_err(|e| format!("Erro ao decodificar bitmap da layer: {e}"))?
+            .to_luma8();
+        if existing.width() == width && existing.height() == height {
+            return Ok(existing);
+        }
+    }
+
+    Ok(ImageBuffer::from_pixel(width, height, Luma([0])))
+}
+
+fn save_bitmap_layer(path: &Path, bitmap: &GrayImage) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Erro ao preparar diretório da layer bitmap: {e}"))?;
+    }
+    let temp_path = path.with_extension("png.tmp");
+    bitmap
+        .save(&temp_path)
+        .map_err(|e| format!("Erro ao salvar layer bitmap temporária: {e}"))?;
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Erro ao substituir layer bitmap anterior: {e}"))?;
+    }
+    std::fs::rename(&temp_path, path)
+        .map_err(|e| format!("Erro ao finalizar gravação da layer bitmap: {e}"))?;
+    Ok(())
+}
+
+fn update_bitmap_layer(
+    config: BitmapLayerUpdateConfig,
+    layer_key: &str,
+) -> Result<String, String> {
+    if config.width == 0 || config.height == 0 {
+        return Err("Dimensões da layer bitmap inválidas".to_string());
+    }
+
+    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+    let relative_layer_path =
+        project_schema::ensure_bitmap_layer_path(&mut project, config.page_index, layer_key)?;
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let absolute_layer_path = project_dir.join(&relative_layer_path);
+
+    let mut bitmap = load_or_create_bitmap_layer(
+        &absolute_layer_path,
+        config.width,
+        config.height,
+        config.clear,
+    )?;
+
+    let radius = (config.brush_size.max(1) as i32 / 2).max(1);
+    let value = if config.erase { 0 } else { 255 };
+    for stroke in &config.strokes {
+        paint_stroke(&mut bitmap, stroke, radius, value);
+    }
+
+    save_bitmap_layer(&absolute_layer_path, &bitmap)?;
+    project_schema::set_layer_visibility(
+        &mut project,
+        config.page_index,
+        "image",
+        Some(layer_key),
+        None,
+        !config.erase || !config.strokes.is_empty(),
+    )?;
+    save_project_after_edit(&project_file, &mut project)?;
+
+    Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
+}
+
+#[tauri::command]
+pub async fn update_mask_region(config: BitmapLayerUpdateConfig) -> Result<String, String> {
+    update_bitmap_layer(config, "mask")
+}
+
+#[tauri::command]
+pub async fn update_brush_region(config: BitmapLayerUpdateConfig) -> Result<String, String> {
+    update_bitmap_layer(config, "brush")
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,8 +544,13 @@ pub struct ExportConfig {
 }
 
 #[tauri::command]
-pub async fn export_project(config: ExportConfig) -> Result<serde_json::Value, String> {
-    let project_dir = normalize_path(&config.project_path);
+pub async fn export_project(config: ExportConfig) -> Result<Value, String> {
+    let project_base = normalize_path(&config.project_path);
+    let project_file = project_schema::resolve_project_file(&project_base);
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or(project_base);
     let output_path = normalize_path(&config.output_path);
 
     let file =
@@ -299,6 +563,7 @@ pub async fn export_project(config: ExportConfig) -> Result<serde_json::Value, S
     let translated_dir = project_dir.join("translated");
     let originals_dir = project_dir.join("originals");
     let legacy_images_dir = project_dir.join("images");
+    let layers_dir = project_dir.join("layers");
     let project_json = project_dir.join("project.json");
 
     match config.format.as_str() {
@@ -310,8 +575,12 @@ pub async fn export_project(config: ExportConfig) -> Result<serde_json::Value, S
 
             if originals_dir.exists() {
                 add_directory_to_zip(&mut zip_writer, &originals_dir, "originals/", options)?;
-            } else if legacy_images_dir.exists() {
+            }
+            if legacy_images_dir.exists() {
                 add_directory_to_zip(&mut zip_writer, &legacy_images_dir, "images/", options)?;
+            }
+            if layers_dir.exists() {
+                add_directory_to_zip(&mut zip_writer, &layers_dir, "layers/", options)?;
             }
 
             if project_json.exists() {
@@ -342,14 +611,13 @@ fn add_directory_to_zip(
         return Ok(());
     }
 
-    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if !path.is_file() {
+    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
             continue;
         }
-
-        let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+        let path = entry.path().to_path_buf();
+        let relative = path.strip_prefix(dir).map_err(|e| e.to_string())?;
+        let name = format!("{prefix}{}", relative.to_string_lossy().replace('\\', "/"));
         zip_writer
             .start_file(&name, options)
             .map_err(|e| e.to_string())?;

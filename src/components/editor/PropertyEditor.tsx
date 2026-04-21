@@ -1,4 +1,3 @@
-import { useAppStore } from "../../lib/stores/appStore";
 import { useEditorStore } from "../../lib/stores/editorStore";
 import {
   AlignLeft,
@@ -8,6 +7,9 @@ import {
   Italic,
   ChevronDown,
   ChevronRight,
+  Search,
+  RefreshCw,
+  Link2Off,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -51,16 +53,19 @@ function InputField({
   onChange,
   type = "text",
   readOnly = false,
+  title = "Campo de entrada",
 }: {
   value: string | number;
   onChange: (val: string) => void;
   type?: "text" | "number";
   readOnly?: boolean;
+  title?: string;
 }) {
   return (
     <input
       type={type}
       value={value}
+      title={title}
       onChange={(e) => onChange(e.target.value)}
       readOnly={readOnly}
       className={`w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm text-text-primary
@@ -71,13 +76,18 @@ function InputField({
 }
 
 export function PropertyEditor() {
-  const project = useAppStore((s) => s.project);
-  const { selectedLayerId, currentPageIndex, pendingEdits } = useEditorStore();
+  const { 
+    selectedLayerId, 
+    pendingEdits, 
+    currentPage, 
+    isRetypesetting 
+  } = useEditorStore();
+  
   const updateEdit = useEditorStore((s) => s.updatePendingEdit);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
-
-  const page = project?.paginas[currentPageIndex];
-  const entry = page?.textos.find((t) => t.id === selectedLayerId);
+  
+  const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
+  const entry = selectedLayer;
 
   if (!entry || !selectedLayerId) {
     return (
@@ -90,12 +100,12 @@ export function PropertyEditor() {
   }
 
   const edit = pendingEdits[selectedLayerId];
-  const traduzido = edit?.traduzido ?? entry.traduzido;
+  const traduzido = edit?.traduzido ?? edit?.translated ?? entry.traduzido ?? entry.translated ?? "";
   const original = entry.original;
   const estilo = edit?.estilo ? { ...entry.estilo, ...edit.estilo } : entry.estilo;
-  const [x1, y1, x2, y2] = edit?.bbox ?? entry.bbox;
+  const [x1, y1, x2, y2] = edit?.bbox ?? entry.layout_bbox ?? entry.bbox;
 
-  const confidencePercent = Math.round((entry.confianca_ocr ?? 0) * 100);
+  const confidencePercent = Math.round(((entry.confianca_ocr ?? entry.ocr_confidence ?? 0) || 0) * 100);
   const confidenceColor =
     confidencePercent >= 80
       ? "text-status-success"
@@ -104,7 +114,8 @@ export function PropertyEditor() {
         : "text-status-error";
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex flex-col h-full bg-bg-secondary/10">
+      <div className="flex-1 overflow-y-auto">
       <div className="border-b border-white/5 bg-bg-primary/35 px-4 py-3">
         <div className="flex items-center justify-between text-[11px] text-text-muted">
           <span className="rounded-full border border-white/10 px-2 py-1 uppercase tracking-[0.14em]">
@@ -127,6 +138,7 @@ export function PropertyEditor() {
           </div>
           <textarea
             value={original}
+            title="Texto original (somente leitura)"
             readOnly
             rows={3}
             className="w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
@@ -137,7 +149,13 @@ export function PropertyEditor() {
           <Label>Tradução</Label>
           <textarea
             value={traduzido}
-            onChange={(e) => updateEdit(selectedLayerId, { traduzido: e.target.value })}
+            title="Texto traduzido"
+            onChange={(e) =>
+              updateEdit(selectedLayerId, {
+                traduzido: e.target.value,
+                translated: e.target.value,
+              })
+            }
             rows={5}
             className="w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
               text-text-primary resize-y focus:border-accent-purple/50 focus:outline-none transition-smooth"
@@ -206,6 +224,7 @@ export function PropertyEditor() {
           <Label>Fonte</Label>
           <select
             value={estilo.fonte}
+            title="Selecionar fonte"
             onChange={(e) => updateEstilo(selectedLayerId, { fonte: e.target.value })}
             className="w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
               text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
@@ -233,6 +252,7 @@ export function PropertyEditor() {
               <input
                 type="color"
                 value={estilo.cor}
+                title="Cor do texto"
                 onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value })}
                 className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
               />
@@ -253,6 +273,7 @@ export function PropertyEditor() {
               return (
                 <button
                   key={align}
+                  title={`Alinhamento ${align}`}
                   onClick={() => updateEstilo(selectedLayerId, { alinhamento: align })}
                   className={`p-1.5 rounded transition-smooth ${
                     estilo.alinhamento === align
@@ -269,6 +290,7 @@ export function PropertyEditor() {
 
             <button
               onClick={() => updateEstilo(selectedLayerId, { bold: !estilo.bold })}
+              title="Negrito"
               className={`p-1.5 rounded transition-smooth ${
                 estilo.bold
                   ? "bg-accent-purple/20 text-accent-purple"
@@ -279,6 +301,7 @@ export function PropertyEditor() {
             </button>
             <button
               onClick={() => updateEstilo(selectedLayerId, { italico: !estilo.italico })}
+              title="Itálico"
               className={`p-1.5 rounded transition-smooth ${
                 estilo.italico
                   ? "bg-accent-purple/20 text-accent-purple"
@@ -300,6 +323,7 @@ export function PropertyEditor() {
             <input
               type="color"
               value={estilo.contorno || "#000000"}
+              title="Cor do contorno"
               onChange={(e) => updateEstilo(selectedLayerId, { contorno: e.target.value })}
               className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
             />
@@ -334,6 +358,7 @@ export function PropertyEditor() {
               <input
                 type="color"
                 value={estilo.glow_cor || "#FFFFFF"}
+                title="Cor do brilho"
                 onChange={(e) => updateEstilo(selectedLayerId, { glow_cor: e.target.value })}
                 className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
               />
@@ -370,6 +395,7 @@ export function PropertyEditor() {
                 <input
                   type="color"
                   value={estilo.sombra_cor || "#000000"}
+                  title="Cor da sombra"
                   onChange={(e) => updateEstilo(selectedLayerId, { sombra_cor: e.target.value })}
                   className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
                 />
@@ -406,5 +432,53 @@ export function PropertyEditor() {
         </div>
       </Section>
     </div>
-  );
+
+    {/* Manual Actions */}
+    <div className="p-4 border-t border-white/10 space-y-3 bg-black/20">
+      <h3 className="text-[10px] font-bold text-white/30 uppercase tracking-widest flex items-center gap-2">
+        Ações Manuais
+      </h3>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={() => useEditorStore.getState().reProcessBlock("ocr")}
+          disabled={isRetypesetting}
+          className="flex items-center justify-center gap-2 px-3 py-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 disabled:opacity-50 text-[11px] font-medium text-indigo-300 rounded border border-indigo-500/20 transition-all active:scale-95"
+          title="Detecta o texto original dentro da área selecionada"
+        >
+          <Search className="w-3.5 h-3.5" />
+          Ler Texto
+        </button>
+        <button
+          onClick={() => useEditorStore.getState().reProcessBlock("inpaint")}
+          disabled={isRetypesetting}
+          className="flex items-center justify-center gap-2 px-3 py-2.5 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-[11px] font-medium text-rose-300 rounded border border-rose-500/20 transition-all active:scale-95"
+          title="Remove o texto original e limpa o balão (Inpainting)"
+        >
+          <div className="w-3.5 h-3.5 border-2 border-rose-300/50 rounded-full" />
+          Limpar
+        </button>
+        <button
+          onClick={() => useEditorStore.getState().reProcessBlock("translate")}
+          disabled={isRetypesetting}
+          className="flex items-center justify-center gap-2 px-3 py-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-50 text-[11px] font-medium text-emerald-300 rounded border border-emerald-500/20 transition-all active:scale-95"
+          title="Traduz o texto original para o idioma de destino"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isRetypesetting ? "animate-spin" : ""}`} />
+          Traduzir
+        </button>
+      </div>
+
+      {/* Only show disconnect if it looks like a connected block */}
+      {selectedLayer?.layout_group_size && selectedLayer.layout_group_size > 1 && (
+        <button
+          onClick={() => useEditorStore.getState().disconnectBlock()}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-rose-500/10 hover:bg-rose-500/20 text-[11px] font-medium text-rose-300 rounded border border-rose-500/20 transition-all active:scale-95 mt-2"
+        >
+          <Link2Off className="w-3.5 h-3.5" />
+          Desconectar de Grupo
+        </button>
+      )}
+    </div>
+  </div>
+);
 }

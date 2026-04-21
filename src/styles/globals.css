@@ -60,6 +60,7 @@ body {
   border: 2px solid transparent;
 }
 
+/* stylelint-disable */
 /* Custom drag region for Tauri */
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
@@ -69,6 +70,7 @@ body {
 [data-tauri-drag-region] input {
   -webkit-app-region: no-drag;
 }
+/* stylelint-enable */
 
 /* Tabular numbers everywhere they matter */
 .tabular {
@@ -90,6 +92,50 @@ body {
 
 /* Selection */
 ::selection {
-  background: rgba(124, 92, 255, 0.4);
+  background: rgba(124,92,255,0.4);
   color: #f2f2f7;
 }
+
+/* Dynamic Layout Utilities */
+.dynamic-pos {
+  left: var(--left, 0);
+  top: var(--top, 0);
+  width: var(--width, auto);
+  height: var(--height, auto);
+}
+
+.dynamic-cursor {
+  cursor: var(--canvas-cursor, default);
+}
+
+.dynamic-brush {
+  width: var(--brush-w, 0);
+  height: var(--brush-h, 0);
+  left: var(--brush-x, 0);
+  top: var(--brush-y, 0);
+  transform: translate(0, 0);
+}
+
+.dynamic-canvas-transform {
+  transform: var(--canvas-transform, none);
+  transform-origin: var(--canvas-origin, center center);
+  transition: var(--canvas-transition, none);
+}
+
+.dynamic-bg-image {
+  background-image: var(--bg-image, none);
+}
+
+.dynamic-progress {
+  width: var(--progress, 0);
+}
+
+.dynamic-animation {
+  animation-name: var(--anim-name);
+  animation-duration: var(--anim-dur, 0.4s);
+  animation-delay: var(--anim-delay, 0s);
+  animation-timing-function: var(--anim-ease, ease-out);
+  animation-fill-mode: var(--anim-fill, both);
+}
+
+

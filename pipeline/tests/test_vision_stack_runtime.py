@@ -104,6 +104,58 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(page["_vision_blocks"][0]["bbox"], [30, 18, 78, 42])
         self.assertEqual(int(np.count_nonzero(page["_vision_blocks"][0]["mask"])), int(np.count_nonzero(mask)))
 
+    def test_build_page_result_accepts_rich_ocr_items_and_preserves_metadata(self):
+        block = SimpleNamespace(
+            xyxy=(30, 18, 78, 42),
+            mask=None,
+            confidence=0.91,
+        )
+        rich_item = {
+            "text": "HELLO",
+            "line_polygons": [
+                [[34, 24], [56, 24], [56, 34], [34, 34]],
+                [[34, 34], [62, 34], [62, 42], [34, 42]],
+            ],
+            "text_pixel_bbox": [35, 24, 61, 42],
+            "bbox": [30, 18, 78, 42],
+        }
+
+        page = build_page_result(
+            image_path="page.jpg",
+            image_rgb=np.full((80, 120, 3), 255, dtype=np.uint8),
+            blocks=[block],
+            texts=[rich_item],
+        )
+
+        text = page["texts"][0]
+        self.assertEqual(text["text"], "HELLO")
+        self.assertEqual(text["bbox"], [30, 18, 78, 42])
+        self.assertEqual(text["confidence"], 0.91)
+        self.assertIn("tipo", text)
+        self.assertFalse(text["skip_processing"])
+        self.assertEqual(text["line_polygons"], rich_item["line_polygons"])
+        self.assertEqual(text["text_pixel_bbox"], rich_item["text_pixel_bbox"])
+
+    def test_build_page_result_marks_balloon_type_for_white_and_textured_regions(self):
+        blocks = [
+            SimpleNamespace(xyxy=(10, 10, 70, 34), mask=None, confidence=0.88),
+            SimpleNamespace(xyxy=(10, 40, 70, 64), mask=None, confidence=0.89),
+        ]
+
+        with patch("vision_stack.runtime._should_use_base_white_balloon_font", side_effect=[True, False]), patch(
+            "vision_stack.runtime._is_white_balloon_region",
+            side_effect=[True, False],
+        ):
+            page = build_page_result(
+                image_path="page.jpg",
+                image_rgb=np.full((100, 100, 3), 255, dtype=np.uint8),
+                blocks=blocks,
+                texts=["HELLO", "WORLD"],
+            )
+
+        self.assertEqual(page["texts"][0]["balloon_type"], "white")
+        self.assertEqual(page["texts"][1]["balloon_type"], "textured")
+
     def test_build_page_result_skips_watermark_and_credit_noise(self):
         blocks = [
             SimpleNamespace(xyxy=(10, 10, 70, 30), mask=None, confidence=0.43),
@@ -177,6 +229,35 @@ class VisionStackRuntimeTests(unittest.TestCase):
         get_font_detector.assert_not_called()
         self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "Newrotic.ttf")
         self.assertEqual(page["texts"][0]["estilo"].get("cor"), "#FFFFFF")
+
+    def test_build_koharu_worker_page_result_passes_rich_text_blocks_to_builder(self):
+        worker_payload = {
+            "text_blocks": [
+                {
+                    "bbox": [30, 18, 78, 42],
+                    "text": "HELLO",
+                    "line_polygons": [
+                        [[34, 24], [56, 24], [56, 34], [34, 34]],
+                    ],
+                    "text_pixel_bbox": [35, 24, 61, 42],
+                    "confidence": 0.88,
+                    "detector": "paddleocr",
+                }
+            ],
+            "bubble_regions": [],
+        }
+
+        with patch("vision_stack.runtime.build_page_result", return_value={"texts": []}) as build_mock:
+            _build_koharu_worker_page_result(
+                image_rgb=np.full((80, 120, 3), 255, dtype=np.uint8),
+                image_label="page.jpg",
+                worker_payload=worker_payload,
+            )
+
+        build_kwargs = build_mock.call_args.kwargs
+        self.assertEqual(build_kwargs["texts"][0]["text"], "HELLO")
+        self.assertEqual(build_kwargs["texts"][0]["line_polygons"], worker_payload["text_blocks"][0]["line_polygons"])
+        self.assertEqual(build_kwargs["texts"][0]["text_pixel_bbox"], worker_payload["text_blocks"][0]["text_pixel_bbox"])
 
     def test_should_use_base_white_balloon_font_detects_real_012_bottom_balloon(self):
         image_path = self._fixture_image_path("012__001.jpg")
@@ -256,6 +337,28 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertGreater(int(mask[30, 60]), 0)
         self.assertEqual(int(mask[21, 34]), 0)
         self.assertEqual(int(mask[46, 106]), 0)
+
+    def test_white_balloon_text_box_cleanup_uses_balloon_bbox_when_available(self):
+        original = np.full((120, 160, 3), 245, dtype=np.uint8)
+        cleaned = original.copy()
+        balloon_mask = np.zeros((120, 160), dtype=np.uint8)
+        balloon_mask[20:92, 28:132] = 255
+        text = {
+            "bbox": [58, 48, 104, 64],
+            "balloon_bbox": [28, 20, 132, 92],
+            "tipo": "fala",
+        }
+
+        with patch("vision_stack.runtime._is_white_balloon_region", return_value=True), patch(
+            "vision_stack.runtime._extract_white_balloon_fill_mask",
+            return_value=balloon_mask,
+        ) as extract_fill_mask, patch(
+            "vision_stack.runtime._extract_white_balloon_text_boxes",
+            return_value=[[58, 48, 104, 64]],
+        ):
+            _apply_white_balloon_text_box_cleanup(original, cleaned, [text])
+
+        self.assertEqual(list(extract_fill_mask.call_args.args[1]), [28, 20, 132, 92])
 
     def test_vision_blocks_to_mask_falls_back_to_full_bbox_without_image(self):
         blocks = [

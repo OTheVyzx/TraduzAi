@@ -1,0 +1,44 @@
+{
+  "include": [
+    "pipeline"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "node_modules",
+    "src",
+    "src-tauri",
+    "pipeline/venv"
+  ],
+  "extraPaths": [
+    "pipeline",
+    "pipeline/ocr",
+    "pipeline/translator",
+    "pipeline/typesetter",
+    "pipeline/layout",
+    "pipeline/vision_stack",
+    "pipeline/extractor",
+    "pipeline/inpainter",
+    "pipeline/corpus"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "pipeline",
+      "extraPaths": [
+        ".",
+        "ocr",
+        "translator",
+        "typesetter",
+        "layout",
+        "vision_stack",
+        "extractor",
+        "inpainter",
+        "corpus"
+      ]
+    }
+  ],
+  "venvPath": "pipeline",
+  "venv": "venv",
+  "pythonVersion": "3.12",
+  "reportMissingImports": "none",
+  "typeCheckingMode": "off"
+}

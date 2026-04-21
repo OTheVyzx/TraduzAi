@@ -79,7 +79,7 @@ KOREAN_FIX = {
 }
 
 
-def fix_ocr_errors(text: str) -> str:
+def fix_ocr_errors(text: str, **kwargs) -> str:
     if not text:
         return ""
 
@@ -195,7 +195,7 @@ def classify_text_type(text: str, bbox: list[int], page_width: int) -> str:
 
 def default_style() -> dict:
     return {
-        "fonte": "AnimeAce",
+        "fonte": "ComicNeue-Bold.ttf",
         "tamanho": 16,
         "cor": "#FFFFFF",
         "cor_gradiente": [],
@@ -444,7 +444,7 @@ def analyze_style(img_array: np.ndarray, bbox: list[int]) -> dict:
     italico = _detect_italic(region_gray)
 
     return {
-        "fonte": "AnimeAce",
+        "fonte": "ComicNeue-Bold.ttf",
         "tamanho": font_size,
         "cor": text_color,
         "cor_gradiente": cor_gradiente,

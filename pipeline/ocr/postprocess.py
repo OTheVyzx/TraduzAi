@@ -282,22 +282,30 @@ def normalize_bbox(
 
 
 def classify_text_type(text: str, bbox: list[int], page_width: int) -> str:
-    x1, _, x2, _ = bbox
+    x1, y1, x2, y2 = bbox
     if is_korean_sfx(text):
         return "sfx"
 
     center_x = (x1 + x2) / 2
     width = x2 - x1
-    height = bbox[3] - bbox[1]
-    is_edge = center_x < page_width * 0.15 or center_x > page_width * 0.85
-    if is_edge and width > height * 2:
+    height = y2 - y1
+    
+    # Narração: Se for muito largo, ou estiver nos cantos, ou for um retângulo perfeito no topo/base
+    is_edge_x = center_x < page_width * 0.15 or center_x > page_width * 0.85
+    aspect = width / max(1, height)
+    
+    if is_edge_x and aspect > 1.8:
         return "narracao"
+    
+    if aspect > 2.5: # Balões muito largos costumam ser narração ou legendas
+        return "narracao"
+        
     return "fala"
 
 
 def default_style() -> dict:
     return {
-        "fonte": "AnimeAce",
+        "fonte": "KOMIKAX_.ttf",
         "tamanho": 16,
         "cor": "#FFFFFF",
         "cor_gradiente": [],
@@ -332,24 +340,56 @@ def _color_distance(h1: str, h2: str) -> float:
 
 
 def _bright_pixels_color(arr_rgb: np.ndarray) -> str:
-    """Average color of the top 30 % brightest pixels in a region."""
+    """Extrai a cor média dos pixels mais brilhantes (estimativa para texto claro)."""
     if arr_rgb.size == 0:
         return "#FFFFFF"
     pixels = arr_rgb.reshape(-1, 3).astype(float)
     brightness = pixels.sum(axis=1)
-    threshold = np.percentile(brightness, 70)
+    # Pega o topo 25% mais brilhante
+    threshold = np.percentile(brightness, 75)
     bright = pixels[brightness >= threshold]
     if len(bright) == 0:
-        bright = pixels
+        return "#FFFFFF"
     return _rgb_to_hex(bright.mean(axis=0))
 
 
-def _detect_text_color(region_rgb: np.ndarray) -> str:
-    h = region_rgb.shape[0]
-    sample = max(1, h // 4)
-    cy = h // 2
-    center = region_rgb[max(0, cy - sample) : cy + sample]
-    return _bright_pixels_color(center)
+def _detect_text_color(region_rgb: np.ndarray, region_gray: np.ndarray) -> str:
+    """Detecta a cor do texto separando-o do fundo via thresholding de Otsu."""
+    if region_rgb.size == 0:
+        return "#FFFFFF"
+    
+    import cv2
+    # Threshold de Otsu para separar texto do fundo
+    _, mask = cv2.threshold(region_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Decide qual lado é o texto (o menos frequente geralmente é o texto)
+    count_white = np.count_nonzero(mask == 255)
+    count_black = np.count_nonzero(mask == 0)
+    
+    # Em mangá, se o fundo for balão branco, o texto é preto (lado menor).
+    # Se for texto flutuante em fundo escuro, o texto é claro (lado menor).
+    text_val = 255 if count_white < count_black else 0
+    text_mask = (mask == text_val).astype(np.uint8)
+    
+    # Se o texto for ridiculamente pequeno, fallback para cor brilhante
+    if np.count_nonzero(text_mask) < 4:
+        return _bright_pixels_color(region_rgb)
+    
+    # Calcula a cor média apenas onde a máscara de texto está ativa
+    mean_color = cv2.mean(region_rgb, mask=text_mask)[:3]
+    hex_color = _rgb_to_hex(mean_color)
+    
+    # Proteção: se a cor for quase fundo, tenta a outra polaridade
+    if count_white > 0 and count_black > 0:
+        bg_val = 255 - text_val
+        bg_mask = (mask == bg_val).astype(np.uint8)
+        bg_color = _rgb_to_hex(cv2.mean(region_rgb, mask=bg_mask)[:3])
+        if _color_distance(hex_color, bg_color) < 25:
+             alt_mask = (mask == bg_val).astype(np.uint8)
+             alt_color = _rgb_to_hex(cv2.mean(region_rgb, mask=alt_mask)[:3])
+             return alt_color
+
+    return hex_color
 
 
 def _detect_gradient(region_rgb: np.ndarray) -> list:
@@ -534,7 +574,7 @@ def analyze_style(img_array: np.ndarray, bbox: list[int]) -> dict:
     bbox_h = y2 - y1
 
     font_size = max(10, min(48, int(bbox_h * 0.7)))
-    text_color = _detect_text_color(region)
+    text_color = _detect_text_color(region, region_gray)
     cor_gradiente = _detect_gradient(region)
     contorno_color, contorno_px = _detect_outline(region, region_gray)
     has_glow, glow_color, glow_px = _detect_glow(region, region_gray)
@@ -546,7 +586,7 @@ def analyze_style(img_array: np.ndarray, bbox: list[int]) -> dict:
     italico = _detect_italic(region_gray)
 
     return {
-        "fonte": "AnimeAce",
+        "fonte": "KOMIKAX_.ttf",
         "tamanho": font_size,
         "cor": text_color,
         "cor_gradiente": cor_gradiente,

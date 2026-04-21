@@ -207,7 +207,62 @@ class TranslateContextTests(unittest.TestCase):
         )
         self.assertEqual(processed, "PODERIA SER AQUELA LUZ...?!")
 
-    def test_resolve_translation_backend_prefers_local_ollama_when_available(self):
+    def test_review_translation_grammar_semantics_rewrites_trading_with_them_phrase(self):
+        reviewed = _review_translation_grammar_semantics(
+            source_text='YOU MEAN THE POWER HE GOT BY TRADING WITH "THEM"?',
+            translated_text='Você quer dizer o poder que ele obteve negociando com "eles"?',
+            tipo="fala",
+        )
+        self.assertEqual(reviewed, "Você quer dizer o poder que ele conseguiu em um acordo com eles?")
+
+    def test_review_translation_grammar_semantics_compacts_half_mana_technique_line(self):
+        reviewed = _review_translation_grammar_semantics(
+            source_text=(
+                "EVEN THOUGH IT'S ONLY HALF OF A MANA TECHNIQUE, "
+                "ITS EFFECTS WILL BE MORE THAN ENOUGH. "
+                "THAT POWER LETS ONE INSTANTLY SURPASS THEIR OWN LIMITS."
+            ),
+            translated_text=(
+                "Mesmo sendo apenas metade de uma técnica de mana, "
+                "seus efeitos serão mais que suficientes. "
+                "Esse poder permite superar instantaneamente seus próprios limites."
+            ),
+            tipo="fala",
+        )
+        self.assertEqual(
+            reviewed,
+            "Pode até ser só metade de uma técnica de mana, mas seus efeitos já são mais do que suficientes. "
+            "Esse poder permite ultrapassar instantaneamente os próprios limites.",
+        )
+
+    def test_review_translation_grammar_semantics_shortens_desmond_power_line(self):
+        reviewed = _review_translation_grammar_semantics(
+            source_text="IF DESMOND ENDS UP USING THAT POWER...",
+            translated_text="Se Desmond acabar usando esse poder...",
+            tipo="fala",
+        )
+        self.assertEqual(reviewed, "Se Desmond usar esse poder...")
+
+    def test_review_translation_grammar_semantics_rewrites_vanessa_mana_line(self):
+        reviewed = _review_translation_grammar_semantics(
+            source_text="THE RAMPAGING VANESSA ALSO USED A SIMILAR MANA TECHNIQUE.",
+            translated_text="A violenta Vanessa também usou uma técnica de mana semelhante.",
+            tipo="fala",
+        )
+        self.assertEqual(
+            reviewed,
+            "A Vanessa em fúria também usava um método semelhante de circulação de mana.",
+        )
+
+    def test_review_translation_grammar_semantics_preserves_split_sentence_continuation(self):
+        reviewed = _review_translation_grammar_semantics(
+            source_text="YOU COULD SEE ALL OF MY ATTACKS?",
+            translated_text="Você pode ver todos os meus ataques?",
+            tipo="fala",
+        )
+        self.assertEqual(reviewed, "Que conseguia ver todos os meus ataques?")
+
+    def test_resolve_translation_backend_prefers_google_by_default_when_available(self):
         with patch.dict("os.environ", {}, clear=False):
             backend = _resolve_translation_backend(
                 google_ok=True,
@@ -218,10 +273,10 @@ class TranslateContextTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(backend, "ollama")
+        self.assertEqual(backend, "google")
 
-    def test_resolve_translation_backend_can_fall_back_to_google_when_local_preference_is_disabled(self):
-        with patch.dict("os.environ", {"TRADUZAI_PREFER_LOCAL_TRANSLATION": "0"}, clear=False):
+    def test_resolve_translation_backend_prefers_local_when_flag_enabled(self):
+        with patch.dict("os.environ", {"TRADUZAI_PREFER_LOCAL_TRANSLATION": "1"}, clear=False):
             backend = _resolve_translation_backend(
                 google_ok=True,
                 ollama_status={
@@ -231,7 +286,7 @@ class TranslateContextTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(backend, "google")
+        self.assertEqual(backend, "ollama")
 
 
 if __name__ == "__main__":

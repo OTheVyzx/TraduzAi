@@ -1,7 +1,8 @@
-"""Testes offline para lab.agents — sem API key real, sem rede.
+"""Testes offline para lab.agents — sem rede e sem depender do Claude CLI.
 
 Cobre:
 - get_agent_prompt: roteamento target_file → agente correto
+- seleção de prompt especialista por reviewer
 - _parse_review_response: parser de resposta estruturada
 - ClaudeReviewerAgent: fallback rule-based quando Claude indisponível
 - ClaudeSDKCoder: fallback quando Claude indisponível, patch local primeiro
@@ -11,7 +12,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # Adiciona raiz do repo ao sys.path para importações relativas
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -22,37 +23,78 @@ if str(_REPO_ROOT) not in sys.path:
 class TestGetAgentPrompt(unittest.TestCase):
     """Testa roteamento de arquivo → agente correto."""
 
-    def test_typesetter_prefix_routes_to_typesetter(self):
+    def _assert_prompt_contains(
+        self,
+        target_file: str,
+        expected_fragment: str,
+        touched_domains: list[str] | None = None,
+    ) -> None:
         from lab.agents.base import get_agent_prompt
 
-        # Se .claude/agents/typesetter-expert.md não existe, retorna None —
-        # o importante é que não lança exceção e tenta o arquivo certo.
-        result = get_agent_prompt("pipeline/typesetter/renderer.py")
-        # Pode ser None (arquivo não existe) ou uma string não-vazia
-        self.assertTrue(result is None or isinstance(result, str))
+        result = get_agent_prompt(target_file, touched_domains)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn(expected_fragment, result)
+
+    def test_detect_prefix_routes_to_detect(self):
+        self._assert_prompt_contains(
+            "pipeline/vision_stack/detector.py",
+            "TraduzAi **detect expert**",
+        )
+
+    def test_ocr_prefix_routes_to_ocr(self):
+        self._assert_prompt_contains(
+            "pipeline/ocr/postprocess.py",
+            "TraduzAi **OCR expert**",
+        )
+
+    def test_inpaint_prefix_routes_to_inpaint(self):
+        self._assert_prompt_contains(
+            "pipeline/inpainter/mask_builder.py",
+            "TraduzAi **inpaint expert**",
+        )
+
+    def test_runtime_routes_to_vision_stack_orchestrator(self):
+        self._assert_prompt_contains(
+            "pipeline/vision_stack/runtime.py",
+            "TraduzAi **vision stack orchestrator**",
+        )
 
     def test_layout_prefix_routes_to_typesetter(self):
-        from lab.agents.base import get_agent_prompt
-
-        result = get_agent_prompt("pipeline/layout/balloon_layout.py")
-        self.assertTrue(result is None or isinstance(result, str))
+        self._assert_prompt_contains(
+            "pipeline/layout/balloon_layout.py",
+            "TraduzAi **typesetter expert**",
+        )
 
     def test_translator_prefix_routes_to_translator(self):
-        from lab.agents.base import get_agent_prompt
+        self._assert_prompt_contains(
+            "pipeline/translator/translate.py",
+            "TraduzAi **translator expert**",
+        )
 
-        result = get_agent_prompt("pipeline/translator/translate.py")
-        self.assertTrue(result is None or isinstance(result, str))
+    def test_frontend_prefix_routes_to_tauri_frontend(self):
+        self._assert_prompt_contains(
+            "src/pages/Lab.tsx",
+            "TraduzAi **tauri-frontend expert**",
+        )
 
-    def test_vision_stack_prefix_routes_to_vision_stack(self):
-        from lab.agents.base import get_agent_prompt
+    def test_tauri_command_prefix_routes_to_tauri_frontend(self):
+        self._assert_prompt_contains(
+            "src-tauri/src/commands/lab.rs",
+            "TraduzAi **tauri-frontend expert**",
+        )
 
-        result = get_agent_prompt("pipeline/vision_stack/runtime.py")
-        self.assertTrue(result is None or isinstance(result, str))
+    def test_touched_domains_fallback_routes_to_frontend_specialist(self):
+        self._assert_prompt_contains(
+            "",
+            "TraduzAi **tauri-frontend expert**",
+            ["src-tauri/src/"],
+        )
 
     def test_unknown_file_returns_none(self):
         from lab.agents.base import get_agent_prompt
 
-        result = get_agent_prompt("src/pages/Lab.tsx")
+        result = get_agent_prompt("README.md")
         self.assertIsNone(result)
 
     def test_empty_file_returns_none(self):
@@ -61,19 +103,51 @@ class TestGetAgentPrompt(unittest.TestCase):
         result = get_agent_prompt("")
         self.assertIsNone(result)
 
-    def test_touched_domains_fallback(self):
-        from lab.agents.base import get_agent_prompt
-
-        # target_file vazio mas touched_domains contém prefixo válido
-        result = get_agent_prompt("", ["pipeline/typesetter"])
-        self.assertTrue(result is None or isinstance(result, str))
-
-    def test_is_claude_available_false_without_key(self):
-        """is_claude_available deve retornar False quando não há API key."""
+    def test_is_claude_available_false_without_cli(self):
+        """is_claude_available deve refletir indisponibilidade do CLI."""
         from lab.agents.base import is_claude_available
 
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}):
+        with patch("lab.agents.claude_cli_runner.is_cli_available", return_value=False):
             self.assertFalse(is_claude_available())
+
+
+class TestReviewerSystemSelection(unittest.TestCase):
+    """Testa a priorização de prompts especialistas nos reviewers."""
+
+    def _pick(
+        self,
+        reviewer_id: str,
+        target_file: str,
+        touched_domains: list[str] | None = None,
+    ) -> str:
+        from lab.agents.reviewer_agent import ClaudeReviewerAgent
+
+        return ClaudeReviewerAgent()._pick_system(
+            reviewer_id,
+            target_file,
+            touched_domains or [],
+        )
+
+    def test_tauri_boundary_prefers_frontend_specialist(self):
+        system = self._pick("tauri_boundary_reviewer", "src/lib/tauri.ts")
+        self.assertIn("TraduzAi **tauri-frontend expert**", system)
+
+    def test_rust_reviewer_prefers_frontend_specialist_for_tauri_command(self):
+        system = self._pick("rust_senior_reviewer", "src-tauri/src/commands/project.rs")
+        self.assertIn("TraduzAi **tauri-frontend expert**", system)
+
+    def test_react_reviewer_prefers_frontend_specialist_for_src(self):
+        system = self._pick("react_ts_senior_reviewer", "src/pages/Home.tsx")
+        self.assertIn("TraduzAi **tauri-frontend expert**", system)
+
+    def test_python_reviewer_prefers_detect_specialist(self):
+        system = self._pick("python_senior_reviewer", "pipeline/vision_stack/detector.py")
+        self.assertIn("TraduzAi **detect expert**", system)
+
+    def test_tauri_boundary_falls_back_to_generic_boundary_prompt_when_no_specialist_exists(self):
+        with patch("lab.agents.reviewer_agent.get_agent_prompt", return_value=None):
+            system = self._pick("tauri_boundary_reviewer", "docs/notes.md")
+        self.assertIn("fronteira Tauri/IPC", system)
 
 
 class TestParseReviewResponse(unittest.TestCase):
@@ -242,7 +316,7 @@ class TestClaudeSDKCoderFallback(unittest.TestCase):
 
         self.assertEqual(result.proposal_id, "proposal-xyz789")
         self.assertEqual(result.confidence, 0.0)
-        self.assertIn("ANTHROPIC_API_KEY", result.error)
+        self.assertIn("Claude Code CLI", result.error)
 
     def test_coder_id_is_claude_sdk(self):
         from lab.agents.coder_agent import ClaudeSDKCoder
@@ -253,7 +327,7 @@ class TestClaudeSDKCoderFallback(unittest.TestCase):
         from lab.agents.coder_agent import ClaudeSDKCoder
 
         with patch("lab.agents.coder_agent.is_claude_available", return_value=True):
-            with patch("lab.agents.coder_agent.make_client", side_effect=RuntimeError("sem conexão")):
+            with patch.object(ClaudeSDKCoder, "_call_claude", side_effect=RuntimeError("sem conexão")):
                 coder = ClaudeSDKCoder()
                 result = coder.propose_patch(self.proposal, self.repo_root)
 
@@ -263,6 +337,7 @@ class TestClaudeSDKCoderFallback(unittest.TestCase):
     def test_local_patch_hint_takes_priority(self):
         """Quando local_patch_hint produz patch, não deve chamar Claude."""
         from lab.agents.coder_agent import ClaudeSDKCoder
+        from lab.coders.base import PatchProposal
 
         proposal_with_hint = dict(
             self.proposal,
@@ -270,16 +345,20 @@ class TestClaudeSDKCoderFallback(unittest.TestCase):
             local_patch_hint={"pattern": r"threshold\s*=\s*0\.8", "replacement": "threshold = 0.75"},
         )
 
-        # Mesmo com Claude "disponível", deve resolver localmente
-        with patch("lab.agents.coder_agent.is_claude_available", return_value=True) as mock_avail:
-            with patch("lab.agents.coder_agent.make_client") as mock_client:
+        local_patch = PatchProposal(
+            proposal_id="proposal-xyz789",
+            patch_unified_diff="--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new",
+            author="local_patch_hint",
+            confidence=0.9,
+        )
+
+        with patch("lab.agents.coder_agent.build_local_patch_from_hint", return_value=local_patch):
+            with patch.object(ClaudeSDKCoder, "_call_claude") as mock_call:
                 coder = ClaudeSDKCoder()
-                # build_local_patch_from_hint pode retornar None se o arquivo não tiver o pattern
-                # — o importante é que não chama make_client antes de tentar local
-                coder.propose_patch(proposal_with_hint, self.repo_root)
-                # make_client só é chamado se local falhou — não vamos assertar seu call count
-                # pois depende do conteúdo real do arquivo
-        self.assertTrue(True)  # chegou aqui sem exceção
+                result = coder.propose_patch(proposal_with_hint, self.repo_root)
+
+        self.assertEqual(result.author, "local_patch_hint")
+        mock_call.assert_not_called()
 
 
 class TestEstimateConfidence(unittest.TestCase):

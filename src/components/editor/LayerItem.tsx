@@ -24,15 +24,14 @@ interface LayerItemProps {
 
 export function LayerItem({ entry, index }: LayerItemProps) {
   const rowRef = useRef<HTMLDivElement>(null);
-  const { selectedLayerId, hoveredLayerId, hiddenLayers, currentPageIndex, pendingEdits } =
-    useEditorStore();
+  const { selectedLayerId, hoveredLayerId, pendingEdits } = useEditorStore();
   const selectLayer = useEditorStore((s) => s.selectLayer);
   const hoverLayer = useEditorStore((s) => s.hoverLayer);
-  const toggleVisibility = useEditorStore((s) => s.toggleLayerVisibility);
+  const toggleVisibility = useEditorStore((s) => s.toggleTextLayerVisibility);
 
   const isSelected = selectedLayerId === entry.id;
   const isHovered = hoveredLayerId === entry.id;
-  const isHidden = (hiddenLayers[currentPageIndex] ?? []).includes(entry.id);
+  const isHidden = entry.visible === false;
 
   useEffect(() => {
     if (!isSelected || !rowRef.current) return;
@@ -40,12 +39,12 @@ export function LayerItem({ entry, index }: LayerItemProps) {
   }, [isSelected]);
 
   const edit = pendingEdits[entry.id];
-  const displayText = edit?.traduzido ?? entry.traduzido ?? entry.original;
+  const displayText = edit?.traduzido ?? edit?.translated ?? entry.traduzido ?? entry.translated ?? entry.original;
   const hasEdits = !!edit;
 
   const TipoIcon = TIPO_ICONS[entry.tipo] ?? MessageSquare;
 
-  const confidence = entry.confianca_ocr ?? 0;
+  const confidence = entry.confianca_ocr ?? entry.ocr_confidence ?? 0;
   const confidenceColor =
     confidence >= 0.8
       ? "bg-status-success"
@@ -74,7 +73,7 @@ export function LayerItem({ entry, index }: LayerItemProps) {
           }`}
           onClick={(event) => {
             event.stopPropagation();
-            toggleVisibility(entry.id);
+            void toggleVisibility(entry.id);
           }}
         >
           {isHidden ? <EyeOff size={14} /> : <Eye size={14} />}
@@ -107,7 +106,7 @@ export function LayerItem({ entry, index }: LayerItemProps) {
               {displayText.trim() || "(vazio)"}
             </p>
             <div className="mt-1.5 flex items-center justify-between text-[10px] text-text-muted">
-              <span className="truncate">{entry.bbox.join(", ")}</span>
+              <span className="truncate">{(edit?.bbox ?? entry.bbox).join(", ")}</span>
               <span className="flex items-center gap-1">
                 <span className={`h-1.5 w-1.5 rounded-full ${confidenceColor}`} />
                 {Math.round(confidence * 100)}%

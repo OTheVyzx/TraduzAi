@@ -17,19 +17,38 @@ from uuid import uuid4
 import cv2
 import numpy as np
 from PIL import Image
+from typing import TYPE_CHECKING, Callable, Optional
 
-from ocr.postprocess import (
-    _find_hf_model,
-    analyze_style,
-    classify_text_type,
-    fix_ocr_errors,
-    is_editorial_credit,
-    is_non_english,
-    is_watermark,
-    looks_suspicious,
-)
-from ocr.semantic_reviewer import semantic_refine_text
-from vision_stack.ocr import normalize_paddleocr_language
+if TYPE_CHECKING:
+    # Hints para o IDE - Ignorar avisos de resolução pois o sys.path é dinâmico
+    from ocr.postprocess import ( # type: ignore
+        _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
+        is_editorial_credit, is_non_english, is_watermark, looks_suspicious
+    )
+    from ocr.semantic_reviewer import semantic_refine_text # type: ignore
+    from inpainter.classical import _extract_textured_balloon_mask, _expand_overlay_bbox # type: ignore
+    from .ocr import _derive_text_pixel_bbox, normalize_paddleocr_language # type: ignore
+else:
+    # Imports relativos com fallback para garantir portabilidade no runtime
+    try:
+        from ocr.postprocess import (
+            _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
+            is_editorial_credit, is_non_english, is_watermark, looks_suspicious,
+        )
+        from ocr.semantic_reviewer import semantic_refine_text
+    except ImportError:
+        from ..ocr.postprocess import ( 
+            _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
+            is_editorial_credit, is_non_english, is_watermark, looks_suspicious,
+        )
+        from ..ocr.semantic_reviewer import semantic_refine_text
+
+    try:
+        from inpainter.classical import _extract_textured_balloon_mask, _expand_overlay_bbox
+    except ImportError:
+        from ..inpainter.classical import _extract_textured_balloon_mask, _expand_overlay_bbox
+
+    from .ocr import _derive_text_pixel_bbox, normalize_paddleocr_language
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +76,7 @@ def _get_font_detector():
         return None
     fonts_dir = Path(__file__).parent.parent.parent / "fonts"
     try:
-        from typesetter.font_detector import FontDetector
+        from typesetter.font_detector import FontDetector # type: ignore
         _font_detector = FontDetector(model_path, fonts_dir)
     except Exception as exc:
         logger.warning("FontDetector não carregado: %s", exc)
@@ -78,6 +97,36 @@ def _emit_stage_progress(progress_callback, stage: str, progress: float, message
     except Exception:
         clamped = 0.0
     progress_callback(stage, clamped, message)
+
+
+def _coerce_bbox(raw_bbox) -> list[int] | None:
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in raw_bbox]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _normalize_line_polygons(raw_line_polygons) -> list[list[list[int]]]:
+    normalized: list[list[list[int]]] = []
+    for polygon in raw_line_polygons or []:
+        if not isinstance(polygon, (list, tuple)):
+            continue
+        points: list[list[int]] = []
+        for point in polygon:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                points.append([int(round(float(point[0]))), int(round(float(point[1])))])
+            except Exception:
+                continue
+        if len(points) >= 4:
+            normalized.append(points)
+    return normalized
 
 
 def _quick_text_presence_check(image_rgb: np.ndarray) -> bool:
@@ -240,8 +289,8 @@ def _configure_model_roots(models_dir: str = ""):
     if _configured_models_dir == root:
         return
 
-    from vision_stack import detector as detector_module
-    from vision_stack import inpainter as inpainter_module
+    from . import detector as detector_module
+    from . import inpainter as inpainter_module
 
     detector_module.MODELS_DIR = root
     inpainter_module.MODELS_DIR = root
@@ -348,7 +397,9 @@ def _build_koharu_worker_page_result(
                 source_direction=item.get("source_direction"),
             )
         )
-        texts.append(str(item.get("text", "")))
+        rich_item = dict(item)
+        rich_item["text"] = str(rich_item.get("text", "") or "")
+        texts.append(rich_item)
 
     page_result = build_page_result(
         image_path=image_label,
@@ -439,7 +490,7 @@ def _run_koharu_worker_detect_ocr(
 def _get_detector(profile: str = "quality"):
     global _detector
     if _detector is None:
-        from vision_stack.detector import TextDetector
+        from .detector import TextDetector # type: ignore
 
         _detector = TextDetector(
             model="comic-text-detector",
@@ -456,7 +507,7 @@ def _get_ocr_engine(profile: str = "quality", lang: str = "en"):
     current_lang = getattr(_ocr_engine, "lang", "en")
     
     if _ocr_engine is None or current_request != desired_model or current_lang != lang:
-        from vision_stack.ocr import OCREngine
+        from .ocr import OCREngine # type: ignore
 
         _ocr_engine = OCREngine(
             model=desired_model,
@@ -470,7 +521,7 @@ def _get_ocr_engine(profile: str = "quality", lang: str = "en"):
 def _get_inpainter(profile: str = "quality"):
     global _inpainter
     if _inpainter is None:
-        from vision_stack.inpainter import Inpainter
+        from .inpainter import Inpainter # type: ignore
 
         _inpainter = Inpainter(
             model="lama-manga",
@@ -960,7 +1011,8 @@ def _try_koharu_balloon_fill(image_rgb: np.ndarray, text_mask: np.ndarray) -> np
         return None
 
     std_rgb = _color_stddev(image_rgb, non_text_mask, average_bg_color)
-    inpaint_threshold = 7.0 if _stddev3(std_rgb) > 1.0 else 10.0
+    # Se houver qualquer variação cromática significante, não usamos preenchimento sólido (preserva gradientes/texturas)
+    inpaint_threshold = 3.5 if _stddev3(std_rgb) > 0.5 else 5.0
     if max(std_rgb) >= inpaint_threshold:
         return None
 
@@ -1729,10 +1781,6 @@ def _extract_textured_balloon_support_mask(
     if len(seed_bbox) != 4 or len(text_bbox) != 4:
         return None
 
-    try:
-        from inpainter.classical import _extract_textured_balloon_mask
-    except Exception:
-        return None
 
     region = {
         "bbox": [int(v) for v in seed_bbox],
@@ -1901,11 +1949,6 @@ def _apply_textured_balloon_band_artifact_cleanup(
 ) -> np.ndarray:
     result = cleaned_rgb.copy()
     if result.size == 0 or not texts:
-        return result
-
-    try:
-        from inpainter.classical import _expand_overlay_bbox
-    except Exception:
         return result
 
     height, width = result.shape[:2]
@@ -2264,11 +2307,14 @@ def _apply_white_balloon_text_box_cleanup(
         bbox = text.get("bbox") or [0, 0, 0, 0]
         if len(bbox) != 4:
             continue
-        if not _is_white_balloon_region(original_rgb, bbox):
+        balloon_bbox = text.get("balloon_bbox") or bbox
+        if not isinstance(balloon_bbox, (list, tuple)) or len(balloon_bbox) != 4:
+            balloon_bbox = bbox
+        if not _is_white_balloon_region(original_rgb, balloon_bbox):
             continue
-        balloon_mask = _extract_white_balloon_fill_mask(original_rgb, bbox)
+        balloon_mask = _extract_white_balloon_fill_mask(original_rgb, balloon_bbox)
         if not np.any(balloon_mask):
-            legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, bbox)
+            legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, balloon_bbox)
             if isinstance(legacy_mask, np.ndarray):
                 balloon_mask = legacy_mask
         if np.any(balloon_mask):
@@ -2334,17 +2380,24 @@ def _apply_white_balloon_micro_artifact_cleanup(
             bbox = text_items[index].get("bbox") or [0, 0, 0, 0]
             if len(bbox) != 4:
                 continue
-            if not _is_white_balloon_region(original_rgb, bbox):
+            balloon_bbox = text_items[index].get("balloon_bbox") or bbox
+            if not isinstance(balloon_bbox, (list, tuple)) or len(balloon_bbox) != 4:
+                balloon_bbox = bbox
+            if not _is_white_balloon_region(original_rgb, balloon_bbox):
                 continue
-            balloon_mask = _extract_white_balloon_fill_mask(original_rgb, bbox)
+            balloon_mask = _extract_white_balloon_fill_mask(original_rgb, balloon_bbox)
             if not np.any(balloon_mask):
-                legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, bbox)
+                legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, balloon_bbox)
                 if isinstance(legacy_mask, np.ndarray):
                     balloon_mask = legacy_mask
             if not np.any(balloon_mask):
                 continue
 
-            cluster_bbox = bbox if cluster_bbox is None else _bbox_union(cluster_bbox, bbox)
+            cluster_bbox = (
+                [int(v) for v in balloon_bbox]
+                if cluster_bbox is None
+                else _bbox_union(cluster_bbox, balloon_bbox)
+            )
             cluster_mask = np.maximum(cluster_mask, balloon_mask.astype(np.uint8))
 
         if cluster_bbox is None or not np.any(cluster_mask):
@@ -3034,8 +3087,10 @@ def build_page_result(
         if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
             continue
 
+        raw_record = raw_text if isinstance(raw_text, dict) else {}
+        raw_text_value = raw_record.get("text") or raw_record.get("translated") or raw_text
         confidence = round(float(getattr(block, "confidence", 0.0)), 3)
-        cleaned = fix_ocr_errors(str(raw_text or "").strip(), idioma_origem=idioma_origem)
+        cleaned = fix_ocr_errors(str(raw_text_value or "").strip(), idioma_origem=idioma_origem)
         if not cleaned:
             continue
 
@@ -3057,12 +3112,51 @@ def build_page_result(
         if looks_suspicious(cleaned, confidence) and confidence < 0.6:
             continue
         estilo = analyze_style(image_rgb, bbox)
-        if _should_use_base_white_balloon_font(image_rgb, bbox):
-            estilo["fonte"] = "ComicNeue-Bold.ttf"
-        else:
-            estilo["fonte"] = "Newrotic.ttf"
-            estilo["cor"] = "#FFFFFF"
-        estilo["force_upper"] = True
+        is_white_balloon = _is_white_balloon_region(image_rgb, bbox)
+        
+        # Regra do Usuário: Balões quadrados e textos sem balão (narração) usam KOMIKAX
+        # Classificamos como 'square' inicialmente, mas serah refinado no layout.
+        potential_tipo = classify_text_type(cleaned, bbox, width)
+        
+        font_detected = False
+        if enable_font_detection:
+            fd = _get_font_detector()
+            if fd is not None:
+                region = image_rgb[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+                try:
+                    detected_font = fd.detect(region)
+                    estilo["fonte"] = detected_font
+                    if detected_font == "ComicNeue-Bold.ttf":
+                        estilo["force_upper"] = True
+                    font_detected = True
+                except Exception:
+                    pass
+        
+        # Override rules: prioridade para o pedido do usuário
+        if potential_tipo == "narracao" or not is_white_balloon:
+            estilo["fonte"] = "KOMIKAX_.ttf"
+            estilo["force_upper"] = True
+            if not is_white_balloon and estilo["cor"].upper() == "#FFFFFF":
+                # Se não tem balão e a cor deu branco num fundo claro, tenta preto
+                avg_gray = np.mean(image_rgb[bbox[1]:bbox[3], bbox[0]:bbox[2]])
+                if avg_gray > 180:
+                    estilo["cor"] = "#000000"
+        elif not font_detected:
+            if is_white_balloon:
+                estilo["fonte"] = "ComicNeue-Bold.ttf"
+            else:
+                estilo["fonte"] = "KOMIKAX_.ttf"
+            estilo["force_upper"] = True
+        line_polygons = _normalize_line_polygons(
+            raw_record.get("line_polygons")
+            or getattr(block, "line_polygons", None)
+            or []
+        )
+        text_pixel_bbox = _coerce_bbox(raw_record.get("text_pixel_bbox"))
+        if text_pixel_bbox is None:
+            text_pixel_bbox = _derive_text_pixel_bbox(image_rgb, raw_record.get("bbox") or bbox, line_polygons)
+        if text_pixel_bbox is None:
+            text_pixel_bbox = bbox
         page_texts.append(
             {
                 "text": cleaned,
@@ -3076,6 +3170,9 @@ def build_page_result(
                 "ocr_semantic_reviewed": False,
                 "ocr_mode": ocr_backend,
                 "skip_processing": False,
+                "line_polygons": line_polygons,
+                "text_pixel_bbox": text_pixel_bbox,
+                "balloon_type": "white" if is_white_balloon else "textured",
             }
         )
         vision_blocks.append(_serialize_block(block, (height, width)))
@@ -3213,10 +3310,11 @@ def vision_blocks_to_mask(
                                     local_balloon = balloon_mask[ry1 : ry1 + patch_h, rx1 : rx1 + patch_w]
                                     if local_balloon.shape == patch.shape:
                                         patch = cv2.bitwise_and(patch.astype(np.uint8), local_balloon.astype(np.uint8))
+                                        # Expansão mais agressiva para cobrir glows e sombras de texto (melhora inpaint)
                                         patch = cv2.dilate(
                                             patch,
-                                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-                                            iterations=1,
+                                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+                                            iterations=2,
                                         )
                                         refined_area = int(np.count_nonzero(patch))
                                 if area_ratio >= 0.70:

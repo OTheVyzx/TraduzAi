@@ -1,5 +1,47 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+
+function useDynamicStyle<T extends HTMLElement>(styleObj: Record<string, string | number>, deps: any[]) {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    if (ref.current) {
+      for (const [key, value] of Object.entries(styleObj)) {
+        if (value === undefined || value === null) {
+          ref.current.style.removeProperty(key);
+        } else {
+          ref.current.style.setProperty(key, String(value));
+        }
+      }
+    }
+  }, deps);
+  return ref;
+}
+
+function ProgressBar({ progress }: { progress: number }) {
+  const ref = useDynamicStyle<HTMLDivElement>({ "--progress": `${progress}%` }, [progress]);
+  return (
+    <div
+      ref={ref}
+      className="h-full bg-gradient-to-r from-accent-purple to-accent-cyan rounded-full transition-all duration-500 ease-out dynamic-progress"
+    />
+  );
+}
+
+function StepProgressBar({ progress }: { progress: number }) {
+  const ref = useDynamicStyle<HTMLDivElement>({ "--progress": `${progress}%` }, [progress]);
+  return <div ref={ref} className="h-full bg-accent-purple rounded-full transition-all duration-300 ease-out dynamic-progress" />;
+}
+
+function AnimContainer({ name, dur, delay, ease, fill, children, className }: { name: string, dur: string, delay?: string, ease?: string, fill?: string, children?: React.ReactNode, className?: string }) {
+  const ref = useDynamicStyle<HTMLDivElement>({
+    "--anim-name": name,
+    "--anim-dur": dur,
+    "--anim-delay": delay || "0s",
+    "--anim-ease": ease || "ease",
+    "--anim-fill": fill || "none",
+  }, [name, dur, delay, ease, fill]);
+  return <div ref={ref} className={className}>{children}</div>;
+}
 import {
   CheckCircle2,
   Loader2,
@@ -11,7 +53,11 @@ import {
   PauseCircle,
   PlayCircle,
   Layers,
+  Eye,
+  Edit3,
+  FileDown,
 } from "lucide-react";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { useAppStore, PipelineStep } from "../lib/stores/appStore";
 import {
   onPipelineProgress,
@@ -21,8 +67,10 @@ import {
   resumePipeline,
   startPipeline,
   loadProjectJson,
+  openLogSaveDialog,
+  exportTextFile,
 } from "../lib/tauri";
-import type { PageData } from "../lib/stores/appStore";
+import type { PageData, PipelineLogEntry } from "../lib/stores/appStore";
 import {
   blendRemainingSeconds,
   buildHardwareSummary,
@@ -30,6 +78,84 @@ import {
   formatDuration,
   formatEtaClock,
 } from "../lib/time-estimates";
+
+interface CompletionData {
+  obra: string;
+  capitulo: number;
+  pages: number;
+  elapsedSeconds: number;
+  firstPagePath: string | null;
+  paginas: PageData[];
+}
+
+function sanitizeForFilename(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function buildLogFileName(obra?: string | null, capitulo?: number | null): string {
+  const nowIso = new Date().toISOString().replace(/[:]/g, "-").replace(/\..+$/, "");
+  const parts: string[] = ["traduzai"];
+  if (obra) {
+    const slug = sanitizeForFilename(obra);
+    if (slug) parts.push(slug);
+  }
+  if (typeof capitulo === "number" && Number.isFinite(capitulo)) {
+    parts.push(`cap${capitulo}`);
+  }
+  parts.push(nowIso);
+  return `${parts.join("_")}.log`;
+}
+
+function pad2(value: number): string {
+  return value.toString().padStart(2, "0");
+}
+
+function formatTimestamp(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +
+    `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function formatPipelineLog(ctx: {
+  obra: string | null;
+  capitulo: number | null;
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
+  totalPages: number | null;
+  hardware: string | null;
+  entries: PipelineLogEntry[];
+}): string {
+  const lines: string[] = [];
+  lines.push("=== TraduzAi — Log da tradução ===");
+  lines.push(`Obra: ${ctx.obra ?? "(não informada)"}`);
+  lines.push(`Capítulo: ${ctx.capitulo ?? "-"}`);
+  lines.push(`Páginas estimadas: ${ctx.totalPages ?? "-"}`);
+  lines.push(`Início: ${ctx.startedAtMs ? formatTimestamp(ctx.startedAtMs) : "-"}`);
+  lines.push(`Término: ${ctx.finishedAtMs ? formatTimestamp(ctx.finishedAtMs) : "(em andamento)"}`);
+  if (ctx.hardware) lines.push(`Hardware: ${ctx.hardware}`);
+  lines.push(`Exportado em: ${formatTimestamp(Date.now())}`);
+  lines.push(`Total de eventos: ${ctx.entries.length}`);
+  lines.push("");
+  lines.push("--- Eventos ---");
+  for (const entry of ctx.entries) {
+    const ts = formatTimestamp(entry.timestamp);
+    const level = entry.level.toUpperCase().padEnd(8, " ");
+    const step = entry.step ? `[${entry.step}]` : "";
+    const pageInfo =
+      entry.current_page != null && entry.total_pages != null
+        ? ` p${entry.current_page}/${entry.total_pages}`
+        : "";
+    const overall = entry.overall_progress != null ? ` ${Math.round(entry.overall_progress)}%` : "";
+    lines.push(`${ts} ${level}${step}${pageInfo}${overall} ${entry.message}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
 
 const STEPS: { key: PipelineStep; label: string; description: string }[] = [
   { key: "extract", label: "Extração", description: "Descompactando e validando arquivos" },
@@ -52,6 +178,8 @@ export function Processing() {
     systemProfile,
     batchSources,
     setBatchSources,
+    pipelineLog,
+    appendPipelineLog,
   } = useAppStore();
   const startedRef = useRef(false);
   const [started, setStarted] = useState(false);
@@ -60,6 +188,7 @@ export function Processing() {
   const [pauseState, setPauseState] = useState<"running" | "pausing" | "paused" | "resuming">("running");
   const [pausedDurationMs, setPausedDurationMs] = useState(0);
   const pauseStartedAtRef = useRef<number | null>(null);
+  const [completionData, setCompletionData] = useState<CompletionData | null>(null);
 
   // Estados de Lote
   const [batchIndex, setBatchIndex] = useState(0);
@@ -91,6 +220,10 @@ export function Processing() {
 
       try {
         setPipeline(null);
+        appendPipelineLog({
+          level: "info",
+          message: `Iniciando capítulo ${currentChapter} — ${currentPath}`,
+        });
         await startPipeline({
           source_path: currentPath,
           obra: project.obra,
@@ -112,8 +245,13 @@ export function Processing() {
             fontes_usadas: project.contexto.fontes_usadas,
           },
         });
+        updateProject({ status: "processing" });
         setStarted(true);
       } catch (err) {
+        appendPipelineLog({
+          level: "error",
+          message: `Erro ao iniciar capítulo ${currentChapter}: ${err}`,
+        });
         alert(`Erro ao iniciar capítulo ${currentChapter}: ${err}`);
         navigate("/");
       }
@@ -121,22 +259,33 @@ export function Processing() {
 
     async function setup() {
       // 1. Registra listeners PRIMEIRO
+      let lastLoggedStep: PipelineStep | null = null;
       unlistenProgress = (await onPipelineProgress((progress) => {
         setPipeline(progress);
+        appendPipelineLog({
+          level: progress.step !== lastLoggedStep ? "step" : "progress",
+          step: progress.step,
+          current_page: progress.current_page,
+          total_pages: progress.total_pages,
+          overall_progress: progress.overall_progress,
+          step_progress: progress.step_progress,
+          message: progress.message,
+        });
+        lastLoggedStep = progress.step;
       })) as unknown as () => void;
 
       unlistenComplete = (await onPipelineComplete(async (result) => {
+        appendPipelineLog({
+          level: result.success ? "success" : "error",
+          message: result.success
+            ? `Capítulo concluído — saída em ${result.output_path}`
+            : `Pipeline falhou: ${result.error ?? "erro desconhecido"}`,
+        });
         if (result.success) {
           try {
             const raw = await loadProjectJson(result.output_path);
             const outputDir = result.output_path.replace(/\\/g, "/");
-            const paginas: PageData[] = (raw.paginas ?? []).map((p) => ({
-              numero: p.numero,
-              arquivo_original: `${outputDir}/${p.arquivo_original}`.replace(/\\/g, "/"),
-              arquivo_traduzido: `${outputDir}/${p.arquivo_traduzido}`.replace(/\\/g, "/"),
-              inpaint_blocks: p.inpaint_blocks ?? [],
-              textos: p.textos ?? [],
-            }));
+            const paginas: PageData[] = raw.paginas ?? [];
 
             const chapterNum = raw.capitulo || project?.capitulo || 1;
 
@@ -168,7 +317,17 @@ export function Processing() {
                 capitulo: chapterNum,
               });
               setBatchSources([]);
-              navigate("/preview");
+              const elapsed = startedAtMs
+                ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+                : 0;
+              setCompletionData({
+                obra: raw.obra || project?.obra || "Projeto",
+                capitulo: chapterNum,
+                pages: paginas.length,
+                elapsedSeconds: elapsed,
+                firstPagePath: paginas[0]?.arquivo_traduzido ?? null,
+                paginas,
+              });
             }
           } catch (e) {
             console.error("Erro no lifecycle de conclusão:", e);
@@ -200,9 +359,30 @@ export function Processing() {
 
   async function handleCancel() {
     if (confirm("Cancelar tradução em andamento?")) {
+      appendPipelineLog({ level: "info", message: "Tradução cancelada pelo usuário." });
       await cancelPipeline();
       updateProject({ status: "idle" });
       navigate("/");
+    }
+  }
+
+  async function handleExportLog() {
+    try {
+      const suggested = buildLogFileName(project?.obra, project?.capitulo);
+      const target = await openLogSaveDialog(suggested);
+      if (!target) return;
+      const content = formatPipelineLog({
+        obra: project?.obra ?? null,
+        capitulo: project?.capitulo ?? null,
+        startedAtMs,
+        finishedAtMs: completionData ? startedAtMs ? startedAtMs + completionData.elapsedSeconds * 1000 : null : null,
+        totalPages: project?.totalPages ?? null,
+        hardware: hardwareSummary,
+        entries: pipelineLog,
+      });
+      await exportTextFile(target, content);
+    } catch (err) {
+      alert(`Erro ao exportar log: ${err}`);
     }
   }
 
@@ -274,6 +454,18 @@ export function Processing() {
 
   const isBatch = batchSources.length > 1;
 
+  if (completionData) {
+    return (
+      <ChapterCompletionScreen
+        data={completionData}
+        onPreview={() => navigate("/preview")}
+        onEditor={() => navigate("/editor")}
+        onExportLog={handleExportLog}
+        logCount={pipelineLog.length}
+      />
+    );
+  }
+
   return (
     <div className="p-8 max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-1">
@@ -328,11 +520,7 @@ export function Processing() {
           </span>
         </div>
         <div className="h-2 bg-bg-tertiary rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gradient-to-r from-accent-purple to-accent-cyan rounded-full
-              transition-all duration-500 ease-out"
-            style={{ width: `${pipeline?.overall_progress || 0}%` }}
-          />
+          <ProgressBar progress={pipeline?.overall_progress || 0} />
         </div>
         {pipeline && (
           <p className="text-xs text-text-secondary mt-2">
@@ -456,12 +644,199 @@ export function Processing() {
         </button>
 
         <button
+          onClick={handleExportLog}
+          disabled={pipelineLog.length === 0}
+          className="flex items-center gap-2 rounded-full border border-white/10 bg-bg-secondary px-4 py-2 text-sm text-text-secondary transition-smooth hover:border-white/20 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          title={pipelineLog.length === 0 ? "Nada registrado ainda" : `Exportar ${pipelineLog.length} eventos`}
+        >
+          <FileDown size={16} />
+          Exportar log
+        </button>
+
+        <button
           onClick={handleCancel}
           className="flex items-center gap-2 text-sm text-text-secondary hover:text-status-error transition-smooth"
         >
           <XCircle size={16} />
           Cancelar tradução
         </button>
+      </div>
+    </div>
+  );
+}
+
+function ChapterCompletionScreen({
+  data,
+  onPreview,
+  onEditor,
+  onExportLog,
+  logCount,
+}: {
+  data: CompletionData;
+  onPreview: () => void;
+  onEditor: () => void;
+  onExportLog: () => void;
+  logCount: number;
+}) {
+  const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const prevBlobRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const path = data.firstPagePath;
+    if (!path) return;
+    let cancelled = false;
+    readFile(path)
+      .then((bytes) => {
+        if (cancelled) return;
+        const blob = new Blob([bytes], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        if (prevBlobRef.current) URL.revokeObjectURL(prevBlobRef.current);
+        prevBlobRef.current = url;
+        setImageSrc(url);
+      })
+      .catch(() => {
+        if (!cancelled) setImageSrc(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data.firstPagePath]);
+
+  useEffect(() => {
+    return () => {
+      if (prevBlobRef.current) URL.revokeObjectURL(prevBlobRef.current);
+    };
+  }, []);
+
+  return (
+    <div className="relative flex min-h-full flex-col items-center justify-center overflow-hidden p-8">
+      <style>{`
+        @keyframes successPop {
+          from { opacity: 0; transform: scale(0.35); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes pageZoomIn {
+          from { opacity: 0; transform: scale(0.72) translateY(28px); }
+          to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        @keyframes fadeSlideUp {
+          from { opacity: 0; transform: translateY(14px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+
+      {/* Ambient glow */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(ellipse_at_top,_rgba(72,225,120,0.10),_transparent_55%)]" />
+
+      <div className="relative w-full max-w-md">
+        {/* Success icon */}
+        <div className="mb-6 flex justify-center">
+          <AnimContainer
+            name="successPop"
+            dur="0.55s"
+            ease="cubic-bezier(0.34,1.56,0.64,1)"
+            fill="forwards"
+            className="flex h-16 w-16 items-center justify-center rounded-full bg-status-success/15 shadow-[0_0_32px_rgba(72,225,120,0.18)] dynamic-animation"
+          >
+            <CheckCircle2 size={32} className="text-status-success" />
+          </AnimContainer>
+        </div>
+
+        {/* Title */}
+        <AnimContainer
+          name="fadeSlideUp"
+          dur="0.4s"
+          delay="0.12s"
+          ease="ease-out"
+          fill="both"
+          className="mb-6 text-center dynamic-animation"
+        >
+          <h2 className="text-2xl font-semibold text-text-primary">Capítulo concluído!</h2>
+          <p className="mt-1 text-text-secondary">
+            {data.obra} · Capítulo {data.capitulo}
+          </p>
+        </AnimContainer>
+
+        {/* Stats */}
+        <AnimContainer
+          name="fadeSlideUp"
+          dur="0.4s"
+          delay="0.22s"
+          ease="ease-out"
+          fill="both"
+          className="mb-5 grid grid-cols-2 gap-3 dynamic-animation"
+        >
+          <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3 text-center">
+            <p className="text-2xl font-semibold tabular text-text-primary">{data.pages}</p>
+            <p className="mt-1 text-xs text-text-secondary">páginas traduzidas</p>
+          </div>
+          <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3 text-center">
+            <p className="text-2xl font-semibold tabular text-text-primary">{formatDuration(data.elapsedSeconds)}</p>
+            <p className="mt-1 text-xs text-text-secondary">tempo total</p>
+          </div>
+        </AnimContainer>
+
+        {/* First page preview with zoom animation */}
+        {imageSrc && (
+          <AnimContainer
+            name="pageZoomIn"
+            dur="0.65s"
+            delay="0.32s"
+            ease="cubic-bezier(0.34,1.56,0.64,1)"
+            fill="both"
+            className="mb-5 overflow-hidden rounded-2xl border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] dynamic-animation"
+          >
+            <img
+              src={imageSrc}
+              alt="Primeira página traduzida"
+              className="max-h-64 w-full object-contain"
+            />
+          </AnimContainer>
+        )}
+
+        {/* Action buttons */}
+        <AnimContainer
+          name="fadeSlideUp"
+          dur="0.4s"
+          delay="0.42s"
+          ease="ease-out"
+          fill="both"
+          className="flex gap-3 dynamic-animation"
+        >
+          <button
+            onClick={onPreview}
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-purple py-3 text-sm font-medium text-white transition-smooth hover:bg-accent-purple/90"
+          >
+            <Eye size={16} />
+            Ver Preview
+          </button>
+          <button
+            onClick={onEditor}
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 bg-bg-secondary py-3 text-sm text-text-primary transition-smooth hover:border-white/20"
+          >
+            <Edit3 size={16} />
+            Abrir Editor
+          </button>
+        </AnimContainer>
+
+        <AnimContainer
+          name="fadeSlideUp"
+          dur="0.4s"
+          delay="0.52s"
+          ease="ease-out"
+          fill="both"
+          className="mt-3 flex justify-center dynamic-animation"
+        >
+          <button
+            onClick={onExportLog}
+            disabled={logCount === 0}
+            className="flex items-center gap-2 rounded-xl border border-white/10 bg-bg-secondary/70 px-4 py-2 text-xs text-text-secondary transition-smooth hover:border-white/20 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            title={logCount === 0 ? "Sem registros" : `Exportar ${logCount} eventos`}
+          >
+            <FileDown size={14} />
+            Exportar log da tradução
+          </button>
+        </AnimContainer>
       </div>
     </div>
   );

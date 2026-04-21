@@ -179,7 +179,15 @@ export function Setup() {
         Voltar
       </button>
 
-      <h2 className="text-xl font-bold mb-6">Configurar traducao</h2>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xl font-bold">Configurar projeto</h2>
+        {project.mode === "manual" && (
+          <span className="px-2.5 py-1 rounded-full bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 animate-pulse">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent-purple" />
+            Modo Manual
+          </span>
+        )}
+      </div>
 
       <div className="mb-4">
         <label className="text-sm text-text-secondary mb-2 block">Nome da obra <span className="text-text-secondary/40">(opcional)</span></label>
@@ -355,6 +363,7 @@ export function Setup() {
                   </div>
                   <button
                     onClick={() => setBatchSources(batchSources.filter((p) => p !== path))}
+                    title="Remover capítulo"
                     className="p-1 text-text-secondary/30 hover:text-status-error opacity-0 group-hover:opacity-100 transition-smooth"
                   >
                     <X size={14} />
@@ -375,6 +384,7 @@ export function Setup() {
           <input
             type="number"
             value={project.capitulo}
+            title="Número do capítulo"
             onChange={(e) => updateProject({ capitulo: parseInt(e.target.value) || 1 })}
             min={1}
             className="w-24 px-4 py-2.5 bg-bg-secondary border border-white/10 rounded-lg
@@ -447,6 +457,7 @@ export function Setup() {
               <span className="text-sm text-accent-purple flex-1">{value}</span>
               <button
                 onClick={() => removeGlossaryTerm(key)}
+                title="Remover termo"
                 className="p-1 text-text-secondary/40 hover:text-status-error transition-smooth"
               >
                 <X size={14} />
@@ -475,6 +486,7 @@ export function Setup() {
             />
             <button
               onClick={addGlossaryTerm}
+              title="Adicionar termo ao glossário"
               className="p-1.5 text-accent-purple hover:bg-accent-purple/10 rounded transition-smooth"
             >
               <Plus size={16} />
@@ -505,7 +517,7 @@ export function Setup() {
             flex items-center justify-center gap-2 text-base"
         >
           <Rocket size={20} />
-          Traduzir
+          {project.mode === "manual" ? "Iniciar projeto manual" : "Traduzir"}
         </button>
       </div>
     </div>

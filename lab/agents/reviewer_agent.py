@@ -1,14 +1,12 @@
-"""ClaudeReviewerAgent — revisores de proposta usando Claude API.
+"""ClaudeReviewerAgent — revisores de proposta usando Claude Code CLI.
 
-Cada reviewer_id recebe o system prompt do agente especialista adequado:
-- python_senior_reviewer → typesetter/translator/vision-stack expert (por target_file)
-- rust_senior_reviewer → revisor genérico Rust
-- react_ts_senior_reviewer → revisor genérico React/TS
-- integration_architect → revisor de alto nível (benchmark + risco)
-- tauri_boundary_reviewer → revisor de fronteira IPC
+Cada reviewer_id tenta primeiro o prompt especialista roteado pelo domínio real
+do arquivo alvo. Se não houver especialista compatível, cai para prompts
+genéricos de Rust/React/Tauri/Python conforme o reviewer.
 
-Se Claude não estiver disponível (sem API key ou pacote), cai silenciosamente
-para a implementação rule-based original.
+Auth: o CLI `claude` usa OAuth da assinatura (via `claude setup-token`) ou
+API key — o mesmo que o usuario ja configurou. Se o CLI nao estiver disponivel,
+cai silenciosamente para a implementacao rule-based original.
 """
 from __future__ import annotations
 
@@ -19,9 +17,9 @@ from lab.agents.base import (
     REVIEWER_DOMAIN_HINTS,
     get_agent_prompt,
     is_claude_available,
-    make_client,
     read_file_slice,
 )
+from lab.agents.claude_cli_runner import invoke_claude_cli
 
 MODEL = "claude-sonnet-4-5"
 MAX_FILE_LINES = 200
@@ -44,6 +42,12 @@ Responda EXATAMENTE no formato solicitado (VERDICT + FINDING_N).
 _REACT_REVIEWER_SYSTEM = """\
 Você é um engenheiro React/TypeScript sênior revisando código para o projeto TraduzAi.
 Avalie: tipagem correta, hooks React, chamadas invoke() Tauri, acessibilidade básica.
+Responda EXATAMENTE no formato solicitado (VERDICT + FINDING_N).
+"""
+
+_TAURI_BOUNDARY_SYSTEM = """\
+Você é um engenheiro sênior da fronteira Tauri/IPC do TraduzAi.
+Avalie contratos entre React, bindings invoke(), comandos Rust, eventos e serde.
 Responda EXATAMENTE no formato solicitado (VERDICT + FINDING_N).
 """
 
@@ -118,31 +122,39 @@ class ClaudeReviewerAgent:
             proposal, aggregate_benchmark, reviewer_id, file_snippet
         )
 
-        client = make_client()
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
+        text, err = invoke_claude_cli(
+            prompt=user_msg,
             system=system,
-            messages=[{"role": "user", "content": user_msg}],
+            model=MODEL,
+            cwd=repo_root,
         )
+        if err:
+            raise RuntimeError(err)
 
-        raw = response.content[0].text if response.content else ""
-        return _parse_review_response(raw, proposal, reviewer_id)
+        return _parse_review_response(text, proposal, reviewer_id)
 
     def _pick_system(
         self, reviewer_id: str, target_file: str, touched_domains: list[str]
     ) -> str:
         if reviewer_id == "integration_architect":
             return _INTEGRATION_ARCHITECT_SYSTEM
+
+        hinted_domains = list(touched_domains or [])
+        hint = REVIEWER_DOMAIN_HINTS.get(reviewer_id)
+        if hint:
+            hinted_domains.append(hint)
+
+        agent = get_agent_prompt(target_file, hinted_domains)
+        if agent:
+            return agent
+
         if reviewer_id == "rust_senior_reviewer":
             return _RUST_REVIEWER_SYSTEM
         if reviewer_id == "react_ts_senior_reviewer":
             return _REACT_REVIEWER_SYSTEM
+        if reviewer_id == "tauri_boundary_reviewer":
+            return _TAURI_BOUNDARY_SYSTEM
 
-        # Para reviewers Python: carrega agent especialista se disponível
-        agent = get_agent_prompt(target_file, touched_domains)
-        if agent:
-            return agent
         return _GENERIC_PYTHON_SYSTEM
 
 

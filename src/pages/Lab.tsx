@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { readFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
@@ -44,6 +44,7 @@ import {
   onLabReviewRequested,
   onLabReviewResult,
   openLabPatchJsonDialog,
+  exportLabPatchJson,
   onLabState,
   openFiles,
   pauseLab,
@@ -684,9 +685,9 @@ export function Lab() {
           "Cole este JSON no prompt e peca para aplicar patch_unified_diff no repositorio alvo, validando conflitos e testes.",
       };
 
-      await writeTextFile(outputPath, JSON.stringify(payload, null, 2));
+      const savedPath = await exportLabPatchJson(outputPath, JSON.stringify(payload, null, 2));
       setPageError(null);
-      setLiveSignal(`Patch JSON exportado em ${outputPath}`);
+      setLiveSignal(`Patch JSON exportado em ${savedPath}`);
     });
   }
 

@@ -1,0 +1,1149 @@
+{
+  "versao": "2.0",
+  "app": "traduzai",
+  "obra": "",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "contexto": {
+    "aliases": [],
+    "faccoes": [],
+    "fontes_usadas": [],
+    "genero": [],
+    "memoria_lexical": {},
+    "personagens": [],
+    "relacoes": [],
+    "resumo_por_arco": [],
+    "sinopse": "",
+    "termos": []
+  },
+  "paginas": [
+    {
+      "numero": 1,
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "originals/003.webp",
+          "visible": true,
+          "locked": true
+        },
+        "mask": {
+          "key": "mask",
+          "path": "layers/mask/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "images/003.webp",
+          "visible": false,
+          "locked": true
+        },
+        "brush": {
+          "key": "brush",
+          "path": "layers/brush/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "translated/003.webp",
+          "visible": true,
+          "locked": true
+        }
+      },
+      "inpaint_blocks": [
+        {
+          "bbox": [
+            141,
+            9748,
+            575,
+            9995
+          ],
+          "confidence": 0.8682656
+        },
+        {
+          "bbox": [
+            60,
+            6770,
+            652,
+            7090
+          ],
+          "confidence": 0.95478714
+        },
+        {
+          "bbox": [
+            169,
+            5082,
+            549,
+            5262
+          ],
+          "confidence": 0.95082104
+        },
+        {
+          "bbox": [
+            69,
+            2304,
+            385,
+            2441
+          ],
+          "confidence": 0.9117745
+        },
+        {
+          "bbox": [
+            192,
+            2938,
+            497,
+            3169
+          ],
+          "confidence": 0.9565016
+        },
+        {
+          "bbox": [
+            159,
+            922,
+            555,
+            1149
+          ],
+          "confidence": 0.94947976
+        }
+      ],
+      "text_layers": [
+        {
+          "id": "tl_001_001",
+          "kind": "text",
+          "source_bbox": [
+            141,
+            9748,
+            575,
+            9995
+          ],
+          "layout_bbox": [
+            146,
+            9750,
+            571,
+            10000
+          ],
+          "render_bbox": null,
+          "bbox": [
+            146,
+            9750,
+            571,
+            10000
+          ],
+          "tipo": "fala",
+          "original": "ONCE THAT FORCE IS RELEASED,",
+          "translated": "UMA VEZ QUE ESSA FORÇA É LIBERADA,",
+          "text": "ONCE THAT FORCE IS RELEASED,",
+          "ocr_confidence": 0.868,
+          "style": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#141414",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": true,
+            "glow_cor": "#FEFEFE",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#141414",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": true,
+            "glow_cor": "#FEFEFE",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "visible": true,
+          "locked": false,
+          "order": 0,
+          "render_preview_path": "layers/text-preview/001/tl_001_001.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            146,
+            9750,
+            571,
+            10000
+          ],
+          "balloon_subregions": [
+            [
+              146,
+              9750,
+              571,
+              9867
+            ],
+            [
+              146,
+              9881,
+              571,
+              10000
+            ]
+          ],
+          "layout_group_size": 2,
+          "connected_children": null,
+          "connected_text_groups": [
+            [
+              156,
+              9789,
+              562,
+              9861
+            ],
+            [
+              208,
+              9887,
+              500,
+              9970
+            ]
+          ],
+          "connected_lobe_bboxes": [
+            [
+              146,
+              9750,
+              571,
+              9867
+            ],
+            [
+              146,
+              9881,
+              571,
+              10000
+            ]
+          ],
+          "connected_position_bboxes": [
+            [
+              146,
+              9781,
+              571,
+              9867
+            ],
+            [
+              185,
+              9881,
+              523,
+              9979
+            ]
+          ],
+          "connected_focus_bboxes": [
+            [
+              146,
+              9781,
+              571,
+              9867
+            ],
+            [
+              185,
+              9881,
+              523,
+              9979
+            ]
+          ],
+          "connected_balloon_orientation": "top-bottom",
+          "connected_detection_confidence": 1.0,
+          "connected_group_confidence": 0.899,
+          "connected_position_confidence": 0.96,
+          "subregion_confidence": 1.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "Heurística de alta confiança (>88%)",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_002",
+          "kind": "text",
+          "source_bbox": [
+            60,
+            6770,
+            652,
+            7090
+          ],
+          "layout_bbox": [
+            63,
+            6771,
+            650,
+            7085
+          ],
+          "render_bbox": null,
+          "bbox": [
+            63,
+            6771,
+            650,
+            7085
+          ],
+          "tipo": "fala",
+          "original": "STOPS ALL MOVEMENT AND TRANSFORMS INTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER.",
+          "translated": "INTERROMPE TODOS OS MOVIMENTOS E SE TRANSFORMA EM UM ÚNICO RAIO QUE LIBERA PODER EXPLOSIVO.",
+          "text": "STOPS ALL MOVEMENT AND TRANSFORMS INTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER.",
+          "ocr_confidence": 0.955,
+          "style": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#E8E8E8",
+            "cor_gradiente": [
+              "#C5C5C5",
+              "#9B9B9C"
+            ],
+            "contorno": "#000203",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#E8E8E8",
+            "cor_gradiente": [
+              "#C5C5C5",
+              "#9B9B9C"
+            ],
+            "contorno": "#000203",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "visible": true,
+          "locked": false,
+          "order": 1,
+          "render_preview_path": "layers/text-preview/001/tl_001_002.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            63,
+            6771,
+            650,
+            7085
+          ],
+          "balloon_subregions": [
+            [
+              63,
+              6771,
+              650,
+              6887
+            ],
+            [
+              63,
+              6905,
+              650,
+              7085
+            ]
+          ],
+          "layout_group_size": 2,
+          "connected_children": null,
+          "connected_text_groups": [
+            [
+              132,
+              6794,
+              579,
+              6877
+            ],
+            [
+              95,
+              6914,
+              624,
+              7013
+            ]
+          ],
+          "connected_lobe_bboxes": [
+            [
+              63,
+              6771,
+              650,
+              6887
+            ],
+            [
+              63,
+              6905,
+              650,
+              7085
+            ]
+          ],
+          "connected_position_bboxes": [
+            [
+              97,
+              6785,
+              614,
+              6886
+            ],
+            [
+              63,
+              6905,
+              650,
+              7024
+            ]
+          ],
+          "connected_focus_bboxes": [
+            [
+              97,
+              6785,
+              614,
+              6886
+            ],
+            [
+              63,
+              6905,
+              650,
+              7024
+            ]
+          ],
+          "connected_balloon_orientation": "top-bottom",
+          "connected_detection_confidence": 1.0,
+          "connected_group_confidence": 0.905,
+          "connected_position_confidence": 0.962,
+          "subregion_confidence": 1.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "Heurística de alta confiança (>88%)",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_003",
+          "kind": "text",
+          "source_bbox": [
+            169,
+            5082,
+            549,
+            5262
+          ],
+          "layout_bbox": [
+            120,
+            5010,
+            601,
+            5347
+          ],
+          "render_bbox": [
+            185,
+            5094,
+            533,
+            5240
+          ],
+          "bbox": [
+            120,
+            5010,
+            601,
+            5347
+          ],
+          "tipo": "fala",
+          "original": "THIS HUNWON THUNDER, AT THE MOMENT THE INNER ENERGY REACHES A CERTAIN POINT,",
+          "translated": "ESTE TROVÃO HUNWON, NO MOMENTO EM QUE A ENERGIA INTERNA ATINGE UM CERTO PONTO,",
+          "text": "THIS HUNWON THUNDER, AT THE MOMENT THE INNER ENERGY REACHES A CERTAIN POINT,",
+          "ocr_confidence": 0.951,
+          "style": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1D1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FCFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#F5F6F7",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1D1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FCFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#F5F6F7",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 2,
+          "render_preview_path": "layers/text-preview/001/tl_001_003.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            120,
+            5010,
+            601,
+            5347
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_004",
+          "kind": "text",
+          "source_bbox": [
+            69,
+            2304,
+            385,
+            2441
+          ],
+          "layout_bbox": [
+            41,
+            2234,
+            430,
+            2523
+          ],
+          "render_bbox": [
+            81,
+            2309,
+            374,
+            2420
+          ],
+          "bbox": [
+            41,
+            2234,
+            430,
+            2523
+          ],
+          "tipo": "fala",
+          "original": "BOTH DIVIDE INNER ENERGY INTO YIN AND YANG,",
+          "translated": "AMBOS DIVIDEM A ENERGIA INTERNA EM YIN E YANG,",
+          "text": "BOTH DIVIDE INNER ENERGY INTO YIN AND YANG,",
+          "ocr_confidence": 0.912,
+          "style": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1C1C1C",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#FAFAFA",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1C1C1C",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#FAFAFA",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 3,
+          "render_preview_path": "layers/text-preview/001/tl_001_004.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            41,
+            2234,
+            430,
+            2523
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_005",
+          "kind": "text",
+          "source_bbox": [
+            192,
+            2938,
+            497,
+            3169
+          ],
+          "layout_bbox": [
+            51,
+            2921,
+            546,
+            3310
+          ],
+          "render_bbox": null,
+          "bbox": [
+            51,
+            2921,
+            546,
+            3310
+          ],
+          "tipo": "fala",
+          "original": "BUT UNLIKE DRAGON-SUBDUING PALM, WHERE THE TWO FORCES SPIN FIERCELY,",
+          "translated": "MAS, AO CONTRÁRIO DA PALMA SUBJUGADORA DE DRAGÕES, ONDE AS DUAS FORÇAS GIRAM FEROZMENTE,",
+          "text": "BUT UNLIKE DRAGON-SUBDUING PALM, WHERE THE TWO FORCES SPIN FIERCELY,",
+          "ocr_confidence": 0.957,
+          "style": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#ECECEC",
+            "glow_px": 3,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#ECECEC",
+            "glow_px": 3,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "visible": true,
+          "locked": false,
+          "order": 4,
+          "render_preview_path": "layers/text-preview/001/tl_001_005.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            51,
+            2921,
+            546,
+            3310
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        },
+        {
+          "id": "tl_001_006",
+          "kind": "text",
+          "source_bbox": [
+            159,
+            922,
+            555,
+            1149
+          ],
+          "layout_bbox": [
+            142,
+            880,
+            580,
+            1202
+          ],
+          "render_bbox": [
+            177,
+            937,
+            537,
+            1124
+          ],
+          "bbox": [
+            142,
+            880,
+            580,
+            1202
+          ],
+          "tipo": "fala",
+          "original": "THE LIGHTNING OF THE HUNWON MIRROR WAS SIMILAR TO THE SAMADHI TRUE FIRE OF DRAGON-SUBDUING PALM, YET DIFFERENT.",
+          "translated": "O RELÂMPAGO DO ESPELHO HUNWON ERA SEMELHANTE AO VERDADEIRO FOGO SAMADHI DA PALMA SUBJUGADORA DE DRAGÕES, MAS DIFERENTE.",
+          "text": "THE LIGHTNING OF THE HUNWON MIRROR WAS SIMILAR TO THE SAMADHI TRUE FIRE OF DRAGON-SUBDUING PALM, YET DIFFERENT.",
+          "ocr_confidence": 0.949,
+          "style": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#212121",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#F3F3F3",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#212121",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#F3F3F3",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 5,
+          "render_preview_path": "layers/text-preview/001/tl_001_006.png",
+          "detector": null,
+          "line_polygons": [],
+          "source_direction": null,
+          "rendered_direction": null,
+          "source_language": null,
+          "rotation_deg": 0.0,
+          "detected_font_size_px": null,
+          "balloon_bbox": [
+            142,
+            880,
+            580,
+            1202
+          ],
+          "balloon_subregions": [],
+          "layout_group_size": 1,
+          "connected_children": null,
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_position_bboxes": [],
+          "connected_focus_bboxes": [],
+          "connected_balloon_orientation": "",
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "subregion_confidence": 0.0,
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "_connected_slot_index": null,
+          "_connected_slot_count": null,
+          "_connected_vertical_bias_ratio": null,
+          "_is_lobe_subregion": false,
+          "corpus_visual_benchmark": {},
+          "corpus_textual_benchmark": {}
+        }
+      ],
+      "arquivo_original": "originals/003.webp",
+      "arquivo_traduzido": "translated/003.webp",
+      "textos": [
+        {
+          "id": "tl_001_001",
+          "bbox": [
+            146,
+            9750,
+            571,
+            10000
+          ],
+          "tipo": "fala",
+          "original": "ONCE THAT FORCE IS RELEASED,",
+          "traduzido": "UMA VEZ QUE ESSA FORÇA É LIBERADA,",
+          "confianca_ocr": 0.868,
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#141414",
+            "cor_gradiente": [],
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": true,
+            "glow_cor": "#FEFEFE",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          }
+        },
+        {
+          "id": "tl_001_002",
+          "bbox": [
+            63,
+            6771,
+            650,
+            7085
+          ],
+          "tipo": "fala",
+          "original": "STOPS ALL MOVEMENT AND TRANSFORMS INTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER.",
+          "traduzido": "INTERROMPE TODOS OS MOVIMENTOS E SE TRANSFORMA EM UM ÚNICO RAIO QUE LIBERA PODER EXPLOSIVO.",
+          "confianca_ocr": 0.955,
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#E8E8E8",
+            "cor_gradiente": [
+              "#C5C5C5",
+              "#9B9B9C"
+            ],
+            "contorno": "#000203",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          }
+        },
+        {
+          "id": "tl_001_003",
+          "bbox": [
+            120,
+            5010,
+            601,
+            5347
+          ],
+          "tipo": "fala",
+          "original": "THIS HUNWON THUNDER, AT THE MOMENT THE INNER ENERGY REACHES A CERTAIN POINT,",
+          "traduzido": "ESTE TROVÃO HUNWON, NO MOMENTO EM QUE A ENERGIA INTERNA ATINGE UM CERTO PONTO,",
+          "confianca_ocr": 0.951,
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1D1E1E",
+            "cor_gradiente": [],
+            "contorno": "#FCFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#F5F6F7",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_004",
+          "bbox": [
+            41,
+            2234,
+            430,
+            2523
+          ],
+          "tipo": "fala",
+          "original": "BOTH DIVIDE INNER ENERGY INTO YIN AND YANG,",
+          "traduzido": "AMBOS DIVIDEM A ENERGIA INTERNA EM YIN E YANG,",
+          "confianca_ocr": 0.912,
+          "estilo": {
+            "fonte": "DK Full Blast.otf",
+            "tamanho": 48,
+            "cor": "#1C1C1C",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#FAFAFA",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        },
+        {
+          "id": "tl_001_005",
+          "bbox": [
+            51,
+            2921,
+            546,
+            3310
+          ],
+          "tipo": "fala",
+          "original": "BUT UNLIKE DRAGON-SUBDUING PALM, WHERE THE TWO FORCES SPIN FIERCELY,",
+          "traduzido": "MAS, AO CONTRÁRIO DA PALMA SUBJUGADORA DE DRAGÕES, ONDE AS DUAS FORÇAS GIRAM FEROZMENTE,",
+          "confianca_ocr": 0.957,
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#ECECEC",
+            "glow_px": 3,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          }
+        },
+        {
+          "id": "tl_001_006",
+          "bbox": [
+            142,
+            880,
+            580,
+            1202
+          ],
+          "tipo": "fala",
+          "original": "THE LIGHTNING OF THE HUNWON MIRROR WAS SIMILAR TO THE SAMADHI TRUE FIRE OF DRAGON-SUBDUING PALM, YET DIFFERENT.",
+          "traduzido": "O RELÂMPAGO DO ESPELHO HUNWON ERA SEMELHANTE AO VERDADEIRO FOGO SAMADHI DA PALMA SUBJUGADORA DE DRAGÕES, MAS DIFERENTE.",
+          "confianca_ocr": 0.949,
+          "estilo": {
+            "fonte": "KOMIKAX_.ttf",
+            "tamanho": 48,
+            "cor": "#212121",
+            "cor_gradiente": [],
+            "contorno": "#FEFEFE",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#F3F3F3",
+            "glow_px": 4,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          }
+        }
+      ]
+    }
+  ],
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 6,
+    "tempo_processamento_seg": 36.5,
+    "data_criacao": "2026-04-20T21:18:57Z"
+  }
+}

@@ -1,14 +1,15 @@
-"""ClaudeSDKCoder — gera patches via Claude API com contexto do agente especialista.
+"""ClaudeSDKCoder — gera patches via Claude Code CLI com contexto do agente.
 
 Fluxo:
 1. Tenta `build_local_patch_from_hint` (sem LLM, determinístico).
 2. Se não resolver, carrega o .claude/agents/*.md correto para o target_file.
 3. Lê o conteúdo atual do arquivo alvo (até 400 linhas).
-4. Chama Claude com system=agente + user=proposta+arquivo.
+4. Invoca `claude -p` (CLI) com system=agente + user=proposta+arquivo.
 5. Extrai o diff unificado da resposta e retorna PatchProposal.
 
-Fallback: se ANTHROPIC_API_KEY ausente ou `anthropic` não instalado, retorna
-PatchProposal com error preenchido (nunca lança exceção).
+Auth: usa o CLI `claude` (OAuth assinatura ou API key). O nome
+`ClaudeSDKCoder` / `coder_id="claude_sdk"` e mantido por compatibilidade com
+a UI, mas internamente NAO usa mais o Anthropic SDK.
 """
 from __future__ import annotations
 
@@ -20,9 +21,9 @@ from lab.agents.base import (
     find_repo_root,
     get_agent_prompt,
     is_claude_available,
-    make_client,
     read_file_slice,
 )
+from lab.agents.claude_cli_runner import invoke_claude_cli
 from lab.coders.base import PatchProposal, build_local_patch_from_hint
 from lab.coders.ollama_coder import _extract_diff_from_response  # reutiliza parser
 
@@ -79,8 +80,9 @@ class ClaudeSDKCoder:
                 author="claude_sdk_coder",
                 confidence=0.0,
                 error=(
-                    "ANTHROPIC_API_KEY não configurada ou pacote 'anthropic' não instalado. "
-                    "Configure a variável de ambiente e reinicie o app."
+                    "Claude Code CLI (`claude`) nao encontrado no PATH. "
+                    "Instale via `npm install -g @anthropic-ai/claude-code` e "
+                    "autentique com `claude setup-token`."
                 ),
             )
 
@@ -117,15 +119,21 @@ class ClaudeSDKCoder:
 
         user_msg = _build_coder_prompt(proposal, file_content, target_file)
 
-        client = make_client()
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
+        raw, err = invoke_claude_cli(
+            prompt=user_msg,
             system=system,
-            messages=[{"role": "user", "content": user_msg}],
+            model=MODEL,
+            cwd=repo_root,
         )
+        if err:
+            return PatchProposal(
+                proposal_id=proposal_id,
+                patch_unified_diff="",
+                author="claude_sdk_coder",
+                confidence=0.0,
+                error=err[:500],
+            )
 
-        raw = response.content[0].text if response.content else ""
         diff = _extract_diff_from_response(raw)
         rationale = _extract_rationale(raw)
         confidence = _estimate_confidence(diff, raw)

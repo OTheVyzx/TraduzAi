@@ -28,14 +28,18 @@ def is_paddle_available() -> bool:
 def get_paddle_reader(use_gpu: bool = False):
     global _paddle_reader
     if _paddle_reader is None:
+        try:
+            import paddle.base.libpaddle as libpaddle
+            if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
+                libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
+        except Exception:
+            pass
         from paddleocr import PaddleOCR
 
         logger.info("Inicializando PaddleOCR...")
         _paddle_reader = PaddleOCR(
             use_angle_cls=False,
             lang="en",
-            use_gpu=use_gpu,
-            show_log=False,
         )
         logger.info("PaddleOCR pronto.")
     return _paddle_reader
@@ -67,6 +71,6 @@ def normalize_paddle_results(raw_results) -> list[dict]:
 
 
 def run_paddle_primary_recognition(image_bgr, use_gpu: bool = False) -> list[dict]:
-    reader = get_paddle_reader(use_gpu=use_gpu)
+    reader = get_paddle_reader()
     raw_results = reader.ocr(image_bgr, det=True, rec=True, cls=False)
     return normalize_paddle_results(raw_results)
