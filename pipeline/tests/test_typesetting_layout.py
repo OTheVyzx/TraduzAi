@@ -1,12 +1,15 @@
 import unittest
+from pathlib import Path
 
 from PIL import Image
 
 from typesetter.renderer import (
+    SafeTextPathFont,
     _category_font_bounds,
     _assign_texts_to_subregions,
     _build_connected_children_candidates,
     _build_textpath_mask,
+    _inscribe_bbox_in_polygon,
     _looks_like_connected_balloon_pair,
     _measure_safe_text_block_bbox,
     _resolve_english_anchor_bbox,
@@ -60,6 +63,33 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(plan["position_bbox"], [96, 100, 208, 132])
         self.assertEqual(plan["max_width"], 112)
         self.assertEqual(plan["max_height"], 32)
+
+    def test_plan_text_layout_relaxes_tiny_anchor_capacity_for_long_white_balloon_text(self):
+        text_data = {
+            "translated": "EU NÃƒO QUERIA USAR O PODER PARA ISSO, MAS RECEBI ESSA FORÃ‡A DA FAMÃLIA DUCAL.",
+            "bbox": [40, 60, 760, 300],
+            "source_bbox": [288, 40, 541, 79],
+            "text_pixel_bbox": [300, 48, 528, 76],
+            "balloon_bbox": [0, 0, 800, 269],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 28,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["position_bbox"], [0, 0, 800, 269])
+        self.assertGreater(plan["max_width"], 300)
+        self.assertFalse(plan["_anchor_capacity_locked"])
 
     def test_category_font_bounds_clamp_white_balloon(self):
         text_data = {
@@ -126,6 +156,25 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertEqual(plan["line_spacing_ratio"], 0.04)
 
+    def test_recenter_safe_text_positions_recenters_horizontally(self):
+        fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
+        font = SafeTextPathFont(fonts_dir / "ComicNeue-Bold.ttf", 32)
+        lines = ["CENTRALIZADO"]
+        shifted = _recenter_safe_text_positions(
+            font,
+            lines,
+            [(24, 40)],
+            target_bbox=[100, 20, 300, 120],
+            padding_y=8,
+            vertical_anchor="center",
+        )
+
+        measured = _measure_safe_text_block_bbox(font, lines, shifted)
+        self.assertIsNotNone(measured)
+        measured_center_x = (measured[0] + measured[2]) / 2.0
+        target_center_x = (100 + 300) / 2.0
+        self.assertLessEqual(abs(measured_center_x - target_center_x), 4.0)
+
     def test_resolve_text_layout_wraps_long_text_for_readable_size(self):
         text_data = {
             "translated": "ESTE TEXTO NAO PODE SER QUEBRADO AUTOMATICAMENTE EM LINHAS NOVAS",
@@ -148,6 +197,32 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertGreater(len(layout["lines"]), 1)
         self.assertGreaterEqual(layout["font_size"], 10)
+
+    def test_resolve_text_layout_uses_fixed_non_overlapping_leading(self):
+        text_data = {
+            "translated": "QUANDO TE MATEI ANTES,\nPARTI VOCE AO MEIO\nCOM UM UNICO GOLPE,\nENTAO NAO PERCEBI...",
+            "bbox": [71, 265, 748, 537],
+            "balloon_bbox": [71, 265, 748, 537],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 32,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan_text_layout(text_data))
+
+        ys = [pos[1] for pos in resolved["positions"]]
+        self.assertGreater(len(ys), 1)
+        gaps = [b - a for a, b in zip(ys, ys[1:])]
+        self.assertEqual(len(set(gaps)), 1)
+        self.assertGreaterEqual(gaps[0], resolved["font_size"])
 
     def test_resolve_text_layout_preserves_explicit_newlines_only(self):
         # Explicit \n breaks from the caller must survive: even when the
@@ -808,6 +883,64 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 1)
         self.assertEqual(len(blocks[0].get("balloon_subregions", [])), 2)
+
+    def test_build_render_blocks_rejects_short_phrase_connected_false_positive(self):
+        texts = [
+            {
+                "translated": "OBSERVE ATENTAMENTE.",
+                "bbox": [288, 1019, 515, 1200],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [288, 1019, 515, 1200],
+                "balloon_subregions": [[288, 1019, 403, 1200], [411, 1019, 515, 1200]],
+                "connected_text_groups": [[298, 1033, 377, 1161], [435, 1051, 505, 1182]],
+                "connected_position_bboxes": [[292, 1019, 383, 1175], [429, 1044, 511, 1197]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+                "connected_balloon_orientation": "left-right",
+                "connected_detection_confidence": 1.0,
+                "connected_group_confidence": 0.28,
+                "connected_position_confidence": 0.712,
+                "subregion_confidence": 1.0,
+                "layout_profile": "connected_balloon",
+            }
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].get("balloon_subregions", []), [])
+        self.assertNotEqual(blocks[0].get("layout_profile"), "connected_balloon")
+
+    def test_build_render_blocks_rejects_top_bottom_tail_line_false_positive(self):
+        texts = [
+            {
+                "translated": "NÃO HÁ COMO VOLTAR ATRÁS AGORA.",
+                "bbox": [204, 307, 589, 550],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [204, 307, 589, 550],
+                "balloon_subregions": [[204, 307, 589, 482], [204, 482, 589, 550]],
+                "connected_text_groups": [[204, 307, 589, 482], [345, 524, 464, 550]],
+                "connected_position_bboxes": [[204, 307, 589, 482], [336, 518, 473, 550]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+                "connected_balloon_orientation": "top-bottom",
+                "connected_detection_confidence": 1.0,
+                "connected_group_confidence": 0.868,
+                "connected_position_confidence": 0.947,
+                "subregion_confidence": 1.0,
+                "layout_profile": "connected_balloon",
+            }
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].get("balloon_subregions", []), [])
+        self.assertNotEqual(blocks[0].get("layout_profile"), "connected_balloon")
 
     @unittest.skip("Compositor novo agrupa fragmentos OCR por lobo quando a atribuicao e clara.")
     def test_three_texts_two_subregions_merges_then_splits_legacy(self):
@@ -1710,6 +1843,111 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(len(blocks[0].get("connected_children", [])), 2)
         self.assertEqual(len(blocks[0].get("balloon_subregions", [])), 2)
+
+    # ------------------------------------------------------------------
+    # Testes de _inscribe_bbox_in_polygon
+    # ------------------------------------------------------------------
+
+    def test_inscribe_bbox_in_polygon_no_shrink_when_inside(self):
+        """Bbox totalmente dentro do polígono não deve ser modificado."""
+        # Polígono grande (quadrado 300x300)
+        polygon = [[0, 0], [300, 0], [300, 300], [0, 300]]
+        bbox = [50, 50, 250, 250]
+
+        result = _inscribe_bbox_in_polygon(bbox, polygon)
+
+        self.assertEqual(result, [50, 50, 250, 250])
+
+    def test_inscribe_bbox_in_polygon_returns_bbox_when_polygon_none(self):
+        """Polygon None deve retornar bbox sem alteração."""
+        bbox = [10, 10, 90, 90]
+        result = _inscribe_bbox_in_polygon(bbox, None)
+        self.assertEqual(result, [10, 10, 90, 90])
+
+    def test_inscribe_bbox_in_polygon_returns_bbox_when_polygon_empty(self):
+        """Polygon vazio deve retornar bbox sem alteração."""
+        bbox = [10, 10, 90, 90]
+        result = _inscribe_bbox_in_polygon(bbox, [])
+        self.assertEqual(result, [10, 10, 90, 90])
+
+    def test_inscribe_bbox_in_polygon_shrinks_bbox_when_corners_outside_diamond(self):
+        """Bbox maior que um polígono losango deve ser contraído para caber."""
+        # Losango: os cantos do bbox retangular ficam fora do losango
+        cx, cy = 100, 100
+        polygon = [
+            [cx, cy - 80],   # topo
+            [cx + 80, cy],   # direita
+            [cx, cy + 80],   # baixo
+            [cx - 80, cy],   # esquerda
+        ]
+        # Bbox grande: cantos do retângulo ficam fora do losango
+        bbox = [cx - 70, cy - 70, cx + 70, cy + 70]
+
+        result = _inscribe_bbox_in_polygon(bbox, polygon)
+
+        # O bbox resultante deve ser menor que o original
+        orig_w = bbox[2] - bbox[0]
+        orig_h = bbox[3] - bbox[1]
+        res_w = result[2] - result[0]
+        res_h = result[3] - result[1]
+        self.assertLess(res_w, orig_w, "Largura deve ser reduzida para caber no losango")
+        self.assertLess(res_h, orig_h, "Altura deve ser reduzida para caber no losango")
+        # Centro deve ser preservado aproximadamente
+        orig_cx = (bbox[0] + bbox[2]) / 2
+        orig_cy = (bbox[1] + bbox[3]) / 2
+        res_cx = (result[0] + result[2]) / 2
+        res_cy = (result[1] + result[3]) / 2
+        self.assertAlmostEqual(res_cx, orig_cx, delta=5)
+        self.assertAlmostEqual(res_cy, orig_cy, delta=5)
+
+    def test_inscribe_bbox_in_polygon_respects_min_shrink_ratio(self):
+        """Contração não deve passar do min_shrink_ratio do tamanho original."""
+        # Polígono minúsculo (não cabe nada dentro) — deve parar na contração máxima
+        polygon = [[50, 50], [52, 50], [52, 52], [50, 52]]
+        bbox = [0, 0, 200, 200]
+
+        result = _inscribe_bbox_in_polygon(bbox, polygon, min_shrink_ratio=0.55)
+
+        orig_w = bbox[2] - bbox[0]
+        orig_h = bbox[3] - bbox[1]
+        res_w = result[2] - result[0]
+        res_h = result[3] - result[1]
+        # Não pode contrair mais que (1 - 0.55) = 45% do original
+        self.assertGreaterEqual(
+            res_w / float(orig_w), 0.55 - 0.1,  # tolerância de 10%
+            "Largura não deve encolher mais que min_shrink_ratio"
+        )
+
+    def test_build_connected_children_candidates_injects_lobe_polygon(self):
+        """_build_connected_children_candidates deve injetar _lobe_polygon em cada child."""
+        polygon_left = [[0, 0], [100, 0], [100, 200], [0, 200]]
+        polygon_right = [[110, 0], [210, 0], [210, 200], [110, 200]]
+        text_data = {
+            "translated": "HELLO WORLD",
+            "tipo": "fala",
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 18, "cor": "#000000", "contorno": "#ffffff", "contorno_px": 2},
+            "balloon_bbox": [0, 0, 210, 200],
+            "connected_balloon_orientation": "left-right",
+            "connected_lobe_polygons": [polygon_left, polygon_right],
+            "connected_position_bboxes": [],
+            "connected_text_groups": [],
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "layout_group_size": 2,
+            "_is_lobe_subregion": False,
+        }
+        subregions = [[0, 0, 100, 200], [110, 0, 210, 200]]
+
+        candidates = _build_connected_children_candidates(text_data, "HELLO WORLD", subregions)
+
+        self.assertTrue(len(candidates) > 0)
+        children = candidates[0]["children"]
+        self.assertEqual(len(children), 2)
+        # Cada child deve ter _lobe_polygon
+        self.assertIsNotNone(children[0].get("_lobe_polygon"))
+        self.assertIsNotNone(children[1].get("_lobe_polygon"))
+        self.assertEqual(children[0]["_lobe_polygon"], polygon_left)
+        self.assertEqual(children[1]["_lobe_polygon"], polygon_right)
 
 
 if __name__ == "__main__":

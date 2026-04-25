@@ -60,6 +60,37 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertLess(abs(ink_center_x - anchor_center_x), abs(ink_center_x - balloon_center_x))
         self.assertLess(abs(ink_center_y - anchor_center_y), abs(ink_center_y - balloon_center_y))
 
+    def test_render_text_block_populates_render_bbox(self):
+        img = Image.new("RGB", (420, 320), (255, 255, 255))
+        text_data = {
+            "translated": "RENDER BBOX",
+            "bbox": [40, 40, 380, 260],
+            "balloon_bbox": [40, 40, 380, 260],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 28,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+                "sombra": False,
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        render_text_block(img, text_data)
+
+        self.assertIn("render_bbox", text_data)
+        rx1, ry1, rx2, ry2 = text_data["render_bbox"]
+        self.assertLess(rx1, rx2)
+        self.assertLess(ry1, ry2)
+        self.assertGreaterEqual(rx1, 40)
+        self.assertLessEqual(rx2, 380)
+
     def test_resolve_text_layout_clamps_font_size_for_white_balloon_bounds(self):
         text_data = {
             "translated": "TESTE",
@@ -338,6 +369,33 @@ class TypesettingRendererTests(unittest.TestCase):
         right_has_text = np.any(arr[120:280, 240:480] < 200)
         self.assertTrue(left_has_text)
         self.assertTrue(right_has_text)
+
+    def test_plan_text_layout_applies_top_narration_profile(self):
+        plan = plan_text_layout(
+            {
+                "translated": "Three days later, the northern wall had already fallen.",
+                "bbox": [220, 40, 620, 180],
+                "balloon_bbox": [220, 40, 620, 180],
+                "tipo": "narracao",
+                "layout_shape": "wide",
+                "layout_align": "top",
+                "layout_profile": "top_narration",
+                "estilo": {
+                    "fonte": "Newrotic.ttf",
+                    "tamanho": 30,
+                    "cor": "#FFFFFF",
+                    "contorno": "#000000",
+                    "contorno_px": 2,
+                    "alinhamento": "center",
+                    "sombra": False,
+                    "glow": False,
+                    "cor_gradiente": [],
+                },
+            }
+        )
+
+        self.assertEqual(plan["vertical_anchor"], "top")
+        self.assertLess(plan["width_ratio"], 0.90)
 
     def test_render_text_block_wraps_long_text_to_multiple_rows(self):
         img = Image.new("RGB", (420, 260), (255, 255, 255))

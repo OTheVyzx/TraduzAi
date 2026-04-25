@@ -1,4 +1,7 @@
 import unittest
+import tempfile
+import json
+import importlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,8 +13,10 @@ from layout.balloon_layout import (
     _apply_geometric_fallback_subregions,
     _build_balloon_subregions_from_groups,
     _detect_connected_balloon_subregions_from_fill,
+    _detect_connected_lobes_from_outline,
     _detect_lobes_via_distance_transform,
     _enforce_min_lobe_size,
+    _extract_balloon_outline_polygon,
     _geometric_fallback_subregions,
     _refine_connected_position_bboxes_with_ollama,
     _score_subregion_quality,
@@ -188,6 +193,46 @@ class LayoutAnalysisTests(unittest.TestCase):
         self.assertEqual(text["balloon_bbox"], [150, 150, 450, 390])
         self.assertEqual(text["ocr_text_bbox"], [220, 218, 382, 286])
 
+    def test_geometric_fallback_uses_numbered_mask_layer_path_from_project(self):
+        texts = [
+            {
+                "id": "txt-1",
+                "tipo": "fala",
+                "bbox": [60, 70, 240, 170],
+                "balloon_bbox": [20, 20, 340, 240],
+                "layout_group_size": 1,
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            mask_dir = work_dir / "layers" / "mask"
+            mask_dir.mkdir(parents=True)
+            mask = np.zeros((260, 360), dtype=np.uint8)
+            mask[70:140, 80:170] = 255
+            cv2.imwrite(str(mask_dir / "001.png"), mask)
+
+            page_result = {
+                "_work_dir": str(work_dir),
+                "numero": 1,
+                "arquivo_original": "originals/page-1.jpg",
+                "image_layers": {
+                    "mask": {"path": "layers/mask/001.png"},
+                },
+            }
+
+            with patch(
+                "layout.balloon_layout._geometric_fallback_subregions",
+                return_value=[[20, 20, 180, 240], [180, 20, 340, 240]],
+            ) as geometric_fallback:
+                _apply_geometric_fallback_subregions(
+                    texts,
+                    page_result,
+                    np.zeros((260, 360, 3), dtype=np.uint8),
+                )
+
+        geometric_fallback.assert_called_once()
+
     def test_narration_prefers_wide_layout(self):
         page = {
             "width": 1200,
@@ -202,6 +247,90 @@ class LayoutAnalysisTests(unittest.TestCase):
 
         self.assertEqual(text["layout_shape"], "wide")
         self.assertEqual(text["layout_align"], "top")
+
+    def test_enrich_page_layout_clamps_top_narration_bbox_and_records_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            page = {
+                "image": "page-041.jpg",
+                "width": 800,
+                "height": 2600,
+                "texts": [
+                    {
+                        "text": "MY BIGGEST FEAR IS DESMOND UNLEASHING THAT POWER AT THE VERY END.",
+                        "bbox": [300, 80, 500, 130],
+                        "tipo": "narracao",
+                        "confidence": 0.95,
+                    }
+                ],
+            }
+
+            with patch(
+                "layout.balloon_layout._load_page_image",
+                return_value=np.zeros((2600, 800, 3), dtype=np.uint8),
+            ), patch(
+                "layout.balloon_layout.refine_balloon_bbox_from_image",
+                return_value=[20, 30, 780, 220],
+            ):
+                enriched = enrich_page_layout(page)
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(enriched["texts"][0]["balloon_bbox"], [190, 30, 610, 220])
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertEqual(payloads[0]["reason"], "top_caption_overexpand")
+
+    def test_enrich_page_layout_adaptive_top_narration_clamps_earlier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            page = {
+                "image": "page-007.jpg",
+                "width": 800,
+                "height": 2600,
+                "texts": [
+                    {
+                        "text": "Three days later, the northern wall had already fallen.",
+                        "bbox": [300, 80, 500, 130],
+                        "tipo": "narracao",
+                        "confidence": 0.95,
+                        "block_profile": "top_narration",
+                    }
+                ],
+            }
+
+            with patch(
+                "layout.balloon_layout._load_page_image",
+                return_value=np.zeros((2600, 800, 3), dtype=np.uint8),
+            ), patch(
+                "layout.balloon_layout.refine_balloon_bbox_from_image",
+                return_value=[185, 30, 615, 220],
+            ):
+                enriched = enrich_page_layout(page)
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(enriched["texts"][0]["balloon_bbox"], [216, 30, 584, 220])
+            self.assertEqual(enriched["texts"][0]["layout_profile"], "top_narration")
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertEqual(payloads[0]["reason"], "top_caption_overexpand")
+            self.assertEqual(payloads[0]["details"]["layout_profile"], "top_narration")
+
+    def test_analyze_connected_subregions_white_balloon_profile_preserves_close_split(self):
+        subregions = [[20, 20, 120, 120], [102, 20, 202, 120]]
+        balloon_bbox = [0, 0, 220, 140]
+
+        standard = _analyze_connected_subregions(subregions, balloon_bbox)
+        adaptive = _analyze_connected_subregions(subregions, balloon_bbox, profile="white_balloon")
+
+        self.assertEqual(standard["ordered_subregions"], [balloon_bbox])
+        self.assertEqual(adaptive["orientation"], "left-right")
+        self.assertEqual(len(adaptive["ordered_subregions"]), 2)
 
     def test_real_009_connected_balloon_creates_two_subregions(self):
         page = {
@@ -288,6 +417,114 @@ class LayoutAnalysisTests(unittest.TestCase):
         self.assertEqual(text.get("balloon_subregions", []), [])
         self.assertLess(text["balloon_bbox"][2] - text["balloon_bbox"][0], 520)
         self.assertLess(text["balloon_bbox"][3] - text["balloon_bbox"][1], 260)
+
+    def test_textured_standard_region_never_promotes_to_connected_balloon(self):
+        page = {
+            "width": 800,
+            "height": 2560,
+            "texts": [
+                {
+                    "id": "tl_008_001",
+                    "text": "THERE'S NO TURNING BACK NOW.",
+                    "bbox": [111, 238, 707, 610],
+                    "tipo": "fala",
+                    "block_profile": "standard",
+                    "estilo": {"fonte": "Newrotic.ttf"},
+                    "confidence": 0.924,
+                }
+            ],
+        }
+
+        rich_subregions = [
+            {"bbox": [111, 238, 362, 610], "polygon": None, "area": 1000},
+            {"bbox": [376, 238, 707, 610], "polygon": None, "area": 1000},
+        ]
+        with patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.zeros((2560, 800, 3), dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout._detect_connected_balloon_subregions_rich",
+            return_value=rich_subregions,
+        ) as detector:
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertFalse(detector.called, "Texturizado nao deve nem consultar detector conectado")
+        self.assertNotEqual(text.get("layout_profile"), "connected_balloon")
+        self.assertEqual(text.get("layout_group_size"), 1)
+        self.assertEqual(text.get("balloon_subregions"), [])
+
+    def test_narration_region_never_promotes_to_connected_balloon(self):
+        page = {
+            "width": 800,
+            "height": 2560,
+            "texts": [
+                {
+                    "id": "tl_040_001",
+                    "text": "I'VE MET A FEW WHO USE THAT POWER.",
+                    "bbox": [118, 780, 652, 1104],
+                    "tipo": "narracao",
+                    "block_profile": "white_balloon",
+                    "confidence": 0.892,
+                }
+            ],
+        }
+
+        rich_subregions = [
+            {"bbox": [118, 780, 456, 1104], "polygon": None, "area": 1000},
+            {"bbox": [468, 780, 652, 1104], "polygon": None, "area": 1000},
+        ]
+        with patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.zeros((2560, 800, 3), dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout._detect_connected_balloon_subregions_rich",
+            return_value=rich_subregions,
+        ) as detector:
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertFalse(detector.called, "Narracao nao deve entrar no fluxo de balao conectado")
+        self.assertNotEqual(text.get("layout_profile"), "connected_balloon")
+        self.assertEqual(text.get("layout_group_size"), 1)
+        self.assertEqual(text.get("balloon_subregions"), [])
+
+    def test_single_white_balloon_connected_outline_splits_into_two_subregions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "connected-white-balloon.jpg"
+            image = np.full((420, 520, 3), 235, dtype=np.uint8)
+            cv2.ellipse(image, (170, 150), (120, 80), 0, 0, 360, (255, 255, 255), -1)
+            cv2.ellipse(image, (320, 250), (140, 90), 0, 0, 360, (255, 255, 255), -1)
+            cv2.rectangle(image, (180, 165), (305, 235), (255, 255, 255), -1)
+            cv2.ellipse(image, (170, 150), (120, 80), 0, 0, 360, (0, 0, 0), 3)
+            cv2.ellipse(image, (320, 250), (140, 90), 0, 0, 360, (0, 0, 0), 3)
+            cv2.line(image, (180, 165), (305, 165), (0, 0, 0), 3)
+            cv2.line(image, (180, 235), (305, 235), (0, 0, 0), 3)
+            cv2.imwrite(str(image_path), image)
+
+            page = {
+                "image": str(image_path),
+                "width": 520,
+                "height": 420,
+                "texts": [
+                    {
+                        "id": "tl_036_002",
+                        "text": "EVEN THOUGH IT'S ONLY HALF OF A MANA TECHNIQUE, ITS EFFECTS WILL BE MORE THAN ENOUGH. THAT POWER LETS ONE INSTANTLY SURPASS THEIR OWN LIMITS.",
+                        "bbox": [95, 110, 410, 295],
+                        "tipo": "fala",
+                        "block_profile": "white_balloon",
+                        "confidence": 0.909,
+                    }
+                ],
+            }
+
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text.get("layout_profile"), "connected_balloon")
+        self.assertGreaterEqual(text.get("layout_group_size", 0), 2)
+        self.assertEqual(len(text.get("balloon_subregions", [])), 2)
+        self.assertNotEqual(text["balloon_subregions"][0], text["balloon_subregions"][1])
 
     def test_real_002_textured_balloon_does_not_merge_with_distant_white_gap_text(self):
         page = {
@@ -650,6 +887,129 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
         ordered = sorted(subs, key=lambda item: (item[1], item[0]))
         self.assertLess(ordered[0][3], ordered[1][1] + 40)
 
+    def test_geometric_fallback_skips_non_connected_group_without_crashing(self):
+        """Grupo sem shared layout nem heurística válida não deve disparar UnboundLocalError."""
+        texts = [
+            {
+                "text": "Linha 1",
+                "bbox": [60, 70, 240, 170],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [20, 20, 340, 240],
+                "layout_group_size": 1,
+            },
+            {
+                "text": "Linha 2",
+                "bbox": [80, 260, 260, 330],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [20, 20, 340, 240],
+                "layout_group_size": 1,
+            },
+        ]
+
+        _apply_geometric_fallback_subregions(texts, {}, None)
+
+        for text in texts:
+            self.assertEqual(text.get("balloon_subregions", []), [])
+
+    def test_geometric_fallback_skips_stacked_lines_in_same_balloon(self):
+        """Linhas empilhadas do mesmo balÃ£o nÃ£o devem virar lobos conectados."""
+        texts = [
+            {
+                "text": "HE BROKE",
+                "bbox": [233, 734, 673, 770],
+                "text_pixel_bbox": [256, 742, 648, 768],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_type": "white",
+                "balloon_bbox": [233, 734, 673, 906],
+                "layout_group_size": 4,
+            },
+            {
+                "text": "THE MANA-INFUSED",
+                "bbox": [233, 772, 673, 808],
+                "text_pixel_bbox": [248, 780, 652, 806],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_type": "white",
+                "balloon_bbox": [233, 734, 673, 906],
+                "layout_group_size": 4,
+            },
+            {
+                "text": "BLADE WITH SHEER",
+                "bbox": [233, 810, 673, 846],
+                "text_pixel_bbox": [246, 818, 656, 844],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_type": "white",
+                "balloon_bbox": [233, 734, 673, 906],
+                "layout_group_size": 4,
+            },
+            {
+                "text": "GRIP STRENGTH.",
+                "bbox": [233, 848, 673, 884],
+                "text_pixel_bbox": [266, 856, 638, 882],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_type": "white",
+                "balloon_bbox": [233, 734, 673, 906],
+                "layout_group_size": 4,
+            },
+        ]
+
+        _apply_geometric_fallback_subregions(texts, {}, None)
+
+        for text in texts:
+            self.assertEqual(text.get("balloon_subregions", []), [])
+
+    def test_geometric_fallback_skips_dense_single_balloon_when_image_is_available(self):
+        """Balão simples, largo e denso não deve ser splitado só pela geometria."""
+        image = np.full((220, 420, 3), 170, dtype=np.uint8)
+        cv2.ellipse(image, (210, 110), (180, 88), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(image, (210, 110), (180, 88), 0, 0, 360, (18, 18, 18), 3)
+
+        texts = [
+            {
+                "text": "Texto central",
+                "bbox": [92, 62, 328, 160],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [0, 0, 420, 220],
+                "layout_group_size": 1,
+            }
+        ]
+
+        _apply_geometric_fallback_subregions(texts, {}, image)
+
+        self.assertEqual(texts[0].get("balloon_subregions", []), [])
+
+    def test_geometric_fallback_splits_diagonal_shared_group_even_with_aspect_below_one_point_seven(self):
+        """Grupo diagonal real pode dividir mesmo quando o balão compartilhado não é tão largo."""
+        texts = [
+            {
+                "text": "Parte superior",
+                "bbox": [70, 7513, 442, 7761],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [33, 7484, 667, 7995],
+                "layout_group_size": 2,
+            },
+            {
+                "text": "Parte inferior",
+                "bbox": [331, 7800, 631, 7969],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [33, 7484, 667, 7995],
+                "layout_group_size": 2,
+            },
+        ]
+
+        _apply_geometric_fallback_subregions(texts, {}, None)
+
+        for text in texts:
+            self.assertEqual(len(text.get("balloon_subregions", [])), 2)
+
     def test_fill_area_1500_still_accepted(self):
         """Verifica no código-fonte que fill_area_min é 1500 (não 2500)."""
         import inspect
@@ -781,6 +1141,102 @@ class EnforceMinLobeSizeTests(unittest.TestCase):
 
         self.assertEqual(plan["orientation"], "top-bottom")
         self.assertEqual(plan["ordered_subregions"][0], [0, 0, 240, 200])
+
+    # ------------------------------------------------------------------
+    # Testes de detecção topológica (_extract_balloon_outline_polygon,
+    # _detect_connected_lobes_from_outline)
+    # ------------------------------------------------------------------
+
+    def test_extract_balloon_outline_polygon_returns_polygon_for_white_balloon(self):
+        """_extract_balloon_outline_polygon deve retornar um polígono com >= 4 pontos
+        para um balão branco sintético com borda preta."""
+        # Criar imagem sintética: fundo branco com borda preta de 4px
+        h, w = 120, 180
+        img = np.ones((h, w, 3), dtype=np.uint8) * 255
+        # Borda preta
+        img[:4, :] = 0
+        img[-4:, :] = 0
+        img[:, :4] = 0
+        img[:, -4:] = 0
+        balloon_bbox = [0, 0, w, h]
+
+        poly = _extract_balloon_outline_polygon(img, balloon_bbox)
+
+        self.assertIsNotNone(poly, "Deve retornar um polígono para balão com borda preta")
+        self.assertGreaterEqual(len(poly), 4, "Polígono deve ter pelo menos 4 pontos")
+        # Verificar que os pontos estão em coordenadas globais (dentro da imagem)
+        self.assertTrue(np.all(poly[:, 0] >= 0) and np.all(poly[:, 0] <= w))
+        self.assertTrue(np.all(poly[:, 1] >= 0) and np.all(poly[:, 1] <= h))
+
+    def test_extract_balloon_outline_polygon_returns_none_for_empty_region(self):
+        """_extract_balloon_outline_polygon deve retornar None para bbox vazio."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 255
+        result = _extract_balloon_outline_polygon(img, [0, 0, 0, 0])
+        self.assertIsNone(result)
+
+    def test_detect_connected_lobes_from_outline_separates_two_connected_circles(self):
+        """Dois círculos brancos conectados por pescoço fino devem ser separados em 2 lobos.
+
+        A imagem simula um balão manga realista: fundo cinza claro (página),
+        interior branco (área do balão), borda preta (contorno do balão).
+        """
+        # Criar imagem realista de balão conectado:
+        # fundo cinza (simulando papel), interior branco, borda preta
+        h, w = 220, 440
+        # Fundo cinza claro (como papel de mangá)
+        img = np.full((h, w, 3), 200, dtype=np.uint8)
+
+        # Preencher interior dos dois círculos de branco (área do balão)
+        cv2.circle(img, (90, 110), 80, (255, 255, 255), -1)
+        cv2.circle(img, (350, 110), 80, (255, 255, 255), -1)
+        # Pescoço fino branco conectando os dois lobos
+        img[100:120, 150:290] = 255
+
+        # Desenhar borda preta ao redor dos círculos
+        cv2.circle(img, (90, 110), 80, (0, 0, 0), 4)
+        cv2.circle(img, (350, 110), 80, (0, 0, 0), 4)
+        # Apagar a borda preta na região do pescoço para que seja contínuo
+        img[100:120, 145:295] = 255
+
+        balloon_bbox = [5, 20, 435, 200]
+        seed_bbox = [10, 25, 430, 195]
+
+        lobes = _detect_connected_lobes_from_outline(img, balloon_bbox, seed_bbox)
+
+        self.assertGreaterEqual(
+            len(lobes), 2,
+            "Dois círculos conectados devem ser separados em 2+ lobos"
+        )
+        # Cada lobo deve ter bbox e polygon
+        for lobe in lobes[:2]:
+            self.assertIn("bbox", lobe)
+            self.assertIn("polygon", lobe)
+            self.assertIsNotNone(lobe["polygon"])
+            self.assertGreater(lobe["area"], 0)
+
+    def test_detect_connected_lobes_from_outline_returns_empty_for_single_circle(self):
+        """Um único círculo não deve ser separado em lobos."""
+        h, w = 200, 200
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        cv2.circle(img, (100, 100), 80, (255, 255, 255), -1)
+        # Borda preta
+        cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 0), 3)
+
+        balloon_bbox = [0, 0, w, h]
+        seed_bbox = [10, 10, 190, 190]
+
+        lobes = _detect_connected_lobes_from_outline(img, balloon_bbox, seed_bbox)
+
+        # Um único círculo não deve ser separado (pode retornar 0 ou 1 lobe)
+        self.assertLess(
+            len(lobes), 2,
+            "Um único círculo não deve ser separado em 2 lobos"
+        )
+
+    def test_detect_connected_lobes_from_outline_returns_empty_for_none_image(self):
+        """Deve retornar [] quando image é None."""
+        lobes = _detect_connected_lobes_from_outline(None, [0, 0, 100, 100], [0, 0, 100, 100])
+        self.assertEqual(lobes, [])
 
 
 if __name__ == "__main__":

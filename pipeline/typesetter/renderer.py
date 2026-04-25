@@ -425,7 +425,17 @@ def _recenter_safe_text_positions(
         ideal_top = min_top
 
     dy = int(ideal_top - glyph_top)
-    dx = int(horizontal_bias_px) if horizontal_bias_px else 0
+    target_center_x = x1 + (box_width / 2.0) + float(horizontal_bias_px)
+    glyph_center_x = (glyph_left + glyph_right) / 2.0
+    dx = int(round(target_center_x - glyph_center_x))
+
+    if glyph_width <= box_width:
+        shifted_left = glyph_left + dx
+        shifted_right = glyph_right + dx
+        if shifted_left < x1:
+            dx += int(x1 - shifted_left)
+        elif shifted_right > x2:
+            dx -= int(shifted_right - x2)
 
     return [(lx + dx, ly + dy) for lx, ly in corrected]
 
@@ -924,7 +934,96 @@ def _resolve_connected_area_weights(text_data: dict, ordered_subregions: list[li
     return [area / float(total_area) for area in areas]
 
 
-def _resolve_connected_position_bbox(text_data: dict, target_bbox: list[int]) -> list[int]:
+def _inscribe_bbox_in_polygon(
+    bbox: list[int],
+    polygon: list[list[int]] | None,
+    min_shrink_ratio: float = 0.55,
+) -> list[int]:
+    """Reduz o bbox para que caiba totalmente dentro do polygon.
+
+    Se polygon é None ou vazio, retorna bbox sem alteração.
+
+    Estratégia:
+      - Para cada canto e ponto médio de aresta do bbox, testar pointPolygonTest
+      - Se algum ponto está fora, contrair bbox iterativamente
+        (5% por iteração, preservando centro) até:
+          a) todos os pontos estarem dentro do polygon, OU
+          b) bbox ter reduzido ao min_shrink_ratio do original
+
+    Usa cv2.pointPolygonTest para verificar contenção.
+    """
+    if not polygon or len(polygon) < 3:
+        return list(bbox)
+
+    try:
+        poly_np = np.array(polygon, dtype=np.float32)
+        if poly_np.ndim == 1:
+            # Flat list [x,y,x,y,...] — reformatar
+            if len(poly_np) % 2 != 0:
+                return list(bbox)
+            poly_np = poly_np.reshape(-1, 2)
+        elif poly_np.ndim == 3:
+            poly_np = poly_np.reshape(-1, 2)
+        if len(poly_np) < 3:
+            return list(bbox)
+    except (ValueError, TypeError):
+        return list(bbox)
+
+    def _all_inside(bx1: int, by1: int, bx2: int, by2: int) -> bool:
+        """Testa 8 pontos de controle: 4 cantos + 4 pontos médios das arestas."""
+        cx = (bx1 + bx2) / 2.0
+        cy = (by1 + by2) / 2.0
+        test_points = [
+            (float(bx1), float(by1)),
+            (float(bx2), float(by1)),
+            (float(bx2), float(by2)),
+            (float(bx1), float(by2)),
+            (cx, float(by1)),
+            (cx, float(by2)),
+            (float(bx1), cy),
+            (float(bx2), cy),
+        ]
+        for pt in test_points:
+            if cv2.pointPolygonTest(poly_np, pt, False) < 0:
+                return False
+        return True
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    orig_w = max(1, x2 - x1)
+    orig_h = max(1, y2 - y1)
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+
+    cur_x1, cur_y1, cur_x2, cur_y2 = x1, y1, x2, y2
+    max_iters = 20
+    shrink_step = 0.05
+
+    for _ in range(max_iters):
+        if _all_inside(cur_x1, cur_y1, cur_x2, cur_y2):
+            break
+        cur_w = max(1, cur_x2 - cur_x1)
+        cur_h = max(1, cur_y2 - cur_y1)
+        # Verificar se já atingiu o limite de contração
+        if cur_w / float(orig_w) <= min_shrink_ratio or cur_h / float(orig_h) <= min_shrink_ratio:
+            break
+        # Contrair 5% preservando o centro
+        new_w = max(1, int(cur_w * (1.0 - shrink_step)))
+        new_h = max(1, int(cur_h * (1.0 - shrink_step)))
+        cur_x1 = int(cx - new_w / 2.0)
+        cur_y1 = int(cy - new_h / 2.0)
+        cur_x2 = cur_x1 + new_w
+        cur_y2 = cur_y1 + new_h
+
+    return [int(cur_x1), int(cur_y1), int(cur_x2), int(cur_y2)]
+
+
+def _resolve_connected_position_bbox(
+    text_data: dict,
+    target_bbox: list[int],
+    *,
+    prefer_explicit_focus: bool = True,
+    lobe_polygon: list[list[int]] | None = None,
+) -> list[int]:
     if not text_data.get("_is_lobe_subregion"):
         return list(target_bbox)
 
@@ -941,7 +1040,7 @@ def _resolve_connected_position_bbox(text_data: dict, target_bbox: list[int]) ->
         for bbox in ((text_data.get("connected_position_bboxes") or []) or (text_data.get("connected_focus_bboxes") or []))
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
-    if len(explicit_position_bboxes) == slot_count:
+    if prefer_explicit_focus and len(explicit_position_bboxes) == slot_count:
         px1, py1, px2, py2 = explicit_position_bboxes[slot_index]
         tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
         clamped = [
@@ -951,7 +1050,7 @@ def _resolve_connected_position_bbox(text_data: dict, target_bbox: list[int]) ->
             max(ty1, min(ty2, py2)),
         ]
         if clamped[2] > clamped[0] and clamped[3] > clamped[1]:
-            return clamped
+            return _inscribe_bbox_in_polygon(clamped, lobe_polygon)
 
     def _build_border_driven_bbox() -> list[int]:
         x1, y1, x2, y2 = [int(v) for v in target_bbox]
@@ -1043,9 +1142,9 @@ def _resolve_connected_position_bbox(text_data: dict, target_bbox: list[int]) ->
 
         shifted = _shift_bbox_inside_target(base_bbox, desired_center_x, desired_center_y)
         if shifted[2] > shifted[0] and shifted[3] > shifted[1]:
-            return shifted
+            return _inscribe_bbox_in_polygon(shifted, lobe_polygon)
 
-    return base_bbox
+    return _inscribe_bbox_in_polygon(base_bbox, lobe_polygon)
 
 
 def _build_connected_group_block(
@@ -1077,6 +1176,7 @@ def _build_connected_group_block(
         child["_connected_slot_index"] = index
         child["_connected_slot_count"] = len(ordered_subregions)
         child["connected_balloon_orientation"] = orientation
+        child["layout_profile"] = "connected_balloon"
         source_bbox = [int(v) for v in (text.get("bbox") or assigned_sub)]
         child["_connected_source_bbox"] = source_bbox
         child["_connected_vertical_bias_ratio"] = _compute_connected_vertical_bias_ratio(source_bbox, assigned_sub)
@@ -1087,6 +1187,7 @@ def _build_connected_group_block(
     parent["balloon_subregions"] = [list(sub) for sub in ordered_subregions]
     parent["connected_children"] = ordered_children
     parent["connected_balloon_orientation"] = orientation
+    parent["layout_profile"] = "connected_balloon"
     parent["translated"] = " ".join(
         child.get("translated", "").strip()
         for child in ordered_children
@@ -1108,7 +1209,7 @@ def _build_connected_group_block_from_fragment_groups(
     group_style = merge_group_style(flattened)
     ordered_children = []
     for index, (texts_for_subregion, subregion) in enumerate(zip(grouped_texts, ordered_subregions)):
-        merged_text = " ".join(
+        merged_text = "\n".join(
             text.get("translated", "").strip()
             for text in texts_for_subregion
             if text.get("translated", "").strip()
@@ -1128,6 +1229,7 @@ def _build_connected_group_block_from_fragment_groups(
         child["_connected_slot_index"] = index
         child["_connected_slot_count"] = len(ordered_subregions)
         child["connected_balloon_orientation"] = orientation
+        child["layout_profile"] = "connected_balloon"
         child["source_text_count"] = len(texts_for_subregion)
         source_bbox = _merge_bbox_list(texts_for_subregion) or list(subregion)
         child["_connected_source_bbox"] = source_bbox
@@ -1139,6 +1241,7 @@ def _build_connected_group_block_from_fragment_groups(
     parent["balloon_subregions"] = [list(sub) for sub in ordered_subregions]
     parent["connected_children"] = ordered_children
     parent["connected_balloon_orientation"] = orientation
+    parent["layout_profile"] = "connected_balloon"
     parent["translated"] = " ".join(
         child.get("translated", "").strip()
         for child in ordered_children
@@ -1295,6 +1398,176 @@ def _group_texts_by_subregions(
     ]
 
 
+def _has_confident_connected_subregions(text: dict) -> bool:
+    normalized_subregions = _normalize_balloon_subregions(text.get("balloon_subregions", []))
+    if len(normalized_subregions) >= 2 and int(text.get("layout_group_size", 1) or 1) <= len(normalized_subregions):
+        return True
+    return any(
+        float(text.get(key, 0.0) or 0.0) >= 0.5
+        for key in (
+            "subregion_confidence",
+            "connected_detection_confidence",
+            "connected_group_confidence",
+            "connected_position_confidence",
+        )
+    ) or bool(str(text.get("connected_balloon_orientation", "") or "").strip())
+
+
+def _clear_connected_balloon_metadata(text: dict) -> dict:
+    sanitized = dict(text)
+    sanitized["balloon_subregions"] = []
+    if sanitized.get("layout_profile") == "connected_balloon":
+        sanitized["layout_profile"] = "standard"
+    sanitized.pop("connected_children", None)
+    sanitized.pop("connected_balloon_orientation", None)
+    return sanitized
+
+
+def _should_reject_connected_false_positive(text: dict, subregions: list[list[int]]) -> bool:
+    if len(subregions) < 2:
+        return False
+
+    translated = str(text.get("translated", "") or "").strip()
+    if not translated:
+        return True
+
+    if text.get("connected_children"):
+        return False
+
+    has_explicit_connected_signal = bool(text.get("connected_text_groups")) or bool(text.get("connected_position_bboxes")) or any(
+        float(text.get(key, 0.0) or 0.0) > 0.0
+        for key in (
+            "subregion_confidence",
+            "connected_detection_confidence",
+            "connected_group_confidence",
+            "connected_position_confidence",
+        )
+    )
+    if not has_explicit_connected_signal:
+        return False
+
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'’-]*", translated)
+    word_count = len(words)
+    orientation = _infer_connected_orientation_from_subregions(
+        subregions,
+        str(text.get("connected_balloon_orientation", "") or ""),
+    )
+    confidence = float(text.get("connected_group_confidence", 0.0) or 0.0)
+    group_boxes = [
+        [int(v) for v in bbox]
+        for bbox in (text.get("connected_text_groups") or text.get("connected_position_bboxes") or [])
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+    ]
+
+    if orientation == "left-right" and word_count <= 3 and confidence < 0.45:
+        return True
+
+    if orientation == "top-bottom" and len(group_boxes) >= 2:
+        areas = [max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) for bbox in group_boxes[:2]]
+        heights = [max(1, bbox[3] - bbox[1]) for bbox in group_boxes[:2]]
+        smaller_area = min(areas)
+        larger_area = max(areas)
+        smaller_height = min(heights)
+        larger_height = max(heights)
+        if (
+            word_count <= 6
+            and smaller_area / float(max(1, larger_area)) <= 0.22
+            and smaller_height / float(max(1, larger_height)) <= 0.34
+        ):
+            return True
+
+    return False
+
+
+def _build_connected_subregions_from_group_bboxes(
+    group_bboxes: list[list[int]],
+    balloon_bbox: list[int],
+) -> tuple[list[list[int]], str]:
+    if len(group_bboxes) < 2:
+        return [], ""
+
+    first_bbox, second_bbox = [[int(v) for v in bbox] for bbox in group_bboxes[:2]]
+    bx1, by1, bx2, by2 = [int(v) for v in balloon_bbox]
+    balloon_w = max(1, bx2 - bx1)
+    balloon_h = max(1, by2 - by1)
+    c1 = ((first_bbox[0] + first_bbox[2]) / 2.0, (first_bbox[1] + first_bbox[3]) / 2.0)
+    c2 = ((second_bbox[0] + second_bbox[2]) / 2.0, (second_bbox[1] + second_bbox[3]) / 2.0)
+    dx = abs(c1[0] - c2[0])
+    dy = abs(c1[1] - c2[1])
+    gap = 8
+
+    if dx >= dy:
+        orientation = "left-right"
+        left_bbox, right_bbox = sorted([first_bbox, second_bbox], key=lambda bbox: (bbox[0] + bbox[2]) / 2.0)
+        split_x = int(round((left_bbox[2] + right_bbox[0]) / 2.0))
+        split_x = max(bx1 + 1, min(bx2 - 1, split_x))
+        left = [bx1, by1, max(bx1 + 1, split_x - gap), by2]
+        right = [min(bx2 - 1, split_x + gap), by1, bx2, by2]
+        return [left, right], orientation
+
+    orientation = "top-bottom"
+    top_bbox, bottom_bbox = sorted([first_bbox, second_bbox], key=lambda bbox: (bbox[1] + bbox[3]) / 2.0)
+    split_y = int(round((top_bbox[3] + bottom_bbox[1]) / 2.0))
+    split_y = max(by1 + 1, min(by2 - 1, split_y))
+    top = [bx1, by1, bx2, max(by1 + 1, split_y - gap)]
+    bottom = [bx1, min(by2 - 1, split_y + gap), bx2, by2]
+    return [top, bottom], orientation
+
+
+def _infer_connected_fragment_groups(group: list[dict], balloon_bbox: list[int]) -> tuple[list[list[dict]], list[list[int]], str]:
+    ordered = sorted(
+        group,
+        key=lambda item: (
+            item.get("bbox", [0, 0, 0, 0])[1],
+            item.get("bbox", [0, 0, 0, 0])[0],
+        ),
+    )
+    if len(ordered) < 2:
+        return [], [], ""
+
+    if len(ordered) == 2:
+        if not _looks_like_connected_balloon_pair(ordered, balloon_bbox):
+            return [], [], ""
+        groups = [[ordered[0]], [ordered[1]]]
+        bboxes = [_merge_bbox_list(groups[0]), _merge_bbox_list(groups[1])]
+        if not all(bboxes):
+            return [], [], ""
+        subregions, orientation = _build_connected_subregions_from_group_bboxes(bboxes, balloon_bbox)
+        return groups, subregions, orientation
+
+    balloon_w = max(1, int(balloon_bbox[2]) - int(balloon_bbox[0]))
+    balloon_h = max(1, int(balloon_bbox[3]) - int(balloon_bbox[1]))
+    best_payload: tuple[float, list[list[dict]], list[list[int]], str] | None = None
+
+    for split_index in range(1, len(ordered)):
+        first_group = ordered[:split_index]
+        second_group = ordered[split_index:]
+        first_bbox = _merge_bbox_list(first_group)
+        second_bbox = _merge_bbox_list(second_group)
+        if not first_bbox or not second_bbox:
+            continue
+        c1 = ((first_bbox[0] + first_bbox[2]) / 2.0, (first_bbox[1] + first_bbox[3]) / 2.0)
+        c2 = ((second_bbox[0] + second_bbox[2]) / 2.0, (second_bbox[1] + second_bbox[3]) / 2.0)
+        dx = abs(c1[0] - c2[0])
+        dy = abs(c1[1] - c2[1])
+        if dx < balloon_w * 0.16 and dy < balloon_h * 0.16:
+            continue
+        overlap_x = max(0, min(first_bbox[2], second_bbox[2]) - max(first_bbox[0], second_bbox[0]))
+        score = dx + (dy * 0.35) - (overlap_x * 0.20)
+        subregions, orientation = _build_connected_subregions_from_group_bboxes(
+            [first_bbox, second_bbox],
+            balloon_bbox,
+        )
+        if len(subregions) < 2:
+            continue
+        if best_payload is None or score > best_payload[0]:
+            best_payload = (score, [first_group, second_group], subregions, orientation)
+
+    if best_payload is None:
+        return [], [], ""
+    return best_payload[1], best_payload[2], best_payload[3]
+
+
 def build_render_blocks(texts: list[dict]) -> list[dict]:
     grouped: dict[tuple[str, tuple[int, int, int, int]], list[dict]] = {}
     passthrough: list[dict] = []
@@ -1302,9 +1575,18 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
     # Fase 1: Pré-agrupar textos multi-texto que compartilham subregions
     multi_sub_groups: dict[tuple[str, tuple], list[dict]] = {}
     for text in texts:
+        if _should_reject_connected_false_positive(
+            text,
+            _normalize_balloon_subregions(text.get("balloon_subregions", [])),
+        ):
+            text = _clear_connected_balloon_metadata(text)
         balloon_bbox = text.get("balloon_bbox")
         tipo = text.get("tipo", "fala")
-        subregions = _normalize_balloon_subregions(text.get("balloon_subregions", []))
+        subregions = (
+            _normalize_balloon_subregions(text.get("balloon_subregions", []))
+            if _has_confident_connected_subregions(text)
+            else []
+        )
         if len(subregions) >= 2 and balloon_bbox and int(text.get("layout_group_size", 1)) > 1:
             key = (tipo, tuple(int(v) for v in balloon_bbox))
             multi_sub_groups.setdefault(key, []).append(text)
@@ -1361,6 +1643,7 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
                     ordered_subregions,
                     orientation,
                 )
+                merged["layout_profile"] = "connected_balloon"
                 merged["layout_group_size"] = len(ordered)
                 merged["source_text_count"] = len(ordered)
                 passthrough.append(merged)
@@ -1372,12 +1655,25 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
         if id(text) in assigned_ids:
             continue
 
+        if _should_reject_connected_false_positive(
+            text,
+            _normalize_balloon_subregions(text.get("balloon_subregions", [])),
+        ):
+            text = _clear_connected_balloon_metadata(text)
+
         balloon_bbox = text.get("balloon_bbox")
         tipo = text.get("tipo", "fala")
 
-        subregions = _normalize_balloon_subregions(text.get("balloon_subregions", []))
+        subregions = (
+            _normalize_balloon_subregions(text.get("balloon_subregions", []))
+            if _has_confident_connected_subregions(text)
+            else []
+        )
 
         if len(subregions) >= 2:
+            if text.get("layout_profile") != "connected_balloon":
+                text = dict(text)
+                text["layout_profile"] = "connected_balloon"
             passthrough.append(text)
             continue
 
@@ -1411,6 +1707,26 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
                 item.get("bbox", [0, 0, 0, 0])[0],
             ),
         )
+        has_low_confidence_subregions = any(
+            _normalize_balloon_subregions(text.get("balloon_subregions", []))
+            and not _has_confident_connected_subregions(text)
+            for text in ordered
+        )
+        if not has_low_confidence_subregions:
+            inferred_groups, inferred_subregions, inferred_orientation = _infer_connected_fragment_groups(
+                ordered,
+                list(bbox_tuple),
+            )
+            if len(inferred_groups) == 2 and len(inferred_subregions) == 2:
+                blocks.append(
+                    _build_connected_group_block_from_fragment_groups(
+                        inferred_groups,
+                        inferred_subregions,
+                        list(bbox_tuple),
+                        inferred_orientation,
+                    )
+                )
+                continue
         combined = dict(ordered[0])
         combined.pop("_resolved_subregion", None)
         combined["balloon_bbox"] = list(bbox_tuple)
@@ -1422,6 +1738,7 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
         combined["estilo"] = merge_group_style(ordered)
         combined["source_text_count"] = len(ordered)
         combined["layout_group_size"] = len(ordered)
+        combined["layout_profile"] = combined.get("layout_profile") or ordered[0].get("layout_profile")
         if combined.get("balloon_subregions") and all(text.get("_resolved_subregion") for text in ordered):
             combined["balloon_subregions"] = []
         blocks.append(combined)
@@ -1509,6 +1826,42 @@ def _resolve_english_anchor_bbox(text_data: dict) -> list[int] | None:
     return None
 
 
+def _should_limit_capacity_to_anchor(
+    text_data: dict,
+    anchor_bbox: list[int] | None,
+    target_bbox: list[int],
+) -> bool:
+    if not anchor_bbox or text_data.get("_is_lobe_subregion"):
+        return False
+
+    tipo = str(text_data.get("tipo", "fala") or "fala").strip().lower()
+    if tipo not in {"fala", "pensamento"}:
+        return True
+
+    balloon_type = str(text_data.get("balloon_type", "") or "").strip().lower()
+    if balloon_type == "textured":
+        return True
+
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    anchor_w = max(1, ax2 - ax1)
+    anchor_h = max(1, ay2 - ay1)
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    area_ratio = (anchor_w * anchor_h) / float(max(1, target_w * target_h))
+    width_ratio = anchor_w / float(target_w)
+    height_ratio = anchor_h / float(target_h)
+
+    translated = re.sub(r"\s+", "", str(text_data.get("translated", "") or text_data.get("text", "") or ""))
+    if len(translated) <= 18:
+        return True
+    if len(translated) <= 36 and area_ratio >= 0.12 and width_ratio >= 0.30 and height_ratio >= 0.14:
+        return True
+    if area_ratio >= 0.28 and width_ratio >= 0.42 and height_ratio >= 0.18:
+        return True
+    return False
+
+
 def _looks_like_connected_balloon_pair(texts, target_bbox=None) -> bool:
     if not isinstance(texts, list) or len(texts) < 2:
         return False
@@ -1519,16 +1872,74 @@ def _looks_like_connected_balloon_pair(texts, target_bbox=None) -> bool:
     return False
 
 
+def _looks_like_connected_balloon_pair(texts, target_bbox=None) -> bool:
+    if not isinstance(texts, list) or len(texts) < 2:
+        return False
+    if not target_bbox or len(target_bbox) != 4:
+        return False
+
+    ordered = sorted(
+        texts[:2],
+        key=lambda item: (
+            item.get("bbox", [0, 0, 0, 0])[1],
+            item.get("bbox", [0, 0, 0, 0])[0],
+        ),
+    )
+    first_bbox = [int(v) for v in ordered[0].get("bbox", [0, 0, 0, 0])]
+    second_bbox = [int(v) for v in ordered[1].get("bbox", [0, 0, 0, 0])]
+    if first_bbox[2] <= first_bbox[0] or first_bbox[3] <= first_bbox[1]:
+        return False
+    if second_bbox[2] <= second_bbox[0] or second_bbox[3] <= second_bbox[1]:
+        return False
+
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    first_center = ((first_bbox[0] + first_bbox[2]) / 2.0, (first_bbox[1] + first_bbox[3]) / 2.0)
+    second_center = ((second_bbox[0] + second_bbox[2]) / 2.0, (second_bbox[1] + second_bbox[3]) / 2.0)
+    dx = abs(first_center[0] - second_center[0])
+    dy = abs(first_center[1] - second_center[1])
+    overlap_x = max(0, min(first_bbox[2], second_bbox[2]) - max(first_bbox[0], second_bbox[0]))
+    overlap_y = max(0, min(first_bbox[3], second_bbox[3]) - max(first_bbox[1], second_bbox[1]))
+    min_w = max(1, min(first_bbox[2] - first_bbox[0], second_bbox[2] - second_bbox[0]))
+    min_h = max(1, min(first_bbox[3] - first_bbox[1], second_bbox[3] - second_bbox[1]))
+    height_ratio = max(
+        (first_bbox[3] - first_bbox[1]) / float(min_h),
+        (second_bbox[3] - second_bbox[1]) / float(min_h),
+    )
+
+    diagonal_split = (
+        dx >= target_w * 0.18
+        and dy >= target_h * 0.18
+        and overlap_x < min_w * 0.45
+        and overlap_y < min_h * 0.55
+    )
+    horizontal_split = dx >= target_w * 0.35 and overlap_x < min_w * 0.30
+    vertical_split = dy >= target_h * 0.35 and overlap_y < min_h * 0.20 and dx >= target_w * 0.08
+    asymmetric_pair = dx >= target_w * 0.20 and height_ratio >= 2.2
+
+    return diagonal_split or horizontal_split or vertical_split or asymmetric_pair
+
+
 def plan_text_layout(text_data: dict) -> dict:
     target_bbox = text_data.get("balloon_bbox") or text_data.get("bbox") or [0, 0, 0, 0]
     # Check for original text anchor to keep translated text precisely where it was.
     anchor_bbox = _resolve_english_anchor_bbox(text_data)
-    
-    # In wide/tall logic, if we have an anchor, we usually want to STICK to it.
-    if anchor_bbox and not text_data.get("_is_lobe_subregion"):
+
+    anchor_capacity_locked = _should_limit_capacity_to_anchor(text_data, anchor_bbox, target_bbox)
+    _lobe_poly = text_data.get("_lobe_polygon") or None
+    if anchor_bbox and not text_data.get("_is_lobe_subregion") and anchor_capacity_locked:
         position_bbox = anchor_bbox
     else:
-        position_bbox = _resolve_connected_position_bbox(text_data, target_bbox)
+        position_bbox = _resolve_connected_position_bbox(text_data, target_bbox, lobe_polygon=_lobe_poly)
+    capacity_bbox = position_bbox
+    if text_data.get("_is_lobe_subregion"):
+        capacity_bbox = _resolve_connected_position_bbox(
+            text_data,
+            target_bbox,
+            prefer_explicit_focus=False,
+            lobe_polygon=_lobe_poly,
+        )
 
     x1, y1, x2, y2 = target_bbox
     px1, py1, px2, py2 = [int(v) for v in position_bbox]
@@ -1536,10 +1947,14 @@ def plan_text_layout(text_data: dict) -> dict:
     box_height = max(1, y2 - y1)
     position_width = max(1, px2 - px1)
     position_height = max(1, py2 - py1)
+    cx1, cy1, cx2, cy2 = [int(v) for v in capacity_bbox]
+    capacity_width = max(1, cx2 - cx1)
+    capacity_height = max(1, cy2 - cy1)
 
     tipo = text_data.get("tipo", "fala")
     layout_shape = text_data.get("layout_shape", "square")
     layout_align = text_data.get("layout_align", "center")
+    layout_profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "standard")
     group_size = max(1, int(text_data.get("layout_group_size", 1)))
     estilo = text_data.get("estilo", {})
     balloon_geo = _detect_balloon_geometry(text_data)
@@ -1565,7 +1980,7 @@ def plan_text_layout(text_data: dict) -> dict:
             width_ratio = 0.70
             padding_y = max(8, int(box_height * 0.13))
         elif layout_shape == "wide":
-            width_ratio = 0.80
+            width_ratio = 0.83
             padding_y = max(8, int(box_height * 0.15))
         else:
             width_ratio = 0.75
@@ -1576,13 +1991,24 @@ def plan_text_layout(text_data: dict) -> dict:
         padding_y = max(6, int(box_height * 0.10))
         line_spacing = 0.1
 
+    if layout_profile == "top_narration":
+        width_ratio = min(width_ratio, 0.86 if layout_shape == "wide" else 0.82)
+        vertical_anchor = "top"
+        padding_y = max(padding_y, 8)
+        line_spacing = max(line_spacing, 0.11)
+    elif layout_profile == "white_balloon" and balloon_geo == "ellipse" and not text_data.get("_is_lobe_subregion"):
+        width_ratio = max(width_ratio, 0.82 if layout_shape == "wide" else 0.78)
+    elif layout_profile == "connected_balloon" and text_data.get("_is_lobe_subregion"):
+        width_ratio = max(width_ratio, 0.90)
+        line_spacing = min(line_spacing, 0.04)
+
     # Special rules to match test expectations
     if layout_shape == "tall" and not anchor_bbox and group_size == 1:
         # Narrow ellipses should use more relative width
         width_ratio = 1.0
 
     # If anchored to a tight pixel box, use its FULL width
-    if anchor_bbox and not text_data.get("_is_lobe_subregion"):
+    if anchor_bbox and not text_data.get("_is_lobe_subregion") and anchor_capacity_locked:
         width_ratio = 1.0
         padding_y = 0
 
@@ -1591,13 +2017,13 @@ def plan_text_layout(text_data: dict) -> dict:
         balloon_geo = "lobe"
         lobe_aspect = box_width / float(max(1, box_height))
         if lobe_aspect >= 1.4:
-            width_ratio = 0.92
+            width_ratio = 0.78
             padding_y = max(6, int(box_height * 0.07))
         elif lobe_aspect <= 0.7:
-            width_ratio = 0.88
+            width_ratio = 0.72
             padding_y = max(6, int(box_height * 0.05))
         else:
-            width_ratio = 0.91
+            width_ratio = 0.75
             padding_y = max(6, int(box_height * 0.06))
         line_spacing = 0.04
 
@@ -1657,8 +2083,10 @@ def plan_text_layout(text_data: dict) -> dict:
         "position_bbox": position_bbox,
         "layout_shape": layout_shape,
         "balloon_geo": balloon_geo,
-        "max_width": max(4, int(position_width * width_ratio)),
-        "max_height": max(4, position_height - (padding_y * 2)),
+        "layout_profile": layout_profile,
+        "width_ratio": width_ratio,
+        "max_width": max(4, int(capacity_width * width_ratio)),
+        "max_height": max(4, capacity_height - (padding_y * 2)),
         "padding_y": padding_y,
         "vertical_anchor": vertical_anchor if layout_align != "top" else "top",
         "alignment": alignment,
@@ -1677,6 +2105,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "line_spacing_ratio": line_spacing,
         "vertical_bias_px": vertical_bias_px,
         "horizontal_bias_px": horizontal_bias_px,
+        "_anchor_capacity_locked": anchor_capacity_locked,
     }
 
 
@@ -2035,23 +2464,13 @@ def _fits_in_box(text: str, font_name: str, size: int, max_width: int, max_heigh
     wrapped = wrap_text(text, font, max_width)
     if not wrapped:
         return True
-        
-    base_lh = get_line_height(font, size, line_spacing_ratio)
     
-    # Calcular altura adaptativa uniforme (pior caso de acento no bloco)
-    actual_max_h = 0
-    if isinstance(font, SafeTextPathFont):
-        for line in wrapped:
-            l_bbox = font.getbbox(line)
-            actual_max_h = max(actual_max_h, l_bbox[3] - l_bbox[1])
-    
-    # Se não conseguirmos medir, usamos a base
-    final_lh = max(base_lh, int(actual_max_h + (size * 0.15)))
+    final_lh = _resolve_uniform_line_height(font, wrapped, size, line_spacing_ratio)
     total_height = final_lh * len(wrapped)
-    
+
     line_widths = [measure_text_width(font, line, size) for line in wrapped]
     block_width = max(line_widths, default=0)
-    
+
     # Margem de segurança de 4px para evitar redução agressiva por causa de acentos
     return block_width <= max_width and total_height <= (max_height + 4)
 
@@ -2148,20 +2567,12 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         font = get_font(plan["font_name"], attempt_size)
         wrapped = wrap_text(text, font, plan["max_width"])
         
-        # ESPAÇAMENTO ADAPTATIVO UNIFORME:
-        # 1. Pegar métricas base da fonte
-        base_lh = get_line_height(font, attempt_size, plan["line_spacing_ratio"])
-        
-        # 2. Se for Komikax ou narração, verificar se há colisões visuais por causa de acentos (Ã, Õ, Ê)
-        actual_max_h = 0
-        if isinstance(font, SafeTextPathFont):
-            for line in wrapped:
-                l_bbox = font.getbbox(line)
-                actual_max_h = max(actual_max_h, l_bbox[3] - l_bbox[1])
-        
-        # 3. Ajustar line_height se a altura real for maior que a teórica
-        # O valor calculado aqui será fixo para TODAS as linhas do bloco
-        line_height = max(base_lh, int(actual_max_h + (attempt_size * 0.15)))
+        line_height = _resolve_uniform_line_height(
+            font,
+            wrapped,
+            attempt_size,
+            plan["line_spacing_ratio"],
+        )
         
         total_text_height = line_height * len(wrapped)
         line_widths = [measure_text_width(font, line, attempt_size) for line in wrapped]
@@ -2236,7 +2647,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     if best_candidate is not None:
         return best_candidate
 
-    fallback_size = 8
+    fallback_size = max(8, category_min)
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
@@ -2295,14 +2706,16 @@ def _apply_corpus_layout_hints(
     target_size_delta = 0
     outline_boost = 2 if tipo in {"fala", "pensamento"} else 1
     adjusted_width_ratio = width_ratio
+    preserve_full_width = width_ratio >= 0.98
 
     if textual_ratio >= 1.12 and tipo in {"fala", "narracao", "pensamento"}:
         target_size_delta -= 2
-        adjusted_width_ratio -= 0.04
+        if not preserve_full_width:
+            adjusted_width_ratio -= 0.04
 
     if median_width and median_width <= 820 and median_aspect_ratio <= 0.34:
         outline_boost = max(outline_boost, 2)
-        if layout_shape == "tall":
+        if layout_shape == "tall" and not preserve_full_width:
             adjusted_width_ratio -= 0.03
 
     return max(0.58, adjusted_width_ratio), target_size_delta, outline_boost
@@ -2610,6 +3023,24 @@ def _score_connected_group_candidate(
         else:
             score -= 3.8
 
+    discourse_prefixes = (
+        "MAS",
+        "POREM",
+        "PORÉM",
+        "NO ENTANTO",
+        "AINDA ASSIM",
+        "SO QUE",
+        "SÓ QUE",
+        "ENTAO",
+        "ENTÃO",
+        "ENQUANTO",
+    )
+    for previous, current in zip(children, children[1:]):
+        previous_text = str(previous.get("translated", "") or "").strip().upper()
+        current_text = str(current.get("translated", "") or "").strip().upper()
+        if re.search(r"[,;:]$", previous_text) and any(current_text.startswith(prefix) for prefix in discourse_prefixes):
+            score += 3.9
+
     score += semantic_bonus
     return score
 
@@ -2627,6 +3058,13 @@ def _build_connected_children_candidates(
         subregions,
         orientation,
     )
+    # Polígonos de lobo (um por subregion, na mesma ordem de ordered_subregions)
+    raw_polygons = text_data.get("connected_lobe_polygons") or []
+    lobe_polygons: list = [
+        (raw_polygons[i] if i < len(raw_polygons) and raw_polygons[i] else None)
+        for i in range(len(ordered_subregions))
+    ]
+
     connected_children = text_data.get("connected_children") or []
     if connected_children and len(connected_children) == len(ordered_subregions):
         children = []
@@ -2642,6 +3080,7 @@ def _build_connected_children_candidates(
             child["_connected_slot_index"] = index
             child["_connected_slot_count"] = len(ordered_subregions)
             child["connected_balloon_orientation"] = orientation
+            child["_lobe_polygon"] = lobe_polygons[index]
             if not float(child.get("_connected_vertical_bias_ratio", 0.0) or 0.0):
                 child["_connected_vertical_bias_ratio"] = _default_connected_vertical_bias_ratio(
                     index,
@@ -2668,6 +3107,7 @@ def _build_connected_children_candidates(
             child["_connected_slot_index"] = index
             child["_connected_slot_count"] = len(ordered_subregions)
             child["connected_balloon_orientation"] = orientation
+            child["_lobe_polygon"] = lobe_polygons[index]
             child["_connected_vertical_bias_ratio"] = _default_connected_vertical_bias_ratio(
                 index,
                 len(ordered_subregions),
@@ -2777,6 +3217,8 @@ def _render_single_text_block(
     best_lines = resolved["lines"]
     best_size = resolved["font_size"]
     line_height = resolved["line_height"]
+    if "estilo" in text_data and isinstance(text_data["estilo"], dict):
+        text_data["estilo"]["tamanho"] = best_size
     total_text_height = resolved["total_text_height"]
     start_y = resolved["start_y"]
     positions = resolved["positions"]
@@ -2883,6 +3325,10 @@ def _render_single_text_block(
         for line, (lx, ly) in zip(best_lines, positions):
             draw.text((lx, ly), line, font=best_font, fill=plan["text_color"])
 
+    block_bbox = resolved.get("block_bbox")
+    if block_bbox:
+        text_data["render_bbox"] = [int(v) for v in block_bbox]
+
 
 def _apply_glow(
     img: Image.Image,
@@ -2962,7 +3408,13 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
         for bbox in text_data.get("balloon_subregions", []) or []
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
-    if len(subregions) >= 2:
+    should_render_connected = len(subregions) >= 2 and (
+        int(text_data.get("layout_group_size", 1) or 1) > 1
+        or str(text_data.get("layout_profile", "") or "") == "connected_balloon"
+        or bool(text_data.get("connected_balloon_orientation"))
+        or float(text_data.get("subregion_confidence", 0.0) or 0.0) >= 0.5
+    )
+    if should_render_connected:
         text_data = dict(text_data)
         text_data["translated"] = text
         _render_connected_subregions(img, text_data, text, subregions)
@@ -2998,6 +3450,27 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[s
         lines.append(current_line)
     balanced = _rebalance_wrapped_lines(lines or [text], font, max_width)
     return balanced or [text]
+
+
+def _resolve_uniform_line_height(
+    font: ImageFont.FreeTypeFont,
+    lines: list[str],
+    font_size: int,
+    spacing_ratio: float,
+) -> int:
+    base = get_line_height(font, font_size, spacing_ratio)
+    actual_max_h = 0
+    for line in lines or []:
+        try:
+            line_bbox = font.getbbox(line)
+        except Exception:
+            continue
+        actual_max_h = max(actual_max_h, int(line_bbox[3] - line_bbox[1]))
+
+    sample_text = " ".join(lines or [])
+    needs_safe_gap = isinstance(font, SafeTextPathFont) or any(ord(ch) > 127 for ch in sample_text)
+    min_gap_px = max(5, round(font_size * 0.18)) if needs_safe_gap else max(4, round(font_size * 0.14))
+    return int(max(base, actual_max_h + min_gap_px, font_size))
 
 
 def get_line_height(font: ImageFont.FreeTypeFont, font_size: int, spacing_ratio: float) -> int:
