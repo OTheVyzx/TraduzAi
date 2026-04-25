@@ -57,3 +57,17 @@ def build_strip(page_paths: list[Path]) -> VerticalStrip:
         height=total_height,
         source_page_breaks=page_breaks,
     )
+
+
+def split_strip_back(strip: VerticalStrip) -> list[np.ndarray]:
+    """Inverso de build_strip — útil para validação do round-trip.
+
+    NÃO é usado no pipeline real (lá usamos assemble_output_pages da Fase 5
+    com split-points adaptativos). Este helper só serve para testes.
+    """
+    pages = []
+    breaks = strip.source_page_breaks
+    for i in range(len(breaks) - 1):
+        y0, y1 = breaks[i], breaks[i + 1]
+        pages.append(strip.image[y0:y1].copy())
+    return pages

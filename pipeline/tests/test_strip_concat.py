@@ -64,3 +64,27 @@ class BuildStripTests(unittest.TestCase):
             strip = build_strip(paths)
 
             self.assertEqual(strip.source_page_breaks, [0, 100, 200, 300])
+
+
+class SplitStripBackTests(unittest.TestCase):
+    def test_round_trip_recovers_original_pixels(self):
+        from strip.concat import build_strip, split_strip_back
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            originals = [
+                np.random.randint(0, 256, (40, 100, 3), dtype=np.uint8),
+                np.random.randint(0, 256, (60, 100, 3), dtype=np.uint8),
+                np.random.randint(0, 256, (50, 100, 3), dtype=np.uint8),
+            ]
+            paths = []
+            for i, img in enumerate(originals):
+                p = tmp_path / f"p{i}.png"
+                cv2.imwrite(str(p), img)
+                paths.append(p)
+
+            strip = build_strip(paths)
+            recovered = split_strip_back(strip)
+
+            self.assertEqual(len(recovered), len(originals))
+            for orig, rec in zip(originals, recovered):
+                self.assertEqual(orig.shape, rec.shape)
