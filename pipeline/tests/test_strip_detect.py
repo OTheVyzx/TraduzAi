@@ -47,3 +47,28 @@ class NmsBalloonsTests(unittest.TestCase):
         ]
         kept = _nms_balloons(balloons, iou_threshold=0.5)
         self.assertEqual(len(kept), 2)
+
+
+class SplitIntoChunksTests(unittest.TestCase):
+    def test_short_strip_returns_single_chunk(self):
+        from strip.detect_balloons import _split_into_chunks
+        chunks = _split_into_chunks(strip_height=2000, chunk_height=4096, overlap=512)
+        self.assertEqual(chunks, [(0, 2000)])
+
+    def test_long_strip_returns_overlapping_chunks(self):
+        from strip.detect_balloons import _split_into_chunks
+        chunks = _split_into_chunks(strip_height=10000, chunk_height=4096, overlap=512)
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertEqual(chunks[0][0], 0)
+        self.assertEqual(chunks[-1][1], 10000)
+        for i in range(1, len(chunks)):
+            self.assertLess(chunks[i][0], chunks[i - 1][1])
+
+    def test_chunks_cover_entire_strip(self):
+        from strip.detect_balloons import _split_into_chunks
+        chunks = _split_into_chunks(strip_height=15000, chunk_height=4096, overlap=512)
+        covered = [False] * 15000
+        for y0, y1 in chunks:
+            for y in range(y0, y1):
+                covered[y] = True
+        self.assertTrue(all(covered))
