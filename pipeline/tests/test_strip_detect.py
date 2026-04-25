@@ -72,3 +72,52 @@ class SplitIntoChunksTests(unittest.TestCase):
             for y in range(y0, y1):
                 covered[y] = True
         self.assertTrue(all(covered))
+
+
+class DetectStripBalloonsTests(unittest.TestCase):
+    def test_detect_strip_balloons_dedupes_overlap_zone(self):
+        from unittest.mock import MagicMock
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        fake_block = type("FakeBlock", (), {})()
+        fake_block.x1, fake_block.y1, fake_block.x2, fake_block.y2 = 100, 50, 200, 150
+        fake_block.confidence = 0.9
+
+        fake_detector = MagicMock()
+        fake_detector.detect.return_value = [fake_block]
+
+        strip = VerticalStrip(
+            image=np.zeros((10000, 800, 3), dtype=np.uint8),
+            width=800,
+            height=10000,
+            source_page_breaks=[0, 5000, 10000],
+        )
+
+        balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertGreaterEqual(len(balloons), 1)
+        self.assertLessEqual(len(balloons), 4)
+
+    def test_detect_strip_balloons_remaps_to_strip_coords(self):
+        from unittest.mock import MagicMock
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        fake_block = type("FakeBlock", (), {})()
+        fake_block.x1, fake_block.y1, fake_block.x2, fake_block.y2 = 100, 50, 200, 150
+        fake_block.confidence = 0.9
+
+        fake_detector = MagicMock()
+        fake_detector.detect.return_value = [fake_block]
+
+        strip = VerticalStrip(
+            image=np.zeros((1000, 400, 3), dtype=np.uint8),
+            width=400, height=1000, source_page_breaks=[0, 1000],
+        )
+        balloons = detect_strip_balloons(strip, detector=fake_detector)
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual(balloons[0].strip_bbox.y1, 50)
+        self.assertEqual(balloons[0].strip_bbox.y2, 150)
