@@ -48,6 +48,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PK_CTD_DIR = PROJECT_ROOT / "pk" / "huggingface" / "mayocream" / "comic-text-detector"
 
 
+def _pop_module_namespace(prefixes: tuple[str, ...]) -> dict[str, types.ModuleType]:
+    removed: dict[str, types.ModuleType] = {}
+    for name in list(sys.modules.keys()):
+        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
+            module = sys.modules.pop(name, None)
+            if isinstance(module, types.ModuleType):
+                removed[name] = module
+    return removed
+
+
+def _restore_module_namespace(removed: dict[str, types.ModuleType]) -> None:
+    for name, module in removed.items():
+        sys.modules[name] = module
+
+
 class _ComicTextDownBlock(nn.Module):
     def __init__(self, c3_cls, in_channels: int, out_channels: int, stride: int = 1):
         super().__init__()
@@ -346,11 +361,16 @@ class TextDetector:
         if repo_path not in sys.path:
             sys.path.insert(0, repo_path)
 
-        self._ensure_optional_yolov5_runtime_stubs()
-        DetectionModel = importlib.import_module("models.yolo").Model
-        non_max_suppression = importlib.import_module("utils.general").non_max_suppression
-        letterbox = importlib.import_module("utils.augmentations").letterbox
-        c3_cls = importlib.import_module("models.common").C3
+        removed_modules = _pop_module_namespace(("models", "utils"))
+        try:
+            self._ensure_optional_yolov5_runtime_stubs()
+            DetectionModel = importlib.import_module("models.yolo").Model
+            non_max_suppression = importlib.import_module("utils.general").non_max_suppression
+            letterbox = importlib.import_module("utils.augmentations").letterbox
+            c3_cls = importlib.import_module("models.common").C3
+        finally:
+            _pop_module_namespace(("models", "utils"))
+            _restore_module_namespace(removed_modules)
         return DetectionModel, non_max_suppression, letterbox, c3_cls
 
     @staticmethod

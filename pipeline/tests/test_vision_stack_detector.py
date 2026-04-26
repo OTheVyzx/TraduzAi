@@ -1,7 +1,11 @@
 import unittest
 import builtins
+import importlib
+import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import types
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -361,6 +365,36 @@ class VisionStackDetectorTests(unittest.TestCase):
 
         self.assertEqual(detector._backend, "contour-fallback")
         self.assertIsNone(detector._model)
+
+    def test_import_yolov5_runtime_restores_conflicting_utils_namespace(self):
+        detector = TextDetector.__new__(TextDetector)
+        original_utils = types.ModuleType("utils")
+        original_utils.origin = "pipeline"
+        imported_utils_objects = []
+        real_import_module = importlib.import_module
+
+        def fake_import_module(name):
+            imported_utils_objects.append((name, sys.modules.get("utils")))
+            if name == "models.yolo":
+                return SimpleNamespace(Model=object)
+            if name == "utils.general":
+                return SimpleNamespace(non_max_suppression=object())
+            if name == "utils.augmentations":
+                return SimpleNamespace(letterbox=object())
+            if name == "models.common":
+                return SimpleNamespace(C3=object)
+            return real_import_module(name)
+
+        with TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "ultralytics_yolov5_master").mkdir()
+            with patch("vision_stack.detector.torch.hub.get_dir", return_value=tmpdir), patch(
+                "vision_stack.detector.importlib.import_module",
+                side_effect=fake_import_module,
+            ), patch.dict("sys.modules", {"utils": original_utils}, clear=False):
+                TextDetector._import_yolov5_runtime(detector)
+                self.assertIs(sys.modules.get("utils"), original_utils)
+
+        self.assertTrue(all(item[1] is not original_utils for item in imported_utils_objects))
 
 
 if __name__ == "__main__":
