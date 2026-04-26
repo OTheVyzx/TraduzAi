@@ -1,5 +1,7 @@
 import unittest
 import os
+import json
+import importlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -136,6 +138,41 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(text["line_polygons"], rich_item["line_polygons"])
         self.assertEqual(text["text_pixel_bbox"], rich_item["text_pixel_bbox"])
 
+    def test_build_page_result_merges_clustered_line_fragments_before_translation(self):
+        with TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            blocks = [
+                SimpleNamespace(xyxy=(80, 70, 320, 102), mask=None, confidence=0.93),
+                SimpleNamespace(xyxy=(84, 110, 316, 142), mask=None, confidence=0.94),
+                SimpleNamespace(xyxy=(88, 150, 312, 182), mask=None, confidence=0.92),
+                SimpleNamespace(xyxy=(92, 190, 308, 222), mask=None, confidence=0.95),
+            ]
+
+            page = build_page_result(
+                image_path="005.jpg",
+                image_rgb=np.full((320, 420, 3), 255, dtype=np.uint8),
+                blocks=blocks,
+                texts=[
+                    "HE BROKE",
+                    "THE MANA-INFUSED",
+                    "BLADE WITH SHEER",
+                    "GRIP STRENGTH.",
+                ],
+            )
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(len(page["texts"]), 1)
+            self.assertEqual(len(page["_vision_blocks"]), 1)
+            self.assertIn("HE BROKE", page["texts"][0]["text"])
+            self.assertIn("GRIP STRENGTH.", page["texts"][0]["text"])
+            self.assertEqual(page["texts"][0]["ocr_merged_source_count"], 4)
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertTrue(any(item["action"] == "merge_blocks" for item in payloads))
+
     def test_build_page_result_marks_balloon_type_for_white_and_textured_regions(self):
         blocks = [
             SimpleNamespace(xyxy=(10, 10, 70, 34), mask=None, confidence=0.88),
@@ -172,6 +209,196 @@ class VisionStackRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual([item["text"] for item in page["texts"]], ["GET OUT OF HERE!"])
+
+    def test_build_page_result_skips_structured_payload_and_records_reason(self):
+        with TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            block = SimpleNamespace(
+                xyxy=(30, 18, 78, 42),
+                mask=None,
+                confidence=0.73,
+            )
+
+            page = build_page_result(
+                image_path="058.jpg",
+                image_rgb=np.full((80, 120, 3), 255, dtype=np.uint8),
+                blocks=[block],
+                texts=[{"text": "", "source_bbox": [], "line_polygons": [], "text_pixel_bbox": []}],
+            )
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(page["texts"], [])
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertTrue(any(item["reason"] == "structured_payload" for item in payloads))
+
+    def test_build_page_result_skips_punctuation_only_noise_and_records_reason(self):
+        with TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            block = SimpleNamespace(
+                xyxy=(30, 18, 78, 42),
+                mask=None,
+                confidence=0.91,
+            )
+
+            page = build_page_result(
+                image_path="027.jpg",
+                image_rgb=np.full((80, 120, 3), 255, dtype=np.uint8),
+                blocks=[block],
+                texts=["-"],
+            )
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(page["texts"], [])
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertTrue(any(item["reason"] == "punctuation_only" for item in payloads))
+
+    def test_build_page_result_skips_short_ornamental_cover_noise_and_records_reason(self):
+        with TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            block = SimpleNamespace(
+                xyxy=(640, 490, 705, 520),
+                mask=None,
+                confidence=0.59,
+            )
+
+            with patch("vision_stack.runtime._is_white_balloon_region", return_value=False), patch(
+                "vision_stack.runtime.classify_text_type",
+                return_value="narracao",
+            ):
+                page = build_page_result(
+                    image_path="001.jpg",
+                    image_rgb=np.full((800, 1200, 3), 80, dtype=np.uint8),
+                    blocks=[block],
+                    texts=["KIRO"],
+                )
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(page["texts"], [])
+            self.assertEqual(page["page_profile"], "cover_opening")
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertEqual(payloads[0]["action"], "classify_page_profile")
+            self.assertEqual(payloads[0]["reason"], "cover_opening")
+            self.assertTrue(any(item["reason"] == "ornamental_cover_noise" for item in payloads))
+
+    def test_build_page_result_keeps_substantive_text_on_cover_opening_page(self):
+        block = SimpleNamespace(
+            xyxy=(120, 180, 780, 320),
+            mask=None,
+            confidence=0.94,
+        )
+
+        with patch("vision_stack.runtime._is_white_balloon_region", return_value=False), patch(
+            "vision_stack.runtime.classify_text_type",
+            return_value="narracao",
+        ):
+            page = build_page_result(
+                image_path="001.jpg",
+                image_rgb=np.full((1600, 1100, 3), 90, dtype=np.uint8),
+                blocks=[block],
+                texts=["The battle for the northern wall had already begun."],
+            )
+
+        self.assertEqual(page["page_profile"], "cover_opening")
+        self.assertEqual(len(page["texts"]), 1)
+        self.assertEqual(page["texts"][0]["page_profile"], "cover_opening")
+        self.assertEqual(page["texts"][0]["text"], "The battle for the northern wall had already begun.")
+
+    def test_build_page_result_skips_cover_title_logo_noise_even_when_confident(self):
+        with TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            block = SimpleNamespace(
+                xyxy=(560, 320, 1120, 620),
+                mask=None,
+                confidence=0.91,
+            )
+
+            with patch("vision_stack.runtime._is_white_balloon_region", return_value=False), patch(
+                "vision_stack.runtime.classify_text_type",
+                return_value="narracao",
+            ):
+                page = build_page_result(
+                    image_path="001.jpg",
+                    image_rgb=np.full((800, 1200, 3), 70, dtype=np.uint8),
+                    blocks=[block],
+                    texts=["THE REGRESSED MERCENARYS MACHINATIONS KIRO SHOUNEN"],
+                )
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(page["texts"], [])
+            self.assertEqual(page["page_profile"], "cover_opening")
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertTrue(any(item["reason"] == "cover_title_logo" for item in payloads))
+
+    def test_build_page_result_skips_white_background_cover_title_logo(self):
+        block = SimpleNamespace(
+            xyxy=(100, 320, 660, 640),
+            mask=None,
+            confidence=0.69,
+        )
+
+        with patch("vision_stack.runtime._is_white_balloon_region", return_value=True), patch(
+            "vision_stack.runtime.classify_text_type",
+            return_value="fala",
+        ):
+            page = build_page_result(
+                image_path="002__001.jpg",
+                image_rgb=np.full((1600, 800, 3), 250, dtype=np.uint8),
+                blocks=[block],
+                texts=["Theregressed Mercenarys"],
+            )
+
+        self.assertEqual(page["page_profile"], "cover_opening")
+        self.assertEqual(page["texts"], [])
+
+    def test_build_page_result_assigns_top_narration_block_profile(self):
+        with TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+            decision_log.configure_decision_trace(tmp)
+
+            block = SimpleNamespace(
+                xyxy=(180, 40, 620, 118),
+                mask=None,
+                confidence=0.93,
+            )
+
+            with patch("vision_stack.runtime._is_white_balloon_region", return_value=False), patch(
+                "vision_stack.runtime.classify_text_type",
+                return_value="narracao",
+            ):
+                page = build_page_result(
+                    image_path="007.jpg",
+                    image_rgb=np.full((1800, 800, 3), 220, dtype=np.uint8),
+                    blocks=[block],
+                    texts=["Three days later, the northern wall had already fallen."],
+                )
+
+            decision_log.finalize_decision_trace()
+
+            self.assertEqual(page["texts"][0]["block_profile"], "top_narration")
+            trace_lines = (Path(tmp) / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()
+            payloads = [json.loads(line) for line in trace_lines if line.strip()]
+            self.assertTrue(
+                any(
+                    item["action"] == "classify_block_profile" and item["reason"] == "top_narration"
+                    for item in payloads
+                )
+            )
 
     def test_build_page_result_skips_font_detector_by_default(self):
         block = SimpleNamespace(
