@@ -121,3 +121,77 @@ class DetectStripBalloonsTests(unittest.TestCase):
         self.assertEqual(len(balloons), 1)
         self.assertEqual(balloons[0].strip_bbox.y1, 50)
         self.assertEqual(balloons[0].strip_bbox.y2, 150)
+
+
+class FalsePositiveFilterTests(unittest.TestCase):
+    """Bboxes absurdamente grandes são false-positives do detector e devem ser descartados."""
+
+    def _make_detector_with(self, *blocks):
+        from unittest.mock import MagicMock
+        det = MagicMock()
+        det.detect.return_value = list(blocks)
+        return det
+
+    def _make_block(self, x1, y1, x2, y2, conf=0.9):
+        b = type("B", (), {})()
+        b.x1, b.y1, b.x2, b.y2, b.confidence = x1, y1, x2, y2, conf
+        return b
+
+    def test_oversized_balloon_taller_than_25pct_is_dropped(self):
+        """Balão com altura > 25% do strip deve ser descartado."""
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        # Strip de 1000px (< chunk_height=4096) → 1 chunk → mock chamado 1x
+        small = self._make_block(50, 50, 150, 150)       # 100px = 10% de 1000px → ok
+        huge = self._make_block(0, 0, 800, 600, conf=0.7)  # 600px = 60% → false-positive
+
+        strip = VerticalStrip(
+            image=np.zeros((1000, 800, 3), dtype=np.uint8),
+            width=800, height=1000, source_page_breaks=[0, 1000],
+        )
+        det = self._make_detector_with(small, huge)
+        balloons = detect_strip_balloons(strip, detector=det)
+
+        # Só o pequeno deve passar (huge: 600/1000 = 60% > 25%)
+        self.assertEqual(len(balloons), 1, f"Esperado 1 balão, got {len(balloons)}")
+        self.assertEqual(balloons[0].strip_bbox.x2, 150)
+
+    def test_oversized_balloon_wider_than_95pct_is_dropped(self):
+        """Balão com largura > 95% da largura do strip deve ser descartado."""
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        # Strip de 500px (< chunk_height) → 1 chunk
+        normal = self._make_block(50, 100, 200, 200)
+        wide = self._make_block(5, 50, 795, 200, conf=0.6)  # 790px de 800px = 99%
+
+        strip = VerticalStrip(
+            image=np.zeros((500, 800, 3), dtype=np.uint8),
+            width=800, height=500, source_page_breaks=[0, 500],
+        )
+        det = self._make_detector_with(normal, wide)
+        balloons = detect_strip_balloons(strip, detector=det)
+
+        self.assertEqual(len(balloons), 1, f"Esperado 1 balão, got {len(balloons)}")
+        self.assertLess(balloons[0].strip_bbox.width, 200)
+
+    def test_normal_balloon_passes_filter(self):
+        """Balão com tamanho normal deve passar."""
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        b = self._make_block(100, 100, 300, 300)  # 200x200 em strip 1000x600 = 20%
+
+        strip = VerticalStrip(
+            image=np.zeros((1000, 600, 3), dtype=np.uint8),
+            width=600, height=1000, source_page_breaks=[0, 1000],
+        )
+        det = self._make_detector_with(b)
+        balloons = detect_strip_balloons(strip, detector=det)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual(balloons[0].strip_bbox.y1, 100)

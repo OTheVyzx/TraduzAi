@@ -7,12 +7,29 @@ import numpy as np
 from strip.types import Balloon, Band, VerticalStrip
 
 
+def _flush_band(
+    current_balloons: list[Balloon],
+    margin: int,
+) -> Band:
+    """Cria uma Band a partir de uma lista de balões, aplicando margem."""
+    y_top = min(x.strip_bbox.y1 for x in current_balloons) - margin
+    y_bottom = max(x.strip_bbox.y2 for x in current_balloons) + margin
+    return Band(y_top=max(0, y_top), y_bottom=y_bottom, balloons=list(current_balloons))
+
+
 def group_balloons_into_bands(
     balloons: list[Balloon],
     gap_threshold: int = 64,
     margin: int = 16,
+    max_band_height: int = 4000,
 ) -> list[Band]:
-    """Agrupa balões em bandas horizontais."""
+    """Agrupa balões em bandas horizontais.
+
+    - Balloons dentro de `gap_threshold` px são agrupados na mesma banda.
+    - Balloons com gap > `gap_threshold` iniciam nova banda.
+    - Bandas com height > `max_band_height` não são formadas — balões com gap
+      grande que causariam isso já serão separados pelo gap_threshold.
+    """
     if not balloons:
         return []
 
@@ -24,20 +41,20 @@ def group_balloons_into_bands(
 
     for b in sorted_balloons[1:]:
         gap = b.strip_bbox.y1 - current_y_bottom
-        if gap < gap_threshold:
+        # Calcular a altura que a banda teria se adicionarmos este balão
+        prospective_y_top = min(x.strip_bbox.y1 for x in current_balloons) - margin
+        prospective_y_bottom = max(b.strip_bbox.y2, current_y_bottom) + margin
+        prospective_height = prospective_y_bottom - max(0, prospective_y_top)
+
+        if gap < gap_threshold and prospective_height <= max_band_height:
             current_balloons.append(b)
             current_y_bottom = max(current_y_bottom, b.strip_bbox.y2)
         else:
-            y_top = min(x.strip_bbox.y1 for x in current_balloons) - margin
-            y_bottom = max(x.strip_bbox.y2 for x in current_balloons) + margin
-            bands.append(Band(y_top=max(0, y_top), y_bottom=y_bottom, balloons=current_balloons))
+            bands.append(_flush_band(current_balloons, margin))
             current_balloons = [b]
             current_y_bottom = b.strip_bbox.y2
 
-    y_top = min(x.strip_bbox.y1 for x in current_balloons) - margin
-    y_bottom = max(x.strip_bbox.y2 for x in current_balloons) + margin
-    bands.append(Band(y_top=max(0, y_top), y_bottom=y_bottom, balloons=current_balloons))
-
+    bands.append(_flush_band(current_balloons, margin))
     return bands
 
 

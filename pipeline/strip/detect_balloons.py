@@ -57,6 +57,19 @@ def _split_into_chunks(
     return chunks
 
 
+def _is_oversized(
+    bbox: BBox,
+    strip_width: int,
+    strip_height: int,
+    max_height_fraction: float = 0.25,
+    max_width_fraction: float = 0.95,
+) -> bool:
+    """Retorna True se o bbox parece ser um false-positive do detector (muito grande)."""
+    cap_h = int(strip_height * max_height_fraction)
+    cap_w = int(strip_width * max_width_fraction)
+    return bbox.height > cap_h or bbox.width > cap_w
+
+
 def detect_strip_balloons(
     strip,
     detector,
@@ -64,10 +77,15 @@ def detect_strip_balloons(
     overlap: int = 512,
     iou_threshold: float = 0.5,
     confidence_threshold: float = 0.5,
+    max_height_fraction: float = 0.25,
+    max_width_fraction: float = 0.95,
 ) -> list[Balloon]:
-    """Detecta balões no strip via sliding window + NMS."""
-    import numpy as np
-    from strip.types import VerticalStrip
+    """Detecta balões no strip via sliding window + NMS.
+
+    Filtros pós-NMS:
+    - Descarta bboxes com altura > `max_height_fraction` * strip.height
+    - Descarta bboxes com largura > `max_width_fraction` * strip.width
+    """
     chunks = _split_into_chunks(strip.height, chunk_height, overlap)
     all_balloons: list[Balloon] = []
 
@@ -85,4 +103,12 @@ def detect_strip_balloons(
                 Balloon(strip_bbox=bbox, confidence=float(b.confidence))
             )
 
-    return _nms_balloons(all_balloons, iou_threshold=iou_threshold)
+    after_nms = _nms_balloons(all_balloons, iou_threshold=iou_threshold)
+
+    # Filtro pós-NMS: descartar false-positives gigantes
+    filtered = [
+        b for b in after_nms
+        if not _is_oversized(b.strip_bbox, strip.width, strip.height,
+                             max_height_fraction, max_width_fraction)
+    ]
+    return filtered
