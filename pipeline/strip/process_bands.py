@@ -96,6 +96,36 @@ def process_band(
     ocr_page["_cached_image_bgr"] = cv2.cvtColor(band.strip_slice, cv2.COLOR_RGB2BGR)
     ocr_page = enrich_page_layout(ocr_page)
 
+    # Fallback defensivo: garantir balloon_bbox em CADA text após enrich
+    vision_blocks = ocr_page.get("_vision_blocks", [])
+    for txt in ocr_page.get("texts", []):
+        if txt.get("balloon_bbox"):
+            continue
+        # Achar vision_block que melhor contém o text bbox (maior IoU com texto)
+        tx1, ty1, tx2, ty2 = txt.get("bbox", [0, 0, 0, 0])
+        best = None
+        best_iou = 0.0
+        for vb in vision_blocks:
+            vx1, vy1, vx2, vy2 = vb["bbox"]
+            ix = max(0, min(tx2, vx2) - max(tx1, vx1))
+            iy = max(0, min(ty2, vy2) - max(ty1, vy1))
+            inter = ix * iy
+            ta = max(1, (tx2 - tx1) * (ty2 - ty1))
+            ratio = inter / ta
+            if ratio > best_iou:
+                best_iou = ratio
+                best = vb
+        if best:
+            txt["balloon_bbox"] = list(best["bbox"])
+        else:
+            # Último recurso: balloon_bbox = text_bbox + 8 px de margem
+            w = ocr_page.get("width", band.strip_slice.shape[1])
+            h = ocr_page.get("height", band.strip_slice.shape[0])
+            txt["balloon_bbox"] = [
+                max(0, tx1 - 8), max(0, ty1 - 8),
+                min(w, tx2 + 8), min(h, ty2 + 8),
+            ]
+
     translated_pages = translator.translate_pages(
         [ocr_page],
         obra=obra,

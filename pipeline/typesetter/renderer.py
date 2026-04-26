@@ -1855,9 +1855,10 @@ def _should_limit_capacity_to_anchor(
     translated = re.sub(r"\s+", "", str(text_data.get("translated", "") or text_data.get("text", "") or ""))
     if len(translated) <= 18:
         return True
-    if len(translated) <= 36 and area_ratio >= 0.12 and width_ratio >= 0.30 and height_ratio >= 0.14:
-        return True
-    if area_ratio >= 0.28 and width_ratio >= 0.42 and height_ratio >= 0.18:
+    # Para fala/pensamento brancos: só bloquear quando a âncora realmente cobre
+    # a maior parte do balão — âncoras pequenas no canto superior-esquerdo
+    # causam posicionamento errado (texto fica no canto em vez do centro).
+    if area_ratio >= 0.50 and width_ratio >= 0.62 and height_ratio >= 0.38:
         return True
     return False
 
@@ -2577,10 +2578,13 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         total_text_height = line_height * len(wrapped)
         line_widths = [measure_text_width(font, line, attempt_size) for line in wrapped]
         block_width = max(line_widths, default=0)
-        
-        if block_width > plan["max_width"] or total_text_height > plan["max_height"]:
+
+        # Tolerância de +4px na altura (alinhada com _fits_in_box) para evitar
+        # que candidatos válidos pelo binary-search sejam descartados aqui e
+        # caiam no fallback de category_min.
+        if block_width > plan["max_width"] or total_text_height > plan["max_height"] + 4:
             continue
-            
+
         start_y = (
             py1 + plan["padding_y"]
             if plan["vertical_anchor"] == "top"
@@ -2647,7 +2651,10 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     if best_candidate is not None:
         return best_candidate
 
-    fallback_size = max(8, category_min)
+    # Fallback honra o resultado do binary-search (best_fit) em vez de cair
+    # para category_min — se o binary-search achou que size 36 cabe (com +4 px
+    # de tolerância) é melhor renderizar em 36 do que voltar para 14.
+    fallback_size = max(8, best_fit, category_min)
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
@@ -3430,7 +3437,35 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
     _render_single_text_block(img, text_data, plan)
 
 
+
+def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
+    """Adapter em-memória: renderiza textos traduzidos sobre a banda.
+
+    Reusa `build_render_blocks` + `render_text_block` (mesmo caminho da página).
+    """
+    import logging
+    from PIL import Image
+
+    if band_rgb.size == 0 or not ocr_page.get("texts"):
+        return band_rgb.copy()
+
+    # Pré-condição: balloon_bbox deve estar presente (garantido por process_band)
+    missing_bbox = [t for t in ocr_page["texts"] if not t.get("balloon_bbox")]
+    if missing_bbox:
+        logging.getLogger(__name__).warning(
+            "render_band_image: %d text(s) sem balloon_bbox — RISCO DE OVERFLOW",
+            len(missing_bbox),
+        )
+
+    img = Image.fromarray(band_rgb.copy())
+    blocks = build_render_blocks(ocr_page["texts"])
+    for block in blocks:
+        render_text_block(img, block)
+    return np.array(img)
+
+
 def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+
     words = text.split()
     if not words:
         return [text]
@@ -3478,8 +3513,12 @@ def get_line_height(font: ImageFont.FreeTypeFont, font_size: int, spacing_ratio:
         base = font.getbbox("Ay")[3]
     except Exception:
         base = font_size
-    # Para fontes como Komikax, precisamos de um espaçamento maior para evitar sobreposição (eating each other)
-    spacing = max(4, font_size * spacing_ratio)
+    # Garantir espaço mínimo absoluto entre linhas para evitar sobreposição.
+    # O spacing_ratio pode ser baixo (0.04 em lobes conectados) — o mínimo de 0.20
+    # garante legibilidade independente do perfil.
+    min_safe_gap = max(5, round(font_size * 0.20))
+    spacing = max(min_safe_gap, font_size * spacing_ratio)
+    # Para fontes como Komikax, precisamos de um espaçamento ainda maior
     if "KOMIKAX" in str(getattr(font, "font_path", "")).upper():
         spacing = max(spacing, font_size * 0.28)
     return int(base + spacing)
