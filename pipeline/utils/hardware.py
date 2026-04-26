@@ -3,10 +3,9 @@ import sys
 import psutil
 import platform
 import json
-import torch
-
 def get_hardware_facts():
     """Detecta as especificidades do hardware atual."""
+    import torch
     facts = {
         "cpu_name": platform.processor() or "Generic CPU",
         "cpu_cores": psutil.cpu_count(logical=False) or 4,
