@@ -57,6 +57,9 @@ def run_chapter(
     if is_debug_enabled():
         dump_strip_debug(strip, bands, output_dir.parent / "_strip_debug")
 
+    running_glossary: dict = dict(glossario or {})
+    running_history: list[dict] = []
+
     for idx, band in enumerate(bands):
         if progress_callback: progress_callback("process", idx, len(bands))
         process_band(
@@ -67,13 +70,19 @@ def run_chapter(
             typesetter=typesetter,
             page_idx=idx,
             context=context,
-            glossario=glossario,
+            glossario=running_glossary,
             idioma_origem=idioma_origem,
             idioma_destino=idioma_destino,
             obra=obra,
             connected_reasoner_config=connected_reasoner_config,
-
+            band_history=running_history[-20:],
         )
+        # Acumular history e mesclar adições ao glossário
+        if band.ocr_result:
+            running_history.append(band.ocr_result)
+            additions = band.ocr_result.get("_glossary_additions")
+            if additions and isinstance(additions, dict):
+                running_glossary.update(additions)
 
     paste_bands_into_strip(strip, bands)
     output_pages = assemble_output_pages(strip, balloons, target_count=target_count)

@@ -71,6 +71,7 @@ def process_band(
     idioma_destino: str = "pt-BR",
     obra: str = "",
     connected_reasoner_config: dict | None = None,
+    band_history: list[dict] | None = None,
 ) -> Band:
 
 
@@ -88,7 +89,7 @@ def process_band(
     from layout.balloon_layout import enrich_page_layout
     import cv2
 
-    ocr_page = contextual_review_page(ocr_page, [], [])  # History vazio para bandas isoladas
+    ocr_page = contextual_review_page(ocr_page, band_history or [], [])  # Histórico rolante de bandas
     if connected_reasoner_config:
         ocr_page["_connected_balloon_reasoner"] = connected_reasoner_config
 
