@@ -10,6 +10,8 @@ import shutil
 import sys
 import time
 import faulthandler
+import logging
+import contextlib
 from pathlib import Path
 
 # Adiciona o diretório da pipeline ao path para resolver imports locais no Pyright/Linter
@@ -17,18 +19,102 @@ pipeline_root = Path(__file__).parent.absolute()
 if str(pipeline_root) not in sys.path:
     sys.path.insert(0, str(pipeline_root))
 
-from corpus.runtime import extract_expected_terms, load_corpus_bundle, merge_corpus_into_context
-from extractor.extractor import cleanup, extract
-from inpainter.lama import run_inpainting
-from layout.balloon_layout import enrich_page_layout
-from ocr.contextual_reviewer import contextual_review_page
-from ocr.detector import run_ocr
-from translator.context import fetch_context, merge_context
-from translator.translate import list_supported_google_languages, translate_pages
-from typesetter.renderer import run_typesetting
-from vision_stack.runtime import warmup_visual_stack
+# Lazy imports are moved inside functions to allow fast --hardware-info and --list-supported-languages calls
+
+from utils.decision_log import configure_decision_trace, finalize_decision_trace
 
 _EMIT_STDOUT_FAILED = False
+_PIPELINE_FILE_HANDLER: logging.Handler | None = None
+
+
+class _AutoClosingFileHandler(logging.Handler):
+    def __init__(self, log_path: Path):
+        super().__init__(level=logging.INFO)
+        self._log_path = Path(log_path)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+            with self._log_path.open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        except Exception:
+            self.handleError(record)
+
+
+def _configure_pipeline_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
+    )
+
+
+def _attach_work_dir_log_handler(work_dir: str | Path) -> Path:
+    global _PIPELINE_FILE_HANDLER
+
+    log_path = Path(work_dir) / "pipeline.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    root_logger = logging.getLogger()
+
+    _detach_work_dir_log_handler()
+
+    log_path.write_text("", encoding="utf-8")
+    handler = _AutoClosingFileHandler(log_path)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+    root_logger.addHandler(handler)
+    _PIPELINE_FILE_HANDLER = handler
+    return log_path
+
+
+def _detach_work_dir_log_handler() -> None:
+    global _PIPELINE_FILE_HANDLER
+    if _PIPELINE_FILE_HANDLER is None:
+        return
+    root_logger = logging.getLogger()
+    root_logger.removeHandler(_PIPELINE_FILE_HANDLER)
+    with contextlib.suppress(Exception):
+        _PIPELINE_FILE_HANDLER.close()
+    _PIPELINE_FILE_HANDLER = None
+
+
+def _select_local_venv_python(current_executable: str, script_root: Path) -> Path | None:
+    candidates = [
+        script_root / "venv" / "Scripts" / "python.exe",
+        script_root / "venv" / "bin" / "python3",
+    ]
+    current_path = Path(current_executable)
+
+    try:
+        current_resolved = current_path.resolve()
+    except OSError:
+        current_resolved = current_path
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            candidate_resolved = candidate.resolve()
+        except OSError:
+            candidate_resolved = candidate
+        if candidate_resolved == current_resolved:
+            return None
+        return candidate_resolved
+
+    return None
+
+
+def _maybe_reexec_local_venv() -> None:
+    if os.environ.get("TRADUZAI_SKIP_LOCAL_VENV_REEXEC") == "1":
+        return
+
+    preferred_python = _select_local_venv_python(sys.executable, pipeline_root)
+    if not preferred_python:
+        return
+
+    os.environ["TRADUZAI_SKIP_LOCAL_VENV_REEXEC"] = "1"
+    script_path = str(Path(__file__).resolve())
+    os.execv(str(preferred_python), [str(preferred_python), script_path, *sys.argv[1:]])
 
 
 def _report_emit_failure(exc: OSError) -> None:
@@ -86,14 +172,22 @@ def wait_if_paused(config: dict):
 
 
 def main():
+    _maybe_reexec_local_venv()
     faulthandler.enable()
+    _configure_pipeline_logging()
     if len(sys.argv) < 2:
         emit("error", message="Nenhum arquivo de configuracao fornecido")
         sys.exit(1)
 
+    if sys.argv[1] in {"-h", "--help", "help"}:
+        print(_build_cli_help(), flush=True)
+        return
+
     if sys.argv[1] == "--warmup-visual":
+        from vision_stack.runtime import warmup_visual_stack
         models_dir = ""
         profile = "normal"
+        # ... rest of warmup logic ...
         args = sys.argv[2:]
         index = 0
         while index < len(args):
@@ -113,6 +207,7 @@ def main():
         return
 
     if sys.argv[1] == "--list-supported-languages":
+        from translator.translate import list_supported_google_languages
         print(json.dumps(list_supported_google_languages(), ensure_ascii=False), flush=True)
         return
 
@@ -130,6 +225,30 @@ def main():
         _run_process_block(project_json_path, page_idx, block_id, mode)
         return
 
+    if sys.argv[1] == "--detect-page" and len(sys.argv) >= 4:
+        project_json_path = Path(sys.argv[2])
+        page_idx = int(sys.argv[3])
+        _run_detect_page(project_json_path, page_idx)
+        return
+
+    if sys.argv[1] == "--ocr-page" and len(sys.argv) >= 4:
+        project_json_path = Path(sys.argv[2])
+        page_idx = int(sys.argv[3])
+        _run_ocr_page(project_json_path, page_idx)
+        return
+
+    if sys.argv[1] == "--translate-page" and len(sys.argv) >= 4:
+        project_json_path = Path(sys.argv[2])
+        page_idx = int(sys.argv[3])
+        _run_translate_page(project_json_path, page_idx)
+        return
+
+    if sys.argv[1] == "--reinpaint-page" and len(sys.argv) >= 4:
+        project_json_path = Path(sys.argv[2])
+        page_idx = int(sys.argv[3])
+        _run_reinpaint(project_json_path, page_idx)
+        return
+
     if sys.argv[1] == "--hardware-info":
         from utils.hardware import get_hardware_facts
         print(json.dumps(get_hardware_facts(), ensure_ascii=False), flush=True)
@@ -142,6 +261,10 @@ def main():
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
+        try:
+            finalize_decision_trace({"crashed": True, "error": str(exc)})
+        except Exception:
+            pass
         # Garantir que o erro vá para o stdout (Tauri) e stderr (Log)
         err_msg = f"FALHA CATASTROFICA NO PIPELINE: {exc}\n{tb}"
         emit("error", message=err_msg)
@@ -168,13 +291,53 @@ def _log_env_info():
     except Exception:
         pass
 
+def _resolve_strip_target_pages(config: dict, total_pages: int | None = None) -> int:
+    """Determina o número alvo de páginas de output para o pipeline strip.
+
+    Lógica:
+    - Padrão: 60 (a maioria dos capítulos tem ~50-80 páginas)
+    - Override via config["strip_target_pages"]
+    - Clampado para 1..total_pages (se total_pages fornecido)
+    """
+    raw = config.get("strip_target_pages", 60)
+    try:
+        target = int(raw)
+    except (TypeError, ValueError):
+        target = 60
+    if target < 1:
+        target = 60
+    if total_pages is not None and target > total_pages:
+        target = total_pages
+    return target
+
+
 def _run_pipeline(config_path: str):
+    from corpus.runtime import extract_expected_terms, load_corpus_bundle, merge_corpus_into_context
+    from extractor.extractor import cleanup, extract
+    from inpainter.lama import run_inpainting
+    from layout.balloon_layout import enrich_page_layout
+    from ocr.contextual_reviewer import contextual_review_page
+    from ocr.detector import run_ocr
+    from translator.context import fetch_context, merge_context
+    from translator.translate import translate_pages
+    from typesetter.renderer import run_typesetting
+
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
     wait_if_paused(config)
     work_dir = Path(config["work_dir"])
     models_dir = Path(config["models_dir"])
+    _attach_work_dir_log_handler(work_dir)
+    configure_decision_trace(
+        work_dir,
+        {
+            "obra": config.get("obra", ""),
+            "capitulo": config.get("capitulo", 1),
+            "idioma_origem": config.get("idioma_origem", "en"),
+            "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        },
+    )
 
     raw_source = config["source_path"].strip()
     if raw_source.startswith("file:///"):
@@ -220,73 +383,113 @@ def _run_pipeline(config_path: str):
             # Em modo manual, o 'clean' (images) e o final (translated) sao apenas copias
             shutil.copy2(originals_dir / img_path.name, images_dir / img_path.name)
             shutil.copy2(originals_dir / img_path.name, translated_dir / img_path.name)
+            
+            # Garantir diretorios de camadas para o editor nao reclamar
+            (work_dir / "layers" / "mask").mkdir(parents=True, exist_ok=True)
+            (work_dir / "layers" / "brush").mkdir(parents=True, exist_ok=True)
+            (work_dir / "layers" / "text-preview").mkdir(parents=True, exist_ok=True)
+            
         inpainted_paths = [str(images_dir / f.name) for f in image_files]
         # Prepare empty lists for project building
         for _ in range(total_pages):
             ocr_results.append({"texts": [], "_vision_blocks": []})
             page_text_layers.append({"texts": []})
     else:
-        # AUTOMATIC FLOW
-        # Start AniList context fetch
+        # STRIP-BASED PIPELINE (Task 6.2)
+        from types import SimpleNamespace
+        from strip.run import run_chapter
+        from vision_stack.runtime import warmup_visual_stack as _warmup_visual_stack
+        from vision_stack.runtime import _get_detector, run_ocr_stage
+        from translator import translate as translator_mod
+        from inpainter import inpaint_band_image
+        from typesetter import renderer as typesetter_mod
+        from translator.context import fetch_context, merge_context
+
+        # Start AniList context fetch in parallel
         _context_future = None
         if not context.get("sinopse") and config.get("obra"):
             from concurrent.futures import ThreadPoolExecutor as _CtxTPE
             _ctx_pool = _CtxTPE(max_workers=1)
             _context_future = _ctx_pool.submit(fetch_context, config["obra"])
 
-        emit_progress("ocr", 0, 10, total=total_pages, message="Iniciando OCR...")
-        ocr_history = []
+        # Warmup models
+        emit_progress("ocr", 0, 9, total=total_pages, message="Carregando modelos...")
+        _warmup_visual_stack(str(models_dir), "max")
 
-        for i, img_path in enumerate(image_files):
-            def emit_ocr_page_progress(local_progress: float, message: str):
-                wait_if_paused(config)
-                prog = i + max(0.0, min(1.0, float(local_progress)))
-                emit_progress("ocr", (prog/total_pages)*100, 10+(prog/total_pages)*20, page=i+1, total=total_pages, message=f"P{i+1}: {message}")
-
-            page_result = run_ocr(
-                str(img_path), models_dir=str(models_dir), profile="max",
-                vision_worker_path=config.get("vision_worker_path", ""),
-                progress_callback=lambda s, p, m: emit_ocr_page_progress(p, m),
-                idioma_origem=config.get("idioma_origem", "en"),
-            )
-            page_result = contextual_review_page(page_result, ocr_history, corpus_expected_terms)
-            page_result["_connected_balloon_reasoner"] = {
-                "provider": config.get("connected_balloon_reasoner", "ollama"),
-                "enabled": config.get("connected_balloon_reasoner_enabled", True),
-                "host": config.get("connected_balloon_ollama_host", config.get("ollama_host", "http://localhost:11434")),
-                "model": config.get("connected_balloon_ollama_model", "qwen2.5"),
-                "use_image": config.get("connected_balloon_ollama_use_image", True),
-            }
-            page_result = enrich_page_layout(page_result)
-            ocr_results.append(page_result)
-            ocr_history.append(page_result)
-
+        # Resolve AniList context
         if _context_future:
             try:
                 context = merge_context(context, _context_future.result(timeout=10))
-            except: pass
+            except Exception:
+                pass
             _ctx_pool.shutdown(wait=False)
 
-        # Translation + Inpainting
-        from concurrent.futures import ThreadPoolExecutor as _TPE
-        with _TPE(max_workers=1) as pool:
-            def emit_tr_prog(p, t, m): emit_progress("translate", (p/t)*100, 35+(p/t)*12.5, page=p, total=t, message=m)
-            tr_future = pool.submit(translate_pages, ocr_results, config["obra"], context, config.get("glossario",{}), config.get("idioma_destino","pt-BR"), config.get("idioma_origem","en"), "alta", config.get("ollama_host","http://localhost:11434"), config.get("ollama_model","traduzai-translator"), emit_tr_prog)
-            
-            def emit_in_prog(p, t, m): emit_progress("inpaint", (p/t)*100, 47.5+(p/t)*12.5, page=p, total=t, message=m)
-            inpainted_paths = run_inpainting(image_files, ocr_results, str(images_dir), str(models_dir), context.get("corpus_visual_benchmark",{}), emit_in_prog)
-            translated_results = tr_future.result()
+        # Bridges
+        connected_reasoner_config = {
+            "provider": config.get("connected_balloon_reasoner", "ollama"),
+            "enabled": config.get("connected_balloon_reasoner_enabled", True),
+            "host": config.get(
+                "connected_balloon_ollama_host",
+                config.get("ollama_host", "http://localhost:11434"),
+            ),
+            "model": config.get("connected_balloon_ollama_model", "qwen2.5"),
+            "use_image": config.get("connected_balloon_ollama_use_image", True),
+        }
 
-        # Build Layers
-        for page_index, (ocr_page, trans_page) in enumerate(zip(ocr_results, translated_results)):
-            merged = []
-            for idx, ocr_t in enumerate(ocr_page.get("texts", [])):
-                tr = trans_page.get("texts", [])[idx].get("translated", "") if idx < len(trans_page.get("texts", [])) else ""
-                merged.append(build_text_layer(page_number=page_index+1, layer_index=idx, ocr_text=ocr_t, translated=tr, corpus_visual_benchmark=context.get("corpus_visual_benchmark",{}), corpus_textual_benchmark=context.get("corpus_textual_benchmark",{})))
-            page_text_layers.append({"texts": merged})
+        class StripDetector:
+            def detect(self, img, conf_threshold=None):
+                from vision_stack.runtime import _profile_to_detection_threshold
+                thresh = conf_threshold if conf_threshold is not None else _profile_to_detection_threshold("max")
+                return _get_detector("max").detect(img, conf_threshold=thresh)
+                
+        class StripRuntime:
+            def run_ocr_stage(self, img, page_dict):
+                return run_ocr_stage(img, page_dict, profile="max", idioma_origem=config.get("idioma_origem", "en"))
+        
+        def progress_cb(stage, current, total, message=""):
+            # Mapeamento de estágios para o progresso global (Tauri UI)
+            p = current / max(1, total)
+            if stage == "concat":
+                emit_progress("ocr", p * 100, 10 + p * 5, message=f"Concatenando páginas ({current}/{total})...")
+            elif stage == "detect":
+                emit_progress("ocr", p * 100, 15 + p * 10, message="Detectando balões no strip...")
+            elif stage == "process":
+                # O processamento de bandas é a parte mais longa. 25% -> 95%
+                emit_progress("ocr", p * 100, 25 + p * 70, message=f"Processando banda {current+1}/{total}...")
+            elif stage == "ocr":
+                # Chamado internamente por process_band (OCR da banda)
+                pass 
 
-        def emit_ty_prog(p, t, m): emit_progress("typeset", (p/t)*100, 80+(p/t)*18, page=p, total=t, message=m)
-        run_typesetting(inpainted_paths, page_text_layers, str(translated_dir), emit_ty_prog)
+        output_pages = run_chapter(
+            image_files=image_files,
+            output_dir=translated_dir,
+            detector=StripDetector(),
+            runtime=StripRuntime(),
+            translator=translator_mod,
+            inpainter=SimpleNamespace(inpaint_band_image=inpaint_band_image),
+            typesetter=typesetter_mod,
+            target_count=_resolve_strip_target_pages(config, total_pages),
+            progress_callback=progress_cb,
+            context=context,
+            glossario=config.get("glossario", {}),
+            idioma_origem=config.get("idioma_origem", "en"),
+            idioma_destino=config.get("idioma_destino", "pt-BR"),
+            obra=config.get("obra", ""),
+            connected_reasoner_config=connected_reasoner_config,
+        )
+
+
+        
+        # Sincroniza saídas para o wrap-up final (project.json)
+        image_files = [p.path for p in output_pages]
+        ocr_results = [p.ocr_result for p in output_pages]
+        page_text_layers = [p.text_layers for p in output_pages]
+        total_pages = len(output_pages)
+
+        # Copia imagens processadas para images/ para que o editor as veja como base de inpaint
+        for p in output_pages:
+            shutil.copy2(p.path, images_dir / p.path.name)
+
 
 
 
@@ -295,6 +498,12 @@ def _run_pipeline(config_path: str):
     project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
     with open(work_dir/"project.json", "w", encoding="utf-8") as f:
         json.dump(project_data, f, ensure_ascii=False, indent=2)
+    finalize_decision_trace(
+        {
+            "total_paginas": total_pages,
+            "total_textos": project_data.get("estatisticas", {}).get("total_textos", 0),
+        }
+    )
     
     cleanup(tmp_dir)
     emit_progress("typeset", 100, 100, message="Concluido!")
@@ -347,6 +556,13 @@ def _bbox4_list(values) -> list[list[int]]:
         for value in (values or [])
         if isinstance(value, (list, tuple)) and len(value) >= 4
     ]
+
+
+def _resolved_layer_bbox(layer: dict, fallback=None) -> list[int]:
+    return _bbox4(
+        layer.get("bbox"),
+        layer.get("layout_bbox") or layer.get("source_bbox") or layer.get("balloon_bbox") or fallback,
+    )
 
 
 def build_text_layer(
@@ -413,6 +629,13 @@ def build_text_layer(
         "_connected_slot_count": ocr_text.get("_connected_slot_count"),
         "_connected_vertical_bias_ratio": ocr_text.get("_connected_vertical_bias_ratio"),
         "_is_lobe_subregion": bool(ocr_text.get("_is_lobe_subregion", False)),
+        "page_profile": ocr_text.get("page_profile"),
+        "block_profile": ocr_text.get("block_profile"),
+        "layout_profile": ocr_text.get("layout_profile") or ocr_text.get("block_profile"),
+        "entity_flags": list(ocr_text.get("entity_flags") or []),
+        "entity_repairs": list(ocr_text.get("entity_repairs") or []),
+        "glossary_hits": list(ocr_text.get("glossary_hits") or []),
+        "qa_flags": list(ocr_text.get("qa_flags") or []),
         "corpus_visual_benchmark": corpus_visual_benchmark,
         "corpus_textual_benchmark": corpus_textual_benchmark,
     }
@@ -476,6 +699,13 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
         "_connected_slot_count": raw_layer.get("_connected_slot_count"),
         "_connected_vertical_bias_ratio": raw_layer.get("_connected_vertical_bias_ratio"),
         "_is_lobe_subregion": bool(raw_layer.get("_is_lobe_subregion", False)),
+        "page_profile": raw_layer.get("page_profile"),
+        "block_profile": raw_layer.get("block_profile"),
+        "layout_profile": raw_layer.get("layout_profile") or raw_layer.get("block_profile"),
+        "entity_flags": list(raw_layer.get("entity_flags") or []),
+        "entity_repairs": list(raw_layer.get("entity_repairs") or []),
+        "glossary_hits": list(raw_layer.get("glossary_hits") or []),
+        "qa_flags": list(raw_layer.get("qa_flags") or []),
         "corpus_visual_benchmark": raw_layer.get("corpus_visual_benchmark", {}),
         "corpus_textual_benchmark": raw_layer.get("corpus_textual_benchmark", {}),
     }
@@ -507,12 +737,14 @@ def _sync_page_legacy_aliases(page: dict) -> None:
     page["textos"] = [
         {
             "id": layer.get("id"),
-            "bbox": _bbox4(layer.get("layout_bbox"), layer.get("source_bbox")),
+            "bbox": _bbox4(layer.get("render_bbox"), _bbox4(layer.get("layout_bbox"), layer.get("source_bbox"))),
             "tipo": layer.get("tipo", "fala"),
             "original": layer.get("original", ""),
+            "translated": layer.get("translated", layer.get("traduzido", "")),
             "traduzido": layer.get("translated", ""),
             "confianca_ocr": float(layer.get("ocr_confidence", 0.0) or 0.0),
             "estilo": _merge_style(layer.get("style") or layer.get("estilo")),
+            "qa_flags": list(layer.get("qa_flags") or []),
         }
         for layer in text_layers
         if isinstance(layer, dict)
@@ -539,11 +771,40 @@ def _ensure_image_layer(page: dict, layer_key: str, path: str, *, visible: bool,
     layer["locked"] = bool(layer.get("locked", locked))
 
 
+def render_page_image(project, page_idx, output_path):
+    """Auxiliar para renderizar a versao final da pagina para visualizacao."""
+    from typesetter.renderer import _typeset_single_page
+    page = project["paginas"][page_idx]
+    
+    # Prepara o dicionario de textos no formato que o renderer espera
+    trans_texts = _page_text_layers_for_renderer(page, page_idx)
+    trans_page_dict = {"texts": trans_texts}
+    
+    # Determina a imagem de fundo: tenta 'images' (inpainted) primeiro, depois 'originals'
+    work_dir = Path(project.get("_work_dir", "."))
+    img_name = Path(page["arquivo_original"]).name
+    bg_path = work_dir / "images" / img_name
+    if not bg_path.exists():
+        bg_path = work_dir / "originals" / img_name
+        
+    if not bg_path.exists():
+        # Fallback para caminho direto se salvo no layout
+        bg_path = Path(page.get("arquivo_original", ""))
+        
+    out_dir = Path(output_path).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        _typeset_single_page((str(bg_path), trans_page_dict, str(out_dir)))
+    except Exception as e:
+        sys.stderr.write(f"Falha ao renderizar imagem da pagina: {e}\n")
+
 def _run_retypeset(project_json_path: Path, page_idx: int):
     with open(project_json_path, "r", encoding="utf-8") as f:
         project = json.load(f)
 
     work_dir = project_json_path.parent
+    project["_work_dir"] = str(work_dir)
     pages = project.get("paginas", [])
     if page_idx < 0 or page_idx >= len(pages):
         emit("error", message="Indice de pagina invalido")
@@ -594,6 +855,7 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
         project = json.load(f)
 
     work_dir = project_json_path.parent
+    project["_work_dir"] = str(work_dir)
     pages = project.get("paginas", [])
     if page_idx < 0 or page_idx >= len(pages):
         emit("error", message="Indice de pagina invalido")
@@ -630,6 +892,7 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
     ]
 
     try:
+        from inpainter.lama import run_inpainting
         ocr_data = {
             "image": str(original_path),
             "width": 0,
@@ -705,6 +968,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
                 }
                 for block in ocr.get("_vision_blocks", [])
             ],
+            "page_profile": ocr.get("page_profile"),
             "text_layers": text_layers,
         }
         _sync_page_legacy_aliases(page)
@@ -717,6 +981,11 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "capitulo": config.get("capitulo", 1),
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "_ollama_host": config.get("ollama_host"),
+        "_ollama_model": config.get("ollama_model"),
+        "_models_dir": config.get("models_dir"),
+        "_vision_worker_path": config.get("vision_worker_path"),
+        "_work_dir": config.get("work_dir"),
         "contexto": context,
         "paginas": pages,
         "estatisticas": {
@@ -728,6 +997,287 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
     }
 
 
+def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: str):
+    """Refazer processo para um unico bloco."""
+    from ocr.detector import run_ocr_on_block
+    from translator.translate import translate_single_block
+    
+    with open(project_path, "r", encoding="utf-8") as f:
+        project = json.load(f)
+
+    work_dir = project_path.parent
+    _attach_work_dir_log_handler(work_dir)
+    project["_work_dir"] = str(work_dir)
+    page = project["paginas"][page_idx]
+
+    found_block = None
+    # Support both "text_layers" and "textos" keys
+    layers = page.get("text_layers") or page.get("textos") or []
+    for layer in layers:
+        if layer["id"] == block_id:
+            found_block = layer
+            break
+
+    if not found_block:
+        emit("error", message=f"Bloco {block_id} nao encontrado na pagina {page_idx}")
+        return
+
+    original_rel = _resolve_image_layer_path(page, "base", page.get("arquivo_original", ""))
+    orig_img = work_dir / original_rel
+    if not orig_img.exists():
+        orig_img = work_dir / "originals" / Path(original_rel).name
+    if not orig_img.exists():
+        candidate = Path(original_rel)
+        if candidate.exists():
+            orig_img = candidate
+
+    block_bbox = _resolved_layer_bbox(found_block)
+    found_block["bbox"] = block_bbox
+
+    if mode == "ocr":
+        emit_progress("ocr", 10, 50, message="Redetectando texto...")
+        text, conf = run_ocr_on_block(str(orig_img), block_bbox)
+        found_block["original"] = text
+        found_block["ocr_confidence"] = conf
+        found_block["confianca_ocr"] = conf
+
+    if mode == "translate":
+        emit_progress("translate", 50, 80, message="Traduzindo bloco...")
+        translate_single_block(found_block, project)
+
+    if mode == "inpaint" or mode == "ocr":
+        emit_progress("inpaint", 30, 70, message="Limpando balão...")
+        from inpainter.lama import run_inpainting
+        ocr_data = {
+            "image": str(orig_img),
+            "texts": [found_block],
+            "_vision_blocks": [{"bbox": block_bbox, "confidence": 1.0}],
+        }
+        inpaint_out_dir = work_dir / "images"
+        inpaint_out_dir.mkdir(parents=True, exist_ok=True)
+        run_inpainting([orig_img], [ocr_data], str(inpaint_out_dir))
+
+    page["text_layers"] = _page_text_layers_for_renderer(page, page_idx)
+    _sync_page_legacy_aliases(page)
+    _save_project_json(project_path, project)
+
+    emit_progress("render", 80, 95, message="Rerenderizando visual...")
+    out_img = work_dir / _resolve_image_layer_path(
+        page,
+        "rendered",
+        page.get("arquivo_traduzido", f"translated/{Path(original_rel).name}"),
+    )
+    render_page_image(project, page_idx, str(out_img))
+
+    emit("complete", output_path=str(out_img))
+
+def _run_detect_page(project_path: Path, page_idx: int):
+    from ocr.detector import run_ocr
+    from ocr.contextual_reviewer import contextual_review_page
+    from layout.balloon_layout import enrich_page_layout
+    with open(project_path, "r", encoding="utf-8") as f:
+        project = json.load(f)
+
+    work_dir = project_path.parent
+    _attach_work_dir_log_handler(work_dir)
+    project["_work_dir"] = str(work_dir)
+    page = project["paginas"][page_idx]
+    page_number = int(page.get("numero", page_idx + 1) or page_idx + 1)
+    original_rel = _resolve_image_layer_path(page, "base", page.get("arquivo_original", ""))
+    img_name = Path(original_rel).name
+    orig_img = work_dir / original_rel
+    if not orig_img.exists():
+        orig_img = work_dir / "originals" / img_name
+    if not orig_img.exists():
+        candidate = Path(original_rel)
+        if candidate.exists():
+            orig_img = candidate
+    
+    emit_progress("ocr", 0, 10, message="Detectando balões e textos...")
+    
+    # Run full OCR (detect + read)
+    ocr_data = run_ocr(
+        str(orig_img),
+        models_dir=project.get("_models_dir", "models"),
+        vision_worker_path=project.get("_vision_worker_path", ""),
+        idioma_origem=project.get("idioma_origem", "en")
+    )
+    
+    reviewed = contextual_review_page(ocr_data, [], [])
+    reviewed["_connected_balloon_reasoner"] = {
+        "provider": project.get("connected_balloon_reasoner", "ollama"),
+        "enabled": project.get("connected_balloon_reasoner_enabled", True),
+        "host": project.get("connected_balloon_ollama_host", project.get("_ollama_host", "http://localhost:11434")),
+        "model": project.get("connected_balloon_ollama_model", "qwen2.5"),
+        "use_image": project.get("connected_balloon_ollama_use_image", True),
+    }
+    reviewed = enrich_page_layout(reviewed)
+
+    page["text_layers"] = []
+    page["textos"] = []
+    page["inpaint_blocks"] = [
+        {
+            "bbox": _bbox4(block.get("bbox")),
+            "confidence": float(block.get("confidence", 0.0) or 0.0),
+        }
+        for block in reviewed.get("_vision_blocks", [])
+        if isinstance(block, dict)
+    ]
+    
+    _ensure_image_layer(page, "base", original_rel, visible=True, locked=True)
+    _ensure_image_layer(page, "mask", _resolve_image_layer_path(page, "mask", f"layers/mask/{page_number:03}.png"), visible=False, locked=False)
+    _ensure_image_layer(page, "inpaint", _resolve_image_layer_path(page, "inpaint", f"images/{img_name}"), visible=False, locked=True)
+    _ensure_image_layer(page, "brush", _resolve_image_layer_path(page, "brush", f"layers/brush/{page_number:03}.png"), visible=False, locked=False)
+    _ensure_image_layer(page, "rendered", _resolve_image_layer_path(page, "rendered", f"translated/{img_name}"), visible=True, locked=True)
+    _sync_page_legacy_aliases(page)
+    _save_project_json(project_path, project)
+        
+    emit_progress("render", 80, 95, message="Rerenderizando visual...")
+    out_img = work_dir / _resolve_image_layer_path(page, "rendered", f"translated/{img_name}")
+    render_page_image(project, page_idx, str(out_img))
+    
+    emit_progress("render", 100, 100, message="Detecção concluída!")
+    emit("complete", output_path=str(out_img))
+
+def _run_ocr_page(project_path: Path, page_idx: int):
+    from ocr.detector import run_ocr_on_block
+    with open(project_path, "r", encoding="utf-8") as f:
+        project = json.load(f)
+
+    work_dir = project_path.parent
+    _attach_work_dir_log_handler(work_dir)
+    project["_work_dir"] = str(work_dir)
+    page = project["paginas"][page_idx]
+    original_rel = _resolve_image_layer_path(page, "base", page.get("arquivo_original", ""))
+    img_name = Path(original_rel).name
+    orig_img = work_dir / original_rel
+    if not orig_img.exists():
+        orig_img = work_dir / "originals" / img_name
+    if not orig_img.exists():
+        candidate = Path(original_rel)
+        if candidate.exists():
+            orig_img = candidate
+
+    layers = page.get("text_layers") or _page_text_layers_for_renderer(page, page_idx)
+    if not layers:
+        page_number = int(page.get("numero", page_idx + 1) or page_idx + 1)
+        context = project.get("contexto", {}) or {}
+        layers = [
+            build_text_layer(
+                page_number=page_number,
+                layer_index=idx,
+                ocr_text={
+                    "bbox": _bbox4(block.get("bbox")),
+                    "balloon_bbox": _bbox4(block.get("bbox")),
+                    "confidence": float(block.get("confidence", 0.0) or 0.0),
+                    "tipo": block.get("tipo", "fala"),
+                    "text": "",
+                },
+                translated="",
+                corpus_visual_benchmark=context.get("corpus_visual_benchmark", {}),
+                corpus_textual_benchmark=context.get("corpus_textual_benchmark", {}),
+            )
+            for idx, block in enumerate(page.get("inpaint_blocks") or [])
+            if isinstance(block, dict)
+        ]
+    page["text_layers"] = layers
+    total = len(layers)
+    
+    for i, layer in enumerate(layers):
+        emit_progress("ocr", int((i / total) * 100), 10, message=f"OCR em bloco {i+1}/{total}...")
+        block_bbox = _resolved_layer_bbox(layer)
+        layer["bbox"] = block_bbox
+        text, conf = run_ocr_on_block(str(orig_img), block_bbox)
+        layer["original"] = text
+        layer["ocr_confidence"] = conf
+        layer["confianca_ocr"] = conf
+
+    page["text_layers"] = _page_text_layers_for_renderer(page, page_idx)
+    _sync_page_legacy_aliases(page)
+    _save_project_json(project_path, project)
+
+    emit_progress("render", 80, 95, message="Rerenderizando visual...")
+    out_img = work_dir / _resolve_image_layer_path(page, "rendered", f"translated/{img_name}")
+    render_page_image(project, page_idx, str(out_img))
+    
+    emit_progress("render", 100, 100, message="OCR concluído!")
+    emit("complete", output_path=str(out_img))
+
+def _run_translate_page(project_path: Path, page_idx: int):
+    from translator.translate import translate_pages
+    with open(project_path, "r", encoding="utf-8") as f:
+        project = json.load(f)
+
+    work_dir = project_path.parent
+    _attach_work_dir_log_handler(work_dir)
+    project["_work_dir"] = str(work_dir)
+    # We only translate common fields for one page
+    # translate_pages expects a list of pages
+    page = project["paginas"][page_idx]
+    original_rel = _resolve_image_layer_path(page, "base", page.get("arquivo_original", ""))
+    img_name = Path(original_rel).name
+    
+    emit_progress("translate", 0, 10, message="Traduzindo textos...")
+    
+    context = project.get("contexto", {}) or {}
+    source_layers = page.get("text_layers") or page.get("textos") or []
+    page_to_translate = {
+        "texts": [
+            {
+                **layer,
+                "text": layer.get("text") or layer.get("original") or "",
+            }
+            for layer in source_layers
+        ]
+    }
+    
+    translated_pages = translate_pages(
+        ocr_results=[page_to_translate],
+        obra=project.get("obra", ""),
+        context=context,
+        glossario=context.get("glossario", {}) or {},
+        idioma_origem=project.get("idioma_origem", "en"),
+        idioma_destino=project.get("idioma_destino", "pt-BR"),
+        ollama_host=project.get("_ollama_host") or "http://localhost:11434",
+        ollama_model=project.get("_ollama_model") or "traduzai-translator"
+    )
+    
+    translated_layers = (
+        translated_pages[0].get("texts", page_to_translate["texts"])
+        if translated_pages else page_to_translate["texts"]
+    )
+    page["text_layers"] = translated_layers
+    page["textos"] = translated_layers
+    _sync_page_legacy_aliases(page)
+    _save_project_json(project_path, project)
+        
+    emit_progress("render", 80, 95, message="Rerenderizando visual...")
+    out_img = work_dir / _resolve_image_layer_path(page, "rendered", f"translated/{img_name}")
+    render_page_image(project, page_idx, str(out_img))
+    
+    emit_progress("render", 100, 100, message="Tradução concluída!")
+    emit("complete", output_path=str(out_img))
+
+def _build_cli_help() -> str:
+    return "\n".join(
+        [
+            "Uso: python pipeline/main.py <config.json> [comando]",
+            "",
+            "Comandos disponiveis:",
+            "  --help                              Mostra esta ajuda",
+            "  --hardware-info                     Exibe CPU, RAM e GPU detectadas",
+            "  --list-supported-languages          Lista idiomas suportados pelo tradutor",
+            "  --warmup-visual [args]              Inicializa a stack visual",
+            "  --retypeset <project> <page>        Rerenderiza uma pagina",
+            "  --detect-page <project> <page>      Reprocessa deteccao da pagina",
+            "  --ocr-page <project> <page>         Reprocessa OCR da pagina",
+            "  --translate-page <project> <page>   Reprocessa traducao da pagina",
+            "  --reinpaint-page <project> <page>   Reprocessa limpeza/inpaint da pagina",
+            "  --process-block <mode> <project> <page> <block_id>  Reprocessa um bloco",
+        ]
+    )
+
+
 if __name__ == "__main__":
     try:
         main()
@@ -737,67 +1287,3 @@ if __name__ == "__main__":
         sys.stderr.write(tb)
         emit("error", message=f"{e}\n--- traceback ---\n{tb}")
         sys.exit(1)
-def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: str):
-    """Refazer processo para um unico bloco."""
-    from ocr.detector import run_ocr_on_block
-    from translator.translate import translate_single_block
-    from typesetter.renderer import render_page_image
-    
-    with open(project_path, "r", encoding="utf-8") as f:
-        project = json.load(f)
-        
-    page = project["paginas"][page_idx]
-    
-    found_block = None
-    # Support both "text_layers" and "textos" keys
-    layers = page.get("text_layers", page.get("textos", []))
-    for layer in layers:
-        if layer["id"] == block_id:
-            found_block = layer
-            break
-            
-    if not found_block:
-        emit("error", message=f"Bloco {block_id} nao encontrado na pagina {page_idx}")
-        return
-        
-    if mode == "ocr":
-        emit_progress("ocr", 10, 50, message="Redetectando texto...")
-        # Get original image path
-        orig_img = project_path.parent / page["arquivo_original"]
-        text, conf = run_ocr_on_block(str(orig_img), found_block["bbox"])
-        found_block["original"] = text
-        found_block["ocr_confidence"] = conf
-        found_block["confianca_ocr"] = conf
-    
-    if mode == "translate":
-        emit_progress("translate", 50, 80, message="Traduzindo bloco...")
-        translate_single_block(found_block, project)
-
-    if mode == "inpaint" or mode == "ocr":
-        emit_progress("inpaint", 30, 70, message="Limpando balão...")
-        # Run local inpaint for this block
-        orig_img = project_path.parent / page["arquivo_original"]
-        out_img = project_path.parent / page["arquivo_traduzido"]
-        
-        # We use a temporary run_inpainting call for the single page
-        from inpainter.lama import run_inpainting
-        ocr_data = {
-            "image": str(orig_img),
-            "texts": [found_block],
-            "_vision_blocks": [{"bbox": found_block["bbox"], "confidence": 1.0}]
-        }
-        # Render into images/ (inpainted version)
-        inpaint_out_dir = project_path.parent / "images"
-        inpaint_out_dir.mkdir(parents=True, exist_ok=True)
-        run_inpainting([orig_img], [ocr_data], str(inpaint_out_dir))
-        
-    # Save project
-    with open(project_path, "w", encoding="utf-8") as f:
-        json.dump(project, f, indent=2, ensure_ascii=False)
-        
-    # Always re-render the page image to reflect changes
-    emit_progress("render", 80, 95, message="Rerenderizando visual...")
-    out_img = project_path.parent / page["arquivo_traduzido"]
-    render_page_image(project, page_idx, str(out_img))
-    
-    emit("complete", output_path=str(out_img))
