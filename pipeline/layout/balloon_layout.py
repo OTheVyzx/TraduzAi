@@ -492,14 +492,17 @@ def _apply_geometric_fallback_subregions(
 
             if not is_likely_connected and page_image is not None:
                 # Heurística de preenchimento: elipse ~0.78. Lóbulos conectados ~0.45-0.65.
-                mask_path = _resolve_mask_layer_path(page_result)
-                if mask_path.exists():
-                    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-                    if mask is not None:
-                        roi = mask[balloon[1]:balloon[3], balloon[0]:balloon[2]]
-                        fill_ratio = np.count_nonzero(roi) / float(max(1, bw * bh))
-                        if fill_ratio < 0.62:
-                            is_likely_connected = True
+                # Só aplica em balões brancos: burst/texturizado também têm fill baixo por
+                # causa dos raios/pontas, o que causaria falso positivo de balão conectado.
+                if _balloon_region_looks_white(page_image, balloon):
+                    mask_path = _resolve_mask_layer_path(page_result)
+                    if mask_path.exists():
+                        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                        if mask is not None:
+                            roi = mask[balloon[1]:balloon[3], balloon[0]:balloon[2]]
+                            fill_ratio = np.count_nonzero(roi) / float(max(1, bw * bh))
+                            if fill_ratio < 0.62:
+                                is_likely_connected = True
             
             if is_likely_connected:
                 subregions = _geometric_fallback_subregions(

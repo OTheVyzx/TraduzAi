@@ -145,6 +145,37 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreaterEqual(resolved["font_size"], bounds[0])
         self.assertLessEqual(resolved["font_size"], bounds[1])
 
+    def test_resolve_text_layout_grows_short_narracao_anchored_to_small_source_bbox(self):
+        """Regressão para o bug do traduzido3 (Cap 1, "QUE INCÔMODO." em narração branca):
+
+        Quando narração com OCR seed pequeno (14) era ancorada a um source_bbox
+        menor que o balão, o binary-search achava best_fit=36, mas o loop de
+        scoring rejeitava por overflow de altura sem a tolerância de +4px que
+        _fits_in_box já aplicava. O fallback voltava para category_min=14,
+        renderizando texto minúsculo num balão grande.
+        """
+        text_data = {
+            "translated": "QUE INCÔMODO.",
+            "text": "HOW BOTHERSOME.",
+            "tipo": "narracao",
+            "balloon_bbox": [145, 331, 452, 488],
+            "bbox": [145, 331, 452, 488],
+            "source_bbox": [181, 375, 407, 447],
+            "estilo": {"tamanho": 14, "fonte": "ComicNeue-Bold.ttf"},
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        # Antes do fix: font_size=14 (fallback de category_min)
+        # Depois do fix: font_size deve crescer para algo legível dentro do balão.
+        self.assertGreaterEqual(
+            resolved["font_size"], 28,
+            f"Texto curto em balão narração branca deveria crescer; ficou em {resolved['font_size']}",
+        )
+
     def test_normalize_render_text_replaces_katakana_middle_dot(self):
         self.assertEqual(_normalize_render_text("・・・・・"), ".....")
 

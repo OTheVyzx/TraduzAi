@@ -221,6 +221,9 @@ class LayoutAnalysisTests(unittest.TestCase):
                 },
             }
 
+            # A imagem deve ser branca — a heurística de fill_ratio só atua em
+            # balões brancos para evitar falso positivo em burst/texturizado.
+            page_image_white = np.full((260, 360, 3), 255, dtype=np.uint8)
             with patch(
                 "layout.balloon_layout._geometric_fallback_subregions",
                 return_value=[[20, 20, 180, 240], [180, 20, 340, 240]],
@@ -228,7 +231,7 @@ class LayoutAnalysisTests(unittest.TestCase):
                 _apply_geometric_fallback_subregions(
                     texts,
                     page_result,
-                    np.zeros((260, 360, 3), dtype=np.uint8),
+                    page_image_white,
                 )
 
         geometric_fallback.assert_called_once()
