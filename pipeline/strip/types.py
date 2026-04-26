@@ -45,6 +45,7 @@ class VerticalStrip:
     width: int
     height: int
     source_page_breaks: list[int] = field(default_factory=list)
+    page_x_offsets: list[int] = field(default_factory=list)  # letterbox offset por página
 
 
 @dataclass

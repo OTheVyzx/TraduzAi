@@ -14,12 +14,11 @@ import numpy as np
 from strip.types import VerticalStrip
 
 
-def build_strip(page_paths: list[Path]) -> VerticalStrip:
-    """Concatena páginas verticalmente sem separadores.
-
-    Páginas mais estreitas que a maior são centralizadas com letterbox branco
-    para que o detector veja branco puro nas laterais e não dispare ali.
-    """
+def build_strip(
+    page_paths: list[Path],
+    progress_callback=None,
+) -> VerticalStrip:
+    """Concatena páginas verticalmente sem separadores."""
     if not page_paths:
         return VerticalStrip(
             image=np.zeros((0, 0, 3), dtype=np.uint8),
@@ -30,8 +29,11 @@ def build_strip(page_paths: list[Path]) -> VerticalStrip:
 
     # Primeira passada: ler imagens
     images: list[np.ndarray] = []
-    for path in page_paths:
+    for i, path in enumerate(page_paths):
+        if progress_callback:
+            progress_callback("concat", i, len(page_paths))
         img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+
         if img is None:
             raise FileNotFoundError(f"Não consegui ler {path}")
         images.append(img)
@@ -43,11 +45,13 @@ def build_strip(page_paths: list[Path]) -> VerticalStrip:
     strip = np.full((total_height, max_width, 3), 255, dtype=np.uint8)
 
     page_breaks: list[int] = [0]
+    page_x_offsets: list[int] = []
     cursor = 0
     for img in images:
         h, w = img.shape[:2]
-        x_offset = (max_width - w) // 2  # centraliza
+        x_offset = (max_width - w) // 2  # centraliza (letterbox)
         strip[cursor:cursor + h, x_offset:x_offset + w] = img
+        page_x_offsets.append(x_offset)
         cursor += h
         page_breaks.append(cursor)
 
@@ -56,6 +60,7 @@ def build_strip(page_paths: list[Path]) -> VerticalStrip:
         width=max_width,
         height=total_height,
         source_page_breaks=page_breaks,
+        page_x_offsets=page_x_offsets,
     )
 
 

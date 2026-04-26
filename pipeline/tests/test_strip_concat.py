@@ -65,6 +65,36 @@ class BuildStripTests(unittest.TestCase):
 
             self.assertEqual(strip.source_page_breaks, [0, 100, 200, 300])
 
+    def test_build_strip_records_x_offset_per_page(self):
+        """Páginas mais estreitas que max_width devem ter page_x_offsets > 0."""
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Página wide (300px) e narrow (200px)
+            wide = np.zeros((50, 300, 3), dtype=np.uint8)
+            narrow = np.zeros((50, 200, 3), dtype=np.uint8)
+            cv2.imwrite(str(tmp_path / "a.png"), wide)
+            cv2.imwrite(str(tmp_path / "b.png"), narrow)
+            strip = build_strip([tmp_path / "a.png", tmp_path / "b.png"])
+
+            self.assertTrue(hasattr(strip, "page_x_offsets"))
+            self.assertEqual(len(strip.page_x_offsets), 2)
+            # wide (300px = max_width) → offset 0
+            self.assertEqual(strip.page_x_offsets[0], 0)
+            # narrow (200px) → offset (300-200)//2 = 50
+            self.assertEqual(strip.page_x_offsets[1], 50)
+
+    def test_build_strip_same_width_pages_have_zero_offset(self):
+        """Páginas com mesma largura têm offset=0."""
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for i in range(3):
+                cv2.imwrite(str(tmp_path / f"p{i}.png"),
+                           np.zeros((100, 200, 3), dtype=np.uint8))
+            strip = build_strip(sorted(tmp_path.glob("*.png")))
+            self.assertEqual(strip.page_x_offsets, [0, 0, 0])
+
 
 class SplitStripBackTests(unittest.TestCase):
     def test_round_trip_recovers_original_pixels(self):
