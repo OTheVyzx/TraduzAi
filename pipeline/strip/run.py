@@ -79,8 +79,8 @@ def run_chapter(
     output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
 
     # Remapeamento de metadados para project.json
-    all_texts = []
-    all_vision_blocks = []
+    all_texts: list[dict] = []
+    all_vision_blocks: list[dict] = []
     for band in bands:
         if not band.ocr_result:
             continue
@@ -88,12 +88,14 @@ def run_chapter(
         # Coleta textos e remapa para coordenadas do strip
         for txt in band.ocr_result.get("texts", []):
             new_txt = dict(txt)
-            if "bbox" in new_txt:
-                x1, y1, x2, y2 = new_txt["bbox"]
-                new_txt["bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
-            if "balloon_bbox" in new_txt:
-                x1, y1, x2, y2 = new_txt["balloon_bbox"]
-                new_txt["balloon_bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
+            # bbox é OBRIGATÓRIO — pular texto sem bbox para evitar placeholder [0,0,32,32]
+            if not new_txt.get("bbox"):
+                continue
+            x1, y1, x2, y2 = new_txt["bbox"]
+            new_txt["bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
+            if "balloon_bbox" in new_txt and new_txt["balloon_bbox"]:
+                bx1, by1, bx2, by2 = new_txt["balloon_bbox"]
+                new_txt["balloon_bbox"] = [bx1, by1 + b_y, bx2, by2 + b_y]
             # Remapar subregions se houver
             if "balloon_subregions" in new_txt:
                 new_subs = []
@@ -101,43 +103,75 @@ def run_chapter(
                     new_subs.append([sub[0], sub[1] + b_y, sub[2], sub[3] + b_y])
                 new_txt["balloon_subregions"] = new_subs
             all_texts.append(new_txt)
-        
+
         for vb in band.ocr_result.get("_vision_blocks", []):
             new_vb = dict(vb)
-            if "bbox" in new_vb:
-                x1, y1, x2, y2 = new_vb["bbox"]
-                new_vb["bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
+            if not new_vb.get("bbox"):
+                continue
+            x1, y1, x2, y2 = new_vb["bbox"]
+            new_vb["bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
             all_vision_blocks.append(new_vb)
 
-    # Distribui textos para as novas páginas
+    def _assign_text_to_page(txt_y1: int, txt_y2: int, pages: list) -> int | None:
+        """Retorna índice da página com maior intersecção em y (sem duplicar)."""
+        best_idx = None
+        best_overlap = 0
+        for idx, page in enumerate(pages):
+            overlap = max(0, min(txt_y2, page.y_bottom) - max(txt_y1, page.y_top))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_idx = idx
+        return best_idx
+
+    # Inicializar listas em cada página
     for page in output_pages:
-        p_y0, p_y1 = page.y_top, page.y_bottom
-        page_texts = []
-        for txt in all_texts:
-            tx1, ty1, tx2, ty2 = txt["bbox"]
-            # Se o centro do texto está na página, ele pertence a ela
-            t_cy = (ty1 + ty2) / 2
-            if p_y0 <= t_cy < p_y1:
-                local_txt = dict(txt)
-                local_txt["bbox"] = [tx1, ty1 - p_y0, tx2, ty2 - p_y0]
-                if "balloon_bbox" in local_txt:
-                    bx1, by1, bx2, by2 = local_txt["balloon_bbox"]
-                    local_txt["balloon_bbox"] = [bx1, by1 - p_y0, bx2, by2 - p_y0]
-                if "balloon_subregions" in local_txt:
-                    local_txt["balloon_subregions"] = [[s[0], s[1] - p_y0, s[2], s[3] - p_y0] for s in local_txt["balloon_subregions"]]
-                page_texts.append(local_txt)
-        
-        page_vbs = []
-        for vb in all_vision_blocks:
-            vx1, vy1, vx2, vy2 = vb["bbox"]
-            v_cy = (vy1 + vy2) / 2
-            if p_y0 <= v_cy < p_y1:
-                local_vb = dict(vb)
-                local_vb["bbox"] = [vx1, vy1 - p_y0, vx2, vy2 - p_y0]
-                page_vbs.append(local_vb)
-        
-        page.ocr_result = {"_vision_blocks": page_vbs}
-        page.text_layers = {"texts": page_texts}
+        page.ocr_result = {"_vision_blocks": []}
+        page.text_layers = {"texts": []}
+
+    # Distribuir textos para as páginas por máxima intersecção (não centro-y)
+    for txt in all_texts:
+        tx1, ty1, tx2, ty2 = txt["bbox"]
+        pidx = _assign_text_to_page(ty1, ty2, output_pages)
+        if pidx is None:
+            continue
+        page = output_pages[pidx]
+        p_y0 = page.y_top
+        local_txt = dict(txt)
+        local_txt["bbox"] = [tx1, ty1 - p_y0, tx2, ty2 - p_y0]
+        if "balloon_bbox" in local_txt and local_txt["balloon_bbox"]:
+            bx1, by1, bx2, by2 = local_txt["balloon_bbox"]
+            local_txt["balloon_bbox"] = [bx1, by1 - p_y0, bx2, by2 - p_y0]
+        if "balloon_subregions" in local_txt:
+            local_txt["balloon_subregions"] = [
+                [s[0], s[1] - p_y0, s[2], s[3] - p_y0]
+                for s in local_txt["balloon_subregions"]
+            ]
+        page.text_layers["texts"].append(local_txt)
+
+    # Distribuir vision_blocks igualmente
+    for vb in all_vision_blocks:
+        vx1, vy1, vx2, vy2 = vb["bbox"]
+        pidx = _assign_text_to_page(vy1, vy2, output_pages)
+        if pidx is None:
+            continue
+        page = output_pages[pidx]
+        p_y0 = page.y_top
+        local_vb = dict(vb)
+        local_vb["bbox"] = [vx1, vy1 - p_y0, vx2, vy2 - p_y0]
+        page.ocr_result["_vision_blocks"].append(local_vb)
+
+    # Preencher page_profile e inpaint_blocks em cada página
+    for page in output_pages:
+        page.page_profile = {
+            "width": strip.width,
+            "height": page.y_bottom - page.y_top,
+            "y_in_strip_top": page.y_top,
+            "y_in_strip_bottom": page.y_bottom,
+        }
+        page.inpaint_blocks = [
+            {"bbox": vb["bbox"]}
+            for vb in page.ocr_result.get("_vision_blocks", [])
+        ]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for i, page in enumerate(output_pages):

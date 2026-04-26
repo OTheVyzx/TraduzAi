@@ -69,22 +69,43 @@ def process_band(
     glossario: dict | None = None,
     idioma_origem: str = "en",
     idioma_destino: str = "pt-BR",
+    obra: str = "",
+    connected_reasoner_config: dict | None = None,
 ) -> Band:
+
+
     """Processa uma banda pelas stages OCR -> translate -> inpaint -> typeset."""
     if not band.balloons:
         band.rendered_slice = band.original_slice.copy()
+        band.ocr_result = {"texts": [], "_vision_blocks": []}
         return band
 
     page_dict = _band_to_page_dict(band, page_idx)
     ocr_page = runtime.run_ocr_stage(band.strip_slice, page_dict)
 
-    translated_pages, _ = translator.translate_pages(
+    # Qualidade: Revisão contextual e enriquecimento de layout (SFX vs Fala, Balões Conectados)
+    from ocr.contextual_reviewer import contextual_review_page
+    from layout.balloon_layout import enrich_page_layout
+    import cv2
+
+    ocr_page = contextual_review_page(ocr_page, [], [])  # History vazio para bandas isoladas
+    if connected_reasoner_config:
+        ocr_page["_connected_balloon_reasoner"] = connected_reasoner_config
+
+    # enrich_page_layout precisa da imagem em BGR para análise geométrica/cor
+    ocr_page["_cached_image_bgr"] = cv2.cvtColor(band.strip_slice, cv2.COLOR_RGB2BGR)
+    ocr_page = enrich_page_layout(ocr_page)
+
+    translated_pages = translator.translate_pages(
         [ocr_page],
+        obra=obra,
         context=context or {},
         glossario=glossario or {},
         idioma_origem=idioma_origem,
         idioma_destino=idioma_destino,
     )
+
+
     translated_page = translated_pages[0] if translated_pages else {"texts": []}
 
     cleaned = inpainter.inpaint_band_image(band.strip_slice, translated_page)
@@ -92,4 +113,6 @@ def process_band(
 
     band.rendered_slice = rendered
     band.rendered_slice = _apply_copy_back_outside_balloons(band)
+    band.ocr_result = translated_page
     return band
+
