@@ -1064,6 +1064,74 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
         if text.get("balloon_subregions"):
             self.assertGreater(text["subregion_confidence"], 0.0)
 
+    def test_connected_balloon_veto_when_group_confidence_is_sentinel(self):
+        """Regressão: grupo de texto inseparável (group_confidence=0.28) deve vetar split.
+
+        O cenário real ocorreu com o balão em [241,7572,482,7713] — o detector
+        geométrico encontrou dois lobos, mas o texto era uma frase contínua única.
+        _derive_connected_text_groups retornou 0.28 (sentinel), porém o pipeline
+        ainda marcava layout_profile='connected_balloon'.
+
+        O veto deve reverter para balão simples: balloon_subregions=[],
+        layout_group_size=1, layout_profile != 'connected_balloon'.
+        """
+        # Balão pequeno (241×141px) que NÃO deve ser splitado
+        balloon_bbox = [241, 7572, 482, 7713]
+        bw, bh = 241, 141  # max=241 < 300, então geometric fallback NÃO vai re-split
+
+        rich_subregions = [
+            {"bbox": [241, 7572, 361, 7713], "polygon": None, "area": bw * bh // 2},
+            {"bbox": [362, 7572, 482, 7713], "polygon": None, "area": bw * bh // 2},
+        ]
+
+        page = {
+            "width": 720,
+            "height": 9000,
+            "texts": [
+                {
+                    "text": "WHAT HAPPENED WITH THE MATTER IN THE EASTERN PLAINS?",
+                    "bbox": [261, 7590, 462, 7695],
+                    "tipo": "fala",
+                    "block_profile": "white_balloon",
+                    "confidence": 0.91,
+                }
+            ],
+        }
+
+        with patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((9000, 720, 3), 245, dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout._detect_connected_balloon_subregions_rich",
+            return_value=rich_subregions,
+        ), patch(
+            "layout.balloon_layout._derive_connected_text_groups",
+            return_value=([], 0.28),  # sentinel: texto não separável em dois grupos
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(
+            text.get("balloon_subregions", []),
+            [],
+            "Veto deve limpar balloon_subregions quando group_confidence=0.28",
+        )
+        self.assertNotEqual(
+            text.get("layout_profile"),
+            "connected_balloon",
+            "Veto deve reverter layout_profile de connected_balloon",
+        )
+        self.assertEqual(
+            text.get("layout_group_size"),
+            1,
+            "Veto deve resetar layout_group_size para 1",
+        )
+        self.assertEqual(
+            float(text.get("connected_group_confidence", -1)),
+            0.0,
+            "Veto deve zerar connected_group_confidence",
+        )
+
 
 class EnforceMinLobeSizeTests(unittest.TestCase):
     """Testes para _enforce_min_lobe_size e _build_balloon_subregions_from_groups."""

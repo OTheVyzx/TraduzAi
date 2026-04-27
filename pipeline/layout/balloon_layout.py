@@ -359,6 +359,53 @@ def enrich_page_layout(page_result: dict) -> dict:
         updated["connected_reasoner_model"] = connected_visuals["connected_reasoner_model"]
         updated["connected_reasoner_notes"] = connected_visuals["connected_reasoner_notes"]
         updated["subregion_confidence"] = connected_visuals["connected_detection_confidence"]
+
+        # Veto: se o group_confidence é o sentinel 0.28 (clusters de texto não separáveis),
+        # reverter para balão simples. O 0.28 é retornado por _derive_connected_text_groups
+        # quando K-Means / separação falha — significa que o texto forma uma unidade contínua,
+        # não dois balões independentes.
+        GROUP_CONFIDENCE_SENTINEL = 0.28
+        if (
+            len(updated.get("balloon_subregions") or []) >= 2
+            and updated.get("connected_group_confidence", 1.0) <= GROUP_CONFIDENCE_SENTINEL
+        ):
+            logger.info(
+                "VETO LAYOUT: Balão revertido para simples — group_confidence sentinel "
+                "(%.2f ≤ %.2f); texto não separável em dois grupos. bbox=%s",
+                updated.get("connected_group_confidence", 0.0),
+                GROUP_CONFIDENCE_SENTINEL,
+                balloon_bbox,
+            )
+            try:
+                record_decision(
+                    stage="layout",
+                    action="veto_connected_split",
+                    reason="group_confidence_sentinel",
+                    page=page_number,
+                    layer=layer_ref,
+                    text=text.get("text", ""),
+                    bbox=balloon_bbox,
+                    details={
+                        "group_confidence": updated.get("connected_group_confidence"),
+                        "detection_confidence": updated.get("connected_detection_confidence"),
+                    },
+                )
+            except Exception:
+                pass
+            updated["balloon_subregions"] = []
+            updated["connected_lobe_bboxes"] = []
+            updated["connected_lobe_polygons"] = []
+            updated["connected_text_groups"] = []
+            updated["connected_position_bboxes"] = []
+            updated["connected_focus_bboxes"] = []
+            updated["layout_profile"] = str(text.get("block_profile") or updated.get("layout_profile", "fala"))
+            updated["layout_group_size"] = 1
+            updated["connected_detection_confidence"] = 0.0
+            updated["connected_group_confidence"] = 0.0
+            updated["connected_position_confidence"] = 0.0
+            updated["connected_balloon_orientation"] = ""
+            updated["subregion_confidence"] = 0.0
+
         enriched_texts.append(updated)
 
     _apply_geometric_fallback_subregions(enriched_texts, page_result, page_image)
