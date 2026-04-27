@@ -73,6 +73,33 @@ def clean_image(
         if x2 <= x1 or y2 <= y1:
             continue
 
+        # Calcular effective balloon_bbox para ring sampling:
+        # Usa a union de todos os balloon_bboxes dos textos na região.
+        # Isso garante que a cor de fundo seja amostrada FORA do balão real,
+        # não da borda interna (que pode ser mais clara que o fundo).
+        h_img, w_img = img_array.shape[:2]
+        effective_balloon_bbox: list[int] | None = None
+        for t in region.get("texts", []):
+            bb = t.get("balloon_bbox") or t.get("_balloon_region_bbox")
+            if not bb or len(bb) != 4:
+                continue
+            if effective_balloon_bbox is None:
+                effective_balloon_bbox = list(bb)
+            else:
+                effective_balloon_bbox = [
+                    min(effective_balloon_bbox[0], bb[0]),
+                    min(effective_balloon_bbox[1], bb[1]),
+                    max(effective_balloon_bbox[2], bb[2]),
+                    max(effective_balloon_bbox[3], bb[3]),
+                ]
+        if effective_balloon_bbox is not None:
+            effective_balloon_bbox = [
+                max(0, effective_balloon_bbox[0]),
+                max(0, effective_balloon_bbox[1]),
+                min(w_img, effective_balloon_bbox[2]),
+                min(h_img, effective_balloon_bbox[3]),
+            ]
+
         white_balloon = detect_white_balloon_overlay(img_array, region)
         if white_balloon is not None:
             img_array = apply_fill(
@@ -90,8 +117,12 @@ def clean_image(
 
         before = img_array.copy()
 
-        # 1. Classificar tipo de fundo
-        bg_type, bg_meta = classify_background(img_array, region["bbox"], mask, corpus_profile=corpus_profile)
+        # 1. Classificar tipo de fundo (usa balloon_bbox para ring externo ao balão)
+        bg_type, bg_meta = classify_background(
+            img_array, region["bbox"], mask,
+            corpus_profile=corpus_profile,
+            balloon_bbox=effective_balloon_bbox,
+        )
 
         textured_overlay = detect_textured_overlay(img_array, region, mask, bg_type, bg_meta)
         if textured_overlay is not None:
@@ -121,13 +152,30 @@ def classify_background(
     bbox: list[int],
     mask: np.ndarray,
     corpus_profile: dict | None = None,
+    balloon_bbox: list[int] | None = None,
 ) -> tuple[str, dict]:
     """
     Retorna (tipo, meta) onde tipo é um de:
       solid_light, solid_dark, solid_mid, gradient, textured
+
+    balloon_bbox: bbox do balão completo (não apenas do texto OCR).
+    Quando disponível e maior que bbox, o ring de classificação é
+    amostrado FORA do balão, evitando capturar as bordas do balão
+    (que podem ser mais claras que o fundo real).
     """
     profile = corpus_profile or build_corpus_inpainting_profile({})
-    ring = _sample_outer_ring(img_array, bbox, ring_width=profile["ring_width"])
+
+    # Usar balloon_bbox para ring sampling quando disponível e significativamente maior:
+    # isso garante que a cor de fundo amostrada é a do contexto FORA do balão, e não
+    # da borda interna do balão (que pode ter luminância bem diferente do fundo real).
+    ring_bbox = bbox
+    if balloon_bbox is not None:
+        b_area = max(1, (balloon_bbox[2] - balloon_bbox[0]) * (balloon_bbox[3] - balloon_bbox[1]))
+        t_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+        if b_area > t_area * 1.15:  # ao menos 15% maior → usar balloon_bbox
+            ring_bbox = balloon_bbox
+
+    ring = _sample_outer_ring(img_array, ring_bbox, ring_width=profile["ring_width"])
     if len(ring) == 0:
         return "solid_light", {"color": (255, 255, 255)}
 
@@ -247,6 +295,20 @@ def _extract_white_balloon_mask(
 ) -> np.ndarray | None:
     x1, y1, x2, y2 = bbox
     h, w = img_array.shape[:2]
+
+    # Guard: se a região do texto é escura, não pode ser um balão branco.
+    # Sem este check, o detector encontra componentes brancos DISTANTES do bbox
+    # (cabelo iluminado, rostos, efeitos de luz) e os confunde com balão branco,
+    # criando um patch branco sobre fundos escuros.
+    rx1c = max(0, x1)
+    ry1c = max(0, y1)
+    rx2c = min(w, x2)
+    ry2c = min(h, y2)
+    if rx2c > rx1c and ry2c > ry1c:
+        region_pixels = img_array[ry1c:ry2c, rx1c:rx2c]
+        if region_pixels.size > 0 and float(np.mean(region_pixels)) < 140:
+            return None  # região escura → não é balão branco
+
     box_w = max(1, x2 - x1)
     box_h = max(1, y2 - y1)
     pad_x = max(20, int(box_w * 0.9))
