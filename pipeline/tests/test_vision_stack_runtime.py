@@ -24,6 +24,7 @@ from vision_stack.runtime import (
     _apply_white_balloon_fill,
     _apply_letter_white_boxes,
     _apply_white_text_overlay,
+    _build_refined_bbox_mask,
     _build_koharu_worker_page_result,
     _build_bright_zone_line_mask,
     _build_mask_boundary_seam_mask,
@@ -41,6 +42,7 @@ from vision_stack.runtime import (
     _quick_text_presence_check,
     _run_koharu_blockwise_inpaint_page,
     _run_masked_inpaint_passes,
+    _should_merge_ocr_cluster,
     _try_koharu_balloon_fill,
     build_page_result,
     run_inpaint_pages,
@@ -173,6 +175,42 @@ class VisionStackRuntimeTests(unittest.TestCase):
             payloads = [json.loads(line) for line in trace_lines if line.strip()]
             self.assertTrue(any(item["action"] == "merge_blocks" for item in payloads))
 
+    def test_should_merge_ocr_cluster_keeps_separate_stacked_white_balloons(self):
+        texts = [
+            {
+                "text": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!",
+                "bbox": [406, 2079, 740, 2196],
+                "balloon_type": "white",
+            },
+            {
+                "text": "AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "bbox": [673, 2220, 905, 2338],
+                "balloon_type": "white",
+            },
+        ]
+
+        should_merge = _should_merge_ocr_cluster(texts, [277, 1969, 1032, 2436])
+
+        self.assertFalse(should_merge)
+
+    def test_should_merge_ocr_cluster_keeps_separate_diagonal_worker_white_balloons(self):
+        texts = [
+            {
+                "text": "AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "bbox": [656, 2201, 917, 2349],
+                "balloon_type": "white",
+            },
+            {
+                "text": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!",
+                "bbox": [392, 2056, 751, 2209],
+                "balloon_type": "white",
+            },
+        ]
+
+        should_merge = _should_merge_ocr_cluster(texts, [392, 2056, 917, 2349])
+
+        self.assertFalse(should_merge)
+
     def test_build_page_result_marks_balloon_type_for_white_and_textured_regions(self):
         blocks = [
             SimpleNamespace(xyxy=(10, 10, 70, 34), mask=None, confidence=0.88),
@@ -209,6 +247,38 @@ class VisionStackRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual([item["text"] for item in page["texts"]], ["GET OUT OF HERE!"])
+
+    def test_build_page_result_skips_short_textured_sfx_and_noise(self):
+        blocks = [
+            SimpleNamespace(xyxy=(10, 10, 80, 40), mask=None, confidence=0.81),
+            SimpleNamespace(xyxy=(10, 50, 96, 84), mask=None, confidence=0.87),
+            SimpleNamespace(xyxy=(10, 96, 128, 132), mask=None, confidence=0.91),
+            SimpleNamespace(xyxy=(10, 144, 166, 220), mask=None, confidence=0.71),
+            SimpleNamespace(xyxy=(24, 228, 188, 270), mask=None, confidence=0.94),
+        ]
+
+        with patch("vision_stack.runtime._is_white_balloon_region", return_value=False):
+            page = build_page_result(
+                image_path="page.jpg",
+                image_rgb=np.full((320, 220, 3), 48, dtype=np.uint8),
+                blocks=blocks,
+                texts=["XEV", "Mo", "HMPH", "t", "THE ORCS"],
+            )
+
+        self.assertEqual([item["text"] for item in page["texts"]], ["THE ORCS"])
+
+    def test_build_page_result_keeps_short_white_balloon_dialogue(self):
+        block = SimpleNamespace(xyxy=(20, 20, 120, 72), mask=None, confidence=0.88)
+
+        with patch("vision_stack.runtime._is_white_balloon_region", return_value=True):
+            page = build_page_result(
+                image_path="page.jpg",
+                image_rgb=np.full((140, 160, 3), 255, dtype=np.uint8),
+                blocks=[block],
+                texts=["NO"],
+            )
+
+        self.assertEqual([item["text"] for item in page["texts"]], ["NO"])
 
     def test_build_page_result_skips_structured_payload_and_records_reason(self):
         with TemporaryDirectory() as tmp:
@@ -565,6 +635,24 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(int(mask[21, 34]), 0)
         self.assertEqual(int(mask[46, 106]), 0)
 
+    def test_build_refined_bbox_mask_expands_light_text_on_dark_background_beyond_seed(self):
+        image = np.full((180, 260, 3), 18, dtype=np.uint8)
+        cv2.rectangle(image, (40, 40), (220, 140), (20, 20, 20), -1)
+        cv2.putText(image, "TEST", (78, 105), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (80, 80, 80), 10, cv2.LINE_AA)
+        cv2.putText(image, "TEST", (78, 105), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (245, 245, 245), 3, cv2.LINE_AA)
+
+        bbox = [85, 70, 180, 112]
+        refined = _build_refined_bbox_mask(image, bbox)
+
+        self.assertIsNotNone(refined)
+        rx1, ry1, patch = refined
+        ys, xs = np.where(patch > 0)
+        global_x1 = rx1 + int(xs.min())
+        global_x2 = rx1 + int(xs.max()) + 1
+
+        self.assertLess(global_x1, bbox[0])
+        self.assertGreater(global_x2, bbox[2])
+
     def test_white_balloon_text_box_cleanup_uses_balloon_bbox_when_available(self):
         original = np.full((120, 160, 3), 245, dtype=np.uint8)
         cleaned = original.copy()
@@ -641,6 +729,28 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertGreater(int(mask[50, 80]), 0)
         self.assertEqual(int(mask[25, 35]), 0)
+
+    def test_vision_blocks_to_mask_white_balloon_rejects_top_half_exact_boxes_and_uses_refined_mask(self):
+        image = np.full((260, 220, 3), 245, dtype=np.uint8)
+        refined_patch = np.zeros((120, 120), dtype=np.uint8)
+        refined_patch[16:112, 12:108] = 255
+
+        with patch("vision_stack.runtime._is_white_balloon_region", return_value=True), patch(
+            "vision_stack.runtime._extract_white_balloon_text_boxes",
+            return_value=[[62, 70, 158, 94]],
+        ), patch(
+            "vision_stack.runtime._build_refined_bbox_mask",
+            return_value=(50, 60, refined_patch),
+        ):
+            mask = vision_blocks_to_mask(
+                image.shape,
+                [{"bbox": [50, 60, 170, 180], "mask": None}],
+                image_rgb=image,
+                expand_mask=False,
+            )
+
+        self.assertGreater(int(mask[160, 100]), 0)
+        self.assertEqual(int(mask[20, 20]), 0)
 
     def test_vision_blocks_to_mask_splits_real_009_white_balloon_mask_components(self):
         image_path = self._fixture_image_path("009__001.jpg")
@@ -869,6 +979,50 @@ class VisionStackRuntimeTests(unittest.TestCase):
         run_worker.assert_called_once()
         run_current_stack.assert_called_once()
         self.assertEqual(result["texts"][0]["text"], "FALLBACK")
+
+    def test_run_detect_ocr_recovers_sparse_page_with_full_page_lines_when_primary_result_is_empty(self):
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(10, 20, 50, 40), mask=None, confidence=0.42)
+        empty_page = {
+            "image": "page.jpg",
+            "width": 120,
+            "height": 120,
+            "texts": [],
+            "_vision_blocks": [],
+        }
+        recovered_page = {
+            "image": "page.jpg",
+            "width": 120,
+            "height": 120,
+            "texts": [{"bbox": [18, 70, 104, 92], "text": "SO THIS IS HOW IT ENDS"}],
+            "_vision_blocks": [{"bbox": [18, 70, 104, 92], "mask": None, "confidence": 0.88}],
+        }
+
+        with patch("vision_stack.runtime.cv2.imread", return_value=image), patch(
+            "vision_stack.runtime._get_detector"
+        ) as get_detector, patch("vision_stack.runtime._get_ocr_engine") as get_ocr, patch(
+            "vision_stack.runtime.build_page_result",
+            side_effect=[empty_page, recovered_page],
+        ) as build_page_result:
+            get_detector.return_value.detect.return_value = [block]
+            get_detector.return_value.crop.return_value = image[20:40, 10:50]
+            get_ocr.return_value._backend = "paddleocr"
+            get_ocr.return_value.recognize_blocks_from_page.return_value = [{"text": "IL"}]
+            get_ocr.return_value.recognize_full_page_lines.return_value = [
+                {
+                    "text": "SO THIS IS HOW IT ENDS",
+                    "source_bbox": [18, 70, 104, 92],
+                    "line_polygons": [],
+                    "text_pixel_bbox": [18, 70, 104, 92],
+                    "confidence": 0.88,
+                }
+            ]
+
+            result = run_detect_ocr("page.jpg", profile="quality")
+
+        self.assertEqual(result["texts"][0]["text"], "SO THIS IS HOW IT ENDS")
+        get_ocr.return_value.recognize_full_page_lines.assert_called_once()
+        self.assertEqual(build_page_result.call_count, 2)
 
     def test_build_koharu_worker_page_result_accepts_camel_case_payload(self):
         image = np.full((120, 160, 3), 255, dtype=np.uint8)
@@ -1211,6 +1365,49 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertGreater(int(result[118, 81, 0]), 220)
         self.assertGreater(int(result[154, 171, 0]), 220)
         self.assertLessEqual(abs(int(result[130, 48, 0]) - int(original[130, 48, 0])), 8)
+
+    def test_apply_inpainting_round_falls_back_from_overbroad_balloon_bbox_in_white_balloon_cleanup(self):
+        original = np.full((220, 240, 3), 252, dtype=np.uint8)
+        cv2.ellipse(original, (120, 110), (78, 48), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(original, (120, 110), (78, 48), 0, 0, 360, (20, 20, 20), 2)
+        original[84:96, 78:162] = 10
+        original[104:118, 62:178] = 10
+        original[128:138, 86:154] = 10
+
+        mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        mask[84:138, 62:178] = 255
+
+        ocr_data = {
+            "texts": [
+                {
+                    "bbox": [62, 84, 178, 138],
+                    "text_pixel_bbox": [60, 80, 186, 142],
+                    "balloon_bbox": [42, 58, 198, 162],
+                    "skip_processing": False,
+                    "text": "QUEBROU O TEXTO",
+                }
+            ],
+            "_vision_blocks": [
+                {"bbox": [62, 84, 178, 138], "mask": None, "confidence": 0.95},
+            ],
+        }
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, batch_size=4, debug=None, force_no_tiling=False):
+                result = image_np.copy()
+                # Simula resíduo cinza escuro mais largo que as linhas originais.
+                result[80:100, 72:168] = [92, 92, 92]
+                result[100:122, 54:186] = [98, 98, 98]
+                result[124:142, 80:160] = [100, 100, 100]
+                return result
+
+        with patch("vision_stack.runtime.vision_blocks_to_mask", return_value=mask):
+            cleaned = _apply_inpainting_round(original, ocr_data, FakeInpainter())
+
+        cleaned_gray = cv2.cvtColor(cleaned, cv2.COLOR_RGB2GRAY)
+        x1, y1, x2, y2 = ocr_data["texts"][0]["text_pixel_bbox"]
+        residue = int(np.count_nonzero(cleaned_gray[y1:y2, x1:x2] <= 120))
+        self.assertEqual(residue, 0)
 
     def test_merge_text_fragments_inserts_residual_word_in_middle(self):
         merged = _merge_text_fragments(
@@ -1651,6 +1848,76 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertGreater(int(result[90, 90, 0]), 220)
         self.assertGreater(int(result[105, 90, 0]), 220)
 
+    def test_koharu_blockwise_falls_back_to_full_page_when_white_balloon_residual_survives_cleanup(self):
+        image = np.full((120, 160, 3), 255, dtype=np.uint8)
+        bbox = [48, 42, 112, 78]
+        ocr_data = {
+            "texts": [
+                {
+                    "bbox": bbox,
+                    "text_pixel_bbox": [48, 8, 112, 36],
+                    "balloon_bbox": [36, 28, 124, 92],
+                    "skip_processing": False,
+                    "text": "HELLO",
+                },
+            ],
+            "_vision_blocks": [
+                {"bbox": bbox, "mask": None, "confidence": 0.95},
+            ],
+        }
+
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[42:78, 48:112] = 255
+
+        residual = image.copy()
+        residual[52:68, 64:96] = [0, 0, 0]
+
+        recovered = image.copy()
+
+        class FakeInpainter:
+            pass
+
+        def fake_run_masked_inpaint_passes(inpainter, crop_image, crop_mask, **kwargs):
+            crop_residual = crop_image.copy()
+            crop_residual[10:26, 16:48] = [0, 0, 0]
+            return {
+                "expanded_mask": mask.copy(),
+                "raw_output": crop_residual.copy(),
+                "after_roi_paste": crop_residual.copy(),
+                "after_seam_cleanup": crop_residual.copy(),
+                "final_output": crop_residual.copy(),
+                "cleanup_base_mask": mask.copy(),
+                "fallback_to_legacy": False,
+                "fallback_error": "",
+            }
+
+        balloon_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        balloon_mask[34:90, 40:120] = 255
+
+        with patch("vision_stack.runtime.vision_blocks_to_mask", return_value=mask.copy()), patch(
+            "vision_stack.runtime._try_koharu_balloon_fill",
+            return_value=None,
+        ), patch(
+            "vision_stack.runtime._run_masked_inpaint_passes",
+            side_effect=fake_run_masked_inpaint_passes,
+        ), patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup",
+            return_value=residual.copy(),
+        ), patch(
+            "vision_stack.runtime._is_white_balloon_region",
+            return_value=True,
+        ), patch(
+            "vision_stack.runtime._extract_white_balloon_fill_mask",
+            return_value=balloon_mask,
+        ), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=recovered.copy(),
+        ) as fallback_round:
+            result = _run_koharu_blockwise_inpaint_page(image, ocr_data, FakeInpainter())
+
+        fallback_round.assert_called_once()
+        self.assertEqual(int(result[60, 80, 0]), 255)
+
     def test_run_inpaint_pages_can_disable_white_balloon_whitening_temporarily(self):
         image = np.full((180, 180, 3), 255, dtype=np.uint8)
         ocr_data = {
@@ -1820,9 +2087,9 @@ class VisionStackRuntimeTests(unittest.TestCase):
             Image.fromarray(image).save(image_path)
 
             with patch("vision_stack.runtime._get_inpainter", return_value=object()), patch(
-                "vision_stack.runtime._run_koharu_blockwise_inpaint_page",
+                "vision_stack.runtime._apply_inpainting_round",
                 return_value=cleaned,
-            ) as blockwise_round, patch(
+            ) as full_page_round, patch(
                 "vision_stack.runtime._run_detect_ocr_on_image",
                 side_effect=AssertionError("o passo 5 foi removido e nao deve mais rodar"),
             ), patch(
@@ -1833,7 +2100,39 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
             result = np.array(Image.open(outputs[0]).convert("RGB"))
 
-        self.assertEqual(blockwise_round.call_count, 1)
+        self.assertEqual(full_page_round.call_count, 1)
+        self.assertEqual(int(result[45, 70, 0]), 123)
+
+    def test_run_inpaint_pages_does_not_use_blockwise_path_anymore(self):
+        image = np.full((120, 160, 3), 200, dtype=np.uint8)
+        cleaned = image.copy()
+        cleaned[42:54, 60:96] = 123
+        ocr_data = {
+            "texts": [
+                {"bbox": [58, 40, 98, 56], "text": "HELLO", "skip_processing": False},
+            ],
+            "_vision_blocks": [
+                {"bbox": [58, 40, 98, 56], "mask": None, "confidence": 0.9},
+            ],
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "page.jpg"
+            output_dir = Path(tmpdir) / "out"
+            Image.fromarray(image).save(image_path)
+
+            with patch("vision_stack.runtime._get_inpainter", return_value=object()), patch(
+                "vision_stack.runtime._run_koharu_blockwise_inpaint_page",
+                side_effect=AssertionError("blockwise nao deveria mais ser usado no inpaint"),
+            ), patch(
+                "vision_stack.runtime._apply_inpainting_round",
+                return_value=cleaned,
+            ) as full_page_round:
+                outputs = run_inpaint_pages([image_path], [ocr_data], str(output_dir))
+
+            result = np.array(Image.open(outputs[0]).convert("RGB"))
+
+        self.assertEqual(full_page_round.call_count, 1)
         self.assertEqual(int(result[45, 70, 0]), 123)
 
     def test_integrate_recovery_page_merges_residual_into_existing_text(self):

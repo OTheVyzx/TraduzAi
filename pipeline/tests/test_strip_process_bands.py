@@ -149,6 +149,62 @@ class ProcessBandTests(unittest.TestCase):
         inpainter.inpaint_band_image.assert_called_once()
         typesetter.render_band_image.assert_called_once()
 
+    def test_process_band_restores_ocr_metadata_when_translation_payload_is_reduced(self):
+        from unittest.mock import MagicMock
+        from strip.process_bands import process_band
+        import numpy as np
+
+        band = self._make_band()
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [50, 20, 150, 80],
+                    "balloon_bbox": [40, 10, 160, 90],
+                    "text_pixel_bbox": [62, 28, 140, 72],
+                    "line_polygons": [[[62, 28], [140, 28], [140, 72], [62, 72]]],
+                    "text": "HELLO",
+                    "tipo": "fala",
+                    "ocr_source": "paddleocr",
+                    "ocr_confidence": 0.91,
+                },
+            ],
+            "_vision_blocks": [{"bbox": [40, 10, 160, 90], "confidence": 0.9}],
+        }
+        translator = MagicMock()
+        translator.translate_pages.return_value = [
+            {
+                "texts": [{"id": "t1", "translated": "OLA", "tipo": "fala"}],
+                "_vision_blocks": [],
+            }
+        ]
+        inpainter = MagicMock()
+        inpainter.inpaint_band_image.return_value = np.full((100, 300, 3), 255, dtype=np.uint8)
+        typesetter = MagicMock()
+        typesetter.render_band_image.return_value = np.full((100, 300, 3), 100, dtype=np.uint8)
+
+        process_band(
+            band,
+            runtime=runtime,
+            translator=translator,
+            inpainter=inpainter,
+            typesetter=typesetter,
+            page_idx=0,
+        )
+
+        inpaint_page = inpainter.inpaint_band_image.call_args[0][1]
+        self.assertEqual(inpaint_page["texts"][0]["text_pixel_bbox"], [62, 28, 140, 72])
+        self.assertEqual(inpaint_page["texts"][0]["ocr_source"], "paddleocr")
+        self.assertEqual(inpaint_page["texts"][0]["bbox"], [50, 20, 150, 80])
+        self.assertEqual(inpaint_page["_vision_blocks"][0]["bbox"], [40, 10, 160, 90])
+
+        self.assertEqual(band.ocr_result["texts"][0]["translated"], "OLA")
+        self.assertEqual(band.ocr_result["texts"][0]["line_polygons"][0][0], [62, 28])
+
     def test_process_band_with_no_balloons_returns_original_slice(self):
         from strip.process_bands import process_band
         from strip.types import Band
@@ -192,5 +248,4 @@ class BandAdaptersTests(unittest.TestCase):
         ]}
         rendered = render_band_image(band, page)
         self.assertEqual(rendered.shape, band.shape)
-
 

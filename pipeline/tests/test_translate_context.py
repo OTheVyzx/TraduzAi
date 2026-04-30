@@ -6,6 +6,7 @@ from translator.translate import (
     _build_text_payload,
     _fix_infinitive_to_imperative,
     _is_likely_proper_noun,
+    _lookup_special_literal_translation,
     _lookup_memory_translation,
     _postprocess,
     _preprocess_text,
@@ -120,6 +121,12 @@ class TranslateContextTests(unittest.TestCase):
         texts = translated[0]["texts"]
         self.assertEqual(texts[0]["translated"], "PT:HELLO")
         self.assertEqual(texts[1]["translated"], "PT:I'LL WIN.")
+
+    def test_none_is_not_treated_as_proper_noun(self):
+        self.assertFalse(_is_likely_proper_noun("NONE."))
+
+    def test_none_gets_context_safe_literal_translation(self):
+        self.assertEqual(_lookup_special_literal_translation("NONE.", "fala"), "Nenhuma.")
 
     def test_sfx_preprocess_preserves_uppercase(self):
         processed = _preprocess_text("BANG!!", tipo="sfx")

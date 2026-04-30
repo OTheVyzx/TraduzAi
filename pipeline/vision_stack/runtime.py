@@ -25,7 +25,8 @@ if TYPE_CHECKING:
         _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
         infer_block_profile, infer_page_profile,
         is_editorial_credit, is_non_english, is_punctuation_only_noise,
-        is_cover_title_logo, is_short_ornamental_text, is_structured_ocr_payload, is_watermark,
+        is_cover_title_logo, is_short_ornamental_text, is_short_textured_sfx_or_noise,
+        is_structured_ocr_payload, is_watermark,
         looks_suspicious, suspicious_confidence_threshold,
     )
     from ocr.semantic_reviewer import semantic_refine_text # type: ignore
@@ -38,7 +39,8 @@ else:
             _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
             infer_block_profile, infer_page_profile,
             is_editorial_credit, is_non_english, is_punctuation_only_noise,
-            is_cover_title_logo, is_short_ornamental_text, is_structured_ocr_payload, is_watermark,
+            is_cover_title_logo, is_short_ornamental_text, is_short_textured_sfx_or_noise,
+            is_structured_ocr_payload, is_watermark,
             looks_suspicious, suspicious_confidence_threshold,
         )
         from ocr.semantic_reviewer import semantic_refine_text
@@ -47,7 +49,8 @@ else:
             _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
             infer_block_profile, infer_page_profile,
             is_editorial_credit, is_non_english, is_punctuation_only_noise,
-            is_cover_title_logo, is_short_ornamental_text, is_structured_ocr_payload, is_watermark,
+            is_cover_title_logo, is_short_ornamental_text, is_short_textured_sfx_or_noise,
+            is_structured_ocr_payload, is_watermark,
             looks_suspicious, suspicious_confidence_threshold,
         )
         from ..ocr.semantic_reviewer import semantic_refine_text
@@ -123,6 +126,19 @@ def _coerce_bbox(raw_bbox) -> list[int] | None:
     if x2 <= x1 or y2 <= y1:
         return None
     return [x1, y1, x2, y2]
+
+
+def _resolve_white_balloon_bbox(image_rgb: np.ndarray, text: dict) -> list[int] | None:
+    candidates: list[list[int]] = []
+    for key in ("balloon_bbox", "bbox", "text_pixel_bbox"):
+        bbox = _coerce_bbox(text.get(key))
+        if bbox is not None and bbox not in candidates:
+            candidates.append(bbox)
+
+    for bbox in candidates:
+        if _is_white_balloon_region(image_rgb, bbox):
+            return bbox
+    return None
 
 
 def _normalize_line_polygons(raw_line_polygons) -> list[list[list[int]]]:
@@ -943,6 +959,20 @@ def _should_merge_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool
     second_center = _bbox_center(b)
     dx = abs(first_center[0] - second_center[0])
     dy = abs(first_center[1] - second_center[1])
+    white_pair = all(
+        str(item.get("balloon_type", "") or "").strip().lower() == "white"
+        for item in texts[:2]
+    )
+
+    if white_pair and gap_y >= max(18.0, min_h * 0.35) and dx >= min_w * 0.18:
+        return False
+    if (
+        white_pair
+        and dy >= min_h * 0.55
+        and dx >= min_w * 0.45
+        and overlap_y <= max(10.0, min_h * 0.16)
+    ):
+        return False
 
     stacked_lines = (
         gap_y <= max(44.0, min_h * 1.8)
@@ -1367,7 +1397,13 @@ def _build_refined_bbox_mask(image_rgb: np.ndarray, bbox: list[int]) -> tuple[in
     dilate_h = max(3, min(11, (box_h // 10) * 2 + 1))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_w, dilate_h))
     refined = cv2.dilate(refined, kernel, iterations=1)
-    refined = cv2.bitwise_and(refined, seed)
+    clip_mask = seed
+    if light_on_dark:
+        expand_w = max(dilate_w, min(17, dilate_w + 4))
+        expand_h = max(dilate_h, min(19, dilate_h + 6))
+        expand_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (expand_w, expand_h))
+        clip_mask = cv2.dilate(seed, expand_kernel, iterations=1)
+    refined = cv2.bitwise_and(refined, clip_mask)
     return rx1, ry1, refined
 
 
@@ -2549,16 +2585,16 @@ def _apply_white_balloon_text_box_cleanup(
     if result.size == 0 or not texts:
         return result
 
+    original_gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
+
     for text in texts:
         if text.get("skip_processing"):
             continue
         bbox = text.get("bbox") or [0, 0, 0, 0]
         if len(bbox) != 4:
             continue
-        balloon_bbox = text.get("balloon_bbox") or bbox
-        if not isinstance(balloon_bbox, (list, tuple)) or len(balloon_bbox) != 4:
-            balloon_bbox = bbox
-        if not _is_white_balloon_region(original_rgb, balloon_bbox):
+        balloon_bbox = _resolve_white_balloon_bbox(original_rgb, text)
+        if balloon_bbox is None:
             continue
         balloon_mask = _extract_white_balloon_fill_mask(original_rgb, balloon_bbox)
         if not np.any(balloon_mask):
@@ -2600,6 +2636,45 @@ def _apply_white_balloon_text_box_cleanup(
                 patch[rounded_mask] = 255
                 result[by1:by2, bx1:bx2] = patch
 
+        focus_bbox = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(bbox)
+        if focus_bbox is None:
+            continue
+
+        fx1, fy1, fx2, fy2 = focus_bbox
+        focus_mask = np.zeros(result.shape[:2], dtype=np.uint8)
+        focus_mask[fy1:fy2, fx1:fx2] = 255
+        if np.any(balloon_mask):
+            focus_mask = cv2.bitwise_and(focus_mask, balloon_mask.astype(np.uint8))
+        elif np.any(interior):
+            focus_mask = cv2.bitwise_and(focus_mask, interior)
+        if not np.any(focus_mask):
+            continue
+
+        balloon_pixels = original_gray[(balloon_mask > 0) if np.any(balloon_mask) else (focus_mask > 0)]
+        if balloon_pixels.size == 0:
+            continue
+        white_level = float(np.percentile(balloon_pixels, 75))
+        dark_threshold = min(220.0, white_level - 18.0)
+        if dark_threshold < 165.0:
+            dark_threshold = 165.0
+
+        cleaned_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+        residual_mask = (
+            (cleaned_gray.astype(np.float32) <= dark_threshold)
+            & (focus_mask > 0)
+        ).astype(np.uint8) * 255
+        if not np.any(residual_mask):
+            continue
+
+        residual_mask = cv2.dilate(
+            residual_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        )
+        residual_mask = cv2.bitwise_and(residual_mask, focus_mask)
+        if np.any(residual_mask):
+            result[residual_mask > 0] = 255
+
     return result
 
 
@@ -2628,10 +2703,8 @@ def _apply_white_balloon_micro_artifact_cleanup(
             bbox = text_items[index].get("bbox") or [0, 0, 0, 0]
             if len(bbox) != 4:
                 continue
-            balloon_bbox = text_items[index].get("balloon_bbox") or bbox
-            if not isinstance(balloon_bbox, (list, tuple)) or len(balloon_bbox) != 4:
-                balloon_bbox = bbox
-            if not _is_white_balloon_region(original_rgb, balloon_bbox):
+            balloon_bbox = _resolve_white_balloon_bbox(original_rgb, text_items[index])
+            if balloon_bbox is None:
                 continue
             balloon_mask = _extract_white_balloon_fill_mask(original_rgb, balloon_bbox)
             if not np.any(balloon_mask):
@@ -2641,11 +2714,7 @@ def _apply_white_balloon_micro_artifact_cleanup(
             if not np.any(balloon_mask):
                 continue
 
-            cluster_bbox = (
-                [int(v) for v in balloon_bbox]
-                if cluster_bbox is None
-                else _bbox_union(cluster_bbox, balloon_bbox)
-            )
+            cluster_bbox = [int(v) for v in balloon_bbox] if cluster_bbox is None else _bbox_union(cluster_bbox, balloon_bbox)
             cluster_mask = np.maximum(cluster_mask, balloon_mask.astype(np.uint8))
 
         if cluster_bbox is None or not np.any(cluster_mask):
@@ -2924,6 +2993,101 @@ def _apply_post_inpaint_cleanup(
     )
 
 
+def _has_white_balloon_text_residual(
+    original_rgb: np.ndarray,
+    cleaned_rgb: np.ndarray,
+    texts: list[dict],
+) -> bool:
+    if cleaned_rgb.size == 0 or not texts:
+        return False
+
+    cleaned_gray = cv2.cvtColor(cleaned_rgb, cv2.COLOR_RGB2GRAY)
+    original_gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
+    height, width = cleaned_gray.shape[:2]
+
+    def _normalize_focus_bbox(candidate) -> list[int] | None:
+        if not isinstance(candidate, (list, tuple)) or len(candidate) != 4:
+            return None
+        x1, y1, x2, y2 = [int(v) for v in candidate]
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1, y1, x2, y2]
+
+    for text in texts:
+        if text.get("skip_processing"):
+            continue
+
+        bbox = _normalize_focus_bbox(text.get("bbox"))
+        if bbox is None:
+            continue
+
+        resolved_balloon_bbox = _resolve_white_balloon_bbox(original_rgb, text)
+        balloon_bbox = _normalize_focus_bbox(resolved_balloon_bbox) or bbox
+        focus_candidates = [
+            _normalize_focus_bbox(text.get("text_pixel_bbox")),
+            bbox,
+        ]
+
+        if resolved_balloon_bbox is None:
+            continue
+
+        balloon_mask = _extract_white_balloon_fill_mask(original_rgb, balloon_bbox)
+        if not np.any(balloon_mask):
+            legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, balloon_bbox)
+            if isinstance(legacy_mask, np.ndarray):
+                balloon_mask = legacy_mask
+        if not np.any(balloon_mask):
+            continue
+
+        distance = cv2.distanceTransform((balloon_mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
+        interior = (distance > 3.0).astype(np.uint8) * 255
+        if not np.any(interior):
+            interior = (distance > 1.5).astype(np.uint8) * 255
+        if not np.any(interior):
+            continue
+
+        target_mask = None
+        target_area = 0
+        for focus_bbox in focus_candidates:
+            if focus_bbox is None:
+                continue
+            x1, y1, x2, y2 = focus_bbox
+            candidate_mask = np.zeros((height, width), dtype=np.uint8)
+            candidate_mask[y1:y2, x1:x2] = 255
+            candidate_mask = cv2.bitwise_and(candidate_mask, interior)
+            candidate_area = int(np.count_nonzero(candidate_mask))
+            if candidate_area >= 12:
+                target_mask = candidate_mask
+                target_area = candidate_area
+                break
+
+        if target_mask is None or target_area < 12:
+            continue
+
+        balloon_pixels = original_gray[interior > 0]
+        if balloon_pixels.size == 0:
+            continue
+
+        white_level = float(np.percentile(balloon_pixels, 75))
+        dark_threshold = min(220.0, white_level - 18.0)
+        if dark_threshold < 170.0:
+            dark_threshold = 170.0
+
+        residual_pixels = (
+            (cleaned_gray.astype(np.float32) <= dark_threshold)
+            & (target_mask > 0)
+        )
+        residual_count = int(np.count_nonzero(residual_pixels))
+        if residual_count >= max(18, int(target_area * 0.004)):
+            return True
+
+    return False
+
+
 def _run_koharu_blockwise_inpaint_page(
     image_np: np.ndarray,
     ocr_data: dict,
@@ -2980,11 +3144,15 @@ def _run_koharu_blockwise_inpaint_page(
         inpainted[wy1:wy2, wx1:wx2] = output
         _clear_mask_bbox(working_mask, [x1, y1, x2, y2])
 
-    return _apply_post_inpaint_cleanup(
+    cleaned = _apply_post_inpaint_cleanup(
         image_np,
         inpainted,
         list(ocr_data.get("texts", [])),
     )
+    if _has_white_balloon_text_residual(image_np, cleaned, list(ocr_data.get("texts", []))):
+        logger.info("Resíduo persistente em balão branco após inpaint blockwise; usando fallback full-page")
+        return _apply_inpainting_round(image_np, ocr_data, inpainter)
+    return cleaned
 
 
 def _run_masked_inpaint_passes(
@@ -3520,6 +3688,28 @@ def build_page_result(
             )
             continue
         estilo = analyze_style(image_rgb, bbox)
+        if is_short_textured_sfx_or_noise(
+            cleaned,
+            bbox,
+            confidence,
+            is_white_balloon,
+        ):
+            record_decision(
+                stage="ocr",
+                action="drop_block",
+                reason="textured_sfx_or_noise",
+                page=page_number,
+                layer=layer_ref,
+                text=cleaned,
+                bbox=bbox,
+                details={
+                    "confidence": confidence,
+                    "tipo": tipo,
+                    "page_profile": page_profile,
+                    "block_profile": block_profile,
+                },
+            )
+            continue
         if is_short_ornamental_text(
             cleaned,
             confidence,
@@ -3626,6 +3816,110 @@ def build_page_result(
     }
 
 
+def _scan_orphan_lobe_blocks(
+    image_rgb: np.ndarray,
+    blocks: list,
+    ocr,
+) -> list:
+    """Scan each detected block for connected-balloon lobes missed by the detector.
+
+    For each block whose surrounding white balloon is significantly larger than
+    the text area, we run lobe detection and OCR any orphan lobe that has no
+    existing block covering it.  Returns the extended blocks list.
+    """
+    try:
+        from layout.balloon_layout import _detect_connected_lobes_from_outline  # type: ignore
+    except ImportError:
+        try:
+            from ..layout.balloon_layout import _detect_connected_lobes_from_outline  # type: ignore
+        except ImportError:
+            return blocks
+
+    img_h, img_w = image_rgb.shape[:2]
+    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    added: list = []
+
+    for block in blocks:
+        x1, y1, x2, y2 = [int(v) for v in block.xyxy]
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        text_area = bw * bh
+
+        # Search region: generous expansion to see the full balloon
+        pad_x = max(20, int(bw * 0.35))
+        pad_y = max(20, int(bh * 0.35))
+        sx1 = max(0, x1 - pad_x)
+        sy1 = max(0, y1 - pad_y)
+        sx2 = min(img_w, x2 + pad_x)
+        sy2 = min(img_h, y2 + pad_y)
+        balloon_search = [sx1, sy1, sx2, sy2]
+
+        # Only attempt for white-looking balloon regions
+        if not _is_white_balloon_region(image_rgb, balloon_search):
+            continue
+
+        lobes = _detect_connected_lobes_from_outline(
+            image_bgr, balloon_search, [x1, y1, x2, y2],
+        )
+        if len(lobes) < 2:
+            continue
+
+        # Check that balloon is significantly bigger than the existing text block
+        balloon_area = (sx2 - sx1) * (sy2 - sy1)
+        if balloon_area < text_area * 1.8:
+            continue
+
+        for lobe in lobes:
+            lbox = lobe["bbox"]  # [x1,y1,x2,y2] global
+            lx1, ly1, lx2, ly2 = [int(v) for v in lbox]
+
+            # Skip if any existing block covers this lobe adequately
+            covered = False
+            for existing in list(blocks) + added:
+                ex1, ey1, ex2, ey2 = [int(v) for v in existing.xyxy]
+                ix1 = max(lx1, ex1)
+                iy1 = max(ly1, ey1)
+                ix2 = min(lx2, ex2)
+                iy2 = min(ly2, ey2)
+                if ix2 > ix1 and iy2 > iy1:
+                    inter = (ix2 - ix1) * (iy2 - iy1)
+                    lobe_area = max(1, (lx2 - lx1) * (ly2 - ly1))
+                    if inter / lobe_area > 0.25:
+                        covered = True
+                        break
+            if covered:
+                continue
+
+            # OCR the orphan lobe crop
+            crop = image_rgb[max(0,ly1):min(img_h,ly2), max(0,lx1):min(img_w,lx2)]
+            if crop.size == 0:
+                continue
+            try:
+                recognized = ocr.recognize_batch([crop])
+            except Exception:
+                continue
+            if not recognized or not recognized[0].get("text", "").strip():
+                continue
+            if float(recognized[0].get("confidence", 0.0)) < 0.40:
+                continue
+
+            new_block = SimpleNamespace(
+                xyxy=(float(lx1), float(ly1), float(lx2), float(ly2)),
+                mask=None,
+                confidence=float(recognized[0].get("confidence", 0.55)),
+                detector="orphan_lobe_scan",
+                line_polygons=None,
+                source_direction=None,
+            )
+            added.append(new_block)
+            logger.info(
+                "_scan_orphan_lobe_blocks: lobo orfao detectado em [%d,%d,%d,%d] texto=%r",
+                lx1, ly1, lx2, ly2, recognized[0].get("text", "")[:40],
+            )
+
+    return list(blocks) + added
+
+
 def _run_detect_ocr_on_image(
     image_rgb: np.ndarray,
     image_label: str,
@@ -3639,6 +3933,7 @@ def _run_detect_ocr_on_image(
     ocr = _get_ocr_engine(profile, lang=idioma_origem)
     _emit_stage_progress(progress_callback, "detect_text", 0.38, "Detectando regioes de texto")
     blocks = detector.detect(image_rgb, conf_threshold=_profile_to_detection_threshold(profile))
+    blocks = _scan_orphan_lobe_blocks(image_rgb, blocks, ocr)
     backend_name = getattr(ocr, "_backend", getattr(ocr, "model_name", "vision"))
     recognize_message = (
         f"Reconhecendo {len(blocks)} bloco(s) de texto" if blocks else "Nenhum texto detectado"
@@ -3664,13 +3959,88 @@ def _run_detect_ocr_on_image(
     else:
         crops = [detector.crop(image_rgb, block) for block in blocks]
         texts = ocr.recognize_batch(crops) if crops else []
-    return build_page_result(
+    page_result = build_page_result(
         image_path=image_label,
         image_rgb=image_rgb,
         blocks=blocks,
         texts=texts,
         profile=profile,
         ocr_backend=backend_name,
+        enable_font_detection=True,
+        progress_callback=progress_callback,
+        idioma_origem=idioma_origem,
+    )
+    if _should_run_sparse_page_recovery(page_result, blocks, backend_name):
+        recovery_page = _run_sparse_page_recovery_pass(
+            image_rgb=image_rgb,
+            image_label=image_label,
+            ocr=ocr,
+            profile=profile,
+            idioma_origem=idioma_origem,
+            progress_callback=progress_callback,
+        )
+        if recovery_page and recovery_page.get("texts"):
+            if page_result.get("texts"):
+                page_result, _ = _integrate_recovery_page(page_result, recovery_page)
+            else:
+                page_result = recovery_page
+    return page_result
+
+
+def _should_run_sparse_page_recovery(page_result: dict, blocks: list, backend_name: str) -> bool:
+    if backend_name != "paddleocr":
+        return False
+    if not blocks:
+        return False
+    accepted = len(page_result.get("texts", []))
+    detected = len(blocks)
+    return accepted == 0 and detected <= 4
+
+
+def _run_sparse_page_recovery_pass(
+    image_rgb: np.ndarray,
+    image_label: str,
+    ocr,
+    profile: str,
+    idioma_origem: str,
+    progress_callback=None,
+) -> dict | None:
+    if not hasattr(ocr, "recognize_full_page_lines"):
+        return None
+    _emit_stage_progress(progress_callback, "recover_text", 0.68, "Recuperando texto em pagina esparsa")
+    line_records = ocr.recognize_full_page_lines(image_rgb)
+    if not line_records:
+        return None
+
+    recovery_blocks = []
+    recovery_texts = []
+    for record in line_records:
+        bbox = record.get("source_bbox") or record.get("bbox") or []
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        bbox = [int(v) for v in bbox]
+        recovery_blocks.append(
+            SimpleNamespace(
+                xyxy=tuple(bbox),
+                mask=None,
+                confidence=float(record.get("confidence", 0.0) or 0.0),
+                detector="full_page_recovery",
+                line_polygons=record.get("line_polygons"),
+                source_direction=None,
+            )
+        )
+        recovery_texts.append(dict(record))
+
+    if not recovery_blocks:
+        return None
+
+    return build_page_result(
+        image_path=image_label,
+        image_rgb=image_rgb,
+        blocks=recovery_blocks,
+        texts=recovery_texts,
+        profile=profile,
+        ocr_backend=getattr(ocr, "_backend", getattr(ocr, "model_name", "vision")),
         enable_font_detection=True,
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
@@ -3701,6 +4071,9 @@ def run_ocr_stage(
                 source_direction=b.get("source_direction"),
             )
         )
+
+    # Scan for orphan lobes in connected balloons that the strip detector missed.
+    blocks = _scan_orphan_lobe_blocks(image_rgb, blocks, ocr)
 
     recognize_message = f"Reconhecendo {len(blocks)} bloco(s) de texto"
     _emit_stage_progress(progress_callback, "recognize_text", 0.30, recognize_message)
@@ -3795,7 +4168,22 @@ def vision_blocks_to_mask(
                         max(0, int(bx2) - int(bx1)) * max(0, int(by2) - int(by1))
                         for bx1, by1, bx2, by2 in text_boxes
                     )
-                    if text_boxes and text_box_area >= max(64, int(bbox_area * 0.12)):
+                    text_union = None
+                    for bx1, by1, bx2, by2 in text_boxes:
+                        candidate = [int(bx1), int(by1), int(bx2), int(by2)]
+                        text_union = candidate if text_union is None else _bbox_union(text_union, candidate)
+                    union_width_ratio = 0.0
+                    union_height_ratio = 0.0
+                    if text_union is not None:
+                        union_width_ratio = max(0.0, min(1.0, (text_union[2] - text_union[0]) / float(max(1, x2 - x1))))
+                        union_height_ratio = max(0.0, min(1.0, (text_union[3] - text_union[1]) / float(max(1, y2 - y1))))
+                    exact_boxes_are_representative = (
+                        text_boxes
+                        and text_box_area >= max(64, int(bbox_area * 0.12))
+                        and union_width_ratio >= 0.38
+                        and union_height_ratio >= 0.52
+                    )
+                    if exact_boxes_are_representative:
                         for bx1, by1, bx2, by2 in text_boxes:
                             bx1 = max(0, min(width, int(bx1)))
                             bx2 = max(0, min(width, int(bx2)))
@@ -3987,14 +4375,14 @@ def run_inpaint_pages(
                 if "sem_texto_detectado" in ocr_data:
                     ocr_data["sem_texto_detectado"] = False
                 try:
-                    cleaned = _run_koharu_blockwise_inpaint_page(image_np, ocr_data, inpainter)
+                    cleaned = _apply_inpainting_round(image_np, ocr_data, inpainter)
                 except Exception as exc:
                     logger.warning(
-                        "Inpaint blockwise estilo Koharu falhou em %s; fallback para fluxo anterior: %s",
+                        "Inpaint full-page falhou em %s; fallback para fluxo legado: %s",
                         img_path,
                         exc,
                     )
-                    cleaned = _apply_inpainting_round(image_np, ocr_data, inpainter)
+                    raise
 
             if pending_save is not None:
                 pending_save.result()

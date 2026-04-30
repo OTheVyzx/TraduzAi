@@ -93,6 +93,7 @@ TRANSLATION_REVIEW_REPAIRS: list[tuple[str, str, int]] = [
 # a nome próprio (preserva-se em PT-BR ao invés de traduzir).
 _COMMON_EN_CAPS_WORDS = frozenset({
     "YES", "NO", "OK", "OKAY", "YEAH", "YEP", "NAH", "HUH", "OH", "AH", "EH",
+    "NONE",
     "HEY", "HI", "HELLO", "BYE", "GO", "STOP", "WAIT", "RUN", "LOOK", "SEE",
     "WHY", "HOW", "WHAT", "WHO", "WHERE", "WHEN", "WHICH", "DAMN", "GOD",
     "WELL", "WHOA", "WOW", "UGH", "ARGH", "GAH", "TSK", "HUSH", "QUIET",
@@ -924,6 +925,17 @@ def _lookup_memory_translation(text: str, tipo: str, context: dict, glossario: d
     return None
 
 
+def _lookup_special_literal_translation(text: str, tipo: str) -> str | None:
+    del tipo
+    stripped = str(text or "").strip()
+    normalized = re.sub(r"[\W_]+", "", stripped.lower())
+    if normalized != "none":
+        return None
+    suffix = stripped[len(stripped.rstrip("!?.")):] if stripped else ""
+    punct = suffix or "."
+    return f"Nenhuma{punct}"
+
+
 def _build_text_payload(texts: list[dict], index: int, history_tail: list[dict]) -> dict:
     current = texts[index]
     before = texts[index - 1].get("text", "") if index > 0 else ""
@@ -1175,6 +1187,10 @@ def _translate_google_single_page(
             translations[index] = preserved + tail
             texts[index]["proper_noun_preserved"] = True
             continue
+        special_literal = _lookup_special_literal_translation(source, tipo)
+        if special_literal:
+            translations[index] = special_literal
+            continue
         memory_translation = _lookup_memory_translation(source, tipo, context, glossario)
         if memory_translation:
             translations[index] = memory_translation
@@ -1365,6 +1381,9 @@ def _translate_with_ollama(
             memory_translation = _lookup_memory_translation(original, tipo, context, glossario)
             if memory_translation:
                 translated = memory_translation
+            special_literal = _lookup_special_literal_translation(original, tipo)
+            if special_literal:
+                translated = special_literal
             is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
             was_upper = False if is_cjk else (original == original.upper() and any(c.isalpha() for c in original))
 

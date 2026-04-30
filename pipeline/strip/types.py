@@ -64,6 +64,7 @@ class Band:
     balloons: list[Balloon] = field(default_factory=list)
     strip_slice: Optional[np.ndarray] = None
     original_slice: Optional[np.ndarray] = None
+    cleaned_slice: Optional[np.ndarray] = None
     rendered_slice: Optional[np.ndarray] = None
     ocr_result: Optional[dict] = None
 
@@ -79,9 +80,10 @@ class OutputPage:
     y_top: int
     y_bottom: int
     image: np.ndarray
+    original_image: Optional[np.ndarray] = None
+    inpainted_image: Optional[np.ndarray] = None
     path: Optional[Path] = None
     ocr_result: dict = field(default_factory=dict)
     text_layers: dict = field(default_factory=dict)
     page_profile: Optional[dict] = None
     inpaint_blocks: Optional[list] = None
-

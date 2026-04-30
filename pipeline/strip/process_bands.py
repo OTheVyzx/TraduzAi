@@ -58,6 +58,44 @@ def _apply_copy_back_outside_balloons(
     return result.astype(np.uint8)
 
 
+def _merge_translated_page_metadata(ocr_page: dict, translated_page: dict) -> dict:
+    if not isinstance(translated_page, dict):
+        return {"texts": []}
+
+    merged_page = dict(translated_page)
+    ocr_texts = list((ocr_page or {}).get("texts") or [])
+    translated_texts = list((translated_page or {}).get("texts") or [])
+
+    ocr_by_id = {
+        text.get("id"): text
+        for text in ocr_texts
+        if isinstance(text, dict) and text.get("id")
+    }
+
+    merged_texts = []
+    for index, translated_text in enumerate(translated_texts):
+        if not isinstance(translated_text, dict):
+            continue
+        source_text = None
+        text_id = translated_text.get("id")
+        if text_id in ocr_by_id:
+            source_text = ocr_by_id[text_id]
+        elif index < len(ocr_texts) and isinstance(ocr_texts[index], dict):
+            source_text = ocr_texts[index]
+        merged_texts.append({**(source_text or {}), **translated_text})
+
+    merged_page["texts"] = merged_texts
+
+    if not merged_page.get("_vision_blocks"):
+        merged_page["_vision_blocks"] = list((ocr_page or {}).get("_vision_blocks") or [])
+
+    for key in ("numero", "width", "height", "page_profile"):
+        if key not in merged_page and key in ocr_page:
+            merged_page[key] = ocr_page[key]
+
+    return merged_page
+
+
 def process_band(
     band: Band,
     runtime,
@@ -138,12 +176,13 @@ def process_band(
 
 
     translated_page = translated_pages[0] if translated_pages else {"texts": []}
+    translated_page = _merge_translated_page_metadata(ocr_page, translated_page)
 
     cleaned = inpainter.inpaint_band_image(band.strip_slice, translated_page)
     rendered = typesetter.render_band_image(cleaned, translated_page)
 
+    band.cleaned_slice = cleaned
     band.rendered_slice = rendered
     band.rendered_slice = _apply_copy_back_outside_balloons(band)
     band.ocr_result = translated_page
     return band
-

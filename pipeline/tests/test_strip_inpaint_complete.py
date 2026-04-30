@@ -1,126 +1,94 @@
-"""Garante que inpaint_band_image dilata bboxes antes de inpainting.
-
-A dilation de 6px é o fix para striations — pixels anti-aliased que ficam
-na borda do text bbox e sobrevivem ao inpainting sem a expansão.
-"""
+"""Regressões do adapter de inpaint do pipeline strip."""
 
 import unittest
+from unittest.mock import patch
+
 import numpy as np
-from unittest.mock import patch, MagicMock
 
 
-class InpaintDilationTests(unittest.TestCase):
-    """Verifica que os bboxes passados a clean_image são dilatados em 6px."""
-
-    def _capture_inflated_texts(self):
-        """Context manager que intercepta clean_image e captura os texts recebidos."""
-        from PIL import Image
-
-        captured = []
-
-        def fake_clean_image(img, texts, corpus_visual_benchmark=None):
-            captured.extend(texts)
-            return img  # devolver imagem sem alteração
-
-        return captured, fake_clean_image
-
-    def test_bbox_is_dilated_by_6px_in_x(self):
-        """Cada text bbox passado a clean_image deve ser 6px maior em cada borda."""
+class StripInpaintAdapterTests(unittest.TestCase):
+    def test_delegates_to_runtime_inpainting_round(self):
         from inpainter import inpaint_band_image
 
         band = np.full((100, 300, 3), 255, dtype=np.uint8)
-        page = {"texts": [{
-            "id": "t1",
-            "bbox": [60, 20, 160, 60],  # original: 100x40
-            "tipo": "fala",
-        }]}
+        page = {
+            "texts": [{"id": "t1", "bbox": [60, 20, 160, 60], "tipo": "fala"}],
+            "_vision_blocks": [{"bbox": [54, 14, 166, 66], "confidence": 0.92}],
+        }
+        expected = np.full_like(band, 127)
 
-        captured, fake_clean = self._capture_inflated_texts()
-        with patch("inpainter.classical.clean_image", side_effect=fake_clean):
-            inpaint_band_image(band, page)
+        with patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter") as get_inpainter, patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=expected,
+        ) as apply_round:
+            cleaned = inpaint_band_image(band, page)
 
-        self.assertEqual(len(captured), 1, "clean_image deveria receber exatamente 1 texto")
-        ix1, iy1, ix2, iy2 = captured[0]["bbox"]
-        # Deve ter sido dilatado em 6 px em cada borda
-        self.assertLessEqual(ix1, 60 - 6 + 1,
-            f"x1 esperado <= {60-6}, got {ix1}")
-        self.assertLessEqual(iy1, 20 - 6 + 1,
-            f"y1 esperado <= {20-6}, got {iy1}")
-        self.assertGreaterEqual(ix2, 160 + 6 - 1,
-            f"x2 esperado >= {160+6}, got {ix2}")
-        self.assertGreaterEqual(iy2, 60 + 6 - 1,
-            f"y2 esperado >= {60+6}, got {iy2}")
+        self.assertTrue(np.array_equal(cleaned, expected))
+        get_inpainter.assert_called_once_with("quality")
+        apply_round.assert_called_once()
+        args = apply_round.call_args[0]
+        self.assertTrue(np.array_equal(args[0], band))
+        self.assertEqual(args[1], page)
+        self.assertEqual(args[2], "fake-inpainter")
 
-    def test_bbox_dilation_clipped_to_image_bounds(self):
-        """Dilation não deve gerar coordenadas negativas ou maiores que o shape."""
+    def test_synthesizes_vision_blocks_from_texts_when_missing(self):
         from inpainter import inpaint_band_image
 
-        band = np.full((50, 100, 3), 255, dtype=np.uint8)
-        page = {"texts": [{
-            "id": "t2",
-            "bbox": [0, 0, 100, 50],  # cobre a imagem inteira
-            "tipo": "fala",
-        }]}
+        band = np.full((80, 200, 3), 240, dtype=np.uint8)
+        page = {
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [20, 12, 100, 42],
+                    "text_pixel_bbox": [24, 16, 96, 38],
+                    "tipo": "fala",
+                    "text": "HELLO",
+                }
+            ]
+        }
 
-        captured, fake_clean = self._capture_inflated_texts()
-        with patch("inpainter.classical.clean_image", side_effect=fake_clean):
-            inpaint_band_image(band, page)
+        def _capture_payload(image_np, payload, inpainter):
+            self.assertEqual(inpainter, "fake-inpainter")
+            self.assertEqual(len(payload["_vision_blocks"]), 1)
+            self.assertEqual(payload["_vision_blocks"][0]["bbox"], [24, 16, 96, 38])
+            return image_np.copy()
 
-        self.assertEqual(len(captured), 1)
-        ix1, iy1, ix2, iy2 = captured[0]["bbox"]
-        self.assertGreaterEqual(ix1, 0, "x1 não pode ser negativo")
-        self.assertGreaterEqual(iy1, 0, "y1 não pode ser negativo")
-        self.assertLessEqual(ix2, 100, "x2 não pode exceder width")
-        self.assertLessEqual(iy2, 50, "y2 não pode exceder height")
+        with patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter"), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            side_effect=_capture_payload,
+        ) as apply_round:
+            cleaned = inpaint_band_image(band, page)
 
-    def test_texts_without_bbox_are_skipped(self):
-        """Textos sem bbox não devem ser passados a clean_image."""
+        self.assertEqual(cleaned.shape, band.shape)
+        apply_round.assert_called_once()
+
+    def test_texts_without_geometry_are_skipped(self):
         from inpainter import inpaint_band_image
 
         band = np.full((100, 200, 3), 255, dtype=np.uint8)
-        page = {"texts": [
-            {"id": "t_good", "bbox": [10, 10, 100, 50], "tipo": "fala"},
-            {"id": "t_bad", "tipo": "sfx"},  # sem bbox
-        ]}
+        page = {
+            "texts": [
+                {"id": "t_bad", "tipo": "sfx", "text": "..."},
+                {"id": "t_ok", "bbox": [10, 10, 80, 40]},
+            ]
+        }
 
-        captured, fake_clean = self._capture_inflated_texts()
-        with patch("inpainter.classical.clean_image", side_effect=fake_clean):
-            inpaint_band_image(band, page)
+        def _capture_payload(image_np, payload, inpainter):
+            self.assertEqual(len(payload["_vision_blocks"]), 1)
+            self.assertEqual(payload["_vision_blocks"][0]["bbox"], [10, 10, 80, 40])
+            return image_np.copy()
 
-        # Só o texto com bbox deve chegar
-        self.assertEqual(len(captured), 1, "Texto sem bbox não deve ser passado")
-        self.assertEqual(captured[0]["id"], "t_good")
+        with patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter"), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            side_effect=_capture_payload,
+        ):
+            cleaned = inpaint_band_image(band, page)
 
-    def test_multiple_texts_all_dilated(self):
-        """Todos os textos com bbox válido devem ser dilatados."""
-        from inpainter import inpaint_band_image
-
-        band = np.full((200, 400, 3), 255, dtype=np.uint8)
-        page = {"texts": [
-            {"id": "a", "bbox": [50, 30, 150, 70], "tipo": "fala"},
-            {"id": "b", "bbox": [200, 100, 350, 140], "tipo": "fala"},
-        ]}
-
-        captured, fake_clean = self._capture_inflated_texts()
-        with patch("inpainter.classical.clean_image", side_effect=fake_clean):
-            inpaint_band_image(band, page)
-
-        self.assertEqual(len(captured), 2, "Dois textos devem chegar ao clean_image")
-        for txt in captured:
-            orig = next(t for t in page["texts"] if t["id"] == txt["id"])
-            ox1, oy1, ox2, oy2 = orig["bbox"]
-            ix1, iy1, ix2, iy2 = txt["bbox"]
-            self.assertLessEqual(ix1, ox1, f"id={txt['id']}: x1 não dilatado")
-            self.assertLessEqual(iy1, oy1, f"id={txt['id']}: y1 não dilatado")
-            self.assertGreaterEqual(ix2, ox2, f"id={txt['id']}: x2 não dilatado")
-            self.assertGreaterEqual(iy2, oy2, f"id={txt['id']}: y2 não dilatado")
+        self.assertEqual(cleaned.shape, band.shape)
 
 
 class InpaintPassthroughTests(unittest.TestCase):
-    """Testa os casos de passthrough (sem processamento)."""
-
     def test_empty_texts_returns_copy(self):
-        """Com texts vazio, inpaint_band_image deve devolver cópia da imagem."""
         from inpainter import inpaint_band_image
 
         band = np.full((100, 200, 3), 128, dtype=np.uint8)
@@ -130,7 +98,6 @@ class InpaintPassthroughTests(unittest.TestCase):
         self.assertIsNot(result, band)
 
     def test_empty_image_returns_copy(self):
-        """Com imagem vazia, deve retornar cópia."""
         from inpainter import inpaint_band_image
 
         band = np.zeros((0, 200, 3), dtype=np.uint8)
@@ -139,12 +106,14 @@ class InpaintPassthroughTests(unittest.TestCase):
         self.assertEqual(result.size, 0)
 
     def test_output_shape_preserved(self):
-        """Shape da saída deve ser idêntico ao da entrada."""
         from inpainter import inpaint_band_image
 
         for shape in [(50, 100, 3), (200, 400, 3), (1024, 800, 3)]:
             band = np.full(shape, 200, dtype=np.uint8)
             page = {"texts": [{"id": "t", "bbox": [10, 10, 50, 30], "tipo": "fala"}]}
-            with patch("inpainter.classical.clean_image", side_effect=lambda img, t, **kw: img):
+            with patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter"), patch(
+                "vision_stack.runtime._apply_inpainting_round",
+                side_effect=lambda image_np, payload, inp: image_np.copy(),
+            ):
                 result = inpaint_band_image(band, page)
             self.assertEqual(result.shape, shape, f"Shape {shape} foi alterado")

@@ -202,6 +202,29 @@ class TypesettingRendererTests(unittest.TestCase):
         center_y = int((int(ys.min()) + int(ys.max())) / 2)
         self.assertLess(int(mask[center_y, center_x]), 32)
 
+    def test_build_render_blocks_skips_skip_processing_entries(self):
+        blocks = build_render_blocks(
+            [
+                {
+                    "translated": "SFX",
+                    "text": "XEV",
+                    "bbox": [10, 10, 80, 40],
+                    "skip_processing": True,
+                    "tipo": "fala",
+                },
+                {
+                    "translated": "FALA",
+                    "text": "HELLO",
+                    "bbox": [20, 60, 160, 120],
+                    "skip_processing": False,
+                    "tipo": "fala",
+                },
+            ]
+        )
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["translated"], "FALA")
+
     def test_render_text_block_uses_safe_renderer_for_project_font(self):
         img = Image.new("RGB", (320, 240), (255, 255, 255))
         text_data = {
@@ -557,6 +580,36 @@ class TypesettingRendererTests(unittest.TestCase):
         right_has_text = np.any(arr[20:280, 160:480] < 200)
         self.assertTrue(left_has_text, "Left lobe should have text")
         self.assertTrue(right_has_text, "Right lobe should have text")
+
+    def test_build_render_blocks_dedupes_nested_same_balloon_prefix_text(self):
+        base_balloon = [333, 2031, 900, 2187]
+        texts = [
+            {
+                "translated": "A guerra acabou.",
+                "bbox": [484, 2047, 745, 2171],
+                "text_pixel_bbox": [489, 2053, 745, 2165],
+                "tipo": "fala",
+                "balloon_bbox": list(base_balloon),
+                "layout_group_size": 2,
+                "layout_profile": "standard",
+                "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+            },
+            {
+                "translated": "A GUERRA",
+                "bbox": [481, 2049, 745, 2097],
+                "text_pixel_bbox": [489, 2052, 745, 2097],
+                "tipo": "narracao",
+                "balloon_bbox": list(base_balloon),
+                "layout_group_size": 2,
+                "layout_profile": "white_balloon",
+                "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["translated"], "A guerra acabou.")
 
 
 if __name__ == "__main__":

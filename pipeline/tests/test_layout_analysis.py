@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+from unittest.mock import patch
 
 from layout.balloon_layout import (
     _analyze_connected_subregions,
@@ -844,6 +845,54 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
         subs = _geometric_fallback_subregions(texts, balloon)
         self.assertEqual(len(subs), 2)
 
+    def test_geometric_fallback_skips_single_text_that_already_fills_simple_balloon(self):
+        """Texto único ocupando quase todo o balão simples não deve virar connected."""
+        image = np.full((208, 406, 3), 170, dtype=np.uint8)
+        cv2.fillConvexPoly(
+            image,
+            np.array([[18, 14], [388, 14], [404, 102], [392, 194], [16, 194], [0, 104]], dtype=np.int32),
+            (248, 248, 248),
+        )
+        text_entry = {
+            "text": "A TRAP? ARE YOU TELLING ME YOU KNEW OF MY PLANS BEFOREHAND?",
+            "translated": "UMA TRAE? VOCÊ ESTÁ ME DIZENDO QUE SABIA DOS MEUS PLANOS DE ANTEMÃO?",
+            "bbox": [0, 0, 406, 208],
+            "ocr_text_bbox": [0, 0, 406, 208],
+            "tipo": "fala",
+            "confidence": 0.9,
+            "balloon_bbox": [0, 0, 406, 208],
+            "layout_group_size": 1,
+            "layout_shape": "wide",
+            "balloon_type": "white",
+        }
+
+        texts = [text_entry]
+        _apply_geometric_fallback_subregions(texts, {}, image)
+
+        self.assertEqual(texts[0].get("balloon_subregions", []), [])
+        self.assertNotEqual(texts[0].get("layout_profile"), "connected_balloon")
+
+    def test_geometric_fallback_keeps_single_text_connected_when_text_does_not_fill_balloon(self):
+        """Texto único compacto em balão muito largo ainda pode virar connected."""
+        texts = [
+            {
+                "text": "Primeira frase. Segunda frase?",
+                "translated": "Primeira frase. Segunda frase?",
+                "bbox": [90, 60, 280, 180],
+                "ocr_text_bbox": [90, 60, 280, 180],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [0, 0, 420, 240],
+                "layout_group_size": 1,
+                "layout_shape": "wide",
+                "balloon_type": "white",
+            }
+        ]
+
+        _apply_geometric_fallback_subregions(texts, {}, None)
+
+        self.assertEqual(len(texts[0].get("balloon_subregions", [])), 2)
+
     def test_geometric_fallback_accepts_aspect_1_75_with_min_dims_160_420(self):
         """Balão 420×240 (aspect=1.75, min=160, max=420) + texto central → 2 subregions."""
         # bbox [0, 0, 420, 240]: w=420, h=240 → aspect=1.75, min(w,h)=240≥160, max(w,h)=420≥420
@@ -1308,6 +1357,259 @@ class EnforceMinLobeSizeTests(unittest.TestCase):
         """Deve retornar [] quando image é None."""
         lobes = _detect_connected_lobes_from_outline(None, [0, 0, 100, 100], [0, 0, 100, 100])
         self.assertEqual(lobes, [])
+
+
+class MergeConnectedNearbyTextsTests(unittest.TestCase):
+    """_merge_connected_nearby_texts deve fundir pares próximos em balão conectado."""
+
+    def _make_two_lobe_image(self) -> np.ndarray:
+        """Cria imagem BGR com dois círculos brancos conectados (balão duplo)."""
+        img = np.zeros((300, 500, 3), dtype=np.uint8)
+        img[:] = 30
+        cv2.circle(img, (130, 150), 80, (245, 245, 245), -1)
+        cv2.circle(img, (320, 150), 80, (245, 245, 245), -1)
+        # Conectar os dois círculos
+        cv2.rectangle(img, (130, 100), (320, 200), (245, 245, 245), -1)
+        return img
+
+    def test_no_crash_without_page_image(self):
+        from layout.balloon_layout import _merge_connected_nearby_texts
+        texts = [
+            {"bbox": [80, 120, 180, 180], "tipo": "fala", "connected_lobe_bboxes": []},
+            {"bbox": [270, 120, 370, 180], "tipo": "fala", "connected_lobe_bboxes": []},
+        ]
+        # Must not crash when page_image is None
+        _merge_connected_nearby_texts(texts, None, 500, 300)
+
+    def test_skips_texts_already_with_connected_lobes(self):
+        from layout.balloon_layout import _merge_connected_nearby_texts
+        texts = [
+            {
+                "bbox": [80, 120, 180, 180], "tipo": "fala",
+                "connected_lobe_bboxes": [[80, 120, 180, 180]],
+            },
+            {
+                "bbox": [270, 120, 370, 180], "tipo": "fala",
+                "connected_lobe_bboxes": [],
+            },
+        ]
+        page_image = self._make_two_lobe_image()
+        _merge_connected_nearby_texts(texts, page_image, 500, 300)
+        # First text already had lobes — must remain unchanged
+        self.assertEqual(texts[0]["connected_lobe_bboxes"], [[80, 120, 180, 180]])
+
+    def test_far_apart_texts_not_merged(self):
+        from layout.balloon_layout import _merge_connected_nearby_texts
+        texts = [
+            {"bbox": [10, 10, 80, 50], "tipo": "fala", "connected_lobe_bboxes": []},
+            {"bbox": [400, 250, 490, 290], "tipo": "fala", "connected_lobe_bboxes": []},
+        ]
+        page_image = self._make_two_lobe_image()
+        _merge_connected_nearby_texts(texts, page_image, 500, 300)
+        # Should remain separate — too far
+        self.assertEqual(texts[0]["connected_lobe_bboxes"], [])
+        self.assertEqual(texts[1]["connected_lobe_bboxes"], [])
+
+    def test_sfx_texts_ignored(self):
+        from layout.balloon_layout import _merge_connected_nearby_texts
+        texts = [
+            {"bbox": [80, 120, 180, 180], "tipo": "sfx", "connected_lobe_bboxes": []},
+            {"bbox": [200, 120, 300, 180], "tipo": "sfx", "connected_lobe_bboxes": []},
+        ]
+        page_image = self._make_two_lobe_image()
+        _merge_connected_nearby_texts(texts, page_image, 500, 300)
+        # sfx should never be merged
+        self.assertEqual(texts[0]["connected_lobe_bboxes"], [])
+
+    def test_distinct_existing_balloon_bboxes_are_not_forced_into_connected_merge(self):
+        from layout.balloon_layout import _merge_connected_nearby_texts
+
+        page_image = np.full((500, 1200, 3), 255, dtype=np.uint8)
+        texts = [
+            {
+                "bbox": [620, 1180, 880, 1320],
+                "balloon_bbox": [560, 1110, 940, 1360],
+                "tipo": "fala",
+                "connected_lobe_bboxes": [],
+            },
+            {
+                "bbox": [560, 1330, 980, 1510],
+                "balloon_bbox": [480, 1290, 1060, 1620],
+                "tipo": "fala",
+                "connected_lobe_bboxes": [],
+            },
+        ]
+
+        with patch(
+            "layout.balloon_layout._detect_connected_balloon_subregions_rich",
+            return_value=[
+                {"bbox": [520, 1090, 760, 1390]},
+                {"bbox": [760, 1400, 1080, 1800]},
+            ],
+        ) as detector:
+            with patch(
+                "layout.balloon_layout.refine_balloon_bbox_from_image",
+                return_value=[368, 961, 1141, 1602],
+            ):
+                _merge_connected_nearby_texts(texts, page_image, 1200, 500)
+
+        self.assertEqual(texts[0]["connected_lobe_bboxes"], [])
+        self.assertEqual(texts[1]["connected_lobe_bboxes"], [])
+        self.assertFalse(detector.called, "Balões já refinados e distintos não devem entrar no merge conectado")
+
+    def test_enrich_prefers_text_pixel_refinement_when_shared_refine_overexpands(self):
+        page = {
+            "width": 1200,
+            "height": 2200,
+            "texts": [
+                {
+                    "id": "ocr_005",
+                    "text": "IT'S JUST A SHAME...",
+                    "translated": "É UMA PENA...",
+                    "bbox": [639, 1252, 941, 1421],
+                    "text_pixel_bbox": [654, 1284, 929, 1403],
+                    "tipo": "fala",
+                    "block_profile": "white_balloon",
+                    "confidence": 0.92,
+                }
+            ],
+        }
+
+        with patch(
+            "layout.balloon_layout.build_mask_regions",
+            return_value=[],
+        ), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((2200, 1200, 3), 245, dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            side_effect=[
+                [529, 1076, 978, 1496],
+                [594, 1249, 989, 1438],
+            ],
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["balloon_bbox"], [594, 1249, 989, 1438])
+
+    def test_false_shared_white_balloon_pair_is_separated_before_merge(self):
+        from layout.balloon_layout import _separate_false_shared_white_balloons
+
+        page_image = np.full((2400, 1200, 3), 245, dtype=np.uint8)
+        texts = [
+            {
+                "text": "NONE.",
+                "tipo": "fala",
+                "balloon_type": "white",
+                "balloon_bbox": [368, 961, 1141, 1602],
+                "text_pixel_bbox": [584, 1171, 680, 1200],
+                "layout_profile": "connected_balloon",
+                "layout_group_size": 2,
+                "connected_lobe_bboxes": [[486, 1081, 719, 1291], [739, 1267, 1023, 1482]],
+            },
+            {
+                "text": "IT'S JUST A SHAME...",
+                "tipo": "fala",
+                "balloon_type": "white",
+                "balloon_bbox": [368, 961, 1141, 1602],
+                "text_pixel_bbox": [654, 1284, 929, 1403],
+                "layout_profile": "connected_balloon",
+                "layout_group_size": 2,
+                "connected_lobe_bboxes": [[486, 1081, 719, 1291], [739, 1267, 1023, 1482]],
+            },
+        ]
+
+        with patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            side_effect=[
+                [542, 1120, 716, 1238],
+                [594, 1249, 989, 1438],
+            ],
+        ):
+            _separate_false_shared_white_balloons(texts, page_image)
+
+        self.assertEqual(texts[0]["balloon_bbox"], [542, 1120, 716, 1238])
+        self.assertEqual(texts[1]["balloon_bbox"], [594, 1249, 989, 1438])
+        self.assertEqual(texts[0]["layout_group_size"], 1)
+        self.assertEqual(texts[1]["layout_group_size"], 1)
+        self.assertEqual(texts[0]["connected_lobe_bboxes"], [])
+        self.assertEqual(texts[1]["connected_lobe_bboxes"], [])
+
+    def test_false_shared_white_balloon_pair_falls_back_to_text_position_split(self):
+        from layout.balloon_layout import _separate_false_shared_white_balloons
+
+        page_image = np.full((5000, 1200, 3), 245, dtype=np.uint8)
+        texts = [
+            {
+                "text": "SO THIS IS HOW IT ENDS.",
+                "tipo": "fala",
+                "balloon_type": "white",
+                "balloon_bbox": [98, 3852, 1090, 4334],
+                "text_pixel_bbox": [299, 3993, 565, 4069],
+                "layout_profile": "white_balloon",
+                "layout_group_size": 2,
+            },
+            {
+                "text": "GHISLAIN PERDIUM...",
+                "tipo": "narracao",
+                "balloon_type": "white",
+                "balloon_bbox": [98, 3852, 1090, 4334],
+                "text_pixel_bbox": [530, 4092, 891, 4225],
+                "layout_profile": "white_balloon",
+                "layout_group_size": 2,
+            },
+        ]
+
+        with patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            side_effect=[
+                [241, 3971, 623, 4091],
+                [231, 3895, 922, 4334],
+            ],
+        ):
+            _separate_false_shared_white_balloons(texts, page_image)
+
+        self.assertEqual(texts[0]["layout_group_size"], 1)
+        self.assertEqual(texts[1]["layout_group_size"], 1)
+        self.assertLess(texts[0]["balloon_bbox"][3], texts[1]["balloon_bbox"][1] + 4)
+
+    def test_false_shared_white_balloon_pair_splits_even_when_local_refine_fails(self):
+        from layout.balloon_layout import _separate_false_shared_white_balloons
+
+        page_image = np.full((3600, 1200, 3), 245, dtype=np.uint8)
+        texts = [
+            {
+                "text": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!",
+                "tipo": "narracao",
+                "balloon_type": "white",
+                "balloon_bbox": [0, 2063, 1200, 2354],
+                "text_pixel_bbox": [411, 2085, 735, 2192],
+                "layout_profile": "white_balloon",
+                "layout_group_size": 2,
+            },
+            {
+                "text": "AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "tipo": "fala",
+                "balloon_type": "white",
+                "balloon_bbox": [0, 2063, 1200, 2354],
+                "text_pixel_bbox": [676, 2226, 900, 2334],
+                "layout_profile": "white_balloon",
+                "layout_group_size": 2,
+            },
+        ]
+
+        with patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            side_effect=[None, None],
+        ):
+            _separate_false_shared_white_balloons(texts, page_image)
+
+        self.assertEqual(texts[0]["layout_group_size"], 1)
+        self.assertEqual(texts[1]["layout_group_size"], 1)
+        self.assertLess(texts[0]["balloon_bbox"][3], texts[1]["balloon_bbox"][1] + 4)
+        self.assertLess(texts[0]["balloon_bbox"][2] - texts[0]["balloon_bbox"][0], 700)
+        self.assertLess(texts[1]["balloon_bbox"][2] - texts[1]["balloon_bbox"][0], 850)
 
 
 if __name__ == "__main__":

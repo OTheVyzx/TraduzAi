@@ -234,12 +234,15 @@ class MainEmitTests(unittest.TestCase):
                         "id": "tl_001_001",
                         "bbox": [10, 20, 110, 120],
                         "balloon_bbox": [8, 18, 118, 130],
+                        "text_pixel_bbox": [12, 24, 106, 116],
                         "text": "HELLO",
                         "confidence": 0.93,
+                        "ocr_source": "vision-paddleocr",
                         "tipo": "fala",
                         "detector": "comic-text-bubble-detector",
                         "layout_group_size": 2,
                         "balloon_subregions": [[8, 18, 60, 130], [62, 18, 118, 130]],
+                        "layout_profile": "connected_balloon",
                     }
                 ],
                 "_vision_blocks": [{"bbox": [10, 20, 110, 120], "confidence": 0.88}],
@@ -262,10 +265,57 @@ class MainEmitTests(unittest.TestCase):
 
             saved = json.loads(project_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["_work_dir"], str(project_path.parent))
-            self.assertEqual(saved["paginas"][0]["text_layers"], [])
-            self.assertEqual(saved["paginas"][0]["textos"], [])
+            self.assertEqual(len(saved["paginas"][0]["text_layers"]), 1)
+            layer = saved["paginas"][0]["text_layers"][0]
+            self.assertEqual(layer["original"], "HELLO")
+            self.assertEqual(layer["translated"], "")
+            self.assertEqual(layer["source_bbox"], [10, 20, 110, 120])
+            self.assertEqual(layer["balloon_bbox"], [8, 18, 118, 130])
+            self.assertEqual(layer["text_pixel_bbox"], [12, 24, 106, 116])
+            self.assertEqual(layer["layout_group_size"], 2)
+            self.assertEqual(layer["layout_profile"], "connected_balloon")
+            self.assertEqual(saved["paginas"][0]["textos"][0]["layout_group_size"], 2)
+            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_bbox"], [8, 18, 118, 130])
+            self.assertEqual(saved["paginas"][0]["textos"][0]["text_pixel_bbox"], [12, 24, 106, 116])
+            self.assertEqual(saved["paginas"][0]["textos"][0]["ocr_source"], "vision-paddleocr")
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["bbox"], [10, 20, 110, 120])
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["confidence"], 0.88)
+
+    def test_sync_page_legacy_aliases_preserves_rich_text_metadata(self) -> None:
+        page = {
+            "image_layers": {
+                "base": {"path": "originals/001.jpg"},
+                "rendered": {"path": "translated/001.jpg"},
+            },
+            "text_layers": [
+                {
+                    "id": "tl_001_001",
+                    "bbox": [20, 30, 180, 120],
+                    "source_bbox": [24, 34, 176, 116],
+                    "text_pixel_bbox": [40, 52, 150, 96],
+                    "line_polygons": [[[40, 52], [150, 52], [150, 96], [40, 96]]],
+                    "original": "HELLO",
+                    "translated": "OLA",
+                    "tipo": "fala",
+                    "ocr_confidence": 0.93,
+                    "ocr_source": "vision-paddleocr",
+                    "balloon_bbox": [12, 18, 190, 130],
+                    "balloon_type": "white",
+                }
+            ],
+        }
+
+        main._sync_page_legacy_aliases(page)
+
+        legacy = page["textos"][0]
+        self.assertEqual(legacy["id"], "tl_001_001")
+        self.assertEqual(legacy["text_pixel_bbox"], [40, 52, 150, 96])
+        self.assertEqual(legacy["source_bbox"], [24, 34, 176, 116])
+        self.assertEqual(legacy["line_polygons"][0][2], [150, 96])
+        self.assertEqual(legacy["ocr_source"], "vision-paddleocr")
+        self.assertEqual(legacy["ocr_confidence"], 0.93)
+        self.assertEqual(legacy["confianca_ocr"], 0.93)
+        self.assertEqual(legacy["balloon_type"], "white")
 
     def test_run_ocr_page_uses_detected_blocks_when_text_layers_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +372,124 @@ class MainEmitTests(unittest.TestCase):
                 (originals_dir / "001.jpg", [10, 20, 110, 120]),
                 (originals_dir / "001.jpg", [130, 140, 230, 280]),
             ])
+
+    def test_normalize_text_layer_repairs_local_text_pixel_bbox_and_polygons(self) -> None:
+        layer = main._normalize_text_layer_for_renderer(
+            {
+                "id": "tl_009_001",
+                "tipo": "fala",
+                "source_bbox": [422, 1365, 769, 1536],
+                "layout_bbox": [422, 1365, 769, 1536],
+                "balloon_bbox": [422, 1365, 769, 1536],
+                "text_pixel_bbox": [436, 30, 760, 180],
+                "line_polygons": [[[436, 30], [760, 30], [760, 180], [436, 180]]],
+                "original": "HOW COULD YOU?!",
+                "translated": "COMO VOCE PODE?!",
+            },
+            page_number=9,
+            layer_index=0,
+        )
+
+        self.assertEqual(layer["text_pixel_bbox"], [436, 1395, 760, 1545])
+        self.assertEqual(layer["line_polygons"][0][0], [436, 1395])
+        self.assertEqual(layer["line_polygons"][0][2], [760, 1545])
+
+    def test_carry_translations_for_detected_layers_matches_by_geometry_not_index(self) -> None:
+        existing_layers = [
+            {
+                "original": "DAMMIT. WE LET OUR GUARD DOWN!",
+                "translated": "DROGA...",
+                "text_pixel_bbox": [448, 936, 865, 1100],
+            },
+            {
+                "original": "XEV",
+                "translated": "XEV",
+                "text_pixel_bbox": [849, 1484, 985, 1626],
+            },
+            {
+                "original": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!",
+                "translated": "HA MUITO MAIS...",
+                "text_pixel_bbox": [411, 2085, 735, 2192],
+            },
+            {
+                "original": "AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "translated": "NESSE RITMO...",
+                "text_pixel_bbox": [676, 2226, 900, 2334],
+            },
+            {
+                "original": "COMMANDER!",
+                "translated": "COMANDANTE!",
+                "text_pixel_bbox": [363, 2981, 667, 3055],
+            },
+        ]
+        reviewed_texts = [
+            {"text": "KEUK?!", "text_pixel_bbox": [580, 286, 721, 350]},
+            {"text": "DAMMIT. WE LET OUR GUARD DOWN!", "text_pixel_bbox": [428, 908, 881, 1114]},
+            {"text": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!", "text_pixel_bbox": [411, 2085, 735, 2192]},
+            {"text": "AT THIS RATE, WE'RE ALL GONNA DIE-", "text_pixel_bbox": [676, 2226, 900, 2334]},
+            {"text": "COMMANDER!", "text_pixel_bbox": [362, 2977, 669, 3056]},
+        ]
+
+        carried = main._carry_translations_for_detected_layers(existing_layers, reviewed_texts)
+
+        self.assertEqual(carried[0], "")
+        self.assertEqual(carried[1], "DROGA...")
+        self.assertEqual(carried[2], "HA MUITO MAIS...")
+        self.assertEqual(carried[3], "NESSE RITMO...")
+        self.assertEqual(carried[4], "COMANDANTE!")
+
+    def test_carry_translations_for_detected_layers_combines_translations_for_merged_ocr_text(self) -> None:
+        existing_layers = [
+            {
+                "original": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!",
+                "translated": "HA MUITO MAIS...",
+                "text_pixel_bbox": [411, 2085, 735, 2192],
+            },
+            {
+                "original": "AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "translated": "NESSE RITMO...",
+                "text_pixel_bbox": [676, 2226, 900, 2334],
+            },
+        ]
+        reviewed_texts = [
+            {
+                "text": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO! AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "text_pixel_bbox": [411, 2085, 901, 2334],
+            }
+        ]
+
+        carried = main._carry_translations_for_detected_layers(existing_layers, reviewed_texts)
+
+        self.assertEqual(carried, ["HA MUITO MAIS... NESSE RITMO..."])
+
+    def test_carry_translations_for_detected_layers_splits_old_merged_translation_into_new_layers(self) -> None:
+        existing_layers = [
+            {
+                "original": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO! AT THIS RATE, WE'RE ALL GONNA DIE-",
+                "translated": "HÁ MUITO MAIS DELES DO QUE FOI RELATADO TAMBÉM! NESSE RITMO, TODOS NÓS VAMOS MORRER-",
+                "text_pixel_bbox": [411, 2085, 901, 2334],
+            }
+        ]
+        reviewed_texts = [
+            {
+                "text": "AT THIS RATE, WE'RE ALL GONNA DIE—",
+                "text_pixel_bbox": [675, 2226, 901, 2334],
+            },
+            {
+                "text": "THERE ARE WAY MORE OF THEM THAN WAS REPORTED TOO!",
+                "text_pixel_bbox": [411, 2085, 735, 2193],
+            },
+        ]
+
+        carried = main._carry_translations_for_detected_layers(existing_layers, reviewed_texts)
+
+        self.assertEqual(
+            carried,
+            [
+                "NESSE RITMO, TODOS NÓS VAMOS MORRER-",
+                "HÁ MUITO MAIS DELES DO QUE FOI RELATADO TAMBÉM!",
+            ],
+        )
 
     def test_run_process_block_uses_layout_bbox_when_legacy_bbox_alias_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

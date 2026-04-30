@@ -312,6 +312,61 @@ def is_punctuation_only_noise(text: str) -> bool:
     return not any(char.isalnum() for char in stripped)
 
 
+def is_short_textured_sfx_or_noise(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    is_white_balloon: bool,
+) -> bool:
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+
+    core = re.sub(r"[^A-Za-z]", "", stripped)
+    if not core:
+        return False
+    upper_core = core.upper()
+    vowel_count = sum(char in "AEIOU" for char in upper_core)
+    known_short_sfx = {"HMPH", "HUH", "KEUK", "UGH", "GASP", "SNIF", "SNIFF", "XEV", "ULM", "XUF", "SH"}
+
+    if upper_core in known_short_sfx:
+        return True
+
+    if is_white_balloon:
+        return False
+
+    if len(core) == 1:
+        return True
+
+    if len(core) == 2:
+        return True
+
+    # Tokens muito curtos e soltos em fundo texturizado costumam ser SFX/ruído
+    # e devem permanecer na arte original sem OCR/inpaint/typeset.
+    if len(core) <= 4 and core.isalpha() and vowel_count <= 1:
+        return True
+
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return False
+
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+    except Exception:
+        return False
+
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    area = width * height
+    aspect = width / float(max(1, height))
+
+    # Também cobre fragmentos OCR curtos em textura escura que escapam com
+    # confiança média/alta, como "Mo" ou "Xuf".
+    if len(core) <= 4 and vowel_count <= 1 and confidence < 0.94 and (area <= 24000 or aspect <= 2.4):
+        return True
+
+    return False
+
+
 def is_short_ornamental_text(
     text: str,
     confidence: float,

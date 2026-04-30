@@ -14,8 +14,83 @@ from strip.bands import attach_band_slices, group_balloons_into_bands
 from strip.concat import build_strip
 from strip.detect_balloons import detect_strip_balloons
 from strip.process_bands import process_band
-from strip.reassemble import assemble_output_pages, paste_bands_into_strip
-from strip.types import OutputPage
+from strip.reassemble import assemble_output_pages
+from strip.types import OutputPage, VerticalStrip
+
+
+def _paste_band_attr_into_image(strip_image, bands: list, attr_name: str):
+    result = strip_image.copy()
+    strip_height = result.shape[0]
+    for band in bands:
+        band_slice = getattr(band, attr_name, None)
+        if band_slice is None:
+            continue
+        y0 = max(0, band.y_top)
+        y1 = min(strip_height, band.y_bottom)
+        h_avail = y1 - y0
+        if h_avail <= 0:
+            continue
+        result[y0:y1, :, :] = band_slice[:h_avail, :, :]
+    return result
+
+
+def _shift_bbox_y(value, delta_y: int) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    return [int(value[0]), int(value[1]) + delta_y, int(value[2]), int(value[3]) + delta_y]
+
+
+def _shift_bbox_list_y(values, delta_y: int) -> list[list[int]]:
+    shifted: list[list[int]] = []
+    for value in values or []:
+        bbox = _shift_bbox_y(value, delta_y)
+        if bbox is not None:
+            shifted.append(bbox)
+    return shifted
+
+
+def _shift_polygons_y(polygons, delta_y: int):
+    if not isinstance(polygons, list):
+        return polygons
+    shifted = []
+    for polygon in polygons:
+        if not isinstance(polygon, list):
+            shifted.append(polygon)
+            continue
+        shifted_polygon = []
+        for point in polygon:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                shifted_polygon.append([int(point[0]), int(point[1]) + delta_y])
+            else:
+                shifted_polygon.append(point)
+        shifted.append(shifted_polygon)
+    return shifted
+
+
+def _shift_text_geometry_y(text: dict, delta_y: int) -> dict:
+    shifted = dict(text)
+
+    for key in ("bbox", "source_bbox", "balloon_bbox", "text_pixel_bbox"):
+        bbox = _shift_bbox_y(shifted.get(key), delta_y)
+        if bbox is not None:
+            shifted[key] = bbox
+
+    for key in (
+        "balloon_subregions",
+        "connected_lobe_bboxes",
+        "connected_text_groups",
+        "connected_position_bboxes",
+        "connected_focus_bboxes",
+        "_merged_source_bboxes",
+    ):
+        if key in shifted:
+            shifted[key] = _shift_bbox_list_y(shifted.get(key), delta_y)
+
+    for key in ("line_polygons", "connected_lobe_polygons"):
+        if key in shifted:
+            shifted[key] = _shift_polygons_y(shifted.get(key), delta_y)
+
+    return shifted
 
 
 def run_chapter(
@@ -46,6 +121,7 @@ def run_chapter(
 
     page_paths = image_files
     strip = build_strip(page_paths, progress_callback=progress_callback)
+    original_strip_image = strip.image.copy()
 
 
     if progress_callback: progress_callback("detect", 0, 1)
@@ -84,8 +160,33 @@ def run_chapter(
             if additions and isinstance(additions, dict):
                 running_glossary.update(additions)
 
-    paste_bands_into_strip(strip, bands)
+    clean_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
+    rendered_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
+    strip.image[:, :, :] = rendered_strip_image
+
     output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
+    original_pages = assemble_output_pages(
+        VerticalStrip(
+            image=original_strip_image,
+            width=strip.width,
+            height=strip.height,
+            source_page_breaks=list(strip.source_page_breaks),
+            page_x_offsets=list(strip.page_x_offsets),
+        ),
+        balloons,
+        target_count=target_count,
+    )
+    clean_pages = assemble_output_pages(
+        VerticalStrip(
+            image=clean_strip_image,
+            width=strip.width,
+            height=strip.height,
+            source_page_breaks=list(strip.source_page_breaks),
+            page_x_offsets=list(strip.page_x_offsets),
+        ),
+        balloons,
+        target_count=target_count,
+    )
 
     # Remapeamento de metadados para project.json
     all_texts: list[dict] = []
@@ -100,17 +201,7 @@ def run_chapter(
             # bbox é OBRIGATÓRIO — pular texto sem bbox para evitar placeholder [0,0,32,32]
             if not new_txt.get("bbox"):
                 continue
-            x1, y1, x2, y2 = new_txt["bbox"]
-            new_txt["bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
-            if "balloon_bbox" in new_txt and new_txt["balloon_bbox"]:
-                bx1, by1, bx2, by2 = new_txt["balloon_bbox"]
-                new_txt["balloon_bbox"] = [bx1, by1 + b_y, bx2, by2 + b_y]
-            # Remapar subregions se houver
-            if "balloon_subregions" in new_txt:
-                new_subs = []
-                for sub in new_txt["balloon_subregions"]:
-                    new_subs.append([sub[0], sub[1] + b_y, sub[2], sub[3] + b_y])
-                new_txt["balloon_subregions"] = new_subs
+            new_txt = _shift_text_geometry_y(new_txt, b_y)
             all_texts.append(new_txt)
 
         for vb in band.ocr_result.get("_vision_blocks", []):
@@ -145,16 +236,7 @@ def run_chapter(
             continue
         page = output_pages[pidx]
         p_y0 = page.y_top
-        local_txt = dict(txt)
-        local_txt["bbox"] = [tx1, ty1 - p_y0, tx2, ty2 - p_y0]
-        if "balloon_bbox" in local_txt and local_txt["balloon_bbox"]:
-            bx1, by1, bx2, by2 = local_txt["balloon_bbox"]
-            local_txt["balloon_bbox"] = [bx1, by1 - p_y0, bx2, by2 - p_y0]
-        if "balloon_subregions" in local_txt:
-            local_txt["balloon_subregions"] = [
-                [s[0], s[1] - p_y0, s[2], s[3] - p_y0]
-                for s in local_txt["balloon_subregions"]
-            ]
+        local_txt = _shift_text_geometry_y(txt, -p_y0)
         page.text_layers["texts"].append(local_txt)
 
     # Distribuir vision_blocks igualmente
@@ -182,10 +264,13 @@ def run_chapter(
             for vb in page.ocr_result.get("_vision_blocks", [])
         ]
 
+    for page, original_page, clean_page in zip(output_pages, original_pages, clean_pages):
+        page.original_image = original_page.image
+        page.inpainted_image = clean_page.image
+
     output_dir.mkdir(parents=True, exist_ok=True)
     for i, page in enumerate(output_pages):
         page.path = output_dir / f"{i + 1:03d}.jpg"
         cv2.imwrite(str(page.path), page.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
     return output_pages
-

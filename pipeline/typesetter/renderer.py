@@ -651,9 +651,96 @@ def _dedupe_render_blocks(blocks: list[dict]) -> list[dict]:
         key = (block.get("tipo", "fala"), bbox, text)
         if key in seen:
             continue
+        replace_index = _find_nested_same_balloon_duplicate_index(block, deduped)
+        if replace_index is not None:
+            previous = deduped[replace_index]
+            previous_text = _normalize_duplicate_compare_text(previous.get("translated", ""))
+            current_text = _normalize_duplicate_compare_text(block.get("translated", ""))
+            if len(current_text) > len(previous_text):
+                deduped[replace_index] = block
+                seen.discard(
+                    (
+                        previous.get("tipo", "fala"),
+                        tuple(int(v) for v in (previous.get("balloon_bbox") or previous.get("bbox") or [])),
+                        re.sub(r"\s+", " ", str(previous.get("translated", "")).strip()),
+                    )
+                )
+                seen.add(key)
+            continue
         seen.add(key)
         deduped.append(block)
     return deduped
+
+
+def _normalize_duplicate_compare_text(text: str) -> str:
+    collapsed = re.sub(r"\s+", " ", str(text or "").strip()).upper()
+    cleaned = re.sub(r"[^A-ZÀ-ß0-9 ]+", "", collapsed)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _bbox_iou(a: list[int] | tuple[int, ...], b: list[int] | tuple[int, ...]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        return 0.0
+    ax1, ay1, ax2, ay2 = [int(v) for v in a]
+    bx1, by1, bx2, by2 = [int(v) for v in b]
+    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+    if inter_w <= 0 or inter_h <= 0:
+        return 0.0
+    inter = inter_w * inter_h
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return inter / float(area_a + area_b - inter)
+
+
+def _bbox_containment_ratio(inner: list[int] | tuple[int, ...], outer: list[int] | tuple[int, ...]) -> float:
+    if len(inner) != 4 or len(outer) != 4:
+        return 0.0
+    ix1, iy1, ix2, iy2 = [int(v) for v in inner]
+    ox1, oy1, ox2, oy2 = [int(v) for v in outer]
+    inter_w = max(0, min(ix2, ox2) - max(ix1, ox1))
+    inter_h = max(0, min(iy2, oy2) - max(iy1, oy1))
+    if inter_w <= 0 or inter_h <= 0:
+        return 0.0
+    inter = inter_w * inter_h
+    area_inner = max(1, (ix2 - ix1) * (iy2 - iy1))
+    return inter / float(area_inner)
+
+
+def _find_nested_same_balloon_duplicate_index(candidate: dict, accepted: list[dict]) -> int | None:
+    candidate_balloon = candidate.get("balloon_bbox") or candidate.get("bbox") or []
+    candidate_bbox = candidate.get("text_pixel_bbox") or candidate.get("bbox") or []
+    candidate_text = _normalize_duplicate_compare_text(candidate.get("translated", ""))
+    if not candidate_text:
+        return None
+
+    for index, previous in enumerate(accepted):
+        previous_balloon = previous.get("balloon_bbox") or previous.get("bbox") or []
+        if len(candidate_balloon) != 4 or len(previous_balloon) != 4:
+            continue
+        if tuple(int(v) for v in candidate_balloon) != tuple(int(v) for v in previous_balloon):
+            continue
+
+        previous_text = _normalize_duplicate_compare_text(previous.get("translated", ""))
+        if not previous_text or previous_text == candidate_text:
+            continue
+
+        shorter, longer = sorted([candidate_text, previous_text], key=len)
+        if len(shorter) < 4 or shorter == longer or shorter not in longer:
+            continue
+
+        previous_bbox = previous.get("text_pixel_bbox") or previous.get("bbox") or []
+        overlap_score = max(
+            _bbox_iou(candidate_bbox, previous_bbox),
+            _bbox_containment_ratio(candidate_bbox, previous_bbox),
+            _bbox_containment_ratio(previous_bbox, candidate_bbox),
+        )
+        if overlap_score < 0.72:
+            continue
+
+        return index
+
+    return None
 
 
 def get_font(font_name: str, size: int):
@@ -1416,6 +1503,7 @@ def _has_confident_connected_subregions(text: dict) -> bool:
 def _clear_connected_balloon_metadata(text: dict) -> dict:
     sanitized = dict(text)
     sanitized["balloon_subregions"] = []
+    sanitized["layout_group_size"] = 1
     if sanitized.get("layout_profile") == "connected_balloon":
         sanitized["layout_profile"] = "standard"
     sanitized.pop("connected_children", None)
@@ -1434,6 +1522,8 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
     if text.get("connected_children"):
         return False
 
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'’-]*", translated)
+    word_count = len(words)
     has_explicit_connected_signal = bool(text.get("connected_text_groups")) or bool(text.get("connected_position_bboxes")) or any(
         float(text.get(key, 0.0) or 0.0) > 0.0
         for key in (
@@ -1444,10 +1534,10 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
         )
     )
     if not has_explicit_connected_signal:
+        if str(text.get("layout_profile", "") or "") == "connected_balloon" and word_count <= 2:
+            return True
         return False
 
-    words = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'’-]*", translated)
-    word_count = len(words)
     orientation = _infer_connected_orientation_from_subregions(
         subregions,
         str(text.get("connected_balloon_orientation", "") or ""),
@@ -1477,6 +1567,74 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
             return True
 
     return False
+
+
+def _resolve_shared_balloon_anchor_bbox(text: dict) -> list[int] | None:
+    for key in ("text_pixel_bbox", "bbox", "source_bbox"):
+        raw = text.get(key)
+        if isinstance(raw, (list, tuple)) and len(raw) == 4:
+            try:
+                x1, y1, x2, y2 = [int(v) for v in raw]
+            except Exception:
+                continue
+            if x2 > x1 and y2 > y1:
+                return [x1, y1, x2, y2]
+    return None
+
+
+def _split_mixed_type_shared_balloon_group(group: list[dict]) -> list[dict]:
+    if len(group) < 2:
+        return []
+
+    balloon_bbox = group[0].get("balloon_bbox")
+    if not isinstance(balloon_bbox, (list, tuple)) or len(balloon_bbox) != 4:
+        return []
+
+    tipos = {str(item.get("tipo", "") or "").strip().lower() for item in group}
+    if len(tipos) < 2:
+        return []
+
+    anchors: list[tuple[dict, list[int]]] = []
+    for text in group:
+        anchor = _resolve_shared_balloon_anchor_bbox(text)
+        if anchor is None:
+            return []
+        anchors.append((text, anchor))
+
+    ordered = sorted(anchors, key=lambda item: (item[1][1], item[1][0]))
+    bx1, by1, bx2, by2 = [int(v) for v in balloon_bbox]
+    bh = max(1, by2 - by1)
+
+    split_lines: list[int] = [by1]
+    for (_, prev_bbox), (_, curr_bbox) in zip(ordered, ordered[1:]):
+        gap = int(curr_bbox[1]) - int(prev_bbox[3])
+        if gap < max(18, int(bh * 0.06)):
+            return []
+        split_lines.append(int(round((prev_bbox[3] + curr_bbox[1]) / 2.0)))
+    split_lines.append(by2)
+
+    union_x1 = min(anchor[0] for _, anchor in ordered)
+    union_x2 = max(anchor[2] for _, anchor in ordered)
+    union_w = max(1, union_x2 - union_x1)
+    pad_x = max(24, int(union_w * 0.12))
+    shared_x1 = max(bx1, union_x1 - pad_x)
+    shared_x2 = min(bx2, union_x2 + pad_x)
+    if shared_x2 <= shared_x1:
+        return []
+
+    resolved: list[dict] = []
+    for index, (text, anchor) in enumerate(ordered):
+        sub_y1 = split_lines[index]
+        sub_y2 = split_lines[index + 1]
+        if sub_y2 <= sub_y1:
+            return []
+        updated = dict(text)
+        updated["balloon_bbox"] = [shared_x1, sub_y1, shared_x2, sub_y2]
+        updated["balloon_subregions"] = []
+        updated["layout_group_size"] = 1
+        updated["_resolved_subregion"] = True
+        resolved.append(updated)
+    return resolved
 
 
 def _build_connected_subregions_from_group_bboxes(
@@ -1569,6 +1727,31 @@ def _infer_connected_fragment_groups(group: list[dict], balloon_bbox: list[int])
 
 
 def build_render_blocks(texts: list[dict]) -> list[dict]:
+    texts = [text for text in texts if not text.get("skip_processing")]
+    prepared_texts: list[dict] = []
+    shared_balloon_groups: dict[tuple[int, int, int, int], list[dict]] = {}
+    for text in texts:
+        balloon_bbox = text.get("balloon_bbox")
+        if (
+            isinstance(balloon_bbox, (list, tuple))
+            and len(balloon_bbox) == 4
+            and not _normalize_balloon_subregions(text.get("balloon_subregions", []))
+            and int(text.get("layout_group_size", 1) or 1) > 1
+        ):
+            key = tuple(int(v) for v in balloon_bbox)
+            shared_balloon_groups.setdefault(key, []).append(text)
+
+    resolved_ids: set[int] = set()
+    for group in shared_balloon_groups.values():
+        resolved_group = _split_mixed_type_shared_balloon_group(group)
+        if not resolved_group or len(resolved_group) != len(group):
+            continue
+        prepared_texts.extend(resolved_group)
+        resolved_ids.update(id(text) for text in group)
+
+    prepared_texts.extend(text for text in texts if id(text) not in resolved_ids)
+    texts = prepared_texts
+
     grouped: dict[tuple[str, tuple[int, int, int, int]], list[dict]] = {}
     passthrough: list[dict] = []
 
@@ -1730,10 +1913,10 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
         combined = dict(ordered[0])
         combined.pop("_resolved_subregion", None)
         combined["balloon_bbox"] = list(bbox_tuple)
-        combined["translated"] = "\n".join(
-            text.get("translated", "").strip()
+        combined["translated"] = " ".join(
+            " ".join(text.get("translated", "").split()).strip()
             for text in ordered
-            if text.get("translated", "").strip()
+            if str(text.get("translated", "")).strip()
         )
         combined["estilo"] = merge_group_style(ordered)
         combined["source_text_count"] = len(ordered)

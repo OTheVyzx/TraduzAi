@@ -96,6 +96,41 @@ class RunChapterSmokeTests(unittest.TestCase):
             jpgs = sorted(output.glob("*.jpg"))
             self.assertEqual(len(jpgs), 5)
 
+    def test_run_chapter_preserves_distinct_original_clean_and_rendered_pages(self):
+        from strip.run import run_chapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            files = _write_pages(tmp_path, 1)
+            output = tmp_path / "out"
+
+            def fake_process_band(band, **_kw):
+                band.cleaned_slice = np.full_like(band.strip_slice, 200)
+                band.rendered_slice = np.full_like(band.strip_slice, 32)
+                band.ocr_result = {"texts": [], "_vision_blocks": []}
+                return band
+
+            with patch("strip.run.process_band", side_effect=fake_process_band):
+                output_pages = run_chapter(
+                    image_files=files,
+                    output_dir=output,
+                    target_count=1,
+                    detector=_make_detector_with_n_balloons(1),
+                    runtime=MagicMock(),
+                    translator=MagicMock(),
+                    inpainter=MagicMock(),
+                    typesetter=MagicMock(),
+                )
+
+            self.assertEqual(len(output_pages), 1)
+            page = output_pages[0]
+            self.assertTrue(hasattr(page, "original_image"))
+            self.assertTrue(hasattr(page, "inpainted_image"))
+            self.assertIsNotNone(page.original_image)
+            self.assertIsNotNone(page.inpainted_image)
+            self.assertFalse(np.array_equal(page.original_image, page.inpainted_image))
+            self.assertFalse(np.array_equal(page.inpainted_image, page.image))
+
 
 class RunningHistoryTests(unittest.TestCase):
     """H.4 — history rolante de bandas passado para contextual reviewer."""

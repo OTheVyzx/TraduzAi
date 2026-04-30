@@ -6,6 +6,8 @@ and outputs JSON progress messages to stdout for the Tauri sidecar to consume.
 
 import os
 import json
+import math
+import re
 import shutil
 import sys
 import time
@@ -397,6 +399,7 @@ def _run_pipeline(config_path: str):
     else:
         # STRIP-BASED PIPELINE (Task 6.2)
         from types import SimpleNamespace
+        import cv2
         from strip.run import run_chapter
         from vision_stack.runtime import warmup_visual_stack as _warmup_visual_stack
         from vision_stack.runtime import _get_detector, run_ocr_stage
@@ -488,7 +491,43 @@ def _run_pipeline(config_path: str):
 
         # Copia imagens processadas para images/ para que o editor as veja como base de inpaint
         for p in output_pages:
-            shutil.copy2(p.path, images_dir / p.path.name)
+            inpaint_target = images_dir / p.path.name
+            if getattr(p, "inpainted_image", None) is not None:
+                cv2.imwrite(str(inpaint_target), p.inpainted_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            else:
+                shutil.copy2(p.path, inpaint_target)
+
+        # Substituir originals/ (que tem os splits brutos do .cbz) pelas paginas
+        # reassembladas originais. Sem isso, project.json aponta para originals/NNN.jpg
+        # que nao existem (disco mantem nomes originais como originals/002__001.jpg).
+        for stale in originals_dir.glob("*"):
+            if stale.is_file():
+                stale.unlink()
+        for p in output_pages:
+            original_target = originals_dir / p.path.name
+            if getattr(p, "original_image", None) is not None:
+                cv2.imwrite(str(original_target), p.original_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            else:
+                shutil.copy2(p.path, original_target)
+
+        # Garantir diretorios de camadas + PNGs transparentes 1x1 para mask/brush
+        # (UI Tauri reclama de 404 quando layers/mask/NNN.png nao existe).
+        layers_root = work_dir / "layers"
+        (layers_root / "mask").mkdir(parents=True, exist_ok=True)
+        (layers_root / "brush").mkdir(parents=True, exist_ok=True)
+        (layers_root / "text-preview").mkdir(parents=True, exist_ok=True)
+        try:
+            from PIL import Image as _PILImage
+            _empty_png = _PILImage.new("RGBA", (1, 1), (0, 0, 0, 0))
+            for i in range(1, len(output_pages) + 1):
+                mask_path = layers_root / "mask" / f"{i:03}.png"
+                brush_path = layers_root / "brush" / f"{i:03}.png"
+                if not mask_path.exists():
+                    _empty_png.save(mask_path)
+                if not brush_path.exists():
+                    _empty_png.save(brush_path)
+        except Exception:
+            pass
 
 
 
@@ -546,6 +585,12 @@ def _bbox4(value, fallback=None) -> list[int]:
     return [int(source[0]), int(source[1]), int(source[2]), int(source[3])]
 
 
+def _optional_bbox4(value) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    return [int(value[0]), int(value[1]), int(value[2]), int(value[3])]
+
+
 def _preview_rel_path(page_number: int, layer_id: str) -> str:
     return f"layers/text-preview/{page_number:03}/{layer_id}.png"
 
@@ -556,6 +601,263 @@ def _bbox4_list(values) -> list[list[int]]:
         for value in (values or [])
         if isinstance(value, (list, tuple)) and len(value) >= 4
     ]
+
+
+def _bbox_iou(left, right) -> float:
+    a = _optional_bbox4(left)
+    b = _optional_bbox4(right)
+    if a is None or b is None:
+        return 0.0
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    area_a = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    union = area_a + area_b - inter
+    return inter / float(max(1, union))
+
+
+def _bbox_center_distance(left, right) -> float:
+    a = _optional_bbox4(left)
+    b = _optional_bbox4(right)
+    if a is None or b is None:
+        return float("inf")
+    acx = (a[0] + a[2]) / 2.0
+    acy = (a[1] + a[3]) / 2.0
+    bcx = (b[0] + b[2]) / 2.0
+    bcy = (b[1] + b[3]) / 2.0
+    return math.hypot(acx - bcx, acy - bcy)
+
+
+def _layer_match_bbox(layer: dict) -> list[int]:
+    return _bbox4(
+        layer.get("text_pixel_bbox"),
+        layer.get("source_bbox")
+        or layer.get("layout_bbox")
+        or layer.get("balloon_bbox")
+        or layer.get("bbox"),
+    )
+
+
+def _normalize_match_text(text: str) -> str:
+    return "".join(ch for ch in (text or "").upper() if ch.isalnum())
+
+
+def _split_translated_sentences(text: str) -> list[str]:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return []
+    parts = [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?…])\s+", stripped)
+        if segment.strip()
+    ]
+    if len(parts) <= 1 and " - " in stripped:
+        parts = [segment.strip() for segment in stripped.split(" - ") if segment.strip()]
+    return parts or [stripped]
+
+
+def _carry_translations_for_detected_layers(existing_layers: list[dict], reviewed_texts: list[dict]) -> list[str]:
+    if not existing_layers or not reviewed_texts:
+        return ["" for _ in reviewed_texts]
+
+    assignments = [""] * len(reviewed_texts)
+    used_existing: set[int] = set()
+
+    for old_idx, layer in enumerate(existing_layers):
+        if old_idx in used_existing:
+            continue
+        old_text_norm = _normalize_match_text(
+            layer.get("original", layer.get("text", ""))
+        )
+        old_translation = str(layer.get("translated", "") or "").strip()
+        if not old_text_norm or not old_translation:
+            continue
+
+        candidate_new_indices: list[int] = []
+        old_bbox = _layer_match_bbox(layer)
+        for new_idx, text in enumerate(reviewed_texts):
+            if assignments[new_idx]:
+                continue
+            new_text_norm = _normalize_match_text(text.get("text", ""))
+            if not new_text_norm or new_text_norm == old_text_norm:
+                continue
+            if new_text_norm not in old_text_norm:
+                continue
+            if _bbox_center_distance(_layer_match_bbox(text), old_bbox) > max(
+                220.0,
+                (old_bbox[3] - old_bbox[1]) * 1.5,
+            ):
+                continue
+            candidate_new_indices.append(new_idx)
+
+        if len(candidate_new_indices) < 2:
+            continue
+
+        split_translation = _split_translated_sentences(old_translation)
+        if len(split_translation) != len(candidate_new_indices):
+            continue
+
+        ordered_new_indices = sorted(
+            candidate_new_indices,
+            key=lambda idx: (
+                _layer_match_bbox(reviewed_texts[idx])[1],
+                _layer_match_bbox(reviewed_texts[idx])[0],
+            ),
+        )
+        for part, new_idx in zip(split_translation, ordered_new_indices):
+            assignments[new_idx] = part
+        used_existing.add(old_idx)
+
+    for new_idx, text in enumerate(reviewed_texts):
+        if assignments[new_idx]:
+            continue
+        new_bbox = _layer_match_bbox(text)
+        new_text_norm = _normalize_match_text(text.get("text", ""))
+
+        merge_candidates: list[tuple[int, list[int]]] = []
+        if new_text_norm:
+            for old_idx, layer in enumerate(existing_layers):
+                if old_idx in used_existing:
+                    continue
+                old_text_norm = _normalize_match_text(
+                    layer.get("original", layer.get("text", ""))
+                )
+                if not old_text_norm or old_text_norm == new_text_norm:
+                    continue
+                old_bbox = _layer_match_bbox(layer)
+                if old_text_norm in new_text_norm and _bbox_center_distance(new_bbox, old_bbox) <= max(
+                    180.0,
+                    (new_bbox[3] - new_bbox[1]) * 1.2,
+                ):
+                    merge_candidates.append((old_idx, old_bbox))
+
+        if len(merge_candidates) >= 2:
+            ordered_merge = sorted(
+                merge_candidates,
+                key=lambda item: (item[1][1], item[1][0]),
+            )
+            merged_translation = " ".join(
+                str(existing_layers[old_idx].get("translated", "") or "").strip()
+                for old_idx, _ in ordered_merge
+                if str(existing_layers[old_idx].get("translated", "") or "").strip()
+            ).strip()
+            if merged_translation:
+                assignments[new_idx] = merged_translation
+                used_existing.update(old_idx for old_idx, _ in ordered_merge)
+                continue
+
+        best_idx = -1
+        best_score = float("-inf")
+
+        for old_idx, layer in enumerate(existing_layers):
+            if old_idx in used_existing:
+                continue
+
+            old_bbox = _layer_match_bbox(layer)
+            iou = _bbox_iou(new_bbox, old_bbox)
+            center_dist = _bbox_center_distance(new_bbox, old_bbox)
+            old_text_norm = _normalize_match_text(
+                layer.get("original", layer.get("text", ""))
+            )
+            text_bonus = 2.5 if new_text_norm and new_text_norm == old_text_norm else 0.0
+            score = (iou * 12.0) + text_bonus - (center_dist / 180.0)
+
+            if iou < 0.05 and center_dist > max(96.0, (new_bbox[3] - new_bbox[1]) * 1.5):
+                continue
+            if score > best_score:
+                best_score = score
+                best_idx = old_idx
+
+        if best_idx < 0:
+            continue
+
+        translated = str(existing_layers[best_idx].get("translated", "") or "")
+        assignments[new_idx] = translated
+        used_existing.add(best_idx)
+
+    return assignments
+
+
+def _normalize_relative_y_bbox(value, reference_bbox) -> list[int] | None:
+    bbox = _optional_bbox4(value)
+    reference = _optional_bbox4(reference_bbox)
+    if bbox is None:
+        return None
+    if reference is None:
+        return bbox
+
+    bx1, by1, bx2, by2 = bbox
+    _, ry1, _, ry2 = reference
+    ref_h = max(1, ry2 - ry1)
+    box_h = max(1, by2 - by1)
+
+    overlaps_y = not (by2 <= ry1 or by1 >= ry2)
+    if overlaps_y:
+        return bbox
+
+    if by1 >= ry1:
+        return bbox
+
+    if box_h > int(ref_h * 1.5):
+        return bbox
+
+    shifted = [bx1, by1 + ry1, bx2, by2 + ry1]
+    shifted_by1 = shifted[1]
+    shifted_by2 = shifted[3]
+    if shifted_by2 <= ry1 or shifted_by1 >= ry2 + max(64, ref_h):
+        return bbox
+    return shifted
+
+
+def _normalize_relative_y_bbox_list(values, reference_bbox) -> list[list[int]]:
+    normalized: list[list[int]] = []
+    for value in values or []:
+        bbox = _normalize_relative_y_bbox(value, reference_bbox)
+        if bbox is not None:
+            normalized.append(bbox)
+    return normalized
+
+
+def _normalize_relative_y_polygons(polygons, reference_bbox) -> list:
+    if not isinstance(polygons, list) or not polygons:
+        return polygons
+
+    ys: list[int] = []
+    for polygon in polygons:
+        if not isinstance(polygon, list):
+            continue
+        for point in polygon:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                ys.append(int(point[1]))
+    if not ys:
+        return polygons
+
+    poly_bbox = [0, min(ys), 0, max(ys)]
+    normalized_bbox = _normalize_relative_y_bbox(poly_bbox, reference_bbox)
+    if normalized_bbox is None:
+        return polygons
+    delta_y = int(normalized_bbox[1]) - int(poly_bbox[1])
+    if delta_y == 0:
+        return polygons
+
+    shifted = []
+    for polygon in polygons:
+        if not isinstance(polygon, list):
+            shifted.append(polygon)
+            continue
+        shifted_polygon = []
+        for point in polygon:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                shifted_polygon.append([int(point[0]), int(point[1]) + delta_y])
+            else:
+                shifted_polygon.append(point)
+        shifted.append(shifted_polygon)
+    return shifted
 
 
 def _resolved_layer_bbox(layer: dict, fallback=None) -> list[int]:
@@ -575,14 +877,22 @@ def build_text_layer(
     corpus_textual_benchmark: dict,
 ) -> dict:
     layer_id = ocr_text.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
-    source_bbox = _bbox4(ocr_text.get("bbox"))
-    layout_bbox = _bbox4(ocr_text.get("balloon_bbox"), source_bbox)
+    source_bbox = _bbox4(ocr_text.get("source_bbox"), ocr_text.get("bbox"))
+    layout_bbox = _bbox4(
+        ocr_text.get("layout_bbox"),
+        ocr_text.get("balloon_bbox") or source_bbox,
+    )
+    text_pixel_bbox = _bbox4(
+        _normalize_relative_y_bbox(ocr_text.get("text_pixel_bbox"), source_bbox),
+        source_bbox,
+    )
     style = _merge_style(ocr_text.get("estilo"))
-    balloon_subregions = _bbox4_list(ocr_text.get("balloon_subregions"))
-    connected_lobe_bboxes = _bbox4_list(ocr_text.get("connected_lobe_bboxes"))
-    connected_text_groups = _bbox4_list(ocr_text.get("connected_text_groups"))
-    connected_position_bboxes = _bbox4_list(ocr_text.get("connected_position_bboxes"))
-    connected_focus_bboxes = _bbox4_list(ocr_text.get("connected_focus_bboxes"))
+    balloon_subregions = _normalize_relative_y_bbox_list(ocr_text.get("balloon_subregions"), layout_bbox)
+    connected_lobe_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_lobe_bboxes"), layout_bbox)
+    connected_text_groups = _normalize_relative_y_bbox_list(ocr_text.get("connected_text_groups"), layout_bbox)
+    connected_position_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_position_bboxes"), layout_bbox)
+    connected_focus_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_focus_bboxes"), layout_bbox)
+    line_polygons = _normalize_relative_y_polygons(ocr_text.get("line_polygons"), source_bbox)
 
     return {
         "id": layer_id,
@@ -591,11 +901,13 @@ def build_text_layer(
         "layout_bbox": layout_bbox,
         "render_bbox": None,
         "bbox": layout_bbox,
+        "text_pixel_bbox": text_pixel_bbox,
         "tipo": ocr_text.get("tipo", "fala"),
         "original": ocr_text.get("text", ""),
         "translated": translated,
         "text": ocr_text.get("text", ""),
         "ocr_confidence": float(ocr_text.get("confidence", 0.0) or 0.0),
+        "ocr_source": ocr_text.get("ocr_source"),
         "style": style,
         "estilo": style,
         "visible": True,
@@ -603,12 +915,16 @@ def build_text_layer(
         "order": layer_index,
         "render_preview_path": _preview_rel_path(page_number, layer_id),
         "detector": ocr_text.get("detector"),
-        "line_polygons": ocr_text.get("line_polygons"),
+        "line_polygons": line_polygons,
         "source_direction": ocr_text.get("source_direction"),
         "rendered_direction": ocr_text.get("rendered_direction"),
         "source_language": ocr_text.get("source_language"),
         "rotation_deg": float(ocr_text.get("rotation_deg", 0) or 0),
         "detected_font_size_px": ocr_text.get("detected_font_size_px"),
+        "skip_processing": bool(ocr_text.get("skip_processing", False)),
+        "balloon_type": ocr_text.get("balloon_type"),
+        "inpaint_mode": ocr_text.get("inpaint_mode"),
+        "inpaint_strategy": ocr_text.get("inpaint_strategy"),
         "balloon_bbox": layout_bbox,
         "balloon_subregions": balloon_subregions,
         "layout_group_size": int(ocr_text.get("layout_group_size", 1) or 1),
@@ -644,15 +960,20 @@ def build_text_layer(
 def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_index: int) -> dict:
     source_bbox = _bbox4(raw_layer.get("source_bbox"), raw_layer.get("bbox"))
     layout_bbox = _bbox4(raw_layer.get("layout_bbox"), raw_layer.get("balloon_bbox") or source_bbox)
+    text_pixel_bbox = _bbox4(
+        _normalize_relative_y_bbox(raw_layer.get("text_pixel_bbox"), source_bbox),
+        source_bbox,
+    )
     style = _merge_style(raw_layer.get("style") or raw_layer.get("estilo"))
     layer_id = raw_layer.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
     translated = raw_layer.get("translated", raw_layer.get("traduzido", ""))
     original = raw_layer.get("original", raw_layer.get("text", ""))
-    balloon_subregions = _bbox4_list(raw_layer.get("balloon_subregions"))
-    connected_lobe_bboxes = _bbox4_list(raw_layer.get("connected_lobe_bboxes"))
-    connected_text_groups = _bbox4_list(raw_layer.get("connected_text_groups"))
-    connected_position_bboxes = _bbox4_list(raw_layer.get("connected_position_bboxes"))
-    connected_focus_bboxes = _bbox4_list(raw_layer.get("connected_focus_bboxes"))
+    balloon_subregions = _normalize_relative_y_bbox_list(raw_layer.get("balloon_subregions"), layout_bbox)
+    connected_lobe_bboxes = _normalize_relative_y_bbox_list(raw_layer.get("connected_lobe_bboxes"), layout_bbox)
+    connected_text_groups = _normalize_relative_y_bbox_list(raw_layer.get("connected_text_groups"), layout_bbox)
+    connected_position_bboxes = _normalize_relative_y_bbox_list(raw_layer.get("connected_position_bboxes"), layout_bbox)
+    connected_focus_bboxes = _normalize_relative_y_bbox_list(raw_layer.get("connected_focus_bboxes"), layout_bbox)
+    line_polygons = _normalize_relative_y_polygons(raw_layer.get("line_polygons"), source_bbox)
 
     return {
         "id": layer_id,
@@ -661,11 +982,13 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
         "layout_bbox": layout_bbox,
         "render_bbox": raw_layer.get("render_bbox"),
         "bbox": layout_bbox,
+        "text_pixel_bbox": text_pixel_bbox,
         "tipo": raw_layer.get("tipo", "fala"),
         "original": original,
         "translated": translated,
         "text": original,
         "ocr_confidence": float(raw_layer.get("ocr_confidence", raw_layer.get("confianca_ocr", 0.0)) or 0.0),
+        "ocr_source": raw_layer.get("ocr_source"),
         "style": style,
         "estilo": style,
         "visible": bool(raw_layer.get("visible", True)),
@@ -673,12 +996,16 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
         "order": int(raw_layer.get("order", layer_index) or layer_index),
         "render_preview_path": raw_layer.get("render_preview_path") or _preview_rel_path(page_number, layer_id),
         "detector": raw_layer.get("detector"),
-        "line_polygons": raw_layer.get("line_polygons"),
+        "line_polygons": line_polygons,
         "source_direction": raw_layer.get("source_direction"),
         "rendered_direction": raw_layer.get("rendered_direction"),
         "source_language": raw_layer.get("source_language"),
         "rotation_deg": float(raw_layer.get("rotation_deg", 0) or 0),
         "detected_font_size_px": raw_layer.get("detected_font_size_px"),
+        "skip_processing": bool(raw_layer.get("skip_processing", False)),
+        "balloon_type": raw_layer.get("balloon_type"),
+        "inpaint_mode": raw_layer.get("inpaint_mode"),
+        "inpaint_strategy": raw_layer.get("inpaint_strategy"),
         "balloon_bbox": _bbox4(raw_layer.get("balloon_bbox"), layout_bbox),
         "balloon_subregions": balloon_subregions,
         "layout_group_size": int(raw_layer.get("layout_group_size", 1) or 1),
@@ -737,14 +1064,37 @@ def _sync_page_legacy_aliases(page: dict) -> None:
     page["textos"] = [
         {
             "id": layer.get("id"),
-            "bbox": _bbox4(layer.get("render_bbox"), _bbox4(layer.get("layout_bbox"), layer.get("source_bbox"))),
+            "bbox": _bbox4(
+                layer.get("render_bbox"),
+                _bbox4(
+                    layer.get("layout_bbox"),
+                    _bbox4(layer.get("source_bbox"), layer.get("bbox")),
+                ),
+            ),
             "tipo": layer.get("tipo", "fala"),
             "original": layer.get("original", ""),
             "translated": layer.get("translated", layer.get("traduzido", "")),
             "traduzido": layer.get("translated", ""),
             "confianca_ocr": float(layer.get("ocr_confidence", 0.0) or 0.0),
+            "ocr_confidence": float(layer.get("ocr_confidence", 0.0) or 0.0),
+            "ocr_source": layer.get("ocr_source"),
+            "source_bbox": _bbox4(layer.get("source_bbox"), layer.get("bbox")),
+            "text_pixel_bbox": _bbox4(
+                layer.get("text_pixel_bbox"),
+                _bbox4(layer.get("source_bbox"), layer.get("bbox")),
+            ),
+            "line_polygons": _normalize_relative_y_polygons(
+                layer.get("line_polygons"),
+                _bbox4(layer.get("source_bbox"), layer.get("bbox")),
+            ),
             "estilo": _merge_style(layer.get("style") or layer.get("estilo")),
             "qa_flags": list(layer.get("qa_flags") or []),
+            "balloon_bbox": _bbox4(layer.get("balloon_bbox"), layer.get("layout_bbox") or layer.get("bbox")),
+            "balloon_type": layer.get("balloon_type"),
+            "layout_profile": layer.get("layout_profile") or layer.get("block_profile"),
+            "layout_group_size": int(layer.get("layout_group_size", 1) or 1),
+            "skip_processing": bool(layer.get("skip_processing", False)),
+            "balloon_subregions": _bbox4_list(layer.get("balloon_subregions")),
         }
         for layer in text_layers
         if isinstance(layer, dict)
@@ -1113,8 +1463,22 @@ def _run_detect_page(project_path: Path, page_idx: int):
     }
     reviewed = enrich_page_layout(reviewed)
 
-    page["text_layers"] = []
-    page["textos"] = []
+    existing_layers = _page_text_layers_for_renderer(page, page_idx)
+    context = project.get("contexto", {}) or {}
+    reviewed_texts = reviewed.get("texts") or []
+    carried_translations = _carry_translations_for_detected_layers(existing_layers, reviewed_texts)
+    page["text_layers"] = [
+        build_text_layer(
+            page_number=page_number,
+            layer_index=idx,
+            ocr_text=text,
+            translated=carried_translations[idx] if idx < len(carried_translations) else "",
+            corpus_visual_benchmark=context.get("corpus_visual_benchmark", {}),
+            corpus_textual_benchmark=context.get("corpus_textual_benchmark", {}),
+        )
+        for idx, text in enumerate(reviewed_texts)
+        if isinstance(text, dict)
+    ]
     page["inpaint_blocks"] = [
         {
             "bbox": _bbox4(block.get("bbox")),
