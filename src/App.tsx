@@ -12,6 +12,7 @@ import { BootSplash } from "./components/ui/BootSplash";
 import { useAppStore } from "./lib/stores/appStore";
 import { checkModels, getCredits, checkOllama, getSystemProfile, onPipelineProgress } from "./lib/tauri";
 import { installE2EFixtureProject } from "./lib/e2e/fixtureProject";
+import { FEATURES } from "./lib/features";
 
 const LAB_WINDOW_MODE_KEY = "traduzai-window-mode";
 
@@ -24,15 +25,21 @@ function AppRoutes() {
       return;
     }
 
+    if (!FEATURES.lab) {
+      window.sessionStorage.removeItem(LAB_WINDOW_MODE_KEY);
+      return;
+    }
+
     if (queryMode === "lab") {
       window.sessionStorage.setItem(LAB_WINDOW_MODE_KEY, "lab");
     }
   }, [queryMode]);
 
-  const standaloneLab =
+  const standaloneLab = FEATURES.lab && (
     queryMode === "lab"
-      || (typeof window !== "undefined"
-        && window.sessionStorage.getItem(LAB_WINDOW_MODE_KEY) === "lab");
+    || (typeof window !== "undefined"
+      && window.sessionStorage.getItem(LAB_WINDOW_MODE_KEY) === "lab")
+  );
 
   if (standaloneLab) {
     return (
@@ -70,7 +77,11 @@ function AppRoutes() {
               <Route path="/setup" element={<Setup />} />
               <Route path="/processing" element={<Processing />} />
               <Route path="/preview" element={<Preview />} />
-              <Route path="/lab/*" element={<Lab />} />
+              {FEATURES.lab ? (
+                <Route path="/lab/*" element={<Lab />} />
+              ) : (
+                <Route path="/lab/*" element={<Navigate to="/" replace />} />
+              )}
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </Layout>
