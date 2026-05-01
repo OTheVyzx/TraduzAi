@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TraduzAi Project Schema v12",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "app",
+    "run",
+    "source",
+    "work_context",
+    "pages",
+    "glossary_hits",
+    "entity_flags",
+    "qa",
+    "export_report",
+    "legacy"
+  ],
+  "properties": {
+    "schema_version": { "const": "12.0" },
+    "app": { "const": "traduzai" },
+    "run": {
+      "type": "object",
+      "required": ["run_id", "mode", "pipeline_version"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "created_at": { "type": ["string", "null"] },
+        "started_at": { "type": ["string", "null"] },
+        "finished_at": { "type": ["string", "null"] },
+        "duration_ms": { "type": "number" },
+        "mode": { "enum": ["mock", "real", "debug"] },
+        "pipeline_version": { "const": "12.0" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["input_path", "page_count", "hash"],
+      "properties": {
+        "input_path": { "type": "string" },
+        "page_count": { "type": "integer", "minimum": 0 },
+        "hash": { "type": "string" }
+      }
+    },
+    "work_context": { "type": "object" },
+    "pages": { "type": "array" },
+    "glossary_hits": { "type": "array" },
+    "entity_flags": { "type": "array" },
+    "qa": {
+      "type": "object",
+      "required": ["summary", "flags"],
+      "properties": {
+        "summary": {
+          "type": "object",
+          "required": ["total_pages", "pages_with_flags", "critical", "high", "medium", "low"]
+        },
+        "flags": { "type": "array" }
+      }
+    },
+    "export_report": {
+      "type": "object",
+      "required": ["status", "files"],
+      "properties": {
+        "status": { "enum": ["not_exported", "clean", "with_warnings", "blocked"] },
+        "files": { "type": "array" }
+      }
+    },
+    "legacy": {
+      "type": "object",
+      "required": ["paginas"],
+      "properties": {
+        "paginas": { "type": "array" }
+      }
+    }
+  }
+}

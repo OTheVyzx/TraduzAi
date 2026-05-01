@@ -1,0 +1,12 @@
+{
+  "title": "Fixture Tiny",
+  "synopsis": "Synthetic chapter used for deterministic tests.",
+  "genres": ["action"],
+  "characters": ["Ari", "Bram"],
+  "terms": ["Guild", "Mana"],
+  "relationships": [],
+  "factions": ["Northern Guild"],
+  "arc_summaries": [],
+  "lexical_memory": {},
+  "sources_used": []
+}

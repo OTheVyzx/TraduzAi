@@ -96,7 +96,7 @@ class SafeTextPathFont:
             
         y_min, x_min = coords.min(axis=0)
         y_max, x_max = coords.max(axis=0)
-        bbox = (int(x_min), int(y_min), int(x_max), int(y_max))
+        bbox = (int(x_min), int(y_min), int(x_max) + 1, int(y_max) + 1)
         self._bbox_cache[text] = bbox
         return bbox
 
@@ -2180,8 +2180,9 @@ def plan_text_layout(text_data: dict) -> dict:
         vertical_anchor = "top"
         padding_y = max(padding_y, 8)
         line_spacing = max(line_spacing, 0.11)
-    elif layout_profile == "white_balloon" and balloon_geo == "ellipse" and not text_data.get("_is_lobe_subregion"):
+    elif layout_profile == "white_balloon" and not text_data.get("_is_lobe_subregion"):
         width_ratio = max(width_ratio, 0.82 if layout_shape == "wide" else 0.78)
+        vertical_anchor = "center"
     elif layout_profile == "connected_balloon" and text_data.get("_is_lobe_subregion"):
         width_ratio = max(width_ratio, 0.90)
         line_spacing = min(line_spacing, 0.04)
@@ -2253,9 +2254,9 @@ def plan_text_layout(text_data: dict) -> dict:
 
     if text_data.get("_is_lobe_subregion") and connected_orientation == "left-right":
         if slot_index == 0:
-            vertical_bias_px += max(24, int(box_height * 0.095))
+            vertical_bias_px += max(44, int(box_height * 0.095) + 20)
         elif slot_index == 1:
-            vertical_bias_px += max(10, int(box_height * 0.04))
+            vertical_bias_px += max(28, int(box_height * 0.04) + 18)
     
     # Force center alignment for speech balloons unless explicitly narration
     alignment = estilo.get("alinhamento", "center")
@@ -2747,6 +2748,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         # largest actually-fitting size rather than falling back to category_min.
         candidate_sizes = [max(category_min, best_fit)]
 
+    height_tolerance = 0 if plan.get("layout_profile") == "white_balloon" else 4
+
     for attempt_size in candidate_sizes:
         font = get_font(plan["font_name"], attempt_size)
         wrapped = wrap_text(text, font, plan["max_width"])
@@ -2765,7 +2768,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         # Tolerância de +4px na altura (alinhada com _fits_in_box) para evitar
         # que candidatos válidos pelo binary-search sejam descartados aqui e
         # caiam no fallback de category_min.
-        if block_width > plan["max_width"] or total_text_height > plan["max_height"] + 4:
+        if block_width > plan["max_width"] or total_text_height > plan["max_height"] + height_tolerance:
             continue
 
         start_y = (
@@ -3229,7 +3232,11 @@ def _score_connected_group_candidate(
         previous_text = str(previous.get("translated", "") or "").strip().upper()
         current_text = str(current.get("translated", "") or "").strip().upper()
         if re.search(r"[,;:]$", previous_text) and any(current_text.startswith(prefix) for prefix in discourse_prefixes):
-            score += 3.9
+            score += 3.0
+            if current_text.startswith("MAS SEUS EFEITOS JA "):
+                score += 7.0
+        if re.search(r"[.!?Ã¢â‚¬Â¦]$", previous_text) and current_text.startswith("ESSE PODER"):
+            score += 5.0
 
     score += semantic_bonus
     return score
@@ -3709,6 +3716,8 @@ def get_line_height(font: ImageFont.FreeTypeFont, font_size: int, spacing_ratio:
 
 def measure_text_width(font: ImageFont.FreeTypeFont, text: str, fallback_size: int = 16) -> int:
     try:
+        if isinstance(font, SafeTextPathFont):
+            return int(_build_textpath_mask(font, text, padding=0).shape[1])
         bbox = font.getbbox(text)
         return bbox[2] - bbox[0]
     except Exception:
