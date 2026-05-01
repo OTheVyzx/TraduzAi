@@ -1,0 +1,28 @@
+{
+  "include": [
+    "pipeline"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "node_modules",
+    "src",
+    "src-tauri",
+    "pipeline/venv"
+  ],
+  "venvPath": "pipeline",
+  "venv": "venv",
+  "pythonVersion": "3.12",
+  "reportMissingImports": "none",
+  "typeCheckingMode": "off",
+  "extraPaths": [
+    "./pipeline"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "pipeline",
+      "extraPaths": [
+        "."
+      ]
+    }
+  ]
+}

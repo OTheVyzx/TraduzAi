@@ -13,7 +13,10 @@ if __package__ in (None, ""):
     if repo_root_str not in sys.path:
         sys.path.insert(0, repo_root_str)
 
+from lab.agents import ClaudeReviewerAgent
 from lab.benchmarking import aggregate_benchmark_results, benchmark_chapter_output, load_corpus_profiles
+from lab.critics import run_all_critics_over_chapters
+from lab.planner import build_proposals, proposal_to_lab_payload
 from lab.reference_ingestor import ChapterPair, pair_chapters
 
 SNAPSHOT_STATE: dict[str, object] | None = None
@@ -256,9 +259,18 @@ def initialize_snapshot_state(
     persist_snapshot_state()
 
 
+_stdout_pipe_broken = False
+
+
 def emit(message_type: str, **payload: object) -> None:
+    global _stdout_pipe_broken
     apply_snapshot_event(message_type, payload)
-    print(json.dumps({"type": message_type, **payload}, ensure_ascii=False), flush=True)
+    if _stdout_pipe_broken:
+        return
+    try:
+        print(json.dumps({"type": message_type, **payload}, ensure_ascii=False), flush=True)
+    except OSError:
+        _stdout_pipe_broken = True
 
 
 def wait_if_paused(pause_file: Path) -> None:
@@ -1072,48 +1084,98 @@ def main() -> int:
     aggregate_payload = aggregate.to_dict()
     write_json(run_dir / "benchmark_summary.json", aggregate_payload)
 
-    proposal = build_proposal(run_id, git_available, aggregate_payload, chapter_failures)
-    write_json(run_dir / "proposal.json", proposal)
-    emit("review_requested", proposal=proposal)
+    # === Critics rule-based (Fase 2) =====================================
+    # Roda os 4 critics locais (OCR / Translation / Typeset / Inpaint) sobre
+    # os artefatos completados, agrega os findings e gera propostas
+    # priorizadas via Planner. Cada proposal mira um problema especifico
+    # detectado e carrega `local_patch_hint` p/ o Coder downstream.
+    successful_artifacts = [
+        artifact
+        for artifact in artifacts
+        if artifact.get("project_json")
+        and Path(artifact.get("project_json", "")).exists()
+        and not artifact.get("error")
+    ]
+    try:
+        findings = run_all_critics_over_chapters(successful_artifacts)
+    except Exception as exc:  # pragma: no cover - nunca deve derrubar o Lab
+        findings = []
+        write_json(
+            run_dir / "critics_error.json",
+            {"error": str(exc), "traceback": traceback.format_exc()},
+        )
+    write_json(
+        run_dir / "critics_findings.json",
+        {"findings": [f.to_dict() for f in findings], "count": len(findings)},
+    )
 
-    for reviewer_id in proposal["required_reviewers"]:
+    planner_proposals = build_proposals(findings, aggregate_payload, run_id)
+
+    # Converte para payload compativel com LabProposal + enriquece reviewers.
+    proposals: list[dict] = []
+    for proposal_obj in planner_proposals:
+        payload = proposal_to_lab_payload(proposal_obj, run_id, git_available)
+        payload["required_reviewers"] = required_reviewers_for(payload["touched_domains"])
+        proposals.append(payload)
+
+    # Fallback: mesmo sem findings o Lab ainda emite uma proposta consolidada
+    # para manter o contrato do frontend (1 rodada = >=1 proposta).
+    if not proposals:
+        proposals.append(build_proposal(run_id, git_available, aggregate_payload, chapter_failures))
+
+    write_json(run_dir / "proposals.json", {"proposals": proposals})
+    # Mantem proposal.json (singular) apontando para a proposta top-priority
+    # p/ retrocompatibilidade com consumidores antigos.
+    write_json(run_dir / "proposal.json", proposals[0])
+
+    reviewer_agent = ClaudeReviewerAgent()
+
+    for proposal in proposals:
         wait_if_paused(pause_file)
-        label = reviewer_label(reviewer_id)
-        verdict, payload = reviewer_result_for(proposal, aggregate_payload, reviewer_id)
-        emit_agent(
-            agent_id=reviewer_id,
-            label=label,
-            layer="review",
-            status="running",
-            current_task="Revisando benchmark consolidado do lote",
-            last_action=f"Analisando proposta {proposal['proposal_id']}",
-            confidence=0.82,
-            touched_domains=proposal["touched_domains"],
-            proposal_id=proposal["proposal_id"],
-        )
-        time.sleep(0.08)
-        emit(
-            "review_result",
-            review={
-                "proposal_id": proposal["proposal_id"],
-                "reviewer_id": reviewer_id,
-                "reviewer_label": label,
-                "verdict": verdict,
-                "touched_domains": proposal["touched_domains"],
-                "findings": payload["findings"],
-            },
-        )
-        emit_agent(
-            agent_id=reviewer_id,
-            label=label,
-            layer="review",
-            status="idle",
-            current_task="Aguardando proxima proposta",
-            last_action=f"Veredito emitido: {verdict}",
-            confidence=0.82,
-            touched_domains=proposal["touched_domains"],
-            proposal_id=proposal["proposal_id"],
-        )
+        emit("review_requested", proposal=proposal)
+
+        for reviewer_id in proposal["required_reviewers"]:
+            wait_if_paused(pause_file)
+            label = reviewer_label(reviewer_id)
+            verdict, payload = reviewer_agent.review(
+                proposal, aggregate_payload, reviewer_id, repo_root=root
+            )
+            emit_agent(
+                agent_id=reviewer_id,
+                label=label,
+                layer="review",
+                status="running",
+                current_task=f"Revisando {proposal.get('title', proposal['proposal_id'])}",
+                last_action=f"Analisando proposta {proposal['proposal_id']}",
+                confidence=0.82,
+                touched_domains=proposal["touched_domains"],
+                proposal_id=proposal["proposal_id"],
+            )
+            time.sleep(0.04)
+            emit(
+                "review_result",
+                review={
+                    "proposal_id": proposal["proposal_id"],
+                    "reviewer_id": reviewer_id,
+                    "reviewer_label": label,
+                    "verdict": verdict,
+                    "touched_domains": proposal["touched_domains"],
+                    "findings": payload["findings"],
+                },
+            )
+            emit_agent(
+                agent_id=reviewer_id,
+                label=label,
+                layer="review",
+                status="idle",
+                current_task="Aguardando proxima proposta",
+                last_action=f"Veredito emitido: {verdict}",
+                confidence=0.82,
+                touched_domains=proposal["touched_domains"],
+                proposal_id=proposal["proposal_id"],
+            )
+
+    top_proposal = proposals[0]
 
     emit_agent(
         agent_id="eval_judge",
@@ -1121,16 +1183,19 @@ def main() -> int:
         layer="lab",
         status="running",
         current_task="Consolidando benchmark real do corpus completo",
-        last_action=f"{len(chapter_results)} capitulos concluidos e {chapter_failures} com falha",
+        last_action=(
+            f"{len(chapter_results)} capitulos concluidos, "
+            f"{chapter_failures} com falha e {len(proposals)} proposta(s) geradas"
+        ),
         confidence=0.94,
-        proposal_id=proposal["proposal_id"],
+        proposal_id=top_proposal["proposal_id"],
     )
     time.sleep(0.08)
     emit(
         "benchmark_result",
         benchmark={
-            "proposal_id": proposal["proposal_id"],
-            "batch_id": proposal["batch_id"],
+            "proposal_id": top_proposal["proposal_id"],
+            "batch_id": top_proposal["batch_id"],
             "score_before": aggregate.score_before,
             "score_after": aggregate.score_after,
             "green": aggregate.green,
@@ -1148,7 +1213,7 @@ def main() -> int:
         current_task="Aguardando proxima execucao",
         last_action="Benchmark real consolidado e persistido",
         confidence=0.94,
-        proposal_id=proposal["proposal_id"],
+        proposal_id=top_proposal["proposal_id"],
     )
 
     write_json(
@@ -1159,7 +1224,9 @@ def main() -> int:
             "total_pairs": total_pairs,
             "chapter_failures": chapter_failures,
             "benchmark": aggregate_payload,
-            "proposal": proposal,
+            "proposal": top_proposal,
+            "proposals": proposals,
+            "findings_count": len(findings),
         },
     )
 
@@ -1169,14 +1236,15 @@ def main() -> int:
         run_id=run_id,
         current_stage="awaiting_decision",
         message=(
-            f"Rodada finalizada com {len(chapter_results)} capitulos benchmarkados "
-            f"e {chapter_failures} falha(s). Escopo: {scope_label}."
+            f"Rodada finalizada com {len(chapter_results)} capitulos benchmarkados, "
+            f"{chapter_failures} falha(s) e {len(proposals)} proposta(s). "
+            f"Escopo: {scope_label}."
         ),
         total_pairs=total_pairs,
         processed_pairs=len(chapter_results),
         eta_seconds=0,
-        pending_proposals=1,
-        active_batch_id=proposal["batch_id"],
+        pending_proposals=len(proposals),
+        active_batch_id=top_proposal["batch_id"],
         git_available=git_available,
         source_dir=str(source_dir),
         reference_dir=str(reference_dir),

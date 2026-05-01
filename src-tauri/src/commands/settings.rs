@@ -1,5 +1,60 @@
 use serde::{Deserialize, Serialize};
+use std::process::Stdio;
 use tauri::Manager;
+use tokio::process::Command;
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SupportedLanguage {
+    pub code: String,
+    pub label: String,
+    #[serde(default = "default_ocr_strategy")]
+    pub ocr_strategy: String,
+}
+
+fn default_ocr_strategy() -> String {
+    "best_effort".to_string()
+}
+
+fn parse_supported_languages_json(raw: &str) -> Result<Vec<SupportedLanguage>, String> {
+    serde_json::from_str(raw).map_err(|e| format!("Falha ao ler idiomas suportados: {e}"))
+}
+
+#[tauri::command]
+pub async fn load_supported_languages(
+    app: tauri::AppHandle,
+) -> Result<Vec<SupportedLanguage>, String> {
+    let sidecar = crate::commands::pipeline::get_sidecar_info(&app)?;
+    let mut cmd = Command::new(&sidecar.program);
+    if let Some(script) = &sidecar.script {
+        cmd.arg(script);
+    }
+    crate::commands::pipeline::apply_sidecar_env(&mut cmd, &sidecar.program)?;
+    cmd.arg("--list-supported-languages");
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Falha ao consultar idiomas suportados: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+        return Err(format!(
+            "Sidecar nao conseguiu listar idiomas suportados: {detail}"
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Resposta invalida do sidecar: {e}"))?;
+    parse_supported_languages_json(stdout.trim())
+}
 
 #[tauri::command]
 pub async fn restart_app(app: tauri::AppHandle) {
@@ -21,25 +76,51 @@ pub async fn restart_app(app: tauri::AppHandle) {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct AppSettings {
+    #[serde(default = "AppSettings::default_model")]
     pub ollama_model: String,
+    #[serde(default = "AppSettings::default_host")]
     pub ollama_host: String,
+    #[serde(default = "AppSettings::default_source_language")]
+    pub idioma_origem: String,
+    #[serde(default = "AppSettings::default_target_language")]
     pub idioma_destino: String,
+}
+
+impl AppSettings {
+    pub fn default_model() -> String {
+        "traduzai-translator".to_string()
+    }
+
+    pub fn default_host() -> String {
+        "http://localhost:11434".to_string()
+    }
+
+    pub fn default_source_language() -> String {
+        "en".to_string()
+    }
+
+    pub fn default_target_language() -> String {
+        "pt-BR".to_string()
+    }
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            ollama_model: "traduzai-translator".to_string(),
-            ollama_host: "http://localhost:11434".to_string(),
-            idioma_destino: "pt-BR".to_string(),
+            ollama_model: Self::default_model(),
+            ollama_host: Self::default_host(),
+            idioma_origem: Self::default_source_language(),
+            idioma_destino: Self::default_target_language(),
         }
     }
 }
 
-fn settings_path(_app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let app_data = std::path::PathBuf::from("D:\\traduzai_data");
-    Ok(app_data.join("settings.json"))
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let storage = crate::storage::service_for_app(app)?;
+    let paths = storage.ensure_base_dirs()?;
+    Ok(paths.settings)
 }
 
 #[tauri::command]
@@ -61,8 +142,11 @@ pub async fn load_settings(app: tauri::AppHandle) -> Result<AppSettings, String>
 }
 
 /// Synchronous helper used by pipeline to read settings without async context.
-pub fn load_settings_sync(_app: &tauri::AppHandle) -> AppSettings {
-    let path = std::path::PathBuf::from("D:\\traduzai_data").join("settings.json");
+pub fn load_settings_sync(app: &tauri::AppHandle) -> AppSettings {
+    let path = match settings_path(app) {
+        Ok(path) => path,
+        Err(_) => return AppSettings::default(),
+    };
     if !path.exists() {
         return AppSettings::default();
     }
@@ -220,6 +304,25 @@ mod tests {
     fn app_settings_default_values() {
         let settings = AppSettings::default();
         assert_eq!(settings.ollama_model, "traduzai-translator");
+        assert_eq!(settings.idioma_origem, "en");
         assert_eq!(settings.idioma_destino, "pt-BR");
+    }
+
+    #[test]
+    fn parse_supported_languages_json_accepts_valid_payload() {
+        let raw = r#"[{"code":"en","label":"English","ocr_strategy":"dedicated"}]"#;
+        let parsed = parse_supported_languages_json(raw).expect("payload valido");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].code, "en");
+        assert_eq!(parsed[0].ocr_strategy, "dedicated");
+    }
+
+    #[test]
+    fn app_settings_deserialize_old_payload_with_new_field_defaults() {
+        let raw = r#"{"ollama_model":"foo","ollama_host":"http://localhost:11434","idioma_destino":"es"}"#;
+        let parsed: AppSettings = serde_json::from_str(raw).expect("payload antigo valido");
+        assert_eq!(parsed.ollama_model, "foo");
+        assert_eq!(parsed.idioma_origem, "en");
+        assert_eq!(parsed.idioma_destino, "es");
     }
 }

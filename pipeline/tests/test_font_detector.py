@@ -10,7 +10,7 @@ from typesetter.font_detector import FontDetector, _render_font_sample_textpath
 class FontDetectorTests(unittest.TestCase):
     def test_render_font_sample_textpath_renders_project_font_to_rgb_image(self):
         fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
-        font_path = fonts_dir / "CCDaveGibbonsLower W00 Regular.ttf"
+        font_path = fonts_dir / "ComicNeue-Bold.ttf"
 
         sample = _render_font_sample_textpath(
             font_path=font_path,
@@ -36,7 +36,7 @@ class FontDetectorTests(unittest.TestCase):
 
         with patch.object(detector, "_extract_features", return_value=np.array([1.0, 0.0], dtype=np.float32)):
             self.assertEqual(detector.detect(region, allow_default=False), "SINGLE FIGHTER.otf")
-            self.assertEqual(detector.detect(region, allow_default=True), "CCDaveGibbonsLower W00 Regular.ttf")
+            self.assertEqual(detector.detect(region, allow_default=True), "ComicNeue-Bold.ttf")
 
 
 if __name__ == "__main__":

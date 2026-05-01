@@ -1,0 +1,520 @@
+{
+  "image": "D:\\traduzai_data\\projects\\aa66aa60-255f-406e-806b-169abecd5d49\\originals\\003.webp",
+  "width": 720,
+  "height": 10017,
+  "texts": [
+    {
+      "text": "THE LIGHTNNG OF thE HUNWON MRROR WAS SIMILAR TO THE SHMADHI TRuE fie OF DRAGON-SUBDUING PHLM; YET DIFFERENT;",
+      "bbox": [
+        181,
+        927,
+        543,
+        1131
+      ],
+      "confidence": 0.891,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "DK Full Blast.otf",
+        "tamanho": 48,
+        "cor": "#202020",
+        "cor_gradiente": [],
+        "contorno": "",
+        "contorno_px": 0,
+        "glow": true,
+        "glow_cor": "#DEDEDE",
+        "glow_px": 3,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center"
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        181,
+        950,
+        543,
+        1131
+      ],
+      "balloon_type": "white",
+      "balloon_bbox": [
+        181,
+        927,
+        543,
+        1131
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        181,
+        927,
+        543,
+        1131
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "Both DIVIDE INNER ENERGY INTO YIN AND YANG,",
+      "bbox": [
+        73,
+        2316,
+        386,
+        2424
+      ],
+      "confidence": 0.676,
+      "tipo": "narracao",
+      "estilo": {
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#1C1C1C",
+        "cor_gradiente": [],
+        "contorno": "#FDFDFD",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#E8E8E8",
+        "glow_px": 3,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        79,
+        2333,
+        374,
+        2422
+      ],
+      "balloon_type": "white",
+      "balloon_bbox": [
+        73,
+        2316,
+        386,
+        2424
+      ],
+      "layout_shape": "wide",
+      "layout_align": "top",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        73,
+        2316,
+        386,
+        2424
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "BuT NLIKE DRAGON-SUBDUINE PALM; IHErE the TIO FORCES SPIN FIERCELY",
+      "bbox": [
+        198,
+        2952,
+        494,
+        3152
+      ],
+      "confidence": 0.903,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#1C1C1C",
+        "cor_gradiente": [],
+        "contorno": "",
+        "contorno_px": 0,
+        "glow": false,
+        "glow_cor": "",
+        "glow_px": 0,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        205,
+        2961,
+        485,
+        3152
+      ],
+      "balloon_type": "textured",
+      "balloon_bbox": [
+        51,
+        2921,
+        546,
+        3310
+      ],
+      "layout_shape": "square",
+      "layout_align": "center",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        198,
+        2952,
+        494,
+        3152
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "THIS HUNWON THUNDER; At THE MOMENT THE INNER ENERGY REACHES A CERTHIN POINT,",
+      "bbox": [
+        179,
+        5082,
+        548,
+        5248
+      ],
+      "confidence": 0.751,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "DK Full Blast.otf",
+        "tamanho": 48,
+        "cor": "#1D1E1E",
+        "cor_gradiente": [],
+        "contorno": "#FBFCFD",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#DFE1E1",
+        "glow_px": 3,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center"
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        181,
+        5104,
+        536,
+        5243
+      ],
+      "balloon_type": "white",
+      "balloon_bbox": [
+        179,
+        5082,
+        548,
+        5248
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        179,
+        5082,
+        548,
+        5248
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "STOPS ALL MOHEMEHT AND TRANSFORMS IHTO A SINGLE BOLT OF LIGHTHNG ThaT UNLEASHES EXPLOSHIE POIER:",
+      "bbox": [
+        73,
+        6769,
+        631,
+        7092
+      ],
+      "confidence": 0.937,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#E8E8E8",
+        "cor_gradiente": [
+          "#CBCBCB",
+          "#9A9B9C"
+        ],
+        "contorno": "#000203",
+        "contorno_px": 4,
+        "glow": false,
+        "glow_cor": "",
+        "glow_px": 0,
+        "sombra": true,
+        "sombra_cor": "#000000",
+        "sombra_offset": [
+          2,
+          2
+        ],
+        "bold": true,
+        "italico": false,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        89,
+        6796,
+        626,
+        7069
+      ],
+      "balloon_type": "textured",
+      "balloon_bbox": [
+        73,
+        6769,
+        631,
+        7092
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        73,
+        6769,
+        631,
+        7092
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    },
+    {
+      "text": "ONGE That FORGE IS Released,",
+      "bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "confidence": 0.801,
+      "tipo": "fala",
+      "estilo": {
+        "fonte": "KOMIKAX_.ttf",
+        "tamanho": 48,
+        "cor": "#141414",
+        "cor_gradiente": [],
+        "contorno": "#FEFEFE",
+        "contorno_px": 4,
+        "glow": true,
+        "glow_cor": "#E6E6E6",
+        "glow_px": 3,
+        "sombra": false,
+        "sombra_cor": "",
+        "sombra_offset": [
+          0,
+          0
+        ],
+        "bold": true,
+        "italico": true,
+        "rotacao": 0,
+        "alinhamento": "center",
+        "force_upper": true
+      },
+      "ocr_source": "vision-easyocr",
+      "ocr_reviewed": false,
+      "ocr_profile": "max",
+      "ocr_semantic_reviewed": false,
+      "ocr_mode": "easyocr",
+      "skip_processing": false,
+      "line_polygons": [],
+      "text_pixel_bbox": [
+        171,
+        9793,
+        547,
+        9965
+      ],
+      "balloon_type": "textured",
+      "balloon_bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "layout_shape": "wide",
+      "layout_align": "center",
+      "layout_group_size": 1,
+      "ocr_text_bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "connected_text_groups": [],
+      "connected_lobe_bboxes": [],
+      "connected_position_bboxes": [],
+      "connected_detection_confidence": 0.0,
+      "connected_group_confidence": 0.0,
+      "connected_position_confidence": 0.0,
+      "balloon_subregions": [],
+      "connected_balloon_orientation": "",
+      "connected_focus_bboxes": [],
+      "connected_position_reasoner": "heuristic",
+      "connected_reasoner_model": "",
+      "connected_reasoner_notes": "",
+      "subregion_confidence": 0.0
+    }
+  ],
+  "_vision_blocks": [
+    {
+      "bbox": [
+        181,
+        927,
+        543,
+        1131
+      ],
+      "mask": null,
+      "confidence": 0.890625
+    },
+    {
+      "bbox": [
+        73,
+        2316,
+        386,
+        2424
+      ],
+      "mask": null,
+      "confidence": 0.67626953125
+    },
+    {
+      "bbox": [
+        198,
+        2952,
+        494,
+        3152
+      ],
+      "mask": null,
+      "confidence": 0.9033203125
+    },
+    {
+      "bbox": [
+        179,
+        5082,
+        548,
+        5248
+      ],
+      "mask": null,
+      "confidence": 0.7509765625
+    },
+    {
+      "bbox": [
+        73,
+        6769,
+        631,
+        7092
+      ],
+      "mask": null,
+      "confidence": 0.93701171875
+    },
+    {
+      "bbox": [
+        161,
+        9772,
+        553,
+        9968
+      ],
+      "mask": null,
+      "confidence": 0.80078125
+    }
+  ]
+}

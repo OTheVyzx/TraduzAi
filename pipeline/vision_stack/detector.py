@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.util
 import io
 import logging
 import os
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -44,6 +46,21 @@ def _default_models_dir() -> Path:
 MODELS_DIR = _default_models_dir()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PK_CTD_DIR = PROJECT_ROOT / "pk" / "huggingface" / "mayocream" / "comic-text-detector"
+
+
+def _pop_module_namespace(prefixes: tuple[str, ...]) -> dict[str, types.ModuleType]:
+    removed: dict[str, types.ModuleType] = {}
+    for name in list(sys.modules.keys()):
+        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
+            module = sys.modules.pop(name, None)
+            if isinstance(module, types.ModuleType):
+                removed[name] = module
+    return removed
+
+
+def _restore_module_namespace(removed: dict[str, types.ModuleType]) -> None:
+    for name, module in removed.items():
+        sys.modules[name] = module
 
 
 class _ComicTextDownBlock(nn.Module):
@@ -196,22 +213,38 @@ class TextDetector:
                 self._model.half()
             self._backend = "ultralytics"
             logger.info("Detector carregado via ultralytics (%s)", self.device)
+            return
         except Exception as exc:
             logger.warning("comic-text-detector nao carregou via ultralytics: %s", exc)
-            os.environ["OMP_NUM_THREADS"] = "1"
-            os.environ["OPENBLAS_NUM_THREADS"] = "1"
-            os.environ["MKL_NUM_THREADS"] = "1"
-            from paddleocr import PaddleOCR
 
-            use_gpu = self.device.type == "cuda"
-            self._model = PaddleOCR(
-                use_angle_cls=False,
-                lang="en",
-                use_gpu=use_gpu,
-                show_log=False,
-            )
-            self._backend = "paddle-det"
-            logger.info("Detector carregado via paddle-det (gpu=%s)", use_gpu)
+        if self._load_paddle_detection_backend():
+            return
+
+        self._model = None
+        self._backend = "contour-fallback"
+        logger.warning("Detector visual caiu para contour-fallback local")
+
+    def _load_paddle_detection_backend(self) -> bool:
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        try:
+            from paddleocr import PaddleOCR
+            import paddle.base.libpaddle as libpaddle
+            if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
+                libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
+        except Exception as exc:
+            logger.warning("PaddleOCR indisponivel para deteccao; seguindo com fallback local: %s", exc)
+            return False
+
+        use_gpu = self.device.type == "cuda"
+        self._model = PaddleOCR(
+            use_angle_cls=False,
+            lang="en",
+        )
+        self._backend = "paddle-det"
+        logger.info("Detector carregado via paddle-det (gpu=%s)", use_gpu)
+        return True
 
     def _load_comic_text_detector_native(self) -> bool:
         if self._model_type != "comic-text-detector":
@@ -220,7 +253,10 @@ class TextDetector:
             return False
 
         try:
-            checkpoint = torch.load(str(self._model_path), map_location="cpu")
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=FutureWarning)
+                checkpoint = torch.load(str(self._model_path), map_location="cpu", weights_only=False)
             blk_det = checkpoint.get("blk_det") if isinstance(checkpoint, dict) else None
             if not isinstance(blk_det, dict):
                 return False
@@ -236,10 +272,16 @@ class TextDetector:
             seg_state = None
             weight_source = "checkpoint"
             if safetensor_paths["yolo"].exists():
-                yolo_state = self._load_safetensor_state_dict(safetensor_paths["yolo"])
-                weight_source = "safetensors"
+                try:
+                    yolo_state = self._load_safetensor_state_dict(safetensor_paths["yolo"])
+                    weight_source = "safetensors"
+                except Exception as exc:
+                    logger.warning("Nao foi possivel carregar yolo safetensor; usando checkpoint: %s", exc)
             if safetensor_paths["unet"].exists():
-                seg_state = self._load_safetensor_state_dict(safetensor_paths["unet"])
+                try:
+                    seg_state = self._load_safetensor_state_dict(safetensor_paths["unet"])
+                except Exception as exc:
+                    logger.warning("Nao foi possivel carregar unet safetensor; usando checkpoint: %s", exc)
 
             previous_disable = logging.root.manager.disable
             logging.disable(logging.CRITICAL)
@@ -319,11 +361,31 @@ class TextDetector:
         if repo_path not in sys.path:
             sys.path.insert(0, repo_path)
 
-        DetectionModel = importlib.import_module("models.yolo").Model
-        non_max_suppression = importlib.import_module("utils.general").non_max_suppression
-        letterbox = importlib.import_module("utils.augmentations").letterbox
-        c3_cls = importlib.import_module("models.common").C3
+        removed_modules = _pop_module_namespace(("models", "utils"))
+        try:
+            self._ensure_optional_yolov5_runtime_stubs()
+            DetectionModel = importlib.import_module("models.yolo").Model
+            non_max_suppression = importlib.import_module("utils.general").non_max_suppression
+            letterbox = importlib.import_module("utils.augmentations").letterbox
+            c3_cls = importlib.import_module("models.common").C3
+        finally:
+            _pop_module_namespace(("models", "utils"))
+            _restore_module_namespace(removed_modules)
         return DetectionModel, non_max_suppression, letterbox, c3_cls
+
+    @staticmethod
+    def _ensure_optional_yolov5_runtime_stubs():
+        if "seaborn" in sys.modules or importlib.util.find_spec("seaborn") is not None:
+            return
+
+        seaborn_stub = types.ModuleType("seaborn")
+
+        def _noop_color_palette(*args, **kwargs):
+            del args, kwargs
+            return [(0.0, 0.0, 0.0)]
+
+        seaborn_stub.color_palette = _noop_color_palette
+        sys.modules["seaborn"] = seaborn_stub
 
     def _get_comic_text_safetensor_paths(self) -> dict[str, Path]:
         return {
@@ -346,6 +408,8 @@ class TextDetector:
 
         if self._backend == "comic-text-detector":
             blocks = self._detect_comic_text_native(img_rgb, conf_threshold=conf_threshold)
+        elif self._backend == "contour-fallback":
+            blocks = self._detect_contour_fallback(img_rgb)
         else:
             target_size = self._get_inference_size(orig_h, orig_w)
             img_resized = cv2.resize(img_rgb, (target_size[1], target_size[0]))
@@ -361,8 +425,47 @@ class TextDetector:
         blocks.sort(key=lambda b: (b.y1 // 100, -(b.x1)))
         return blocks
 
+    def _detect_contour_fallback(self, img_rgb: np.ndarray) -> list[TextBlock]:
+        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=3.0, sigmaY=3.0)
+        dark_contrast = cv2.subtract(blur, gray)
+        bright_contrast = cv2.subtract(gray, blur)
+
+        dark_mask = (dark_contrast >= 18).astype(np.uint8) * 255
+        bright_mask = (bright_contrast >= 18).astype(np.uint8) * 255
+
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        kernel_join = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 5))
+        mask = cv2.max(dark_mask, bright_mask)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+        mask = cv2.dilate(mask, kernel_join, iterations=1)
+
+        component_count, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        blocks: list[TextBlock] = []
+        for index in range(1, component_count):
+            x, y, w, h, area = stats[index].tolist()
+            if area < 32 or w < 8 or h < 8:
+                continue
+            if w > img_rgb.shape[1] * 0.9 or h > img_rgb.shape[0] * 0.5:
+                continue
+            fill_ratio = area / float(max(1, w * h))
+            aspect_ratio = max(w / float(max(1, h)), h / float(max(1, w)))
+            if fill_ratio < 0.06 or aspect_ratio > 18.0:
+                continue
+            blocks.append(
+                TextBlock(
+                    xyxy=(float(x), float(y), float(x + w), float(y + h)),
+                    confidence=0.55,
+                )
+            )
+
+        return self._dedupe_blocks(blocks)
+
     def _detect_comic_text_native(self, img_rgb: np.ndarray, conf_threshold: float = 0.5) -> list[TextBlock]:
-        input_size = int(getattr(self, "_ctd_input_size", 1024))
+        orig_h, orig_w = img_rgb.shape[:2]
+        target_size = self._get_inference_size(orig_h, orig_w)
+        input_size = max(target_size)
+        
         letterbox = self._ctd_letterbox
         nms = self._ctd_nms
         img_in, ratio, (dw, dh) = letterbox(img_rgb, new_shape=(input_size, input_size), auto=False, stride=64)
@@ -508,7 +611,11 @@ class TextDetector:
         return inter / max(1.0, area_a + area_b - inter)
 
     def _get_inference_size(self, h: int, w: int) -> tuple[int, int]:
+        # Para strips verticais, aumentamos o limite para manter detalhes dos balões
         max_size = 1024
+        if h > w * 2: # Strip vertical
+            max_size = 2048 if h < 4000 else 3072
+        
         scale = min(max_size / max(h, w), 1.0)
         new_h = int(h * scale / 32) * 32
         new_w = int(w * scale / 32) * 32

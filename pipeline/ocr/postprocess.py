@@ -234,6 +234,299 @@ def is_korean_sfx(text: str) -> bool:
     return len(KOREAN_PATTERN.findall(text)) / len(meaningful) > 0.3
 
 
+def is_structured_ocr_payload(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped or stripped[0] not in "{[":
+        return False
+    normalized = stripped.lower()
+    expected_keys = ("source_bbox", "line_polygons", "text_pixel_bbox")
+    return all(key in normalized for key in expected_keys)
+
+
+_HALLUCINATION_PHRASES: list[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"the quick brown fox jumps? over the lazy dog",
+        r"lorem ipsum",
+        r"\bhello[,\s]+world\b",
+        r"\bexample text\b",
+        r"\bfoo bar\b",
+        r"\bthe quick brown fox\b",
+        r"\bjumps? over the lazy\b",
+    ]
+]
+
+# Characters-per-pixel threshold: above this, a bbox is implausibly dense
+# for manhwa/manga text (30 chars in 200×22 px ≈ 0.0068 chars/px).
+_HALLUCINATION_CHARS_PER_PX = 0.006
+
+
+def is_hallucination(text: str, bbox: list[int], confidence: float) -> bool:
+    """Return True if the OCR output is almost certainly a model hallucination.
+
+    Two independent signals trigger the guard:
+
+    1. Known training-corpus phrases ("quick brown fox", "lorem ipsum", etc.)
+       combined with moderate confidence (< 0.85).  A real comic rarely
+       contains pangrams; seeing one at less-than-high confidence is a
+       strong hallucination indicator.
+
+    2. Geometric implausibility: bbox height <= 30 px AND text length > 30
+       chars AND chars-per-pixel ratio exceeds the empirical limit for
+       manhwa/manga fonts.  A 200×22 balloon edge cannot physically hold a
+       44-char sentence in any legible manga typeface.
+
+    The guard is conservative: it requires *both* geometry criteria to fire
+    on their own, and only needs the phrase match plus a moderate-confidence
+    cap for phrase-based detection.  Real short text in small boxes is never
+    discarded by this function alone.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+
+    # 1. Known hallucination phrases at non-high confidence
+    if confidence < 0.85:
+        for pattern in _HALLUCINATION_PHRASES:
+            if pattern.search(stripped):
+                return True
+
+    # 2. Geometric implausibility
+    if len(bbox) == 4:
+        x1, y1, x2, y2 = bbox
+        bbox_h = max(1, int(y2) - int(y1))
+        bbox_w = max(1, int(x2) - int(x1))
+        bbox_area = bbox_h * bbox_w
+        char_count = len(stripped)
+        density = char_count / float(bbox_area)
+        if bbox_h <= 30 and char_count > 30 and density > _HALLUCINATION_CHARS_PER_PX:
+            return True
+
+    return False
+
+
+def is_punctuation_only_noise(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    return not any(char.isalnum() for char in stripped)
+
+
+def is_short_textured_sfx_or_noise(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    is_white_balloon: bool,
+) -> bool:
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+
+    core = re.sub(r"[^A-Za-z]", "", stripped)
+    if not core:
+        return False
+    upper_core = core.upper()
+    vowel_count = sum(char in "AEIOU" for char in upper_core)
+    known_short_sfx = {"HMPH", "HUH", "KEUK", "UGH", "GASP", "SNIF", "SNIFF", "XEV", "ULM", "XUF", "SH"}
+
+    if upper_core in known_short_sfx:
+        return True
+
+    if is_white_balloon:
+        return False
+
+    if len(core) == 1:
+        return True
+
+    if len(core) == 2:
+        return True
+
+    # Tokens muito curtos e soltos em fundo texturizado costumam ser SFX/ruído
+    # e devem permanecer na arte original sem OCR/inpaint/typeset.
+    if len(core) <= 4 and core.isalpha() and vowel_count <= 1:
+        return True
+
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return False
+
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+    except Exception:
+        return False
+
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    area = width * height
+    aspect = width / float(max(1, height))
+
+    # Também cobre fragmentos OCR curtos em textura escura que escapam com
+    # confiança média/alta, como "Mo" ou "Xuf".
+    if len(core) <= 4 and vowel_count <= 1 and confidence < 0.94 and (area <= 24000 or aspect <= 2.4):
+        return True
+
+    return False
+
+
+def is_short_ornamental_text(
+    text: str,
+    confidence: float,
+    bbox: list[int],
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    tipo: str,
+    is_white_balloon: bool,
+    page_profile: str = "standard",
+) -> bool:
+    if page_profile != "cover_opening":
+        return False
+    if tipo != "narracao" or is_white_balloon:
+        return False
+    if confidence >= 0.72:
+        return False
+    stripped = re.sub(r"\s+", "", (text or "").strip())
+    if not stripped or len(stripped) > 12:
+        return False
+
+    x1, y1, x2, y2 = bbox
+    box_w = max(1, int(x2) - int(x1))
+    box_h = max(1, int(y2) - int(y1))
+    image_h = int(image_shape[0])
+    image_w = int(image_shape[1])
+    box_area = box_w * box_h
+    page_area = max(1, image_w * image_h)
+
+    return box_h <= 56 and box_area <= int(page_area * 0.025)
+
+
+def infer_page_profile(
+    page_number: int | None,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    block_count: int,
+) -> str:
+    if page_number is None:
+        return "standard"
+
+    image_h = int(image_shape[0])
+    image_w = int(image_shape[1])
+    aspect_ratio = max(image_h, image_w) / float(max(1, min(image_h, image_w)))
+
+    if page_number <= 2 and aspect_ratio >= 1.2:
+        return "cover_opening"
+    if page_number == 3 and block_count <= 4 and aspect_ratio >= 1.2:
+        return "cover_opening"
+    return "standard"
+
+
+def is_cover_title_logo(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    tipo: str,
+    is_white_balloon: bool,
+    page_profile: str = "standard",
+) -> bool:
+    if page_profile != "cover_opening":
+        return False
+
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'’-]*", stripped)
+    if not words:
+        return False
+
+    punctuation_marks = re.findall(r"[.!?…,:;]", stripped)
+    if punctuation_marks:
+        return False
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    image_h = int(image_shape[0])
+    image_w = int(image_shape[1])
+    page_area = max(1, image_w * image_h)
+    area_ratio = (box_w * box_h) / float(page_area)
+    width_ratio = box_w / float(max(1, image_w))
+    alpha_chars = [char for char in stripped if char.isalpha()]
+    uppercase_ratio = (
+        sum(1 for char in alpha_chars if char.isupper()) / float(len(alpha_chars))
+        if alpha_chars
+        else 0.0
+    )
+    title_case_ratio = sum(1 for word in words if word[:1].isupper()) / float(max(1, len(words)))
+    compact_len = len(re.sub(r"\s+", "", stripped))
+    word_count = len(words)
+
+    if is_white_balloon:
+        return (
+            tipo in {"fala", "narracao"}
+            and 1 <= word_count <= 4
+            and compact_len >= 10
+            and box_h >= int(image_h * 0.08)
+            and width_ratio >= 0.22
+            and area_ratio <= 0.22
+            and confidence <= 0.84
+        )
+
+    return (
+        tipo == "narracao"
+        and 2 <= word_count <= 10
+        and compact_len >= 14
+        and width_ratio >= 0.24
+        and area_ratio <= 0.20
+        and (uppercase_ratio >= 0.58 or title_case_ratio >= 0.72)
+    )
+
+
+def infer_block_profile(
+    text: str,
+    bbox: list[int],
+    tipo: str,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    *,
+    page_profile: str = "standard",
+    is_white_balloon: bool = False,
+) -> str:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    image_h = int(image_shape[0])
+    image_w = int(image_shape[1])
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    compact = re.sub(r"\s+", "", (text or "").strip())
+
+    if (
+        page_profile == "cover_opening"
+        and tipo == "narracao"
+        and not is_white_balloon
+        and compact
+        and len(compact) <= 12
+        and box_h <= 56
+        and (box_w * box_h) <= int(max(1, image_w * image_h) * 0.025)
+    ):
+        return "decorative_noise"
+
+    if tipo == "narracao" and y1 <= int(image_h * 0.18) and box_w >= int(image_w * 0.32):
+        return "top_narration"
+
+    if is_white_balloon:
+        return "white_balloon"
+
+    return "standard"
+
+
+def suspicious_confidence_threshold(block_profile: str, page_profile: str = "standard") -> float:
+    if block_profile == "decorative_noise":
+        return 0.68
+    if block_profile == "white_balloon":
+        return 0.55
+    if block_profile == "top_narration":
+        return 0.58
+    if page_profile == "cover_opening":
+        return 0.64
+    return 0.60
+
+
 def looks_suspicious(text: str, confidence: float) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -282,22 +575,30 @@ def normalize_bbox(
 
 
 def classify_text_type(text: str, bbox: list[int], page_width: int) -> str:
-    x1, _, x2, _ = bbox
+    x1, y1, x2, y2 = bbox
     if is_korean_sfx(text):
         return "sfx"
 
     center_x = (x1 + x2) / 2
     width = x2 - x1
-    height = bbox[3] - bbox[1]
-    is_edge = center_x < page_width * 0.15 or center_x > page_width * 0.85
-    if is_edge and width > height * 2:
+    height = y2 - y1
+    
+    # Narração: Se for muito largo, ou estiver nos cantos, ou for um retângulo perfeito no topo/base
+    is_edge_x = center_x < page_width * 0.15 or center_x > page_width * 0.85
+    aspect = width / max(1, height)
+    
+    if is_edge_x and aspect > 1.8:
         return "narracao"
+    
+    if aspect > 2.5: # Balões muito largos costumam ser narração ou legendas
+        return "narracao"
+        
     return "fala"
 
 
 def default_style() -> dict:
     return {
-        "fonte": "AnimeAce",
+        "fonte": "KOMIKAX_.ttf",
         "tamanho": 16,
         "cor": "#FFFFFF",
         "cor_gradiente": [],
@@ -332,24 +633,56 @@ def _color_distance(h1: str, h2: str) -> float:
 
 
 def _bright_pixels_color(arr_rgb: np.ndarray) -> str:
-    """Average color of the top 30 % brightest pixels in a region."""
+    """Extrai a cor média dos pixels mais brilhantes (estimativa para texto claro)."""
     if arr_rgb.size == 0:
         return "#FFFFFF"
     pixels = arr_rgb.reshape(-1, 3).astype(float)
     brightness = pixels.sum(axis=1)
-    threshold = np.percentile(brightness, 70)
+    # Pega o topo 25% mais brilhante
+    threshold = np.percentile(brightness, 75)
     bright = pixels[brightness >= threshold]
     if len(bright) == 0:
-        bright = pixels
+        return "#FFFFFF"
     return _rgb_to_hex(bright.mean(axis=0))
 
 
-def _detect_text_color(region_rgb: np.ndarray) -> str:
-    h = region_rgb.shape[0]
-    sample = max(1, h // 4)
-    cy = h // 2
-    center = region_rgb[max(0, cy - sample) : cy + sample]
-    return _bright_pixels_color(center)
+def _detect_text_color(region_rgb: np.ndarray, region_gray: np.ndarray) -> str:
+    """Detecta a cor do texto separando-o do fundo via thresholding de Otsu."""
+    if region_rgb.size == 0:
+        return "#FFFFFF"
+    
+    import cv2
+    # Threshold de Otsu para separar texto do fundo
+    _, mask = cv2.threshold(region_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Decide qual lado é o texto (o menos frequente geralmente é o texto)
+    count_white = np.count_nonzero(mask == 255)
+    count_black = np.count_nonzero(mask == 0)
+    
+    # Em mangá, se o fundo for balão branco, o texto é preto (lado menor).
+    # Se for texto flutuante em fundo escuro, o texto é claro (lado menor).
+    text_val = 255 if count_white < count_black else 0
+    text_mask = (mask == text_val).astype(np.uint8)
+    
+    # Se o texto for ridiculamente pequeno, fallback para cor brilhante
+    if np.count_nonzero(text_mask) < 4:
+        return _bright_pixels_color(region_rgb)
+    
+    # Calcula a cor média apenas onde a máscara de texto está ativa
+    mean_color = cv2.mean(region_rgb, mask=text_mask)[:3]
+    hex_color = _rgb_to_hex(mean_color)
+    
+    # Proteção: se a cor for quase fundo, tenta a outra polaridade
+    if count_white > 0 and count_black > 0:
+        bg_val = 255 - text_val
+        bg_mask = (mask == bg_val).astype(np.uint8)
+        bg_color = _rgb_to_hex(cv2.mean(region_rgb, mask=bg_mask)[:3])
+        if _color_distance(hex_color, bg_color) < 25:
+             alt_mask = (mask == bg_val).astype(np.uint8)
+             alt_color = _rgb_to_hex(cv2.mean(region_rgb, mask=alt_mask)[:3])
+             return alt_color
+
+    return hex_color
 
 
 def _detect_gradient(region_rgb: np.ndarray) -> list:
@@ -534,7 +867,7 @@ def analyze_style(img_array: np.ndarray, bbox: list[int]) -> dict:
     bbox_h = y2 - y1
 
     font_size = max(10, min(48, int(bbox_h * 0.7)))
-    text_color = _detect_text_color(region)
+    text_color = _detect_text_color(region, region_gray)
     cor_gradiente = _detect_gradient(region)
     contorno_color, contorno_px = _detect_outline(region, region_gray)
     has_glow, glow_color, glow_px = _detect_glow(region, region_gray)
@@ -546,7 +879,7 @@ def analyze_style(img_array: np.ndarray, bbox: list[int]) -> dict:
     italico = _detect_italic(region_gray)
 
     return {
-        "fonte": "AnimeAce",
+        "fonte": "KOMIKAX_.ttf",
         "tamanho": font_size,
         "cor": text_color,
         "cor_gradiente": cor_gradiente,

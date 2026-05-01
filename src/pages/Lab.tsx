@@ -7,14 +7,18 @@ import {
   ArrowRight,
   Bot,
   CheckCircle2,
+  CheckSquare,
   ChevronRight,
   Clock3,
   FlaskConical,
   FolderOpen,
+  FolderSearch,
   GitBranch,
+  Share2,
   Pause,
   Play,
   RefreshCw,
+  Search,
   ShieldCheck,
   Square,
   XCircle,
@@ -24,8 +28,12 @@ import { useLabStore } from "../lib/stores/labStore";
 import {
   type LabChapterPair,
   type LabChapterScopeMode,
+  type LabCoderStrategy,
   type LabGpuPolicy,
+  type LabPatchApplyResult,
+  type LabPatchProposal,
   type StartLabRequest,
+  applyLabPatch,
   approveLabBatch,
   approveLabProposal,
   getLabReferencePreview,
@@ -35,11 +43,17 @@ import {
   onLabProposalPromoted,
   onLabReviewRequested,
   onLabReviewResult,
+  openLabPatchJsonDialog,
+  exportLabPatchJson,
   onLabState,
   openFiles,
   pauseLab,
+  pickLabReferenceDir,
+  pickLabSourceDir,
+  proposeLabPatch,
   rejectLabProposal,
   resumeLab,
+  setLabDirs,
   startLab,
   stopLab,
 } from "../lib/tauri";
@@ -208,6 +222,12 @@ export function Lab() {
   const [rangeEnd, setRangeEnd] = useState<number | null>(null);
   const [gpuPolicy, setGpuPolicy] = useState<LabGpuPolicy>("require_gpu");
   const [selectedLabFile, setSelectedLabFile] = useState<string | null>(null);
+  const [explicitChapters, setExplicitChapters] = useState<Set<number>>(new Set());
+  const [chapterFilter, setChapterFilter] = useState("");
+  const [patchModal, setPatchModal] = useState<{ proposalId: string; patch: LabPatchProposal } | null>(null);
+  const [patchCoderStrategy, setPatchCoderStrategy] = useState<LabCoderStrategy>("local");
+  const [applyResult, setApplyResult] = useState<LabPatchApplyResult | null>(null);
+  const [applyConfirm, setApplyConfirm] = useState(false); // aguardando confirmacao
 
   const pathParts = location.pathname.split("/").filter(Boolean);
   const allowedSections: LabSection[] = ["home", "run", "reviews", "decisions", "benchmarks", "history"];
@@ -241,8 +261,18 @@ export function Lab() {
       const end = Math.max(effectiveRangeStart, effectiveRangeEnd);
       return catalogChapterPairs.filter((pair) => pair.chapter_number >= start && pair.chapter_number <= end);
     }
+    if (chapterScopeMode === "explicit") {
+      return catalogChapterPairs.filter((pair) => explicitChapters.has(pair.chapter_number));
+    }
     return catalogChapterPairs;
   })();
+
+  const filteredCatalogPairs = chapterFilter.trim()
+    ? catalogChapterPairs.filter((pair) =>
+        String(pair.chapter_number).includes(chapterFilter.trim())
+        || pair.reference_group.toLowerCase().includes(chapterFilter.trim().toLowerCase())
+      )
+    : catalogChapterPairs;
   const scopeSummary = describeSelectedScope(scopedChapterPairs, catalogChapterPairs.length);
   const maxPageIndex = Math.max(0, Math.max(selectedPair?.source_pages ?? 1, selectedPair?.reference_pages ?? 1) - 1);
   const selectedProposal = snapshot?.proposals.find((proposal) => proposal.proposal_id === highlightedProposalId)
@@ -436,22 +466,103 @@ export function Lab() {
 
   async function handleStartLab() {
     await runAction("start", async () => {
+      let chapter_scope: StartLabRequest["chapter_scope"];
+      if (chapterScopeMode === "first_n") {
+        chapter_scope = { mode: "first_n", first_n: parsedFirstChapterCount };
+      } else if (
+        chapterScopeMode === "range"
+        && effectiveRangeStart !== null
+        && effectiveRangeEnd !== null
+      ) {
+        chapter_scope = {
+          mode: "range",
+          start_chapter: Math.min(effectiveRangeStart, effectiveRangeEnd),
+          end_chapter: Math.max(effectiveRangeStart, effectiveRangeEnd),
+        };
+      } else if (chapterScopeMode === "explicit") {
+        const numbers = Array.from(explicitChapters).sort((a, b) => a - b);
+        if (numbers.length === 0) {
+          throw new Error("Marque ao menos um capitulo antes de iniciar a rodada.");
+        }
+        chapter_scope = { mode: "explicit", chapter_numbers: numbers };
+      } else {
+        chapter_scope = { mode: "all" };
+      }
+
       const request: StartLabRequest = {
-        chapter_scope: chapterScopeMode === "first_n"
-          ? { mode: "first_n", first_n: parsedFirstChapterCount }
-          : chapterScopeMode === "range" && effectiveRangeStart !== null && effectiveRangeEnd !== null
-            ? {
-                mode: "range",
-                start_chapter: Math.min(effectiveRangeStart, effectiveRangeEnd),
-                end_chapter: Math.max(effectiveRangeStart, effectiveRangeEnd),
-              }
-            : { mode: "all" },
+        chapter_scope,
         gpu_policy: gpuPolicy,
       };
 
       const response = await startLab(request);
       navigate(`/lab/run/${response.run_id}`);
       await refreshSnapshot();
+    });
+  }
+
+  async function handlePickSourceDir() {
+    try {
+      const picked = await pickLabSourceDir();
+      if (!picked) return;
+      const referenceDir = snapshot?.reference_dir ?? "";
+      if (!referenceDir) {
+        setPageError("Selecione tambem uma pasta de referencia PT-BR para pareamento.");
+        return;
+      }
+      const next = await setLabDirs(picked, referenceDir);
+      setSnapshot(next);
+      setPageError(null);
+    } catch (error) {
+      setPageError(extractErrorMessage(error));
+    }
+  }
+
+  async function handlePickReferenceDir() {
+    try {
+      const picked = await pickLabReferenceDir();
+      if (!picked) return;
+      const sourceDir = snapshot?.source_dir ?? "";
+      if (!sourceDir) {
+        setPageError("Selecione tambem uma pasta de origem EN para pareamento.");
+        return;
+      }
+      const next = await setLabDirs(sourceDir, picked);
+      setSnapshot(next);
+      setPageError(null);
+    } catch (error) {
+      setPageError(extractErrorMessage(error));
+    }
+  }
+
+  function toggleExplicitChapter(chapterNumber: number) {
+    setExplicitChapters((current) => {
+      const next = new Set(current);
+      if (next.has(chapterNumber)) {
+        next.delete(chapterNumber);
+      } else {
+        next.add(chapterNumber);
+      }
+      return next;
+    });
+  }
+
+  function selectAllExplicitChapters() {
+    setExplicitChapters(new Set(filteredCatalogPairs.map((pair) => pair.chapter_number)));
+  }
+
+  function clearExplicitChapters() {
+    setExplicitChapters(new Set());
+  }
+
+  function invertExplicitChapters() {
+    setExplicitChapters((current) => {
+      const next = new Set<number>();
+      for (const pair of filteredCatalogPairs) {
+        if (!current.has(pair.chapter_number)) {
+          next.add(pair.chapter_number);
+        }
+      }
+      return next;
     });
   }
 
@@ -499,6 +610,84 @@ export function Lab() {
     await runAction(`reject:${proposalId}`, async () => {
       await rejectLabProposal(proposalId);
       await refreshSnapshot();
+    });
+  }
+
+  async function handleGeneratePatch(proposalId: string) {
+    await runAction(`patch:${proposalId}`, async () => {
+      const patch = await proposeLabPatch(proposalId, patchCoderStrategy);
+      setPatchModal({ proposalId, patch });
+      setApplyResult(null);
+      setApplyConfirm(false);
+    });
+  }
+
+  async function handleApplyPatch(proposalId: string, diff: string, createBranch: boolean) {
+    await runAction(`apply:${proposalId}`, async () => {
+      const result = await applyLabPatch(
+        proposalId,
+        diff,
+        createBranch,
+        createBranch, // commit somente se criou branch
+        `Lab: patch automatico para ${proposalId}\n\nRevisado e aprovado pelo usuario via TraduzAi Lab.`
+      );
+      setApplyResult(result);
+      setApplyConfirm(false);
+      if (result.applied) await refreshSnapshot();
+    });
+  }
+
+  async function handleExportPatchJson(proposalId: string, patch: LabPatchProposal) {
+    await runAction(`export:${proposalId}`, async () => {
+      const outputPath = await openLabPatchJsonDialog(proposalId);
+      if (!outputPath) return;
+
+      const proposal = snapshot?.proposals.find((item) => item.proposal_id === proposalId) ?? null;
+      const reviews = snapshot?.reviews.filter((review) => review.proposal_id === proposalId) ?? [];
+      const benchmark = snapshot?.benchmarks.find((entry) => entry.proposal_id === proposalId) ?? null;
+
+      const payload = {
+        schema_version: "traduzai_lab_patch_v1",
+        exported_at_iso: new Date().toISOString(),
+        exported_from: "TraduzAi Lab",
+        proposal_id: proposalId,
+        run_id: snapshot?.run_id ?? "",
+        intent:
+          "Pacote para enviar ao Codex ou Claude Code e pedir implementacao manual do patch.",
+        proposal_context: proposal
+          ? {
+              title: proposal.title,
+              summary: proposal.summary,
+              risk: proposal.risk,
+              touched_domains: proposal.touched_domains,
+              target_file: proposal.target_file ?? "",
+              target_anchor: proposal.target_anchor ?? "",
+              issue_type: proposal.issue_type ?? "",
+            }
+          : null,
+        review_context: reviews.map((review) => ({
+          reviewer_id: review.reviewer_id,
+          reviewer_label: review.reviewer_label,
+          verdict: review.verdict,
+          findings: review.findings,
+        })),
+        benchmark_context: benchmark
+          ? {
+              green: benchmark.green,
+              summary: benchmark.summary,
+              score_before: benchmark.score_before,
+              score_after: benchmark.score_after,
+              metrics: benchmark.metrics,
+            }
+          : null,
+        patch,
+        usage_hint:
+          "Cole este JSON no prompt e peca para aplicar patch_unified_diff no repositorio alvo, validando conflitos e testes.",
+      };
+
+      const savedPath = await exportLabPatchJson(outputPath, JSON.stringify(payload, null, 2));
+      setPageError(null);
+      setLiveSignal(`Patch JSON exportado em ${savedPath}`);
     });
   }
 
@@ -597,6 +786,46 @@ export function Lab() {
             )}
           </div>
 
+          <div className="rounded-2xl border border-white/8 bg-black/20 p-4 space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.24em] text-text-secondary">Fontes do corpus</p>
+                <p className="text-sm text-text-secondary mt-1">
+                  Aponte a pasta com CBZs EN e a pasta com referencia PT-BR. O pareamento e feito
+                  por numero de capitulo.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handlePickSourceDir}
+                  disabled={running || busyAction !== null}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-2xl border border-accent-cyan/25 bg-accent-cyan/10 text-accent-cyan text-xs font-medium hover:bg-accent-cyan/15 transition-smooth disabled:opacity-40"
+                >
+                  <FolderSearch size={14} />
+                  Selecionar pasta EN
+                </button>
+                <button
+                  onClick={handlePickReferenceDir}
+                  disabled={running || busyAction !== null}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-2xl border border-accent-purple/25 bg-accent-purple/10 text-accent-purple text-xs font-medium hover:bg-accent-purple/15 transition-smooth disabled:opacity-40"
+                >
+                  <FolderSearch size={14} />
+                  Selecionar pasta PT-BR
+                </button>
+              </div>
+            </div>
+            <div className="grid md:grid-cols-2 gap-3 text-xs text-text-secondary">
+              <div className="rounded-xl border border-white/6 bg-black/30 px-3 py-2">
+                <p className="uppercase tracking-[0.18em] text-[10px] text-text-secondary">EN (origem)</p>
+                <p className="text-text-primary break-all mt-1">{snapshot?.source_dir || "Nao definido"}</p>
+              </div>
+              <div className="rounded-xl border border-white/6 bg-black/30 px-3 py-2">
+                <p className="uppercase tracking-[0.18em] text-[10px] text-text-secondary">PT-BR (referencia)</p>
+                <p className="text-text-primary break-all mt-1">{snapshot?.reference_dir || "Nao definido"}</p>
+              </div>
+            </div>
+          </div>
+
           <div className="grid xl:grid-cols-[1.1fr_0.9fr] gap-4">
             <div className="rounded-2xl border border-white/8 bg-black/20 p-4 space-y-4">
               <div>
@@ -606,11 +835,12 @@ export function Lab() {
                 </p>
               </div>
 
-              <div className="grid md:grid-cols-3 gap-2">
+              <div className="grid md:grid-cols-4 gap-2">
                 {([
                   ["all", "Todos"],
                   ["first_n", "Primeiros N"],
                   ["range", "Intervalo"],
+                  ["explicit", "Escolher"],
                 ] as Array<[LabChapterScopeMode, string]>).map(([mode, label]) => (
                   <button
                     key={mode}
@@ -675,6 +905,80 @@ export function Lab() {
                       ))}
                     </select>
                   </label>
+                </div>
+              )}
+
+              {chapterScopeMode === "explicit" && (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="relative flex-1 min-w-[180px]">
+                      <Search
+                        size={14}
+                        className="absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary pointer-events-none"
+                      />
+                      <input
+                        type="text"
+                        value={chapterFilter}
+                        onChange={(event) => setChapterFilter(event.target.value)}
+                        placeholder="Buscar por numero ou grupo"
+                        disabled={running || busyAction !== null}
+                        className="block w-full rounded-xl bg-bg-secondary border border-white/8 pl-9 pr-3 py-2 text-sm text-text-primary"
+                      />
+                    </div>
+                    <button
+                      onClick={selectAllExplicitChapters}
+                      disabled={running || busyAction !== null}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+                    >
+                      <CheckSquare size={13} />
+                      Todos
+                    </button>
+                    <button
+                      onClick={clearExplicitChapters}
+                      disabled={running || busyAction !== null}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+                    >
+                      Nenhum
+                    </button>
+                    <button
+                      onClick={invertExplicitChapters}
+                      disabled={running || busyAction !== null}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+                    >
+                      Inverter
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-1.5 max-h-[240px] overflow-y-auto rounded-xl border border-white/6 bg-black/25 p-2">
+                    {filteredCatalogPairs.length === 0 ? (
+                      <p className="col-span-full text-center text-xs text-text-secondary py-3">
+                        Nenhum capitulo corresponde ao filtro atual.
+                      </p>
+                    ) : (
+                      filteredCatalogPairs.map((pair) => {
+                        const selected = explicitChapters.has(pair.chapter_number);
+                        return (
+                          <button
+                            key={`explicit-${pair.chapter_number}`}
+                            onClick={() => toggleExplicitChapter(pair.chapter_number)}
+                            disabled={running || busyAction !== null}
+                            title={`${pair.reference_group} - ${pair.source_pages} pag.`}
+                            className={`px-2 py-1.5 rounded-lg text-xs border transition-smooth ${
+                              selected
+                                ? "border-accent-cyan/45 bg-accent-cyan/15 text-accent-cyan"
+                                : "border-white/8 bg-white/4 text-text-secondary hover:text-text-primary hover:bg-white/8"
+                            } disabled:opacity-40`}
+                          >
+                            {pair.chapter_number}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <p className="text-xs text-text-secondary">
+                    {explicitChapters.size} capitulo(s) marcado(s). Arbitrarios, fora de ordem, OK.
+                  </p>
                 </div>
               )}
             </div>
@@ -1107,6 +1411,47 @@ export function Lab() {
                       </div>
                     )}
 
+                    {/* Planner metadata */}
+                    {(proposal.motivation || proposal.change_kind) && (
+                      <div className="rounded-2xl border border-white/6 bg-black/20 p-3 space-y-1.5 text-xs">
+                        {proposal.motivation && (
+                          <p className="text-text-secondary leading-relaxed">{proposal.motivation}</p>
+                        )}
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {proposal.change_kind && (
+                            <span className="px-2 py-0.5 rounded-full bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-[10px]">
+                              {proposal.change_kind}
+                            </span>
+                          )}
+                          {proposal.issue_type && (
+                            <span className="px-2 py-0.5 rounded-full bg-white/6 border border-white/10 text-text-secondary text-[10px]">
+                              {proposal.issue_type}
+                            </span>
+                          )}
+                          {proposal.target_file && (
+                            <span className="px-2 py-0.5 rounded-full bg-white/6 border border-white/10 text-accent-cyan text-[10px] font-mono">
+                              {proposal.target_file}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Patch preview se ja gerado */}
+                    {proposal.patch_proposal && (
+                      <button
+                        onClick={() => setPatchModal({ proposalId: proposal.proposal_id, patch: proposal.patch_proposal! })}
+                        className="w-full text-left rounded-2xl border border-accent-cyan/20 bg-accent-cyan/5 p-3 text-xs hover:bg-accent-cyan/10 transition-smooth"
+                      >
+                        <p className="text-accent-cyan font-medium">
+                          Patch gerado ({proposal.patch_proposal.author}) · confianca {Math.round(proposal.patch_proposal.confidence * 100)}%
+                        </p>
+                        <p className="text-text-secondary mt-1 truncate">
+                          {proposal.patch_proposal.rationale || proposal.patch_proposal.error || "Ver diff…"}
+                        </p>
+                      </button>
+                    )}
+
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() => handleApproveProposal(proposal.proposal_id)}
@@ -1122,6 +1467,23 @@ export function Lab() {
                       >
                         Rejeitar proposta
                       </button>
+                      <button
+                        onClick={() => handleGeneratePatch(proposal.proposal_id)}
+                        disabled={busyAction !== null}
+                        className="px-3 py-2 rounded-xl bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-xs font-medium hover:bg-accent-purple/15 transition-smooth disabled:opacity-40"
+                        title={`Estrategia: ${patchCoderStrategy}`}
+                      >
+                        {busyAction === `patch:${proposal.proposal_id}` ? "Gerando…" : "Gerar patch"}
+                      </button>
+                      {proposal.patch_proposal && (
+                        <button
+                          onClick={() => handleExportPatchJson(proposal.proposal_id, proposal.patch_proposal!)}
+                          disabled={busyAction !== null}
+                          className="px-3 py-2 rounded-xl bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-xs font-medium hover:bg-accent-cyan/15 transition-smooth disabled:opacity-40"
+                        >
+                          {busyAction === `export:${proposal.proposal_id}` ? "Exportando…" : "Exportar JSON"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1235,6 +1597,195 @@ export function Lab() {
           </section>
         )}
       </div>
+
+      {/* Patch modal — dry-run diff viewer */}
+      {patchModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setPatchModal(null)}
+        >
+          <div
+            className="relative w-full max-w-3xl max-h-[90vh] rounded-3xl border border-white/10 bg-bg-surface flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between p-5 border-b border-white/8">
+              <div>
+                <p className="text-sm font-semibold text-text-primary">Patch gerado — dry-run</p>
+                <p className="text-xs text-text-secondary mt-0.5">
+                  {patchModal.patch.author} · modelo: {patchModal.patch.model_used || "local"} · confiança {Math.round(patchModal.patch.confidence * 100)}%
+                </p>
+              </div>
+              <button
+                onClick={() => setPatchModal(null)}
+                className="p-2 rounded-xl text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth"
+              >
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            {/* Coder strategy selector */}
+            <div className="flex items-center gap-3 px-5 py-3 border-b border-white/8 text-xs">
+              <span className="text-text-secondary">Coder:</span>
+              {(["local", "ollama", "claude_code", "claude_sdk"] as LabCoderStrategy[]).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setPatchCoderStrategy(s)}
+                  className={`px-2.5 py-1 rounded-full border text-[11px] transition-smooth ${patchCoderStrategy === s ? "border-accent-purple/50 bg-accent-purple/15 text-accent-purple" : "border-white/10 bg-white/4 text-text-secondary"}`}
+                >
+                  {s === "local" ? "Local (sem LLM)" : s === "ollama" ? "Ollama" : s === "claude_code" ? "Claude Code" : "Claude SDK"}
+                </button>
+              ))}
+              <button
+                onClick={() => handleGeneratePatch(patchModal.proposalId)}
+                disabled={busyAction !== null}
+                className="ml-auto px-3 py-1.5 rounded-xl bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-[11px] font-medium hover:bg-accent-purple/18 disabled:opacity-40 transition-smooth"
+              >
+                {busyAction === `patch:${patchModal.proposalId}` ? "Gerando…" : "Regenerar"}
+              </button>
+            </div>
+
+            {/* Rationale */}
+            {patchModal.patch.rationale && (
+              <div className="px-5 py-3 border-b border-white/8">
+                <p className="text-xs text-text-secondary leading-relaxed">{patchModal.patch.rationale}</p>
+              </div>
+            )}
+
+            {/* Error */}
+            {patchModal.patch.error && (
+              <div className="px-5 py-3 border-b border-white/8">
+                <p className="text-xs text-status-error">{patchModal.patch.error}</p>
+              </div>
+            )}
+
+            {/* Diff */}
+            <div className="flex-1 overflow-y-auto p-5">
+              {patchModal.patch.patch_unified_diff ? (
+                <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-all">
+                  {patchModal.patch.patch_unified_diff.split("\n").map((line, i) => (
+                    <span
+                      key={i}
+                      className={
+                        line.startsWith("+") && !line.startsWith("+++")
+                          ? "text-status-success block"
+                          : line.startsWith("-") && !line.startsWith("---")
+                          ? "text-status-error block"
+                          : line.startsWith("@@")
+                          ? "text-accent-cyan block"
+                          : "text-text-secondary block"
+                      }
+                    >
+                      {line || " "}
+                    </span>
+                  ))}
+                </pre>
+              ) : (
+                <p className="text-xs text-text-secondary italic">
+                  Nenhum diff gerado. Tente outro coder ou verifique os logs.
+                </p>
+              )}
+            </div>
+
+            {/* Footer — ações de aplicação */}
+            <div className="px-5 py-4 border-t border-white/8 space-y-3">
+              {/* Resultado de sucesso */}
+              {applyResult?.applied && (
+                <div className="rounded-xl border border-status-success/25 bg-status-success/8 p-3 text-xs space-y-1">
+                  <p className="text-status-success font-medium">✓ Patch aplicado com sucesso</p>
+                  {applyResult.branch_created && (
+                    <p className="text-text-secondary">
+                      Branch: <code className="text-accent-cyan">{applyResult.branch_created}</code>
+                      {applyResult.commit_sha && (
+                        <span> · commit <code className="text-accent-cyan">{applyResult.commit_sha}</code></span>
+                      )}
+                    </p>
+                  )}
+                  {applyResult.files_patched.length > 0 && (
+                    <p className="text-text-secondary">
+                      Arquivos: {applyResult.files_patched.join(", ")}
+                    </p>
+                  )}
+                  {!applyResult.branch_created && (
+                    <p className="text-text-secondary">
+                      Patch aplicado diretamente (sem git). Revise com <code className="text-accent-cyan">git diff</code>.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Erro de aplicação */}
+              {applyResult && !applyResult.applied && applyResult.error && (
+                <div className="rounded-xl border border-status-error/25 bg-status-error/8 p-3 text-xs">
+                  <p className="text-status-error font-medium">Falha ao aplicar patch</p>
+                  <p className="text-text-secondary mt-1">{applyResult.error}</p>
+                </div>
+              )}
+
+              {/* Confirmação de aplicação */}
+              {applyConfirm && patchModal && (
+                <div className="rounded-xl border border-accent-yellow/20 bg-accent-yellow/6 p-3 text-xs space-y-2">
+                  <p className="text-accent-yellow font-medium">Confirmar aplicação do patch?</p>
+                  <p className="text-text-secondary">
+                    Esta ação modifica arquivos no disco. Recomendado com "Criar branch".
+                  </p>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={() => handleApplyPatch(patchModal.proposalId, patchModal.patch.patch_unified_diff, true)}
+                      disabled={busyAction !== null}
+                      className="px-3 py-1.5 rounded-xl bg-status-success/15 border border-status-success/25 text-status-success text-[11px] font-medium hover:bg-status-success/20 disabled:opacity-40 transition-smooth"
+                    >
+                      {busyAction === `apply:${patchModal.proposalId}` ? "Aplicando…" : "Aplicar + criar branch"}
+                    </button>
+                    <button
+                      onClick={() => handleApplyPatch(patchModal.proposalId, patchModal.patch.patch_unified_diff, false)}
+                      disabled={busyAction !== null}
+                      className="px-3 py-1.5 rounded-xl bg-white/6 border border-white/10 text-text-secondary text-[11px] hover:bg-white/10 disabled:opacity-40 transition-smooth"
+                    >
+                      Aplicar direto (sem branch)
+                    </button>
+                    <button
+                      onClick={() => setApplyConfirm(false)}
+                      className="px-3 py-1.5 rounded-xl text-text-secondary text-[11px] hover:text-text-primary transition-smooth"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Botão principal + nota */}
+              {!applyConfirm && !applyResult?.applied && (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[11px] text-text-secondary">
+                    Dry-run — aplique manualmente via{" "}
+                    <code className="text-accent-cyan">git apply</code> ou use o botão abaixo.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleExportPatchJson(patchModal.proposalId, patchModal.patch)}
+                      disabled={busyAction !== null}
+                      className="shrink-0 px-3 py-1.5 rounded-xl bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-[11px] font-medium hover:bg-accent-cyan/15 disabled:opacity-40 transition-smooth inline-flex items-center gap-1.5"
+                    >
+                      <Share2 size={13} />
+                      {busyAction === `export:${patchModal.proposalId}` ? "Exportando…" : "Exportar .json"}
+                    </button>
+                    {patchModal?.patch.patch_unified_diff && !patchModal.patch.error && (
+                      <button
+                        onClick={() => setApplyConfirm(true)}
+                        disabled={busyAction !== null}
+                        className="shrink-0 px-3 py-1.5 rounded-xl bg-status-success/12 border border-status-success/20 text-status-success text-[11px] font-medium hover:bg-status-success/18 disabled:opacity-40 transition-smooth"
+                      >
+                        Aplicar patch ↗
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

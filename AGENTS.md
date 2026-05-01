@@ -6,7 +6,7 @@ TraduzAi é um app desktop Tauri v2 (React + TypeScript frontend, Rust backend, 
 ## Stack
 - **Frontend:** React 19 + TypeScript + Tailwind CSS + Zustand + Framer Motion
 - **Backend:** Rust (Tauri v2 core)
-- **Pipeline IA:** Python 3.12 (PaddleOCR, Codex Haiku API, OpenCV inpainting, Pillow typesetting)
+- **Pipeline IA:** Python 3.12 (PaddleOCR, Google Translate + Ollama fallback, OpenCV inpainting, matplotlib FT2Font typesetting)
 - **Comunicação:** Tauri IPC (invoke) + Python sidecar via stdout JSON lines
 
 ## Arquitetura chave
@@ -28,7 +28,7 @@ TraduzAi é um app desktop Tauri v2 (React + TypeScript frontend, Rust backend, 
 - `src/lib/stores/appStore.ts` — State global (projeto, pipeline, créditos)
 - `src-tauri/src/commands/` — Commands Rust expostos ao frontend
 - `pipeline/main.py` — Entry point do pipeline Python
-- `pipeline/translator/translate.py` — Prompt do Codex Haiku e chamada API
+- `pipeline/translator/translate.py` — Tradução via Google Translate (primário) + Ollama local (fallback)
 - `fonts/font-map.json` — Mapeamento tipo de texto → fonte
 
 ## Como testar
@@ -38,8 +38,9 @@ cd pipeline && python main.py config.json  # Pipeline isolado
 ```
 
 ## Decisões de design
-- Processamento 100% local (exceto tradução via API e contexto via AniList)
+- Processamento 100% local (tradução via Google Translate público ou Ollama local; contexto via AniList)
 - Nenhuma imagem é enviada a servidores — apenas texto extraído
+- Sem dependência de APIs pagas no runtime
 - Formato project.json aberto e reimportável
 - Sem funcionalidade de compartilhamento (segurança legal)
 - 1 crédito = 1 página (modelo simples e transparente)

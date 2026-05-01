@@ -1,0 +1,75 @@
+{
+  "versao": "e2e",
+  "app": "TraduzAi",
+  "obra": "Fixture E2E",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "paginas": [
+    {
+      "numero": 1,
+      "arquivo_original": "./images/page-001-original.png",
+      "arquivo_traduzido": "./images/page-001-rendered.png",
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "./images/page-001-original.png",
+          "visible": true,
+          "locked": true
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "./images/page-001-inpaint.png",
+          "visible": true,
+          "locked": true
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "./images/page-001-rendered.png",
+          "visible": true,
+          "locked": true
+        }
+      },
+      "text_layers": [
+        {
+          "id": "fixture-text-1",
+          "kind": "text",
+          "bbox": [118, 166, 302, 252],
+          "layout_bbox": [118, 166, 302, 252],
+          "source_bbox": [118, 166, 302, 252],
+          "tipo": "fala",
+          "original": "BURNED",
+          "traduzido": "TEXTO LIMPO",
+          "translated": "TEXTO LIMPO",
+          "confianca_ocr": 0.98,
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 28,
+            "cor": "#ffffff",
+            "cor_gradiente": [],
+            "contorno": "#111111",
+            "contorno_px": 2,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [0, 0],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": false
+          },
+          "visible": true,
+          "locked": false,
+          "order": 0,
+          "balloon_bbox": [118, 166, 302, 252],
+          "balloon_subregions": [],
+          "layout_group_size": 1
+        }
+      ],
+      "textos": []
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "versao": "1.0",
+  "app": "TraduzAi",
+  "obra": "Fixture Tiny",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "paginas": [
+    {
+      "numero": 1,
+      "arquivo_original": "original/page-001-original.png",
+      "arquivo_traduzido": "expected/page-001-inpaint.png",
+      "textos": [
+        {
+          "id": "tiny-text-1",
+          "bbox": [118, 166, 302, 252],
+          "texto": "HELLO",
+          "traduzido": "OLA",
+          "tipo": "fala",
+          "confidence": 0.98
+        }
+      ]
+    }
+  ]
+}

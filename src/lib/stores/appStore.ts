@@ -1,30 +1,76 @@
 import { create } from "zustand";
+import { sanitizeFavoriteWorks, upsertFavoriteWork } from "../favoriteWorks";
+
+export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "rendered";
+
+export interface TextLayerStyle {
+  fonte: string;
+  tamanho: number;
+  cor: string;
+  cor_gradiente: string[];
+  contorno: string;
+  contorno_px: number;
+  glow: boolean;
+  glow_cor: string;
+  glow_px: number;
+  sombra: boolean;
+  sombra_cor: string;
+  sombra_offset: [number, number];
+  bold: boolean;
+  italico: boolean;
+  rotacao: number;
+  alinhamento: "left" | "center" | "right";
+  force_upper?: boolean;
+}
+
+export interface QaAction {
+  flag_id: string;
+  status: "ignored" | "resolved";
+  ignored_reason?: string;
+  ignored_at?: string;
+}
 
 export interface TextEntry {
   id: string;
+  kind?: "text";
+  source_bbox?: [number, number, number, number];
+  layout_bbox?: [number, number, number, number];
+  render_bbox?: [number, number, number, number] | null;
   bbox: [number, number, number, number];
   tipo: "fala" | "narracao" | "sfx" | "pensamento";
   original: string;
   traduzido: string;
+  translated?: string;
   confianca_ocr: number;
-  estilo: {
-    fonte: string;
-    tamanho: number;
-    cor: string;
-    cor_gradiente: string[];
-    contorno: string;
-    contorno_px: number;
-    glow: boolean;
-    glow_cor: string;
-    glow_px: number;
-    sombra: boolean;
-    sombra_cor: string;
-    sombra_offset: [number, number];
-    bold: boolean;
-    italico: boolean;
-    rotacao: number;
-    alinhamento: "left" | "center" | "right";
-  };
+  ocr_confidence?: number;
+  estilo: TextLayerStyle;
+  style?: TextLayerStyle;
+  visible?: boolean;
+  locked?: boolean;
+  order?: number;
+  render_preview_path?: string | null;
+  detector?: string | null;
+  line_polygons?: unknown;
+  source_direction?: string | null;
+  rendered_direction?: string | null;
+  source_language?: string | null;
+  rotation_deg?: number;
+  detected_font_size_px?: number | null;
+  page_profile?: string | null;
+  block_profile?: string | null;
+  layout_profile?: string | null;
+  balloon_bbox?: [number, number, number, number];
+  balloon_subregions?: [number, number, number, number][];
+  layout_group_size?: number;
+  qa_flags?: string[];
+  qa_actions?: QaAction[];
+}
+
+export interface ImageLayer {
+  key: ImageLayerKey;
+  path: string | null;
+  visible: boolean;
+  locked: boolean;
 }
 
 export interface InpaintBlock {
@@ -36,7 +82,9 @@ export interface PageData {
   numero: number;
   arquivo_original: string;
   arquivo_traduzido: string;
+  image_layers?: Partial<Record<ImageLayerKey, ImageLayer>>;
   inpaint_blocks?: InpaintBlock[];
+  text_layers: TextEntry[];
   textos: TextEntry[];
 }
 
@@ -59,6 +107,19 @@ export interface ProjectContext {
   resumo_por_arco: string[];
   memoria_lexical: Record<string, string>;
   fontes_usadas: ContextSourceRef[];
+  internet_context?: unknown;
+}
+
+export interface WorkContextSummary {
+  selected: boolean;
+  work_id: string;
+  title: string;
+  context_loaded: boolean;
+  glossary_loaded: boolean;
+  glossary_entries_count: number;
+  internet_context_loaded?: boolean;
+  risk_level: "high" | "medium" | "low";
+  user_ignored_warning: boolean;
 }
 
 export interface Project {
@@ -69,11 +130,15 @@ export interface Project {
   idioma_destino: string;
   qualidade: ProjectQuality;
   contexto: ProjectContext;
+  work_context?: WorkContextSummary | null;
+  qa?: unknown;
   paginas: PageData[];
   status: "idle" | "setup" | "processing" | "done" | "error";
   source_path: string;
   output_path?: string;
   totalPages: number;
+  mode: "auto" | "manual";
+  preset?: unknown;
 }
 
 export type ProjectQuality = "rapida" | "normal" | "alta";
@@ -129,6 +194,19 @@ export interface PipelineTimeEstimate {
 
 export type RecentProject = { id: string; obra: string; capitulo: number; pages: number; date: string; status: string };
 
+export type PipelineLogLevel = "info" | "step" | "progress" | "error" | "success";
+
+export interface PipelineLogEntry {
+  timestamp: number;
+  level: PipelineLogLevel;
+  message: string;
+  step?: PipelineStep | null;
+  current_page?: number | null;
+  total_pages?: number | null;
+  overall_progress?: number | null;
+  step_progress?: number | null;
+}
+
 function sanitizeRecentProjects(value: unknown): RecentProject[] {
   if (!Array.isArray(value)) return [];
 
@@ -160,9 +238,14 @@ function persistRecentProjects(projects: RecentProject[]) {
   localStorage.setItem("traduzai_recent", JSON.stringify(projects));
 }
 
+function persistFavoriteWorks(favoriteWorks: string[]) {
+  localStorage.setItem("traduzai_favorite_works", JSON.stringify(favoriteWorks));
+}
+
 interface AppState {
   project: Project | null;
   recentProjects: RecentProject[];
+  favoriteWorks: string[];
   pipeline: PipelineProgress | null;
   systemProfile: SystemProfile | null;
   setupEstimate: PipelineTimeEstimate | null;
@@ -176,6 +259,7 @@ interface AppState {
   ollamaModels: string[];
   ollamaHasTranslator: boolean;
   batchSources: string[];
+  pipelineLog: PipelineLogEntry[];
 
   setProject: (project: Project | null) => void;
   updateProject: (updates: Partial<Project>) => void;
@@ -191,6 +275,10 @@ interface AppState {
   setBatchSources: (sources: string[]) => void;
   addRecentProject: (p: RecentProject) => void;
   removeRecentProject: (id: string) => void;
+  addFavoriteWork: (title: string) => void;
+  removeFavoriteWork: (title: string) => void;
+  appendPipelineLog: (entry: Omit<PipelineLogEntry, "timestamp"> & { timestamp?: number }) => void;
+  clearPipelineLog: () => void;
 
   canTranslate: (pages: number) => boolean;
   freeRemaining: () => number;
@@ -208,9 +296,21 @@ const savedRecent: RecentProject[] = (() => {
   }
 })();
 
+const savedFavoriteWorks: string[] = (() => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("traduzai_favorite_works") || "[]");
+    const sanitized = sanitizeFavoriteWorks(parsed);
+    persistFavoriteWorks(sanitized);
+    return sanitized;
+  } catch {
+    return [];
+  }
+})();
+
 export const useAppStore = create<AppState>((set, get) => ({
   project: null,
   recentProjects: savedRecent,
+  favoriteWorks: savedFavoriteWorks,
   pipeline: null,
   systemProfile: null,
   setupEstimate: null,
@@ -224,8 +324,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   ollamaModels: [],
   ollamaHasTranslator: false,
   batchSources: [],
+  pipelineLog: [],
 
-  setProject: (project) => set({ project, pipeline: null, setupEstimate: null }),
+  setProject: (project) => set({ project, pipeline: null, setupEstimate: null, pipelineLog: [] }),
   updateProject: (updates) =>
     set((s) => ({
       project: s.project ? { ...s.project, ...updates } : null,
@@ -262,6 +363,37 @@ export const useAppStore = create<AppState>((set, get) => ({
       persistRecentProjects(updated);
       return { recentProjects: updated };
     }),
+  addFavoriteWork: (title) => {
+    const updated = upsertFavoriteWork(get().favoriteWorks, title);
+    persistFavoriteWorks(updated);
+    set({ favoriteWorks: updated });
+  },
+  removeFavoriteWork: (title) =>
+    set((s) => {
+      const normalized = title.trim().toLocaleLowerCase("pt-BR");
+      const updated = sanitizeFavoriteWorks(s.favoriteWorks).filter(
+        (item) => item.toLocaleLowerCase("pt-BR") !== normalized,
+      );
+      persistFavoriteWorks(updated);
+      return { favoriteWorks: updated };
+    }),
+  appendPipelineLog: (entry) =>
+    set((s) => {
+      const next: PipelineLogEntry = {
+        timestamp: entry.timestamp ?? Date.now(),
+        level: entry.level,
+        message: entry.message,
+        step: entry.step ?? null,
+        current_page: entry.current_page ?? null,
+        total_pages: entry.total_pages ?? null,
+        overall_progress: entry.overall_progress ?? null,
+        step_progress: entry.step_progress ?? null,
+      };
+      const MAX = 5000;
+      const appended = [...s.pipelineLog, next];
+      return { pipelineLog: appended.length > MAX ? appended.slice(-MAX) : appended };
+    }),
+  clearPipelineLog: () => set({ pipelineLog: [] }),
 
   canTranslate: (pages) => {
     const { credits, weeklyFreeUsed, weeklyFreeLimit } = get();

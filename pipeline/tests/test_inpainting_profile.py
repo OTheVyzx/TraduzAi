@@ -8,6 +8,8 @@ from inpainter.classical import (
     build_corpus_inpainting_profile,
     classify_background,
     clean_image,
+    detect_white_balloon_overlay,
+    _extract_white_balloon_mask,
 )
 
 
@@ -133,6 +135,146 @@ class InpaintingProfileTests(unittest.TestCase):
         self.assertGreater(float(bottom_overlay[0] - top_overlay[0]), 4.0)
         self.assertGreater(float(bottom_overlay[1] - top_overlay[1]), 1.0)
         self.assertLess(float(np.abs(outside_balloon - np.array([232, 232, 232])).mean()), 3.0)
+
+
+class DarkBalloonInpaintingTests(unittest.TestCase):
+    """Regressões para o cenário de balão escuro em fundo escuro.
+
+    O bug original: _extract_white_balloon_mask pesquisava com padding enorme
+    e encontrava componentes brancos distantes do bbox (face iluminada,
+    brilhos), criando um patch branco visível sobre o fundo escuro.
+    """
+
+    def test_extract_white_balloon_mask_returns_none_for_dark_region(self):
+        """Se a região do texto é escura (mean < 140), o detector NÃO deve retornar máscara."""
+        # Imagem toda escura (cena noturna)
+        image = np.full((300, 400, 3), 30, dtype=np.uint8)
+        # Balão de fala escuro: retângulo cinza-escuro
+        image[50:150, 100:300] = 60
+        # Texto EN branco dentro do balão (seria o input antes do inpaint)
+        image[70:90, 130:270] = 220
+        image[100:120, 140:260] = 220
+
+        # O bbox do texto aponta para a região DENTRO do balão escuro
+        bbox = [130, 70, 270, 120]
+        result = _extract_white_balloon_mask(image, bbox)
+
+        self.assertIsNone(
+            result,
+            "Região escura (mean < 140) não deve ser detectada como balão branco",
+        )
+
+    def test_detect_white_balloon_overlay_skips_dark_background_text(self):
+        """detect_white_balloon_overlay deve retornar None para texto em balão escuro."""
+        # Cena noturna: fundo escuro + balão cinza-escuro
+        image = np.full((200, 300, 3), 25, dtype=np.uint8)
+        image[40:160, 60:240] = 55  # balão cinza-escuro
+
+        # Adicionamos uma área branca distante (rosto iluminado do personagem)
+        # que NÃO deve ser confundida com o balão
+        image[10:30, 10:50] = 245  # brilho distante
+
+        region = {
+            "tipo": "fala",
+            "bbox": [70, 55, 230, 145],
+            "texts": [
+                {"bbox": [80, 65, 220, 95], "confidence": 0.9},
+                {"bbox": [90, 100, 210, 130], "confidence": 0.9},
+            ],
+        }
+
+        result = detect_white_balloon_overlay(image, region)
+        self.assertIsNone(
+            result,
+            "Balão escuro com brilho distante não deve disparar white_balloon_overlay",
+        )
+
+    def test_classify_background_uses_balloon_bbox_for_ring_when_larger(self):
+        """classify_background usa balloon_bbox para ring sampling quando é 15%+ maior.
+
+        Cenário: balão branco com borda escura, mas o fundo real (fora do balão)
+        é escuro. O ring ao redor do text_bbox captura a borda clara do balão,
+        enquanto o ring ao redor do balloon_bbox captura o fundo escuro correto.
+        """
+        # Imagem: fundo escuro com balão branco no centro
+        image = np.full((200, 300, 3), 20, dtype=np.uint8)
+        # Balão branco: [60, 40, 240, 160]
+        image[40:160, 60:240] = 240
+        # Borda escura do balão (3px)
+        image[40:43, 60:240] = 15
+        image[157:160, 60:240] = 15
+        image[40:160, 60:63] = 15
+        image[40:160, 237:240] = 15
+
+        mask = np.zeros((200, 300), dtype=np.uint8)
+        mask[70:130, 100:200] = 255  # máscara do texto (dentro do balão)
+
+        # Sem balloon_bbox: ring ao redor do text_bbox captura o branco do balão
+        text_bbox = [100, 70, 200, 130]
+        bg_type_text, _ = classify_background(image, text_bbox, mask)
+
+        # Com balloon_bbox (maior): ring ao redor do balloon_bbox captura o fundo escuro
+        balloon_bbox = [60, 40, 240, 160]  # ~3.5x maior que text_bbox
+        bg_type_balloon, _ = classify_background(image, text_bbox, mask, balloon_bbox=balloon_bbox)
+
+        # Sem balloon_bbox: anel ao redor do text_bbox amosta pixels brancos → solid_light
+        self.assertIn(bg_type_text, {"solid_light", "solid_mid"})
+        # Com balloon_bbox: anel vai para fora do balão → pixels escuros → solid_dark
+        self.assertEqual(
+            bg_type_balloon,
+            "solid_dark",
+            f"Com balloon_bbox maior, ring deve capturar fundo escuro. Obteve: {bg_type_balloon}",
+        )
+
+    def test_clean_image_dark_balloon_does_not_produce_white_patch(self):
+        """clean_image não deve criar patch branco em fundo escuro.
+
+        Regressão: antes do fix, o white_balloon_overlay era disparado por brilhos
+        distantes (rosto do personagem) → area branca visível sobre fundo escuro.
+        """
+        # Cena noturna: fundo escuro
+        image = np.full((200, 300, 3), 20, dtype=np.uint8)
+        # Balão de fala cinza-escuro
+        image[50:150, 80:220] = 55
+        # Texto EN branco dentro do balão (antes do inpaint)
+        image[70:90, 110:190] = 210
+        image[100:120, 120:180] = 210
+        # Brilho distante (rosto iluminado) — NÃO deve disparar white_balloon
+        image[5:25, 5:45] = 248  # branco brilhante longe do balão
+
+        texts = [
+            {
+                "bbox": [110, 70, 190, 90],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [80, 50, 220, 150],
+            },
+            {
+                "bbox": [120, 100, 180, 120],
+                "tipo": "fala",
+                "confidence": 0.9,
+                "balloon_bbox": [80, 50, 220, 150],
+            },
+        ]
+
+        cleaned = np.array(clean_image(Image.fromarray(image), texts))
+
+        # A região do balão (fora do texto) deve permanecer escura (não virar branca)
+        balloon_edge_top = cleaned[52:68, 90:210]  # interior do balão, acima do texto
+        mean_balloon_edge = float(np.mean(balloon_edge_top))
+        self.assertLess(
+            mean_balloon_edge,
+            180,
+            f"Região do balão escuro não deve ser preenchida com branco. mean={mean_balloon_edge:.1f}",
+        )
+
+        # Os pixels do texto devem ter sido inpaintados (não branco 210)
+        text_area = cleaned[72:88, 115:185]
+        self.assertLess(
+            float(np.mean(text_area)),
+            200,
+            "Área de texto deve ter sido inpaintada com cor escura, não preservada como branca",
+        )
 
 
 if __name__ == "__main__":

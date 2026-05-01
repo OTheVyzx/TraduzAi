@@ -5,7 +5,7 @@ Não usa a cabeça de classificação (treinada em 6162 classes CJK).
 Usa o backbone para extrair embeddings de 2048 dims e compara por
 similaridade de cosseno com renders de amostra das fontes disponíveis.
 
-Fonte padrão para todos os textos: CCDaveGibbonsLower W00 Regular (MAIÚSCULO).
+Fonte padrão para todos os textos: ComicNeue-Bold (MAIÚSCULO).
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 SAMPLE_TEXT   = "ABCDEFGHabcdefgh123!?"
 SIMILARITY_THRESHOLD = 0.72
-DEFAULT_FONT  = "CCDaveGibbonsLower W00 Regular.ttf"
+DEFAULT_FONT  = "ComicNeue-Bold.ttf"
 CANDIDATE_FONTS = [
+    "KOMIKAX_.ttf",
     "DK Full Blast.otf",
     "SINGLE FIGHTER.otf",
     "Libel Suit Suit Rg.otf",

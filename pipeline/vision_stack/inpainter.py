@@ -9,7 +9,11 @@ import os
 from pathlib import Path
 import shutil
 import sysconfig
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..inpainter.lama_onnx import get_lama_session, is_lama_manga_available, inpaint_region_with_lama
+    from ..inpainter.lama import LaMa
 
 import cv2
 import numpy as np
@@ -91,9 +95,22 @@ class Inpainter:
         except ImportError:
             pass
 
+        # Tenta usar o modelo lama-manga especializado encontrado no PK se disponivel
+        if model_name == "lama-manga":
+            pk_model = Path("d:/TraduzAi/pk/huggingface/mayocream/lama-manga/lama-manga.safetensors")
+            if pk_model.exists():
+                try:
+                    from safetensors.torch import load_file as load_safetensors
+                    self._model = self._load_lama_checkpoint(pk_model, is_safetensors=True)
+                    self._backend = "lama_manga_pk"
+                    logger.info("LaMA-Manga carregado do diretório PK (safetensors)")
+                    return
+                except Exception as e:
+                    logger.warning(f"Falha ao carregar lama-manga do PK: {e}")
+
         # Fallback: carrega checkpoint diretamente
         ckpt_path = Path(model_path) if model_path else MODELS_DIR / f"{model_name}.pt"
-        if not ckpt_path.exists():
+        if not ckpt_path.exists() and not (model_name == "lama-manga" and "lama_manga_pk" in getattr(self, "_backend", "")):
             self._download_model(model_name, ckpt_path)
 
         try:
@@ -101,10 +118,11 @@ class Inpainter:
             self._backend = "lama_direct"
             logger.info(f"LaMA carregado diretamente ({self.device})")
         except Exception as e:
-            logger.error(f"Falha ao carregar LaMA: {e}")
-            logger.info("Usando OpenCV inpainting como fallback")
-            self._model = None
-            self._backend = "opencv"
+            if not getattr(self, "_model", None):
+                logger.error(f"Falha ao carregar LaMA: {e}")
+                logger.info("Usando OpenCV inpainting como fallback")
+                self._model = None
+                self._backend = "opencv"
 
     def _try_load_onnx_backend(self, model_name: str, model_path: Optional[str] = None):
         del model_path
@@ -113,7 +131,13 @@ class Inpainter:
 
         try:
             import onnxruntime as ort
-            from inpainter.lama_onnx import get_lama_session, is_lama_manga_available
+            if not TYPE_CHECKING:
+                try:
+                    from inpainter.lama_onnx import get_lama_session, is_lama_manga_available
+                except ImportError:
+                    from ..inpainter.lama_onnx import get_lama_session, is_lama_manga_available
+            else:
+                from ..inpainter.lama_onnx import get_lama_session, is_lama_manga_available
 
             if not is_lama_manga_available():
                 return None
@@ -217,9 +241,13 @@ class Inpainter:
         urllib.request.urlretrieve(url, dest, progress)
         print()
 
-    def _load_lama_checkpoint(self, ckpt_path: Path):
+    def _load_lama_checkpoint(self, ckpt_path: Path, is_safetensors: bool = False):
         """Carrega checkpoint LaMA manualmente."""
-        state = torch.load(str(ckpt_path), map_location="cpu")
+        if is_safetensors:
+            from safetensors.torch import load_file as load_safetensors
+            state = load_safetensors(str(ckpt_path), device="cpu")
+        else:
+            state = torch.load(str(ckpt_path), map_location="cpu")
         
         # Suporte a diferentes formatos de checkpoint
         if isinstance(state, dict):
@@ -229,7 +257,13 @@ class Inpainter:
                 state = state["generator"]
 
         # Importa a arquitetura LaMA
-        from .lama_arch import LaMa
+        if not TYPE_CHECKING:
+            try:
+                from inpainter.lama import LaMa
+            except ImportError:
+                from ..inpainter.lama import LaMa
+        else:
+            from ..inpainter.lama import LaMa
         model = LaMa()
         model.load_state_dict(state, strict=False)
         model.to(self.device)
@@ -299,7 +333,13 @@ class Inpainter:
             f"mask/image mismatch before run: mask={mask.shape[:2]} image={img_np.shape[:2]}"
         )
         if self._backend in {"lama_onnx_cuda", "lama_onnx_tensorrt"}:
-            from inpainter.lama_onnx import inpaint_region_with_lama
+            if not TYPE_CHECKING:
+                try:
+                    from inpainter.lama_onnx import inpaint_region_with_lama
+                except ImportError:
+                    from ..inpainter.lama_onnx import inpaint_region_with_lama
+            else:
+                from ..inpainter.lama_onnx import inpaint_region_with_lama
 
             result_np = inpaint_region_with_lama(self._model, img_np, mask)
             if debug:

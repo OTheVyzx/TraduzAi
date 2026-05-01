@@ -1,0 +1,120 @@
+"""Testes de concat.py — concatenação vertical de páginas em strip."""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+
+class BuildStripTests(unittest.TestCase):
+    def _write_png(self, dir_path: Path, name: str, image: np.ndarray) -> Path:
+        p = dir_path / name
+        cv2.imwrite(str(p), image)
+        return p
+
+    def test_build_strip_concatenates_without_separator_pixels(self):
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            page_a = np.full((100, 200, 3), 50, dtype=np.uint8)
+            page_b = np.full((80, 200, 3), 200, dtype=np.uint8)
+            page_a[-1, :] = 50
+            page_b[0, :] = 200
+            paths = [
+                self._write_png(tmp_path, "a.png", page_a),
+                self._write_png(tmp_path, "b.png", page_b),
+            ]
+
+            strip = build_strip(paths)
+
+            self.assertEqual(strip.image.shape[0], 180)
+            self.assertTrue(np.all(strip.image[99, :] == 50))
+            self.assertTrue(np.all(strip.image[100, :] == 200))
+
+    def test_build_strip_letterboxes_narrow_pages_with_white(self):
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            wide = np.full((50, 300, 3), 0, dtype=np.uint8)
+            narrow = np.full((50, 200, 3), 0, dtype=np.uint8)
+            paths = [
+                self._write_png(tmp_path, "wide.png", wide),
+                self._write_png(tmp_path, "narrow.png", narrow),
+            ]
+
+            strip = build_strip(paths)
+
+            self.assertEqual(strip.width, 300)
+            # Narrow page is centered: 50px letterbox on each side
+            self.assertTrue(np.all(strip.image[60, 0:49] == 255))
+            self.assertTrue(np.all(strip.image[60, 251:300] == 255))
+            self.assertTrue(np.all(strip.image[60, 50:250] == 0))
+
+    def test_build_strip_records_page_breaks(self):
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            paths = [
+                self._write_png(tmp_path, f"p{i}.png", np.zeros((100, 200, 3), dtype=np.uint8))
+                for i in range(3)
+            ]
+
+            strip = build_strip(paths)
+
+            self.assertEqual(strip.source_page_breaks, [0, 100, 200, 300])
+
+    def test_build_strip_records_x_offset_per_page(self):
+        """Páginas mais estreitas que max_width devem ter page_x_offsets > 0."""
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Página wide (300px) e narrow (200px)
+            wide = np.zeros((50, 300, 3), dtype=np.uint8)
+            narrow = np.zeros((50, 200, 3), dtype=np.uint8)
+            cv2.imwrite(str(tmp_path / "a.png"), wide)
+            cv2.imwrite(str(tmp_path / "b.png"), narrow)
+            strip = build_strip([tmp_path / "a.png", tmp_path / "b.png"])
+
+            self.assertTrue(hasattr(strip, "page_x_offsets"))
+            self.assertEqual(len(strip.page_x_offsets), 2)
+            # wide (300px = max_width) → offset 0
+            self.assertEqual(strip.page_x_offsets[0], 0)
+            # narrow (200px) → offset (300-200)//2 = 50
+            self.assertEqual(strip.page_x_offsets[1], 50)
+
+    def test_build_strip_same_width_pages_have_zero_offset(self):
+        """Páginas com mesma largura têm offset=0."""
+        from strip.concat import build_strip
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for i in range(3):
+                cv2.imwrite(str(tmp_path / f"p{i}.png"),
+                           np.zeros((100, 200, 3), dtype=np.uint8))
+            strip = build_strip(sorted(tmp_path.glob("*.png")))
+            self.assertEqual(strip.page_x_offsets, [0, 0, 0])
+
+
+class SplitStripBackTests(unittest.TestCase):
+    def test_round_trip_recovers_original_pixels(self):
+        from strip.concat import build_strip, split_strip_back
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            originals = [
+                np.random.randint(0, 256, (40, 100, 3), dtype=np.uint8),
+                np.random.randint(0, 256, (60, 100, 3), dtype=np.uint8),
+                np.random.randint(0, 256, (50, 100, 3), dtype=np.uint8),
+            ]
+            paths = []
+            for i, img in enumerate(originals):
+                p = tmp_path / f"p{i}.png"
+                cv2.imwrite(str(p), img)
+                paths.append(p)
+
+            strip = build_strip(paths)
+            recovered = split_strip_back(strip)
+
+            self.assertEqual(len(recovered), len(originals))
+            for orig, rec in zip(originals, recovered):
+                self.assertEqual(orig.shape, rec.shape)

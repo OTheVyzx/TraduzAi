@@ -1,0 +1,12 @@
+[
+  {
+    "id": "english_leak",
+    "translated": "Eu vou protect you.",
+    "expected_flags": ["english_leak"]
+  },
+  {
+    "id": "clean_ptbr",
+    "translated": "Eu vou proteger voce.",
+    "expected_flags": []
+  }
+]

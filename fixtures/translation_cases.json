@@ -1,0 +1,8 @@
+[
+  {
+    "id": "glossary_lock",
+    "source": "The Knight joined the Guild.",
+    "glossary": { "Knight": "Cavaleiro", "Guild": "Guilda" },
+    "expected_contains": ["Cavaleiro", "Guilda"]
+  }
+]

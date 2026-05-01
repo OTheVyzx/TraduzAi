@@ -17,9 +17,22 @@ vision-worker/.toolvenv/
 pipeline/models/
 pipeline/teste/
 
+# Local models/weights (never commit binaries)
+*.onnx
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Temp files
+*.tmp
+*.bak
+*.old
+
 # IDE
 .vscode/
 .idea/
+.worktrees/
 *.swp
 *.swo
 .claude/

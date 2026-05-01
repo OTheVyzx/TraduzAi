@@ -14,6 +14,222 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+PADDLE_DIRECT_LANGUAGE_CODES = {"ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka"}
+PADDLE_LATIN_LANGUAGE_CODES = {
+    "af", "az", "bs", "cs", "cy", "da", "de", "es", "et", "fr", "ga", "hr", "hu",
+    "id", "is", "it", "ku", "la", "lt", "lv", "mi", "ms", "mt", "nl", "no", "oc",
+    "pi", "pl", "pt", "ro", "rs_latin", "sk", "sl", "sq", "sv", "sw", "tl", "tr",
+    "uz", "vi", "french", "german",
+}
+PADDLE_ARABIC_LANGUAGE_CODES = {"ar", "fa", "ug", "ur"}
+PADDLE_CYRILLIC_LANGUAGE_CODES = {
+    "ru", "rs_cyrillic", "be", "bg", "uk", "mn", "abq", "ady", "kbd", "ava", "dar",
+    "inh", "che", "lbe", "lez", "tab",
+}
+PADDLE_DEVANAGARI_LANGUAGE_CODES = {
+    "hi", "mr", "ne", "bh", "mai", "ang", "bho", "mah", "sck", "new", "gom", "sa", "bgc",
+}
+
+PADDLE_LANGUAGE_ALIASES = {
+    "en-gb": "en",
+    "en-us": "en",
+    "pt-br": "pt",
+    "pt-pt": "pt",
+    "zh": "ch",
+    "zh-cn": "ch",
+    "zh-hans": "ch",
+    "zh-tw": "chinese_cht",
+    "zh-hant": "chinese_cht",
+    "ja": "japan",
+    "ko": "korean",
+}
+
+EASYOCR_LANGUAGE_ALIASES = {
+    "en-gb": ["en"],
+    "en-us": ["en"],
+    "pt-br": ["pt", "en"],
+    "pt-pt": ["pt", "en"],
+    "zh": ["ch_sim", "en"],
+    "zh-cn": ["ch_sim", "en"],
+    "zh-hans": ["ch_sim", "en"],
+    "zh-tw": ["ch_tra", "en"],
+    "zh-hant": ["ch_tra", "en"],
+    "ja": ["ja", "en"],
+    "ko": ["ko", "en"],
+    "ru": ["ru", "en"],
+    "ar": ["ar", "en"],
+}
+
+
+def normalize_paddleocr_language(lang: str) -> str:
+    normalized = (lang or "en").strip().replace("_", "-").lower()
+    if normalized in PADDLE_LANGUAGE_ALIASES:
+        return PADDLE_LANGUAGE_ALIASES[normalized]
+
+    base = normalized.split("-", 1)[0]
+    if base in PADDLE_LANGUAGE_ALIASES:
+        return PADDLE_LANGUAGE_ALIASES[base]
+    if base in PADDLE_DIRECT_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_LATIN_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_ARABIC_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_CYRILLIC_LANGUAGE_CODES:
+        return base
+    if base in PADDLE_DEVANAGARI_LANGUAGE_CODES:
+        return base
+
+    return "latin"
+
+
+def normalize_easyocr_languages(lang: str) -> list[str]:
+    normalized = (lang or "en").strip().replace("_", "-").lower()
+    if normalized in EASYOCR_LANGUAGE_ALIASES:
+        return EASYOCR_LANGUAGE_ALIASES[normalized]
+
+    base = normalized.split("-", 1)[0]
+    if base in EASYOCR_LANGUAGE_ALIASES:
+        return EASYOCR_LANGUAGE_ALIASES[base]
+    if base in {"es", "de", "fr", "it", "pt", "nl"}:
+        return [base, "en"]
+    if base == "en":
+        return ["en"]
+
+    return ["en"]
+
+
+def _coerce_bbox(raw_bbox) -> list[int] | None:
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in raw_bbox]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _normalize_line_polygons(raw_line_polygons) -> list[list[list[int]]]:
+    normalized: list[list[list[int]]] = []
+    for polygon in raw_line_polygons or []:
+        if not isinstance(polygon, (list, tuple)):
+            continue
+        points: list[list[int]] = []
+        for point in polygon:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                points.append([int(round(float(point[0]))), int(round(float(point[1])))])
+            except Exception:
+                continue
+        if len(points) >= 4:
+            normalized.append(points)
+    return normalized
+
+
+def _bbox_from_polygons(line_polygons) -> list[int] | None:
+    points: list[tuple[float, float]] = []
+    for polygon in line_polygons or []:
+        if not isinstance(polygon, (list, tuple)):
+            continue
+        for point in polygon:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                points.append((float(point[0]), float(point[1])))
+            except Exception:
+                continue
+    if not points:
+        return None
+    xs = [pt[0] for pt in points]
+    ys = [pt[1] for pt in points]
+    return [
+        int(np.floor(min(xs))),
+        int(np.floor(min(ys))),
+        int(np.ceil(max(xs))),
+        int(np.ceil(max(ys))),
+    ]
+
+
+def _select_text_mask(gray_crop: np.ndarray) -> np.ndarray:
+    if gray_crop.size == 0:
+        return np.zeros(gray_crop.shape, dtype=np.uint8)
+
+    _, mask_normal = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, mask_inverted = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    mask = mask_normal if int(np.count_nonzero(mask_normal)) <= int(np.count_nonzero(mask_inverted)) else mask_inverted
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+    return mask
+
+
+def _derive_text_pixel_bbox(
+    page_rgb: np.ndarray,
+    seed_bbox,
+    line_polygons: list[list[list[int]]] | None = None,
+) -> list[int] | None:
+    bbox = _coerce_bbox(seed_bbox)
+    polygon_bbox = _bbox_from_polygons(line_polygons or [])
+    if polygon_bbox is not None:
+        if bbox is None:
+            bbox = polygon_bbox
+        else:
+            bbox = [
+                min(bbox[0], polygon_bbox[0]),
+                min(bbox[1], polygon_bbox[1]),
+                max(bbox[2], polygon_bbox[2]),
+                max(bbox[3], polygon_bbox[3]),
+            ]
+    if bbox is None or not isinstance(page_rgb, np.ndarray) or page_rgb.size == 0:
+        return bbox
+
+    height, width = page_rgb.shape[:2]
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return bbox
+
+    crop = page_rgb[y1:y2, x1:x2]
+    if crop.size == 0:
+        return bbox
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    mask = _select_text_mask(gray)
+    if not np.any(mask):
+        return polygon_bbox or bbox
+
+    row_counts = np.count_nonzero(mask > 0, axis=1)
+    col_counts = np.count_nonzero(mask > 0, axis=0)
+    for top_count, bottom_count, side_count in ((2, 3, 3), (3, 4, 4), (4, 5, 5), (5, 6, 6)):
+        top_rows = np.where(row_counts >= top_count)[0]
+        bottom_rows = np.where(row_counts >= bottom_count)[0]
+        cols = np.where(col_counts >= side_count)[0]
+        if top_rows.size < 4 or bottom_rows.size < 4 or cols.size < 4:
+            continue
+        left = int(cols[0])
+        right = int(cols[-1]) + 1
+        top = int(top_rows[0])
+        bottom = int(bottom_rows[-1]) + 1
+        if bottom > top and right > left:
+            return [x1 + left, y1 + top, x1 + right, y1 + bottom]
+
+    return polygon_bbox or bbox
+
 
 class OCREngine:
     """
@@ -54,6 +270,8 @@ class OCREngine:
             self._load_manga_ocr()
         elif self.model_name == "paddleocr":
             self._load_paddle_ocr()
+        elif self.model_name == "easyocr":
+            self._load_easyocr()
         else:
             raise ValueError(f"OCR backend '{self.model_name}' não suportado")
 
@@ -91,30 +309,40 @@ class OCREngine:
         os.environ["OMP_NUM_THREADS"] = "1"
         os.environ["OPENBLAS_NUM_THREADS"] = "1"
         os.environ["MKL_NUM_THREADS"] = "1"
-        from paddleocr import PaddleOCR
+        try:
+            import sys
+            if sys.version_info >= (3, 12) and self.device.type != "cuda":
+                raise ImportError("PaddleOCR incompatível com Python 3.12 via CPU (C++ Segfault). Forçando EasyOCR.")
+            from paddleocr import PaddleOCR
+            import paddle.base.libpaddle as libpaddle
+            if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
+                libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
+        except Exception as exc:
+            logger.warning("PaddleOCR nÃ£o carregou (%s); usando EasyOCR como fallback", exc)
+            self.model_name = "easyocr"
+            self._load_easyocr()
+            return
         
-        # Mapeamento do TraduzAi (app) para o PaddleOCR
-        # en -> en
-        # ja -> japan
-        # ko -> korean
-        # zh -> ch
-        mapped_lang = {
-            "en": "en",
-            "ja": "japan",
-            "ko": "korean",
-            "zh": "ch",
-        }.get(self.lang, "en")
+        mapped_lang = normalize_paddleocr_language(self.lang)
         
         use_gpu = self.device.type == "cuda"
         self._model = PaddleOCR(
-            use_angle_cls=True,
+            use_angle_cls=False,
             lang=mapped_lang,
-            use_gpu=use_gpu,
-            show_log=False,
             enable_mkldnn=not use_gpu,  # MKL-DNN acelera CPU
         )
         self._backend = "paddleocr"
         logger.info(f"PaddleOCR carregado (lang={mapped_lang}, gpu={use_gpu})")
+
+    def _load_easyocr(self):
+        import easyocr
+
+        languages = normalize_easyocr_languages(self.lang)
+
+        use_gpu = self.device.type == "cuda"
+        self._model = easyocr.Reader(languages, gpu=use_gpu, verbose=False)
+        self._backend = "easyocr"
+        logger.info(f"EasyOCR carregado (lang={languages}, gpu={use_gpu})")
 
     # ------------------------------------------------------------------
     # API pública
@@ -135,7 +363,7 @@ class OCREngine:
             results.extend(batch_results)
         return results
 
-    def recognize_blocks_from_page(self, page_rgb: np.ndarray, blocks: list) -> list[str]:
+    def recognize_blocks_from_page(self, page_rgb: np.ndarray, blocks: list) -> list[str | dict]:
         """Reconhece texto para cada bloco detectado, alinhando o resultado ao `blocks`.
 
         Otimiza o backend PaddleOCR: evita rodar detecção repetidamente por crop.
@@ -170,7 +398,8 @@ class OCREngine:
         for index, text in enumerate(texts):
             if attempted >= max_fallback:
                 break
-            if text.strip():
+            current_text = text.get("text", "") if isinstance(text, dict) else text
+            if str(current_text or "").strip():
                 continue
             try:
                 block_confidence = float(getattr(blocks[index], "confidence", 1.0) or 0.0)
@@ -182,7 +411,13 @@ class OCREngine:
             if not self._crop_might_have_text(crop):
                 continue
             attempted += 1
-            texts[index] = self._recognize_single_paddle_with_retry(crop)
+            recovered = self._recognize_single_paddle_with_retry(crop)
+            if isinstance(texts[index], dict):
+                updated = dict(texts[index])
+                updated["text"] = recovered
+                texts[index] = updated
+            else:
+                texts[index] = recovered
 
         return texts
 
@@ -194,8 +429,33 @@ class OCREngine:
     def _recognize_batch_impl(self, crops: list[np.ndarray]) -> list[str]:
         if self._backend == "manga-ocr":
             return self._manga_ocr_batch(crops)
+        if self._backend == "easyocr":
+            return self._easyocr_batch(crops)
         else:
             return self._paddle_ocr_batch(crops)
+
+    def _easyocr_batch(self, crops: list[np.ndarray]) -> list[str]:
+        texts = []
+        for crop in crops:
+            if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+                texts.append("")
+                continue
+            try:
+                results = self._model.readtext(
+                    crop,
+                    text_threshold=0.35,
+                    low_text=0.25,
+                    canvas_size=2048,
+                    paragraph=False,
+                )
+            except Exception as exc:
+                logger.warning(f"EasyOCR error: {exc}")
+                texts.append("")
+                continue
+
+            lines = [str(item[1]).strip() for item in results if item and len(item) >= 2 and str(item[1]).strip()]
+            texts.append(" ".join(lines).strip())
+        return texts
 
     def _manga_ocr_batch(self, crops: list[np.ndarray]) -> list[str]:
         """Inferência batched com manga-ocr."""
@@ -427,7 +687,7 @@ class OCREngine:
             return 0
         return int((ix2 - ix1) * (iy2 - iy1))
 
-    def _paddle_ocr_full_page_to_blocks(self, page_bgr: np.ndarray, blocks: list) -> list[str] | None:
+    def _paddle_ocr_full_page_to_blocks(self, page_bgr: np.ndarray, blocks: list) -> list[dict] | None:
         try:
             result = self._model.ocr(page_bgr, det=True, rec=True, cls=False)
         except Exception as exc:
@@ -453,7 +713,14 @@ class OCREngine:
                 xyxy = getattr(block, "xyxy", (0, 0, 0, 0))
                 block_bboxes.append([int(v) for v in xyxy])
 
-        assigned: list[list[tuple[list[int], str]]] = [[] for _ in blocks]
+        page_rgb = page_bgr
+        if len(page_bgr.shape) == 3 and page_bgr.shape[2] >= 3:
+            try:
+                page_rgb = cv2.cvtColor(page_bgr, cv2.COLOR_BGR2RGB)
+            except Exception:
+                page_rgb = page_bgr
+
+        assigned: list[list[dict]] = [[] for _ in blocks]
 
         for item in raw_lines:
             if not item or len(item) < 2:
@@ -475,6 +742,8 @@ class OCREngine:
             line_bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
             lx1, ly1, lx2, ly2 = line_bbox
             line_area = max(1, (lx2 - lx1) * (ly2 - ly1))
+            line_polygon = _normalize_line_polygons([box])
+            normalized_polygon = line_polygon[0] if line_polygon else []
 
             best_index = None
             best_score = 0.0
@@ -490,16 +759,41 @@ class OCREngine:
                     best_index = idx
 
             if best_index is not None and best_score >= 0.18:
-                assigned[best_index].append((line_bbox, str(text).strip()))
+                assigned[best_index].append(
+                    {
+                        "line_bbox": line_bbox,
+                        "text": str(text).strip(),
+                        "line_polygon": normalized_polygon,
+                        "confidence": float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0,
+                    }
+                )
 
-        texts: list[str] = []
+        texts: list[dict] = []
         non_empty = 0
         for lines in assigned:
-            lines.sort(key=lambda entry: (entry[0][1], entry[0][0]))
-            joined = " ".join(text for _, text in lines).strip()
+            lines.sort(key=lambda entry: (entry["line_bbox"][1], entry["line_bbox"][0]))
+            joined = " ".join(entry["text"] for entry in lines if str(entry.get("text", "")).strip()).strip()
             if joined:
                 non_empty += 1
-            texts.append(joined)
+            combined_polygons = [entry["line_polygon"] for entry in lines if entry.get("line_polygon")]
+            combined_line_bboxes = [entry["line_bbox"] for entry in lines if entry.get("line_bbox")]
+            if combined_line_bboxes:
+                source_bbox = [
+                    min(box[0] for box in combined_line_bboxes),
+                    min(box[1] for box in combined_line_bboxes),
+                    max(box[2] for box in combined_line_bboxes),
+                    max(box[3] for box in combined_line_bboxes),
+                ]
+            else:
+                source_bbox = []
+            texts.append(
+                {
+                    "text": joined,
+                    "source_bbox": source_bbox,
+                    "line_polygons": combined_polygons,
+                    "text_pixel_bbox": _derive_text_pixel_bbox(page_rgb, source_bbox, combined_polygons) or source_bbox,
+                }
+            )
 
         if non_empty == 0:
             return None

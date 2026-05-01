@@ -1,0 +1,14 @@
+[
+  {
+    "id": "split_i",
+    "raw": "l am here",
+    "expected": "I am here",
+    "language": "en"
+  },
+  {
+    "id": "ellipsis_spacing",
+    "raw": "Wait . . .",
+    "expected": "Wait...",
+    "language": "en"
+  }
+]

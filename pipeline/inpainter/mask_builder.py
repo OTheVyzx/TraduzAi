@@ -112,22 +112,22 @@ def expand_bbox(
     height = max(1, y2 - y1)
 
     if _is_vertical_text(bbox):
-        # Texto vertical: máscara estreita horizontalmente, justa verticalmente
-        margin_x = max(3, int(width * 0.10))
-        margin_y = max(3, int(height * 0.08))
+        margin_x = max(2, int(width * 0.08))
+        margin_y = max(2, int(height * 0.06))
     elif tipo == "narracao":
-        margin_x = max(4, int(width * 0.16))
-        margin_y = max(4, int(height * 0.36))
+        margin_x = max(3, int(width * 0.12))
+        margin_y = max(3, int(height * 0.18))
     elif tipo == "sfx":
-        margin_x = max(4, int(width * 0.18))
-        margin_y = max(4, int(height * 0.20))
+        margin_x = max(4, int(width * 0.15))
+        margin_y = max(4, int(height * 0.15))
     else:
-        margin_x = max(4, int(width * 0.12))
-        margin_y = max(4, int(height * 0.30))
+        # Texto normal (fala): margens reduzidas para evitar comer spikes e bordas
+        margin_x = max(4, int(width * 0.10))
+        margin_y = max(4, int(height * 0.12))
 
     if confidence < 0.65:
-        margin_x += 3
-        margin_y += 3
+        margin_x += 2
+        margin_y += 2
 
     if estilo:
         contorno_px = int(estilo.get("contorno_px", 0))

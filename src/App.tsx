@@ -10,7 +10,9 @@ import { Lab } from "./pages/Lab";
 import { Layout } from "./components/ui/Layout";
 import { BootSplash } from "./components/ui/BootSplash";
 import { useAppStore } from "./lib/stores/appStore";
-import { checkModels, getCredits, checkOllama, getSystemProfile } from "./lib/tauri";
+import { checkModels, getCredits, checkOllama, getSystemProfile, onPipelineProgress } from "./lib/tauri";
+import { installE2EFixtureProject } from "./lib/e2e/fixtureProject";
+import { FEATURES } from "./lib/features";
 
 const LAB_WINDOW_MODE_KEY = "traduzai-window-mode";
 
@@ -23,15 +25,21 @@ function AppRoutes() {
       return;
     }
 
+    if (!FEATURES.lab) {
+      window.sessionStorage.removeItem(LAB_WINDOW_MODE_KEY);
+      return;
+    }
+
     if (queryMode === "lab") {
       window.sessionStorage.setItem(LAB_WINDOW_MODE_KEY, "lab");
     }
   }, [queryMode]);
 
-  const standaloneLab =
+  const standaloneLab = FEATURES.lab && (
     queryMode === "lab"
-      || (typeof window !== "undefined"
-        && window.sessionStorage.getItem(LAB_WINDOW_MODE_KEY) === "lab");
+    || (typeof window !== "undefined"
+      && window.sessionStorage.getItem(LAB_WINDOW_MODE_KEY) === "lab")
+  );
 
   if (standaloneLab) {
     return (
@@ -39,7 +47,7 @@ function AppRoutes() {
         <Route
           path="/lab/*"
           element={
-            <div className="h-screen overflow-y-auto overflow-x-hidden bg-bg-primary">
+            <div className="h-screen overflow-y-auto overflow-x-hidden bg-bg-primary bg-noise">
               <Lab />
             </div>
           }
@@ -69,7 +77,11 @@ function AppRoutes() {
               <Route path="/setup" element={<Setup />} />
               <Route path="/processing" element={<Processing />} />
               <Route path="/preview" element={<Preview />} />
-              <Route path="/lab/*" element={<Lab />} />
+              {FEATURES.lab ? (
+                <Route path="/lab/*" element={<Lab />} />
+              ) : (
+                <Route path="/lab/*" element={<Navigate to="/" replace />} />
+              )}
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </Layout>
@@ -80,17 +92,50 @@ function AppRoutes() {
 }
 
 export default function App() {
+  const e2eMode = ((import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_E2E ?? "") === "1";
   const setSystemProfile = useAppStore((s) => s.setSystemProfile);
   const setModelsReady = useAppStore((s) => s.setModelsReady);
   const setCredits = useAppStore((s) => s.setCredits);
   const setOllamaStatus = useAppStore((s) => s.setOllamaStatus);
   const [bootState, setBootState] = useState({
-    ready: false,
-    progress: 0.08,
-    message: "Preparando ambiente...",
+    ready: e2eMode,
+    progress: e2eMode ? 1 : 0.08,
+    message: e2eMode ? "Pronto" : "Preparando ambiente...",
   });
 
+  const setPipeline = useAppStore((s) => s.setPipeline);
+  const appendPipelineLog = useAppStore((s) => s.appendPipelineLog);
+
   useEffect(() => {
+    if (e2eMode) {
+      installE2EFixtureProject();
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    let lastLoggedStep: string | null = null;
+
+    async function setup() {
+      unlisten = (await onPipelineProgress((progress) => {
+        setPipeline(progress);
+        appendPipelineLog({
+          level: progress.step !== lastLoggedStep ? "step" : "progress",
+          step: progress.step as any,
+          current_page: progress.current_page,
+          total_pages: progress.total_pages,
+          overall_progress: progress.overall_progress,
+          step_progress: progress.step_progress,
+          message: progress.message,
+        });
+        lastLoggedStep = progress.step;
+      })) as unknown as () => void;
+    }
+
+    setup();
+    return () => unlisten?.();
+  }, [appendPipelineLog, e2eMode, setPipeline]);
+
+  useEffect(() => {
+    if (e2eMode) return;
     let cancelled = false;
     let revealTimer: number | null = null;
     let completedSteps = 0;
@@ -200,7 +245,7 @@ export default function App() {
         window.clearTimeout(revealTimer);
       }
     };
-  }, [setCredits, setModelsReady, setOllamaStatus, setSystemProfile]);
+  }, [e2eMode, setCredits, setModelsReady, setOllamaStatus, setSystemProfile]);
 
   if (!bootState.ready) {
     return <BootSplash progress={bootState.progress} message={bootState.message} />;
