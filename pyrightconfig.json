@@ -9,36 +9,20 @@
     "src-tauri",
     "pipeline/venv"
   ],
+  "venvPath": "pipeline",
+  "venv": "venv",
+  "pythonVersion": "3.12",
+  "reportMissingImports": "none",
+  "typeCheckingMode": "off",
   "extraPaths": [
-    "pipeline",
-    "pipeline/ocr",
-    "pipeline/translator",
-    "pipeline/typesetter",
-    "pipeline/layout",
-    "pipeline/vision_stack",
-    "pipeline/extractor",
-    "pipeline/inpainter",
-    "pipeline/corpus"
+    "./pipeline"
   ],
   "executionEnvironments": [
     {
       "root": "pipeline",
       "extraPaths": [
-        ".",
-        "ocr",
-        "translator",
-        "typesetter",
-        "layout",
-        "vision_stack",
-        "extractor",
-        "inpainter",
-        "corpus"
+        "."
       ]
     }
-  ],
-  "venvPath": "pipeline",
-  "venv": "venv",
-  "pythonVersion": "3.12",
-  "reportMissingImports": "none",
-  "typeCheckingMode": "off"
+  ]
 }

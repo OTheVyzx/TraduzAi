@@ -61,9 +61,11 @@ fn credits_state_to_json(state: &CreditsState) -> serde_json::Value {
 }
 
 #[tauri::command]
-pub async fn get_credits(_app: tauri::AppHandle) -> Result<CreditsInfo, String> {
-    let app_data = std::path::PathBuf::from("D:\\traduzai_data");
-    let credits_file = app_data.join("credits.json");
+pub async fn get_credits(app: tauri::AppHandle) -> Result<CreditsInfo, String> {
+    let storage = crate::storage::service_for_app(&app)?;
+    let paths = storage.ensure_base_dirs()?;
+    storage.check_writable()?;
+    let credits_file = paths.root.join("credits.json");
     let current_week = current_week_start();
 
     let raw = if credits_file.exists() {

@@ -20,7 +20,9 @@ fn parse_supported_languages_json(raw: &str) -> Result<Vec<SupportedLanguage>, S
 }
 
 #[tauri::command]
-pub async fn load_supported_languages(app: tauri::AppHandle) -> Result<Vec<SupportedLanguage>, String> {
+pub async fn load_supported_languages(
+    app: tauri::AppHandle,
+) -> Result<Vec<SupportedLanguage>, String> {
     let sidecar = crate::commands::pipeline::get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
     if let Some(script) = &sidecar.script {
@@ -44,7 +46,9 @@ pub async fn load_supported_languages(app: tauri::AppHandle) -> Result<Vec<Suppo
         } else {
             stdout.trim().to_string()
         };
-        return Err(format!("Sidecar nao conseguiu listar idiomas suportados: {detail}"));
+        return Err(format!(
+            "Sidecar nao conseguiu listar idiomas suportados: {detail}"
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout)
@@ -113,9 +117,10 @@ impl Default for AppSettings {
     }
 }
 
-fn settings_path(_app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let app_data = std::path::PathBuf::from("D:\\traduzai_data");
-    Ok(app_data.join("settings.json"))
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let storage = crate::storage::service_for_app(app)?;
+    let paths = storage.ensure_base_dirs()?;
+    Ok(paths.settings)
 }
 
 #[tauri::command]
@@ -137,8 +142,11 @@ pub async fn load_settings(app: tauri::AppHandle) -> Result<AppSettings, String>
 }
 
 /// Synchronous helper used by pipeline to read settings without async context.
-pub fn load_settings_sync(_app: &tauri::AppHandle) -> AppSettings {
-    let path = std::path::PathBuf::from("D:\\traduzai_data").join("settings.json");
+pub fn load_settings_sync(app: &tauri::AppHandle) -> AppSettings {
+    let path = match settings_path(app) {
+        Ok(path) => path,
+        Err(_) => return AppSettings::default(),
+    };
     if !path.exists() {
         return AppSettings::default();
     }

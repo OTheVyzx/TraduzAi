@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { tauriMock } from "./e2e/tauriMock";
 import type {
   ContextSourceRef,
   ImageLayer,
@@ -11,6 +12,12 @@ import type {
   SystemProfile,
 } from "./stores/appStore";
 
+function isE2E() {
+  const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
+  if ((meta.env?.VITE_E2E ?? "") === "1") return true;
+  return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
+}
+
 export interface ProjectJson {
   versao?: string;
   app?: string;
@@ -19,6 +26,7 @@ export interface ProjectJson {
   idioma_origem?: string;
   idioma_destino?: string;
   contexto?: Partial<ProjectContext>;
+  work_context?: Partial<WorkContextSummary>;
   paginas?: PageData[];
   estatisticas?: {
     total_paginas?: number;
@@ -34,6 +42,83 @@ export interface EditorPagePayload {
   page_index: number;
   total_pages: number;
   page: PageData;
+}
+
+export interface StoragePaths {
+  mode: "dev" | "production";
+  root: string;
+  works: string;
+  memory: string;
+  logs: string;
+  exports: string;
+  debug: string;
+  fixtures: string;
+  models: string;
+  projects: string;
+  settings: string;
+}
+
+export type WorkContextQuality = "empty" | "partial" | "reviewed";
+export type WorkContextRisk = "high" | "medium" | "low";
+
+export interface WorkContextTranslationStyle {
+  tone: string;
+  honorifics: string;
+  names: string;
+  lore_terms: string;
+  sound_effects: string;
+}
+
+export interface WorkContextProfile {
+  work_id: string;
+  title: string;
+  alt_titles: string[];
+  source_language: string;
+  target_language: string;
+  status: string;
+  context_quality: WorkContextQuality;
+  synopsis: string;
+  genre: string[];
+  translation_style: WorkContextTranslationStyle;
+  characters: unknown[];
+  places: unknown[];
+  factions: unknown[];
+  terms: unknown[];
+  forbidden_translations: unknown[];
+  chapter_memory: unknown[];
+  last_updated: string;
+}
+
+export interface WorkContextSummary {
+  selected: boolean;
+  work_id: string;
+  title: string;
+  context_loaded: boolean;
+  glossary_loaded: boolean;
+  glossary_entries_count: number;
+  risk_level: WorkContextRisk;
+  user_ignored_warning: boolean;
+}
+
+export interface GlossaryEntry {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  case_sensitive: boolean;
+  protect: boolean;
+  aliases: string[];
+  forbidden: string[];
+  confidence: number;
+  status: string;
+  notes: string;
+  context_rule: string;
+}
+
+export interface Glossary {
+  work_id: string;
+  version: number;
+  entries: GlossaryEntry[];
 }
 
 const IMAGE_LAYER_KEYS: ImageLayerKey[] = ["base", "mask", "inpaint", "brush", "rendered"];
@@ -52,14 +137,21 @@ function joinProjectPath(baseDir: string, maybeRelative?: string | null) {
   return `${projectBaseDir(baseDir)}/${maybeRelative}`.replace(/\\/g, "/");
 }
 
+export function buildPlainPageCommandArgs(args: { project_path: string; page_index: number }) {
+  return {
+    projectPath: args.project_path,
+    pageIndex: args.page_index,
+  };
+}
+
 function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry {
-  const style = (layer.style ?? layer.estilo ?? {
+  const rawStyle = (layer.style ?? layer.estilo ?? {
     fonte: "CCDaveGibbonsLower W00 Regular.ttf",
     tamanho: 28,
-    cor: "#FFFFFF",
+    cor: "#000000",
     cor_gradiente: [],
-    contorno: "#000000",
-    contorno_px: 2,
+    contorno: "",
+    contorno_px: 0,
     glow: false,
     glow_cor: "",
     glow_px: 0,
@@ -72,8 +164,14 @@ function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry
     alinhamento: "center",
     force_upper: false,
   }) as TextEntry["estilo"];
+  const style: TextEntry["estilo"] = {
+    ...rawStyle,
+    cor: "#000000",
+    contorno: "",
+    contorno_px: 0,
+  };
   const bbox =
-    layer.layout_bbox ?? layer.bbox ?? layer.source_bbox ?? layer.balloon_bbox ?? [0, 0, 32, 32];
+    layer.render_bbox ?? layer.layout_bbox ?? layer.bbox ?? layer.source_bbox ?? layer.balloon_bbox ?? [0, 0, 32, 32];
 
   return {
     ...layer,
@@ -102,6 +200,9 @@ function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry
     source_language: layer.source_language ?? null,
     rotation_deg: layer.rotation_deg ?? 0,
     detected_font_size_px: layer.detected_font_size_px ?? null,
+    page_profile: layer.page_profile ?? null,
+    block_profile: layer.block_profile ?? null,
+    layout_profile: layer.layout_profile ?? layer.block_profile ?? null,
     balloon_bbox: layer.balloon_bbox ?? bbox,
     balloon_subregions: layer.balloon_subregions ?? [],
     layout_group_size: layer.layout_group_size ?? 1,
@@ -170,6 +271,7 @@ export interface WorkSearchResponse {
 }
 
 export interface EnrichedWorkContext {
+  work_id: string;
   title: string;
   synopsis: string;
   genres: string[];
@@ -182,6 +284,9 @@ export interface EnrichedWorkContext {
   lexical_memory: Record<string, string>;
   sources_used: ExternalContextSourceRef[];
   cover_url?: string;
+  context_quality: WorkContextQuality;
+  risk_level: WorkContextRisk;
+  glossary_entries_count: number;
 }
 
 export interface ExternalContextSourceRef {
@@ -226,6 +331,10 @@ export interface LabAgentStatus {
   confidence: number;
   touched_domains: string[];
   proposal_id: string;
+  chapter_number: number;
+  page_index: number;
+  preview_path: string;
+  selection_reason: string;
   updated_at_ms: number;
 }
 
@@ -268,6 +377,22 @@ export interface LabBenchmarkResult {
   generated_at_ms: number;
 }
 
+export interface LabVisualCriticPageProfile {
+  page_index: number;
+  text_count: number;
+  total_area: number;
+  max_area: number;
+}
+
+export interface LabVisualCriticRun {
+  critic_id: string;
+  chapter_number: number;
+  selection_mode: string;
+  selected_pages: number[];
+  sample_limit: number;
+  page_profiles: LabVisualCriticPageProfile[];
+}
+
 export interface LabPatchProposal {
   proposal_id: string;
   patch_unified_diff: string;
@@ -279,6 +404,8 @@ export interface LabPatchProposal {
   generated_at_iso: string;
   dry_run: boolean;
   error: string;
+  review_package_json_path?: string;
+  review_package_markdown_path?: string;
 }
 
 export interface LabPatchApplyResult {
@@ -290,7 +417,7 @@ export interface LabPatchApplyResult {
   files_patched: string[];
 }
 
-export type LabCoderStrategy = "local" | "ollama" | "claude_code" | "claude_sdk";
+export type LabCoderStrategy = "local" | "ollama" | "nvidia_minimax" | "claude_code" | "claude_sdk";
 
 export interface LabProposal {
   proposal_id: string;
@@ -345,6 +472,8 @@ export interface LabSnapshot {
   active_batch_id: string;
   git_available: boolean;
   pr_ready: boolean;
+  visual_critic_summary: string;
+  visual_critic_runs: LabVisualCriticRun[];
   source_dir: string;
   reference_dir: string;
   chapter_pairs: LabChapterPair[];
@@ -372,6 +501,28 @@ export interface LabReferencePreview {
   output_kind: string;
 }
 
+export interface LabHumanFeedbackEntry {
+  id: string;
+  scope_id: string;
+  chapter_number: number;
+  page_index: number;
+  kind: string;
+  status: string;
+  bbox: number[];
+  comment: string;
+  created_at_ms: number;
+  source_run_id: string;
+}
+
+export interface SaveLabHumanFeedbackRequest {
+  chapter_number: number;
+  page_index: number;
+  kind: string;
+  status: string;
+  bbox: number[];
+  comment: string;
+}
+
 export interface LabPromotionEvent {
   proposal_id: string;
   proposal_status: string;
@@ -394,6 +545,25 @@ export async function warmupVisualStack(): Promise<string> {
 
 export async function checkModels(): Promise<{ ready: boolean; size_mb: number }> {
   return invoke("check_models");
+}
+
+export async function getStoragePaths(): Promise<StoragePaths> {
+  if (isE2E()) {
+    return {
+      mode: "dev",
+      root: "data",
+      works: "data/works",
+      memory: "data/memory",
+      logs: "data/logs",
+      exports: "data/exports",
+      debug: "debug",
+      fixtures: "fixtures",
+      models: "data/models",
+      projects: "data/projects",
+      settings: "data/settings.json",
+    };
+  }
+  return invoke("get_storage_paths");
 }
 
 export async function downloadModels(): Promise<void> {
@@ -435,11 +605,13 @@ export async function validateImport(path: string): Promise<{
 }
 
 export async function loadProjectJson(path: string): Promise<ProjectJson> {
+  if (isE2E()) return tauriMock.loadProjectJson();
   const project = await invoke<ProjectJson>("load_project_json", { path });
   return hydrateProjectJson(project, path);
 }
 
 export async function saveProjectJson(config: { project_path: string; project_json: any }): Promise<void> {
+  if (isE2E()) return tauriMock.saveProjectJson(config);
   return invoke("save_project_json", { config });
 }
 
@@ -447,6 +619,7 @@ export async function loadEditorPage(config: {
   project_path: string;
   page_index: number;
 }): Promise<EditorPagePayload> {
+  if (isE2E()) return tauriMock.loadEditorPage(config);
   const payload = await invoke<EditorPagePayload>("load_editor_page", { config });
   return {
     ...payload,
@@ -469,6 +642,7 @@ export async function patchEditorTextLayer(config: {
   layer_id: string;
   patch: Record<string, unknown>;
 }): Promise<TextEntry> {
+  if (isE2E()) return tauriMock.patchEditorTextLayer(config);
   const layer = await invoke<Partial<TextEntry>>("patch_text_layer", { config });
   return hydrateTextLayer(layer, config.project_path);
 }
@@ -489,6 +663,7 @@ export async function setEditorLayerVisibility(config: {
   layer_id?: string | null;
   visible: boolean;
 }): Promise<void> {
+  if (isE2E()) return tauriMock.setEditorLayerVisibility(config);
   return invoke("set_layer_visibility", { config });
 }
 
@@ -502,6 +677,7 @@ export async function updateMaskRegion(config: {
   erase?: boolean;
   strokes: [number, number][][];
 }): Promise<string> {
+  if (isE2E()) return tauriMock.updateMaskRegion();
   return invoke("update_mask_region", { config });
 }
 
@@ -515,6 +691,7 @@ export async function updateBrushRegion(config: {
   erase?: boolean;
   strokes: [number, number][][];
 }): Promise<string> {
+  if (isE2E()) return tauriMock.updateBrushRegion();
   return invoke("update_brush_region", { config });
 }
 
@@ -537,15 +714,103 @@ export async function enrichWorkContext(selection: WorkSearchCandidate): Promise
   return invoke("enrich_work_context", { selection });
 }
 
+export async function loadOrCreateWorkContext(request: {
+  title: string;
+  source_language: string;
+  target_language: string;
+  synopsis?: string;
+  genre?: string[];
+  characters?: string[];
+  terms?: string[];
+  factions?: string[];
+}): Promise<WorkContextProfile> {
+  if (isE2E()) {
+    const workId =
+      request.title.toLocaleLowerCase("pt-BR").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+      "obra-sem-titulo";
+    return {
+      work_id: workId,
+      title: request.title,
+      alt_titles: [],
+      source_language: request.source_language,
+      target_language: request.target_language,
+      status: "active",
+      context_quality: request.synopsis ? "partial" : "empty",
+      synopsis: request.synopsis ?? "",
+      genre: request.genre ?? [],
+      translation_style: {
+        tone: "natural Brazilian Portuguese",
+        honorifics: "adapted",
+        names: "preserve proper names",
+        lore_terms: "use glossary",
+        sound_effects: "review",
+      },
+      characters: request.characters ?? [],
+      places: [],
+      factions: request.factions ?? [],
+      terms: request.terms ?? [],
+      forbidden_translations: [],
+      chapter_memory: [],
+      last_updated: new Date(0).toISOString(),
+    };
+  }
+  return invoke("load_or_create_work_context", { request });
+}
+
+function browserGlossaryKey(workId: string) {
+  return `traduzai_e2e_glossary_${workId}`;
+}
+
+export async function loadGlossary(workId: string): Promise<Glossary> {
+  if (isE2E()) {
+    const raw = localStorage.getItem(browserGlossaryKey(workId));
+    return raw ? JSON.parse(raw) : { work_id: workId, version: 1, entries: [] };
+  }
+  return invoke("load_glossary", { workId });
+}
+
+export async function saveGlossary(glossary: Glossary): Promise<Glossary> {
+  if (isE2E()) {
+    localStorage.setItem(browserGlossaryKey(glossary.work_id), JSON.stringify(glossary));
+    return glossary;
+  }
+  return invoke("save_glossary", { glossary });
+}
+
+export async function upsertGlossaryEntry(workId: string, entry: GlossaryEntry): Promise<Glossary> {
+  if (isE2E()) {
+    const glossary = await loadGlossary(workId);
+    const index = glossary.entries.findIndex((item) => item.id === entry.id);
+    const entries = [...glossary.entries];
+    if (index >= 0) entries[index] = entry;
+    else entries.push(entry);
+    return saveGlossary({ ...glossary, entries });
+  }
+  return invoke("upsert_glossary_entry", { workId, entry });
+}
+
+export async function removeGlossaryEntry(workId: string, entryId: string): Promise<Glossary> {
+  if (isE2E()) {
+    const glossary = await loadGlossary(workId);
+    return saveGlossary({
+      ...glossary,
+      entries: glossary.entries.filter((entry) => entry.id !== entryId),
+    });
+  }
+  return invoke("remove_glossary_entry", { workId, entryId });
+}
+
 // Pipeline
 export async function startPipeline(config: {
   source_path: string;
+  mode: "auto" | "manual";
   obra: string;
   capitulo: number;
   idioma_origem: string;
   idioma_destino: string;
   qualidade: "rapida" | "normal" | "alta";
   glossario: Record<string, string>;
+  work_context?: WorkContextSummary | null;
   contexto: {
     sinopse: string;
     genero: string[];
@@ -562,19 +827,41 @@ export async function startPipeline(config: {
   return invoke("start_pipeline", { config });
 }
 
-export async function retypesetPage(config: { project_path: string; page_index: number }): Promise<string> {
-  return invoke("retypeset_page", { config });
+export async function retypesetPage(args: { project_path: string; page_index: number }): Promise<string> {
+  return await invoke("retypeset_page", { config: args });
 }
 
-export async function reinpaintPage(config: { project_path: string; page_index: number }): Promise<string> {
-  return invoke("reinpaint_page", { config });
+export async function renderPreviewPage(args: {
+  project_path: string;
+  page_index: number;
+  page: PageData;
+  fingerprint: string;
+}): Promise<string> {
+  if (isE2E()) return tauriMock.renderPreviewPage();
+  return await invoke("render_preview_page", { config: args });
+}
+
+export async function detectPage(args: { project_path: string; page_index: number }): Promise<string> {
+  return await invoke("detect_page", buildPlainPageCommandArgs(args));
+}
+
+export async function ocrPage(args: { project_path: string; page_index: number }): Promise<string> {
+  return await invoke("ocr_page", buildPlainPageCommandArgs(args));
+}
+
+export async function translatePage(args: { project_path: string; page_index: number }): Promise<string> {
+  return await invoke("translate_page", buildPlainPageCommandArgs(args));
+}
+
+export async function reinpaintPage(args: { project_path: string; page_index: number }): Promise<string> {
+  return invoke("reinpaint_page", { config: args });
 }
 
 export async function processBlock(config: {
   project_path: string;
   page_index: number;
   block_id: string;
-  mode: "ocr" | "translate";
+  mode: "ocr" | "translate" | "inpaint";
 }): Promise<string> {
   return invoke("process_block", { config });
 }
@@ -656,6 +943,22 @@ export async function getLabReferencePreview(
   });
 }
 
+export async function listLabHumanFeedback(
+  chapterNumber: number,
+  pageIndex?: number
+): Promise<LabHumanFeedbackEntry[]> {
+  return invoke("list_lab_human_feedback", {
+    chapterNumber,
+    pageIndex: pageIndex ?? null,
+  });
+}
+
+export async function saveLabHumanFeedback(
+  request: SaveLabHumanFeedbackRequest
+): Promise<LabHumanFeedbackEntry> {
+  return invoke("save_lab_human_feedback", { request });
+}
+
 export async function pickLabSourceDir(): Promise<string | null> {
   return invoke("pick_lab_source_dir");
 }
@@ -681,7 +984,7 @@ export async function setLabDirs(
 
 export async function proposeLabPatch(
   proposalId: string,
-  coderStrategy: LabCoderStrategy = "local",
+  coderStrategy: LabCoderStrategy = "nvidia_minimax",
   ollamaHost?: string
 ): Promise<LabPatchProposal> {
   return invoke("propose_lab_patch", {
@@ -760,8 +1063,17 @@ export async function exportProject(config: {
   project_path: string;
   format: "zip_full" | "jpg_only" | "cbz" | "psd";
   output_path: string;
+  export_mode?: "clean" | "with_warnings" | "debug";
 }): Promise<{ path: string }> {
   return invoke("export_project", { config });
+}
+
+export async function exportPagePsd(config: {
+  project_path: string;
+  page_index: number;
+  output_path: string;
+}): Promise<string> {
+  return invoke("export_page_psd", { config });
 }
 
 export async function openExportDialog(format: "zip_full" | "jpg_only" | "cbz" | "psd"): Promise<string | null> {
@@ -777,6 +1089,62 @@ export async function openLogSaveDialog(suggestedName?: string): Promise<string 
 
 export async function exportTextFile(outputPath: string, content: string): Promise<string> {
   return invoke("export_text_file", { outputPath, content });
+}
+
+export async function exportLocalMemory(): Promise<unknown> {
+  return invoke("export_local_memory");
+}
+
+export async function importLocalMemory(payload: unknown): Promise<void> {
+  return invoke("import_local_memory", { payload });
+}
+
+export async function upsertMemoryWork(workId: string, title: string): Promise<void> {
+  return invoke("upsert_memory_work", { workId, title });
+}
+
+export async function recordTranslationMemory(input: {
+  work_id: string;
+  source_text: string;
+  target_text: string;
+  context_json: string;
+  confidence: number;
+  confirmed_by_user: boolean;
+}): Promise<void> {
+  return invoke("record_translation_memory", { input });
+}
+
+export async function recordUserCorrection(input: {
+  work_id: string;
+  page: number;
+  region_id: string;
+  before_text: string;
+  after_text: string;
+  correction_type: string;
+}): Promise<void> {
+  return invoke("record_user_correction", { input });
+}
+
+export async function recordOcrCorrection(input: {
+  work_id: string;
+  raw_text: string;
+  normalized_text: string;
+  reason: string;
+  confidence: number;
+}): Promise<void> {
+  return invoke("record_ocr_correction", { input });
+}
+
+export async function suggestMemoryTranslation(args: {
+  work_id: string;
+  source_text: string;
+  glossary_reviewed: boolean;
+}): Promise<{ target_text: string; source: string; confidence: number } | null> {
+  return invoke("suggest_memory_translation", {
+    workId: args.work_id,
+    sourceText: args.source_text,
+    glossaryReviewed: args.glossary_reviewed,
+  });
 }
 
 export async function openLabPatchJsonDialog(proposalId: string): Promise<string | null> {
@@ -818,6 +1186,7 @@ export async function loadSettings(): Promise<AppSettings> {
 }
 
 export async function loadSupportedLanguages(): Promise<SupportedLanguage[]> {
+  if (isE2E()) return [];
   return invoke("load_supported_languages");
 }
 

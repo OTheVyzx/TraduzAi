@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { sanitizeFavoriteWorks, upsertFavoriteWork } from "../favoriteWorks";
 
 export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "rendered";
 
@@ -20,6 +21,13 @@ export interface TextLayerStyle {
   rotacao: number;
   alinhamento: "left" | "center" | "right";
   force_upper?: boolean;
+}
+
+export interface QaAction {
+  flag_id: string;
+  status: "ignored" | "resolved";
+  ignored_reason?: string;
+  ignored_at?: string;
 }
 
 export interface TextEntry {
@@ -48,9 +56,14 @@ export interface TextEntry {
   source_language?: string | null;
   rotation_deg?: number;
   detected_font_size_px?: number | null;
+  page_profile?: string | null;
+  block_profile?: string | null;
+  layout_profile?: string | null;
   balloon_bbox?: [number, number, number, number];
   balloon_subregions?: [number, number, number, number][];
   layout_group_size?: number;
+  qa_flags?: string[];
+  qa_actions?: QaAction[];
 }
 
 export interface ImageLayer {
@@ -96,6 +109,17 @@ export interface ProjectContext {
   fontes_usadas: ContextSourceRef[];
 }
 
+export interface WorkContextSummary {
+  selected: boolean;
+  work_id: string;
+  title: string;
+  context_loaded: boolean;
+  glossary_loaded: boolean;
+  glossary_entries_count: number;
+  risk_level: "high" | "medium" | "low";
+  user_ignored_warning: boolean;
+}
+
 export interface Project {
   id: string;
   obra: string;
@@ -104,6 +128,8 @@ export interface Project {
   idioma_destino: string;
   qualidade: ProjectQuality;
   contexto: ProjectContext;
+  work_context?: WorkContextSummary | null;
+  qa?: unknown;
   paginas: PageData[];
   status: "idle" | "setup" | "processing" | "done" | "error";
   source_path: string;
@@ -209,9 +235,14 @@ function persistRecentProjects(projects: RecentProject[]) {
   localStorage.setItem("traduzai_recent", JSON.stringify(projects));
 }
 
+function persistFavoriteWorks(favoriteWorks: string[]) {
+  localStorage.setItem("traduzai_favorite_works", JSON.stringify(favoriteWorks));
+}
+
 interface AppState {
   project: Project | null;
   recentProjects: RecentProject[];
+  favoriteWorks: string[];
   pipeline: PipelineProgress | null;
   systemProfile: SystemProfile | null;
   setupEstimate: PipelineTimeEstimate | null;
@@ -241,6 +272,8 @@ interface AppState {
   setBatchSources: (sources: string[]) => void;
   addRecentProject: (p: RecentProject) => void;
   removeRecentProject: (id: string) => void;
+  addFavoriteWork: (title: string) => void;
+  removeFavoriteWork: (title: string) => void;
   appendPipelineLog: (entry: Omit<PipelineLogEntry, "timestamp"> & { timestamp?: number }) => void;
   clearPipelineLog: () => void;
 
@@ -260,9 +293,21 @@ const savedRecent: RecentProject[] = (() => {
   }
 })();
 
+const savedFavoriteWorks: string[] = (() => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("traduzai_favorite_works") || "[]");
+    const sanitized = sanitizeFavoriteWorks(parsed);
+    persistFavoriteWorks(sanitized);
+    return sanitized;
+  } catch {
+    return [];
+  }
+})();
+
 export const useAppStore = create<AppState>((set, get) => ({
   project: null,
   recentProjects: savedRecent,
+  favoriteWorks: savedFavoriteWorks,
   pipeline: null,
   systemProfile: null,
   setupEstimate: null,
@@ -314,6 +359,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       const updated = s.recentProjects.filter((project) => project.id !== id);
       persistRecentProjects(updated);
       return { recentProjects: updated };
+    }),
+  addFavoriteWork: (title) => {
+    const updated = upsertFavoriteWork(get().favoriteWorks, title);
+    persistFavoriteWorks(updated);
+    set({ favoriteWorks: updated });
+  },
+  removeFavoriteWork: (title) =>
+    set((s) => {
+      const normalized = title.trim().toLocaleLowerCase("pt-BR");
+      const updated = sanitizeFavoriteWorks(s.favoriteWorks).filter(
+        (item) => item.toLocaleLowerCase("pt-BR") !== normalized,
+      );
+      persistFavoriteWorks(updated);
+      return { favoriteWorks: updated };
     }),
   appendPipelineLog: (entry) =>
     set((s) => {

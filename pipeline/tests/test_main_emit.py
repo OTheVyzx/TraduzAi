@@ -53,6 +53,91 @@ class MainEmitTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("--list-supported-languages", output)
         self.assertIn("--translate-page", output)
+        self.assertIn("--input", output)
+
+    def test_runner_cli_parser_accepts_mock_debug_flags(self) -> None:
+        parsed = main._parse_runner_cli_args(
+            [
+                "--input",
+                "fixtures/tiny_chapter/original",
+                "--work",
+                "The Regressed Mercenary Has a Plan",
+                "--target",
+                "pt-BR",
+                "--mode",
+                "mock",
+                "--debug",
+                "--skip-inpaint",
+                "--skip-ocr",
+                "--strict",
+                "--export-mode",
+                "clean",
+                "--output",
+                "debug/runs/tiny_chapter",
+            ]
+        )
+
+        self.assertEqual(parsed["source_path"], "fixtures/tiny_chapter/original")
+        self.assertEqual(parsed["obra"], "The Regressed Mercenary Has a Plan")
+        self.assertEqual(parsed["idioma_destino"], "pt-BR")
+        self.assertEqual(parsed["mode"], "mock")
+        self.assertTrue(parsed["debug"])
+        self.assertTrue(parsed["skip_inpaint"])
+        self.assertTrue(parsed["skip_ocr"])
+        self.assertTrue(parsed["strict"])
+        self.assertEqual(parsed["export_mode"], "clean")
+
+    def test_runner_cli_mock_generates_project_and_reports_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+
+            exit_code = main._run_pipeline_runner_cli(
+                {
+                    "source_path": str(input_dir),
+                    "obra": "Fixture",
+                    "idioma_origem": "en",
+                    "idioma_destino": "pt-BR",
+                    "mode": "mock",
+                    "debug": True,
+                    "strict": False,
+                    "export_mode": "clean",
+                    "work_dir": str(output_dir),
+                }
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_dir / "project.json").exists())
+            self.assertTrue((output_dir / "qa_report.json").exists())
+            self.assertTrue((output_dir / "qa_report.md").exists())
+            self.assertTrue((output_dir / "issues.csv").exists())
+
+    def test_runner_cli_strict_returns_nonzero_when_mock_has_critical_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+
+            exit_code = main._run_pipeline_runner_cli(
+                {
+                    "source_path": str(input_dir),
+                    "obra": "Fixture",
+                    "idioma_origem": "en",
+                    "idioma_destino": "pt-BR",
+                    "mode": "mock",
+                    "debug": True,
+                    "strict": True,
+                    "mock_critical": True,
+                    "work_dir": str(output_dir),
+                }
+            )
+
+            self.assertNotEqual(exit_code, 0)
+            qa = json.loads((output_dir / "qa_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(qa["summary"]["critical"], 1)
 
     def test_select_local_venv_python_prefers_project_venv_when_current_is_global(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

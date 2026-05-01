@@ -173,6 +173,232 @@ def wait_if_paused(config: dict):
         time.sleep(0.25)
 
 
+def _parse_runner_cli_args(args: list[str]) -> dict:
+    parsed = {
+        "source_path": "",
+        "obra": "",
+        "idioma_origem": "en",
+        "idioma_destino": "pt-BR",
+        "mode": "real",
+        "debug": False,
+        "skip_inpaint": False,
+        "skip_ocr": False,
+        "strict": False,
+        "export_mode": "with_warnings",
+        "work_dir": str(Path("debug") / "runs" / "pipeline_cli"),
+        "mock_critical": False,
+    }
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--input" and index + 1 < len(args):
+            parsed["source_path"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--work" and index + 1 < len(args):
+            parsed["obra"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--source-lang" and index + 1 < len(args):
+            parsed["idioma_origem"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--target" and index + 1 < len(args):
+            parsed["idioma_destino"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--mode" and index + 1 < len(args):
+            parsed["mode"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--export-mode" and index + 1 < len(args):
+            parsed["export_mode"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--output" and index + 1 < len(args):
+            parsed["work_dir"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--debug":
+            parsed["debug"] = True
+            index += 1
+            continue
+        if arg == "--skip-inpaint":
+            parsed["skip_inpaint"] = True
+            index += 1
+            continue
+        if arg == "--skip-ocr":
+            parsed["skip_ocr"] = True
+            index += 1
+            continue
+        if arg == "--strict":
+            parsed["strict"] = True
+            index += 1
+            continue
+        if arg == "--mock-critical":
+            parsed["mock_critical"] = True
+            index += 1
+            continue
+        raise ValueError(f"Argumento CLI desconhecido ou incompleto: {arg}")
+
+    if not parsed["source_path"]:
+        raise ValueError("--input e obrigatorio para o runner CLI")
+    if not parsed["obra"]:
+        parsed["obra"] = Path(parsed["source_path"]).stem or "Obra sem titulo"
+    return parsed
+
+
+def _list_input_images(source_path: Path) -> list[Path]:
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    if source_path.is_file() and source_path.suffix.lower() in image_exts:
+        return [source_path]
+    if not source_path.exists():
+        raise FileNotFoundError(f"Entrada nao encontrada: {source_path}")
+    return sorted(path for path in source_path.iterdir() if path.suffix.lower() in image_exts and path.is_file())
+
+
+def _write_mock_runner_reports(work_dir: Path, project: dict, issues: list[dict]) -> None:
+    critical = sum(1 for issue in issues if issue.get("severity") == "critical")
+    qa_report = {
+        "summary": {
+            "total": len(issues),
+            "critical": critical,
+            "high": sum(1 for issue in issues if issue.get("severity") == "high"),
+        },
+        "issues": issues,
+    }
+    (work_dir / "qa_report.json").write_text(json.dumps(qa_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (work_dir / "qa_report.md").write_text(
+        "\n".join(
+            [
+                f"# QA - {project.get('obra', 'Projeto')}",
+                "",
+                f"- total: {len(issues)}",
+                f"- critical: {critical}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    rows = ["id,page,region_id,type,severity"]
+    for issue in issues:
+        rows.append(
+            f"{issue['id']},{issue['page']},{issue['region_id']},{issue['type']},{issue['severity']}"
+        )
+    (work_dir / "issues.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    (work_dir / "glossary_used.json").write_text("[]\n", encoding="utf-8")
+    (work_dir / "ocr_corrections.json").write_text("[]\n", encoding="utf-8")
+    (work_dir / "structured_log.jsonl").write_text(
+        json.dumps({"event": "mock_run", "status": "complete"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _run_mock_pipeline_runner(config: dict) -> int:
+    source_path = Path(config["source_path"])
+    work_dir = Path(config["work_dir"])
+    originals_dir = work_dir / "originals"
+    images_dir = work_dir / "images"
+    translated_dir = work_dir / "translated"
+    for directory in [originals_dir, images_dir, translated_dir, work_dir / "layers" / "mask"]:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    image_files = _list_input_images(source_path)
+    pages = []
+    issues = []
+    for index, image_path in enumerate(image_files, start=1):
+        output_name = f"{index:03}{image_path.suffix.lower()}"
+        for directory in [originals_dir, images_dir, translated_dir]:
+            shutil.copy2(image_path, directory / output_name)
+        (work_dir / "layers" / "mask" / f"{index:03}.png").write_bytes(b"")
+
+        text_layers = []
+        if index == 1 and config.get("mock_critical"):
+            text_layers = [
+                {
+                    "id": "mock-critical-1",
+                    "bbox": [0, 0, 10, 10],
+                    "tipo": "fala",
+                    "original": "YOUNG MASTER?!",
+                    "traduzido": "YOUNG MASTER?!",
+                    "qa_flags": ["visual_text_leak"],
+                    "qa_actions": [],
+                }
+            ]
+            issues.append(
+                {
+                    "id": "0:mock-critical-1:visual_text_leak",
+                    "page": index,
+                    "region_id": "mock-critical-1",
+                    "type": "visual_text_leak",
+                    "severity": "critical",
+                }
+            )
+
+        pages.append(
+            {
+                "numero": index,
+                "arquivo_original": f"originals/{output_name}",
+                "arquivo_traduzido": f"translated/{output_name}",
+                "image_layers": {
+                    "base": {"key": "base", "path": f"originals/{output_name}", "visible": True, "locked": True},
+                    "inpaint": {"key": "inpaint", "path": f"images/{output_name}", "visible": True, "locked": True},
+                    "rendered": {"key": "rendered", "path": f"translated/{output_name}", "visible": True, "locked": True},
+                    "mask": {"key": "mask", "path": f"layers/mask/{index:03}.png", "visible": True, "locked": False},
+                },
+                "inpaint_blocks": [],
+                "text_layers": text_layers,
+                "textos": text_layers,
+            }
+        )
+
+    project = {
+        "obra": config.get("obra", ""),
+        "capitulo": 1,
+        "idioma_origem": config.get("idioma_origem", "en"),
+        "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "qualidade": "normal",
+        "contexto": {},
+        "paginas": pages,
+        "estatisticas": {"total_paginas": len(pages), "total_textos": sum(len(p["text_layers"]) for p in pages)},
+        "qa": {"summary": {"total": len(issues), "critical": sum(1 for issue in issues if issue["severity"] == "critical")}},
+        "mode": "mock",
+    }
+    _save_project_json(work_dir / "project.json", project)
+    _write_mock_runner_reports(work_dir, project, issues)
+    emit("complete", output_path=str(work_dir))
+    if config.get("strict") and any(issue["severity"] == "critical" for issue in issues):
+        emit("error", message="Strict falhou: ha flags critical ativas")
+        return 2
+    return 0
+
+
+def _run_pipeline_runner_cli(config: dict) -> int:
+    if config.get("mode") == "mock":
+        return _run_mock_pipeline_runner(config)
+
+    work_dir = Path(config["work_dir"])
+    work_dir.mkdir(parents=True, exist_ok=True)
+    runtime_config = {
+        "source_path": config["source_path"],
+        "work_dir": str(work_dir),
+        "models_dir": str(pipeline_root / "models"),
+        "obra": config.get("obra", ""),
+        "capitulo": 1,
+        "idioma_origem": config.get("idioma_origem", "en"),
+        "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "mode": "manual" if config.get("skip_ocr") else "auto",
+        "debug": config.get("debug", False),
+        "skip_inpaint": config.get("skip_inpaint", False),
+        "skip_ocr": config.get("skip_ocr", False),
+        "export_mode": config.get("export_mode", "with_warnings"),
+    }
+    config_path = work_dir / "runner_config.json"
+    config_path.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2), encoding="utf-8")
+    _run_pipeline(str(config_path))
+    return 0
+
+
 def main():
     _maybe_reexec_local_venv()
     faulthandler.enable()
@@ -183,6 +409,12 @@ def main():
 
     if sys.argv[1] in {"-h", "--help", "help"}:
         print(_build_cli_help(), flush=True)
+        return
+
+    if "--input" in sys.argv[1:]:
+        exit_code = _run_pipeline_runner_cli(_parse_runner_cli_args(sys.argv[1:]))
+        if exit_code:
+            sys.exit(exit_code)
         return
 
     if sys.argv[1] == "--warmup-visual":
@@ -217,6 +449,14 @@ def main():
         project_json_path = Path(sys.argv[2])
         page_idx = int(sys.argv[3])
         _run_retypeset(project_json_path, page_idx)
+        return
+
+    if sys.argv[1] == "--render-preview-page" and len(sys.argv) >= 6:
+        project_json_path = Path(sys.argv[2])
+        page_idx = int(sys.argv[3])
+        override_page_path = Path(sys.argv[4])
+        output_path = Path(sys.argv[5])
+        _run_render_preview_page(project_json_path, page_idx, override_page_path, output_path)
         return
 
     if (sys.argv[1] == "--process-block") and len(sys.argv) >= 6:
@@ -535,8 +775,15 @@ def _run_pipeline(config_path: str):
     # Wrap up
     emit_progress("typeset", 100, 98, message="Finalizando projeto...")
     project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
-    with open(work_dir/"project.json", "w", encoding="utf-8") as f:
-        json.dump(project_data, f, ensure_ascii=False, indent=2)
+    from structured_logger import StructuredLogger, build_log_summary
+    structured_logger = StructuredLogger(config.get("logs_dir") or (work_dir / "logs"), config.get("job_id", "run"))
+    log_summary = build_log_summary(project_data)
+    structured_logger.log(stage="summary", event="run_summary", payload=log_summary)
+    project_data["log"] = {
+        "structured_log_path": str(structured_logger.path),
+        "summary": log_summary,
+    }
+    _save_project_json(work_dir / "project.json", project_data)
     finalize_decision_trace(
         {
             "total_paginas": total_pages,
@@ -876,6 +1123,9 @@ def build_text_layer(
     corpus_visual_benchmark: dict,
     corpus_textual_benchmark: dict,
 ) -> dict:
+    from ocr.ocr_normalizer import normalize_ocr_record
+
+    ocr_text = normalize_ocr_record(ocr_text)
     layer_id = ocr_text.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
     source_bbox = _bbox4(ocr_text.get("source_bbox"), ocr_text.get("bbox"))
     layout_bbox = _bbox4(
@@ -904,6 +1154,9 @@ def build_text_layer(
         "text_pixel_bbox": text_pixel_bbox,
         "tipo": ocr_text.get("tipo", "fala"),
         "original": ocr_text.get("text", ""),
+        "raw_ocr": ocr_text.get("raw_ocr", ocr_text.get("text", "")),
+        "normalized_ocr": ocr_text.get("normalized_ocr", ocr_text.get("text", "")),
+        "normalization": ocr_text.get("normalization", {"changed": False, "corrections": [], "is_gibberish": False}),
         "translated": translated,
         "text": ocr_text.get("text", ""),
         "ocr_confidence": float(ocr_text.get("confidence", 0.0) or 0.0),
@@ -1102,8 +1355,9 @@ def _sync_page_legacy_aliases(page: dict) -> None:
 
 
 def _save_project_json(project_json_path: Path, project: dict) -> None:
-    with open(project_json_path, "w", encoding="utf-8") as f:
-        json.dump(project, f, ensure_ascii=False, indent=2)
+    from project_writer import write_project_json_atomic
+
+    write_project_json_atomic(project_json_path, project)
 
 
 def _resolve_image_layer_path(page: dict, layer_key: str, fallback: str) -> str:
@@ -1128,7 +1382,7 @@ def render_page_image(project, page_idx, output_path):
     
     # Prepara o dicionario de textos no formato que o renderer espera
     trans_texts = _page_text_layers_for_renderer(page, page_idx)
-    trans_page_dict = {"texts": trans_texts}
+    trans_page_dict = {"texts": _visible_render_texts(trans_texts)}
     
     # Determina a imagem de fundo: tenta 'images' (inpainted) primeiro, depois 'originals'
     work_dir = Path(project.get("_work_dir", "."))
@@ -1148,6 +1402,72 @@ def render_page_image(project, page_idx, output_path):
         _typeset_single_page((str(bg_path), trans_page_dict, str(out_dir)))
     except Exception as e:
         sys.stderr.write(f"Falha ao renderizar imagem da pagina: {e}\n")
+
+def _visible_render_texts(texts: list[dict]) -> list[dict]:
+    return [text for text in texts if text.get("visible", True) is not False]
+
+def _run_render_preview_page(
+    project_json_path: Path,
+    page_idx: int,
+    override_page_path: Path,
+    output_path: Path,
+):
+    try:
+        with open(project_json_path, "r", encoding="utf-8") as f:
+            project = json.load(f)
+        with open(override_page_path, "r", encoding="utf-8") as f:
+            override_payload = json.load(f)
+
+        work_dir = project_json_path.parent
+        project["_work_dir"] = str(work_dir)
+        pages = project.get("paginas", [])
+        if page_idx < 0 or page_idx >= len(pages):
+            emit("error", message="Indice de pagina invalido")
+            return
+
+        page = override_payload.get("page", override_payload)
+        if not isinstance(page, dict):
+            emit("error", message="Pagina temporaria do preview invalida")
+            return
+        pages[page_idx] = page
+
+        original_rel = _resolve_image_layer_path(page, "base", page.get("arquivo_original", ""))
+        inpaint_rel = _resolve_image_layer_path(page, "inpaint", f"images/{Path(original_rel).name}")
+        img_name = Path(original_rel).name
+        inpainted_path = work_dir / inpaint_rel
+        if not inpainted_path.exists():
+            inpainted_path = work_dir / "originals" / img_name
+        if not inpainted_path.exists():
+            candidate = Path(inpaint_rel)
+            if candidate.exists():
+                inpainted_path = candidate
+        if not inpainted_path.exists():
+            candidate = Path(original_rel)
+            if candidate.exists():
+                inpainted_path = candidate
+
+        if not inpainted_path.exists():
+            emit("error", message=f"Imagem base nao encontrada: {img_name}")
+            return
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        trans_texts = _visible_render_texts(_page_text_layers_for_renderer(page, page_idx))
+        trans_page_dict = {"texts": trans_texts}
+
+        from typesetter.renderer import _typeset_single_page
+
+        _typeset_single_page((str(inpainted_path), trans_page_dict, str(output_path.parent)))
+        renderer_output = output_path.parent / Path(inpainted_path).name
+        if renderer_output.exists() and renderer_output.resolve() != output_path.resolve():
+            if output_path.exists():
+                output_path.unlink()
+            shutil.move(str(renderer_output), str(output_path))
+
+        emit("complete", output_path=str(output_path))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        emit("error", message=f"Falha no preview final: {e}\n{tb}")
 
 def _run_retypeset(project_json_path: Path, page_idx: int):
     with open(project_json_path, "r", encoding="utf-8") as f:
@@ -1179,7 +1499,7 @@ def _run_retypeset(project_json_path: Path, page_idx: int):
         return
 
     trans_texts = _page_text_layers_for_renderer(page, page_idx)
-    trans_page_dict = {"texts": trans_texts}
+    trans_page_dict = {"texts": _visible_render_texts(trans_texts)}
 
     try:
         from typesetter.renderer import _typeset_single_page
@@ -1274,9 +1594,15 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
 
 def build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, elapsed):
     """Build the project.json structure."""
+    from layout.region_grouping import group_regions
+    from qa.translation_qa import summarize_flags
+
     pages = []
+    qa_regions = []
     for i, (img, ocr, text_page) in enumerate(zip(image_files, ocr_results, page_text_layers)):
         text_layers = text_page.get("texts", [])
+        text_layers = group_regions(text_layers)
+        qa_regions.extend(text_layers)
         page = {
             "numero": i + 1,
             "image_layers": {
@@ -1337,12 +1663,16 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "_vision_worker_path": config.get("vision_worker_path"),
         "_work_dir": config.get("work_dir"),
         "contexto": context,
+        "work_context": config.get("work_context") or {},
         "paginas": pages,
         "estatisticas": {
             "total_paginas": total_pages,
             "total_textos": sum(len(p["text_layers"]) for p in pages),
             "tempo_processamento_seg": round(elapsed, 1),
             "data_criacao": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        "qa": {
+            "summary": summarize_flags(qa_regions),
         },
     }
 
@@ -1626,6 +1956,7 @@ def _build_cli_help() -> str:
     return "\n".join(
         [
             "Uso: python pipeline/main.py <config.json> [comando]",
+            "Uso novo: python pipeline/main.py --input <pasta> --work <obra> --target pt-BR --mode mock|real --output <dir>",
             "",
             "Comandos disponiveis:",
             "  --help                              Mostra esta ajuda",
@@ -1633,11 +1964,19 @@ def _build_cli_help() -> str:
             "  --list-supported-languages          Lista idiomas suportados pelo tradutor",
             "  --warmup-visual [args]              Inicializa a stack visual",
             "  --retypeset <project> <page>        Rerenderiza uma pagina",
+            "  --render-preview-page <project> <page> <page-json> <output>  Renderiza preview sem salvar projeto",
             "  --detect-page <project> <page>      Reprocessa deteccao da pagina",
             "  --ocr-page <project> <page>         Reprocessa OCR da pagina",
             "  --translate-page <project> <page>   Reprocessa traducao da pagina",
             "  --reinpaint-page <project> <page>   Reprocessa limpeza/inpaint da pagina",
             "  --process-block <mode> <project> <page> <block_id>  Reprocessa um bloco",
+            "  --input <pasta|imagem>                Roda o pipeline runner/CLI debug",
+            "  --mode mock|real                      Define runner offline mock ou pipeline real",
+            "  --debug                              Gera artefatos de debug",
+            "  --skip-inpaint                       Pula inpaint quando suportado pelo runner",
+            "  --skip-ocr                           Pula OCR quando suportado pelo runner",
+            "  --strict                             Retorna codigo != 0 quando QA bloqueia",
+            "  --export-mode clean|with_warnings|debug  Modo de validacao do export",
         ]
     )
 

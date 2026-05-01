@@ -7,19 +7,26 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   ChevronLeft,
+  Check,
   Download,
+  Edit3,
   Eye,
   EyeOff,
   FileText,
   LocateFixed,
   Minus,
   Plus,
+  RotateCw,
+  ShieldPlus,
 } from "lucide-react";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAppStore } from "../lib/stores/appStore";
+import { collectIgnoredQaActions, collectQaIssues, ignoreQaIssue, type QaIssue } from "../lib/qaPanel";
+import { getStaleRenderPreviewPages, useEditorStore } from "../lib/stores/editorStore";
 import {
   exportPagePsd,
   exportProject,
@@ -39,7 +46,8 @@ import { getPreviewImageCandidates, getPreviewToggleLabel } from "./previewImage
 
 export function Preview() {
   const navigate = useNavigate();
-  const { project } = useAppStore();
+  const { project, updateProject } = useAppStore();
+  const renderPreviewCacheByPageKey = useEditorStore((s) => s.renderPreviewCacheByPageKey);
   const [currentPage, setCurrentPage] = useState(0);
   const [showOriginal, setShowOriginal] = useState(false);
   const [exportFormat, setExportFormat] = useState<"zip_full" | "jpg_only" | "cbz" | "psd">("zip_full");
@@ -50,11 +58,19 @@ export function Preview() {
   const [panOffset, setPanOffset] = useState<PreviewPanOffset>({ x: 0, y: 0 });
   const [panSession, setPanSession] = useState<PreviewPanSession | null>(null);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [ignoreIssueId, setIgnoreIssueId] = useState<string | null>(null);
+  const [ignoreReason, setIgnoreReason] = useState("");
+  const [ignoreError, setIgnoreError] = useState<string | null>(null);
+  const [lastIgnoredReason, setLastIgnoredReason] = useState<string | null>(null);
   const prevBlobRef = useRef<string | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   const totalPages = project?.paginas.length || 0;
   const page = project?.paginas[currentPage] ?? null;
+  const staleRenderPages = getStaleRenderPreviewPages(project, renderPreviewCacheByPageKey);
+  const qaIssues = collectQaIssues(project);
+  const ignoredQaActions = collectIgnoredQaActions(project);
+  const activeIgnoreIssue = qaIssues.find((issue) => issue.id === ignoreIssueId) ?? null;
 
   useEffect(() => {
     if (!page) {
@@ -223,6 +239,13 @@ export function Preview() {
 
   async function handleExport() {
     if (!project) return;
+    if (staleRenderPages.length > 0) {
+      alert(
+        `Preview final desatualizado nas paginas: ${staleRenderPages.join(", ")}. ` +
+          "Abra o editor e use Salvar+Render para renderizar antes de exportar.",
+      );
+      return;
+    }
     setExporting(true);
 
     try {
@@ -283,6 +306,57 @@ export function Preview() {
     }
   }
 
+  function goToQaIssue(issue: QaIssue) {
+    setCurrentPage(issue.pageIndex);
+  }
+
+  function startIgnoreIssue(issue: QaIssue) {
+    setIgnoreIssueId(issue.id);
+    setIgnoreReason("");
+    setIgnoreError(null);
+  }
+
+  function confirmIgnoreIssue() {
+    if (!project || !ignoreIssueId) return;
+    try {
+      const updatedProject = ignoreQaIssue(project, ignoreIssueId, ignoreReason);
+      updateProject({ paginas: updatedProject.paginas });
+      setLastIgnoredReason(ignoreReason.trim());
+      setIgnoreIssueId(null);
+      setIgnoreReason("");
+      setIgnoreError(null);
+    } catch (err) {
+      setIgnoreError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleExportQaReport() {
+    if (!project) return;
+    const report = [
+      `# QA - ${project.obra}`,
+      "",
+      `Capitulo: ${project.capitulo}`,
+      `Flags ativas: ${qaIssues.length}`,
+      `Ignoradas: ${ignoredQaActions.length}`,
+      "",
+      "## Flags",
+      ...qaIssues.map(
+        (issue) =>
+          `- Pagina ${issue.pageNumber} / ${issue.regionId}: ${issue.label} (${issue.severity}) - ${issue.sourceText}`,
+      ),
+      "",
+      "## Acoes do usuario",
+      ...ignoredQaActions.map(
+        (action) => `- ${action.flag_id}: ignorado em ${action.ignored_at ?? "-"} - ${action.ignored_reason ?? "-"}`,
+      ),
+      "",
+    ].join("\n");
+
+    const savePath = await openLogSaveDialog(`qa-${project.obra}-${project.capitulo}.md`);
+    if (!savePath) return;
+    await exportTextFile(savePath, report);
+  }
+
   const viewportCursor = panSession ? "cursor-grabbing" : isSpacePressed ? "cursor-grab" : "cursor-default";
 
   return (
@@ -305,6 +379,15 @@ export function Preview() {
         </div>
 
         <div className="flex items-center gap-2">
+          {staleRenderPages.length > 0 && (
+            <span
+              className="rounded-full border border-status-warning/25 bg-status-warning/10 px-2.5 py-1 text-[11px] text-status-warning"
+              title="Existem paginas com preview final desatualizado."
+            >
+              Preview final pendente
+            </span>
+          )}
+
           <button
             onClick={() => setShowOriginal(!showOriginal)}
             title={getPreviewToggleLabel(showOriginal)}
@@ -326,6 +409,7 @@ export function Preview() {
           </button>
 
           <button
+            data-testid="export-panel-toggle"
             onClick={() => setShowExportPanel(!showExportPanel)}
             className="flex items-center gap-1.5 rounded-lg bg-brand/10 px-3 py-1.5 text-xs text-brand-300 transition-smooth hover:bg-brand/20"
           >
@@ -418,6 +502,145 @@ export function Preview() {
           </div>
         </div>
 
+        <aside data-testid="qa-panel" className="w-80 overflow-y-auto border-l border-border bg-bg-secondary p-5">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium">QA do projeto</h3>
+              <p className="mt-1 text-xs text-text-secondary">Revisao de flags antes do export.</p>
+            </div>
+            <span
+              data-testid="qa-issue-count"
+              className={`rounded-full px-2 py-1 font-mono text-xs ${
+                qaIssues.length > 0
+                  ? "bg-status-warning/10 text-status-warning"
+                  : "bg-status-success/10 text-status-success"
+              }`}
+            >
+              {qaIssues.length}
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            {qaIssues.length === 0 ? (
+              <div className="rounded-lg border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
+                Nenhuma flag ativa.
+              </div>
+            ) : (
+              qaIssues.map((issue) => (
+                <div key={issue.id} className="rounded-lg border border-border bg-bg-tertiary p-3">
+                  <button
+                    data-testid="qa-flag-item"
+                    onClick={() => goToQaIssue(issue)}
+                    className="flex w-full items-start gap-2 text-left"
+                  >
+                    <AlertTriangle
+                      size={16}
+                      className={
+                        issue.severity === "critical" || issue.severity === "high"
+                          ? "mt-0.5 text-status-error"
+                          : "mt-0.5 text-status-warning"
+                      }
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium text-text-primary">{issue.label}</span>
+                      <span className="mt-1 block text-xs text-text-secondary">
+                        Pagina {issue.pageNumber} - regiao {issue.regionId}
+                      </span>
+                      <span className="mt-1 block truncate text-[11px] text-text-muted">{issue.sourceText}</span>
+                    </span>
+                  </button>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => navigate("/editor")}
+                      className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
+                    >
+                      <Edit3 size={12} />
+                      Corrigir texto
+                    </button>
+                    <button
+                      onClick={() => navigate("/setup")}
+                      className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
+                    >
+                      <ShieldPlus size={12} />
+                      Glossario
+                    </button>
+                    <button
+                      onClick={() => alert("Regiao marcada para reprocessamento.")}
+                      className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
+                    >
+                      <RotateCw size={12} />
+                      Reprocessar
+                    </button>
+                    <button
+                      onClick={() => alert("Mascara marcada para regeneracao.")}
+                      className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
+                    >
+                      <RotateCw size={12} />
+                      Mascara
+                    </button>
+                  </div>
+
+                  {activeIgnoreIssue?.id === issue.id ? (
+                    <div className="mt-3 space-y-2">
+                      <textarea
+                        data-testid="qa-ignore-reason"
+                        value={ignoreReason}
+                        onChange={(event) => {
+                          setIgnoreReason(event.target.value);
+                          setIgnoreError(null);
+                        }}
+                        placeholder="Motivo para ignorar"
+                        className="min-h-[72px] w-full rounded-md border border-border bg-bg-primary px-2 py-2 text-xs text-text-primary outline-none focus:border-brand/50"
+                      />
+                      {ignoreError && <p className="text-xs text-status-error">{ignoreError}</p>}
+                      <div className="flex gap-2">
+                        <button
+                          data-testid="qa-save-ignore"
+                          onClick={confirmIgnoreIssue}
+                          disabled={ignoreReason.trim().length === 0}
+                          className="flex flex-1 items-center justify-center gap-1 rounded-md bg-brand px-2 py-1.5 text-[11px] font-medium text-white transition-smooth hover:bg-brand-600 disabled:opacity-40"
+                        >
+                          <Check size={12} />
+                          Salvar motivo
+                        </button>
+                        <button
+                          onClick={() => setIgnoreIssueId(null)}
+                          className="rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      data-testid="qa-ignore-button"
+                      onClick={() => startIgnoreIssue(issue)}
+                      className="mt-3 w-full rounded-md border border-status-warning/25 bg-status-warning/10 px-2 py-1.5 text-[11px] font-medium text-status-warning transition-smooth hover:bg-status-warning/15"
+                    >
+                      Ignorar com motivo
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+
+          <button
+            onClick={handleExportQaReport}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-bg-tertiary py-2 text-xs font-medium text-text-secondary transition-smooth hover:bg-white/[0.03] hover:text-text-primary"
+          >
+            <FileText size={14} />
+            Exportar relatorio
+          </button>
+
+          {(lastIgnoredReason || ignoredQaActions.length > 0) && (
+            <div className="mt-4 rounded-lg border border-status-success/20 bg-status-success/10 p-3 text-xs text-status-success">
+              {lastIgnoredReason ?? ignoredQaActions[ignoredQaActions.length - 1]?.ignored_reason}
+            </div>
+          )}
+        </aside>
+
         {showExportPanel && (
           <div className="w-72 space-y-4 border-l border-border bg-bg-secondary p-5">
             <h3 className="text-sm font-medium">Exportar projeto</h3>
@@ -448,6 +671,7 @@ export function Preview() {
 
             <div className="space-y-2 pt-2">
               <button
+                data-testid="export-button"
                 onClick={handleExport}
                 disabled={exporting}
                 className="w-full rounded-lg bg-brand py-2.5 text-sm font-medium text-white transition-smooth hover:bg-brand-600 disabled:opacity-50"
@@ -456,6 +680,7 @@ export function Preview() {
               </button>
 
               <button
+                data-testid="export-report-link"
                 onClick={handleExportLog}
                 className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-bg-tertiary py-2 text-xs font-medium text-text-secondary transition-smooth hover:bg-white/[0.03] hover:text-text-primary"
               >
@@ -477,7 +702,7 @@ export function Preview() {
           <ArrowLeft size={16} />
         </button>
 
-        <span className="min-w-[80px] text-center font-mono text-sm text-text-secondary">
+        <span data-testid="preview-page-counter" className="min-w-[80px] text-center font-mono text-sm text-text-secondary">
           {currentPage + 1} / {totalPages}
         </span>
 

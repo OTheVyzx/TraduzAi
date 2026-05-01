@@ -1,6 +1,6 @@
 # TRADUZAI_CORRECAO_TOTAL_V12 Status
 
-Atualizado em: 2026-04-30.
+Atualizado em: 2026-05-01.
 Plano executado: `TRADUZAI_CORRECAO_TOTAL_V12_SENIOR.md`.
 Branch: `fixpipeline`.
 
@@ -8,18 +8,81 @@ Branch: `fixpipeline`.
 - Fase 0: inventario obrigatorio do repositorio.
 - Fase 1: test harness, fixtures deterministicas e seletores estaveis.
 - Fase 2: contrato v12 minimo, migrador e testes focados.
+- Fase 3: Storage seguro por ambiente.
+- Fase 4: Work Context Profile.
+- Fase 5: Glossary Manager.
+- Fase 6: Reading Order e Region Grouping.
+- Fase 7: OCR Normalizer.
+- Fase 8: Entity Detector e Term Protection.
+- Fase 9: Contextual Translation Engine.
+- Fase 10: Translation QA Blocking.
+- Fase 11: Project Writer e persistencia transacional.
+- Fase 12: Structured Logger.
+- Fase 13: Visual Text Leak QA.
+- Fase 14: Mascaras reais e validacao.
+- Fase 15: Inpaint por tipo de regiao.
+- Fase 16: Typesetting Fit QA.
+- Fase 17: UI QA Panel.
+- Fase 18: Export Validator e relatorios.
+- Fase 19: Memoria local.
+- Fase 20: Pipeline Runner e CLI debug.
+- Fase 21: Teste final completo.
 
 ## Arquivos principais criados
 - `debug/phase_00_repo_inventory.md`
 - `debug/phase_00_report.md`
 - `debug/phase_01_report.md`
 - `debug/phase_02_report.md`
+- `debug/phase_03_report.md`
+- `debug/phase_04_report.md`
+- `debug/phase_05_report.md`
+- `debug/phase_06_report.md`
+- `debug/phase_07_report.md`
+- `debug/phase_08_report.md`
+- `debug/phase_09_report.md`
+- `debug/phase_10_report.md`
+- `debug/phase_11_report.md`
+- `debug/phase_12_report.md`
+- `debug/phase_13_report.md`
+- `debug/phase_14_report.md`
+- `debug/phase_15_report.md`
+- `debug/phase_16_report.md`
+- `debug/phase_17_report.md`
+- `debug/phase_18_report.md`
+- `debug/phase_19_report.md`
+- `debug/phase_20_report.md`
+- `debug/phase_21_report.md`
 - `pipeline/schema/project_schema_v12.py`
 - `pipeline/schema/project_schema_v12.json`
 - `pipeline/schema/migrate_project.py`
 - `pipeline/tests/test_project_schema_v12.py`
 - `pipeline/tests/test_project_migration.py`
 - `src/lib/projectSchema.ts`
+- `src-tauri/src/storage.rs`
+- `src-tauri/src/commands/storage.rs`
+- `src-tauri/src/work_context.rs`
+- `src-tauri/src/commands/work_context.rs`
+- `src-tauri/src/glossary.rs`
+- `src-tauri/src/commands/glossary.rs`
+- `src/lib/workContextProfile.ts`
+- `pipeline/layout/reading_order.py`
+- `pipeline/layout/region_grouping.py`
+- `pipeline/ocr/ocr_normalizer.py`
+- `pipeline/context/entity_detector.py`
+- `pipeline/translator/term_protection.py`
+- `pipeline/translator/contextual_engine.py`
+- `pipeline/qa/translation_qa.py`
+- `pipeline/project_writer.py`
+- `pipeline/structured_logger.py`
+- `pipeline/qa/visual_text_leak.py`
+- `pipeline/inpainter/mask_validator.py`
+- `pipeline/inpainter/region_strategy.py`
+- `pipeline/typesetter/fit_qa.py`
+- `src/lib/qaPanel.ts`
+- `src-tauri/src/local_memory.rs`
+- `src-tauri/src/commands/local_memory.rs`
+- `debug/runs/tiny_chapter/`
+- `debug/final_run/`
 - `fixtures/`
 
 ## Checks rodados
@@ -28,12 +91,86 @@ Branch: `fixpipeline`.
 - `pipeline/venv/Scripts/python.exe -m pytest tests/test_typesetting_layout.py -q` passou com 71 passed, 1 skipped.
 - `pipeline/venv/Scripts/python.exe -m pytest -q` passou com 483 passed, 1 skipped.
 - `npx playwright test --grep "@smoke"` passou com 1 teste.
+- `cargo test storage --lib` passou com 6 testes.
+- `cargo test credits --lib` passou com 4 testes.
+- `cargo test settings --lib` passou com 3 testes.
+- `cargo check` passou.
+- `Select-String -Path src-tauri\src\**\*.rs -Pattern 'traduzai_data|D:\\|D:/'` nao encontrou hardcodes antigos.
+- `cargo test work_context --lib` passou com 4 testes.
+- `npx vitest run src/lib/__tests__/workContextProfile.test.ts` passou com 3 testes.
+- `npx playwright test --grep "@phase4"` passou com 1 teste.
+- `npx playwright test --grep "@smoke|@phase4"` passou com 2 testes.
+- `cargo test glossary --lib` passou com 5 testes filtrados.
+- `npx playwright test --grep "@phase5"` passou com 1 teste.
+- `npx playwright test --grep "@smoke|@phase4|@phase5"` passou com 3 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_region_grouping.py tests/test_reading_order.py -q` passou com 7 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_region_grouping.py tests/test_reading_order.py tests/test_main_emit.py -q` passou com 27 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_ocr_normalizer.py tests/test_main_emit.py -q` passou com 25 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_ocr_normalizer.py tests/test_translate_context.py tests/test_main_emit.py -q` passou com 71 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_term_protection.py -q` passou com 5 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_contextual_engine.py tests/test_term_protection.py -q` passou com 10 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_translation_qa.py -q` passou com 9 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_translation_qa.py tests/test_main_emit.py -q` passou com 29 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_project_writer.py tests/test_main_emit.py -q` passou com 25 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_structured_logger.py -q` passou com 3 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_structured_logger.py tests/test_project_writer.py tests/test_main_emit.py -q` passou com 29 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_visual_text_leak.py -q` passou com 5 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_mask_validator.py -q` passou com 5 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_inpaint_region_strategy.py tests/test_mask_validator.py -q` passou com 9 testes.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_typesetting_fit_qa.py -q` passou com 5 testes.
+- `npx vitest run src/lib/__tests__/qaPanel.test.ts` passou com 2 testes.
+- `npx playwright test --grep "@phase17"` passou com 1 teste.
+- `npm run build` passou apos a Fase 17.
+- `cargo test export_ --lib` passou com 6 testes.
+- `cargo check` passou apos a Fase 18.
+- `npm run build` passou apos a Fase 18.
+- `cargo test local_memory --lib` passou com 4 testes.
+- `cargo check` passou apos a Fase 19.
+- `npm run build` passou apos a Fase 19.
+- `.\\venv\\Scripts\\python.exe -m pytest tests/test_main_emit.py -q` passou com 23 testes.
+- `.\\pipeline\\venv\\Scripts\\python.exe pipeline\\main.py --input fixtures\\tiny_chapter\\original --work "The Regressed Mercenary Has a Plan" --target pt-BR --mode mock --debug --strict --export-mode clean --output debug\\runs\\tiny_chapter` passou.
+- `npm run build` passou na Fase 21.
+- `.\\venv\\Scripts\\python.exe -m pytest -q` passou com 545 passed, 1 skipped.
+- `cargo test export_ --lib` passou com 7 testes.
+- `cargo test local_memory --lib` passou com 4 testes.
+- `npx playwright test` passou com 4 testes.
+- `.\\pipeline\\venv\\Scripts\\python.exe pipeline\\main.py --input fixtures\\tiny_chapter\\original --work "The Regressed Mercenary Has a Plan" --target pt-BR --mode mock --debug --strict --export-mode clean --output debug\\final_run` passou.
+- Validacao de artefatos em `debug\\final_run` passou.
+- `cargo check` passou apos a Fase 21.
 
 ## Observacoes
 - O worktree ja estava sujo antes desta execucao; nao foi feita reversao de mudancas existentes.
 - `rg` falhou com `Acesso negado`; usei `Get-ChildItem` e `Select-String`.
 - O primeiro comando Playwright sem aspas falhou por parsing do PowerShell; o comando correto e `npx playwright test --grep "@smoke"`.
 - O schema v12 ainda nao esta plugado como formato principal do pipeline/editor; a Fase 2 entregou contrato, migrador e testes para a integracao segura posterior.
+- Checkpoint das Fases 0-2 criado em `9504feb` e enviado para `origin/fixpipeline`.
+- Fase 3 removeu os hardcodes `D:\traduzai_data` de `src-tauri/src` e centralizou `works`, `memory`, `logs` e `exports`.
+- Falha corrigida: `cargo test credits settings --lib` nao e uma sintaxe valida do Cargo; os testes foram executados separadamente.
+- Fase 4 criou/carregou `works/<work_id>/work_context.json`, adicionou resumo no Setup e persistiu `work_context` no `project.json` gerado pelo pipeline.
+- Falha corrigida: Playwright da Fase 4 precisou de fallback para ambiente sem runtime Tauri ao chamar bindings no navegador.
+- Fase 5 criou `works/<work_id>/glossary.json`, funcoes de busca/validacao e comandos Tauri para carregar/salvar/upsert/remover entradas.
+- Observacao Fase 5: a UI cobre adicionar/remover no editor simples atual; campos avancados do glossario estruturado ficam disponiveis no contrato backend.
+- Fase 6 adicionou leitura/agrupamento leve no `project.json` via `group_regions()` e overlay de debug.
+- Fase 7 normaliza OCR antes da traducao e persiste `raw_ocr`, `normalized_ocr` e `normalization`.
+- Fase 8 adicionou placeholders seguros `⟦TA_TERM_001⟧`, detector de entidades e validacao de restauracao.
+- Fase 9 adicionou motor contextual estruturado com mock translator, fallback seguro e validacao de JSON/placeholders.
+- Fase 10 adicionou politicas de QA/render/export e `qa.summary` no `project.json`.
+- Fase 11 adicionou escrita transacional com temp file, backup e validacao de consistencia.
+- Fase 12 adicionou `structured_log.jsonl`, dedupe por `event_id`, duracao real e `log.summary`.
+- Fase 13 adicionou QA visual para texto ingles remanescente e pagina nao processada.
+- Fase 14 adicionou validacao de mascaras reais e checagem de export.
+- Fase 15 adicionou decisao de inpaint por tipo de regiao e paths de debug.
+- Fase 16 adicionou QA de fit para typesetting e fallback de fonte/reescrita.
+- Fase 17 adicionou painel de QA no Preview com contador, navegacao, ignorar com motivo persistido e exportacao de relatorio simples.
+- Falha corrigida Fase 17: teste unitario estava tipado como match completo de `QaIssue`; ajustado para match parcial antes do build.
+- Fase 18 adicionou relatorios obrigatorios no ZIP completo, manifest com SHA-256 e bloqueio por modo de export.
+- Falha corrigida Fase 18: export bloqueado nao deixa mais arquivo ZIP parcial.
+- Fase 19 adicionou `traduzai_memory.db`, schema SQLite, prioridade de correcao do usuario, regra de confianca e comandos de import/export.
+- Falha corrigida Fase 19: comandos Tauri de memoria foram adicionados para evitar codigo morto e deixar a memoria plugavel.
+- Fase 20 adicionou runner CLI por flags, modo mock offline, reports e retorno strict != 0 para critical.
+- Falha corrigida Fase 20: ajuda e parser nao reconheciam `--input`.
+- Fase 21 validou build, pytest completo, Playwright completo, testes Rust de export/memoria e fixture final.
+- Falha corrigida Fase 21: comando Cargo combinado tinha sintaxe invalida; filtros foram rodados separadamente.
 
 ## Proximo ponto de retomada
-Continuar na Fase 3: Storage seguro por ambiente.
+Plano V12 concluido. Proximo ponto: commit final, push e desligamento autorizado pelo usuario.

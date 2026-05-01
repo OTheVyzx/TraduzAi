@@ -87,6 +87,18 @@ export function Home() {
         memoria_lexical: raw.contexto?.memoria_lexical || {},
         fontes_usadas: raw.contexto?.fontes_usadas || [],
       },
+      work_context: raw.work_context
+        ? {
+            selected: Boolean(raw.work_context.selected),
+            work_id: String(raw.work_context.work_id ?? ""),
+            title: String(raw.work_context.title ?? raw.obra ?? ""),
+            context_loaded: Boolean(raw.work_context.context_loaded),
+            glossary_loaded: Boolean(raw.work_context.glossary_loaded),
+            glossary_entries_count: Number(raw.work_context.glossary_entries_count ?? 0),
+            risk_level: (raw.work_context.risk_level as "high" | "medium" | "low") ?? "high",
+            user_ignored_warning: Boolean(raw.work_context.user_ignored_warning),
+          }
+        : null,
       paginas: raw.paginas ?? [],
       status: "done" as const,
       source_path: outputDir,
@@ -256,23 +268,27 @@ export function Home() {
 
   return (
     <div className="relative min-h-full">
-      {/* Ambient gradient */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-[radial-gradient(ellipse_at_top,_rgba(124,92,255,0.18),_transparent_55%)]" />
+      {/* Ambient gradient — sutil e premium */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-[480px] bg-[radial-gradient(ellipse_at_top,_rgba(108,92,231,0.10),_transparent_55%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-noise" />
 
       <div className="relative px-10 py-10 max-w-5xl mx-auto animate-fade-in">
         {/* Header */}
         <header className="mb-10">
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2.5 mb-3">
             <Badge tone="brand" size="sm" icon={<Sparkles size={10} />}>
               BETA
             </Badge>
-            <span className="text-xs text-text-muted">v0.1 · desktop</span>
+            <span className="text-2xs text-text-muted">v0.1 · desktop</span>
           </div>
-          <h1 className="text-3xl font-semibold text-text-primary tracking-tight">
-            Bem-vindo ao TraduzAi
+          <h1 className="text-3xl font-bold text-text-primary tracking-tight">
+            Bem-vindo ao{" "}
+            <span className="bg-gradient-to-r from-brand-300 to-accent-cyan bg-clip-text text-transparent">
+              TraduzAi
+            </span>
           </h1>
-          <p className="text-md text-text-secondary mt-2">
-            Traduza mangá, manhwa e manhua automaticamente com IA local.
+          <p className="text-md text-text-secondary mt-2 max-w-lg">
+            Traduza mangá, manhwa e manhua automaticamente com IA 100% local.
           </p>
         </header>
 
@@ -288,23 +304,23 @@ export function Home() {
               </div>
               <p className="text-sm text-text-secondary mb-3">
                 {free > 0
-                  ? `${free} páginas restantes esta semana · 2 capítulos grátis, reseta toda segunda-feira`
+                  ? `${free} páginas restantes esta semana · reseta toda segunda-feira`
                   : "Limite semanal atingido — compre créditos para continuar"}
               </p>
-              <div className="h-1.5 bg-white/5 rounded-pill overflow-hidden">
+              <div className="h-1 bg-white/[0.04] rounded-pill overflow-hidden">
                 <ProgressBar progress={progressPercent} />
               </div>
               {credits > 0 && (
-                <p className="text-xs text-text-secondary mt-3">
+                <p className="text-xs text-text-muted mt-3">
                   + {credits} créditos pagos disponíveis
                 </p>
               )}
             </div>
             <div className="text-right shrink-0">
-              <p className="text-4xl font-semibold text-text-primary tabular leading-none">
+              <p className="text-4xl font-bold text-text-primary tabular leading-none tracking-tight">
                 {quota}
               </p>
-              <p className="text-xs text-text-muted mt-1 uppercase tracking-wider">
+              <p className="text-2xs text-text-muted mt-1 uppercase tracking-wider">
                 páginas
               </p>
             </div>
@@ -312,31 +328,33 @@ export function Home() {
         </Card>
 
         {/* Primary actions */}
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           <button
             onClick={handleNewTranslation}
             disabled={loading}
             className="group relative w-full overflow-hidden rounded-xl p-6 text-left
-              bg-gradient-to-br from-brand-600 to-brand-700 hover:from-brand-500 hover:to-brand-600
-              shadow-glow-brand transition-all duration-240 ease-out-expo
-              disabled:opacity-50 disabled:cursor-not-allowed
+              bg-gradient-to-br from-brand-500/90 to-brand-700/90
+              hover:from-brand-400/90 hover:to-brand-600/90
+              shadow-glow-brand/50 hover:shadow-glow-brand
+              transition-all duration-240 ease-out-expo
+              disabled:opacity-40 disabled:cursor-not-allowed
               focus-visible:ring-2 focus-visible:ring-brand-300 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-primary"
           >
-            <div className="absolute inset-0 bg-grid opacity-40" />
+            <div className="absolute inset-0 bg-grid opacity-20" />
             <div className="relative flex items-center gap-5">
-              <div className="w-12 h-12 rounded-lg bg-white/15 backdrop-blur-sm flex items-center justify-center shrink-0
-                group-hover:scale-105 transition-transform duration-240">
+              <div className="w-12 h-12 rounded-xl bg-white/[0.06] backdrop-blur-sm flex items-center justify-center shrink-0
+                group-hover:scale-105 group-hover:bg-white/[0.08] transition-all duration-240">
                 <Plus size={24} className="text-white" strokeWidth={2.5} />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-lg font-semibold text-white">Novo capítulo</p>
-                <p className="text-sm text-white/70 mt-0.5">
+                <p className="text-sm text-white/60 mt-0.5">
                   Automático: OCR + Tradução IA
                 </p>
               </div>
               <ArrowRight
                 size={20}
-                className="text-white/70 group-hover:text-white group-hover:translate-x-1 transition-all duration-240"
+                className="text-white/40 group-hover:text-white/80 group-hover:translate-x-1 transition-all duration-240"
               />
             </div>
           </button>
@@ -345,15 +363,16 @@ export function Home() {
             onClick={handleManualTranslation}
             disabled={loading}
             className="group relative w-full overflow-hidden rounded-xl p-6 text-left
-              bg-bg-secondary border border-white/10 hover:border-accent-purple/40 hover:bg-white/[0.02]
+              bg-bg-secondary border border-border hover:border-brand/25 hover:bg-brand/[0.03]
+              shadow-card hover:shadow-card-hover
               transition-all duration-240 ease-out-expo
-              disabled:opacity-50 disabled:cursor-not-allowed
-              focus-visible:ring-2 focus-visible:ring-accent-purple/30 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-primary"
+              disabled:opacity-40 disabled:cursor-not-allowed
+              focus-visible:ring-2 focus-visible:ring-brand/30 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-primary"
           >
             <div className="relative flex items-center gap-5">
-              <div className="w-12 h-12 rounded-lg bg-accent-purple/10 flex items-center justify-center shrink-0
-                group-hover:scale-105 transition-transform duration-240 border border-accent-purple/20">
-                <Plus size={24} className="text-accent-purple" strokeWidth={2.5} />
+              <div className="w-12 h-12 rounded-xl bg-accent-violet/8 flex items-center justify-center shrink-0
+                group-hover:scale-105 group-hover:bg-accent-violet/12 transition-all duration-240 border border-accent-violet/15">
+                <Plus size={24} className="text-accent-violet" strokeWidth={2.5} />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-lg font-semibold text-text-primary">Tradução Manual</p>
@@ -363,7 +382,7 @@ export function Home() {
               </div>
               <ArrowRight
                 size={20}
-                className="text-text-muted group-hover:text-text-primary group-hover:translate-x-1 transition-all duration-240"
+                className="text-text-muted group-hover:text-text-secondary group-hover:translate-x-1 transition-all duration-240"
               />
             </div>
           </button>
@@ -393,12 +412,12 @@ export function Home() {
           <section>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <Clock size={14} className="text-text-secondary" />
-                <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider">
+                <Clock size={14} className="text-text-muted" />
+                <h2 className="text-xs font-medium text-text-muted uppercase tracking-wider">
                   Projetos recentes
                 </h2>
               </div>
-              <span className="text-xs text-text-muted tabular">
+              <span className="text-2xs text-text-muted tabular">
                 {recentProjects.length}
               </span>
             </div>
@@ -423,8 +442,8 @@ export function Home() {
                         e.stopPropagation();
                         removeRecentProject(proj.id);
                       }}
-                      className="shrink-0 w-7 h-7 rounded-md text-text-muted opacity-0 group-hover:opacity-100
-                        hover:text-text-primary hover:bg-white/5 transition-all duration-180
+                      className="shrink-0 w-7 h-7 rounded-lg text-text-muted opacity-0 group-hover:opacity-100
+                        hover:text-text-primary hover:bg-white/[0.04] transition-all duration-200
                         flex items-center justify-center"
                       aria-label={`Remover ${proj.obra} dos recentes`}
                       title="Remover dos recentes"
@@ -474,36 +493,38 @@ function SecondaryAction({
 }: SecondaryActionProps) {
   const accentClasses =
     accent === "cyan"
-      ? "group-hover:border-accent-cyan/40 group-hover:bg-accent-cyan/5"
-      : "group-hover:border-brand/40 group-hover:bg-brand/5";
+      ? "group-hover:border-accent-cyan/25 group-hover:bg-accent-cyan/[0.03]"
+      : "group-hover:border-brand/25 group-hover:bg-brand/[0.03]";
   const iconColor = accent === "cyan" ? "text-accent-cyan" : "text-brand-300";
   const iconBg =
     accent === "cyan"
-      ? "bg-accent-cyan/10 group-hover:bg-accent-cyan/15"
-      : "bg-brand/10 group-hover:bg-brand/15";
+      ? "bg-accent-cyan/8 group-hover:bg-accent-cyan/12"
+      : "bg-brand/8 group-hover:bg-brand/12";
 
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`group flex items-center gap-4 p-5 rounded-lg text-left
-        bg-bg-secondary border border-border transition-all duration-180 ease-out-expo
+      className={`group flex items-center gap-4 p-5 rounded-xl text-left
+        bg-bg-secondary border border-border shadow-card
+        transition-all duration-200 ease-out-expo
         ${accentClasses}
-        disabled:opacity-40 disabled:cursor-not-allowed
+        hover:shadow-card-hover
+        disabled:opacity-35 disabled:cursor-not-allowed
         focus-visible:outline-none`}
     >
       <div
-        className={`w-10 h-10 rounded-md flex items-center justify-center shrink-0 transition-colors duration-180 ${iconBg}`}
+        className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 transition-all duration-200 ${iconBg}`}
       >
-        <Icon size={20} className={iconColor} />
+        <Icon size={20} className={iconColor} strokeWidth={1.75} />
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-text-primary">{title}</p>
-        <p className="text-xs text-text-secondary mt-0.5">{description}</p>
+        <p className="text-xs text-text-muted mt-0.5">{description}</p>
       </div>
       <ArrowRight
         size={16}
-        className="text-text-muted group-hover:text-text-secondary group-hover:translate-x-0.5 transition-all duration-180"
+        className="text-text-muted group-hover:text-text-secondary group-hover:translate-x-0.5 transition-all duration-200"
       />
     </button>
   );

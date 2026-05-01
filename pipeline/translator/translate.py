@@ -1133,7 +1133,9 @@ def _translate_google_single_page(
     """
     is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
 
-    texts = ocr_page.get("texts", [])
+    from ocr.ocr_normalizer import normalize_ocr_record
+
+    texts = [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
     if not texts:
         if progress_callback:
             progress_callback(page_idx + 1, total, f"Pagina {page_idx + 1}: sem texto")
@@ -1308,7 +1310,9 @@ def _translate_with_ollama(
     translated_pages = []
     history_tail: list[dict] = []
     for page_idx, ocr_page in enumerate(ocr_results):
-        texts = ocr_page.get("texts", [])
+        from ocr.ocr_normalizer import normalize_ocr_record
+
+        texts = [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
         if not texts:
             translated_pages.append({"texts": []})
             if progress_callback:

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 function useDynamicStyle<T extends HTMLElement>(styleObj: Record<string, string | number>, deps: any[]) {
@@ -22,14 +22,9 @@ function ProgressBar({ progress }: { progress: number }) {
   return (
     <div
       ref={ref}
-      className="h-full bg-gradient-to-r from-accent-purple to-accent-cyan rounded-full transition-all duration-500 ease-out dynamic-progress"
+      className="h-full bg-gradient-to-r from-brand to-accent-cyan rounded-pill transition-all duration-500 ease-out-expo dynamic-progress"
     />
   );
-}
-
-function StepProgressBar({ progress }: { progress: number }) {
-  const ref = useDynamicStyle<HTMLDivElement>({ "--progress": `${progress}%` }, [progress]);
-  return <div ref={ref} className="h-full bg-accent-purple rounded-full transition-all duration-300 ease-out dynamic-progress" />;
 }
 
 function AnimContainer({ name, dur, delay, ease, fill, children, className }: { name: string, dur: string, delay?: string, ease?: string, fill?: string, children?: React.ReactNode, className?: string }) {
@@ -60,7 +55,6 @@ import {
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAppStore, PipelineStep } from "../lib/stores/appStore";
 import {
-  onPipelineProgress,
   onPipelineComplete,
   cancelPipeline,
   pausePipeline,
@@ -78,6 +72,11 @@ import {
   formatDuration,
   formatEtaClock,
 } from "../lib/time-estimates";
+import {
+  formatFlaggedPages,
+  summarizeProcessingQaReport,
+  type ProcessingQaSummary,
+} from "./processingQa";
 
 interface CompletionData {
   obra: string;
@@ -86,6 +85,7 @@ interface CompletionData {
   elapsedSeconds: number;
   firstPagePath: string | null;
   paginas: PageData[];
+  qaSummary: ProcessingQaSummary | null;
 }
 
 function sanitizeForFilename(value: string): string {
@@ -157,6 +157,17 @@ function formatPipelineLog(ctx: {
   return lines.join("\n");
 }
 
+async function loadProcessingQaSummary(outputDir: string): Promise<ProcessingQaSummary | null> {
+  try {
+    const qaPath = `${outputDir.replace(/\\/g, "/")}/qa_report.json`;
+    const bytes = await readFile(qaPath);
+    const raw = JSON.parse(new TextDecoder().decode(bytes));
+    return summarizeProcessingQaReport(raw);
+  } catch {
+    return null;
+  }
+}
+
 const STEPS: { key: PipelineStep; label: string; description: string }[] = [
   { key: "extract", label: "Extração", description: "Descompactando e validando arquivos" },
   { key: "ocr", label: "OCR", description: "Detectando texto nos balões" },
@@ -164,6 +175,10 @@ const STEPS: { key: PipelineStep; label: string; description: string }[] = [
   { key: "translate", label: "Tradução", description: "Traduzindo com contexto local" },
   { key: "inpaint", label: "Inpainting", description: "Removendo texto original" },
   { key: "typeset", label: "Typesetting", description: "Aplicando texto traduzido" },
+];
+
+const MANUAL_STEPS: { key: PipelineStep; label: string; description: string }[] = [
+  { key: "extract", label: "Preparando arquivos", description: "Copiando imagens e criando estrutura do projeto" },
 ];
 
 export function Processing() {
@@ -209,7 +224,6 @@ export function Processing() {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    let unlistenProgress: (() => void) | undefined;
     let unlistenComplete: (() => void) | undefined;
 
     async function processChapter(index: number) {
@@ -226,12 +240,14 @@ export function Processing() {
         });
         await startPipeline({
           source_path: currentPath,
+          mode: project.mode,
           obra: project.obra,
           capitulo: currentChapter,
           idioma_origem: project.idioma_origem,
           idioma_destino: project.idioma_destino,
           qualidade: project.qualidade,
           glossario: project.contexto.glossario,
+          work_context: project.work_context ?? null,
           contexto: {
             sinopse: project.contexto.sinopse,
             genero: project.contexto.genero,
@@ -259,21 +275,6 @@ export function Processing() {
 
     async function setup() {
       // 1. Registra listeners PRIMEIRO
-      let lastLoggedStep: PipelineStep | null = null;
-      unlistenProgress = (await onPipelineProgress((progress) => {
-        setPipeline(progress);
-        appendPipelineLog({
-          level: progress.step !== lastLoggedStep ? "step" : "progress",
-          step: progress.step,
-          current_page: progress.current_page,
-          total_pages: progress.total_pages,
-          overall_progress: progress.overall_progress,
-          step_progress: progress.step_progress,
-          message: progress.message,
-        });
-        lastLoggedStep = progress.step;
-      })) as unknown as () => void;
-
       unlistenComplete = (await onPipelineComplete(async (result) => {
         appendPipelineLog({
           level: result.success ? "success" : "error",
@@ -285,6 +286,7 @@ export function Processing() {
           try {
             const raw = await loadProjectJson(result.output_path);
             const outputDir = result.output_path.replace(/\\/g, "/");
+            const qaSummary = await loadProcessingQaSummary(outputDir);
             const paginas: PageData[] = raw.paginas ?? [];
 
             const chapterNum = raw.capitulo || project?.capitulo || 1;
@@ -317,9 +319,23 @@ export function Processing() {
                 capitulo: chapterNum,
               });
               setBatchSources([]);
+
+              if (project?.mode === "manual") {
+                navigate("/editor");
+                return;
+              }
+
               const elapsed = startedAtMs
                 ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
                 : 0;
+              if (qaSummary) {
+                appendPipelineLog({
+                  level: "info",
+                  message:
+                    `QA detectou ${qaSummary.flaggedPages.length} página(s) sinalizada(s) ` +
+                    `e ${qaSummary.totalDecisions} decisão(ões) registradas.`,
+                });
+              }
               setCompletionData({
                 obra: raw.obra || project?.obra || "Projeto",
                 capitulo: chapterNum,
@@ -327,6 +343,7 @@ export function Processing() {
                 elapsedSeconds: elapsed,
                 firstPagePath: paginas[0]?.arquivo_traduzido ?? null,
                 paginas,
+                qaSummary,
               });
             }
           } catch (e) {
@@ -352,7 +369,6 @@ export function Processing() {
     setup();
 
     return () => {
-      unlistenProgress?.();
       unlistenComplete?.();
     };
   }, []);
@@ -415,8 +431,10 @@ export function Processing() {
     }
   }
 
+  const activeSteps = project?.mode === "manual" ? MANUAL_STEPS : STEPS;
+
   const currentStepIndex = pipeline
-    ? STEPS.findIndex((s) => s.key === pipeline.step)
+    ? activeSteps.findIndex((s) => s.key === pipeline.step)
     : 0;
 
   const initialEstimate =
@@ -467,32 +485,34 @@ export function Processing() {
   }
 
   return (
-    <div className="p-8 max-w-2xl mx-auto">
+    <div className="p-8 max-w-2xl mx-auto animate-fade-in">
       <div className="flex items-center justify-between mb-1">
-        <h2 className="text-xl font-bold">Traduzindo...</h2>
+        <h2 className="text-xl font-bold tracking-tight text-text-primary">
+          {project?.mode === "manual" ? "Preparando projeto..." : "Traduzindo..."}
+        </h2>
         {isBatch && (
-          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-accent-purple/10 text-accent-purple text-xs font-medium">
+          <div className="flex items-center gap-2 px-3 py-1 rounded-pill bg-brand/8 text-brand-300 text-xs font-medium border border-brand/15">
             <Layers size={14} />
             Lote: {batchIndex + 1} de {batchSources.length}
           </div>
         )}
       </div>
-      <p className="text-sm text-text-secondary mb-8">
-        {project?.obra} - Capítulo {project?.capitulo ? project.capitulo + batchIndex : ""}
+      <p className="text-sm text-text-muted mb-8">
+        {project?.obra} - Capítulo {project?.capitulo ? project.capitulo + (isBatch ? batchIndex : 0) : ""}
       </p>
 
       {/* Batch progress summary */}
       {isBatch && (
-        <div className="mb-8 grid grid-cols-2 gap-4">
-            <div className="bg-bg-secondary border border-white/5 rounded-xl p-3">
+        <div data-testid="page-status-grid" className="mb-8 grid grid-cols-2 gap-4">
+            <div className="bg-bg-secondary border border-border rounded-xl p-3">
               <p className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">Status do Lote</p>
               <p className="text-sm text-text-primary">
                 {batchCompletedCount} concluídos
               </p>
             </div>
-            <div className="bg-bg-secondary border border-white/5 rounded-xl p-3">
+            <div className="bg-bg-secondary border border-border rounded-xl p-3">
               <p className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">Atual</p>
-              <p className="text-sm text-accent-purple truncate">
+              <p className="text-sm text-brand-300 truncate">
                 {batchSources[batchIndex]?.split(/[/\\]/).pop()}
               </p>
             </div>
@@ -519,7 +539,7 @@ export function Processing() {
               : "Calculando..."}
           </span>
         </div>
-        <div className="h-2 bg-bg-tertiary rounded-full overflow-hidden">
+        <div className="h-2 bg-bg-tertiary rounded-pill overflow-hidden">
           <ProgressBar progress={pipeline?.overall_progress || 0} />
         </div>
         {pipeline && (
@@ -531,60 +551,64 @@ export function Processing() {
       </div>
 
       {/* Timing cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-        <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3">
-          <p className="text-[11px] uppercase tracking-wide text-text-secondary/70 flex items-center gap-1.5">
-            <TimerReset size={12} />
-            Decorrido
+      {project?.mode !== "manual" && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+          <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3">
+            <p className="text-[11px] uppercase tracking-wide text-text-muted flex items-center gap-1.5">
+              <TimerReset size={12} />
+              Decorrido
+            </p>
+            <p className="text-lg font-semibold text-text-primary mt-1">
+              {formatDuration(elapsedSeconds)}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3">
+            <p className="text-[11px] uppercase tracking-wide text-text-muted flex items-center gap-1.5">
+              <AlarmClock size={12} />
+              Restante
+            </p>
+            <p className="text-lg font-semibold text-text-primary mt-1">
+              {remainingSeconds > 0 ? formatDuration(remainingSeconds) : "--"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3">
+            <p className="text-[11px] uppercase tracking-wide text-text-muted flex items-center gap-1.5">
+              <Flag size={12} />
+              Término previsto
+            </p>
+            <p className="text-lg font-semibold text-text-primary mt-1">
+              {finishAtLabel}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {project?.mode !== "manual" && (
+        <div className="rounded-xl border border-border bg-bg-secondary/60 px-4 py-3 mb-8">
+          <p className="text-xs text-text-secondary">
+            {initialEstimate
+              ? `Base inicial: ~${formatDuration(initialEstimate.total_seconds)} para ${initialEstimate.total_pages} páginas.`
+              : "Detectando o hardware para montar a previsão inicial."}
           </p>
-          <p className="text-lg font-semibold text-text-primary mt-1">
-            {formatDuration(elapsedSeconds)}
+          <p className="text-xs text-text-muted mt-1">
+            {hardwareSummary}
           </p>
         </div>
-
-        <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3">
-          <p className="text-[11px] uppercase tracking-wide text-text-secondary/70 flex items-center gap-1.5">
-            <AlarmClock size={12} />
-            Restante
-          </p>
-          <p className="text-lg font-semibold text-text-primary mt-1">
-            {remainingSeconds > 0 ? formatDuration(remainingSeconds) : "--"}
-          </p>
-        </div>
-
-        <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3">
-          <p className="text-[11px] uppercase tracking-wide text-text-secondary/70 flex items-center gap-1.5">
-            <Flag size={12} />
-            Término previsto
-          </p>
-          <p className="text-lg font-semibold text-text-primary mt-1">
-            {finishAtLabel}
-          </p>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-white/5 bg-bg-secondary/60 px-4 py-3 mb-8">
-        <p className="text-xs text-text-secondary">
-          {initialEstimate
-            ? `Base inicial: ~${formatDuration(initialEstimate.total_seconds)} para ${initialEstimate.total_pages} páginas.`
-            : "Detectando o hardware para montar a previsão inicial."}
-        </p>
-        <p className="text-xs text-text-secondary/70 mt-1">
-          {hardwareSummary}
-        </p>
-      </div>
+      )}
 
       {/* Steps */}
       <div className="space-y-1 mb-8">
-        {STEPS.map((step, i) => {
-          const isCurrent = i === currentStepIndex;
-          const isDone = i < currentStepIndex;
+        {activeSteps.map((step, i) => {
+          const isCurrent = i === currentStepIndex || (project?.mode === "manual" && pipeline?.step !== "extract" && i === 0);
+          const isDone = i < currentStepIndex && !(project?.mode === "manual" && i === 0);
 
           return (
             <div
               key={step.key}
               className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-smooth
-                ${isCurrent ? "bg-accent-purple/5 border border-accent-purple/20" : ""}
+                ${isCurrent ? "bg-brand/5 border border-brand/15" : ""}
                 ${isDone ? "opacity-60" : ""}
               `}
             >
@@ -592,7 +616,7 @@ export function Processing() {
               {isDone ? (
                 <CheckCircle2 size={18} className="text-status-success flex-shrink-0" />
               ) : isCurrent ? (
-                <Loader2 size={18} className="text-accent-purple animate-spin flex-shrink-0" />
+                <Loader2 size={18} className="text-brand-300 animate-spin flex-shrink-0" />
               ) : (
                 <Circle size={18} className="text-text-secondary/30 flex-shrink-0" />
               )}
@@ -602,7 +626,7 @@ export function Processing() {
                 <p
                   className={`text-sm ${
                     isCurrent
-                      ? "text-accent-purple font-medium"
+                      ? "text-brand-300 font-medium"
                       : isDone
                       ? "text-text-secondary"
                       : "text-text-secondary/50"
@@ -610,14 +634,14 @@ export function Processing() {
                 >
                   {step.label}
                 </p>
-                <p className="text-[11px] text-text-secondary/60 mt-0.5">
+                <p className="text-[11px] text-text-muted mt-0.5">
                   {isCurrent && pipeline ? pipeline.message : step.description}
                 </p>
               </div>
 
               {/* Step progress */}
               {isCurrent && pipeline && (
-                <span className="text-xs text-accent-purple font-mono">
+                <span className="text-xs text-brand-300 font-mono">
                   {Math.round(pipeline.step_progress)}%
                 </span>
               )}
@@ -630,11 +654,11 @@ export function Processing() {
         <button
           onClick={handleTogglePause}
           disabled={!started || pauseState === "pausing" || pauseState === "resuming"}
-          className={`flex items-center gap-2 rounded-full border px-4 py-2 text-sm transition-smooth
+          className={`flex items-center gap-2 rounded-pill border px-4 py-2 text-sm transition-smooth
             ${
               isPaused
-                ? "border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/15"
-                : "border-accent-purple/35 bg-accent-purple/10 text-accent-purple hover:bg-accent-purple/15"
+                ? "border-accent-cyan/25 bg-accent-cyan/8 text-accent-cyan hover:bg-accent-cyan/12"
+                : "border-brand/25 bg-brand/8 text-brand-300 hover:bg-brand/12"
             }
             disabled:cursor-not-allowed disabled:opacity-50
           `}
@@ -646,7 +670,7 @@ export function Processing() {
         <button
           onClick={handleExportLog}
           disabled={pipelineLog.length === 0}
-          className="flex items-center gap-2 rounded-full border border-white/10 bg-bg-secondary px-4 py-2 text-sm text-text-secondary transition-smooth hover:border-white/20 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex items-center gap-2 rounded-pill border border-border bg-bg-secondary px-4 py-2 text-sm text-text-secondary transition-smooth hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
           title={pipelineLog.length === 0 ? "Nada registrado ainda" : `Exportar ${pipelineLog.length} eventos`}
         >
           <FileDown size={16} />
@@ -736,7 +760,7 @@ function ChapterCompletionScreen({
             dur="0.55s"
             ease="cubic-bezier(0.34,1.56,0.64,1)"
             fill="forwards"
-            className="flex h-16 w-16 items-center justify-center rounded-full bg-status-success/15 shadow-[0_0_32px_rgba(72,225,120,0.18)] dynamic-animation"
+            className="flex h-16 w-16 items-center justify-center rounded-pill bg-status-success/15 shadow-[0_0_32px_rgba(72,225,120,0.18)] dynamic-animation"
           >
             <CheckCircle2 size={32} className="text-status-success" />
           </AnimContainer>
@@ -766,15 +790,53 @@ function ChapterCompletionScreen({
           fill="both"
           className="mb-5 grid grid-cols-2 gap-3 dynamic-animation"
         >
-          <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3 text-center">
+          <div data-testid="page-status-grid" className="rounded-xl border border-border bg-bg-secondary px-4 py-3 text-center">
             <p className="text-2xl font-semibold tabular text-text-primary">{data.pages}</p>
             <p className="mt-1 text-xs text-text-secondary">páginas traduzidas</p>
           </div>
-          <div className="rounded-xl border border-white/5 bg-bg-secondary px-4 py-3 text-center">
+          <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3 text-center">
             <p className="text-2xl font-semibold tabular text-text-primary">{formatDuration(data.elapsedSeconds)}</p>
             <p className="mt-1 text-xs text-text-secondary">tempo total</p>
           </div>
         </AnimContainer>
+
+        {data.qaSummary && (
+          <AnimContainer
+            name="fadeSlideUp"
+            dur="0.4s"
+            delay="0.28s"
+            ease="ease-out"
+            fill="both"
+            className="mb-5 dynamic-animation"
+          >
+            <div
+              data-testid="qa-panel"
+              className="rounded-2xl border border-amber-400/15 bg-[linear-gradient(180deg,rgba(245,158,11,0.09),rgba(255,255,255,0.02))] px-4 py-4"
+            >
+              <div className="flex items-center gap-2 text-sm font-medium text-text-primary">
+                <Flag size={15} className="text-amber-300" />
+                RevisÃ£o sugerida
+              </div>
+              <p className="mt-2 text-xs text-text-secondary">
+                {data.qaSummary.totalDecisions} decisÃ£o(Ãµes) registradas. PÃ¡ginas sinalizadas:{" "}
+                {formatFlaggedPages(data.qaSummary.flaggedPages)}.
+              </p>
+              {data.qaSummary.topReasons.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {data.qaSummary.topReasons.map((item) => (
+                    <span
+                      data-testid="qa-flag-item"
+                      key={item.reason}
+                      className="rounded-pill border border-border bg-bg-secondary/70 px-3 py-1 text-[11px] text-text-secondary"
+                    >
+                      {item.label}: {item.count}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </AnimContainer>
+        )}
 
         {/* First page preview with zoom animation */}
         {imageSrc && (
@@ -784,7 +846,7 @@ function ChapterCompletionScreen({
             delay="0.32s"
             ease="cubic-bezier(0.34,1.56,0.64,1)"
             fill="both"
-            className="mb-5 overflow-hidden rounded-2xl border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] dynamic-animation"
+            className="mb-5 overflow-hidden rounded-2xl border border-border shadow-[0_20px_50px_rgba(0,0,0,0.5)] dynamic-animation"
           >
             <img
               src={imageSrc}
@@ -805,14 +867,14 @@ function ChapterCompletionScreen({
         >
           <button
             onClick={onPreview}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-purple py-3 text-sm font-medium text-white transition-smooth hover:bg-accent-purple/90"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-brand py-3 text-sm font-medium text-white transition-smooth hover:bg-brand/90"
           >
             <Eye size={16} />
             Ver Preview
           </button>
           <button
             onClick={onEditor}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 bg-bg-secondary py-3 text-sm text-text-primary transition-smooth hover:border-white/20"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-border bg-bg-secondary py-3 text-sm text-text-primary transition-smooth hover:border-border-strong"
           >
             <Edit3 size={16} />
             Abrir Editor
@@ -828,9 +890,10 @@ function ChapterCompletionScreen({
           className="mt-3 flex justify-center dynamic-animation"
         >
           <button
+            data-testid="export-report-link"
             onClick={onExportLog}
             disabled={logCount === 0}
-            className="flex items-center gap-2 rounded-xl border border-white/10 bg-bg-secondary/70 px-4 py-2 text-xs text-text-secondary transition-smooth hover:border-white/20 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-2 rounded-xl border border-border bg-bg-secondary/70 px-4 py-2 text-xs text-text-secondary transition-smooth hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
             title={logCount === 0 ? "Sem registros" : `Exportar ${logCount} eventos`}
           >
             <FileDown size={14} />

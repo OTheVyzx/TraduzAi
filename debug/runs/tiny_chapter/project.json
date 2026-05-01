@@ -1,0 +1,55 @@
+{
+  "obra": "The Regressed Mercenary Has a Plan",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "qualidade": "normal",
+  "contexto": {},
+  "paginas": [
+    {
+      "numero": 1,
+      "arquivo_original": "originals/001.png",
+      "arquivo_traduzido": "translated/001.png",
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "originals/001.png",
+          "visible": true,
+          "locked": true
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "images/001.png",
+          "visible": true,
+          "locked": true
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "translated/001.png",
+          "visible": true,
+          "locked": true
+        },
+        "mask": {
+          "key": "mask",
+          "path": "layers/mask/001.png",
+          "visible": true,
+          "locked": false
+        }
+      },
+      "inpaint_blocks": [],
+      "text_layers": [],
+      "textos": []
+    }
+  ],
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 0
+  },
+  "qa": {
+    "summary": {
+      "total": 0,
+      "critical": 0
+    }
+  },
+  "mode": "mock"
+}
