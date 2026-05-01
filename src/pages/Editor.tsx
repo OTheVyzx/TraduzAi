@@ -16,16 +16,19 @@ import {
   LocateFixed,
   Minus,
   PenTool,
-  Play,
   Plus,
   SquareDashedMousePointer,
   Undo2,
+  ScanText,
+  Languages,
+  Loader2,
 } from "lucide-react";
 import { useAppStore } from "../lib/stores/appStore";
-import { EditorCanvas } from "../components/editor/EditorCanvas";
+import { EditorStage } from "../components/editor/stage/EditorStage";
 import { LayersPanel } from "../components/editor/LayersPanel";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
 import { useEditorStore, type EditorToolMode } from "../lib/stores/editorStore";
+import { EDITOR_PROFESSIONAL_SHORTCUTS, EDITOR_PROFESSIONAL_TOOLS } from "../lib/editorProfessionalTools";
 
 const VIEW_MODES = [
   { key: "original" as const, label: "Original", icon: Image, hotkey: "1" },
@@ -41,9 +44,21 @@ const TOOL_MODES: { key: EditorToolMode; label: string; icon: typeof PenTool; ho
   { key: "eraser", label: "Borracha", icon: Eraser, hotkey: "E" },
 ];
 
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    target.isContentEditable ||
+    !!target.closest("[contenteditable='true']")
+  );
+}
+
 export function Editor() {
   const navigate = useNavigate();
   const project = useAppStore((s) => s.project);
+  const pipeline = useAppStore((s) => s.pipeline);
   const {
     currentPageIndex,
     currentPage,
@@ -54,6 +69,8 @@ export function Editor() {
     zoom,
     brushSize,
     pendingEdits,
+    pendingStructuralEdits,
+    renderPreviewCacheByPageKey,
     isRetypesetting,
     isReinpainting,
     loadCurrentPage,
@@ -68,28 +85,52 @@ export function Editor() {
     setPan,
     commitEdits,
     discardEdits,
+    undoEditor,
+    redoEditor,
     deleteSelectedLayer,
     retypesetCurrentPage,
     reinpaintCurrentPage,
+    detectInPage,
+    ocrInPage,
+    translateInPage,
+    renderPreviewPage,
+    currentPageKey,
     setBrushSize,
   } = useEditorStore();
 
   const totalPages = project?.paginas.length ?? 0;
-  const pendingCount = Object.keys(pendingEdits).length;
+  const projectId = project?.id ?? null;
+  const pendingCount =
+    Object.keys(pendingEdits).length +
+    pendingStructuralEdits.created.length +
+    Object.keys(pendingStructuralEdits.deleted).length +
+    (pendingStructuralEdits.order ? 1 : 0);
+  const pagePipelineBusy = isRetypesetting || isReinpainting;
+  const pageKey = currentPageKey();
+  const renderPreviewState = renderPreviewCacheByPageKey[pageKey];
+  const previewRendering = renderPreviewState?.status === "rendering";
 
   useEffect(() => {
     if (!project || totalPages === 0) return;
     void loadCurrentPage();
-  }, [loadCurrentPage, project, totalPages]);
+  }, [loadCurrentPage, projectId, totalPages]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const active = document.activeElement;
-      const isTyping =
-        !!active &&
-        (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT");
+      const isTyping = isEditableTarget(document.activeElement);
 
       if (!isTyping) {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+          event.preventDefault();
+          if (event.shiftKey) redoEditor();
+          else undoEditor();
+          return;
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+          event.preventDefault();
+          redoEditor();
+          return;
+        }
         if (event.key === "1") setViewMode("original");
         if (event.key === "2") setViewMode("inpainted");
         if (event.key === "3") setViewMode("translated");
@@ -137,6 +178,7 @@ export function Editor() {
     commitEdits,
     currentPageIndex,
     deleteSelectedLayer,
+    redoEditor,
     resetViewport,
     selectedLayerId,
     setCurrentPage,
@@ -144,6 +186,7 @@ export function Editor() {
     setViewMode,
     toggleOverlays,
     totalPages,
+    undoEditor,
     zoomIn,
     zoomOut,
   ]);
@@ -161,7 +204,7 @@ export function Editor() {
           <p className="text-sm text-text-secondary">Nenhum projeto carregado</p>
           <button
             onClick={() => navigate("/")}
-            className="text-sm text-accent-purple hover:underline"
+            className="text-sm text-brand hover:underline"
           >
             Voltar ao início
           </button>
@@ -170,17 +213,12 @@ export function Editor() {
     );
   }
 
-  const applyCurrentView = () => {
-    if (viewMode === "inpainted") return reinpaintCurrentPage();
-    return retypesetCurrentPage();
-  };
-
   return (
     <div className="flex h-screen bg-bg-primary">
       <PageThumbnails />
 
-      <div className="flex min-w-0 flex-1 flex-col border-r border-white/5">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/5 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))] px-4 py-3">
+      <div className="flex min-w-0 flex-1 flex-col border-r border-border">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))] px-4 py-3">
           <div className="flex min-w-0 items-center gap-3">
             <button
               onClick={() => navigate("/preview")}
@@ -197,7 +235,7 @@ export function Editor() {
             </div>
             <div
               data-tauri-drag-region
-              className="hidden h-6 w-16 shrink-0 cursor-grab items-center justify-center rounded-full border border-white/10 bg-bg-tertiary/70 text-text-muted md:flex"
+              className="hidden h-6 w-16 shrink-0 cursor-grab items-center justify-center rounded-full border border-border bg-bg-tertiary/70 text-text-muted md:flex"
               title="Arrastar janela"
             >
               <GripHorizontal size={14} />
@@ -208,10 +246,11 @@ export function Editor() {
             {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
               <button
                 key={key}
+                data-testid={`editor-view-${key}`}
                 onClick={() => setViewMode(key)}
                 className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
                   viewMode === key
-                    ? "border-accent-purple/35 bg-accent-purple/15 text-accent-purple"
+                    ? "border-brand/35 bg-brand/15 text-brand"
                     : "border-transparent text-text-secondary hover:text-text-primary"
                 }`}
                 title={`${label} (${hotkey})`}
@@ -221,11 +260,12 @@ export function Editor() {
               </button>
             ))}
 
-            <div className="mx-1 h-5 w-px bg-white/5" />
+            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
 
             {TOOL_MODES.map(({ key, label, icon: Icon, hotkey }) => (
               <button
                 key={key}
+                data-testid={`editor-tool-${key}`}
                 onClick={() => setToolMode(key)}
                 className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
                   toolMode === key
@@ -239,7 +279,7 @@ export function Editor() {
               </button>
             ))}
 
-            <div className="mx-1 h-5 w-px bg-white/5" />
+            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
 
             <button
               onClick={toggleOverlays}
@@ -255,13 +295,15 @@ export function Editor() {
             </button>
 
             {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") && (
-              <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-bg-tertiary/50 px-2 py-1">
+              <div className="flex items-center gap-2 rounded-xl border border-border bg-bg-tertiary/50 px-2 py-1">
                 <span className="text-[11px] text-text-muted">Pincel</span>
                 <input
                   type="range"
                   min={4}
                   max={96}
                   value={brushSize}
+                  title="Tamanho do pincel"
+                  aria-label="Tamanho do pincel"
                   onChange={(event) => setBrushSize(Number(event.target.value))}
                 />
                 <span className="w-8 text-right text-[11px] text-text-secondary">{brushSize}px</span>
@@ -289,30 +331,83 @@ export function Editor() {
               Descartar
             </button>
             {pendingCount > 0 && (
-              <span className="rounded-full bg-accent-purple/12 px-2 py-1 text-[11px] text-accent-purple">
+              <span className="rounded-full bg-brand/12 px-2 py-1 text-[11px] text-brand">
                 {pendingCount} alteração(ões)
               </span>
             )}
 
-            <div className="mx-1 h-5 w-px bg-white/5" />
+            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
 
-            <button
-              disabled={isRetypesetting || isReinpainting}
-              onClick={() => void applyCurrentView()}
-              className="flex items-center gap-1 rounded-xl bg-accent-purple px-2.5 py-1.5 text-xs text-white transition-smooth hover:bg-accent-purple/90 disabled:opacity-50"
-              title={viewMode === "inpainted" ? "Refazer página limpa" : "Rerenderizar página"}
-            >
-              <Play size={13} className={isRetypesetting || isReinpainting ? "animate-pulse" : ""} />
-              {viewMode === "inpainted"
-                ? isReinpainting
-                  ? "Reinpaint..."
-                  : "Reinpaint"
-                : isRetypesetting
-                  ? "Rerender..."
-                  : "Rerender"}
-            </button>
+            <div className="flex items-center gap-1.5 rounded-xl border border-border bg-bg-tertiary/30 px-1.5 py-1">
+              <button
+                disabled={pagePipelineBusy}
+                onClick={() => void detectInPage()}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
+                title="Detectar balões na página"
+              >
+                <ScanText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                Detectar
+              </button>
+              <button
+                disabled={pagePipelineBusy}
+                onClick={() => void ocrInPage()}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
+                title="Executar OCR em todos os blocos"
+              >
+                <FileText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                OCR
+              </button>
+              <button
+                disabled={pagePipelineBusy}
+                onClick={() => void translateInPage()}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
+                title="Traduzir todos os textos da página"
+              >
+                <Languages size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                Traduzir
+              </button>
+              <button
+                disabled={pagePipelineBusy}
+                onClick={() => void reinpaintCurrentPage()}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
+                title="Limpar a imagem com inpaint"
+              >
+                <Eraser size={13} className={isReinpainting ? "animate-pulse" : ""} />
+                Inpaint
+              </button>
+              <button
+                disabled={pagePipelineBusy || previewRendering}
+                onClick={() => void renderPreviewPage(pageKey)}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
+                title="Renderizar preview final sem salvar alteracoes"
+              >
+                <FileText size={13} className={previewRendering ? "animate-pulse" : ""} />
+                Preview fiel
+              </button>
+              <button
+                disabled={pagePipelineBusy || previewRendering}
+                onClick={() => void retypesetCurrentPage()}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
+                title="Salvar alterações e renderizar o preview final"
+              >
+                <FileText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                Salvar+Render
+              </button>
+            </div>
 
-            <div className="mx-1 h-5 w-px bg-white/5" />
+            {(isRetypesetting || isReinpainting) && !!pipeline && (
+              <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-brand/10 border border-brand/20">
+                <Loader2 size={12} className="text-brand animate-spin" />
+                <span className="text-[11px] text-brand font-medium truncate max-w-[120px]">
+                  {pipeline.message || "Processando..."}
+                </span>
+                <span className="text-[10px] text-brand/70 font-mono">
+                  {Math.round(pipeline.step_progress)}%
+                </span>
+              </div>
+            )}
+
+            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
 
             <button
               onClick={zoomOut}
@@ -353,7 +448,7 @@ export function Editor() {
               {Math.round(zoom * 100)}%
             </span>
 
-            <div className="mx-1 h-5 w-px bg-white/5" />
+            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
 
             <button
               onClick={() => void setCurrentPage(Math.max(0, currentPageIndex - 1))}
@@ -377,7 +472,29 @@ export function Editor() {
           </div>
         </div>
 
-        <EditorCanvas />
+        <div
+          data-testid="editor-professional-toolbar"
+          className="flex flex-wrap items-center gap-2 border-b border-border bg-bg-secondary/45 px-4 py-2 text-[11px] text-text-secondary"
+        >
+          <span className="font-medium text-text-primary">Ferramentas</span>
+          {EDITOR_PROFESSIONAL_TOOLS.map((tool) => (
+            <span
+              key={tool.key}
+              className="rounded-full border border-border bg-bg-tertiary/45 px-2 py-1"
+              title={`${tool.label} - ${tool.hotkey}`}
+            >
+              {tool.label}
+            </span>
+          ))}
+          <span className="mx-1 h-4 w-px bg-white/[0.05]" />
+          {EDITOR_PROFESSIONAL_SHORTCUTS.map((shortcut) => (
+            <span key={shortcut} className="text-text-muted">
+              {shortcut}
+            </span>
+          ))}
+        </div>
+
+        <EditorStage />
       </div>
 
       <LayersPanel />

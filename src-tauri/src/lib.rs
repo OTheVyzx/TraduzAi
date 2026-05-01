@@ -1,6 +1,7 @@
 mod commands;
 mod export;
 pub(crate) mod glossary;
+pub(crate) mod internet_context;
 pub(crate) mod local_memory;
 pub(crate) mod storage;
 pub(crate) mod work_context;

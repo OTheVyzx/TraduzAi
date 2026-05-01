@@ -14,6 +14,16 @@ export interface QaIssue {
   translatedText: string;
 }
 
+export interface QaReviewSummary {
+  totalPages: number;
+  approvedPages: number;
+  warningPages: number;
+  blockedPages: number;
+  criticalCount: number;
+  warningCount: number;
+  groups: Record<string, number>;
+}
+
 const QA_LABELS: Record<string, string> = {
   critical_error: "Erros criticos",
   glossary_violation: "Glossario violado",
@@ -54,6 +64,18 @@ export function qaIssueSeverity(flagId: string): QaSeverity {
   return QA_SEVERITY[flagId] ?? "low";
 }
 
+export function qaIssueGroup(flagId: string): string {
+  if (["critical_error"].includes(flagId)) return "Criticos";
+  if (["glossary_violation", "forbidden_term", "missing_protected_term"].includes(flagId)) return "Glossario";
+  if (["ocr_gibberish", "ocr_suspect"].includes(flagId)) return "OCR";
+  if (["context_missing", "context_low_confidence"].includes(flagId)) return "Contexto";
+  if (["inpaint_suspicious"].includes(flagId)) return "Inpaint";
+  if (["typesetting_overflow", "text_too_large"].includes(flagId)) return "Typesetting";
+  if (["invalid_mask", "missing_mask"].includes(flagId)) return "Mascaras";
+  if (["visual_text_leak", "page_not_processed"].includes(flagId)) return "Ingles restante";
+  return "Outros";
+}
+
 function flagIssueId(pageIndex: number, regionId: string, flagId: string): string {
   return `${pageIndex}:${regionId}:${flagId}`;
 }
@@ -89,6 +111,43 @@ export function collectIgnoredQaActions(project: Project | null): QaAction[] {
   return project.paginas.flatMap((page) =>
     (page.text_layers ?? []).flatMap((layer) => (layer.qa_actions ?? []).filter((action) => action.status === "ignored")),
   );
+}
+
+export function buildQaReviewSummary(project: Project | null): QaReviewSummary {
+  const issues = collectQaIssues(project);
+  const totalPages = project?.paginas.length ?? 0;
+  const blockedPageIndexes = new Set(
+    issues
+      .filter((issue) => issue.severity === "critical" || issue.severity === "high")
+      .map((issue) => issue.pageIndex),
+  );
+  const warningPageIndexes = new Set(
+    issues
+      .filter((issue) => issue.severity === "medium" || issue.severity === "low")
+      .map((issue) => issue.pageIndex)
+      .filter((pageIndex) => !blockedPageIndexes.has(pageIndex)),
+  );
+  const groups = issues.reduce<Record<string, number>>((acc, issue) => {
+    const group = qaIssueGroup(issue.flagId);
+    acc[group] = (acc[group] ?? 0) + 1;
+    return acc;
+  }, {});
+  const blockedPages = blockedPageIndexes.size;
+  const warningPages = warningPageIndexes.size;
+
+  return {
+    totalPages,
+    approvedPages: Math.max(0, totalPages - blockedPages - warningPages),
+    warningPages,
+    blockedPages,
+    criticalCount: issues.filter((issue) => issue.severity === "critical" || issue.severity === "high").length,
+    warningCount: issues.filter((issue) => issue.severity === "medium" || issue.severity === "low").length,
+    groups,
+  };
+}
+
+export function canExportClean(summary: QaReviewSummary) {
+  return summary.criticalCount === 0 && summary.blockedPages === 0;
 }
 
 export function ignoreQaIssue(project: Project, issueId: string, reason: string, ignoredAt = new Date().toISOString()): Project {

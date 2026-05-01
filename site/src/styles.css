@@ -1,0 +1,251 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #f5f7fa;
+  background: #0b0b12;
+  font-family: Inter, Geist, Manrope, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(124, 92, 255, 0.16), transparent 34rem),
+    radial-gradient(circle at 80% 10%, rgba(34, 211, 238, 0.12), transparent 28rem),
+    #0b0b12;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.site-nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem clamp(1rem, 5vw, 4rem);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(11, 11, 18, 0.88);
+  backdrop-filter: blur(16px);
+}
+
+.brand {
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+}
+
+.hero {
+  min-height: calc(100vh - 72px);
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(320px, 1.15fr);
+  align-items: center;
+  gap: clamp(1.5rem, 5vw, 5rem);
+  padding: clamp(2rem, 6vw, 5rem) clamp(1rem, 5vw, 4rem) 2rem;
+}
+
+.hero-copy {
+  max-width: 680px;
+}
+
+.eyebrow {
+  margin: 0 0 0.8rem;
+  color: #22d3ee;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+h1,
+h2,
+h3,
+p {
+  overflow-wrap: anywhere;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(3.4rem, 10vw, 7.5rem);
+  line-height: 0.9;
+  letter-spacing: 0;
+}
+
+h2 {
+  margin: 0 0 1rem;
+  font-size: clamp(1.8rem, 4vw, 3.3rem);
+  line-height: 1.05;
+}
+
+h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+p {
+  color: #cbd5e1;
+  line-height: 1.65;
+}
+
+.lead {
+  max-width: 720px;
+  color: #f5f7fa;
+  font-size: clamp(1.25rem, 2.5vw, 1.8rem);
+  line-height: 1.25;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin-top: 1.5rem;
+}
+
+.button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-weight: 800;
+}
+
+.button.primary {
+  background: #7c5cff;
+  color: white;
+}
+
+.button.ghost {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.hero-image,
+.visual-grid img,
+.product-panels img,
+.download-card img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
+}
+
+.section,
+.page {
+  padding: clamp(3rem, 7vw, 6rem) clamp(1rem, 5vw, 4rem);
+}
+
+.visual-grid,
+.download-card {
+  display: grid;
+  grid-template-columns: minmax(0, 0.78fr) minmax(320px, 1.22fr);
+  align-items: center;
+  gap: 2rem;
+}
+
+.cards,
+.steps,
+.product-panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.product-panels {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.card,
+.step-card,
+.download-card,
+.legal-callout {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(21, 21, 34, 0.78);
+  padding: 1.1rem;
+}
+
+.step-card span {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(34, 211, 238, 0.14);
+  color: #22d3ee;
+  font-weight: 800;
+}
+
+.price {
+  color: #22c55e;
+  font-weight: 800;
+}
+
+li {
+  margin: 0.45rem 0;
+  color: #cbd5e1;
+}
+
+details {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 1rem 0;
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.muted {
+  color: #9ca3af;
+  font-size: 0.92rem;
+}
+
+.legal-text {
+  margin-bottom: 1rem;
+}
+
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.2rem clamp(1rem, 5vw, 4rem);
+  color: #9ca3af;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+@media (max-width: 900px) {
+  .hero,
+  .visual-grid,
+  .download-card,
+  .cards,
+  .steps,
+  .product-panels {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    min-height: auto;
+  }
+}

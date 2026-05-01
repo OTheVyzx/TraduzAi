@@ -1664,6 +1664,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "_work_dir": config.get("work_dir"),
         "contexto": context,
         "work_context": config.get("work_context") or {},
+        "preset": config.get("preset") or {},
         "paginas": pages,
         "estatisticas": {
             "total_paginas": total_pages,

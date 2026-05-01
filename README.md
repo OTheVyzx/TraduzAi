@@ -1,156 +1,143 @@
-# TraduzAi — Tradutor Desktop de Mangá/Manhwa/Manhua por IA
+# TraduzAI
 
-> Ferramenta local de tradução automática. Sem distribuição. Sem servidores. Seu mangá, sua tradução, seu arquivo.
+![Build](https://img.shields.io/badge/build-local-blue)
+![Tests](https://img.shields.io/badge/tests-pytest%20%7C%20vitest%20%7C%20playwright-green)
+![Tauri](https://img.shields.io/badge/Tauri-v2-7C5CFF)
+![React](https://img.shields.io/badge/React-19-22D3EE)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB)
+![Status](https://img.shields.io/badge/status-v0.2.0--beta-orange)
 
-## Requisitos
+TraduzAI e um app desktop local para traduzir, revisar e exportar manga, manhwa e manhua EN -> PT-BR com IA, contexto de obra, glossario, memoria, editor visual e QA antes do export.
 
-### Sistema
-- **Windows 10+**, macOS 12+, ou Linux (Ubuntu 22.04+)
-- **RAM:** 8GB mínimo, 16GB recomendado
-- **Disco:** 3GB para o app + modelos de IA
-- **Internet:** necessária apenas para tradução (API Claude) e busca de contexto
+## O que e
 
-### GPU (opcional, mas recomendado)
-- **NVIDIA:** GPU com 4GB+ VRAM e CUDA 11.8+ (RTX 20xx ou superior)
-- **Apple Silicon:** M1/M2/M3 (Metal — suportado nativamente)
-- **Sem GPU:** funciona em modo CPU (mais lento, ~30s/página vs ~5s/página)
+O app importa um capitulo, detecta regioes de texto, executa OCR, traduz com contexto, remove texto original, recria o typesetting e entrega um projeto editavel. O usuario revisa glossario, alertas de QA e export antes de finalizar.
 
-### Desenvolvimento
-- **Node.js** 20+
-- **Rust** 1.77+ (via rustup)
-- **Python** 3.10+
-- **Tauri CLI** 2.x
+O TraduzAI nao fornece obras, nao hospeda conteudo e nao distribui material protegido. Ele processa arquivos locais do usuario.
 
-## Setup de Desenvolvimento
+## Principais recursos
 
-### 1. Instalar dependências do sistema
+- Contexto online da obra com cache e candidatos revisaveis.
+- Glossario central com termos reviewed, candidates, rejected e conflicts.
+- Memoria da obra para manter consistencia entre capitulos.
+- Presets de projeto para perfis de traducao e typesetting.
+- Pipeline local com OCR, traducao, inpaint, typesetting e export.
+- Editor visual com camadas, propriedades, mascara, preview e atalhos.
+- QA profissional com flags, agrupamento, ignorar com motivo e bloqueio de export limpo.
+- Export em modos clean, with warnings, debug e review package.
+- Site publico em `site/` com landing, download, docs, legal e roadmap.
 
-```bash
-# Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+## Demonstracao
 
-# Tauri system dependencies (Linux)
-sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+Assets sinteticos do site:
 
-# Tauri system dependencies (macOS)
-xcode-select --install
+- `site/public/assets/hero-app-mockup.png`
+- `site/public/assets/before-after-demo.png`
+- `site/public/assets/context-panel.png`
+- `site/public/assets/glossary-panel.png`
+- `site/public/assets/qa-report.png`
+- `site/public/assets/editor-view.png`
+
+## Como funciona
+
+```text
+Importar capitulo
+-> selecionar obra e contexto
+-> revisar glossario
+-> detectar/OCR/traduzir
+-> inpaint
+-> typesetting
+-> QA
+-> editor visual
+-> export
 ```
 
-### 2. Clonar e instalar
+## Stack
+
+- Frontend: React 19, TypeScript, Tailwind CSS, Zustand.
+- Desktop: Tauri v2, Rust, Tokio, Serde.
+- Pipeline: Python 3.12, OCR, traducao, OpenCV/inpaint, renderer/typesetting.
+- Testes: Vitest, Pytest, Cargo tests/check, Playwright.
+- Site: Vite, React, Tailwind em `site/`.
+
+## Instalacao
+
+Requisitos de desenvolvimento:
+
+- Node.js 20+
+- Rust stable
+- Python 3.12
+- Windows 10/11 recomendado para o fluxo atual
 
 ```bash
-git clone https://github.com/seu-usuario/traduzai.git
-cd traduzai
-
-# Frontend dependencies
 npm install
-
-# Python pipeline dependencies
 cd pipeline
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python -m venv venv
+.\\venv\\Scripts\\python.exe -m pip install -r requirements.txt
 cd ..
 ```
 
-### 3. Configurar API key (opcional)
+## Desenvolvimento
 
 ```bash
-# Criar arquivo de configuração
-mkdir -p ~/.traduzai
-echo "sk-ant-sua-chave-aqui" > ~/.traduzai/api_key
-```
-
-Sem API key, o app funciona em modo mock (tradução simulada para testar o pipeline).
-
-### 4. Rodar em desenvolvimento
-
-```bash
-# Inicia o Tauri dev server (frontend + backend)
 npm run tauri dev
 ```
 
-### 5. Build para produção
+Pipeline isolado:
 
 ```bash
-# Primeiro, gerar o sidecar Python
 cd pipeline
-pyinstaller --onefile --name traduzai-pipeline main.py
+.\\venv\\Scripts\\python.exe main.py config.json
+```
+
+Site:
+
+```bash
+cd site
+npm install
+npm run dev
+```
+
+## Testes
+
+```bash
+npm run build
+cd pipeline
+.\\venv\\Scripts\\python.exe -m pytest -q
 cd ..
-
-# Build do app Tauri
-npm run tauri build
+cargo check
+npx playwright test
 ```
 
-O instalador será gerado em `src-tauri/target/release/bundle/`.
+Checks focados comuns:
 
-## Estrutura do Projeto
-
-```
-traduzai/
-├── src/                    # Frontend React (Tauri WebView)
-│   ├── pages/              # Home, Setup, Processing, Preview, Settings
-│   ├── components/         # UI components
-│   ├── lib/                # Stores (Zustand), Tauri bindings
-│   └── styles/             # Tailwind + tema dark
-├── src-tauri/              # Backend Rust (Tauri Core)
-│   └── src/commands/       # project, pipeline, credits
-├── pipeline/               # Python Sidecar (IA)
-│   ├── ocr/                # PaddleOCR
-│   ├── translator/         # Claude Haiku API
-│   ├── inpainter/          # OpenCV / LaMA
-│   └── typesetter/         # Pillow text rendering
-├── fonts/                  # Fontes manga livres
-└── docs/                   # Documentação
+```bash
+npx vitest run src/lib/__tests__/glossaryCenter.test.ts
+npx playwright test --grep "@setup"
+cargo test glossary --lib
 ```
 
-## Pipeline de Tradução
+## Formatos principais
 
-```
-Importar arquivo → Extrair imagens → OCR (PaddleOCR)
-→ Contexto (AniList) → Tradução (Claude Haiku)
-→ Inpainting (OpenCV/LaMA) → Typesetting (Pillow)
-→ Exportar .zip com project.json
-```
+- `project.json`: projeto editavel e reimportavel.
+- `work_context.json`: contexto normalizado da obra.
+- `glossary.json`: termos revisados, candidatos, rejeitados e conflitos.
+- `memory`: historico local da obra para consistencia.
+- `qa_report`: flags e decisoes de revisao.
 
-## Formato project.json
+## Roadmap
 
-O TraduzAi usa um formato aberto que permite reimportação e edição:
+- v0.2.0-beta: fluxo local testavel, site, docs, QA/export/editor melhorados.
+- Instalador Windows e checksums publicados.
+- Export avancado e pacote de revisao.
+- Modo lote.
+- macOS/Linux.
+- Integracao comercial somente depois de validacao legal e produto.
 
-```json
-{
-  "versao": "1.0",
-  "app": "traduzai",
-  "obra": "Solo Leveling",
-  "capitulo": 42,
-  "paginas": [
-    {
-      "numero": 1,
-      "textos": [
-        {
-          "bbox": [120, 45, 380, 120],
-          "original": "I alone can level up.",
-          "traduzido": "Somente eu posso subir de nível.",
-          "estilo": { "fonte": "AnimeAce", "tamanho": 16, "cor": "#FFFFFF" }
-        }
-      ]
-    }
-  ]
-}
-```
+## Aviso legal
 
-## Monetização
+O TraduzAI e uma ferramenta local de edicao, OCR, traducao e typesetting. Ele nao hospeda, distribui ou fornece obras protegidas por direitos autorais. O usuario e responsavel pelos arquivos utilizados e por possuir direito de processa-los.
 
-- **Free:** 2 capítulos/semana (~40 páginas)
-- **Créditos:** 1 página = 1 crédito (a partir de R$0.05/página)
-- **Planos:** Leitor R$15/mês, Tradutor R$30/mês, Scanlator R$60/mês
-- **API própria:** use sua chave Claude para tradução ilimitada sem créditos
+## Privacidade
 
-## Aviso Legal
-
-TraduzAi é uma ferramenta de processamento local. Não distribui, armazena ou compartilha conteúdo protegido por direitos autorais. O usuário é responsável pelos arquivos que utiliza. Funciona de forma análoga a editores de imagem e tradutores de texto.
-
-## Licença
-
-MIT
+As imagens e capitulos ficam no computador do usuario. O app so acessa a internet para traducao textual e busca de contexto quando esses recursos estiverem ativados. Nenhuma pagina e enviada para fontes de contexto.

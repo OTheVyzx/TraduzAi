@@ -77,6 +77,12 @@ import {
   summarizeProcessingQaReport,
   type ProcessingQaSummary,
 } from "./processingQa";
+import {
+  countFlagLogs,
+  hardwareUsageLabel,
+  pagesPerMinute,
+  PERCEIVED_PROCESSING_STEPS,
+} from "../lib/processingMetrics";
 
 interface CompletionData {
   obra: string;
@@ -248,6 +254,7 @@ export function Processing() {
           qualidade: project.qualidade,
           glossario: project.contexto.glossario,
           work_context: project.work_context ?? null,
+          preset: project.preset ?? null,
           contexto: {
             sinopse: project.contexto.sinopse,
             genero: project.contexto.genero,
@@ -460,6 +467,9 @@ export function Processing() {
     : 0;
   const finishAtLabel = remainingSeconds > 0 ? formatEtaClock(remainingSeconds) : "--:--";
   const hardwareSummary = buildHardwareSummary(systemProfile);
+  const ppm = pagesPerMinute(pipeline ?? null, elapsedSeconds);
+  const flagLogCount = countFlagLogs(pipelineLog);
+  const hardwareUsage = hardwareUsageLabel(systemProfile);
   const isPaused = pauseState === "paused" || pauseState === "pausing";
   const pauseButtonLabel =
     pauseState === "paused"
@@ -597,6 +607,42 @@ export function Processing() {
           </p>
         </div>
       )}
+
+      <div data-testid="processing-performance-panel" className="mb-8 rounded-xl border border-border bg-bg-secondary p-4">
+        <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
+          <div>
+            <p className="text-text-muted">Pagina atual</p>
+            <p className="mt-1 text-sm font-medium text-text-primary">{pipeline?.current_page ?? 0}</p>
+          </div>
+          <div>
+            <p className="text-text-muted">Total de paginas</p>
+            <p className="mt-1 text-sm font-medium text-text-primary">{pipeline?.total_pages ?? project?.totalPages ?? 0}</p>
+          </div>
+          <div>
+            <p className="text-text-muted">Paginas/minuto</p>
+            <p data-testid="processing-pages-per-minute" className="mt-1 text-sm font-medium text-text-primary">{ppm.toFixed(1)}</p>
+          </div>
+          <div>
+            <p className="text-text-muted">Flags encontradas</p>
+            <p className="mt-1 text-sm font-medium text-text-primary">{flagLogCount}</p>
+          </div>
+          <div className="sm:col-span-2">
+            <p className="text-text-muted">Uso CPU/GPU</p>
+            <p className="mt-1 truncate text-sm font-medium text-text-primary">{hardwareUsage}</p>
+          </div>
+        </div>
+      </div>
+
+      <div data-testid="processing-perceived-steps" className="mb-8 rounded-xl border border-border bg-bg-secondary p-4">
+        <p className="mb-3 text-sm font-medium text-text-primary">Etapas detalhadas</p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {PERCEIVED_PROCESSING_STEPS.map((step) => (
+            <div key={step} className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2 text-xs text-text-secondary">
+              {step}
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* Steps */}
       <div className="space-y-1 mb-8">

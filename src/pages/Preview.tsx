@@ -25,7 +25,14 @@ import {
 } from "lucide-react";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAppStore } from "../lib/stores/appStore";
-import { collectIgnoredQaActions, collectQaIssues, ignoreQaIssue, type QaIssue } from "../lib/qaPanel";
+import {
+  buildQaReviewSummary,
+  collectIgnoredQaActions,
+  collectQaIssues,
+  ignoreQaIssue,
+  qaIssueGroup,
+  type QaIssue,
+} from "../lib/qaPanel";
 import { getStaleRenderPreviewPages, useEditorStore } from "../lib/stores/editorStore";
 import {
   exportPagePsd,
@@ -43,6 +50,7 @@ import {
   type PreviewPanSession,
 } from "./previewZoom";
 import { getPreviewImageCandidates, getPreviewToggleLabel } from "./previewImage";
+import { EXPORT_MODE_OPTIONS, exportBlockReason, exportModeForBackend, type ExportMode } from "../lib/exportModes";
 
 export function Preview() {
   const navigate = useNavigate();
@@ -51,6 +59,7 @@ export function Preview() {
   const [currentPage, setCurrentPage] = useState(0);
   const [showOriginal, setShowOriginal] = useState(false);
   const [exportFormat, setExportFormat] = useState<"zip_full" | "jpg_only" | "cbz" | "psd">("zip_full");
+  const [exportMode, setExportMode] = useState<ExportMode>("clean");
   const [exporting, setExporting] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
@@ -62,6 +71,7 @@ export function Preview() {
   const [ignoreReason, setIgnoreReason] = useState("");
   const [ignoreError, setIgnoreError] = useState<string | null>(null);
   const [lastIgnoredReason, setLastIgnoredReason] = useState<string | null>(null);
+  const [exportBlockMessage, setExportBlockMessage] = useState<string | null>(null);
   const prevBlobRef = useRef<string | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
@@ -70,7 +80,9 @@ export function Preview() {
   const staleRenderPages = getStaleRenderPreviewPages(project, renderPreviewCacheByPageKey);
   const qaIssues = collectQaIssues(project);
   const ignoredQaActions = collectIgnoredQaActions(project);
+  const qaReviewSummary = buildQaReviewSummary(project);
   const activeIgnoreIssue = qaIssues.find((issue) => issue.id === ignoreIssueId) ?? null;
+  const qaGroups = Object.entries(qaReviewSummary.groups);
 
   useEffect(() => {
     if (!page) {
@@ -237,8 +249,15 @@ export function Preview() {
     }
   }
 
-  async function handleExport() {
+  async function handleExport(options: { mode?: ExportMode } = {}) {
     if (!project) return;
+    setExportBlockMessage(null);
+    const activeMode = options.mode ?? exportMode;
+    const blockReason = exportBlockReason(activeMode, qaReviewSummary);
+    if (blockReason) {
+      setExportBlockMessage(blockReason);
+      return;
+    }
     if (staleRenderPages.length > 0) {
       alert(
         `Preview final desatualizado nas paginas: ${staleRenderPages.join(", ")}. ` +
@@ -276,6 +295,7 @@ export function Preview() {
           project_path: project.output_path ?? project.source_path,
           format: exportFormat,
           output_path: outputPath,
+          export_mode: exportModeForBackend(activeMode),
         });
       }
 
@@ -336,8 +356,15 @@ export function Preview() {
       `# QA - ${project.obra}`,
       "",
       `Capitulo: ${project.capitulo}`,
+      `Paginas: ${qaReviewSummary.totalPages}`,
+      `Aprovadas: ${qaReviewSummary.approvedPages}`,
+      `Com aviso: ${qaReviewSummary.warningPages}`,
+      `Bloqueadas: ${qaReviewSummary.blockedPages}`,
       `Flags ativas: ${qaIssues.length}`,
       `Ignoradas: ${ignoredQaActions.length}`,
+      "",
+      "## Grupos",
+      ...qaGroups.map(([group, count]) => `- ${group}: ${count}`),
       "",
       "## Flags",
       ...qaIssues.map(
@@ -505,8 +532,8 @@ export function Preview() {
         <aside data-testid="qa-panel" className="w-80 overflow-y-auto border-l border-border bg-bg-secondary p-5">
           <div className="mb-4 flex items-start justify-between gap-3">
             <div>
-              <h3 className="text-sm font-medium">QA do projeto</h3>
-              <p className="mt-1 text-xs text-text-secondary">Revisao de flags antes do export.</p>
+              <h3 className="text-sm font-medium">Relatorio do capitulo</h3>
+              <p className="mt-1 text-xs text-text-secondary">Revisao profissional antes do export.</p>
             </div>
             <span
               data-testid="qa-issue-count"
@@ -518,6 +545,52 @@ export function Preview() {
             >
               {qaIssues.length}
             </span>
+          </div>
+
+          <div data-testid="qa-review-report" className="mb-4 rounded-xl border border-border bg-bg-tertiary/70 p-3">
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div>
+                <p className="text-text-muted">Paginas</p>
+                <p className="text-sm font-medium text-text-primary">{qaReviewSummary.totalPages}</p>
+              </div>
+              <div>
+                <p className="text-text-muted">Aprovadas</p>
+                <p className="text-sm font-medium text-status-success">{qaReviewSummary.approvedPages}</p>
+              </div>
+              <div>
+                <p className="text-text-muted">Com aviso</p>
+                <p className="text-sm font-medium text-status-warning">{qaReviewSummary.warningPages}</p>
+              </div>
+              <div>
+                <p className="text-text-muted">Bloqueadas</p>
+                <p data-testid="qa-blocked-pages" className="text-sm font-medium text-status-error">{qaReviewSummary.blockedPages}</p>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
+              <div>
+                <p className="text-text-muted">Criticos</p>
+                <p data-testid="qa-critical-count" className="text-sm font-medium text-status-error">{qaReviewSummary.criticalCount}</p>
+              </div>
+              <div>
+                <p className="text-text-muted">Warnings</p>
+                <p className="text-sm font-medium text-status-warning">{qaReviewSummary.warningCount}</p>
+              </div>
+            </div>
+          </div>
+
+          <div data-testid="qa-group-list" className="mb-4 space-y-1">
+            {qaGroups.length === 0 ? (
+              <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-secondary">
+                Sem grupos ativos.
+              </div>
+            ) : (
+              qaGroups.map(([group, count]) => (
+                <div key={group} className="flex items-center justify-between rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs">
+                  <span className="text-text-secondary">{group}</span>
+                  <span className="font-mono text-text-primary">{count}</span>
+                </div>
+              ))
+            )}
           </div>
 
           <div className="space-y-2">
@@ -541,16 +614,26 @@ export function Preview() {
                           : "mt-0.5 text-status-warning"
                       }
                     />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-medium text-text-primary">{issue.label}</span>
-                      <span className="mt-1 block text-xs text-text-secondary">
-                        Pagina {issue.pageNumber} - regiao {issue.regionId}
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-medium text-text-primary">{issue.label}</span>
+                        <span className="mt-1 inline-flex rounded-md bg-bg-primary px-2 py-0.5 text-[10px] text-text-muted">
+                          {qaIssueGroup(issue.flagId)}
+                        </span>
+                        <span className="mt-1 block text-xs text-text-secondary">
+                          Pagina {issue.pageNumber} - regiao {issue.regionId}
                       </span>
                       <span className="mt-1 block truncate text-[11px] text-text-muted">{issue.sourceText}</span>
                     </span>
                   </button>
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => goToQaIssue(issue)}
+                      className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
+                    >
+                      <LocateFixed size={12} />
+                      Ir para pagina
+                    </button>
                     <button
                       onClick={() => navigate("/editor")}
                       className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
@@ -669,14 +752,56 @@ export function Preview() {
               ))}
             </div>
 
+            <div data-testid="export-mode-options" className="space-y-2">
+              {EXPORT_MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  data-testid={`export-mode-${option.id}`}
+                  type="button"
+                  onClick={() => setExportMode(option.id)}
+                  className={`w-full rounded-lg border p-3 text-left transition-smooth ${
+                    exportMode === option.id
+                      ? "border-brand/25 bg-brand/5"
+                      : "border-border hover:border-border"
+                  }`}
+                >
+                  <p className="text-sm font-medium">{option.label}</p>
+                  <p className="mt-0.5 text-xs text-text-secondary">{option.description}</p>
+                </button>
+              ))}
+            </div>
+
             <div className="space-y-2 pt-2">
+              {exportBlockMessage && (
+                <div data-testid="export-block-message" className="rounded-lg border border-status-error/25 bg-status-error/10 px-3 py-2 text-xs text-status-error">
+                  {exportBlockMessage}
+                </div>
+              )}
               <button
                 data-testid="export-button"
-                onClick={handleExport}
+                onClick={() => handleExport()}
                 disabled={exporting}
                 className="w-full rounded-lg bg-brand py-2.5 text-sm font-medium text-white transition-smooth hover:bg-brand-600 disabled:opacity-50"
               >
-                {exporting ? "Exportando..." : "Salvar arquivo"}
+                {exporting ? "Exportando..." : "Exportar limpo"}
+              </button>
+
+              <button
+                data-testid="export-with-warnings-button"
+                onClick={() => handleExport({ mode: "with_warnings" })}
+                disabled={exporting}
+                className="w-full rounded-lg border border-status-warning/25 bg-status-warning/10 py-2 text-xs font-medium text-status-warning transition-smooth hover:bg-status-warning/15 disabled:opacity-50"
+              >
+                Exportar com avisos
+              </button>
+
+              <button
+                data-testid="export-debug-button"
+                onClick={() => handleExport({ mode: "debug" })}
+                disabled={exporting}
+                className="w-full rounded-lg border border-border bg-bg-tertiary py-2 text-xs font-medium text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-50"
+              >
+                Exportar debug
               </button>
 
               <button

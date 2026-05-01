@@ -11,6 +11,7 @@ import type {
   TextEntry,
   SystemProfile,
 } from "./stores/appStore";
+import type { InternetContextCandidate, InternetContextSourceResult } from "./internetContext";
 
 function isE2E() {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
@@ -27,6 +28,7 @@ export interface ProjectJson {
   idioma_destino?: string;
   contexto?: Partial<ProjectContext>;
   work_context?: Partial<WorkContextSummary>;
+  preset?: unknown;
   paginas?: PageData[];
   estatisticas?: {
     total_paginas?: number;
@@ -87,6 +89,7 @@ export interface WorkContextProfile {
   forbidden_translations: unknown[];
   chapter_memory: unknown[];
   last_updated: string;
+  internet_context?: unknown;
 }
 
 export interface WorkContextSummary {
@@ -96,6 +99,7 @@ export interface WorkContextSummary {
   context_loaded: boolean;
   glossary_loaded: boolean;
   glossary_entries_count: number;
+  internet_context_loaded?: boolean;
   risk_level: WorkContextRisk;
   user_ignored_warning: boolean;
 }
@@ -113,6 +117,7 @@ export interface GlossaryEntry {
   status: string;
   notes: string;
   context_rule: string;
+  sources?: string[];
 }
 
 export interface Glossary {
@@ -259,7 +264,7 @@ export interface WorkSearchCandidate {
   id: string;
   title: string;
   synopsis: string;
-  source: "anilist" | "webnovel" | "fandom";
+  source: "anilist" | "myanimelist" | "mangaupdates" | "kitsu" | "shikimori" | "bangumi" | "wikipedia" | "wikidata" | "fandom" | "webnovel";
   source_url: string;
   cover_url?: string;
   score: number;
@@ -287,6 +292,9 @@ export interface EnrichedWorkContext {
   context_quality: WorkContextQuality;
   risk_level: WorkContextRisk;
   glossary_entries_count: number;
+  internet_context_loaded?: boolean;
+  source_results?: InternetContextSourceResult[];
+  glossary_candidates?: InternetContextCandidate[];
 }
 
 export interface ExternalContextSourceRef {
@@ -707,10 +715,60 @@ export async function searchAnilist(query: string): Promise<{
 }
 
 export async function searchWork(query: string): Promise<WorkSearchResponse> {
+  if (isE2E()) {
+    return {
+      query,
+      candidates: [
+        {
+          id: "anilist:the-regressed-mercenary-has-a-plan",
+          title: "The Regressed Mercenary Has a Plan",
+          synopsis: "A mercenary returns with memories, allies and a plan.",
+          source: "anilist",
+          source_url: "https://anilist.co/manga/fixture",
+          cover_url: "",
+          score: 98,
+        },
+      ],
+    };
+  }
   return invoke("search_work", { query });
 }
 
 export async function enrichWorkContext(selection: WorkSearchCandidate): Promise<EnrichedWorkContext> {
+  if (isE2E()) {
+    return {
+      work_id: "the-regressed-mercenary-has-a-plan",
+      title: selection.title,
+      synopsis: selection.synopsis,
+      genres: ["Action", "Fantasy"],
+      characters: ["Ghislain Perdium"],
+      aliases: [],
+      terms: ["mana technique"],
+      relationships: [],
+      factions: ["Cavald"],
+      arc_summaries: [],
+      lexical_memory: {},
+      sources_used: [
+        { source: "anilist", title: selection.title, url: selection.source_url, snippet: selection.synopsis },
+        { source: "fandom", title: "Fan Wiki", url: "https://example.test/wiki", snippet: "baixa confianca" },
+      ],
+      cover_url: "",
+      context_quality: "partial",
+      risk_level: "medium",
+      glossary_entries_count: 0,
+      internet_context_loaded: true,
+      source_results: [
+        { source: "anilist", status: "found", confidence: 0.95, title: selection.title, synopsis: selection.synopsis, url: selection.source_url },
+        { source: "fandom", status: "found", confidence: 0.48, title: "Fan Wiki", url: "https://example.test/wiki" },
+        { source: "myanimelist", status: "unavailable", confidence: 0, error: "api key ausente" },
+      ],
+      glossary_candidates: [
+        { kind: "character", source: "Ghislain Perdium", target: "Ghislain Perdium", confidence: 0.95, sources: ["anilist"], status: "candidate", protect: true, aliases: [], forbidden: [], notes: "" },
+        { kind: "term", source: "mana technique", target: "tecnica de mana", confidence: 0.91, sources: ["anilist"], status: "candidate", protect: true, aliases: [], forbidden: [], notes: "" },
+        { kind: "faction", source: "Cavald", target: "Cavald", confidence: 0.72, sources: ["fandom"], status: "candidate", protect: true, aliases: [], forbidden: [], notes: "" },
+      ],
+    };
+  }
   return invoke("enrich_work_context", { selection });
 }
 
@@ -752,6 +810,7 @@ export async function loadOrCreateWorkContext(request: {
       forbidden_translations: [],
       chapter_memory: [],
       last_updated: new Date(0).toISOString(),
+      internet_context: null,
     };
   }
   return invoke("load_or_create_work_context", { request });
@@ -811,6 +870,7 @@ export async function startPipeline(config: {
   qualidade: "rapida" | "normal" | "alta";
   glossario: Record<string, string>;
   work_context?: WorkContextSummary | null;
+  preset?: unknown;
   contexto: {
     sinopse: string;
     genero: string[];
@@ -1092,10 +1152,18 @@ export async function exportTextFile(outputPath: string, content: string): Promi
 }
 
 export async function exportLocalMemory(): Promise<unknown> {
+  if (isE2E()) {
+    const raw = localStorage.getItem("traduzai_e2e_local_memory");
+    return raw ? JSON.parse(raw) : { works: [], glossary_entries: [], translation_memory: [], ocr_corrections: [] };
+  }
   return invoke("export_local_memory");
 }
 
 export async function importLocalMemory(payload: unknown): Promise<void> {
+  if (isE2E()) {
+    localStorage.setItem("traduzai_e2e_local_memory", JSON.stringify(payload));
+    return;
+  }
   return invoke("import_local_memory", { payload });
 }
 
@@ -1140,6 +1208,14 @@ export async function suggestMemoryTranslation(args: {
   source_text: string;
   glossary_reviewed: boolean;
 }): Promise<{ target_text: string; source: string; confidence: number } | null> {
+  if (isE2E()) {
+    if (args.glossary_reviewed) return null;
+    return {
+      target_text: "Sugestao da memoria",
+      source: "automatic_memory",
+      confidence: 0.91,
+    };
+  }
   return invoke("suggest_memory_translation", {
     workId: args.work_id,
     sourceText: args.source_text,

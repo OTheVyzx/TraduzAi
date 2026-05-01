@@ -48,6 +48,7 @@ import {
   validateImport,
 } from "../lib/tauri";
 import { Card, Badge } from "../components/ui";
+import { ONBOARDING_FLOW } from "../lib/onboarding";
 
 export function Home() {
   const navigate = useNavigate();
@@ -61,6 +62,15 @@ export function Home() {
   } = useAppStore();
   const free = freeRemaining();
   const [loading, setLoading] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("traduzai_onboarding_done") !== "1";
+  });
+
+  function skipOnboarding() {
+    window.localStorage.setItem("traduzai_onboarding_done", "1");
+    setShowOnboarding(false);
+  }
 
   function buildProjectFromJson(
     path: string,
@@ -99,6 +109,7 @@ export function Home() {
             user_ignored_warning: Boolean(raw.work_context.user_ignored_warning),
           }
         : null,
+      preset: raw.preset ?? null,
       paginas: raw.paginas ?? [],
       status: "done" as const,
       source_path: outputDir,
@@ -290,6 +301,14 @@ export function Home() {
           <p className="text-md text-text-secondary mt-2 max-w-lg">
             Traduza mangá, manhwa e manhua automaticamente com IA 100% local.
           </p>
+          <button
+            data-testid="open-onboarding"
+            type="button"
+            onClick={() => setShowOnboarding(true)}
+            className="mt-4 rounded-lg border border-border bg-bg-secondary px-3 py-2 text-xs text-text-secondary transition-smooth hover:text-text-primary"
+          >
+            Ajuda
+          </button>
         </header>
 
         {/* Quota banner */}
@@ -470,6 +489,38 @@ export function Home() {
           </section>
         )}
       </div>
+
+      {showOnboarding && (
+        <div data-testid="onboarding-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-bg-secondary p-5 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-text-primary">Como o TraduzAI funciona</h2>
+                <p className="mt-1 text-xs text-text-secondary">Fluxo recomendado para produzir um capitulo com controle.</p>
+              </div>
+              <button type="button" onClick={skipOnboarding} className="rounded-lg p-1 text-text-muted hover:text-text-primary">
+                <X size={16} />
+              </button>
+            </div>
+            <ol className="space-y-2">
+              {ONBOARDING_FLOW.map((step, index) => (
+                <li key={step} className="flex items-center gap-3 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-brand/10 text-xs text-brand-300">{index + 1}</span>
+                  {step}
+                </li>
+              ))}
+            </ol>
+            <button
+              data-testid="skip-onboarding"
+              type="button"
+              onClick={skipOnboarding}
+              className="mt-4 w-full rounded-lg bg-brand px-3 py-2 text-sm font-medium text-white transition-smooth hover:bg-brand-600"
+            >
+              Pular tutorial
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

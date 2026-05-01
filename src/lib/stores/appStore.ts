@@ -107,6 +107,7 @@ export interface ProjectContext {
   resumo_por_arco: string[];
   memoria_lexical: Record<string, string>;
   fontes_usadas: ContextSourceRef[];
+  internet_context?: unknown;
 }
 
 export interface WorkContextSummary {
@@ -116,6 +117,7 @@ export interface WorkContextSummary {
   context_loaded: boolean;
   glossary_loaded: boolean;
   glossary_entries_count: number;
+  internet_context_loaded?: boolean;
   risk_level: "high" | "medium" | "low";
   user_ignored_warning: boolean;
 }
@@ -136,6 +138,7 @@ export interface Project {
   output_path?: string;
   totalPages: number;
   mode: "auto" | "manual";
+  preset?: unknown;
 }
 
 export type ProjectQuality = "rapida" | "normal" | "alta";

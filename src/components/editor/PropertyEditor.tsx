@@ -1,4 +1,7 @@
 import { useEditorStore } from "../../lib/stores/editorStore";
+import { useFieldEditSession } from "../../lib/useFieldEditSession";
+import { useTextEditSession } from "../../lib/useTextEditSession";
+import type { TextLayerStyle } from "../../lib/stores/appStore";
 import {
   AlignLeft,
   AlignCenter,
@@ -31,7 +34,7 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="border-b border-white/5">
+    <div className="border-b border-border">
       <button
         className="flex items-center gap-1.5 w-full px-4 py-2 text-xs font-medium text-text-secondary hover:text-text-primary transition-smooth"
         onClick={() => setOpen(!open)}
@@ -54,12 +57,16 @@ function InputField({
   type = "text",
   readOnly = false,
   title = "Campo de entrada",
+  onFocus,
+  onBlur,
 }: {
   value: string | number;
   onChange: (val: string) => void;
   type?: "text" | "number";
   readOnly?: boolean;
   title?: string;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   return (
     <input
@@ -67,9 +74,11 @@ function InputField({
       value={value}
       title={title}
       onChange={(e) => onChange(e.target.value)}
+      onFocus={onFocus}
+      onBlur={onBlur}
       readOnly={readOnly}
-      className={`w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm text-text-primary
-        focus:border-accent-purple/50 focus:outline-none transition-smooth
+      className={`w-full px-2 py-1.5 bg-bg-tertiary border border-border rounded text-sm text-text-primary
+        focus:border-brand/50 focus:outline-none transition-smooth
         ${readOnly ? "opacity-60 cursor-default" : ""}`}
     />
   );
@@ -85,6 +94,16 @@ export function PropertyEditor() {
   
   const updateEdit = useEditorStore((s) => s.updatePendingEdit);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
+  const currentPageKey = useEditorStore((s) => s.currentPageKey);
+  const setWorkingEstiloPatch = useEditorStore((s) => s.setWorkingEstiloPatch);
+  const recordEditorCommand = useEditorStore((s) => s.recordEditorCommand);
+  const activeLayerId = selectedLayerId ?? "";
+  const textEdit = useTextEditSession(activeLayerId);
+  const tamanhoSession = useFieldEditSession(activeLayerId, "tamanho");
+  const corSession = useFieldEditSession(activeLayerId, "cor");
+  const contornoPxSession = useFieldEditSession(activeLayerId, "contorno_px");
+  const glowPxSession = useFieldEditSession(activeLayerId, "glow_px");
+  const sombraOffsetSession = useFieldEditSession(activeLayerId, "sombra_offset");
   
   const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
   const entry = selectedLayer;
@@ -99,11 +118,29 @@ export function PropertyEditor() {
     );
   }
 
+  const layerId = selectedLayerId;
   const edit = pendingEdits[selectedLayerId];
-  const traduzido = edit?.traduzido ?? edit?.translated ?? entry.traduzido ?? entry.translated ?? "";
+  const traduzido = textEdit.value;
   const original = entry.original;
   const estilo = edit?.estilo ? { ...entry.estilo, ...edit.estilo } : entry.estilo;
   const [x1, y1, x2, y2] = edit?.bbox ?? entry.layout_bbox ?? entry.bbox;
+  const pageKey = currentPageKey();
+
+  function applyStyleAction<K extends keyof TextLayerStyle>(key: K, next: TextLayerStyle[K]) {
+    const liveLayer = useEditorStore.getState().getLayer(pageKey, layerId);
+    const before = liveLayer?.estilo[key];
+    setWorkingEstiloPatch(pageKey, layerId, { [key]: next } as Partial<TextLayerStyle>, [key]);
+    recordEditorCommand({
+      commandId: `edit-${String(key)}-${crypto.randomUUID()}`,
+      pageKey,
+      createdAt: Date.now(),
+      type: "edit-estilo",
+      layerId,
+      before: { [key]: before } as Partial<TextLayerStyle>,
+      after: { [key]: next } as Partial<TextLayerStyle>,
+      touchedKeys: [key],
+    });
+  }
 
   const confidencePercent = Math.round(((entry.confianca_ocr ?? entry.ocr_confidence ?? 0) || 0) * 100);
   const confidenceColor =
@@ -116,9 +153,9 @@ export function PropertyEditor() {
   return (
     <div className="flex flex-col h-full bg-bg-secondary/10">
       <div className="flex-1 overflow-y-auto">
-      <div className="border-b border-white/5 bg-bg-primary/35 px-4 py-3">
+      <div className="border-b border-border bg-bg-primary/35 px-4 py-3">
         <div className="flex items-center justify-between text-[11px] text-text-muted">
-          <span className="rounded-full border border-white/10 px-2 py-1 uppercase tracking-[0.14em]">
+          <span className="rounded-full border border-border px-2 py-1 uppercase tracking-[0.14em]">
             {entry.tipo}
           </span>
           <span className={`font-mono ${confidenceColor}`}>{confidencePercent}% OCR</span>
@@ -141,7 +178,7 @@ export function PropertyEditor() {
             title="Texto original (somente leitura)"
             readOnly
             rows={3}
-            className="w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
+            className="w-full px-2 py-1.5 bg-bg-tertiary border border-border rounded text-sm
               text-text-secondary resize-none opacity-60 cursor-default"
           />
         </div>
@@ -150,15 +187,15 @@ export function PropertyEditor() {
           <textarea
             value={traduzido}
             title="Texto traduzido"
-            onChange={(e) =>
-              updateEdit(selectedLayerId, {
-                traduzido: e.target.value,
-                translated: e.target.value,
-              })
-            }
+            onFocus={textEdit.onFocus}
+            onChange={(e) => textEdit.onChange(e.target.value)}
+            onBlur={textEdit.onBlur}
+            onCompositionStart={textEdit.onCompositionStart}
+            onCompositionEnd={textEdit.onCompositionEnd}
+            onKeyDown={textEdit.onKeyDown}
             rows={5}
-            className="w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
-              text-text-primary resize-y focus:border-accent-purple/50 focus:outline-none transition-smooth"
+            className="w-full px-2 py-1.5 bg-bg-tertiary border border-border rounded text-sm
+              text-text-primary resize-y focus:border-brand/50 focus:outline-none transition-smooth"
           />
           <p className="mt-1 text-[11px] text-text-muted">
             Ctrl+S salva as alteracoes; o overlay no canvas atualiza em tempo real.
@@ -225,9 +262,9 @@ export function PropertyEditor() {
           <select
             value={estilo.fonte}
             title="Selecionar fonte"
-            onChange={(e) => updateEstilo(selectedLayerId, { fonte: e.target.value })}
-            className="w-full px-2 py-1.5 bg-bg-tertiary border border-white/5 rounded text-sm
-              text-text-primary focus:border-accent-purple/50 focus:outline-none transition-smooth"
+            onChange={(e) => applyStyleAction("fonte", e.target.value)}
+            className="w-full px-2 py-1.5 bg-bg-tertiary border border-border rounded text-sm
+              text-text-primary focus:border-brand/50 focus:outline-none transition-smooth"
           >
             {AVAILABLE_FONTS.map((f) => (
               <option key={f} value={f}>
@@ -242,8 +279,10 @@ export function PropertyEditor() {
             <Label>Tamanho</Label>
             <InputField
               type="number"
-              value={estilo.tamanho}
-              onChange={(v) => updateEstilo(selectedLayerId, { tamanho: parseInt(v) || 12 })}
+              value={tamanhoSession.value ?? estilo.tamanho}
+              onFocus={tamanhoSession.onFocus}
+              onChange={(v) => tamanhoSession.onChange(parseInt(v) || 12)}
+              onBlur={tamanhoSession.onBlur}
             />
           </div>
           <div>
@@ -254,11 +293,13 @@ export function PropertyEditor() {
                 value={estilo.cor}
                 title="Cor do texto"
                 onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value })}
-                className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
+                className="w-7 h-7 rounded border border-border cursor-pointer bg-transparent"
               />
               <InputField
-                value={estilo.cor}
-                onChange={(v) => updateEstilo(selectedLayerId, { cor: v })}
+                value={corSession.value ?? estilo.cor}
+                onFocus={corSession.onFocus}
+                onChange={(v) => corSession.onChange(v)}
+                onBlur={corSession.onBlur}
               />
             </div>
           </div>
@@ -274,10 +315,10 @@ export function PropertyEditor() {
                 <button
                   key={align}
                   title={`Alinhamento ${align}`}
-                  onClick={() => updateEstilo(selectedLayerId, { alinhamento: align })}
+                  onClick={() => applyStyleAction("alinhamento", align)}
                   className={`p-1.5 rounded transition-smooth ${
                     estilo.alinhamento === align
-                      ? "bg-accent-purple/20 text-accent-purple"
+                      ? "bg-brand/20 text-brand"
                       : "bg-bg-tertiary text-text-secondary hover:text-text-primary"
                   }`}
                 >
@@ -286,25 +327,25 @@ export function PropertyEditor() {
               );
             })}
 
-            <div className="w-px bg-white/5 mx-1" />
+            <div className="w-px bg-white/[0.03] mx-1" />
 
             <button
-              onClick={() => updateEstilo(selectedLayerId, { bold: !estilo.bold })}
+              onClick={() => applyStyleAction("bold", !estilo.bold)}
               title="Negrito"
               className={`p-1.5 rounded transition-smooth ${
                 estilo.bold
-                  ? "bg-accent-purple/20 text-accent-purple"
+                  ? "bg-brand/20 text-brand"
                   : "bg-bg-tertiary text-text-secondary hover:text-text-primary"
               }`}
             >
               <Bold size={14} />
             </button>
             <button
-              onClick={() => updateEstilo(selectedLayerId, { italico: !estilo.italico })}
+              onClick={() => applyStyleAction("italico", !estilo.italico)}
               title="Itálico"
               className={`p-1.5 rounded transition-smooth ${
                 estilo.italico
-                  ? "bg-accent-purple/20 text-accent-purple"
+                  ? "bg-brand/20 text-brand"
                   : "bg-bg-tertiary text-text-secondary hover:text-text-primary"
               }`}
             >
@@ -325,13 +366,15 @@ export function PropertyEditor() {
               value={estilo.contorno || "#000000"}
               title="Cor do contorno"
               onChange={(e) => updateEstilo(selectedLayerId, { contorno: e.target.value })}
-              className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
+              className="w-7 h-7 rounded border border-border cursor-pointer bg-transparent"
             />
             <div className="flex-1">
               <InputField
                 type="number"
-                value={estilo.contorno_px}
-                onChange={(v) => updateEstilo(selectedLayerId, { contorno_px: parseInt(v) || 0 })}
+                value={contornoPxSession.value ?? estilo.contorno_px}
+                onFocus={contornoPxSession.onFocus}
+                onChange={(v) => contornoPxSession.onChange(parseInt(v) || 0)}
+                onBlur={contornoPxSession.onBlur}
               />
             </div>
             <span className="text-xs text-text-muted">px</span>
@@ -343,7 +386,7 @@ export function PropertyEditor() {
           <div className="flex items-center gap-2 mb-1">
             <Label>Brilho</Label>
             <button
-              onClick={() => updateEstilo(selectedLayerId, { glow: !estilo.glow })}
+              onClick={() => applyStyleAction("glow", !estilo.glow)}
               className={`text-[10px] px-1.5 py-0.5 rounded transition-smooth ${
                 estilo.glow
                   ? "bg-accent-cyan/20 text-accent-cyan"
@@ -360,13 +403,15 @@ export function PropertyEditor() {
                 value={estilo.glow_cor || "#FFFFFF"}
                 title="Cor do brilho"
                 onChange={(e) => updateEstilo(selectedLayerId, { glow_cor: e.target.value })}
-                className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
+                className="w-7 h-7 rounded border border-border cursor-pointer bg-transparent"
               />
               <div className="flex-1">
                 <InputField
                   type="number"
-                  value={estilo.glow_px}
-                  onChange={(v) => updateEstilo(selectedLayerId, { glow_px: parseInt(v) || 0 })}
+                  value={glowPxSession.value ?? estilo.glow_px}
+                  onFocus={glowPxSession.onFocus}
+                  onChange={(v) => glowPxSession.onChange(parseInt(v) || 0)}
+                  onBlur={glowPxSession.onBlur}
                 />
               </div>
               <span className="text-xs text-text-muted">px</span>
@@ -379,7 +424,7 @@ export function PropertyEditor() {
           <div className="flex items-center gap-2 mb-1">
             <Label>Sombra</Label>
             <button
-              onClick={() => updateEstilo(selectedLayerId, { sombra: !estilo.sombra })}
+              onClick={() => applyStyleAction("sombra", !estilo.sombra)}
               className={`text-[10px] px-1.5 py-0.5 rounded transition-smooth ${
                 estilo.sombra
                   ? "bg-accent-cyan/20 text-accent-cyan"
@@ -397,7 +442,7 @@ export function PropertyEditor() {
                   value={estilo.sombra_cor || "#000000"}
                   title="Cor da sombra"
                   onChange={(e) => updateEstilo(selectedLayerId, { sombra_cor: e.target.value })}
-                  className="w-7 h-7 rounded border border-white/10 cursor-pointer bg-transparent"
+                  className="w-7 h-7 rounded border border-border cursor-pointer bg-transparent"
                 />
                 <span className="text-xs text-text-muted">cor</span>
               </div>
@@ -407,11 +452,11 @@ export function PropertyEditor() {
                   <InputField
                     type="number"
                     value={estilo.sombra_offset?.[0] ?? 0}
+                    onFocus={sombraOffsetSession.onFocus}
                     onChange={(v) =>
-                      updateEstilo(selectedLayerId, {
-                        sombra_offset: [parseInt(v) || 0, estilo.sombra_offset?.[1] ?? 0],
-                      })
+                      sombraOffsetSession.onChange([parseInt(v) || 0, estilo.sombra_offset?.[1] ?? 0])
                     }
+                    onBlur={sombraOffsetSession.onBlur}
                   />
                 </div>
                 <div>
@@ -419,11 +464,11 @@ export function PropertyEditor() {
                   <InputField
                     type="number"
                     value={estilo.sombra_offset?.[1] ?? 0}
+                    onFocus={sombraOffsetSession.onFocus}
                     onChange={(v) =>
-                      updateEstilo(selectedLayerId, {
-                        sombra_offset: [estilo.sombra_offset?.[0] ?? 0, parseInt(v) || 0],
-                      })
+                      sombraOffsetSession.onChange([estilo.sombra_offset?.[0] ?? 0, parseInt(v) || 0])
                     }
+                    onBlur={sombraOffsetSession.onBlur}
                   />
                 </div>
               </div>
@@ -434,7 +479,7 @@ export function PropertyEditor() {
     </div>
 
     {/* Manual Actions */}
-    <div className="p-4 border-t border-white/10 space-y-3 bg-black/20">
+    <div className="p-4 border-t border-border space-y-3 bg-black/20">
       <h3 className="text-[10px] font-bold text-white/30 uppercase tracking-widest flex items-center gap-2">
         Ações Manuais
       </h3>

@@ -28,6 +28,8 @@ pub struct GlossaryEntry {
     pub notes: String,
     #[serde(default)]
     pub context_rule: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -233,6 +235,7 @@ pub fn create_candidate(term: &str, page: u32, region_id: &str) -> GlossaryEntry
         status: "candidate".to_string(),
         notes: "Candidato extraido automaticamente. Revisar antes de confirmar.".to_string(),
         context_rule: String::new(),
+        sources: vec!["chapter".to_string()],
     }
 }
 
@@ -318,6 +321,7 @@ mod tests {
                     status: "reviewed".to_string(),
                     notes: String::new(),
                     context_rule: String::new(),
+                    sources: vec!["fixture".to_string()],
                 },
                 GlossaryEntry {
                     id: "rank_knight".to_string(),
@@ -332,6 +336,7 @@ mod tests {
                     status: "reviewed".to_string(),
                     notes: String::new(),
                     context_rule: String::new(),
+                    sources: vec!["fixture".to_string()],
                 },
             ],
         }

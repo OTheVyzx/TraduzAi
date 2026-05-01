@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildQaReviewSummary,
+  canExportClean,
   collectQaIssues,
   ignoreQaIssue,
   qaIssueLabel,
@@ -126,5 +128,27 @@ describe("qaPanel", () => {
     expect(updated.paginas[0].textos[0].qa_actions).toMatchObject(
       updated.paginas[0].text_layers[0].qa_actions ?? [],
     );
+  });
+
+  it("builds professional review summary and blocks clean export with critical flags", () => {
+    const project = buildProject(
+      buildTextLayer({
+        qa_flags: ["visual_text_leak", "ocr_suspect"],
+      }),
+    );
+
+    const summary = buildQaReviewSummary(project);
+
+    expect(summary).toMatchObject({
+      totalPages: 1,
+      approvedPages: 0,
+      warningPages: 0,
+      blockedPages: 1,
+      criticalCount: 1,
+      warningCount: 1,
+    });
+    expect(summary.groups["Ingles restante"]).toBe(1);
+    expect(summary.groups.OCR).toBe(1);
+    expect(canExportClean(summary)).toBe(false);
   });
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  emptyWorkContextSummary,
   riskLevel,
+  setupWarningKind,
   shouldWarnWorkContext,
   summarizeWorkContext,
 } from "../workContextProfile";
@@ -33,5 +35,31 @@ describe("workContextProfile", () => {
 
     expect(summary.user_ignored_warning).toBe(true);
     expect(shouldWarnWorkContext(summary)).toBe(true);
+  });
+
+  it("separates missing work and empty glossary warnings", () => {
+    expect(setupWarningKind(emptyWorkContextSummary(), "")).toBe("missing_work");
+
+    const summary = summarizeWorkContext(
+      { work_id: "fixture", title: "Fixture", context_quality: "empty" },
+      0,
+    );
+    expect(setupWarningKind(summary, "Fixture")).toBe("empty_glossary");
+  });
+
+  it("keeps online context loading state in the summary", () => {
+    const summary = summarizeWorkContext(
+      {
+        work_id: "fixture",
+        title: "Fixture",
+        context_quality: "partial",
+        internet_context_loaded: true,
+      },
+      3,
+    );
+
+    expect(summary.internet_context_loaded).toBe(true);
+    expect(summary.glossary_loaded).toBe(true);
+    expect(setupWarningKind(summary, "Fixture")).toBeNull();
   });
 });

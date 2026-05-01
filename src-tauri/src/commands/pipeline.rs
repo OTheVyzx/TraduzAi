@@ -79,6 +79,8 @@ pub struct PipelineConfig {
     pub mode: String,
     #[serde(default)]
     pub work_context: Option<PipelineWorkContextSummary>,
+    #[serde(default)]
+    pub preset: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +368,7 @@ pub async fn start_pipeline(
             "memoria_lexical": config.contexto.memoria_lexical, "fontes_usadas": config.contexto.fontes_usadas
         },
         "work_context": config.work_context,
+        "preset": config.preset,
         "models_dir": storage_paths.models.to_string_lossy(),
         "logs_dir": storage_paths.logs.to_string_lossy(),
         "ollama_host": settings.ollama_host, "ollama_model": settings.ollama_model,

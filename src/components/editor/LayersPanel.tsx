@@ -19,6 +19,7 @@ export function LayersPanel() {
     selectedLayerId,
     selectedImageLayerKey,
     pendingEdits,
+    pendingStructuralEdits,
     toggleImageLayerVisibility,
     selectImageLayer,
     deleteSelectedLayer,
@@ -28,7 +29,12 @@ export function LayersPanel() {
 
   const textLayers = currentPage?.text_layers ?? [];
   const imageLayers = currentPage?.image_layers ?? {};
-  const hasPendingEdits = Object.keys(pendingEdits).length > 0;
+  const structuralPendingCount =
+    pendingStructuralEdits.created.length +
+    Object.keys(pendingStructuralEdits.deleted).length +
+    (pendingStructuralEdits.order ? 1 : 0);
+  const pendingCount = Object.keys(pendingEdits).length + structuralPendingCount;
+  const hasPendingEdits = pendingCount > 0;
 
   const filteredTextLayers = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -40,11 +46,11 @@ export function LayersPanel() {
   }, [query, textLayers]);
 
   return (
-    <div className="flex h-full w-[360px] flex-col border-l border-white/5 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] backdrop-blur">
-      <div className="border-b border-white/5 px-4 py-3">
+    <div className="flex h-full w-[360px] flex-col border-l border-border bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] backdrop-blur">
+      <div className="border-b border-border px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Layers size={14} className="text-accent-purple" />
+            <Layers size={14} className="text-brand" />
             <span className="text-sm font-medium">Camadas</span>
             <span className="text-xs text-text-muted">
               {filteredTextLayers.length}/{textLayers.length}
@@ -77,12 +83,12 @@ export function LayersPanel() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Buscar texto, tipo ou camada..."
-            className="w-full rounded-xl border border-white/5 bg-bg-tertiary py-2 pl-8 pr-3 text-sm text-text-primary outline-none transition-smooth focus:border-accent-purple/40"
+            className="w-full rounded-xl border border-border bg-bg-tertiary py-2 pl-8 pr-3 text-sm text-text-primary outline-none transition-smooth focus:border-brand/40"
           />
         </div>
 
         <div className="mt-2 flex items-center justify-between text-[11px] text-text-muted">
-          <span>{Object.keys(pendingEdits).length} alteração(ões) pendentes</span>
+          <span>{pendingCount} alteração(ões) pendentes</span>
           <span>
             {selectedLayerId
               ? "Texto selecionado"
@@ -93,7 +99,7 @@ export function LayersPanel() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto border-b border-white/5">
+      <div className="min-h-0 flex-1 overflow-y-auto border-b border-border">
         <div className="px-3 py-3">
           <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-text-muted">
             <ImageIcon size={12} />
@@ -105,24 +111,28 @@ export function LayersPanel() {
               const visible = layer?.visible ?? (key === "base");
               const selected = selectedImageLayerKey === key;
               return (
-                <button
+                <div
                   key={key}
-                  onClick={() => selectImageLayer(key)}
                   className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left transition-smooth ${
                     selected
                       ? "border-accent-cyan/35 bg-accent-cyan/10"
-                      : "border-white/5 bg-bg-tertiary/45 hover:border-white/12"
+                      : "border-border bg-bg-tertiary/45 hover:border-white/12"
                   }`}
                 >
-                  <div className="min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => selectImageLayer(key)}
+                    className="min-w-0 flex-1 text-left"
+                  >
                     <p className="text-sm text-text-primary">{IMAGE_LAYER_LABELS[key]}</p>
                     <p className="truncate text-[11px] text-text-muted">
                       {layer?.path?.split(/[\\/]/).pop() ?? "Sem arquivo"}
                     </p>
-                  </div>
+                  </button>
 
                   <button
-                    className="rounded p-1 text-text-secondary transition-smooth hover:bg-white/5 hover:text-text-primary"
+                    type="button"
+                    className="rounded p-1 text-text-secondary transition-smooth hover:bg-white/[0.03] hover:text-text-primary"
                     onClick={(event) => {
                       event.stopPropagation();
                       void toggleImageLayerVisibility(key);
@@ -131,13 +141,13 @@ export function LayersPanel() {
                   >
                     {visible ? <Eye size={14} /> : <EyeOff size={14} />}
                   </button>
-                </button>
+                </div>
               );
             })}
           </div>
         </div>
 
-        <div className="border-t border-white/5 px-3 py-3">
+        <div className="border-t border-border px-3 py-3">
           <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-text-muted">
             <Wand2 size={12} />
             Blocos de texto
@@ -159,7 +169,7 @@ export function LayersPanel() {
       </div>
 
       <div className="flex min-h-0 flex-[0_0_44%] flex-col">
-        <div className="border-b border-white/5 px-4 py-2">
+        <div className="border-b border-border px-4 py-2">
           <span className="text-xs font-medium text-text-secondary">Propriedades</span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">

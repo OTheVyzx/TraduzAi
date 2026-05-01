@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import {
   Eye,
   EyeOff,
+  Lock,
+  LockOpen,
   MessageSquare,
   BookOpen,
   Zap,
@@ -28,10 +30,12 @@ export function LayerItem({ entry, index }: LayerItemProps) {
   const selectLayer = useEditorStore((s) => s.selectLayer);
   const hoverLayer = useEditorStore((s) => s.hoverLayer);
   const toggleVisibility = useEditorStore((s) => s.toggleTextLayerVisibility);
+  const toggleLock = useEditorStore((s) => s.toggleTextLayerLock);
 
   const isSelected = selectedLayerId === entry.id;
   const isHovered = hoveredLayerId === entry.id;
   const isHidden = entry.visible === false;
+  const isLocked = entry.locked === true;
 
   useEffect(() => {
     if (!isSelected || !rowRef.current) return;
@@ -57,9 +61,9 @@ export function LayerItem({ entry, index }: LayerItemProps) {
       ref={rowRef}
       className={`border-l-2 px-3 py-2.5 transition-smooth ${
         isSelected
-          ? "border-accent-purple bg-accent-purple/5"
+          ? "border-brand bg-brand/5"
           : isHovered
-            ? "border-accent-purple/30 bg-bg-hover"
+            ? "border-brand/30 bg-bg-hover"
             : "border-transparent"
       }`}
       onClick={() => selectLayer(entry.id)}
@@ -75,8 +79,21 @@ export function LayerItem({ entry, index }: LayerItemProps) {
             event.stopPropagation();
             void toggleVisibility(entry.id);
           }}
+          title={isHidden ? "Mostrar camada de texto" : "Ocultar camada de texto"}
         >
           {isHidden ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+        <button
+          className={`mt-0.5 flex-shrink-0 p-0.5 transition-smooth ${
+            isLocked ? "text-status-warning" : "text-text-muted hover:text-text-primary"
+          }`}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleLock(entry.id);
+          }}
+          title={isLocked ? "Desbloquear camada de texto" : "Bloquear camada de texto"}
+        >
+          {isLocked ? <Lock size={14} /> : <LockOpen size={14} />}
         </button>
 
         <div className="flex min-w-0 flex-1 gap-2">
@@ -89,11 +106,11 @@ export function LayerItem({ entry, index }: LayerItemProps) {
 
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="rounded-full border border-white/10 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-[0.14em] text-text-muted">
                 {entry.tipo}
               </span>
               {hasEdits && (
-                <span className="rounded-full bg-accent-purple/12 px-1.5 py-0.5 text-[10px] text-accent-purple">
+                <span className="rounded-full bg-brand/12 px-1.5 py-0.5 text-[10px] text-brand">
                   editado
                 </span>
               )}

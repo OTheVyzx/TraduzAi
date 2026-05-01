@@ -70,7 +70,7 @@ function Thumbnail({
       onClick={onClick}
       className={`group relative w-full flex-shrink-0 overflow-hidden rounded-xl border-2 text-left transition-smooth ${
         isActive
-          ? "border-accent-purple shadow-[0_0_0_1px_rgba(124,92,255,0.25)]"
+          ? "border-brand shadow-[0_0_0_1px_rgba(108,92,231,0.25)]"
           : "border-transparent hover:border-white/20"
       }`}
     >
@@ -82,9 +82,9 @@ function Thumbnail({
         )}
       </div>
 
-      <div className="border-t border-white/5 bg-bg-secondary/95 px-2 py-1.5">
+      <div className="border-t border-border bg-bg-secondary/95 px-2 py-1.5">
         <div className="flex items-center justify-between text-[11px]">
-          <span className={`font-medium ${isActive ? "text-accent-purple" : "text-text-primary"}`}>
+          <span className={`font-medium ${isActive ? "text-brand" : "text-text-primary"}`}>
             Pag. {numero}
           </span>
           <span className="text-text-muted">{blocks} bloco(s)</span>
@@ -101,8 +101,8 @@ export function PageThumbnails() {
   if (!project) return null;
 
   return (
-    <div className="flex w-[124px] flex-shrink-0 flex-col border-r border-white/5 bg-bg-secondary">
-      <div className="border-b border-white/5 px-3 py-3">
+    <div className="flex w-[124px] flex-shrink-0 flex-col border-r border-border bg-bg-secondary">
+      <div className="border-b border-border px-3 py-3">
         <p className="text-[11px] uppercase tracking-[0.18em] text-text-muted">Paginas</p>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-2.5">
