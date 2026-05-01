@@ -125,6 +125,42 @@ cargo test glossary --lib
 - `memory`: historico local da obra para consistencia.
 - `qa_report`: flags e decisoes de revisao.
 
+## Feature flags
+
+Algumas funcionalidades experimentais ficam desativadas por padrao.
+
+### Lab
+
+O modulo Lab esta oculto por padrao.
+
+Para ativar em ambiente de desenvolvimento:
+
+```env
+VITE_ENABLE_LAB=1
+```
+
+Sem essa variavel, a rota `/lab/*` redireciona para a tela inicial e o item Lab nao aparece no menu lateral.
+
+## Stack de traducao e OCR
+
+### Traducao
+
+O pipeline usa traducao automatica com fallback local:
+
+- Google Translate via `deep-translator`
+- Fallback local via Ollama, usando modelo configuravel
+- Glossario/contexto da obra quando disponivel
+
+### OCR e deteccao
+
+O pipeline utiliza um stack visual com deteccao/OCR e fallback legado quando necessario.
+
+Componentes principais:
+
+- `pipeline/vision_stack/` — stack ativo de deteccao/OCR/inpaint
+- `pipeline/ocr/` — entrada OCR ativa
+- `pipeline/ocr_legacy/` — fallback legado
+
 ## Roadmap
 
 - v0.2.0-beta: fluxo local testavel, site, docs, QA/export/editor melhorados.
