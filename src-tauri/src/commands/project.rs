@@ -1298,6 +1298,149 @@ fn add_directory_to_zip_tracked(
     Ok(())
 }
 
+// ─── Máscara regional — helpers + command ────────────────────────────────────
+
+/// Pixels abaixo deste limiar são ignorados ao calcular se a máscara tem conteúdo.
+const MASK_ACTIVE_THRESHOLD: u8 = 8;
+
+/// Retorna `true` se pelo menos um pixel da imagem grayscale é >= MASK_ACTIVE_THRESHOLD.
+fn mask_has_nonzero_pixels(path: &Path) -> Result<bool, String> {
+    let img = image::open(path).map_err(|e| format!("mask_has_nonzero_pixels: {e}"))?;
+    let gray = img.to_luma8();
+    Ok(gray.pixels().any(|p| p[0] >= MASK_ACTIVE_THRESHOLD))
+}
+
+/// Retorna o bbox [x1, y1, x2, y2) **half-open** (x2/y2 exclusivos) da região ativa da máscara.
+/// Retorna `None` se a máscara estiver vazia.
+fn mask_bounding_box(path: &Path) -> Result<Option<[u32; 4]>, String> {
+    let img = image::open(path).map_err(|e| format!("mask_bounding_box: {e}"))?;
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+    let (mut x1, mut y1, mut x2, mut y2) = (w, h, 0u32, 0u32);
+    for (x, y, p) in gray.enumerate_pixels() {
+        if p[0] >= MASK_ACTIVE_THRESHOLD {
+            x1 = x1.min(x);
+            y1 = y1.min(y);
+            x2 = x2.max(x + 1); // half-open: exclusivo
+            y2 = y2.max(y + 1);
+        }
+    }
+    if x1 >= x2 || y1 >= y2 {
+        Ok(None)
+    } else {
+        Ok(Some([x1, y1, x2, y2]))
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageActionMode {
+    Global,
+    Regional,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+// Variantes Brush/Mask/Inpaint/Rendered/Preview serão usadas nas Fases 4B-4E (regional real)
+#[allow(dead_code)]
+pub enum ChangedAsset {
+    Brush,
+    Mask,
+    Inpaint,
+    Rendered,
+    Preview,
+    ProjectJson,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageActionResult {
+    pub action: String,
+    pub mode: PageActionMode,
+    pub bbox: Option<[u32; 4]>,
+    pub changed_assets: Vec<ChangedAsset>,
+    pub changed_layers: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PageActionConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub action: String,
+}
+
+/// Detecta se a página corrente tem uma máscara com pixels ativos e executa a ação
+/// no modo Regional (com bbox da máscara) ou Global (página inteira).
+///
+/// Fase 4A: delega para as ações globais existentes.
+/// Fases 4B-4E: adicionar `--mask`/`--bbox` ao sidecar quando `mode == Regional`.
+#[tauri::command]
+pub async fn run_page_action_with_optional_mask(
+    app: tauri::AppHandle,
+    config: PageActionConfig,
+) -> Result<PageActionResult, String> {
+    use crate::commands::pipeline::{
+        detect_page, ocr_page, reinpaint_page, translate_page, ReinpaintConfig,
+    };
+
+    // Carregar project.json para encontrar o caminho da máscara desta página
+    let project_str = std::fs::read_to_string(&config.project_path)
+        .map_err(|e| format!("Erro ao ler project.json: {e}"))?;
+    let project: serde_json::Value =
+        serde_json::from_str(&project_str).map_err(|e| format!("Erro ao parsear project.json: {e}"))?;
+
+    let mask_path_str = project["paginas"]
+        .get(config.page_index)
+        .and_then(|p| p["image_layers"]["mask"]["path"].as_str())
+        .map(str::to_owned);
+
+    let (mode, bbox) = if let Some(ref mp) = mask_path_str {
+        let mp = Path::new(mp);
+        if mp.exists() && mask_has_nonzero_pixels(mp)? {
+            let b = mask_bounding_box(mp)?;
+            (PageActionMode::Regional, b)
+        } else {
+            (PageActionMode::Global, None)
+        }
+    } else {
+        (PageActionMode::Global, None)
+    };
+
+    let page_index_u32 = config.page_index as u32;
+
+    match config.action.as_str() {
+        "detect" => {
+            detect_page(app, config.project_path.clone(), page_index_u32).await?;
+        }
+        "ocr" => {
+            ocr_page(app, config.project_path.clone(), page_index_u32).await?;
+        }
+        "translate" => {
+            translate_page(app, config.project_path.clone(), page_index_u32).await?;
+        }
+        "inpaint" => {
+            reinpaint_page(
+                app,
+                ReinpaintConfig {
+                    project_path: config.project_path.clone(),
+                    page_index: page_index_u32,
+                },
+            )
+            .await?;
+        }
+        other => return Err(format!("Ação desconhecida: {other}")),
+    }
+
+    Ok(PageActionResult {
+        action: config.action,
+        mode,
+        bbox,
+        changed_assets: vec![ChangedAsset::ProjectJson],
+        changed_layers: vec![],
+        message: "Ação concluída".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

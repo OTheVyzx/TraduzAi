@@ -1284,3 +1284,25 @@ export async function createTranslatorModel(): Promise<string> {
 export async function restartApp(): Promise<void> {
   return invoke("restart_app");
 }
+
+// ─── Máscara regional ────────────────────────────────────────────────────────
+
+export type PageActionMode = "global" | "regional";
+export type ChangedAsset = "brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json";
+
+export type PageActionResult = {
+  action: "detect" | "ocr" | "translate" | "inpaint";
+  mode: PageActionMode;
+  bbox?: [number, number, number, number] | null;
+  changed_assets: ChangedAsset[];
+  changed_layers: string[];
+  message: string;
+};
+
+export async function runPageActionWithOptionalMask(config: {
+  project_path: string;
+  page_index: number;
+  action: "detect" | "ocr" | "translate" | "inpaint";
+}): Promise<PageActionResult> {
+  return invoke("run_page_action_with_optional_mask", { config });
+}

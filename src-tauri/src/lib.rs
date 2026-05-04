@@ -1,7 +1,8 @@
 mod commands;
 mod export;
 pub(crate) mod glossary;
-pub(crate) mod internet_context;
+// internet_context: módulo futuro (structs sem callers em produção)
+// pub(crate) mod internet_context;
 pub(crate) mod local_memory;
 pub(crate) mod storage;
 pub(crate) mod work_context;
@@ -47,6 +48,7 @@ pub fn run() {
             commands::project::update_brush_region,
             commands::project::export_project,
             commands::project::export_page_psd,
+            commands::project::run_page_action_with_optional_mask,
             commands::glossary::load_glossary,
             commands::glossary::save_glossary,
             commands::glossary::upsert_glossary_entry,

@@ -15,6 +15,7 @@ import {
   setEditorLayerVisibility,
   updateBrushRegion,
   updateMaskRegion,
+  runPageActionWithOptionalMask,
 } from "../tauri";
 import {
   createHistoryStack,
@@ -683,14 +684,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   runMaskedAction: async (action) => {
     if (get().activePageAction) return; // previne duplo clique
+    const path = projectPath();
+    if (!path) return;
     set({ activePageAction: action });
     try {
-      switch (action) {
-        case "detect":    await get().detectInPage();           break;
-        case "ocr":       await get().ocrInPage();              break;
-        case "translate": await get().translateInPage();        break;
-        case "inpaint":   await get().reinpaintCurrentPage();   break;
+      const result = await runPageActionWithOptionalMask({
+        project_path: path,
+        page_index: get().currentPageIndex,
+        action,
+      });
+      await get().loadCurrentPage();
+      // Cache-bust para assets que foram modificados
+      for (const asset of result.changed_assets) {
+        if (asset === "inpaint") get().bumpBitmapLayerVersion("inpaint");
+        if (asset === "rendered") get().bumpBitmapLayerVersion("rendered");
+        if (asset === "mask") get().bumpBitmapLayerVersion("mask");
       }
+      get().markRenderPreviewStale(get().currentPageKey());
     } finally {
       set({ activePageAction: null });
     }
