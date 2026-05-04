@@ -89,13 +89,11 @@ export function Editor() {
     redoEditor,
     deleteSelectedLayer,
     retypesetCurrentPage,
-    reinpaintCurrentPage,
-    detectInPage,
-    ocrInPage,
-    translateInPage,
     renderPreviewPage,
     currentPageKey,
     setBrushSize,
+    activePageAction,
+    runMaskedAction,
   } = useEditorStore();
 
   const totalPages = project?.paginas.length ?? 0;
@@ -339,40 +337,52 @@ export function Editor() {
             <div className="mx-1 h-5 w-px bg-white/[0.03]" />
 
             <div className="flex items-center gap-1.5 rounded-xl border border-border bg-bg-tertiary/30 px-1.5 py-1">
+              {activePageAction === null && (
+                <span className="text-[11px] text-text-muted px-1 hidden md:inline">
+                  {currentPage?.image_layers?.mask?.path
+                    ? "Escopo: Região mascarada"
+                    : "Escopo: Página inteira"}
+                </span>
+              )}
+              {activePageAction !== null && (
+                <span className="text-[11px] text-brand px-1 hidden md:inline">
+                  Executando: {activePageAction}...
+                </span>
+              )}
               <button
-                disabled={pagePipelineBusy}
-                onClick={() => void detectInPage()}
+                disabled={pagePipelineBusy || activePageAction !== null}
+                onClick={() => void runMaskedAction("detect")}
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
                 title="Detectar balões na página"
               >
-                <ScanText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                <ScanText size={13} className={activePageAction === "detect" ? "animate-pulse" : ""} />
                 Detectar
               </button>
               <button
-                disabled={pagePipelineBusy}
-                onClick={() => void ocrInPage()}
+                disabled={pagePipelineBusy || activePageAction !== null}
+                onClick={() => void runMaskedAction("ocr")}
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
                 title="Executar OCR em todos os blocos"
               >
-                <FileText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                <FileText size={13} className={activePageAction === "ocr" ? "animate-pulse" : ""} />
                 OCR
               </button>
               <button
-                disabled={pagePipelineBusy}
-                onClick={() => void translateInPage()}
+                disabled={pagePipelineBusy || activePageAction !== null}
+                onClick={() => void runMaskedAction("translate")}
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
                 title="Traduzir todos os textos da página"
               >
-                <Languages size={13} className={isRetypesetting ? "animate-pulse" : ""} />
+                <Languages size={13} className={activePageAction === "translate" ? "animate-pulse" : ""} />
                 Traduzir
               </button>
               <button
-                disabled={pagePipelineBusy}
-                onClick={() => void reinpaintCurrentPage()}
+                disabled={pagePipelineBusy || activePageAction !== null}
+                onClick={() => void runMaskedAction("inpaint")}
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
                 title="Limpar a imagem com inpaint"
               >
-                <Eraser size={13} className={isReinpainting ? "animate-pulse" : ""} />
+                <Eraser size={13} className={activePageAction === "inpaint" ? "animate-pulse" : ""} />
                 Inpaint
               </button>
               <button

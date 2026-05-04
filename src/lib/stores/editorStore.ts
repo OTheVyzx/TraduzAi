@@ -343,6 +343,9 @@ interface EditorState {
   renderPreviewPage: (pageKey: string) => Promise<void>;
   pendingStructuralEdits: PendingStructuralEdits;
   setWorkingTraduzido: (pageKey: string, layerId: string, value: string) => void;
+  setWorkingOriginal: (pageKey: string, layerId: string, value: string) => void;
+  activePageAction: null | "detect" | "ocr" | "translate" | "inpaint";
+  runMaskedAction: (action: "detect" | "ocr" | "translate" | "inpaint") => Promise<void>;
   setWorkingEstiloPatch: (
     pageKey: string,
     layerId: string,
@@ -409,6 +412,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   lastRetypesetTime: 0,
   brushSize: 18,
   bitmapLayerVersions: {},
+  activePageAction: null,
 
   bumpBitmapLayerVersion: (layerKey) =>
     set((state) => ({
@@ -650,6 +654,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
     if (shouldMarkStale) get().markRenderPreviewStale(pageKey);
+  },
+
+  setWorkingOriginal: (pageKey, layerId, value) => {
+    const shouldMarkStale =
+      pageKey === get().currentPageKey() &&
+      !!get().currentPage?.text_layers.some((item) => item.id === layerId);
+    set((state) => {
+      if (pageKey !== get().currentPageKey()) return {};
+      const layer = state.currentPage?.text_layers.find((item) => item.id === layerId);
+      if (!layer) return {};
+      const pending = { ...state.pendingEdits };
+      const current = { ...(pending[layerId] ?? {}) };
+      if (value === layer.original) {
+        delete current.original;
+      } else {
+        current.original = value;
+      }
+      pending[layerId] = current;
+      return {
+        pendingEdits: removeEmptyPendingEdit(pending, layerId),
+        selectedLayerId: layerId,
+        selectedImageLayerKey: null,
+      };
+    });
+    if (shouldMarkStale) get().markRenderPreviewStale(pageKey);
+  },
+
+  runMaskedAction: async (action) => {
+    if (get().activePageAction) return; // previne duplo clique
+    set({ activePageAction: action });
+    try {
+      switch (action) {
+        case "detect":    await get().detectInPage();           break;
+        case "ocr":       await get().ocrInPage();              break;
+        case "translate": await get().translateInPage();        break;
+        case "inpaint":   await get().reinpaintCurrentPage();   break;
+      }
+    } finally {
+      set({ activePageAction: null });
+    }
   },
 
   setWorkingEstiloPatch: (pageKey, layerId, patch, touchedKeys) => {

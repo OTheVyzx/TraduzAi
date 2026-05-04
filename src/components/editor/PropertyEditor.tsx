@@ -14,7 +14,7 @@ import {
   RefreshCw,
   Link2Off,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const AVAILABLE_FONTS = [
   "ComicNeue-Bold.ttf",
@@ -96,6 +96,7 @@ export function PropertyEditor() {
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
   const currentPageKey = useEditorStore((s) => s.currentPageKey);
   const setWorkingEstiloPatch = useEditorStore((s) => s.setWorkingEstiloPatch);
+  const setWorkingOriginal = useEditorStore((s) => s.setWorkingOriginal);
   const recordEditorCommand = useEditorStore((s) => s.recordEditorCommand);
   const activeLayerId = selectedLayerId ?? "";
   const textEdit = useTextEditSession(activeLayerId);
@@ -107,6 +108,12 @@ export function PropertyEditor() {
   
   const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
   const entry = selectedLayer;
+
+  // Draft local para "Texto Original" editável — sincroniza ao trocar de layer
+  const [originalDraft, setOriginalDraft] = useState(selectedLayer?.original ?? "");
+  useEffect(() => {
+    setOriginalDraft(selectedLayer?.original ?? "");
+  }, [selectedLayer?.id, selectedLayer?.original]);
 
   if (!entry || !selectedLayerId) {
     return (
@@ -121,7 +128,6 @@ export function PropertyEditor() {
   const layerId = selectedLayerId;
   const edit = pendingEdits[selectedLayerId];
   const traduzido = textEdit.value;
-  const original = entry.original;
   const estilo = edit?.estilo ? { ...entry.estilo, ...edit.estilo } : entry.estilo;
   const [x1, y1, x2, y2] = edit?.bbox ?? entry.layout_bbox ?? entry.bbox;
   const pageKey = currentPageKey();
@@ -174,12 +180,20 @@ export function PropertyEditor() {
             </span>
           </div>
           <textarea
-            value={original}
-            title="Texto original (somente leitura)"
-            readOnly
+            value={originalDraft}
+            title="Texto original detectado pelo OCR (editável)"
             rows={3}
+            onChange={(e) => setOriginalDraft(e.target.value)}
+            onBlur={() => {
+              if (entry && originalDraft !== entry.original) {
+                setWorkingOriginal(pageKey, layerId, originalDraft);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && e.ctrlKey) e.currentTarget.blur();
+            }}
             className="w-full px-2 py-1.5 bg-bg-tertiary border border-border rounded text-sm
-              text-text-secondary resize-none opacity-60 cursor-default"
+              text-text-secondary resize-none focus:border-brand/50 focus:outline-none transition-smooth"
           />
         </div>
         <div>
