@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { sanitizeFavoriteWorks, upsertFavoriteWork } from "../favoriteWorks";
+import type { WorkContext } from "../workContext";
 
 export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "rendered";
 
@@ -131,6 +132,8 @@ export interface Project {
   qualidade: ProjectQuality;
   contexto: ProjectContext;
   work_context?: WorkContextSummary | null;
+  /** Contexto rico da obra para guiar a tradução (persiste no project.json) */
+  translation_context?: WorkContext;
   qa?: unknown;
   paginas: PageData[];
   status: "idle" | "setup" | "processing" | "done" | "error";

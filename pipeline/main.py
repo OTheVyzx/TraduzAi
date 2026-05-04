@@ -1934,7 +1934,8 @@ def _run_translate_page(project_path: Path, page_idx: int):
         idioma_origem=project.get("idioma_origem", "en"),
         idioma_destino=project.get("idioma_destino", "pt-BR"),
         ollama_host=project.get("_ollama_host") or "http://localhost:11434",
-        ollama_model=project.get("_ollama_model") or "traduzai-translator"
+        ollama_model=project.get("_ollama_model") or "traduzai-translator",
+        translation_context=project.get("translation_context") or None,
     )
     
     translated_layers = (

@@ -912,6 +912,82 @@ def _build_context_hints(context: dict, glossario: dict) -> str:
     )
 
 
+def build_translation_context_header(translation_context: dict | None) -> str:
+    """Constrói um bloco de contexto da obra a ser injetado no prompt do tradutor.
+
+    Usa o campo ``translation_context`` do project.json (editor-side rich context),
+    distinto do ``context`` do pipeline (WorkContextProfile do Rust).
+    Retorna string vazia se translation_context for None ou vazio.
+    """
+    if not translation_context:
+        return ""
+
+    parts: list[str] = []
+
+    title = translation_context.get("title")
+    if title:
+        parts.append(f"TITULO_OBRA: {title}")
+
+    synopsis = translation_context.get("synopsis")
+    if synopsis:
+        parts.append(f"SINOPSE: {synopsis[:400]}")  # limitar tamanho
+
+    genre = translation_context.get("genre") or []
+    if genre:
+        parts.append(f"GENERO: {', '.join(genre)}")
+
+    tone = translation_context.get("tone")
+    if tone:
+        parts.append(f"TOM: {tone}")
+
+    # Glossário travado — prioridade máxima
+    locked = [e for e in (translation_context.get("glossary") or []) if e.get("locked")]
+    if locked:
+        parts.append("GLOSSARIO_OBRIGATORIO:")
+        for e in locked[:20]:  # limitar a 20 entradas
+            note = f" ({e['notes']})" if e.get("notes") else ""
+            parts.append(f"  {e['source']} => {e['target']}{note}")
+
+    # Personagens
+    characters = translation_context.get("characters") or []
+    if characters:
+        char_lines = []
+        for c in characters[:15]:  # limitar a 15 personagens
+            name = c.get("name", "")
+            if not name:
+                continue
+            parts_char = [name]
+            if c.get("doNotTranslateName"):
+                parts_char.append("(nao traduzir nome)")
+            if c.get("preferredPortugueseName"):
+                parts_char.append(f"PT: {c['preferredPortugueseName']}")
+            if c.get("speechStyle"):
+                parts_char.append(f"tom: {c['speechStyle']}")
+            char_lines.append(", ".join(parts_char))
+        if char_lines:
+            parts.append("PERSONAGENS_EDITOR:")
+            parts.extend(f"  {line}" for line in char_lines)
+
+    # Regras de tradução livres
+    rules = translation_context.get("translationRules") or []
+    if rules:
+        parts.append(f"REGRAS: {'; '.join(rules[:8])}")
+
+    if not parts:
+        return ""
+
+    header = "\n".join(parts)
+    logger.info(
+        json.dumps({
+            "event": "translation_context_used",
+            "glossary_locked_count": len(locked),
+            "characters_count": len(characters),
+            "has_title": bool(title),
+        })
+    )
+    return header
+
+
 def _lookup_memory_translation(text: str, tipo: str, context: dict, glossario: dict) -> str | None:
     del tipo
     normalized = re.sub(r"[\W_]+", "", text.lower())
@@ -989,6 +1065,7 @@ def translate_pages(
     ollama_model: str = "traduzai-translator",
     progress_callback: Callable | None = None,
     models_dir: str = "",
+    translation_context: dict | None = None,
 ) -> list[dict]:
     del qualidade
 
@@ -1055,6 +1132,7 @@ def translate_pages(
                 ollama_host,
                 _google if google_ok else None,
                 progress_callback,
+                translation_context=translation_context,
             )
 
         logger.warning("Nenhum backend de traducao disponivel. Retornando texto original.")
@@ -1296,15 +1374,18 @@ def _translate_with_ollama(
     host: str,
     repair_translator: Optional[_GoogleTranslator],
     progress_callback: Callable | None,
+    translation_context: dict | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
+    tc_header = build_translation_context_header(translation_context)
     system = (
         f"Voce e um tradutor de manga especializado em {idioma_origem}->{idioma_destino}. Responda SOMENTE com JSON array.\n"
         f"OBRA: {obra}\n"
         f"PERSONAGENS: {', '.join(context.get('personagens', [])[:8]) or 'N/A'}\n"
         f"GLOSSARIO: {json.dumps(glossario, ensure_ascii=False)}\n"
         f"{_build_context_hints(context, glossario)}\n"
-        "Formato: [{\"id\":\"t1\",\"translated\":\"texto\"}]"
+        + (f"{tc_header}\n" if tc_header else "")
+        + "Formato: [{\"id\":\"t1\",\"translated\":\"texto\"}]"
     )
 
     translated_pages = []

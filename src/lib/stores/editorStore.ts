@@ -33,6 +33,11 @@ import {
   type ValidationResult,
   type WorkingStateDraft,
 } from "../editorHistory";
+import {
+  defaultWorkContext,
+  type WorkCharacter,
+  type WorkGlossaryEntry,
+} from "../workContext";
 
 export type EditorToolMode = "select" | "block" | "brush" | "repairBrush" | "eraser";
 export type EditorViewMode = "translated" | "inpainted" | "original";
@@ -390,6 +395,14 @@ interface EditorState {
   reProcessBlock: (mode: "ocr" | "translate" | "inpaint") => Promise<void>;
   disconnectBlock: () => Promise<void>;
   resetEditor: () => void;
+  // ─── Contexto da Obra ────────────────────────────────────────────────────
+  setTranslationContextPatch: (patch: Partial<import("../workContext").WorkContext>) => void;
+  addCharacter: (char: WorkCharacter) => void;
+  updateCharacter: (id: string, patch: Partial<WorkCharacter>) => void;
+  removeCharacter: (id: string) => void;
+  addGlossaryEntry: (entry: WorkGlossaryEntry) => void;
+  updateGlossaryEntry: (id: string, patch: Partial<WorkGlossaryEntry>) => void;
+  removeGlossaryEntry: (id: string) => void;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -1393,4 +1406,121 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       lastRetypesetTime: 0,
       brushSize: 18,
     }),
+
+  // ─── Contexto da Obra ────────────────────────────────────────────────────
+
+  setTranslationContextPatch: (patch) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const current = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: { ...current, ...patch, updatedAt: new Date().toISOString() },
+        },
+      };
+    });
+  },
+
+  addCharacter: (char) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const ctx = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: {
+            ...ctx,
+            characters: [...(ctx.characters ?? []), char],
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  },
+
+  updateCharacter: (id, patch) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const ctx = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: {
+            ...ctx,
+            characters: (ctx.characters ?? []).map((c) => (c.id === id ? { ...c, ...patch } : c)),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  },
+
+  removeCharacter: (id) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const ctx = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: {
+            ...ctx,
+            characters: (ctx.characters ?? []).filter((c) => c.id !== id),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  },
+
+  addGlossaryEntry: (entry) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const ctx = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: {
+            ...ctx,
+            glossary: [...(ctx.glossary ?? []), entry],
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  },
+
+  updateGlossaryEntry: (id, patch) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const ctx = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: {
+            ...ctx,
+            glossary: (ctx.glossary ?? []).map((e) => (e.id === id ? { ...e, ...patch } : e)),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  },
+
+  removeGlossaryEntry: (id) => {
+    useAppStore.setState((appState) => {
+      if (!appState.project) return {};
+      const ctx = appState.project.translation_context ?? defaultWorkContext();
+      return {
+        project: {
+          ...appState.project,
+          translation_context: {
+            ...ctx,
+            glossary: (ctx.glossary ?? []).filter((e) => e.id !== id),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  },
 }));
