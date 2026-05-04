@@ -1,5 +1,7 @@
 import { Layer, Line, Rect, Stage } from "react-konva";
 import { getRenderPreviewStateForPage, useEditorStore } from "../../../lib/stores/editorStore";
+import { EditorBitmapOverlay } from "./EditorBitmapOverlay";
+import { EditorPaintCursor } from "./EditorPaintCursor";
 import { EditorStageBackground } from "./EditorStageBackground";
 import { EditorTextLayer } from "./EditorTextLayer";
 import { EditorTransformer } from "./EditorTransformer";
@@ -76,6 +78,9 @@ export function EditorStage() {
     handleStageMouseDown,
     handleStageMouseMove,
     handleStageMouseUp,
+    handleStageMouseEnter,
+    handleStageMouseLeave,
+    cursorPoint,
   } = controller;
 
   const width = baseImage.size.width;
@@ -156,6 +161,8 @@ export function EditorStage() {
               }}
               onMouseMove={handleStageMouseMove}
               onMouseUp={handleStageMouseUp}
+              onMouseEnter={handleStageMouseEnter}
+              onMouseLeave={handleStageMouseLeave}
               onTap={(event) => {
                 if (event.target === event.target.getStage()) {
                   selectLayer(null);
@@ -166,10 +173,22 @@ export function EditorStage() {
               <Layer>
                 <EditorStageBackground image={baseImage.image} width={width} height={height} />
                 {maskImage.image && (
-                  <EditorStageBackground image={maskImage.image} width={width} height={height} />
+                  <EditorBitmapOverlay
+                    image={maskImage.image}
+                    width={width}
+                    height={height}
+                    color="#7C5CFF"
+                    opacity={0.65}
+                  />
                 )}
                 {brushImage.image && (
-                  <EditorStageBackground image={brushImage.image} width={width} height={height} />
+                  <EditorBitmapOverlay
+                    image={brushImage.image}
+                    width={width}
+                    height={height}
+                    color="#48B0FF"
+                    opacity={0.65}
+                  />
                 )}
                 <Rect width={width} height={height} fill="rgba(0,0,0,0)" />
               </Layer>
@@ -206,6 +225,15 @@ export function EditorStage() {
                     listening={false}
                   />
                 )}
+                {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") &&
+                  cursorPoint && (
+                    <EditorPaintCursor
+                      x={cursorPoint.x}
+                      y={cursorPoint.y}
+                      radius={brushSize / 2}
+                      toolMode={toolMode as "brush" | "repairBrush" | "eraser"}
+                    />
+                  )}
                 {translatedEditing &&
                   layers.map((entry) => (
                     <EditorTextLayer

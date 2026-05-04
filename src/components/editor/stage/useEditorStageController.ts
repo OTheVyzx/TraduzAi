@@ -86,6 +86,7 @@ export function useEditorStageController() {
   const zoom = useEditorStore((state) => state.zoom);
   const panOffset = useEditorStore((state) => state.panOffset);
   const lastRetypesetTime = useEditorStore((state) => state.lastRetypesetTime);
+  const bitmapLayerVersions = useEditorStore((state) => state.bitmapLayerVersions);
   const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
   const selectedImageLayerKey = useEditorStore((state) => state.selectedImageLayerKey);
   const hoveredLayerId = useEditorStore((state) => state.hoveredLayerId);
@@ -109,7 +110,10 @@ export function useEditorStageController() {
     current: { x: number; y: number };
   } | null>(null);
   const [paintStroke, setPaintStroke] = useState<[number, number][]>([]);
+  const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
+  // Ref para garantir acesso ao finishPaintStroke mais recente sem criar stale closure
+  const finishPaintStrokeRef = useRef<(() => Promise<void>) | null>(null);
   const [panSession, setPanSession] = useState<{
     startX: number;
     startY: number;
@@ -199,15 +203,16 @@ export function useEditorStageController() {
   );
 
   const baseImageSrc = useObjectUrl(displayImagePath, "image/png", lastRetypesetTime);
+  // Usar versão dedicada por camada para garantir re-load imediato após stroke
   const maskOverlaySrc = useObjectUrl(
     currentPage?.image_layers?.mask?.visible ? currentPage.image_layers.mask.path : null,
     "image/png",
-    lastRetypesetTime,
+    bitmapLayerVersions.mask ?? 0,
   );
   const brushOverlaySrc = useObjectUrl(
     currentPage?.image_layers?.brush?.visible ? currentPage.image_layers.brush.path : null,
     "image/png",
-    lastRetypesetTime,
+    bitmapLayerVersions.brush ?? 0,
   );
 
   const baseImage = useImageElement(baseImageSrc);
@@ -306,6 +311,22 @@ export function useEditorStageController() {
         return [...points, [point.x, point.y]];
       });
     }
+    // Atualizar posição do cursor circular em modos de pintura
+    if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") {
+      setCursorPoint(point);
+    }
+  };
+
+  const handleStageMouseEnter = (event: Konva.KonvaEventObject<MouseEvent>) => {
+    const point = pointFromStageEvent(event);
+    if (point && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser")) {
+      setCursorPoint(point);
+    }
+  };
+
+  const handleStageMouseLeave = () => {
+    // Manter cursor visível enquanto está pintando (stroke ativo)
+    if (paintStroke.length === 0) setCursorPoint(null);
   };
 
   const finishBlockDraft = async () => {
@@ -330,6 +351,24 @@ export function useEditorStageController() {
       strokes: [stroke],
     });
   };
+
+  // Sincronizar ref para evitar stale closure no global mouseup handler
+  finishPaintStrokeRef.current = finishPaintStroke;
+
+  // FIX CRÍTICO: commit do stroke quando mouseup ocorre FORA do canvas Konva
+  // Sem isso, soltar o mouse fora do <Stage> descarta o stroke silenciosamente.
+  useEffect(() => {
+    if (paintStroke.length === 0) return;
+
+    const handleGlobalMouseUp = (event: MouseEvent) => {
+      // Não duplicar com handler do Konva: só age fora do container do stage
+      if (containerRef.current?.contains(event.target as Node)) return;
+      void finishPaintStrokeRef.current?.();
+    };
+
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+    return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
+  }, [paintStroke.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleStageMouseUp = () => {
     if (blockDraft) {
@@ -398,5 +437,8 @@ export function useEditorStageController() {
     handleStageMouseDown,
     handleStageMouseMove,
     handleStageMouseUp,
+    handleStageMouseEnter,
+    handleStageMouseLeave,
+    cursorPoint,
   };
 }

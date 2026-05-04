@@ -37,6 +37,10 @@ export type EditorToolMode = "select" | "block" | "brush" | "repairBrush" | "era
 export type EditorViewMode = "translated" | "inpainted" | "original";
 export type RenderPreviewStatus = "fresh" | "stale" | "rendering" | "error";
 
+// Chaves de camadas bitmap — "base" é imutável (nunca reescrita pelo brush/inpaint)
+export type BitmapLayerKey = "base" | "mask" | "inpaint" | "brush" | "rendered" | "preview";
+export type MutableBitmapLayerKey = Exclude<BitmapLayerKey, "base">;
+
 export interface RenderPreviewCacheEntry {
   fingerprint: string;
   status: RenderPreviewStatus;
@@ -309,6 +313,9 @@ interface EditorState {
   isLoadingPage: boolean;
   lastRetypesetTime: number;
   brushSize: number;
+  // Cache-bust por camada — nunca persiste no project.json (runtime-only)
+  bitmapLayerVersions: Partial<Record<BitmapLayerKey, number>>;
+  bumpBitmapLayerVersion: (layerKey: MutableBitmapLayerKey) => void;
 
   loadCurrentPage: () => Promise<void>;
   setCurrentPage: (index: number) => Promise<void>;
@@ -401,6 +408,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   isLoadingPage: false,
   lastRetypesetTime: 0,
   brushSize: 18,
+  bitmapLayerVersions: {},
+
+  bumpBitmapLayerVersion: (layerKey) =>
+    set((state) => ({
+      bitmapLayerVersions: {
+        ...state.bitmapLayerVersions,
+        [layerKey]: (state.bitmapLayerVersions[layerKey] ?? 0) + 1,
+      },
+    })),
 
   loadCurrentPage: async () => {
     const path = projectPath();
@@ -1148,6 +1164,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedLayerId: null,
       lastRetypesetTime: Date.now(),
     });
+    // Cache-bust da camada editada (runtime-only, não persiste no project.json)
+    get().bumpBitmapLayerVersion(layerKey as MutableBitmapLayerKey);
     get().markRenderPreviewStale(get().currentPageKey());
   },
 
@@ -1164,6 +1182,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
+      get().bumpBitmapLayerVersion("rendered");
       set({ lastRetypesetTime: Date.now(), viewMode: "translated", showOverlays: true });
     } finally {
       set({ isRetypesetting: false });
@@ -1232,6 +1251,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
       await get().loadCurrentPage();
       get().markRenderPreviewStale(pageKey);
+      get().bumpBitmapLayerVersion("inpaint");
       set({ lastRetypesetTime: Date.now(), viewMode: "inpainted" });
     } finally {
       set({ isReinpainting: false });
