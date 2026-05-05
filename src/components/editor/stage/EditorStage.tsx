@@ -6,6 +6,7 @@ import { EditorStageBackground } from "./EditorStageBackground";
 import { EditorTextLayer } from "./EditorTextLayer";
 import { EditorTransformer } from "./EditorTransformer";
 import { FloatingTextEditor } from "./FloatingTextEditor";
+import { MaskInProgressOverlay } from "./MaskInProgressOverlay";
 import { useEditorStageController } from "./useEditorStageController";
 
 function StageStatusBadge() {
@@ -85,6 +86,8 @@ export function EditorStage() {
     handleStageMouseEnter,
     handleStageMouseLeave,
     cursorPoint,
+    maskInProgress,
+    maskShape,
   } = controller;
 
   const width = baseImage.size.width;
@@ -270,6 +273,14 @@ export function EditorStage() {
                   ))}
                 {translatedEditing && <EditorTransformer selectedNodeName={selectedNodeName} />}
               </Layer>
+
+              {/* Fase 8: Lasso em construção */}
+              {maskInProgress && maskInProgress.points.length > 0 && (
+                <MaskInProgressOverlay
+                  points={maskInProgress.points}
+                  shape={maskShape}
+                />
+              )}
             </Stage>
           </div>
         ) : currentPage ? (

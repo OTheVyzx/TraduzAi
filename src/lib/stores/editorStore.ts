@@ -39,7 +39,7 @@ import {
   type WorkGlossaryEntry,
 } from "../workContext";
 
-export type EditorToolMode = "select" | "block" | "brush" | "repairBrush" | "eraser";
+export type EditorToolMode = "select" | "block" | "brush" | "repairBrush" | "eraser" | "mask";
 export type EditorViewMode = "translated" | "inpainted" | "original";
 export type RenderPreviewStatus = "fresh" | "stale" | "rendering" | "error";
 
@@ -331,6 +331,17 @@ interface EditorState {
   setBrushColor: (color: string) => void;
   setBrushOpacity: (opacity: number) => void;
   setBrushHardness: (hardness: number) => void;
+  // ── Máscara Lasso (Fase 8) ───────────────────────────────────────────────
+  /** Modo do lasso: freehand (arrastar) ou polygonal (cliques). */
+  maskShape: "freehand" | "polygonal";
+  /** Operação: substituir, adicionar ou subtrair da máscara existente. */
+  maskOp: "replace" | "add" | "subtract";
+  /** Pontos do lasso em construção (espaço da imagem). null = nenhuma seleção em progresso. */
+  maskInProgress: { points: Array<[number, number]> } | null;
+  setMaskShape: (shape: "freehand" | "polygonal") => void;
+  setMaskOp: (op: "replace" | "add" | "subtract") => void;
+  setMaskInProgress: (progress: { points: Array<[number, number]> } | null) => void;
+  clearMask: () => Promise<void>;
 
   // Cache-bust por camada — nunca persiste no project.json (runtime-only)
   bitmapLayerVersions: Partial<Record<BitmapLayerKey, number>>;
@@ -488,6 +499,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   brushOpacity: 1,
   brushHardness: 0.8,
   recentBrushColors: ["#000000", "#ffffff", "#ff0000", "#00ff00", "#0000ff"],
+  // Fase 8 — Lasso
+  maskShape: "freehand",
+  maskOp: "replace",
+  maskInProgress: null,
   bitmapLayerVersions: {},
   activePageAction: null,
   pageActionError: null,
@@ -764,6 +779,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       renderVersion: 0,
       renderInFlightVersion: null,
       renderError: null,
+      maskInProgress: null,
     });
     await get().loadCurrentPage();
   },
@@ -790,6 +806,33 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     })),
   setBrushOpacity: (opacity) => set({ brushOpacity: Math.max(0, Math.min(1, opacity)) }),
   setBrushHardness: (hardness) => set({ brushHardness: Math.max(0, Math.min(1, hardness)) }),
+
+  // Fase 8 — Lasso setters
+  setMaskShape: (shape) => set({ maskShape: shape }),
+  setMaskOp: (op) => set({ maskOp: op }),
+  setMaskInProgress: (progress) => set({ maskInProgress: progress }),
+  clearMask: async () => {
+    const path = projectPath();
+    const { currentPageIndex, bumpBitmapLayerVersion } = get();
+    if (!path) return;
+    const { writeMaskFromPng } = await import("../tauri");
+    const blank = document.createElement("canvas");
+    blank.width = 1;
+    blank.height = 1;
+    const pngData = blank.toDataURL("image/png");
+    try {
+      await writeMaskFromPng({
+        project_path: path,
+        page_index: currentPageIndex,
+        png_data: pngData,
+        layer_key: "mask",
+        op: "replace",
+      });
+      bumpBitmapLayerVersion("mask");
+    } catch (_e) {
+      // silencia falha de limpeza
+    }
+  },
 
   updatePendingEdit: (layerId, changes) => {
     const pageKey = get().currentPageKey();
@@ -1019,6 +1062,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         if (asset === "mask") get().bumpBitmapLayerVersion("mask");
       }
       get().markRenderPreviewStale(get().currentPageKey());
+      // Fase 8: limpar lasso após inpaint concluído
+      if (action === "inpaint") {
+        set({ maskInProgress: null });
+      }
       console.log(
         `[EditorAction] success ${action} page=${pageIndex} changed=${result.changed_assets.join(",")}`,
       );
@@ -1720,6 +1767,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       brushColor: "#000000",
       brushOpacity: 1,
       brushHardness: 0.8,
+      maskShape: "freehand",
+      maskOp: "replace",
+      maskInProgress: null,
       dirty: false,
       autoSaveStatus: "idle",
       renderStatus: "idle",

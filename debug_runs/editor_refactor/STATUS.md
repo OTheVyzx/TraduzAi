@@ -170,8 +170,8 @@
 | Fase | Descrição | Status |
 |------|-----------|--------|
 | 7 | Brush Photoshop (cor/opacidade/dureza + BrushOptionsPopover) | ✅ Concluída |
-| 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | 🔲 Próxima |
-| 9 | Borracha inteligente (alvo paint/mask) | 🔲 Pendente |
+| 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | ✅ Concluída |
+| 9 | Borracha inteligente (alvo paint/mask) | 🔲 Próxima |
 | 10 | BITMAP como Layers MVP (drag reorder, opacity, lock, thumbnails) | 🔲 Pendente |
 | 11 | Undo/Redo | 🔲 Pendente |
 | 12 | E2E final + relatório | 🔲 Pendente |
@@ -180,9 +180,43 @@
 
 ## Onde parei
 
-**Próximo passo:** Iniciar **Fase 4 — Reorganização da UI**.
+**Próximo passo:** Iniciar **Fase 9 — Borracha Inteligente**.
 
-### Fase 4 — plano de execução
+---
+
+### ✅ Fase 8 — Máscara Lasso
+**Concluída em:** 2026-05-05
+
+**O que foi feito:**
+- `write_mask_from_png` Rust command: decodifica PNG base64 e escreve/compõe na camada mask com ops replace/add/subtract
+- `base64 = "0.22"` adicionado ao `Cargo.toml`
+- `writeMaskFromPng()` TypeScript binding em `src/lib/tauri.ts`
+- Estado `maskShape`, `maskOp`, `maskInProgress` + setters + `clearMask` adicionados ao `editorStore.ts`
+- `EditorToolMode` expandido com `"mask"`
+- `useEditorStageController.ts`: `commitLasso` rasteriza polígono em offscreen canvas → chama `writeMaskFromPng`; freehand (drag) e polygonal (click-a-click) suportados; Esc cancela, Enter fecha polígono
+- `MaskInProgressOverlay.tsx`: Konva Layer com linha tracejada roxa + bolinhas nos vértices (polygonal)
+- `EditorStage.tsx`: overlay montado por cima de todas as camadas
+- `ToolSidebar.tsx`: ferramenta "M (repairBrush)" substituída por "L (mask)"
+- `Editor.tsx`: atalho L → mask; `MaskLassoControls` contextual com shape/op toggles + botão Limpar
+- `maskInProgress` limpo após inpaint concluído e ao trocar de página
+
+**Arquivos modificados:**
+- `src-tauri/src/commands/project.rs`
+- `src-tauri/src/lib.rs`
+- `src-tauri/Cargo.toml`
+- `src/lib/tauri.ts`
+- `src/lib/stores/editorStore.ts`
+- `src/components/editor/stage/useEditorStageController.ts`
+- `src/components/editor/stage/EditorStage.tsx`
+- `src/components/editor/toolbar/ToolSidebar.tsx`
+- `src/pages/Editor.tsx`
+
+**Arquivos novos:**
+- `src/components/editor/stage/MaskInProgressOverlay.tsx`
+
+---
+
+### Fase 4 — plano de execução (legado)
 1. **TypesettingBar** (`src/components/editor/toolbar/TypesettingBar.tsx`)
    - Migrar Estilo+Efeitos do `PropertyEditor.tsx` para barra horizontal
    - Sub-componentes: `FontSelect`, `SizeStepper`, `ColorChip`, `AlignToggle`, `EffectPopover`

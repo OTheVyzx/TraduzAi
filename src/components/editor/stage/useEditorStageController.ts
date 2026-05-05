@@ -103,6 +103,12 @@ export function useEditorStageController() {
   const recordEditorCommand = useEditorStore((state) => state.recordEditorCommand);
   const createTextLayer = useEditorStore((state) => state.createTextLayer);
   const applyBitmapStroke = useEditorStore((state) => state.applyBitmapStroke);
+  // Fase 8 — Lasso
+  const maskShape = useEditorStore((state) => state.maskShape);
+  const maskOp = useEditorStore((state) => state.maskOp);
+  const maskInProgress = useEditorStore((state) => state.maskInProgress);
+  const setMaskInProgress = useEditorStore((state) => state.setMaskInProgress);
+  const bumpBitmapLayerVersion = useEditorStore((state) => state.bumpBitmapLayerVersion);
 
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [blockDraft, setBlockDraft] = useState<{
@@ -136,11 +142,30 @@ export function useEditorStageController() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== " ") return;
       const active = document.activeElement;
       if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return;
-      event.preventDefault();
-      setIsSpacePressed(true);
+
+      if (event.key === " ") {
+        event.preventDefault();
+        setIsSpacePressed(true);
+        return;
+      }
+
+      // Lasso keyboard shortcuts — lê estado fresco via getState para evitar stale closure
+      const s = useEditorStore.getState();
+      if (s.toolMode === "mask") {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          s.setMaskInProgress(null);
+          return;
+        }
+        // Enter fecha o polígono (equivalente a clicar no primeiro ponto)
+        if (event.key === "Enter" && s.maskShape === "polygonal") {
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent("lasso:commit-polygon"));
+          return;
+        }
+      }
     };
     const handleKeyUp = (event: KeyboardEvent) => {
       if (event.key === " ") setIsSpacePressed(false);
@@ -174,6 +199,21 @@ export function useEditorStageController() {
       window.removeEventListener("mouseup", handleMouseUp);
     };
   }, [panSession, setPan]);
+
+  // Ref para commitLasso mais recente (evita stale closure no event listener)
+  const commitLassoRef = useRef<((pts: Array<[number, number]>) => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    const handleCommitPolygon = () => {
+      const s = useEditorStore.getState();
+      const pts = s.maskInProgress?.points ?? [];
+      if (pts.length >= 3 && commitLassoRef.current) {
+        void commitLassoRef.current(pts);
+      }
+    };
+    window.addEventListener("lasso:commit-polygon", handleCommitPolygon);
+    return () => window.removeEventListener("lasso:commit-polygon", handleCommitPolygon);
+  }, []);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -295,6 +335,31 @@ export function useEditorStageController() {
       selectImageLayer(toolMode === "brush" ? "brush" : "mask");
       setPaintStroke([[point.x, point.y]]);
     }
+
+    if (toolMode === "mask") {
+      const point = pointFromStageEvent(event);
+      if (!point) return;
+      event.cancelBubble = true;
+      selectLayer(null);
+      selectImageLayer("mask");
+
+      if (maskShape === "freehand") {
+        // Inicia traço freehand
+        setMaskInProgress({ points: [[point.x, point.y]] });
+      } else {
+        // Poligonal: adicionar ponto ou fechar se perto do primeiro
+        const existing = maskInProgress?.points ?? [];
+        if (existing.length >= 3) {
+          const [fx, fy] = existing[0];
+          const dist = Math.hypot(point.x - fx, point.y - fy);
+          if (dist < 12) {
+            void commitLasso(existing);
+            return;
+          }
+        }
+        setMaskInProgress({ points: [...existing, [point.x, point.y]] });
+      }
+    }
   };
 
   const handleStageMouseMove = (event: Konva.KonvaEventObject<MouseEvent>) => {
@@ -310,6 +375,14 @@ export function useEditorStageController() {
         if (last && last[0] === point.x && last[1] === point.y) return points;
         return [...points, [point.x, point.y]];
       });
+    }
+
+    // Freehand lasso — decimação mínima de 2px para evitar pontos redundantes
+    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress !== null) {
+      const last = maskInProgress.points[maskInProgress.points.length - 1];
+      if (!last || Math.hypot(point.x - last[0], point.y - last[1]) >= 2) {
+        setMaskInProgress({ points: [...maskInProgress.points, [point.x, point.y]] });
+      }
     }
     // Atualizar posição do cursor circular em modos de pintura
     if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") {
@@ -352,8 +425,61 @@ export function useEditorStageController() {
     });
   };
 
+  // ── Fase 8: Lasso commit ─────────────────────────────────────────────────
+  const commitLasso = async (points: Array<[number, number]>) => {
+    const { project } = (await import("../../../lib/stores/appStore")).useAppStore.getState();
+    const path = project ? (project.output_path ?? project.source_path) : null;
+    if (points.length < 3 || !baseImage.size.width || !baseImage.size.height || !path) {
+      setMaskInProgress(null);
+      return;
+    }
+    const w = baseImage.size.width;
+    const h = baseImage.size.height;
+    const currentPageIndex = useEditorStore.getState().currentPageIndex;
+
+    // Rasterizar polígono em offscreen canvas (espaço da imagem)
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) { setMaskInProgress(null); return; }
+
+    // Se "subtract", apagar (preto no canal alpha); caso contrário, preencher (branco)
+    const isSub = maskOp === "subtract";
+    if (isSub) {
+      ctx.globalCompositeOperation = "source-over";
+    }
+    ctx.fillStyle = isSub ? "#000000" : "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i][0], points[i][1]);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    const pngData = canvas.toDataURL("image/png");
+    setMaskInProgress(null);
+
+    try {
+      const { writeMaskFromPng } = await import("../../../lib/tauri");
+      await writeMaskFromPng({
+        project_path: path,
+        page_index: currentPageIndex,
+        png_data: pngData,
+        layer_key: "mask",
+        op: maskOp,
+      });
+      selectImageLayer("mask");
+      bumpBitmapLayerVersion("mask");
+    } catch (e) {
+      console.error("[Lasso] Falha ao escrever máscara:", e);
+    }
+  };
+
   // Sincronizar ref para evitar stale closure no global mouseup handler
   finishPaintStrokeRef.current = finishPaintStroke;
+  commitLassoRef.current = commitLasso;
 
   // FIX CRÍTICO: commit do stroke quando mouseup ocorre FORA do canvas Konva
   // Sem isso, soltar o mouse fora do <Stage> descarta o stroke silenciosamente.
@@ -378,6 +504,10 @@ export function useEditorStageController() {
     if (paintStroke.length > 0) {
       void finishPaintStroke();
     }
+    // Freehand lasso commit ao soltar o mouse
+    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress && maskInProgress.points.length >= 3) {
+      void commitLasso(maskInProgress.points);
+    }
   };
 
   const handleViewportMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -398,7 +528,7 @@ export function useEditorStageController() {
     ? "grabbing"
     : isSpacePressed
       ? "grab"
-      : toolMode === "block"
+      : toolMode === "block" || toolMode === "mask"
         ? "crosshair"
         : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser"
           ? "none"
@@ -441,5 +571,9 @@ export function useEditorStageController() {
     handleStageMouseEnter,
     handleStageMouseLeave,
     cursorPoint,
+    // Fase 8 — Lasso
+    maskInProgress,
+    maskShape,
+    maskOp,
   };
 }

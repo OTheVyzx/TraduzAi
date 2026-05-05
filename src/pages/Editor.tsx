@@ -36,6 +36,59 @@ const VIEW_MODES = [
 ];
 
 
+/** Controles contextuais da ferramenta Lasso (Fase 8). */
+function MaskLassoControls() {
+  const maskShape = useEditorStore((s) => s.maskShape);
+  const maskOp = useEditorStore((s) => s.maskOp);
+  const setMaskShape = useEditorStore((s) => s.setMaskShape);
+  const setMaskOp = useEditorStore((s) => s.setMaskOp);
+  const clearMask = useEditorStore((s) => s.clearMask);
+
+  return (
+    <div className="flex items-center gap-2">
+      {/* Shape toggle */}
+      <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+        {(["freehand", "polygonal"] as const).map((shape) => (
+          <button
+            key={shape}
+            onClick={() => setMaskShape(shape)}
+            className={`rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+              maskShape === shape ? "bg-accent-cyan/15 text-accent-cyan" : "text-text-muted hover:text-text-primary"
+            }`}
+          >
+            {shape === "freehand" ? "Livre" : "Poligonal"}
+          </button>
+        ))}
+      </div>
+
+      {/* Op toggle */}
+      <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+        {(["replace", "add", "subtract"] as const).map((op) => (
+          <button
+            key={op}
+            onClick={() => setMaskOp(op)}
+            className={`rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+              maskOp === op ? "bg-accent-cyan/15 text-accent-cyan" : "text-text-muted hover:text-text-primary"
+            }`}
+            title={op === "replace" ? "Substituir (padrão)" : op === "add" ? "Adicionar (Shift)" : "Subtrair (Alt)"}
+          >
+            {op === "replace" ? "⊙" : op === "add" ? "+" : "−"}
+          </button>
+        ))}
+      </div>
+
+      {/* Clear mask */}
+      <button
+        onClick={() => void clearMask()}
+        className="flex items-center gap-1 rounded-lg border border-border bg-bg-tertiary/30 px-2 py-1 text-[10px] text-text-muted transition-smooth hover:border-status-error/30 hover:text-status-error"
+        title="Limpar máscara"
+      >
+        Limpar
+      </button>
+    </div>
+  );
+}
+
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   return (
@@ -166,10 +219,13 @@ export function Editor() {
         if (event.key === "2") setViewMode("inpainted");
         if (event.key === "3") setViewMode("translated");
         if (event.key.toLowerCase() === "v") setToolMode("select");
-        if (event.key.toLowerCase() === "b") setToolMode("block");
-        if (event.key.toLowerCase() === "n") setToolMode("brush");
-        if (event.key.toLowerCase() === "m") setToolMode("repairBrush");
+        if (event.key.toLowerCase() === "t") setToolMode("block");
+        if (event.key.toLowerCase() === "b") setToolMode("brush");
         if (event.key.toLowerCase() === "e") setToolMode("eraser");
+        if (event.key.toLowerCase() === "l") setToolMode("mask");
+        // Legacy aliases
+        if (event.key.toLowerCase() === "n") setToolMode("brush");
+        if (event.key.toLowerCase() === "m") setToolMode("mask");
         if (event.key.toLowerCase() === "o") toggleOverlays();
         if (event.key === "=" || event.key === "+") {
           event.preventDefault();
@@ -370,6 +426,8 @@ export function Editor() {
 
           {/* Brush options — contextual quando ferramenta brush ativa (Fase 7: inclui color picker) */}
           {toolMode === "brush" && <BrushOptionsInline />}
+          {/* Máscara Lasso options — Fase 8 */}
+          {toolMode === "mask" && <MaskLassoControls />}
           {/* Brush size simples para repairBrush/eraser */}
           {(toolMode === "repairBrush" || toolMode === "eraser") && (
             <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">

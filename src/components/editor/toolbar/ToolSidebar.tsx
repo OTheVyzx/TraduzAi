@@ -6,11 +6,11 @@
  *
  * Ferramentas:
  *  V  Selecionar
- *  H  Mover/Pan     (placeholder — implementação completa na Fase 7)
+ *  H  Mover/Pan     (placeholder — Space+drag no canvas)
  *  T  Novo bloco    (block)
  *  B  Brush
  *  E  Borracha
- *  M  Máscara/Brush de reparo  (lasso virá na Fase 8)
+ *  L  Máscara Lasso (freehand/poligonal — Fase 8)
  */
 
 import {
@@ -34,7 +34,7 @@ const TOOLS: {
   { key: "block", label: "T", icon: PenTool, hotkey: "T", title: "Novo bloco de texto (T)" },
   { key: "brush", label: "B", icon: Brush, hotkey: "B", title: "Brush (B)" },
   { key: "eraser", label: "E", icon: Eraser, hotkey: "E", title: "Borracha (E)" },
-  { key: "repairBrush", label: "M", icon: Scissors, hotkey: "M", title: "Máscara/Reparo (M)" },
+  { key: "mask", label: "L", icon: Scissors, hotkey: "L", title: "Máscara Lasso (L)" },
 ];
 
 // Ferramenta "Hand/Pan" — mapeada para select até termos o modo pan dedicado (Fase 7)

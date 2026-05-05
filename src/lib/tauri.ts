@@ -703,6 +703,17 @@ export async function updateBrushRegion(config: {
   return invoke("update_brush_region", { config });
 }
 
+export async function writeMaskFromPng(config: {
+  project_path: string;
+  page_index: number;
+  png_data: string;
+  layer_key: string;
+  op: "replace" | "add" | "subtract";
+}): Promise<string> {
+  if (isE2E()) return "";
+  return invoke("write_mask_from_png", { config });
+}
+
 // Context lookup
 export async function searchAnilist(query: string): Promise<{
   title: string;

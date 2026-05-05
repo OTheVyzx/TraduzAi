@@ -1,6 +1,7 @@
 use crate::commands::project_schema;
 use crate::export::psd::engine_data::{TextEngineSpec, TextJustification, TextOrientation};
 use crate::export::psd::{export_psd, PsdLayer};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
 use image::{open, GrayImage, ImageBuffer, ImageReader, Luma, RgbaImage};
 use serde::{Deserialize, Serialize};
@@ -516,6 +517,109 @@ pub async fn update_mask_region(config: BitmapLayerUpdateConfig) -> Result<Strin
 #[tauri::command]
 pub async fn update_brush_region(config: BitmapLayerUpdateConfig) -> Result<String, String> {
     update_bitmap_layer(config, "brush")
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WriteMaskFromPngConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    /// PNG em base64 (com ou sem prefixo data:image/png;base64,)
+    pub png_data: String,
+    /// "mask" ou "brush"
+    pub layer_key: String,
+    /// Operação: "replace" (substitui), "add" (max), "subtract" (min do inverso).
+    /// Para compatibilidade: se ausente, usa compose=true → "add", compose=false → "replace".
+    #[serde(default)]
+    pub op: String,
+    /// Legado — use op em vez disso.
+    #[serde(default)]
+    pub compose: bool,
+}
+
+/// Escreve uma imagem PNG (passada como base64) diretamente na camada mask/brush da página.
+/// Usado pelo lasso tool (Fase 8) para polygon fill.
+#[tauri::command]
+pub async fn write_mask_from_png(config: WriteMaskFromPngConfig) -> Result<String, String> {
+    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let layer_key = config.layer_key.as_str();
+
+    // Obtém (ou cria) o path relativo da camada
+    let relative_layer_path =
+        project_schema::ensure_bitmap_layer_path(&mut project, config.page_index, layer_key)?;
+    let absolute_layer_path = project_dir.join(&relative_layer_path);
+    if let Some(parent) = absolute_layer_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Erro ao criar diretório: {e}"))?;
+    }
+
+    // Decodificar base64
+    let b64 = config
+        .png_data
+        .trim_start_matches("data:image/png;base64,")
+        .trim_start_matches("data:image/webp;base64,");
+    let png_bytes = BASE64.decode(b64).map_err(|e| format!("Base64 inválido: {e}"))?;
+
+    // Resolver op: campo "op" tem prioridade; senão interpreta "compose"
+    let effective_op = if !config.op.is_empty() {
+        config.op.as_str()
+    } else if config.compose {
+        "add"
+    } else {
+        "replace"
+    };
+
+    if (effective_op == "add" || effective_op == "subtract") && absolute_layer_path.exists() {
+        let existing = image::load_from_memory(
+            &std::fs::read(&absolute_layer_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?
+        .into_luma8();
+
+        let incoming = image::load_from_memory(&png_bytes)
+            .map_err(|e| e.to_string())?
+            .into_luma8();
+
+        let (w, h) = (existing.width(), existing.height());
+        let mut composed = existing.clone();
+        for y in 0..h.min(incoming.height()) {
+            for x in 0..w.min(incoming.width()) {
+                let ev = existing.get_pixel(x, y)[0];
+                let iv = incoming.get_pixel(x, y)[0];
+                let result = if effective_op == "add" {
+                    ev.max(iv) // union
+                } else {
+                    // subtract: apaga pixels onde incoming é branco
+                    if iv > 127 { 0u8 } else { ev }
+                };
+                composed.put_pixel(x, y, Luma([result]));
+            }
+        }
+        composed
+            .save(&absolute_layer_path)
+            .map_err(|e| format!("Erro ao salvar máscara composta: {e}"))?;
+    } else {
+        // replace (ou arquivo não existe): escrita direta
+        std::fs::write(&absolute_layer_path, &png_bytes)
+            .map_err(|e| format!("Erro ao escrever PNG: {e}"))?;
+    }
+
+    // Atualizar visibilidade no project.json
+    project_schema::set_layer_visibility(
+        &mut project,
+        config.page_index,
+        "image",
+        Some(layer_key),
+        None,
+        true,
+    )?;
+    save_project_after_edit(&project_file, &mut project)?;
+
+    Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
 }
 
 #[derive(Debug, Deserialize)]
