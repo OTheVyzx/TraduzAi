@@ -1,0 +1,18 @@
+{
+  "run": {
+    "obra": "",
+    "capitulo": 1,
+    "idioma_origem": "en",
+    "idioma_destino": "pt",
+    "total_paginas": 1,
+    "total_textos": 0
+  },
+  "summary": {
+    "total_decisions": 0,
+    "by_stage": {},
+    "by_action": {},
+    "by_reason": {}
+  },
+  "flagged_pages": [],
+  "entries_preview": []
+}

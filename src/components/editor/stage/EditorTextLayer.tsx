@@ -29,9 +29,11 @@ export function EditorTextLayer({
   onHover: (hovered: boolean) => void;
   onCommitBbox: (before: TextEntry["bbox"], after: TextEntry["bbox"]) => void;
 }) {
+  // IMPORTANTE: nenhum return condicional entre hooks — todos os hooks antes
+  // do early-return de visibility, senão React quebra com "Rendered fewer
+  // hooks than expected" e o canvas pisca.
   const textRef = useRef<Konva.Text>(null);
   const [, bumpFontVersion] = useState(0);
-  if (entry.visible === false) return null;
 
   const bbox = entry.layout_bbox ?? entry.bbox;
   const rect = bboxToRect(bbox);
@@ -54,6 +56,9 @@ export function EditorTextLayer({
       cancelled = true;
     };
   }, [fontFamily, style.tamanho]);
+
+  // Early-return só DEPOIS de todos os hooks
+  if (entry.visible === false) return null;
 
   const commitGroupBbox = (node: Konva.Group) => {
     const next = rectToBbox({
@@ -102,13 +107,13 @@ export function EditorTextLayer({
         width={rect.width}
         height={rect.height}
         cornerRadius={12}
-        fill={selected ? "rgba(124, 92, 255, 0.08)" : hovered ? "rgba(124, 92, 255, 0.05)" : "rgba(0,0,0,0)"}
+        fill={selected ? "rgba(108, 92, 231, 0.08)" : hovered ? "rgba(108, 92, 231, 0.05)" : "rgba(0,0,0,0)"}
         stroke={
           showFrame
             ? selected
-              ? "rgba(124, 92, 255, 0.95)"
+              ? "rgba(108, 92, 231, 0.95)"
               : hovered
-                ? "rgba(124, 92, 255, 0.55)"
+                ? "rgba(108, 92, 231, 0.55)"
                 : "rgba(255, 255, 255, 0.18)"
             : "rgba(0,0,0,0)"
         }

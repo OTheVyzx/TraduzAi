@@ -18,7 +18,7 @@ export function EditorPaintCursor({ x, y, radius, toolMode }: Props) {
       ? "rgba(72, 176, 255, 0.9)"
       : toolMode === "eraser"
         ? "rgba(255, 255, 255, 0.75)"
-        : "rgba(124, 92, 255, 0.9)";
+        : "rgba(108, 92, 231, 0.9)";
 
   return (
     <Circle

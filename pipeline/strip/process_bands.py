@@ -34,21 +34,54 @@ def _band_to_page_dict(band: Band, page_idx: int) -> dict:
 def _apply_copy_back_outside_balloons(
     band: Band,
     balloon_margin: int = 8,
+    ocr_page: dict | None = None,
 ) -> np.ndarray:
-    """Copy-back defensivo: preserva pixels fora dos balões da banda."""
+    """Copy-back defensivo: preserva pixels fora dos balões da banda.
+
+    A máscara é a UNIÃO de:
+      1. strip_bbox de cada balão (bbox do detector, em coords absolutas)
+      2. balloon_bbox de cada texto no ocr_page (pode ser expandida por
+         enrich_page_layout para cobrir a área branca real do balão)
+
+    Sem a segunda fonte, texto renderizado na área expandida do balão seria
+    sobrescrito pelo original, causando clipping visual nas bordas.
+    """
     if band.original_slice is None or band.rendered_slice is None:
         raise ValueError("Band precisa de original_slice e rendered_slice")
 
     h, w = band.original_slice.shape[:2]
     mask_inside = np.zeros((h, w), dtype=bool)
 
+    def _mark(x1: int, y1: int, x2: int, y2: int) -> None:
+        bx1 = max(0, x1)
+        by1 = max(0, y1)
+        bx2 = min(w, x2)
+        by2 = min(h, y2)
+        if bx2 > bx1 and by2 > by1:
+            mask_inside[by1:by2, bx1:bx2] = True
+
+    # 1. Detector bbox (coords absolutas → band-local)
     for balloon in band.balloons:
-        x1 = max(0, balloon.strip_bbox.x1 - balloon_margin)
-        y1 = max(0, balloon.strip_bbox.y1 - band.y_top - balloon_margin)
-        x2 = min(w, balloon.strip_bbox.x2 + balloon_margin)
-        y2 = min(h, balloon.strip_bbox.y2 - band.y_top + balloon_margin)
-        if x2 > x1 and y2 > y1:
-            mask_inside[y1:y2, x1:x2] = True
+        _mark(
+            balloon.strip_bbox.x1 - balloon_margin,
+            balloon.strip_bbox.y1 - band.y_top - balloon_margin,
+            balloon.strip_bbox.x2 + balloon_margin,
+            balloon.strip_bbox.y2 - band.y_top + balloon_margin,
+        )
+
+    # 2. balloon_bbox das camadas de texto (já em coords band-local)
+    if ocr_page:
+        for txt in ocr_page.get("texts", []):
+            bbox = txt.get("balloon_bbox") or txt.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            bx1, by1, bx2, by2 = [int(v) for v in bbox]
+            _mark(
+                bx1 - balloon_margin,
+                by1 - balloon_margin,
+                bx2 + balloon_margin,
+                by2 + balloon_margin,
+            )
 
     result = np.where(
         mask_inside[:, :, None],
@@ -183,6 +216,6 @@ def process_band(
 
     band.cleaned_slice = cleaned
     band.rendered_slice = rendered
-    band.rendered_slice = _apply_copy_back_outside_balloons(band)
+    band.rendered_slice = _apply_copy_back_outside_balloons(band, ocr_page=translated_page)
     band.ocr_result = translated_page
     return band

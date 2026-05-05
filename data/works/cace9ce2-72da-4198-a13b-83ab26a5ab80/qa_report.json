@@ -1,0 +1,3164 @@
+{
+  "run": {
+    "obra": "Reincarnated Murim Lord",
+    "capitulo": 113,
+    "idioma_origem": "ko",
+    "idioma_destino": "pt",
+    "total_paginas": 60,
+    "total_textos": 47
+  },
+  "summary": {
+    "total_decisions": 349,
+    "by_stage": {
+      "ocr": 210,
+      "translate": 92,
+      "layout": 47
+    },
+    "by_action": {
+      "classify_page_profile": 92,
+      "drop_block": 45,
+      "select_backend": 92,
+      "classify_block_profile": 26,
+      "accept_block": 47,
+      "assign_balloon_bbox": 47
+    },
+    "by_reason": {
+      "standard": 92,
+      "punctuation_only": 9,
+      "ollama": 92,
+      "suspicious_low_confidence": 19,
+      "textured_sfx_or_noise": 14,
+      "white_balloon": 26,
+      "ready_for_layout": 47,
+      "refined_same_as_cluster": 47,
+      "empty_after_cleanup": 3
+    }
+  },
+  "flagged_pages": [],
+  "entries_preview": [
+    {
+      "ts": "2026-05-03T22:45:49.341108+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_1"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:49.342102+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "punctuation_only",
+      "layer": "ocr_001",
+      "text": "- --+",
+      "bbox": [
+        132,
+        16,
+        588,
+        637
+      ]
+    },
+    {
+      "ts": "2026-05-03T22:45:49.817123+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:50.293403+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_2"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:50.296428+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "ii3 -",
+      "bbox": [
+        290,
+        16,
+        400,
+        52
+      ],
+      "details": {
+        "confidence": 0.455,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:50.301935+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:50.565778+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_3"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:50.565778+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "punctuation_only",
+      "layer": "ocr_001",
+      "text": "......",
+      "bbox": [
+        192,
+        16,
+        261,
+        32
+      ]
+    },
+    {
+      "ts": "2026-05-03T22:45:50.593898+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.002981+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_4"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.010518+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "Grot",
+      "bbox": [
+        336,
+        16,
+        466,
+        106
+      ],
+      "details": {
+        "confidence": 0.788,
+        "tipo": "fala",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.030141+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.748761+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_5"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.764472+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "도저히 생문을 찾을 수가 없다",
+      "bbox": [
+        112,
+        16,
+        394,
+        187
+      ],
+      "details": {
+        "confidence": 0.958,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.777554+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "도저히 생문을 찾을 수가 없다",
+      "bbox": [
+        112,
+        16,
+        394,
+        187
+      ],
+      "details": {
+        "confidence": 0.958,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.777554+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "도저히 생문을 찾을 수가 없다",
+      "bbox": [
+        112,
+        16,
+        394,
+        187
+      ],
+      "details": {
+        "source_bbox": [
+          112,
+          16,
+          394,
+          187
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:45:51.782220+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:06.305209+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_6"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:06.316795+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "진법은 이 갈사량의 짓이 분명합니다",
+      "bbox": [
+        200,
+        16,
+        426,
+        181
+      ],
+      "details": {
+        "confidence": 0.935,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:06.331890+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "진법은 이 갈사량의 짓이 분명합니다",
+      "bbox": [
+        200,
+        16,
+        426,
+        181
+      ],
+      "details": {
+        "confidence": 0.935,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:06.332396+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "진법은 이 갈사량의 짓이 분명합니다",
+      "bbox": [
+        200,
+        16,
+        426,
+        181
+      ],
+      "details": {
+        "source_bbox": [
+          200,
+          16,
+          426,
+          181
+        ],
+        "layout_shape": "square",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:06.358978+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.319740+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_7"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.320239+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "장o",
+      "bbox": [
+        560,
+        16,
+        674,
+        112
+      ],
+      "details": {
+        "confidence": 0.426,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.325259+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.615298+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_8"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.617817+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "남하",
+      "bbox": [
+        165,
+        16,
+        298,
+        128
+      ],
+      "details": {
+        "confidence": 0.767,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.618830+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "남하",
+      "bbox": [
+        165,
+        16,
+        298,
+        128
+      ],
+      "details": {
+        "source_bbox": [
+          165,
+          16,
+          298,
+          128
+        ],
+        "layout_shape": "square",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:10.622846+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:12.904107+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_9"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:12.908635+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "그렇겠지",
+      "bbox": [
+        157,
+        16,
+        344,
+        69
+      ],
+      "details": {
+        "confidence": 0.714,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:12.913156+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "그렇겠지",
+      "bbox": [
+        157,
+        16,
+        344,
+        69
+      ],
+      "details": {
+        "confidence": 0.714,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:12.914159+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "그렇겠지",
+      "bbox": [
+        157,
+        16,
+        344,
+        69
+      ],
+      "details": {
+        "source_bbox": [
+          157,
+          16,
+          344,
+          69
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:12.919176+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:14.670266+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_10"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:14.676313+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "상TCH를 잘못 골랐다",
+      "bbox": [
+        246,
+        16,
+        574,
+        69
+      ],
+      "details": {
+        "confidence": 0.862,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:14.684359+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "상TCH를 잘못 골랐다",
+      "bbox": [
+        246,
+        16,
+        574,
+        69
+      ],
+      "details": {
+        "confidence": 0.862,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:14.684864+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "상TCH를 잘못 골랐다",
+      "bbox": [
+        246,
+        16,
+        574,
+        69
+      ],
+      "details": {
+        "source_bbox": [
+          246,
+          16,
+          574,
+          69
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:14.700462+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:17.280155+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_11"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:17.291734+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "그동안 일을 수많은 해왔지만",
+      "bbox": [
+        193,
+        16,
+        385,
+        187
+      ],
+      "details": {
+        "confidence": 0.926,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:17.303306+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "그동안 일을 수많은 해왔지만",
+      "bbox": [
+        193,
+        16,
+        385,
+        187
+      ],
+      "details": {
+        "confidence": 0.926,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:17.303306+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "그동안 일을 수많은 해왔지만",
+      "bbox": [
+        193,
+        16,
+        385,
+        187
+      ],
+      "details": {
+        "source_bbox": [
+          193,
+          16,
+          385,
+          187
+        ],
+        "layout_shape": "square",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:17.307826+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:20.798461+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_12"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:20.801476+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "부들",
+      "bbox": [
+        92,
+        16,
+        249,
+        160
+      ],
+      "details": {
+        "confidence": 0.657,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:20.801977+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "부들",
+      "bbox": [
+        92,
+        16,
+        249,
+        160
+      ],
+      "details": {
+        "source_bbox": [
+          92,
+          16,
+          249,
+          160
+        ],
+        "layout_shape": "square",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:20.826574+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.423607+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_13"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.425123+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "부를",
+      "bbox": [
+        518,
+        16,
+        665,
+        160
+      ],
+      "details": {
+        "confidence": 0.289,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.450854+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.938557+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_14"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.950630+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "이렇게 무기력하고 건 공포스러운 처음이구나",
+      "bbox": [
+        204,
+        16,
+        510,
+        187
+      ],
+      "details": {
+        "confidence": 0.951,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.963713+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "이렇게 무기력하고 건 공포스러운 처음이구나",
+      "bbox": [
+        204,
+        16,
+        510,
+        187
+      ],
+      "details": {
+        "confidence": 0.951,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.964214+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "이렇게 무기력하고 건 공포스러운 처음이구나",
+      "bbox": [
+        204,
+        16,
+        510,
+        187
+      ],
+      "details": {
+        "source_bbox": [
+          204,
+          16,
+          510,
+          187
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:22.968727+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:26.589115+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_15"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:26.611748+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "내가 것을 알면 된 꼴이 이 백석 놈이 그 좋아하겠군 ER지간히",
+      "bbox": [
+        120,
+        16,
+        461,
+        240
+      ],
+      "details": {
+        "confidence": 0.89,
+        "tipo": "sfx",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:26.636364+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.279978+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_16"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.295587+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "말씀을 I그런 왜 하십니까?",
+      "bbox": [
+        108,
+        16,
+        406,
+        144
+      ],
+      "details": {
+        "confidence": 0.922,
+        "tipo": "sfx",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.322534+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.842242+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_17"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.855842+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "이제는 모든 게 끝인 같군 것",
+      "bbox": [
+        228,
+        16,
+        558,
+        155
+      ],
+      "details": {
+        "confidence": 0.914,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.857351+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "이제는 모든 게 끝인 같군 것",
+      "bbox": [
+        228,
+        16,
+        558,
+        155
+      ],
+      "details": {
+        "source_bbox": [
+          228,
+          16,
+          558,
+          155
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:27.861350+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:30.634500+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_18"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:30.642037+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "그런 말씀하지마십시오",
+      "bbox": [
+        148,
+        16,
+        537,
+        67
+      ],
+      "details": {
+        "confidence": 0.262,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:30.671143+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:31.400095+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_19"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:31.415161+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "북명TCH를 믿으십시오 올 우LL를 겁니다 구하러",
+      "bbox": [
+        134,
+        16,
+        542,
+        123
+      ],
+      "details": {
+        "confidence": 0.864,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:31.415667+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "북명TCH를 믿으십시오 올 우LL를 겁니다 구하러",
+      "bbox": [
+        134,
+        16,
+        542,
+        123
+      ],
+      "details": {
+        "source_bbox": [
+          134,
+          16,
+          542,
+          123
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:31.438273+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:33.976322+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_20"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:33.984354+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "과연 그럴까?",
+      "bbox": [
+        130,
+        16,
+        394,
+        75
+      ],
+      "details": {
+        "confidence": 0.704,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:33.985866+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "과연 그럴까?",
+      "bbox": [
+        130,
+        16,
+        394,
+        75
+      ],
+      "details": {
+        "source_bbox": [
+          130,
+          16,
+          394,
+          75
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:34.006589+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.251310+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_21"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.257372+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "아시잖습니까?",
+      "bbox": [
+        185,
+        16,
+        433,
+        67
+      ],
+      "details": {
+        "confidence": 0.437,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.275216+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.672230+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_22"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.685797+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "북명TCH는 무적입니다",
+      "bbox": [
+        212,
+        16,
+        481,
+        171
+      ],
+      "details": {
+        "confidence": 0.878,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.702415+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "북명TCH는 무적입니다",
+      "bbox": [
+        212,
+        16,
+        481,
+        171
+      ],
+      "details": {
+        "confidence": 0.878,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.702918+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "북명TCH는 무적입니다",
+      "bbox": [
+        212,
+        16,
+        481,
+        171
+      ],
+      "details": {
+        "source_bbox": [
+          212,
+          16,
+          481,
+          171
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:36.728532+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:39.882228+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_23"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:39.894297+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "북명검진四集無葉을 펼쳐라!",
+      "bbox": [
+        133,
+        16,
+        597,
+        153
+      ],
+      "details": {
+        "confidence": 0.702,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:39.908860+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "북명검진四集無葉을 펼쳐라!",
+      "bbox": [
+        133,
+        16,
+        597,
+        153
+      ],
+      "details": {
+        "confidence": 0.702,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:39.909363+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "북명검진四集無葉을 펼쳐라!",
+      "bbox": [
+        133,
+        16,
+        597,
+        153
+      ],
+      "details": {
+        "source_bbox": [
+          133,
+          16,
+          597,
+          153
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:39.929946+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.033323+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_24"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.036333+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "그",
+      "bbox": [
+        262,
+        16,
+        673,
+        339
+      ],
+      "details": {
+        "confidence": 0.46,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.065499+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.410215+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_25"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.413740+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "북명검진",
+      "bbox": [
+        464,
+        16,
+        608,
+        64
+      ],
+      "details": {
+        "confidence": 0.861,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.418775+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "북명검진",
+      "bbox": [
+        464,
+        16,
+        608,
+        64
+      ],
+      "details": {
+        "confidence": 0.861,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.418775+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "북명검진",
+      "bbox": [
+        464,
+        16,
+        608,
+        64
+      ],
+      "details": {
+        "source_bbox": [
+          464,
+          16,
+          608,
+          64
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:46.441367+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:50.251583+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_26"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:50.256607+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "걸었구나 목숨을",
+      "bbox": [
+        238,
+        16,
+        518,
+        67
+      ],
+      "details": {
+        "confidence": 0.776,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:50.263135+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "걸었구나 목숨을",
+      "bbox": [
+        238,
+        16,
+        518,
+        67
+      ],
+      "details": {
+        "confidence": 0.776,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:50.264138+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "걸었구나 목숨을",
+      "bbox": [
+        238,
+        16,
+        518,
+        67
+      ],
+      "details": {
+        "source_bbox": [
+          238,
+          16,
+          518,
+          67
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:50.268642+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:52.999864+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_27"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.000371+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "empty_after_cleanup",
+      "layer": "ocr_001",
+      "bbox": [
+        416,
+        16,
+        634,
+        443
+      ]
+    },
+    {
+      "ts": "2026-05-03T22:46:53.004324+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.356900+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_28"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.365841+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "죽여라!",
+      "bbox": [
+        245,
+        16,
+        472,
+        104
+      ],
+      "details": {
+        "confidence": 0.492,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.370334+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.705922+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_29"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.708441+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "DE",
+      "bbox": [
+        592,
+        16,
+        672,
+        77
+      ],
+      "details": {
+        "confidence": 0.693,
+        "tipo": "fala",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:53.712961+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.274465+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_30"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.275470+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "punctuation_only",
+      "layer": "ocr_001",
+      "text": "-",
+      "bbox": [
+        390,
+        16,
+        662,
+        666
+      ]
+    },
+    {
+      "ts": "2026-05-03T22:46:54.300576+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.418549+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_31"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.424598+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "울ER라",
+      "bbox": [
+        417,
+        16,
+        540,
+        69
+      ],
+      "details": {
+        "confidence": 0.862,
+        "tipo": "sfx",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.442158+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.554589+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_32"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.566680+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "수라명왕검",
+      "bbox": [
+        94,
+        16,
+        401,
+        91
+      ],
+      "details": {
+        "confidence": 0.773,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.567179+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "수라명왕검",
+      "bbox": [
+        94,
+        16,
+        401,
+        91
+      ],
+      "details": {
+        "source_bbox": [
+          94,
+          16,
+          401,
+          91
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:54.572539+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.593366+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_33"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.598881+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "이",
+      "bbox": [
+        358,
+        16,
+        628,
+        839
+      ],
+      "details": {
+        "confidence": 0.523,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.604525+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.934839+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_34"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.938357+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "삼초식 제 -",
+      "bbox": [
+        81,
+        16,
+        241,
+        67
+      ],
+      "details": {
+        "confidence": 0.926,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.942880+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "삼초식 제 -",
+      "bbox": [
+        81,
+        16,
+        241,
+        67
+      ],
+      "details": {
+        "confidence": 0.926,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.943885+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "삼초식 제 -",
+      "bbox": [
+        81,
+        16,
+        241,
+        67
+      ],
+      "details": {
+        "source_bbox": [
+          81,
+          16,
+          241,
+          67
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:46:57.960941+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:01.713005+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_35"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:01.722550+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "투극인",
+      "bbox": [
+        513,
+        16,
+        574,
+        286
+      ],
+      "details": {
+        "confidence": 0.944,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:01.723554+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "투극인",
+      "bbox": [
+        513,
+        16,
+        574,
+        286
+      ],
+      "details": {
+        "source_bbox": [
+          513,
+          16,
+          574,
+          286
+        ],
+        "layout_shape": "tall",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:01.727981+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.302579+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_36"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.303584+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "empty_after_cleanup",
+      "layer": "ocr_001",
+      "bbox": [
+        558,
+        16,
+        598,
+        45
+      ]
+    },
+    {
+      "ts": "2026-05-03T22:47:05.307603+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.656956+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_37"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.666321+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "크아아악!!",
+      "bbox": [
+        218,
+        16,
+        576,
+        109
+      ],
+      "details": {
+        "confidence": 0.647,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.677397+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "크아아악!!",
+      "bbox": [
+        218,
+        16,
+        576,
+        109
+      ],
+      "details": {
+        "confidence": 0.647,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.677397+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "크아아악!!",
+      "bbox": [
+        218,
+        16,
+        576,
+        109
+      ],
+      "details": {
+        "source_bbox": [
+          218,
+          16,
+          576,
+          109
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:05.704043+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:08.681132+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_38"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:08.689693+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "뭐냐 저괴물은 도TCH체",
+      "bbox": [
+        210,
+        16,
+        570,
+        143
+      ],
+      "details": {
+        "confidence": 0.871,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:08.703259+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "뭐냐 저괴물은 도TCH체",
+      "bbox": [
+        210,
+        16,
+        570,
+        143
+      ],
+      "details": {
+        "confidence": 0.871,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:08.703259+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "뭐냐 저괴물은 도TCH체",
+      "bbox": [
+        210,
+        16,
+        570,
+        143
+      ],
+      "details": {
+        "source_bbox": [
+          210,
+          16,
+          570,
+          143
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:08.708269+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:13.198744+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_39"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:13.207814+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "내공을 너무 소모했다",
+      "bbox": [
+        148,
+        16,
+        390,
+        126
+      ],
+      "details": {
+        "confidence": 0.934,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:13.216421+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "내공을 너무 소모했다",
+      "bbox": [
+        148,
+        16,
+        390,
+        126
+      ],
+      "details": {
+        "confidence": 0.934,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:13.217425+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "내공을 너무 소모했다",
+      "bbox": [
+        148,
+        16,
+        390,
+        126
+      ],
+      "details": {
+        "source_bbox": [
+          148,
+          16,
+          390,
+          126
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:13.221995+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.202706+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_40"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.213775+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "한번에 해 처LL해",
+      "bbox": [
+        252,
+        16,
+        524,
+        167
+      ],
+      "details": {
+        "confidence": 0.936,
+        "tipo": "sfx",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.218334+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.395406+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_41"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.395406+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "punctuation_only",
+      "layer": "ocr_001",
+      "text": "-:",
+      "bbox": [
+        176,
+        16,
+        280,
+        160
+      ]
+    },
+    {
+      "ts": "2026-05-03T22:47:16.400428+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.737290+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_42"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.745357+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "흐아아아아!!!",
+      "bbox": [
+        116,
+        16,
+        436,
+        88
+      ],
+      "details": {
+        "confidence": 0.425,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.749869+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.886468+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_43"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.897020+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "Hfor",
+      "bbox": [
+        392,
+        16,
+        626,
+        176
+      ],
+      "details": {
+        "confidence": 0.854,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.911117+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "Hfor",
+      "bbox": [
+        392,
+        16,
+        626,
+        176
+      ],
+      "details": {
+        "confidence": 0.854,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.918148+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "Hfor",
+      "bbox": [
+        392,
+        16,
+        626,
+        176
+      ],
+      "details": {
+        "source_bbox": [
+          392,
+          16,
+          626,
+          176
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:16.948744+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:20.532141+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_44"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:20.536675+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "이하하+",
+      "bbox": [
+        49,
+        16,
+        284,
+        186
+      ],
+      "details": {
+        "confidence": 0.741,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:20.536675+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "이하하+",
+      "bbox": [
+        49,
+        16,
+        284,
+        186
+      ],
+      "details": {
+        "source_bbox": [
+          49,
+          16,
+          284,
+          186
+        ],
+        "layout_shape": "square",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:20.541192+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:25.473024+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_45"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:25.476049+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "O-",
+      "bbox": [
+        480,
+        16,
+        653,
+        486
+      ],
+      "details": {
+        "confidence": 0.287,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:25.504708+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:26.531166+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_46"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:26.541249+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "후",
+      "bbox": [
+        56,
+        16,
+        258,
+        180
+      ],
+      "details": {
+        "confidence": 0.538,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:26.541756+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "후",
+      "bbox": [
+        56,
+        16,
+        258,
+        180
+      ],
+      "details": {
+        "confidence": 0.538,
+        "threshold": 0.55,
+        "block_profile": "white_balloon",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:26.570895+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:27.612101+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_47"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:27.613613+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "우",
+      "bbox": [
+        452,
+        16,
+        660,
+        154
+      ],
+      "details": {
+        "confidence": 0.425,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:27.642242+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.272671+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_48"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.285756+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "TCH체 무슨 무공이냐? 그건",
+      "bbox": [
+        122,
+        16,
+        464,
+        125
+      ],
+      "details": {
+        "confidence": 0.607,
+        "tipo": "sfx",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.313873+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.693985+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_49"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.704045+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "추혼수라검술",
+      "bbox": [
+        265,
+        16,
+        609,
+        92
+      ],
+      "details": {
+        "confidence": 0.766,
+        "tipo": "sfx",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.704045+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "추혼수라검술",
+      "bbox": [
+        265,
+        16,
+        609,
+        92
+      ],
+      "details": {
+        "source_bbox": [
+          265,
+          16,
+          609,
+          92
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:28.721477+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:32.112941+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_50"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:32.119979+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "뭐?!",
+      "bbox": [
+        109,
+        16,
+        277,
+        88
+      ],
+      "details": {
+        "confidence": 0.94,
+        "tipo": "sfx",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:32.128043+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "뭐?!",
+      "bbox": [
+        109,
+        16,
+        277,
+        88
+      ],
+      "details": {
+        "confidence": 0.94,
+        "tipo": "sfx",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:32.128550+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "뭐?!",
+      "bbox": [
+        109,
+        16,
+        277,
+        88
+      ],
+      "details": {
+        "source_bbox": [
+          109,
+          16,
+          277,
+          88
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:32.152593+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:33.070005+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_51"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:33.074030+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "그건!!",
+      "bbox": [
+        198,
+        16,
+        342,
+        69
+      ],
+      "details": {
+        "confidence": 0.477,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:33.078541+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:34.280344+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_52"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:34.282355+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "Bt는 쿄 ++로 'E: I we는 품학: 원복 \"R!: k Lez",
+      "bbox": [
+        204,
+        16,
+        585,
+        92
+      ],
+      "details": {
+        "confidence": 0.291,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:34.287385+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "ko",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:34.646121+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_53"
+      }
+    },
+    {
+      "ts": "2026-05-03T22:47:34.649647+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "goh",
+      "bbox": [
+        453,
+        16,
+        653,
+        130
+      ],
+      "details": {
+        "confidence": 0.59,
+        "tipo": "fala",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    }
+  ]
+}

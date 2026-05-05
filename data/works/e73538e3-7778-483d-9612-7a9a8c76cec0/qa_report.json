@@ -1,0 +1,574 @@
+{
+  "run": {
+    "obra": "",
+    "capitulo": 1,
+    "idioma_origem": "en",
+    "idioma_destino": "pt",
+    "total_paginas": 1,
+    "total_textos": 5
+  },
+  "summary": {
+    "total_decisions": 32,
+    "by_stage": {
+      "ocr": 20,
+      "translate": 7,
+      "layout": 5
+    },
+    "by_action": {
+      "classify_page_profile": 7,
+      "drop_block": 3,
+      "select_backend": 7,
+      "classify_block_profile": 5,
+      "accept_block": 5,
+      "assign_balloon_bbox": 5
+    },
+    "by_reason": {
+      "standard": 7,
+      "textured_sfx_or_noise": 1,
+      "ollama": 7,
+      "white_balloon": 3,
+      "ready_for_layout": 5,
+      "refined_from_image": 4,
+      "top_narration": 2,
+      "refined_same_as_cluster": 1,
+      "suspicious_low_confidence": 2
+    }
+  },
+  "flagged_pages": [],
+  "entries_preview": [
+    {
+      "ts": "2026-05-04T13:51:29.088570+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_1"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:29.102794+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "textured_sfx_or_noise",
+      "layer": "ocr_001",
+      "text": "A",
+      "bbox": [
+        546,
+        16,
+        701,
+        168
+      ],
+      "details": {
+        "confidence": 0.871,
+        "tipo": "fala",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:29.717694+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:30.241028+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_2"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:30.262902+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+      "bbox": [
+        172,
+        16,
+        545,
+        205
+      ],
+      "details": {
+        "confidence": 0.959,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:30.284109+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+      "bbox": [
+        172,
+        16,
+        545,
+        205
+      ],
+      "details": {
+        "confidence": 0.959,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:30.288134+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+      "bbox": [
+        0,
+        0,
+        572,
+        221
+      ],
+      "details": {
+        "source_bbox": [
+          172,
+          16,
+          545,
+          205
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:30.327462+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:49.002653+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_3"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:49.011691+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+      "bbox": [
+        74,
+        16,
+        376,
+        112
+      ],
+      "details": {
+        "confidence": 0.917,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:49.021731+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+      "bbox": [
+        74,
+        16,
+        376,
+        112
+      ],
+      "details": {
+        "confidence": 0.917,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:49.024245+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+      "bbox": [
+        38,
+        0,
+        424,
+        128
+      ],
+      "details": {
+        "source_bbox": [
+          74,
+          16,
+          376,
+          112
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:49.045440+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:51.449480+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_4"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:51.463052+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+      "bbox": [
+        204,
+        16,
+        484,
+        219
+      ],
+      "details": {
+        "confidence": 0.945,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:51.478120+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+      "bbox": [
+        204,
+        16,
+        484,
+        219
+      ],
+      "details": {
+        "confidence": 0.945,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:51.482642+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+      "bbox": [
+        149,
+        0,
+        545,
+        235
+      ],
+      "details": {
+        "source_bbox": [
+          204,
+          16,
+          484,
+          219
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:51.514098+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:53.933152+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_5"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:53.945722+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+      "bbox": [
+        180,
+        16,
+        540,
+        166
+      ],
+      "details": {
+        "confidence": 0.958,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:53.961049+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+      "bbox": [
+        180,
+        16,
+        540,
+        166
+      ],
+      "details": {
+        "confidence": 0.958,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:53.964234+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+      "bbox": [
+        0,
+        0,
+        590,
+        182
+      ],
+      "details": {
+        "source_bbox": [
+          180,
+          16,
+          540,
+          166
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:53.988489+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:56.884659+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_6"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:56.896211+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+      "bbox": [
+        82,
+        16,
+        624,
+        304
+      ],
+      "details": {
+        "confidence": 0.861,
+        "tipo": "fala",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:56.901740+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+      "bbox": [
+        82,
+        16,
+        624,
+        304
+      ],
+      "details": {
+        "source_bbox": [
+          82,
+          16,
+          624,
+          304
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:56.905756+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:59.828845+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 2,
+        "image_path": "band_7"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:59.840382+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "ONCE THAT FORCE",
+      "bbox": [
+        171,
+        16,
+        545,
+        89
+      ],
+      "details": {
+        "confidence": 0.422,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:59.840884+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "ONCE THAT FORCE",
+      "bbox": [
+        171,
+        16,
+        545,
+        89
+      ],
+      "details": {
+        "confidence": 0.422,
+        "threshold": 0.58,
+        "block_profile": "top_narration",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:59.854849+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_002",
+      "text": "IS RELEASED",
+      "bbox": [
+        201,
+        89,
+        513,
+        194
+      ],
+      "details": {
+        "confidence": 0.476,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T13:51:59.859358+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    }
+  ]
+}

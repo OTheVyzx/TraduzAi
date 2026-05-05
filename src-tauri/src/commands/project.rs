@@ -455,7 +455,13 @@ fn save_bitmap_layer(path: &Path, bitmap: &GrayImage) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Erro ao preparar diretório da layer bitmap: {e}"))?;
     }
-    let temp_path = path.with_extension("png.tmp");
+    // Sufixo .tmp.png garante que image-rs reconheça como PNG ao gravar
+    let mut temp_path = path.to_path_buf();
+    let original_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "layer.png".to_string());
+    temp_path.set_file_name(format!("{original_name}.tmp.png"));
     bitmap
         .save(&temp_path)
         .map_err(|e| format!("Erro ao salvar layer bitmap temporária: {e}"))?;

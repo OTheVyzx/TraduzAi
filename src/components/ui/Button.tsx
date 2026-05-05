@@ -25,7 +25,7 @@ const variants: Record<Variant, string> = {
     "bg-bg-secondary text-text-primary border border-border hover:border-border-strong " +
     "hover:bg-bg-tertiary",
   ghost:
-    "bg-transparent text-text-secondary hover:text-text-primary hover:bg-white/5",
+    "bg-transparent text-text-secondary hover:text-text-primary hover:bg-white/[0.03]",
   danger:
     "bg-status-error/10 text-status-error border border-status-error/25 " +
     "hover:bg-status-error/15 hover:border-status-error/40",

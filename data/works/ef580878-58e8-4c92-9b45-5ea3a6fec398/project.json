@@ -1,0 +1,122 @@
+{
+  "versao": "2.0",
+  "app": "traduzai",
+  "obra": "",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "_ollama_host": "http://localhost:11434",
+  "_ollama_model": "traduzai-translator",
+  "_models_dir": "D:\\TraduzAi\\data\\models",
+  "_vision_worker_path": "D:\\TraduzAi\\vision-worker/target/debug/traduzai-vision.exe",
+  "_work_dir": "D:\\TraduzAi\\data\\works\\ef580878-58e8-4c92-9b45-5ea3a6fec398",
+  "contexto": {
+    "aliases": [],
+    "faccoes": [],
+    "fontes_usadas": [],
+    "genero": [],
+    "memoria_lexical": {},
+    "personagens": [],
+    "relacoes": [],
+    "resumo_por_arco": [],
+    "sinopse": "",
+    "termos": []
+  },
+  "work_context": {
+    "context_loaded": false,
+    "glossary_entries_count": 0,
+    "glossary_loaded": false,
+    "risk_level": "high",
+    "selected": false,
+    "title": "",
+    "user_ignored_warning": true,
+    "work_id": ""
+  },
+  "preset": {
+    "description": "Ideal para capitulos coloridos verticais. Traducao natural, fonte maior, revisao de SFX manual.",
+    "id": "manhwa_webtoon_color",
+    "name": "Manhwa/Webtoon colorido",
+    "quality": "alta",
+    "settings": {
+      "balloon_margin": 0.12,
+      "inpaint_mode": "normal",
+      "ocr_cleanup": "normal",
+      "ocr_sensitivity": "high",
+      "qa_mode": "review",
+      "sfx_mode": "preserve",
+      "translation_style": "natural_br",
+      "typesetting_font_scale": 1.08
+    }
+  },
+  "paginas": [
+    {
+      "numero": 1,
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "originals/003.webp",
+          "visible": true,
+          "locked": true
+        },
+        "mask": {
+          "key": "mask",
+          "path": "layers/mask/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "images/003.webp",
+          "visible": false,
+          "locked": true
+        },
+        "brush": {
+          "key": "brush",
+          "path": "layers/brush/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "translated/003.webp",
+          "visible": true,
+          "locked": true
+        }
+      },
+      "inpaint_blocks": [],
+      "page_profile": null,
+      "text_layers": [],
+      "arquivo_original": "originals/003.webp",
+      "arquivo_traduzido": "translated/003.webp",
+      "textos": []
+    }
+  ],
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 0,
+    "tempo_processamento_seg": 0.0,
+    "data_criacao": "2026-05-04T19:26:07Z"
+  },
+  "qa": {
+    "summary": {
+      "flags": [],
+      "counts": {},
+      "highest_severity": "none",
+      "critical_count": 0,
+      "total": 0
+    }
+  },
+  "log": {
+    "structured_log_path": "D:\\TraduzAi\\data\\logs\\ef580878-58e8-4c92-9b45-5ea3a6fec398\\structured_log.jsonl",
+    "summary": {
+      "actual_pages": 1,
+      "processed_pages": 1,
+      "translated_regions": 0,
+      "qa_flags": 0,
+      "critical_flags": 0,
+      "glossary_hits": 0,
+      "entity_flags": 0,
+      "export_status": "clean"
+    }
+  }
+}

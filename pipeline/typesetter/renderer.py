@@ -2263,15 +2263,29 @@ def plan_text_layout(text_data: dict) -> dict:
     if tipo == "fala":
         alignment = "center"
     
+    computed_max_width = max(4, int(capacity_width * width_ratio))
+    computed_max_height = max(4, capacity_height - (padding_y * 2))
+
+    # safe_text_box: área explícita onde o texto será renderizado
+    # Derivada da capacity_bbox com padding e width_ratio aplicados.
+    # Usada para QA (detectar clipping) e debug visual.
+    cap_center_x = (cx1 + cx2) // 2
+    _stb_x1 = max(x1, cap_center_x - computed_max_width // 2)
+    _stb_x2 = min(x2, cap_center_x + computed_max_width // 2)
+    _stb_y1 = cy1 + padding_y
+    _stb_y2 = cy1 + padding_y + computed_max_height
+    safe_text_box = [_stb_x1, _stb_y1, _stb_x2, _stb_y2]
+
     return {
         "target_bbox": target_bbox,
         "position_bbox": position_bbox,
+        "safe_text_box": safe_text_box,
         "layout_shape": layout_shape,
         "balloon_geo": balloon_geo,
         "layout_profile": layout_profile,
         "width_ratio": width_ratio,
-        "max_width": max(4, int(capacity_width * width_ratio)),
-        "max_height": max(4, capacity_height - (padding_y * 2)),
+        "max_width": computed_max_width,
+        "max_height": computed_max_height,
         "padding_y": padding_y,
         "vertical_anchor": vertical_anchor if layout_align != "top" else "top",
         "alignment": alignment,
@@ -3409,6 +3423,10 @@ def _render_single_text_block(
     if box_width < 10 or box_height < 10:
         return
 
+    # Expor safe_text_box no text_data para debug visual e QA externo
+    if plan.get("safe_text_box"):
+        text_data["_debug_safe_text_box"] = plan["safe_text_box"]
+
     resolved = _resolve_text_layout(text_data, plan)
     best_font = resolved["font"]
     best_lines = resolved["lines"]
@@ -3488,6 +3506,8 @@ def _render_single_text_block(
         if max_rx > min_rx:
             text_data["render_bbox"] = [int(min_rx), int(min_ry), int(max_rx), int(max_ry)]
         img.paste(Image.fromarray(image_np))
+        # QA pós-render (SafeTextPathFont path)
+        _run_render_qa(text_data, plan)
         return
 
     # PIL path (system fallback fonts)
@@ -3525,6 +3545,104 @@ def _render_single_text_block(
     block_bbox = resolved.get("block_bbox")
     if block_bbox:
         text_data["render_bbox"] = [int(v) for v in block_bbox]
+
+    # QA pós-render: detectar clipping e overflow
+    _run_render_qa(text_data, plan)
+
+
+def _run_render_qa(text_data: dict, plan: dict) -> None:
+    """Verifica se o texto renderizado ultrapassa safe_text_box ou toca suas bordas.
+
+    Gera issues TEXT_CLIPPED ou TEXT_OVERFLOW em text_data["qa_flags"].
+    TEXT_CLIPPED  — ink_bbox toca ou cruza a borda da safe_text_box (texto cortado)
+    TEXT_OVERFLOW — ink_bbox ultrapassa target_bbox (texto fora do balão)
+    """
+    render_bbox = text_data.get("render_bbox")
+    if not render_bbox or len(render_bbox) != 4:
+        return
+
+    rx1, ry1, rx2, ry2 = [int(v) for v in render_bbox]
+    safe = plan.get("safe_text_box")
+    target = plan.get("target_bbox")
+
+    qa_flags: list = list(text_data.get("qa_flags") or [])
+
+    # TEXT_CLIPPED: ink_bbox toca a borda da safe_text_box (margem ≤ 1px)
+    if safe and len(safe) == 4:
+        sx1, sy1, sx2, sy2 = [int(v) for v in safe]
+        CLIP_MARGIN = 2  # px — menos que isso é clipping
+        if (
+            rx1 <= sx1 + CLIP_MARGIN
+            or rx2 >= sx2 - CLIP_MARGIN
+            or ry1 <= sy1 + CLIP_MARGIN
+            or ry2 >= sy2 - CLIP_MARGIN
+        ):
+            if "TEXT_CLIPPED" not in qa_flags:
+                qa_flags.append("TEXT_CLIPPED")
+
+    # TEXT_OVERFLOW: ink_bbox ultrapassa o balloon_bbox
+    if target and len(target) == 4:
+        tx1, ty1, tx2, ty2 = [int(v) for v in target]
+        if rx1 < tx1 or rx2 > tx2 or ry1 < ty1 or ry2 > ty2:
+            if "TEXT_OVERFLOW" not in qa_flags:
+                qa_flags.append("TEXT_OVERFLOW")
+
+    if qa_flags != list(text_data.get("qa_flags") or []):
+        text_data["qa_flags"] = qa_flags
+        logger.warning(
+            "RENDER QA: %s — texto='%s...' render_bbox=%s safe_text_box=%s",
+            qa_flags,
+            str(text_data.get("translated", ""))[:30],
+            render_bbox,
+            safe,
+        )
+
+
+def render_debug_overlay(
+    img: "Image.Image",
+    texts: list[dict],
+    *,
+    show_ocr_bbox: bool = True,
+    show_balloon_bbox: bool = True,
+    show_safe_text_box: bool = True,
+    show_render_bbox: bool = True,
+) -> "Image.Image":
+    """Gera imagem de debug com bboxes coloridas sobrepostas.
+
+    Cores:
+      Vermelho  — bbox OCR (source_bbox / ocr_text_bbox)
+      Azul      — balloon_bbox
+      Verde     — safe_text_box (área segura para texto)
+      Roxo      — render_bbox (ink real após renderização)
+
+    Retorna uma cópia da imagem com as sobrepostas desenhadas.
+    """
+    from PIL import ImageDraw as _IDraw
+
+    out = img.copy().convert("RGBA")
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    draw = _IDraw.Draw(overlay)
+
+    def _rect(bbox: list, color: tuple, width: int = 2) -> None:
+        if not bbox or len(bbox) != 4:
+            return
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
+
+    for text_data in texts:
+        if show_ocr_bbox:
+            _rect(
+                text_data.get("source_bbox") or text_data.get("ocr_text_bbox") or text_data.get("bbox"),
+                (255, 60, 60, 220),  # vermelho
+            )
+        if show_balloon_bbox:
+            _rect(text_data.get("balloon_bbox"), (60, 120, 255, 220), width=2)  # azul
+        if show_safe_text_box:
+            _rect(text_data.get("_debug_safe_text_box"), (60, 200, 80, 220), width=2)  # verde
+        if show_render_bbox:
+            _rect(text_data.get("render_bbox"), (180, 60, 220, 220), width=2)  # roxo
+
+    return Image.alpha_composite(out, overlay).convert("RGB")
 
 
 def _apply_glow(

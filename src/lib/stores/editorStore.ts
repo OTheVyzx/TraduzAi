@@ -550,52 +550,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   resumeAutoSave: () => set({ autoSavePaused: false }),
 
   // ── Auto Fidelity Render (Fase 6) ───────────────────────────────────────
-  markRenderStale: () =>
-    set((state) => ({
-      renderStatus: "stale",
-      renderVersion: state.renderVersion + 1,
-    })),
-
-  // Debounce timer — armazenado fora do store para não causar re-renders.
-  // Cada chamada a scheduleAutoFidelityRender cancela o timer anterior.
-
-  scheduleAutoFidelityRender: (() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    return () => {
-      if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
-        const state = useEditorStore.getState();
-        if (state.renderStatus === "stale" && !state.isRetypesetting && !state.isReinpainting) {
-          void state.runAutoFidelityRender();
-        }
-      }, 1500);
-    };
-  })(),
-
-  runAutoFidelityRender: async () => {
-    const state = get();
-    if (state.renderStatus === "rendering") return;
-    if (state.isRetypesetting || state.isReinpainting || state.activePageAction !== null) return;
-    const version = state.renderVersion;
-    set({ renderStatus: "rendering", renderInFlightVersion: version });
+  // Auto Fidelity Render REMOVIDO — o canvas (Konva.Text) é WYSIWYG.
+  // Funções mantidas como no-op por compatibilidade de chamadas existentes.
+  markRenderStale: () => {},
+  scheduleAutoFidelityRender: () => {},
+  runAutoFidelityRender: async () => {},
+  forceFidelityRender: async () => {
+    // Mantido apenas pra atalho Ctrl+Shift+R caso usuário queira render manual
+    if (get().isRetypesetting || get().isReinpainting) return;
     try {
       await get().retypesetCurrentPage();
-      if (get().renderVersion !== version) {
-        // Edição aconteceu durante o render — fica stale para próximo ciclo
-        set({ renderStatus: "stale", renderInFlightVersion: null });
-      } else {
-        set({ renderStatus: "updated", renderInFlightVersion: null });
-      }
-    } catch (err) {
-      set({ renderStatus: "error", renderError: String(err), renderInFlightVersion: null });
+    } catch {
+      /* erro silencioso */
     }
-  },
-
-  forceFidelityRender: async () => {
-    // Ignora debounce — marca stale e roda imediatamente
-    set((state) => ({ renderStatus: "stale", renderVersion: state.renderVersion + 1 }));
-    await get().runAutoFidelityRender();
   },
 
   // Variante de commitEdits sem loadCurrentPage no fim, usada pelo auto-save
@@ -868,10 +835,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
     set({ currentPage: updatedPage });
     get().markDirty();
-    get().markRenderStale();
-    get().scheduleAutoFidelityRender();
-    // Auto-save será responsável por persistir opacity via commitEdits
-    void get().runAutoSave();
+    // opacity persiste via Ctrl+S / botão Salvar
   },
 
   setImageLayerLocked: async (key, locked) => {
@@ -1143,12 +1107,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const path = projectPath();
     if (!path) return;
     const pageIndex = get().currentPageIndex;
-    // Fase 3: flush auto-save antes de qualquer ação pipeline para garantir
-    // que pendingEdits estão persistidos no project.json que o sidecar lê.
-    try {
-      await get().flushAutoSave();
-    } catch {
-      /* erro já registrado em lastSaveError; segue mesmo assim */
+    // Garante que pendingEdits sejam persistidos no project.json antes do sidecar Python ler.
+    // Se nada pendente, não-op imediato.
+    if (get().dirty) {
+      try {
+        await get().commitEditsPatchOnly();
+        set({ dirty: false });
+      } catch (err) {
+        console.warn("[runMaskedAction] commit pré-pipeline falhou:", err);
+      }
     }
     set({ activePageAction: action, pageActionError: null });
     console.log(`[EditorAction] start  ${action} page=${pageIndex}`);

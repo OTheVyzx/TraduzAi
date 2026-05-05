@@ -1,5 +1,5 @@
 import { Layer, Line, Rect, Stage } from "react-konva";
-import { getRenderPreviewStateForPage, useEditorStore } from "../../../lib/stores/editorStore";
+import { useEditorStore } from "../../../lib/stores/editorStore";
 import { EditorBitmapOverlay } from "./EditorBitmapOverlay";
 import { EditorPaintCursor } from "./EditorPaintCursor";
 import { EditorStageBackground } from "./EditorStageBackground";
@@ -9,43 +9,7 @@ import { FloatingTextEditor } from "./FloatingTextEditor";
 import { MaskInProgressOverlay } from "./MaskInProgressOverlay";
 import { useEditorStageController } from "./useEditorStageController";
 
-function StageStatusBadge() {
-  const currentPage = useEditorStore((state) => state.currentPage);
-  const currentPageKey = useEditorStore((state) => state.currentPageKey());
-  const cache = useEditorStore((state) => state.renderPreviewCacheByPageKey);
-  const viewMode = useEditorStore((state) => state.viewMode);
-  const state = getRenderPreviewStateForPage(currentPageKey, currentPage, cache);
-  if (viewMode !== "translated") return null;
-
-  const label =
-    state.status === "rendering"
-      ? "Renderizando preview"
-      : state.status === "error"
-        ? "Preview pendente"
-        : state.status === "stale"
-          ? "Preview desatualizado"
-          : state.previewPath
-            ? "Preview fiel"
-            : null;
-  if (!label) return null;
-
-  const fresh = state.status === "fresh" && !!state.previewPath;
-  return (
-    <div className="pointer-events-none absolute left-4 top-4 z-20">
-      <div
-        data-testid="editor-preview-status"
-        data-status={state.status}
-        className={`rounded-lg border px-2.5 py-1 text-[10px] font-medium backdrop-blur-md ${
-          fresh
-            ? "border-status-success/20 bg-status-success/10 text-status-success"
-            : "border-status-warning/20 bg-status-warning/10 text-status-warning"
-        }`}
-      >
-        {label}
-      </div>
-    </div>
-  );
-}
+// StageStatusBadge removido — canvas Konva é WYSIWYG, não há "preview" separado.
 
 export function EditorStage() {
   const controller = useEditorStageController();
@@ -129,8 +93,7 @@ export function EditorStage() {
         </div>
       </div>
 
-      {/* Status badges */}
-      <StageStatusBadge />
+      {/* Status badges (StageStatusBadge removido — canvas é WYSIWYG) */}
       {bitmapInspection && (
         <div className="pointer-events-none absolute right-4 top-4 z-20">
           <div className="rounded-lg border border-accent-cyan/20 bg-accent-cyan/10 px-2.5 py-1 text-[10px] font-medium text-accent-cyan backdrop-blur-md">

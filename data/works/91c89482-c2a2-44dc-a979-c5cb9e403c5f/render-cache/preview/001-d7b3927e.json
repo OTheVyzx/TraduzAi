@@ -1,0 +1,1243 @@
+{
+  "page": {
+    "arquivo_original": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/originals/001.jpg",
+    "arquivo_traduzido": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/translated/001.jpg",
+    "image_layers": {
+      "base": {
+        "key": "base",
+        "locked": true,
+        "path": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/originals/001.jpg",
+        "visible": true
+      },
+      "brush": {
+        "key": "brush",
+        "locked": false,
+        "path": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/layers/brush/001.png",
+        "visible": false
+      },
+      "inpaint": {
+        "key": "inpaint",
+        "locked": true,
+        "path": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/images/001.jpg",
+        "visible": false
+      },
+      "mask": {
+        "key": "mask",
+        "locked": false,
+        "path": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/layers/mask/001.png",
+        "visible": false
+      },
+      "rendered": {
+        "key": "rendered",
+        "locked": true,
+        "path": "D:/TraduzAi/data/works/91c89482-c2a2-44dc-a979-c5cb9e403c5f/translated/001.jpg",
+        "visible": true
+      }
+    },
+    "inpaint_blocks": [
+      {
+        "bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "confidence": 0.86572265625
+      },
+      {
+        "bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "confidence": 0.9091796875
+      },
+      {
+        "bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "confidence": 0.8134765625
+      }
+    ],
+    "numero": 1,
+    "page_profile": null,
+    "text_layers": [
+      {
+        "balloon_bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "balloon_subregions": [],
+        "balloon_type": "white",
+        "bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "block_profile": "top_narration",
+        "confianca_ocr": 0.866,
+        "confidence": 0.866,
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0,
+        "connected_focus_bboxes": [],
+        "connected_group_confidence": 0,
+        "connected_lobe_bboxes": [],
+        "connected_lobe_polygons": [],
+        "connected_position_bboxes": [],
+        "connected_position_confidence": 0,
+        "connected_position_reasoner": "heuristic",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "connected_text_groups": [],
+        "detected_font_size_px": null,
+        "detector": null,
+        "entity_flags": [],
+        "entity_repairs": [],
+        "estilo": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": true,
+          "glow_cor": "#D8D9D9",
+          "glow_px": 2,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 30
+        },
+        "glossary_hits": [],
+        "group_id": "g001",
+        "grouping_status": "separated",
+        "id": "tl_001_001",
+        "kind": "text",
+        "layout_align": "top",
+        "layout_bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "layout_group_size": 1,
+        "layout_profile": "top_narration",
+        "layout_shape": "wide",
+        "line_polygons": [
+          [
+            [
+              113,
+              442
+            ],
+            [
+              439,
+              442
+            ],
+            [
+              439,
+              468
+            ],
+            [
+              113,
+              468
+            ]
+          ],
+          [
+            [
+              152,
+              485
+            ],
+            [
+              397,
+              485
+            ],
+            [
+              397,
+              509
+            ],
+            [
+              152,
+              509
+            ]
+          ]
+        ],
+        "locked": false,
+        "normalization": {
+          "changed": false,
+          "corrections": [],
+          "is_gibberish": false
+        },
+        "normalized_ocr": "IF DESMOND USES THAT POWER..",
+        "ocr_confidence": 0.866,
+        "ocr_context_reviewed": false,
+        "ocr_mode": "paddleocr",
+        "ocr_profile": "max",
+        "ocr_reviewed": false,
+        "ocr_semantic_reviewed": false,
+        "ocr_source": "vision-paddleocr",
+        "ocr_text_bbox": [
+          104,
+          16,
+          441,
+          92
+        ],
+        "order": 0,
+        "original": "IF DESMOND USES THAT POWER..",
+        "page_profile": "standard",
+        "qa_flags": [],
+        "raw_ocr": "IF DESMOND USES THAT POWER..",
+        "reading_order": 0,
+        "render_bbox": null,
+        "render_preview_path": null,
+        "rendered_direction": null,
+        "rotation_deg": 0,
+        "skip_processing": false,
+        "source_bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "source_direction": null,
+        "source_language": null,
+        "style": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": true,
+          "glow_cor": "#D8D9D9",
+          "glow_px": 2,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 30
+        },
+        "subregion_confidence": 0,
+        "text": "IF DESMOND USES THAT POWER..",
+        "text_pixel_bbox": [
+          113,
+          442,
+          439,
+          509
+        ],
+        "tipo": "narracao",
+        "traduzido": "SE DESMOND USAR ESSE PODER...",
+        "translated": "SE DESMOND USAR ESSE PODER...",
+        "visible": true
+      },
+      {
+        "balloon_bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "balloon_subregions": [],
+        "balloon_type": "white",
+        "bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "block_profile": "white_balloon",
+        "confianca_ocr": 0.909,
+        "confidence": 0.909,
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0,
+        "connected_focus_bboxes": [],
+        "connected_group_confidence": 0,
+        "connected_lobe_bboxes": [],
+        "connected_lobe_polygons": [],
+        "connected_position_bboxes": [],
+        "connected_position_confidence": 0,
+        "connected_position_reasoner": "heuristic",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "connected_text_groups": [],
+        "detected_font_size_px": null,
+        "detector": null,
+        "entity_flags": [],
+        "entity_repairs": [],
+        "estilo": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": true,
+          "sombra_cor": "#000000",
+          "sombra_offset": [
+            -2,
+            2
+          ],
+          "tamanho": 25
+        },
+        "glossary_hits": [],
+        "group_id": "g002",
+        "grouping_status": "separated",
+        "id": "tl_001_002",
+        "kind": "text",
+        "layout_align": "center",
+        "layout_bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "layout_group_size": 1,
+        "layout_profile": "white_balloon",
+        "layout_shape": "wide",
+        "line_polygons": [
+          [
+            [
+              502,
+              1213
+            ],
+            [
+              646,
+              1213
+            ],
+            [
+              646,
+              1240
+            ],
+            [
+              502,
+              1240
+            ]
+          ],
+          [
+            [
+              445,
+              1252
+            ],
+            [
+              704,
+              1252
+            ],
+            [
+              704,
+              1277
+            ],
+            [
+              445,
+              1277
+            ]
+          ],
+          [
+            [
+              477,
+              1290
+            ],
+            [
+              662,
+              1287
+            ],
+            [
+              662,
+              1314
+            ],
+            [
+              477,
+              1316
+            ]
+          ]
+        ],
+        "locked": false,
+        "normalization": {
+          "changed": false,
+          "corrections": [],
+          "is_gibberish": false
+        },
+        "normalized_ocr": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "ocr_confidence": 0.909,
+        "ocr_context_reviewed": false,
+        "ocr_mode": "paddleocr",
+        "ocr_profile": "max",
+        "ocr_reviewed": false,
+        "ocr_semantic_reviewed": false,
+        "ocr_source": "vision-paddleocr",
+        "ocr_text_bbox": [
+          441,
+          16,
+          710,
+          126
+        ],
+        "order": 1,
+        "original": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "page_profile": "standard",
+        "qa_flags": [],
+        "raw_ocr": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "reading_order": 1,
+        "render_bbox": null,
+        "render_preview_path": null,
+        "rendered_direction": null,
+        "rotation_deg": 0,
+        "skip_processing": false,
+        "source_bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "source_direction": null,
+        "source_language": null,
+        "style": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": true,
+          "sombra_cor": "#000000",
+          "sombra_offset": [
+            -2,
+            2
+          ],
+          "tamanho": 25
+        },
+        "subregion_confidence": 0,
+        "text": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "text_pixel_bbox": [
+          445,
+          1213,
+          704,
+          1316
+        ],
+        "tipo": "fala",
+        "traduzido": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+        "translated": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+        "visible": true
+      },
+      {
+        "balloon_bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "balloon_subregions": [],
+        "balloon_type": "textured",
+        "bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "block_profile": "standard",
+        "confianca_ocr": 0.813,
+        "confidence": 0.813,
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0,
+        "connected_focus_bboxes": [],
+        "connected_group_confidence": 0,
+        "connected_lobe_bboxes": [],
+        "connected_lobe_polygons": [],
+        "connected_position_bboxes": [],
+        "connected_position_confidence": 0,
+        "connected_position_reasoner": "heuristic",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "connected_text_groups": [],
+        "detected_font_size_px": null,
+        "detector": null,
+        "entity_flags": [],
+        "entity_repairs": [],
+        "estilo": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "Newrotic.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 27
+        },
+        "glossary_hits": [],
+        "group_id": "g003",
+        "grouping_status": "separated",
+        "id": "tl_001_003",
+        "kind": "text",
+        "layout_align": "center",
+        "layout_bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "layout_group_size": 1,
+        "layout_profile": "standard",
+        "layout_shape": "wide",
+        "line_polygons": [
+          [
+            [
+              265,
+              2251
+            ],
+            [
+              528,
+              2251
+            ],
+            [
+              528,
+              2278
+            ],
+            [
+              265,
+              2278
+            ]
+          ],
+          [
+            [
+              250,
+              2293
+            ],
+            [
+              563,
+              2293
+            ],
+            [
+              563,
+              2322
+            ],
+            [
+              250,
+              2322
+            ]
+          ],
+          [
+            [
+              265,
+              2337
+            ],
+            [
+              524,
+              2337
+            ],
+            [
+              524,
+              2364
+            ],
+            [
+              265,
+              2364
+            ]
+          ]
+        ],
+        "locked": false,
+        "normalization": {
+          "changed": false,
+          "corrections": [],
+          "is_gibberish": false
+        },
+        "normalized_ocr": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "ocr_confidence": 0.813,
+        "ocr_context_reviewed": false,
+        "ocr_mode": "paddleocr",
+        "ocr_profile": "max",
+        "ocr_reviewed": false,
+        "ocr_semantic_reviewed": false,
+        "ocr_source": "vision-paddleocr",
+        "ocr_text_bbox": [
+          255,
+          16,
+          570,
+          143
+        ],
+        "order": 2,
+        "original": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "page_profile": "standard",
+        "qa_flags": [],
+        "raw_ocr": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "reading_order": 2,
+        "render_bbox": null,
+        "render_preview_path": null,
+        "rendered_direction": null,
+        "rotation_deg": 0,
+        "skip_processing": false,
+        "source_bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "source_direction": null,
+        "source_language": null,
+        "style": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "Newrotic.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 27
+        },
+        "subregion_confidence": 0,
+        "text": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "text_pixel_bbox": [
+          250,
+          2251,
+          563,
+          2364
+        ],
+        "tipo": "fala",
+        "traduzido": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+        "translated": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+        "visible": true
+      }
+    ],
+    "textos": [
+      {
+        "balloon_bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "balloon_subregions": [],
+        "balloon_type": "white",
+        "bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "block_profile": "top_narration",
+        "confianca_ocr": 0.866,
+        "confidence": 0.866,
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0,
+        "connected_focus_bboxes": [],
+        "connected_group_confidence": 0,
+        "connected_lobe_bboxes": [],
+        "connected_lobe_polygons": [],
+        "connected_position_bboxes": [],
+        "connected_position_confidence": 0,
+        "connected_position_reasoner": "heuristic",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "connected_text_groups": [],
+        "detected_font_size_px": null,
+        "detector": null,
+        "entity_flags": [],
+        "entity_repairs": [],
+        "estilo": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": true,
+          "glow_cor": "#D8D9D9",
+          "glow_px": 2,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 30
+        },
+        "glossary_hits": [],
+        "group_id": "g001",
+        "grouping_status": "separated",
+        "id": "tl_001_001",
+        "kind": "text",
+        "layout_align": "top",
+        "layout_bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "layout_group_size": 1,
+        "layout_profile": "top_narration",
+        "layout_shape": "wide",
+        "line_polygons": [
+          [
+            [
+              113,
+              442
+            ],
+            [
+              439,
+              442
+            ],
+            [
+              439,
+              468
+            ],
+            [
+              113,
+              468
+            ]
+          ],
+          [
+            [
+              152,
+              485
+            ],
+            [
+              397,
+              485
+            ],
+            [
+              397,
+              509
+            ],
+            [
+              152,
+              509
+            ]
+          ]
+        ],
+        "locked": false,
+        "normalization": {
+          "changed": false,
+          "corrections": [],
+          "is_gibberish": false
+        },
+        "normalized_ocr": "IF DESMOND USES THAT POWER..",
+        "ocr_confidence": 0.866,
+        "ocr_context_reviewed": false,
+        "ocr_mode": "paddleocr",
+        "ocr_profile": "max",
+        "ocr_reviewed": false,
+        "ocr_semantic_reviewed": false,
+        "ocr_source": "vision-paddleocr",
+        "ocr_text_bbox": [
+          104,
+          16,
+          441,
+          92
+        ],
+        "order": 0,
+        "original": "IF DESMOND USES THAT POWER..",
+        "page_profile": "standard",
+        "qa_flags": [],
+        "raw_ocr": "IF DESMOND USES THAT POWER..",
+        "reading_order": 0,
+        "render_bbox": null,
+        "render_preview_path": null,
+        "rendered_direction": null,
+        "rotation_deg": 0,
+        "skip_processing": false,
+        "source_bbox": [
+          104,
+          436,
+          441,
+          512
+        ],
+        "source_direction": null,
+        "source_language": null,
+        "style": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": true,
+          "glow_cor": "#D8D9D9",
+          "glow_px": 2,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 30
+        },
+        "subregion_confidence": 0,
+        "text": "IF DESMOND USES THAT POWER..",
+        "text_pixel_bbox": [
+          113,
+          442,
+          439,
+          509
+        ],
+        "tipo": "narracao",
+        "traduzido": "SE DESMOND USAR ESSE PODER...",
+        "translated": "SE DESMOND USAR ESSE PODER...",
+        "visible": true
+      },
+      {
+        "balloon_bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "balloon_subregions": [],
+        "balloon_type": "white",
+        "bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "block_profile": "white_balloon",
+        "confianca_ocr": 0.909,
+        "confidence": 0.909,
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0,
+        "connected_focus_bboxes": [],
+        "connected_group_confidence": 0,
+        "connected_lobe_bboxes": [],
+        "connected_lobe_polygons": [],
+        "connected_position_bboxes": [],
+        "connected_position_confidence": 0,
+        "connected_position_reasoner": "heuristic",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "connected_text_groups": [],
+        "detected_font_size_px": null,
+        "detector": null,
+        "entity_flags": [],
+        "entity_repairs": [],
+        "estilo": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": true,
+          "sombra_cor": "#000000",
+          "sombra_offset": [
+            -2,
+            2
+          ],
+          "tamanho": 25
+        },
+        "glossary_hits": [],
+        "group_id": "g002",
+        "grouping_status": "separated",
+        "id": "tl_001_002",
+        "kind": "text",
+        "layout_align": "center",
+        "layout_bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "layout_group_size": 1,
+        "layout_profile": "white_balloon",
+        "layout_shape": "wide",
+        "line_polygons": [
+          [
+            [
+              502,
+              1213
+            ],
+            [
+              646,
+              1213
+            ],
+            [
+              646,
+              1240
+            ],
+            [
+              502,
+              1240
+            ]
+          ],
+          [
+            [
+              445,
+              1252
+            ],
+            [
+              704,
+              1252
+            ],
+            [
+              704,
+              1277
+            ],
+            [
+              445,
+              1277
+            ]
+          ],
+          [
+            [
+              477,
+              1290
+            ],
+            [
+              662,
+              1287
+            ],
+            [
+              662,
+              1314
+            ],
+            [
+              477,
+              1316
+            ]
+          ]
+        ],
+        "locked": false,
+        "normalization": {
+          "changed": false,
+          "corrections": [],
+          "is_gibberish": false
+        },
+        "normalized_ocr": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "ocr_confidence": 0.909,
+        "ocr_context_reviewed": false,
+        "ocr_mode": "paddleocr",
+        "ocr_profile": "max",
+        "ocr_reviewed": false,
+        "ocr_semantic_reviewed": false,
+        "ocr_source": "vision-paddleocr",
+        "ocr_text_bbox": [
+          441,
+          16,
+          710,
+          126
+        ],
+        "order": 1,
+        "original": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "page_profile": "standard",
+        "qa_flags": [],
+        "raw_ocr": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "reading_order": 1,
+        "render_bbox": null,
+        "render_preview_path": null,
+        "rendered_direction": null,
+        "rotation_deg": 0,
+        "skip_processing": false,
+        "source_bbox": [
+          441,
+          1209,
+          710,
+          1319
+        ],
+        "source_direction": null,
+        "source_language": null,
+        "style": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "ComicNeue-Bold.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": true,
+          "sombra_cor": "#000000",
+          "sombra_offset": [
+            -2,
+            2
+          ],
+          "tamanho": 25
+        },
+        "subregion_confidence": 0,
+        "text": "GHISLAIN WILL DEFINITELY STRUGGLE",
+        "text_pixel_bbox": [
+          445,
+          1213,
+          704,
+          1316
+        ],
+        "tipo": "fala",
+        "traduzido": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+        "translated": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+        "visible": true
+      },
+      {
+        "balloon_bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "balloon_subregions": [],
+        "balloon_type": "textured",
+        "bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "block_profile": "standard",
+        "confianca_ocr": 0.813,
+        "confidence": 0.813,
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0,
+        "connected_focus_bboxes": [],
+        "connected_group_confidence": 0,
+        "connected_lobe_bboxes": [],
+        "connected_lobe_polygons": [],
+        "connected_position_bboxes": [],
+        "connected_position_confidence": 0,
+        "connected_position_reasoner": "heuristic",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "connected_text_groups": [],
+        "detected_font_size_px": null,
+        "detector": null,
+        "entity_flags": [],
+        "entity_repairs": [],
+        "estilo": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "Newrotic.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 27
+        },
+        "glossary_hits": [],
+        "group_id": "g003",
+        "grouping_status": "separated",
+        "id": "tl_001_003",
+        "kind": "text",
+        "layout_align": "center",
+        "layout_bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "layout_group_size": 1,
+        "layout_profile": "standard",
+        "layout_shape": "wide",
+        "line_polygons": [
+          [
+            [
+              265,
+              2251
+            ],
+            [
+              528,
+              2251
+            ],
+            [
+              528,
+              2278
+            ],
+            [
+              265,
+              2278
+            ]
+          ],
+          [
+            [
+              250,
+              2293
+            ],
+            [
+              563,
+              2293
+            ],
+            [
+              563,
+              2322
+            ],
+            [
+              250,
+              2322
+            ]
+          ],
+          [
+            [
+              265,
+              2337
+            ],
+            [
+              524,
+              2337
+            ],
+            [
+              524,
+              2364
+            ],
+            [
+              265,
+              2364
+            ]
+          ]
+        ],
+        "locked": false,
+        "normalization": {
+          "changed": false,
+          "corrections": [],
+          "is_gibberish": false
+        },
+        "normalized_ocr": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "ocr_confidence": 0.813,
+        "ocr_context_reviewed": false,
+        "ocr_mode": "paddleocr",
+        "ocr_profile": "max",
+        "ocr_reviewed": false,
+        "ocr_semantic_reviewed": false,
+        "ocr_source": "vision-paddleocr",
+        "ocr_text_bbox": [
+          255,
+          16,
+          570,
+          143
+        ],
+        "order": 2,
+        "original": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "page_profile": "standard",
+        "qa_flags": [],
+        "raw_ocr": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "reading_order": 2,
+        "render_bbox": null,
+        "render_preview_path": null,
+        "rendered_direction": null,
+        "rotation_deg": 0,
+        "skip_processing": false,
+        "source_bbox": [
+          255,
+          2243,
+          570,
+          2370
+        ],
+        "source_direction": null,
+        "source_language": null,
+        "style": {
+          "alinhamento": "center",
+          "bold": true,
+          "contorno": "",
+          "contorno_px": 0,
+          "cor": "#000000",
+          "cor_gradiente": [],
+          "fonte": "Newrotic.ttf",
+          "force_upper": true,
+          "glow": false,
+          "glow_cor": "",
+          "glow_px": 0,
+          "italico": false,
+          "rotacao": 0,
+          "sombra": false,
+          "sombra_cor": "",
+          "sombra_offset": [
+            0,
+            0
+          ],
+          "tamanho": 27
+        },
+        "subregion_confidence": 0,
+        "text": "THERE'S STILL ONE THING THAT BOTHERS ME",
+        "text_pixel_bbox": [
+          250,
+          2251,
+          563,
+          2364
+        ],
+        "tipo": "fala",
+        "traduzido": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+        "translated": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+        "visible": true
+      }
+    ]
+  }
+}

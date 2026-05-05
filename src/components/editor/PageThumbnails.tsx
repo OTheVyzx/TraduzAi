@@ -68,26 +68,33 @@ function Thumbnail({
     <button
       ref={containerRef}
       onClick={onClick}
-      className={`group relative w-full flex-shrink-0 overflow-hidden rounded-xl border-2 text-left transition-smooth ${
+      className={`group relative w-full flex-shrink-0 overflow-hidden rounded-lg text-left transition-all duration-150 ${
         isActive
-          ? "border-brand shadow-[0_0_0_1px_rgba(108,92,231,0.25)]"
-          : "border-transparent hover:border-white/20"
+          ? "ring-2 ring-brand ring-offset-1 ring-offset-bg-primary shadow-[0_0_12px_rgba(108,92,231,0.2)]"
+          : "ring-1 ring-transparent hover:ring-white/15"
       }`}
     >
-      <div className="aspect-[2/3] w-full overflow-hidden bg-bg-tertiary">
+      <div className="aspect-[2/3] w-full overflow-hidden bg-bg-tertiary rounded-lg">
         {src ? (
-          <img src={src} alt={`Pagina ${numero}`} className="h-full w-full object-cover" />
+          <img
+            src={src}
+            alt={`Pagina ${numero}`}
+            className={`h-full w-full object-cover transition-all duration-150 ${
+              isActive ? "" : "opacity-70 group-hover:opacity-100"
+            }`}
+          />
         ) : (
           <div className="h-full w-full animate-pulse bg-bg-tertiary" />
         )}
       </div>
 
-      <div className="border-t border-border bg-bg-secondary/95 px-2 py-1.5">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className={`font-medium ${isActive ? "text-brand" : "text-text-primary"}`}>
-            Pag. {numero}
+      {/* Page number overlay */}
+      <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-4">
+        <div className="flex items-center justify-between">
+          <span className={`text-[10px] font-semibold ${isActive ? "text-brand-300" : "text-white/80"}`}>
+            {numero}
           </span>
-          <span className="text-text-muted">{blocks} bloco(s)</span>
+          <span className="text-[9px] text-white/50">{blocks}</span>
         </div>
       </div>
     </button>
@@ -101,11 +108,13 @@ export function PageThumbnails() {
   if (!project) return null;
 
   return (
-    <div className="flex w-[124px] flex-shrink-0 flex-col border-r border-border bg-bg-secondary">
-      <div className="border-b border-border px-3 py-3">
-        <p className="text-[11px] uppercase tracking-[0.18em] text-text-muted">Paginas</p>
+    <div className="flex w-[100px] flex-shrink-0 flex-col border-r border-border bg-bg-primary">
+      <div className="border-b border-border px-3 py-2.5">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted">
+          Paginas
+        </p>
       </div>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-2.5">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
         <div className="flex flex-col gap-2">
           {project.paginas.map((page, index) => {
             const thumbPath =

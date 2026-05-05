@@ -6,7 +6,7 @@
  *   2. TEXTO — lista filtrada de TextEntry (igual ao anterior)
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Check,
   Eye,
@@ -66,7 +66,6 @@ interface SortableRowProps {
   locked: boolean;
   opacity: number;
   selected: boolean;
-  thumbnail: string | undefined;
   onSelect: () => void;
   onToggleVisibility: () => void;
   onToggleLock: () => void;
@@ -79,7 +78,6 @@ function SortableImageLayerRow({
   locked,
   opacity,
   selected,
-  thumbnail,
   onSelect,
   onToggleVisibility,
   onToggleLock,
@@ -122,18 +120,13 @@ function SortableImageLayerRow({
         <GripVertical size={11} />
       </button>
 
-      {/* Thumbnail */}
+      {/* Ícone da camada (thumbnail removido por preferência do usuário) */}
       <div
-        className="shrink-0 w-8 h-8 rounded overflow-hidden border border-border/60 bg-white/[0.04] cursor-pointer"
+        className="shrink-0 w-6 h-6 rounded border border-border/60 bg-white/[0.04] flex items-center justify-center cursor-pointer"
         onClick={onSelect}
+        title={IMAGE_LAYER_LABELS[layerKey]}
       >
-        {thumbnail ? (
-          <img src={thumbnail} alt={IMAGE_LAYER_LABELS[layerKey]} className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <ImageIcon size={10} className="text-text-muted/40" />
-          </div>
-        )}
+        <ImageIcon size={11} className="text-text-muted/60" />
       </div>
 
       {/* Label + opacity */}
@@ -190,7 +183,6 @@ export function LayersPanel() {
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   const selectedImageLayerKey = useEditorStore((s) => s.selectedImageLayerKey);
   const pendingEdits = useEditorStore((s) => s.pendingEdits);
-  const layerThumbnails = useEditorStore((s) => s.layerThumbnails);
   const toggleImageLayerVisibility = useEditorStore((s) => s.toggleImageLayerVisibility);
   const selectImageLayer = useEditorStore((s) => s.selectImageLayer);
   const deleteSelectedLayer = useEditorStore((s) => s.deleteSelectedLayer);
@@ -198,8 +190,6 @@ export function LayersPanel() {
   const setImageLayerOpacity = useEditorStore((s) => s.setImageLayerOpacity);
   const setImageLayerLocked = useEditorStore((s) => s.setImageLayerLocked);
   const reorderImageLayers = useEditorStore((s) => s.reorderImageLayers);
-  const generateLayerThumbnail = useEditorStore((s) => s.generateLayerThumbnail);
-  const bitmapLayerVersions = useEditorStore((s) => s.bitmapLayerVersions);
 
   const [query, setQuery] = useState("");
 
@@ -226,19 +216,7 @@ export function LayersPanel() {
     });
   }, [imageLayers]);
 
-  // Gerar thumbnails APENAS para camadas que têm path mas não têm thumbnail.
-  // Não inclui `layerThumbnails` nas deps — o guard previne loop e a inclusão
-  // dispararia uma rerun a cada thumbnail gerado.
-  useEffect(() => {
-    for (const key of orderedBitmapKeys) {
-      const layer = imageLayers[key];
-      const hasThumb = !!useEditorStore.getState().layerThumbnails[key];
-      if (layer?.path && !hasThumb) {
-        void generateLayerThumbnail(key);
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderedBitmapKeys, bitmapLayerVersions]);
+  // (thumbnails removidos — usuário não quer)
 
   const filteredTextLayers = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -347,7 +325,6 @@ export function LayersPanel() {
                       locked={locked}
                       opacity={opacity}
                       selected={selected}
-                      thumbnail={layerThumbnails[key]}
                       onSelect={() => selectImageLayer(key)}
                       onToggleVisibility={() => void toggleImageLayerVisibility(key)}
                       onToggleLock={() => void setImageLayerLocked(key, !locked)}

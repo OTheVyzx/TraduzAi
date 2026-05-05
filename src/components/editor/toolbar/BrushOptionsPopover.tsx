@@ -49,41 +49,11 @@ export function BrushOptionsPopover({ onClose }: BrushOptionsPopoverProps) {
       ref={ref}
       className="absolute z-50 mt-1 w-[220px] rounded-xl border border-border bg-bg-secondary shadow-lg p-3 space-y-3"
     >
-      {/* Cor */}
-      <div>
-        <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-text-muted mb-1.5">Cor</p>
-        <div className="flex items-center gap-2">
-          {/* Color preview + native picker */}
-          <div className="relative flex-shrink-0">
-            <input
-              type="color"
-              value={brushColor}
-              onChange={(e) => setBrushColor(e.target.value)}
-              className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-              title="Escolher cor"
-            />
-            <div
-              className="h-7 w-7 rounded-full border-2 border-white/20 shadow-sm"
-              style={{ backgroundColor: brushColor }}
-            />
-          </div>
-
-          {/* Recent swatches */}
-          <div className="flex flex-wrap gap-1">
-            {recentBrushColors.slice(0, 8).map((c) => (
-              <button
-                key={c}
-                onClick={() => setBrushColor(c)}
-                className={`h-5 w-5 rounded-full border-2 transition-smooth ${
-                  c === brushColor ? "border-white/60 scale-110" : "border-white/15 hover:border-white/30"
-                }`}
-                style={{ backgroundColor: c }}
-                title={c}
-              />
-            ))}
-          </div>
-        </div>
-      </div>
+      <ColorSection
+        brushColor={brushColor}
+        recentBrushColors={recentBrushColors}
+        setBrushColor={setBrushColor}
+      />
 
       {/* Tamanho */}
       <div>
@@ -138,6 +108,66 @@ export function BrushOptionsPopover({ onClose }: BrushOptionsPopoverProps) {
         {/* Preview circular da dureza */}
         <div className="mt-2 flex items-center justify-center">
           <HardnessPreview size={32} hardness={brushHardness} color={brushColor} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Seção de cor — usa state local para preview ao vivo, só commita ao
+ * store quando o picker fecha (onBlur) ou quando seleciona swatch recente.
+ * Evita re-renders no canvas a cada movimento do HSV picker.
+ */
+function ColorSection({
+  brushColor,
+  recentBrushColors,
+  setBrushColor,
+}: {
+  brushColor: string;
+  recentBrushColors: string[];
+  setBrushColor: (c: string) => void;
+}) {
+  const [draft, setDraft] = useState(brushColor);
+
+  useEffect(() => {
+    setDraft(brushColor);
+  }, [brushColor]);
+
+  return (
+    <div>
+      <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-text-muted mb-1.5">Cor</p>
+      <div className="flex items-center gap-2">
+        <div className="relative flex-shrink-0">
+          <input
+            type="color"
+            value={draft}
+            // onChange (= mudança final do picker) commita ao store
+            onChange={(e) => setBrushColor(e.target.value)}
+            // onInput (= drag contínuo) só atualiza preview local
+            onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+            onBlur={(e) => setBrushColor(e.target.value)}
+            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+            title="Escolher cor"
+          />
+          <div
+            className="h-7 w-7 rounded-full border-2 border-white/20 shadow-sm"
+            style={{ backgroundColor: draft }}
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-1">
+          {recentBrushColors.slice(0, 8).map((c) => (
+            <button
+              key={c}
+              onClick={() => setBrushColor(c)}
+              className={`h-5 w-5 rounded-full border-2 transition-smooth ${
+                c === brushColor ? "border-white/60 scale-110" : "border-white/15 hover:border-white/30"
+              }`}
+              style={{ backgroundColor: c }}
+              title={c}
+            />
+          ))}
         </div>
       </div>
     </div>

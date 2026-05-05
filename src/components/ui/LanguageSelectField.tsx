@@ -98,20 +98,20 @@ export function LanguageSelectField({
         aria-controls={listboxId}
         className={`w-full rounded-xl border px-4 py-3 text-left transition-smooth ${
           open
-            ? "border-accent-purple/40 bg-bg-tertiary shadow-[0_0_0_1px_rgba(168,85,247,0.16)]"
-            : "border-white/10 bg-bg-secondary hover:border-white/20"
+            ? "border-brand/40 bg-bg-tertiary shadow-[0_0_0_1px_rgba(168,85,247,0.16)]"
+            : "border-border bg-bg-secondary hover:border-white/20"
         }`}
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-sm text-text-primary">
-              <Globe size={14} className="text-accent-purple flex-shrink-0" />
+              <Globe size={14} className="text-brand flex-shrink-0" />
               <span className="truncate">
                 {selectedLanguage ? selectedLanguage.label : "Selecione um idioma"}
               </span>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-text-secondary/80">
-              <span className="rounded-md bg-white/5 px-2 py-0.5 font-mono uppercase tracking-wide">
+              <span className="rounded-md bg-white/[0.03] px-2 py-0.5 font-mono uppercase tracking-wide">
                 {selectedLanguage?.code ?? fallbackCode}
               </span>
               {sourceMode && selectedLanguage?.ocr_strategy === "best_effort" && (
@@ -135,8 +135,8 @@ export function LanguageSelectField({
       )}
 
       {open && (
-        <div className="absolute left-0 right-0 top-full z-30 mt-2 overflow-hidden rounded-2xl border border-white/10 bg-bg-primary shadow-2xl shadow-black/30">
-          <div className="border-b border-white/5 p-3">
+        <div className="absolute left-0 right-0 top-full z-30 mt-2 overflow-hidden rounded-2xl border border-border bg-bg-primary shadow-2xl shadow-black/30">
+          <div className="border-b border-border p-3">
             <div className="relative">
               <Search
                 size={14}
@@ -148,7 +148,7 @@ export function LanguageSelectField({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={searchPlaceholder}
-                className="w-full rounded-lg border border-white/10 bg-bg-secondary py-2 pl-9 pr-3 text-sm text-text-primary placeholder:text-text-secondary/45 focus:border-accent-purple/40 focus:outline-none"
+                className="w-full rounded-lg border border-border bg-bg-secondary py-2 pl-9 pr-3 text-sm text-text-primary placeholder:text-text-secondary/45 focus:border-brand/40 focus:outline-none"
               />
             </div>
           </div>
@@ -174,8 +174,8 @@ export function LanguageSelectField({
                     onClick={() => handleSelect(language.code)}
                     className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left transition-smooth ${
                       isSelected
-                        ? "bg-accent-purple/12 text-text-primary"
-                        : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                        ? "bg-brand/12 text-text-primary"
+                        : "text-text-secondary hover:bg-white/[0.03] hover:text-text-primary"
                     }`}
                   >
                     <div className="min-w-0 flex-1">
@@ -200,7 +200,7 @@ export function LanguageSelectField({
                     </div>
                     <Check
                       size={15}
-                      className={isSelected ? "text-accent-purple" : "text-transparent"}
+                      className={isSelected ? "text-brand" : "text-transparent"}
                     />
                   </button>
                 );

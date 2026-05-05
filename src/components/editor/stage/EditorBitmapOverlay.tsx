@@ -5,7 +5,7 @@ type Props = {
   image: HTMLImageElement | null;
   width: number;
   height: number;
-  /** Cor hex para o overlay, ex: "#48B0FF" para brush, "#7C5CFF" para máscara */
+  /** Cor hex para o overlay, ex: "#48B0FF" para brush, "#6C5CE7" para máscara */
   color: string;
   /** Opacidade do overlay (0–1). Default: 0.65 */
   opacity?: number;

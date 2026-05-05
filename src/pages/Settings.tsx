@@ -133,7 +133,7 @@ export function Settings() {
 
       <section className="mb-8">
         <h3 className="text-sm font-medium text-text-secondary mb-3">Traducao local (Ollama)</h3>
-        <div className="bg-bg-secondary border border-white/5 rounded-xl p-4 space-y-4">
+        <div className="bg-bg-secondary border border-border rounded-xl p-4 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Bot
@@ -208,7 +208,7 @@ export function Settings() {
                     className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-smooth disabled:opacity-50
                       ${confirmCreate
                         ? "bg-status-warning/20 text-status-warning hover:bg-status-warning/30"
-                        : "bg-accent-purple/10 text-accent-purple hover:bg-accent-purple/20"}`}
+                        : "bg-brand/10 text-brand hover:bg-brand/20"}`}
                   >
                     <Download size={13} />
                     {creatingModel ? "Abrindo terminal..." : confirmCreate ? "Confirmar e abrir terminal" : "Criar modelo"}
@@ -248,8 +248,8 @@ ollama create traduzai-translator -f ...Modelfile`}
                 <select
                   value={ollamaModel}
                   onChange={(e) => setOllamaModel(e.target.value)}
-                  className="w-full px-3 py-2 bg-bg-tertiary border border-white/5 rounded-lg text-sm
-                    text-text-primary focus:outline-none focus:border-accent-purple/30 transition-smooth"
+                  className="w-full px-3 py-2 bg-bg-tertiary border border-border rounded-lg text-sm
+                    text-text-primary focus:outline-none focus:border-brand/30 transition-smooth"
                 >
                   {ollamaHasTranslator && (
                     <option value="traduzai-translator">
@@ -272,8 +272,8 @@ ollama create traduzai-translator -f ...Modelfile`}
                   type="text"
                   value={ollamaHost}
                   onChange={(e) => setOllamaHost(e.target.value)}
-                  className="w-full px-3 py-2 bg-bg-tertiary border border-white/5 rounded-lg text-sm
-                    text-text-primary font-mono focus:outline-none focus:border-accent-purple/30 transition-smooth"
+                  className="w-full px-3 py-2 bg-bg-tertiary border border-border rounded-lg text-sm
+                    text-text-primary font-mono focus:outline-none focus:border-brand/30 transition-smooth"
                 />
               </div>
             </>
@@ -283,7 +283,7 @@ ollama create traduzai-translator -f ...Modelfile`}
 
       <section className="mb-8">
         <h3 className="text-sm font-medium text-text-secondary mb-3">Sistema</h3>
-        <div className="bg-bg-secondary border border-white/5 rounded-xl divide-y divide-white/5">
+        <div className="bg-bg-secondary border border-border rounded-xl divide-y divide-border">
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center gap-3">
               <Zap size={16} className={(gpuAvailable || gpuDetecting) ? "text-status-success" : "text-status-warning"} />
@@ -312,7 +312,7 @@ ollama create traduzai-translator -f ...Modelfile`}
                 <button
                   onClick={handleDownloadModels}
                   disabled={downloading}
-                  className="text-xs px-3 py-1 rounded bg-accent-purple/10 text-accent-purple hover:bg-accent-purple/20 transition-smooth disabled:opacity-50"
+                  className="text-xs px-3 py-1 rounded bg-brand/10 text-brand hover:bg-brand/20 transition-smooth disabled:opacity-50"
                 >
                   {downloading ? "Baixando..." : "Baixar"}
                 </button>
@@ -335,7 +335,7 @@ ollama create traduzai-translator -f ...Modelfile`}
                 <p className="text-xs text-text-secondary">{credits} disponiveis</p>
               </div>
             </div>
-            <button className="text-xs px-3 py-1 rounded bg-accent-purple/10 text-accent-purple hover:bg-accent-purple/20 transition-smooth">
+            <button className="text-xs px-3 py-1 rounded bg-brand/10 text-brand hover:bg-brand/20 transition-smooth">
               Comprar
             </button>
           </div>
@@ -344,9 +344,9 @@ ollama create traduzai-translator -f ...Modelfile`}
 
       <section className="mb-8">
         <h3 className="text-sm font-medium text-text-secondary mb-3">Idiomas padrao</h3>
-        <div className="bg-bg-secondary border border-white/5 rounded-xl p-4">
+        <div className="bg-bg-secondary border border-border rounded-xl p-4">
           <div className="flex items-start gap-3 mb-4">
-            <div className="rounded-xl bg-accent-purple/10 p-2 text-accent-purple">
+            <div className="rounded-xl bg-brand/10 p-2 text-brand">
               <Globe size={16} />
             </div>
             <div>
@@ -383,7 +383,7 @@ ollama create traduzai-translator -f ...Modelfile`}
           <button
             onClick={handleSave}
             disabled={saving}
-            className="flex items-center gap-2 px-4 py-2 bg-accent-purple hover:bg-accent-purple-dark
+            className="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-600
               text-white text-sm rounded-lg transition-smooth disabled:opacity-50"
           >
             {saved ? <><CheckCircle2 size={14} /> Salvo!</> : <><Save size={14} /> {saving ? "Salvando..." : "Salvar"}</>}
