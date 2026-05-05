@@ -25,6 +25,7 @@ import { ZoomControls } from "../components/editor/toolbar/ZoomControls";
 import { AutoSaveIndicator } from "../components/editor/toolbar/AutoSaveIndicator";
 import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
 import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
+import { RenderStatusBadge } from "../components/editor/toolbar/RenderStatusBadge";
 import { preloadEditorFonts } from "../lib/fonts";
 
 const VIEW_MODES = [
@@ -75,7 +76,6 @@ export function Editor() {
     undoEditor,
     redoEditor,
     deleteSelectedLayer,
-    retypesetCurrentPage,
     renderPreviewPage,
     currentPageKey,
     setBrushSize,
@@ -85,6 +85,7 @@ export function Editor() {
     clearPageActionError,
     runAutoSave,
     flushAutoSave,
+    forceFidelityRender,
   } = useEditorStore();
 
   const totalPages = project?.paginas.length ?? 0;
@@ -206,7 +207,7 @@ export function Editor() {
         event.key.toLowerCase() === "r"
       ) {
         event.preventDefault();
-        void retypesetCurrentPage();
+        void forceFidelityRender();
       }
       if (
         (event.ctrlKey || event.metaKey) &&
@@ -224,7 +225,9 @@ export function Editor() {
     commitEdits,
     currentPageIndex,
     deleteSelectedLayer,
+    forceFidelityRender,
     redoEditor,
+    renderPreviewPage,
     resetViewport,
     selectedLayerId,
     setCurrentPage,
@@ -312,8 +315,9 @@ export function Editor() {
             </button>
           </div>
 
-          {/* Auto-save indicator + descartar (Fase 3 substitui o botão Salvar). */}
-          <div className="flex items-center gap-1">
+          {/* Auto-save indicator + Render badge + descartar */}
+          <div className="flex items-center gap-1.5">
+            <RenderStatusBadge />
             <AutoSaveIndicator />
             <button
               onClick={discardEdits}

@@ -379,6 +379,25 @@ interface EditorState {
   flushAutoSave: () => Promise<void>;
   pauseAutoSave: () => void;
   resumeAutoSave: () => void;
+
+  // ── Auto Fidelity Render (Fase 6) ───────────────────────────────────────
+  /** Versão monotônica para detectar edições durante render em curso. */
+  renderVersion: number;
+  /** Versão do render em curso (null = nenhum rodando). */
+  renderInFlightVersion: number | null;
+  /** Estado do render fiel. */
+  renderStatus: "idle" | "stale" | "rendering" | "updated" | "error";
+  /** Mensagem do último erro de render. */
+  renderError: string | null;
+  /** Marca render como desatualizado + incrementa renderVersion. */
+  markRenderStale: () => void;
+  /** Debounce 1500ms + chama runAutoFidelityRender se ainda stale. */
+  scheduleAutoFidelityRender: () => void;
+  /** Executa retypesetCurrentPage com proteção anti-race. */
+  runAutoFidelityRender: () => Promise<void>;
+  /** Força render imediato (sem debounce). Ctrl+Shift+R. */
+  forceFidelityRender: () => Promise<void>;
+
   setWorkingEstiloPatch: (
     pageKey: string,
     layerId: string,
@@ -462,6 +481,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   saveInFlightVersion: null,
   lastSaveError: null,
   autoSavePaused: false,
+  renderVersion: 0,
+  renderInFlightVersion: null,
+  renderStatus: "idle",
+  renderError: null,
 
   clearPageActionError: () => set({ pageActionError: null }),
 
@@ -474,6 +497,55 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   pauseAutoSave: () => set({ autoSavePaused: true }),
   resumeAutoSave: () => set({ autoSavePaused: false }),
+
+  // ── Auto Fidelity Render (Fase 6) ───────────────────────────────────────
+  markRenderStale: () =>
+    set((state) => ({
+      renderStatus: "stale",
+      renderVersion: state.renderVersion + 1,
+    })),
+
+  // Debounce timer — armazenado fora do store para não causar re-renders.
+  // Cada chamada a scheduleAutoFidelityRender cancela o timer anterior.
+
+  scheduleAutoFidelityRender: (() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        const state = useEditorStore.getState();
+        if (state.renderStatus === "stale" && !state.isRetypesetting && !state.isReinpainting) {
+          void state.runAutoFidelityRender();
+        }
+      }, 1500);
+    };
+  })(),
+
+  runAutoFidelityRender: async () => {
+    const state = get();
+    if (state.renderStatus === "rendering") return;
+    if (state.isRetypesetting || state.isReinpainting || state.activePageAction !== null) return;
+    const version = state.renderVersion;
+    set({ renderStatus: "rendering", renderInFlightVersion: version });
+    try {
+      await get().retypesetCurrentPage();
+      if (get().renderVersion !== version) {
+        // Edição aconteceu durante o render — fica stale para próximo ciclo
+        set({ renderStatus: "stale", renderInFlightVersion: null });
+      } else {
+        set({ renderStatus: "updated", renderInFlightVersion: null });
+      }
+    } catch (err) {
+      set({ renderStatus: "error", renderError: String(err), renderInFlightVersion: null });
+    }
+  },
+
+  forceFidelityRender: async () => {
+    // Ignora debounce — marca stale e roda imediatamente
+    set((state) => ({ renderStatus: "stale", renderVersion: state.renderVersion + 1 }));
+    await get().runAutoFidelityRender();
+  },
 
   // Variante de commitEdits sem loadCurrentPage no fim, usada pelo auto-save
   // a cada 3s. Evita o flicker de re-render que aconteceria ao recarregar a
@@ -670,6 +742,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       // Estado de auto-save resetado para a nova página.
       dirty: false,
       autoSaveStatus: "idle",
+      // Estado de render fiel resetado para a nova página (Fase 6).
+      renderStatus: "idle",
+      renderVersion: 0,
+      renderInFlightVersion: null,
+      renderError: null,
     });
     await get().loadCurrentPage();
   },
@@ -698,6 +775,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedImageLayerKey: null,
     }));
     get().markRenderPreviewStale(pageKey);
+    // Fase 6: agenda re-render fiel (debounce 1.5s)
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
   },
 
   updatePendingEstilo: (layerId, estiloChanges) => {
@@ -716,6 +796,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
     get().markRenderPreviewStale(pageKey);
+    // Fase 6: agenda re-render fiel (debounce 1.5s)
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
   },
 
   currentPageKey: () => {
@@ -1607,6 +1690,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       isLoadingPage: false,
       lastRetypesetTime: 0,
       brushSize: 18,
+      dirty: false,
+      autoSaveStatus: "idle",
+      renderStatus: "idle",
+      renderVersion: 0,
+      renderInFlightVersion: null,
+      renderError: null,
     }),
 
   // ─── Contexto da Obra ────────────────────────────────────────────────────

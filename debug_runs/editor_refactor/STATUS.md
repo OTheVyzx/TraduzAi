@@ -141,12 +141,35 @@
 
 ---
 
+---
+
+### ✅ Fase 6 — Live Preview + Auto Fidelity Render
+**Concluída em:** 2026-05-05
+
+**O que foi feito:**
+- `renderVersion`, `renderInFlightVersion`, `renderStatus`, `renderError` adicionados ao editorStore
+- `markRenderStale()`, `scheduleAutoFidelityRender()` (debounce 1500ms), `runAutoFidelityRender()`, `forceFidelityRender()` implementados
+- `updatePendingEdit` + `updatePendingEstilo` chamam `markRenderStale + scheduleAutoFidelityRender` automaticamente
+- P3 já implementado via lógica existente: `faithfulPreview` oculta Konva.Text quando há render fresco
+- `RenderStatusBadge.tsx` com 4 estados visuais (rendering/updated/stale/error)
+- Ctrl+Shift+R agora chama `forceFidelityRender()` (antes chamava `retypesetCurrentPage` diretamente)
+- `RenderStatusBadge` montado no header junto ao `AutoSaveIndicator`
+- `npm run check` ✓ · `npm run test` 50/50 ✓
+
+**Arquivos modificados:**
+- `src/lib/stores/editorStore.ts`
+- `src/pages/Editor.tsx`
+
+**Arquivos novos:**
+- `src/components/editor/toolbar/RenderStatusBadge.tsx`
+
+---
+
 ## Fases pendentes
 
 | Fase | Descrição | Status |
 |------|-----------|--------|
-| 6 | Live Preview + Auto Fidelity Render + RenderStatusBadge | 🔲 Próxima |
-| 7 | Brush Photoshop (layer `paint`, cor/opacidade/dureza) | 🔲 Pendente |
+| 7 | Brush Photoshop (layer `paint`, cor/opacidade/dureza) | 🔲 Próxima |
 | 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | 🔲 Pendente |
 | 9 | Borracha inteligente (alvo paint/mask) | 🔲 Pendente |
 | 10 | BITMAP como Layers MVP (drag reorder, opacity, lock, thumbnails) | 🔲 Pendente |
