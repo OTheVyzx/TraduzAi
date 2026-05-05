@@ -95,12 +95,34 @@
 
 ---
 
+---
+
+### ✅ Fase 4 — Reorganização da UI
+**Concluída em:** 2026-05-05  
+**Commit:** (incluso no commit "Fase 4")
+
+**O que foi feito:**
+- `TypesettingBar.tsx` criado — barra horizontal contextual com Fonte/Tamanho/Cor/Alinhamento/B/I + popovers Contorno/Sombra/Brilho. Aparece abaixo da toolbar quando texto está selecionado.
+- `ToolSidebar.tsx` criado — sidebar vertical 44px com Selecionar/Novo Bloco/Brush/Borracha/Máscara + atalhos de teclado visíveis. Posicionada entre PageThumbnails e canvas.
+- PROPRIEDADES removida do `LayersPanel.tsx` (import `PropertyEditor` eliminado)
+- `Editor.tsx`: horizontal TOOL_MODES segmented control removido; ToolSidebar + TypesettingBar montados
+- `npm run check` ✓ · `npm run test` 50/50 ✓
+
+**Arquivos modificados:**
+- `src/components/editor/LayersPanel.tsx`
+- `src/pages/Editor.tsx`
+
+**Arquivos novos:**
+- `src/components/editor/toolbar/TypesettingBar.tsx`
+- `src/components/editor/toolbar/ToolSidebar.tsx`
+
+---
+
 ## Fases pendentes
 
 | Fase | Descrição | Status |
 |------|-----------|--------|
-| 4 | TypesettingBar + ToolSidebar + remove PROPRIEDADES | 🔲 Próxima |
-| 5 | FloatingTextEditor | 🔲 Pendente |
+| 5 | FloatingTextEditor | 🔲 Próxima |
 | 6 | Live Preview + Auto Fidelity Render + RenderStatusBadge | 🔲 Pendente |
 | 7 | Brush Photoshop (layer `paint`, cor/opacidade/dureza) | 🔲 Pendente |
 | 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | 🔲 Pendente |

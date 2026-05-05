@@ -3,7 +3,6 @@ import { Check, Eye, EyeOff, Image as ImageIcon, Layers, Search, Trash2, Wand2 }
 import { useEditorStore } from "../../lib/stores/editorStore";
 import type { ImageLayerKey } from "../../lib/stores/appStore";
 import { LayerItem } from "./LayerItem";
-import { PropertyEditor } from "./PropertyEditor";
 
 const IMAGE_LAYER_LABELS: Record<ImageLayerKey, string> = {
   base: "Base",
@@ -152,15 +151,6 @@ export function LayersPanel() {
         </div>
       </div>
 
-      {/* Properties */}
-      <div className="flex min-h-0 flex-[0_0_44%] flex-col border-t border-border">
-        <div className="px-4 py-2">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">Propriedades</span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <PropertyEditor />
-        </div>
-      </div>
     </div>
   );
 }

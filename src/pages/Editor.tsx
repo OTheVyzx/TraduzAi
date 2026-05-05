@@ -3,7 +3,6 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowRight,
-  Brush,
   ChevronLeft,
   Eraser,
   Eye,
@@ -12,8 +11,6 @@ import {
   GripHorizontal,
   Image,
   Layers,
-  PenTool,
-  SquareDashedMousePointer,
   Undo2,
   ScanText,
   Languages,
@@ -23,9 +20,11 @@ import { useAppStore } from "../lib/stores/appStore";
 import { EditorStage } from "../components/editor/stage/EditorStage";
 import { LayersPanel } from "../components/editor/LayersPanel";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
-import { useEditorStore, type EditorToolMode } from "../lib/stores/editorStore";
+import { useEditorStore } from "../lib/stores/editorStore";
 import { ZoomControls } from "../components/editor/toolbar/ZoomControls";
 import { AutoSaveIndicator } from "../components/editor/toolbar/AutoSaveIndicator";
+import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
+import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
 import { preloadEditorFonts } from "../lib/fonts";
 
 const VIEW_MODES = [
@@ -34,13 +33,6 @@ const VIEW_MODES = [
   { key: "translated" as const, label: "Camadas", icon: FileText, hotkey: "3" },
 ];
 
-const TOOL_MODES: { key: EditorToolMode; label: string; icon: typeof PenTool; hotkey: string }[] = [
-  { key: "select", label: "Selecionar", icon: PenTool, hotkey: "V" },
-  { key: "block", label: "Novo bloco", icon: SquareDashedMousePointer, hotkey: "B" },
-  { key: "brush", label: "Brush", icon: Brush, hotkey: "N" },
-  { key: "repairBrush", label: "Máscara", icon: Brush, hotkey: "M" },
-  { key: "eraser", label: "Borracha", icon: Eraser, hotkey: "E" },
-];
 
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
@@ -334,7 +326,7 @@ export function Editor() {
           </div>
         </div>
 
-        {/* ── Row 2: Tools ── */}
+        {/* ── Row 2: View + Pipeline + Zoom ── */}
         <div className="flex items-center gap-2 border-b border-border bg-bg-primary px-3 py-1.5">
           {/* View modes — segmented control */}
           <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
@@ -358,26 +350,6 @@ export function Editor() {
 
           <div className="h-4 w-px bg-border" />
 
-          {/* Tool modes — segmented control */}
-          <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
-            {TOOL_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-tool-${key}`}
-                onClick={() => setToolMode(key)}
-                className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-smooth ${
-                  toolMode === key
-                    ? "bg-accent-cyan/12 text-accent-cyan shadow-sm"
-                    : "text-text-muted hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={12} />
-                <span className="hidden lg:inline">{label}</span>
-              </button>
-            ))}
-          </div>
-
           {/* Overlays toggle */}
           <button
             onClick={toggleOverlays}
@@ -391,7 +363,7 @@ export function Editor() {
             {showOverlays ? <Eye size={12} /> : <EyeOff size={12} />}
           </button>
 
-          {/* Brush size — contextual */}
+          {/* Brush size — contextual (quando ferramenta de brush/eraser ativa) */}
           {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") && (
             <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">
               <span className="text-[10px] text-text-muted">Pincel</span>
@@ -454,10 +426,6 @@ export function Editor() {
               <Eraser size={12} className={activePageAction === "inpaint" ? "animate-pulse" : ""} />
               <span className="hidden xl:inline">Inpaint</span>
             </button>
-
-            {/* Fase 1.2: Preview/Render removidos da UI principal.
-                Auto-render da Fase 6 (debounce 1.5s) faz o trabalho automaticamente.
-                Ctrl+Shift+R força render fiel; Ctrl+Shift+P força preview. */}
           </div>
 
           {/* Pipeline progress indicator */}
@@ -473,12 +441,12 @@ export function Editor() {
             </div>
           )}
 
-          {/* Zoom controls — Fase 1: movido do canto inferior direito do canvas
-              para ficar próximo das ações pipeline e liberar área visual */}
-          <div className="ml-auto">
-            <ZoomControls />
-          </div>
+          {/* Zoom controls (movido do canvas para cá na Fase 1) */}
+          <ZoomControls />
         </div>
+
+        {/* ── Row 3: TypesettingBar — só quando texto selecionado (Fase 4) ── */}
+        <TypesettingBar />
 
         {/* Banner de erro de ação pipeline (Fase 0 - sem falhas silenciosas) */}
         {pageActionError && (
@@ -512,7 +480,12 @@ export function Editor() {
           </div>
         )}
 
-        <EditorStage />
+        {/* ── Canvas area: ToolSidebar + Stage ── */}
+        <div className="flex min-h-0 flex-1">
+          {/* Fase 4: ToolSidebar vertical substituindo o segmented control horizontal */}
+          <ToolSidebar />
+          <EditorStage />
+        </div>
       </div>
 
       <LayersPanel />
