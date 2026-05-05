@@ -48,6 +48,8 @@ function StageStatusBadge() {
 
 export function EditorStage() {
   const controller = useEditorStageController();
+  const brushColor = useEditorStore((s) => s.brushColor);
+  const brushOpacity = useEditorStore((s) => s.brushOpacity);
   const {
     containerRef,
     containerSize,
@@ -204,8 +206,8 @@ export function EditorStage() {
                     image={brushImage.image}
                     width={width}
                     height={height}
-                    color="#48B0FF"
-                    opacity={0.65}
+                    color={brushColor}
+                    opacity={brushOpacity}
                   />
                 )}
                 <Rect width={width} height={height} fill="rgba(0,0,0,0)" />
@@ -231,15 +233,15 @@ export function EditorStage() {
                     points={paintStroke.flatMap(([x, y]) => [x, y])}
                     stroke={
                       toolMode === "brush"
-                        ? "rgba(72, 176, 255, 0.90)"
+                        ? brushColor  // Fase 7: usa brushColor dinâmica
                         : toolMode === "eraser"
                           ? "rgba(255,255,255,0.72)"
                           : "rgba(108, 92, 231, 0.90)"
                     }
+                    opacity={toolMode === "brush" ? brushOpacity : 0.85}
                     strokeWidth={Math.max(4, brushSize)}
                     lineCap="round"
                     lineJoin="round"
-                    opacity={0.85}
                     listening={false}
                   />
                 )}

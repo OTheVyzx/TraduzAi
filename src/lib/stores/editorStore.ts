@@ -319,6 +319,19 @@ interface EditorState {
   isLoadingPage: boolean;
   lastRetypesetTime: number;
   brushSize: number;
+  // ── Brush (Fase 7) ───────────────────────────────────────────────────────
+  /** Cor atual do brush em hex (#rrggbb). */
+  brushColor: string;
+  /** Opacidade do traço (0..1). */
+  brushOpacity: number;
+  /** Dureza da borda (0..1). Afeta a visualização no EditorBitmapOverlay. */
+  brushHardness: number;
+  /** Até 8 cores recentes. */
+  recentBrushColors: string[];
+  setBrushColor: (color: string) => void;
+  setBrushOpacity: (opacity: number) => void;
+  setBrushHardness: (hardness: number) => void;
+
   // Cache-bust por camada — nunca persiste no project.json (runtime-only)
   bitmapLayerVersions: Partial<Record<BitmapLayerKey, number>>;
   bumpBitmapLayerVersion: (layerKey: MutableBitmapLayerKey) => void;
@@ -471,6 +484,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   isLoadingPage: false,
   lastRetypesetTime: 0,
   brushSize: 18,
+  brushColor: "#000000",
+  brushOpacity: 1,
+  brushHardness: 0.8,
+  recentBrushColors: ["#000000", "#ffffff", "#ff0000", "#00ff00", "#0000ff"],
   bitmapLayerVersions: {},
   activePageAction: null,
   pageActionError: null,
@@ -763,6 +780,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setPan: (offset) => set({ panOffset: offset }),
   resetViewport: () => set({ zoom: 1, panOffset: { x: 0, y: 0 } }),
   setBrushSize: (brushSize) => set({ brushSize: Math.max(4, Math.min(160, brushSize)) }),
+  setBrushColor: (color) =>
+    set((state) => ({
+      brushColor: color,
+      recentBrushColors: [
+        color,
+        ...state.recentBrushColors.filter((c) => c !== color),
+      ].slice(0, 8),
+    })),
+  setBrushOpacity: (opacity) => set({ brushOpacity: Math.max(0, Math.min(1, opacity)) }),
+  setBrushHardness: (hardness) => set({ brushHardness: Math.max(0, Math.min(1, hardness)) }),
 
   updatePendingEdit: (layerId, changes) => {
     const pageKey = get().currentPageKey();
@@ -1690,6 +1717,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       isLoadingPage: false,
       lastRetypesetTime: 0,
       brushSize: 18,
+      brushColor: "#000000",
+      brushOpacity: 1,
+      brushHardness: 0.8,
       dirty: false,
       autoSaveStatus: "idle",
       renderStatus: "idle",

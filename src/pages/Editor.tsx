@@ -26,6 +26,7 @@ import { AutoSaveIndicator } from "../components/editor/toolbar/AutoSaveIndicato
 import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
 import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
 import { RenderStatusBadge } from "../components/editor/toolbar/RenderStatusBadge";
+import { BrushOptionsInline } from "../components/editor/toolbar/BrushOptionsPopover";
 import { preloadEditorFonts } from "../lib/fonts";
 
 const VIEW_MODES = [
@@ -367,8 +368,10 @@ export function Editor() {
             {showOverlays ? <Eye size={12} /> : <EyeOff size={12} />}
           </button>
 
-          {/* Brush size — contextual (quando ferramenta de brush/eraser ativa) */}
-          {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") && (
+          {/* Brush options — contextual quando ferramenta brush ativa (Fase 7: inclui color picker) */}
+          {toolMode === "brush" && <BrushOptionsInline />}
+          {/* Brush size simples para repairBrush/eraser */}
+          {(toolMode === "repairBrush" || toolMode === "eraser") && (
             <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">
               <span className="text-[10px] text-text-muted">Pincel</span>
               <input

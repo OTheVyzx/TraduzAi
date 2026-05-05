@@ -8,7 +8,7 @@ const IMAGE_LAYER_LABELS: Record<ImageLayerKey, string> = {
   base: "Base",
   mask: "Mascara",
   inpaint: "Inpaint",
-  brush: "Brush",
+  brush: "Pintura",  // Fase 7: brush = camada de pintura livre
   rendered: "Render",
 };
 

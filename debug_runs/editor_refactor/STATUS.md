@@ -169,8 +169,8 @@
 
 | Fase | Descrição | Status |
 |------|-----------|--------|
-| 7 | Brush Photoshop (layer `paint`, cor/opacidade/dureza) | 🔲 Próxima |
-| 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | 🔲 Pendente |
+| 7 | Brush Photoshop (cor/opacidade/dureza + BrushOptionsPopover) | ✅ Concluída |
+| 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | 🔲 Próxima |
 | 9 | Borracha inteligente (alvo paint/mask) | 🔲 Pendente |
 | 10 | BITMAP como Layers MVP (drag reorder, opacity, lock, thumbnails) | 🔲 Pendente |
 | 11 | Undo/Redo | 🔲 Pendente |
