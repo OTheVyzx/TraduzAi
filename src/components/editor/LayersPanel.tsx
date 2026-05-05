@@ -55,6 +55,9 @@ const IMAGE_LAYER_LABELS: Record<ImageLayerKey, string> = {
 // Camadas técnicas — não exportadas no resultado final (ex: máscara)
 const TECHNICAL_LAYERS: Set<ImageLayerKey> = new Set(["mask"]);
 
+// Referência estável para fallback de image_layers vazio (evita loop por ref nova)
+const EMPTY_IMAGE_LAYERS: Partial<Record<ImageLayerKey, never>> = Object.freeze({});
+
 // ─── SortableImageLayerRow ───────────────────────────────────────────────────
 
 interface SortableRowProps {
@@ -181,26 +184,31 @@ function SortableImageLayerRow({
 // ─── LayersPanel ─────────────────────────────────────────────────────────────
 
 export function LayersPanel() {
-  const {
-    currentPage,
-    selectedLayerId,
-    selectedImageLayerKey,
-    pendingEdits,
-    layerThumbnails,
-    toggleImageLayerVisibility,
-    selectImageLayer,
-    deleteSelectedLayer,
-    commitEdits,
-    setImageLayerOpacity,
-    setImageLayerLocked,
-    reorderImageLayers,
-    generateLayerThumbnail,
-    bitmapLayerVersions,
-  } = useEditorStore();
+  // Selectors individuais — evita re-render do panel inteiro quando qualquer
+  // outra parte do store muda (ex: zoom, brushColor, etc.)
+  const currentPage = useEditorStore((s) => s.currentPage);
+  const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
+  const selectedImageLayerKey = useEditorStore((s) => s.selectedImageLayerKey);
+  const pendingEdits = useEditorStore((s) => s.pendingEdits);
+  const layerThumbnails = useEditorStore((s) => s.layerThumbnails);
+  const toggleImageLayerVisibility = useEditorStore((s) => s.toggleImageLayerVisibility);
+  const selectImageLayer = useEditorStore((s) => s.selectImageLayer);
+  const deleteSelectedLayer = useEditorStore((s) => s.deleteSelectedLayer);
+  const commitEdits = useEditorStore((s) => s.commitEdits);
+  const setImageLayerOpacity = useEditorStore((s) => s.setImageLayerOpacity);
+  const setImageLayerLocked = useEditorStore((s) => s.setImageLayerLocked);
+  const reorderImageLayers = useEditorStore((s) => s.reorderImageLayers);
+  const generateLayerThumbnail = useEditorStore((s) => s.generateLayerThumbnail);
+  const bitmapLayerVersions = useEditorStore((s) => s.bitmapLayerVersions);
+
   const [query, setQuery] = useState("");
 
   const textLayers = currentPage?.text_layers ?? [];
-  const imageLayers = currentPage?.image_layers ?? {};
+  // Referência ESTÁVEL: usa o objeto real do store (mesma ref enquanto não muda)
+  // ou o EMPTY_IMAGE_LAYERS pré-congelado. Sem `?? {}` que cria objeto novo a cada render.
+  const imageLayers = (currentPage?.image_layers ?? EMPTY_IMAGE_LAYERS) as Partial<
+    Record<ImageLayerKey, { path: string | null; visible: boolean; locked: boolean; opacity?: number; order?: number }>
+  >;
   const hasPendingEdits = Object.keys(pendingEdits).length > 0;
 
   // Compute display order for bitmap layers
@@ -218,23 +226,19 @@ export function LayersPanel() {
     });
   }, [imageLayers]);
 
-  // Gerar thumbnails para camadas que têm path mas não têm thumbnail
+  // Gerar thumbnails APENAS para camadas que têm path mas não têm thumbnail.
+  // Não inclui `layerThumbnails` nas deps — o guard previne loop e a inclusão
+  // dispararia uma rerun a cada thumbnail gerado.
   useEffect(() => {
     for (const key of orderedBitmapKeys) {
       const layer = imageLayers[key];
-      if (layer?.path && !layerThumbnails[key]) {
+      const hasThumb = !!useEditorStore.getState().layerThumbnails[key];
+      if (layer?.path && !hasThumb) {
         void generateLayerThumbnail(key);
       }
     }
-  }, [orderedBitmapKeys, imageLayers, layerThumbnails, generateLayerThumbnail, bitmapLayerVersions]);
-
-  // Re-gerar thumbnails ao bump de versão
-  useEffect(() => {
-    for (const [key] of Object.entries(bitmapLayerVersions)) {
-      void generateLayerThumbnail(key as ImageLayerKey);
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bitmapLayerVersions]);
+  }, [orderedBitmapKeys, bitmapLayerVersions]);
 
   const filteredTextLayers = useMemo(() => {
     const normalized = query.trim().toLowerCase();
