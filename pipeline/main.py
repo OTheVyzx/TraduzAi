@@ -162,6 +162,21 @@ def emit_progress(
     )
 
 
+def log_editor_action(phase: str, action: str, **fields):
+    """Log estruturado da Fase 0: imprime em stderr com prefixo [EditorAction].
+
+    O Rust agora captura stderr (Stdio::piped) e anexa em mensagens de erro,
+    então qualquer crash de import ou exceção visível aqui chega na UI.
+    """
+    parts = [f"{k}={v}" for k, v in fields.items()]
+    line = f"[EditorAction] {phase:<7} {action} {' '.join(parts)}"
+    try:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
 def wait_if_paused(config: dict):
     """Block cooperatively while the Tauri pause marker exists."""
     pause_file = config.get("pause_file")
@@ -467,28 +482,34 @@ def main():
         _run_process_block(project_json_path, page_idx, block_id, mode)
         return
 
-    if sys.argv[1] == "--detect-page" and len(sys.argv) >= 4:
+    # Despachador unificado dos 4 handlers per-página (Fase 0 — sem falhas silenciosas).
+    # Cada exceção é logada com [EditorAction] error e re-emitida como JSON "error"
+    # para que o Rust e a UI vejam a mensagem em vez de terminar 1 sem motivo claro.
+    _ACTION_DISPATCH = {
+        "--detect-page": ("detect", _run_detect_page),
+        "--ocr-page": ("ocr", _run_ocr_page),
+        "--translate-page": ("translate", _run_translate_page),
+        "--reinpaint-page": ("inpaint", _run_reinpaint),
+    }
+    if sys.argv[1] in _ACTION_DISPATCH and len(sys.argv) >= 4:
+        action_name, handler = _ACTION_DISPATCH[sys.argv[1]]
         project_json_path = Path(sys.argv[2])
         page_idx = int(sys.argv[3])
-        _run_detect_page(project_json_path, page_idx)
-        return
-
-    if sys.argv[1] == "--ocr-page" and len(sys.argv) >= 4:
-        project_json_path = Path(sys.argv[2])
-        page_idx = int(sys.argv[3])
-        _run_ocr_page(project_json_path, page_idx)
-        return
-
-    if sys.argv[1] == "--translate-page" and len(sys.argv) >= 4:
-        project_json_path = Path(sys.argv[2])
-        page_idx = int(sys.argv[3])
-        _run_translate_page(project_json_path, page_idx)
-        return
-
-    if sys.argv[1] == "--reinpaint-page" and len(sys.argv) >= 4:
-        project_json_path = Path(sys.argv[2])
-        page_idx = int(sys.argv[3])
-        _run_reinpaint(project_json_path, page_idx)
+        log_editor_action("start", action_name, page=page_idx)
+        try:
+            handler(project_json_path, page_idx)
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            log_editor_action("error", action_name, page=page_idx, message=str(exc))
+            try:
+                sys.stderr.write(tb + "\n")
+                sys.stderr.flush()
+            except OSError:
+                pass
+            emit("error", message=f"{action_name} falhou: {exc}")
+            sys.exit(1)
+        log_editor_action("success", action_name, page=page_idx)
         return
 
     if sys.argv[1] == "--hardware-info":

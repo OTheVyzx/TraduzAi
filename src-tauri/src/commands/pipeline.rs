@@ -6,9 +6,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 #[allow(dead_code)]
 static PIPELINE_ACTIVE: once_cell::sync::Lazy<Mutex<bool>> =
@@ -605,6 +606,52 @@ fn render_preview_extension_hint(page: &serde_json::Value) -> String {
         .unwrap_or_else(|| "jpg".to_string())
 }
 
+/// Inicia captura assíncrona do stderr do sidecar Python para que crashes antes
+/// de emitir JSON de erro fiquem visíveis nos logs e nas mensagens de erro.
+///
+/// Retorna `(child, JoinHandle<String>)`. Use `await` no JoinHandle no caminho
+/// de erro/sucesso para anexar o stderr capturado à mensagem.
+fn spawn_with_stderr_capture(
+    mut cmd: Command,
+    label: &'static str,
+) -> Result<(Child, JoinHandle<String>), String> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("[EditorAction] erro ao iniciar {label}: {e}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .expect("stderr deveria estar capturado (Stdio::piped)");
+    let handle = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut buf).await;
+        buf
+    });
+    Ok((child, handle))
+}
+
+/// Coleta o stderr capturado e formata erro consolidado.
+async fn collect_stderr(handle: JoinHandle<String>) -> String {
+    handle.await.unwrap_or_default()
+}
+
+/// Formata mensagem de erro com stderr anexado quando há conteúdo relevante.
+fn format_pipeline_error(action: &str, base: &str, stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        format!("[EditorAction] {action} falhou: {base}")
+    } else {
+        // Limita stderr a 4KB para evitar mensagens enormes na UI.
+        let truncated = if trimmed.len() > 4096 {
+            format!("{}\n... (truncado, {} bytes total)", &trimmed[trimmed.len() - 4096..], trimmed.len())
+        } else {
+            trimmed.to_string()
+        };
+        format!("[EditorAction] {action} falhou: {base}\n--- stderr Python ---\n{truncated}")
+    }
+}
+
 #[tauri::command]
 pub async fn retypeset_page(app: AppHandle, config: RetypesetConfig) -> Result<String, String> {
     let pf = resolve_project_json_path(&config.project_path)?;
@@ -616,11 +663,12 @@ pub async fn retypeset_page(app: AppHandle, config: RetypesetConfig) -> Result<S
     cmd.arg("--retypeset")
         .arg(pf.to_string_lossy().to_string())
         .arg(config.page_index.to_string());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar retypeset: {e}"))?;
+    eprintln!(
+        "[EditorAction] start  retypeset page={}",
+        config.page_index
+    );
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "retypeset")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = String::new();
@@ -644,16 +692,32 @@ pub async fn retypeset_page(app: AppHandle, config: RetypesetConfig) -> Result<S
                         out = msg["output_path"].as_str().unwrap_or("").to_string();
                     }
                     "error" => {
-                        return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                        let stderr_text = collect_stderr(stderr_handle).await;
+                        let base = msg["message"].as_str().unwrap_or("Erro Python");
+                        let err = format_pipeline_error("retypeset", base, &stderr_text);
+                        eprintln!("[EditorAction] error  retypeset: {base}");
+                        return Err(err);
                     }
                     _ => {}
                 }
             }
         }
     }
-    if !child.wait().await.map_err(|e| e.to_string())?.success() {
-        return Err("Retypeset falhou".into());
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "retypeset",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  retypeset status={status}");
+        return Err(err);
     }
+    eprintln!(
+        "[EditorAction] success retypeset page={} out={}",
+        config.page_index, out
+    );
     Ok(out)
 }
 
@@ -683,11 +747,12 @@ pub async fn render_preview_page(
         .arg(config.page_index.to_string())
         .arg(override_path.to_string_lossy().to_string())
         .arg(output_path.to_string_lossy().to_string());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar preview final: {e}"))?;
+    eprintln!(
+        "[EditorAction] start  render_preview page={}",
+        config.page_index
+    );
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "render_preview")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = output_path.to_string_lossy().replace('\\', "/");
@@ -714,16 +779,32 @@ pub async fn render_preview_page(
                             .replace('\\', "/");
                     }
                     "error" => {
-                        return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                        let stderr_text = collect_stderr(stderr_handle).await;
+                        let base = msg["message"].as_str().unwrap_or("Erro Python");
+                        let err = format_pipeline_error("render_preview", base, &stderr_text);
+                        eprintln!("[EditorAction] error  render_preview: {base}");
+                        return Err(err);
                     }
                     _ => {}
                 }
             }
         }
     }
-    if !child.wait().await.map_err(|e| e.to_string())?.success() {
-        return Err("Preview final falhou".into());
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "render_preview",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  render_preview status={status}");
+        return Err(err);
     }
+    eprintln!(
+        "[EditorAction] success render_preview page={} out={}",
+        config.page_index, out
+    );
     Ok(out)
 }
 
@@ -740,11 +821,12 @@ pub async fn process_block(app: AppHandle, config: ProcessBlockConfig) -> Result
         .arg(pf.to_string_lossy().to_string())
         .arg(config.page_index.to_string())
         .arg(&config.block_id);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar process_block: {e}"))?;
+    eprintln!(
+        "[EditorAction] start  process_block page={} block={}",
+        config.page_index, config.block_id
+    );
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "process_block")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = String::new();
@@ -754,14 +836,30 @@ pub async fn process_block(app: AppHandle, config: ProcessBlockConfig) -> Result
                 if t == "complete" {
                     out = msg["output_path"].as_str().unwrap_or("").to_string();
                 } else if t == "error" {
-                    return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                    let stderr_text = collect_stderr(stderr_handle).await;
+                    let base = msg["message"].as_str().unwrap_or("Erro Python");
+                    let err = format_pipeline_error("process_block", base, &stderr_text);
+                    eprintln!("[EditorAction] error  process_block: {base}");
+                    return Err(err);
                 }
             }
         }
     }
-    if !child.wait().await.map_err(|e| e.to_string())?.success() {
-        return Err("ProcessBlock falhou".into());
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "process_block",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  process_block status={status}");
+        return Err(err);
     }
+    eprintln!(
+        "[EditorAction] success process_block page={} block={}",
+        config.page_index, config.block_id
+    );
     Ok(out)
 }
 
@@ -776,11 +874,12 @@ pub async fn reinpaint_page(app: AppHandle, config: ReinpaintConfig) -> Result<S
     cmd.arg("--reinpaint-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(config.page_index.to_string());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar reinpaint: {e}"))?;
+    eprintln!(
+        "[EditorAction] start  inpaint page={}",
+        config.page_index
+    );
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "inpaint")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = String::new();
@@ -790,14 +889,30 @@ pub async fn reinpaint_page(app: AppHandle, config: ReinpaintConfig) -> Result<S
                 if t == "complete" {
                     out = msg["output_path"].as_str().unwrap_or("").to_string();
                 } else if t == "error" {
-                    return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                    let stderr_text = collect_stderr(stderr_handle).await;
+                    let base = msg["message"].as_str().unwrap_or("Erro Python");
+                    let err = format_pipeline_error("inpaint", base, &stderr_text);
+                    eprintln!("[EditorAction] error  inpaint: {base}");
+                    return Err(err);
                 }
             }
         }
     }
-    if !child.wait().await.map_err(|e| e.to_string())?.success() {
-        return Err("Reinpaint falhou".into());
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "inpaint",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  inpaint status={status}");
+        return Err(err);
     }
+    eprintln!(
+        "[EditorAction] success inpaint page={} out={}",
+        config.page_index, out
+    );
     Ok(out)
 }
 
@@ -816,11 +931,9 @@ pub async fn detect_page(
     cmd.arg("--detect-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar detect_page: {e}"))?;
+    eprintln!("[EditorAction] start  detect page={page_index}");
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "detect")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = String::new();
@@ -844,7 +957,11 @@ pub async fn detect_page(
                         out = msg["output_path"].as_str().unwrap_or("").to_string();
                     }
                     "error" => {
-                        return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                        let stderr_text = collect_stderr(stderr_handle).await;
+                        let base = msg["message"].as_str().unwrap_or("Erro Python");
+                        let err = format_pipeline_error("detect", base, &stderr_text);
+                        eprintln!("[EditorAction] error  detect: {base}");
+                        return Err(err);
                     }
                     _ => {}
                 }
@@ -853,8 +970,16 @@ pub async fn detect_page(
     }
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if !status.success() {
-        return Err(format!("DetectPage falhou com status {}", status));
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "detect",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  detect status={status}");
+        return Err(err);
     }
+    eprintln!("[EditorAction] success detect page={page_index} out={out}");
     Ok(out)
 }
 
@@ -873,11 +998,9 @@ pub async fn ocr_page(
     cmd.arg("--ocr-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar ocr_page: {e}"))?;
+    eprintln!("[EditorAction] start  ocr page={page_index}");
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "ocr")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = String::new();
@@ -901,7 +1024,11 @@ pub async fn ocr_page(
                         out = msg["output_path"].as_str().unwrap_or("").to_string();
                     }
                     "error" => {
-                        return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                        let stderr_text = collect_stderr(stderr_handle).await;
+                        let base = msg["message"].as_str().unwrap_or("Erro Python");
+                        let err = format_pipeline_error("ocr", base, &stderr_text);
+                        eprintln!("[EditorAction] error  ocr: {base}");
+                        return Err(err);
                     }
                     _ => {}
                 }
@@ -910,8 +1037,16 @@ pub async fn ocr_page(
     }
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if !status.success() {
-        return Err(format!("OCRPage falhou com status {}", status));
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "ocr",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  ocr status={status}");
+        return Err(err);
     }
+    eprintln!("[EditorAction] success ocr page={page_index} out={out}");
     Ok(out)
 }
 
@@ -930,11 +1065,9 @@ pub async fn translate_page(
     cmd.arg("--translate-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Erro ao iniciar translate_page: {e}"))?;
+    eprintln!("[EditorAction] start  translate page={page_index}");
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "translate")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = String::new();
@@ -958,7 +1091,11 @@ pub async fn translate_page(
                         out = msg["output_path"].as_str().unwrap_or("").to_string();
                     }
                     "error" => {
-                        return Err(msg["message"].as_str().unwrap_or("Erro").to_string());
+                        let stderr_text = collect_stderr(stderr_handle).await;
+                        let base = msg["message"].as_str().unwrap_or("Erro Python");
+                        let err = format_pipeline_error("translate", base, &stderr_text);
+                        eprintln!("[EditorAction] error  translate: {base}");
+                        return Err(err);
                     }
                     _ => {}
                 }
@@ -967,8 +1104,16 @@ pub async fn translate_page(
     }
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if !status.success() {
-        return Err(format!("TranslatePage falhou com status {}", status));
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "translate",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  translate status={status}");
+        return Err(err);
     }
+    eprintln!("[EditorAction] success translate page={page_index} out={out}");
     Ok(out)
 }
 

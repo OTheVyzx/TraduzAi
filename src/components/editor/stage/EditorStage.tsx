@@ -17,13 +17,13 @@ function StageStatusBadge() {
 
   const label =
     state.status === "rendering"
-      ? "Renderizando preview final"
+      ? "Renderizando preview"
       : state.status === "error"
-        ? "Preview final pendente"
+        ? "Preview pendente"
         : state.status === "stale"
-          ? "Preview final desatualizado"
+          ? "Preview desatualizado"
           : state.previewPath
-            ? "Preview final fiel"
+            ? "Preview fiel"
             : null;
   if (!label) return null;
 
@@ -33,10 +33,10 @@ function StageStatusBadge() {
       <div
         data-testid="editor-preview-status"
         data-status={state.status}
-        className={`rounded-full border px-3 py-1 text-[11px] backdrop-blur ${
+        className={`rounded-lg border px-2.5 py-1 text-[10px] font-medium backdrop-blur-md ${
           fresh
-            ? "border-status-success/25 bg-status-success/10 text-status-success"
-            : "border-status-warning/25 bg-status-warning/10 text-status-warning"
+            ? "border-status-success/20 bg-status-success/10 text-status-success"
+            : "border-status-warning/20 bg-status-warning/10 text-status-warning"
         }`}
       >
         {label}
@@ -86,6 +86,13 @@ export function EditorStage() {
   const width = baseImage.size.width;
   const height = baseImage.size.height;
 
+  const hintText =
+    toolMode === "block"
+      ? "Arraste para criar uma nova camada de texto"
+      : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser"
+        ? "Pintura ativa no Stage"
+        : "Ctrl+scroll: zoom · Scroll: mover · Space+drag: mover";
+
   return (
     <div
       ref={containerRef}
@@ -101,28 +108,28 @@ export function EditorStage() {
               ? "base"
               : "original"
       }
-      className="relative flex-1 overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(72,176,255,0.08),_transparent_38%),linear-gradient(180deg,_rgba(255,255,255,0.02),_transparent_28%)]"
+      className="relative flex-1 overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(108,92,231,0.06),_transparent_40%)]"
       style={{ cursor: viewportCursor }}
       onMouseDownCapture={handleViewportMouseDown}
     >
-      <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-4">
-        <div className="rounded-full border border-border bg-black/45 px-3 py-1 text-[11px] text-text-secondary backdrop-blur">
-          {toolMode === "block"
-            ? "Arraste para criar uma nova camada de texto"
-            : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser"
-              ? "Pintura ativa no Stage"
-              : "Ctrl+scroll: zoom | scroll: mover | Space+drag: mover | Arraste blocos para reposicionar"}
+      {/* Bottom hint */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4">
+        <div className="rounded-lg border border-border bg-bg-secondary/80 px-3 py-1 text-[10px] text-text-muted backdrop-blur-md">
+          {hintText}
         </div>
       </div>
 
+      {/* Status badges */}
       <StageStatusBadge />
       {bitmapInspection && (
         <div className="pointer-events-none absolute right-4 top-4 z-20">
-          <div className="rounded-full border border-accent-cyan/25 bg-accent-cyan/10 px-3 py-1 text-[11px] text-accent-cyan backdrop-blur">
-            Inspecionando bitmap: {selectedImageLayerKey}
+          <div className="rounded-lg border border-accent-cyan/20 bg-accent-cyan/10 px-2.5 py-1 text-[10px] font-medium text-accent-cyan backdrop-blur-md">
+            Bitmap: {selectedImageLayerKey}
           </div>
         </div>
       )}
+
+      {/* Hidden state for tests */}
       <div
         data-testid="editor-stage-state"
         data-layers={JSON.stringify(
@@ -146,7 +153,7 @@ export function EditorStage() {
               transformOrigin: "center center",
               transition: panSession ? "none" : "transform 0.12s ease-out",
             }}
-            className="rounded-2xl border border-border shadow-[0_20px_60px_rgba(0,0,0,0.55)]"
+            className="rounded-2xl border border-border shadow-[0_20px_60px_rgba(0,0,0,0.45)]"
           >
             <Stage
               width={width}
@@ -177,7 +184,7 @@ export function EditorStage() {
                     image={maskImage.image}
                     width={width}
                     height={height}
-                    color="#7C5CFF"
+                    color="#6C5CE7"
                     opacity={0.65}
                   />
                 )}
@@ -201,10 +208,10 @@ export function EditorStage() {
                     width={Math.abs(blockDraft.current.x - blockDraft.start.x)}
                     height={Math.abs(blockDraft.current.y - blockDraft.start.y)}
                     cornerRadius={12}
-                    stroke="rgba(124, 92, 255, 0.95)"
+                    stroke="rgba(108, 92, 231, 0.95)"
                     strokeWidth={2}
                     dash={[8, 6]}
-                    fill="rgba(124, 92, 255, 0.10)"
+                    fill="rgba(108, 92, 231, 0.10)"
                     listening={false}
                   />
                 )}
@@ -216,7 +223,7 @@ export function EditorStage() {
                         ? "rgba(72, 176, 255, 0.90)"
                         : toolMode === "eraser"
                           ? "rgba(255,255,255,0.72)"
-                          : "rgba(124, 92, 255, 0.90)"
+                          : "rgba(108, 92, 231, 0.90)"
                     }
                     strokeWidth={Math.max(4, brushSize)}
                     lineCap="round"

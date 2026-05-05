@@ -351,7 +351,34 @@ interface EditorState {
   setWorkingTraduzido: (pageKey: string, layerId: string, value: string) => void;
   setWorkingOriginal: (pageKey: string, layerId: string, value: string) => void;
   activePageAction: null | "detect" | "ocr" | "translate" | "inpaint";
+  pageActionError: { action: "detect" | "ocr" | "translate" | "inpaint"; message: string } | null;
+  clearPageActionError: () => void;
   runMaskedAction: (action: "detect" | "ocr" | "translate" | "inpaint") => Promise<void>;
+
+  // ── Auto-save (Fase 3) ───────────────────────────────────────────────
+  /** True quando há edição não persistida (incrementa em todo mutador). */
+  dirty: boolean;
+  /** Timestamp ms do último save bem-sucedido. */
+  lastSavedAt: number | null;
+  /** Estado visível pelo AutoSaveIndicator. */
+  autoSaveStatus: "idle" | "pending" | "saving" | "saved" | "error";
+  /** Versão monotônica das edições pendentes — incrementa em markDirty. */
+  saveVersion: number;
+  /** Versão sendo salva no momento (para descarte de race antiga). */
+  saveInFlightVersion: number | null;
+  /** Última mensagem de erro de save (exibida no indicator + tooltip). */
+  lastSaveError: string | null;
+  /** Pausa o auto-save (usado durante pipeline action). */
+  autoSavePaused: boolean;
+  markDirty: () => void;
+  /** Salva apenas patches incrementais sem chamar loadCurrentPage (no flicker). */
+  commitEditsPatchOnly: () => Promise<void>;
+  /** Loop a cada 3s — chama commitEditsPatchOnly se dirty + não pausado. */
+  runAutoSave: () => Promise<void>;
+  /** Salva síncrono. Chame antes de troca de página, unmount, pipeline action. */
+  flushAutoSave: () => Promise<void>;
+  pauseAutoSave: () => void;
+  resumeAutoSave: () => void;
   setWorkingEstiloPatch: (
     pageKey: string,
     layerId: string,
@@ -427,6 +454,155 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   brushSize: 18,
   bitmapLayerVersions: {},
   activePageAction: null,
+  pageActionError: null,
+  dirty: false,
+  lastSavedAt: null,
+  autoSaveStatus: "idle",
+  saveVersion: 0,
+  saveInFlightVersion: null,
+  lastSaveError: null,
+  autoSavePaused: false,
+
+  clearPageActionError: () => set({ pageActionError: null }),
+
+  markDirty: () =>
+    set((state) => ({
+      dirty: true,
+      saveVersion: state.saveVersion + 1,
+      autoSaveStatus: state.autoSaveStatus === "saving" ? "saving" : "pending",
+    })),
+
+  pauseAutoSave: () => set({ autoSavePaused: true }),
+  resumeAutoSave: () => set({ autoSavePaused: false }),
+
+  // Variante de commitEdits sem loadCurrentPage no fim, usada pelo auto-save
+  // a cada 3s. Evita o flicker de re-render que aconteceria ao recarregar a
+  // página completa do disco. (commitEdits original ainda é chamada via Ctrl+S
+  // e nas pipeline actions.)
+  commitEditsPatchOnly: async () => {
+    const path = projectPath();
+    const { pendingEdits, pendingStructuralEdits, currentPageIndex, currentPage } = get();
+    const hasPendingUpdates = Object.keys(pendingEdits).length > 0;
+    const hasPendingStructural = hasStructuralEdits(pendingStructuralEdits);
+    if (!path || !currentPage || (!hasPendingUpdates && !hasPendingStructural)) return;
+
+    if (hasPendingStructural) {
+      // Para mudanças estruturais (criar/deletar/reordenar layers) ainda
+      // precisamos do save full (saveProjectJson). Sem reload depois.
+      const project = useAppStore.getState().project;
+      if (!project) return;
+      const materializedLayers = normalizeTextLayerOrder(
+        currentPage.text_layers
+          .filter((layer) => !pendingStructuralEdits.deleted[layer.id])
+          .map((layer) => mergePendingEdit(layer, pendingEdits[layer.id])),
+      );
+      const materializedPage: PageData = {
+        ...currentPage,
+        text_layers: materializedLayers,
+        textos: materializedLayers,
+      };
+      const paginas = [...project.paginas];
+      paginas[currentPageIndex] = materializedPage;
+      const nextProject = { ...project, paginas };
+      await saveProjectJson({ project_path: path, project_json: nextProject });
+      useAppStore.getState().updateProject({ paginas });
+      set({ pendingEdits: {}, pendingStructuralEdits: emptyStructuralEdits() });
+      return;
+    }
+
+    for (const [layerId, edit] of Object.entries(pendingEdits)) {
+      const patch: Record<string, unknown> = {};
+      if (edit.traduzido !== undefined || edit.translated !== undefined) {
+        patch.translated = edit.traduzido ?? edit.translated ?? "";
+      }
+      if (edit.tipo) patch.tipo = edit.tipo;
+      if (edit.bbox) {
+        patch.layout_bbox = edit.bbox;
+        patch.balloon_bbox = edit.bbox;
+        patch.bbox = edit.bbox;
+      }
+      if (edit.estilo) patch.style = edit.estilo;
+      if (edit.visible !== undefined) patch.visible = edit.visible;
+      if (edit.locked !== undefined) patch.locked = edit.locked;
+
+      await patchEditorTextLayer({
+        project_path: path,
+        page_index: currentPageIndex,
+        layer_id: layerId,
+        patch,
+      });
+    }
+
+    set({ pendingEdits: {}, pendingStructuralEdits: emptyStructuralEdits() });
+  },
+
+  runAutoSave: async () => {
+    const state = get();
+    if (
+      !state.dirty ||
+      state.autoSavePaused ||
+      state.activePageAction !== null ||
+      state.isRetypesetting ||
+      state.isReinpainting ||
+      state.saveInFlightVersion !== null
+    ) {
+      return;
+    }
+    const versionAtStart = state.saveVersion;
+    set({ autoSaveStatus: "saving", saveInFlightVersion: versionAtStart, lastSaveError: null });
+    try {
+      await get().commitEditsPatchOnly();
+      // Race-safe: se nova edição entrou enquanto salvávamos, mantém dirty pra
+      // próxima janela do interval. Senão, marca limpo.
+      const nowVersion = get().saveVersion;
+      if (nowVersion === versionAtStart) {
+        set({
+          dirty: false,
+          lastSavedAt: Date.now(),
+          autoSaveStatus: "saved",
+          saveInFlightVersion: null,
+        });
+      } else {
+        set({ saveInFlightVersion: null, autoSaveStatus: "pending" });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[AutoSave] error:", message);
+      set({
+        autoSaveStatus: "error",
+        lastSaveError: message,
+        saveInFlightVersion: null,
+      });
+    }
+  },
+
+  // flushAutoSave: salvamento síncrono "obrigatório" antes de troca de página,
+  // unmount, beforeunload, ou pipeline action. Bloqueia até concluir.
+  flushAutoSave: async () => {
+    const state = get();
+    if (!state.dirty || state.activePageAction !== null) return;
+    const versionAtStart = state.saveVersion;
+    set({ autoSaveStatus: "saving", saveInFlightVersion: versionAtStart, lastSaveError: null });
+    try {
+      await get().commitEditsPatchOnly();
+      const nowVersion = get().saveVersion;
+      set({
+        dirty: nowVersion !== versionAtStart,
+        lastSavedAt: Date.now(),
+        autoSaveStatus: nowVersion === versionAtStart ? "saved" : "pending",
+        saveInFlightVersion: null,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[AutoSave] flush error:", message);
+      set({
+        autoSaveStatus: "error",
+        lastSaveError: message,
+        saveInFlightVersion: null,
+      });
+      throw error;
+    }
+  },
 
   bumpBitmapLayerVersion: (layerKey) =>
     set((state) => ({
@@ -474,6 +650,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setCurrentPage: async (index) => {
+    // Fase 3: flush obrigatório antes de descartar pendingEdits da página
+    // anterior — sem isso, edições não-salvas seriam perdidas em silêncio.
+    try {
+      await get().flushAutoSave();
+    } catch {
+      /* erro registrado em lastSaveError; ainda assim trocamos de página */
+    }
     set({
       currentPageIndex: index,
       currentPage: null,
@@ -484,6 +667,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       hoveredLayerId: null,
       zoom: 1,
       panOffset: { x: 0, y: 0 },
+      // Estado de auto-save resetado para a nova página.
+      dirty: false,
+      autoSaveStatus: "idle",
     });
     await get().loadCurrentPage();
   },
@@ -699,11 +885,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (get().activePageAction) return; // previne duplo clique
     const path = projectPath();
     if (!path) return;
-    set({ activePageAction: action });
+    const pageIndex = get().currentPageIndex;
+    // Fase 3: flush auto-save antes de qualquer ação pipeline para garantir
+    // que pendingEdits estão persistidos no project.json que o sidecar lê.
+    try {
+      await get().flushAutoSave();
+    } catch {
+      /* erro já registrado em lastSaveError; segue mesmo assim */
+    }
+    set({ activePageAction: action, pageActionError: null });
+    console.log(`[EditorAction] start  ${action} page=${pageIndex}`);
     try {
       const result = await runPageActionWithOptionalMask({
         project_path: path,
-        page_index: get().currentPageIndex,
+        page_index: pageIndex,
         action,
       });
       await get().loadCurrentPage();
@@ -714,6 +909,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         if (asset === "mask") get().bumpBitmapLayerVersion("mask");
       }
       get().markRenderPreviewStale(get().currentPageKey());
+      console.log(
+        `[EditorAction] success ${action} page=${pageIndex} changed=${result.changed_assets.join(",")}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[EditorAction] error  ${action} page=${pageIndex}: ${message}`);
+      set({ pageActionError: { action, message } });
     } finally {
       set({ activePageAction: null });
     }
@@ -1524,3 +1726,40 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
 }));
+
+// ── Auto-save dirty tracking (Fase 3) ─────────────────────────────────
+// Em vez de chamar markDirty() em ~20 mutadores, usamos um subscriber que
+// detecta qualquer alteração em pendingEdits ou pendingStructuralEdits.
+// Quando os dois ficam vazios (após save bem-sucedido), o subscriber não
+// faz nada — markDirty só dispara em transições não-vazio→não-vazio ou
+// vazio→não-vazio com conteúdo novo.
+let lastTrackedPendingHash = "";
+function hashPendingEdits(s: EditorState): string {
+  const peKeys = Object.keys(s.pendingEdits).sort().join(",");
+  const struct =
+    s.pendingStructuralEdits.created.length +
+    "_" +
+    Object.keys(s.pendingStructuralEdits.deleted).length +
+    "_" +
+    (s.pendingStructuralEdits.order ? "1" : "0");
+  return `${peKeys}|${struct}|${JSON.stringify(s.pendingEdits)}`;
+}
+useEditorStore.subscribe((state) => {
+  const hash = hashPendingEdits(state);
+  if (hash !== lastTrackedPendingHash) {
+    lastTrackedPendingHash = hash;
+    // Só dispara markDirty se há de fato algo pendente. Evita marcar dirty
+    // logo após um save bem-sucedido (que limpou pendingEdits).
+    const hasAny =
+      Object.keys(state.pendingEdits).length > 0 ||
+      hasStructuralEdits(state.pendingStructuralEdits);
+    if (hasAny && !state.dirty) {
+      state.markDirty();
+    }
+    // Também incrementa saveVersion enquanto continua dirty (cada nova edição
+    // invalida saves em curso pelo race-check em runAutoSave).
+    if (hasAny && state.dirty) {
+      useEditorStore.setState((s) => ({ saveVersion: s.saveVersion + 1 }));
+    }
+  }
+});

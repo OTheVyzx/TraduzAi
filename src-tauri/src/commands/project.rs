@@ -1341,7 +1341,7 @@ pub enum PageActionMode {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-// Variantes Brush/Mask/Inpaint/Rendered/Preview serão usadas nas Fases 4B-4E (regional real)
+// Brush/Preview ainda não populadas pelo dispatcher atual mas existem no contrato
 #[allow(dead_code)]
 pub enum ChangedAsset {
     Brush,
@@ -1408,15 +1408,29 @@ pub async fn run_page_action_with_optional_mask(
 
     let page_index_u32 = config.page_index as u32;
 
-    match config.action.as_str() {
+    eprintln!(
+        "[EditorAction] start  page_action action={} page={} mode={:?} bbox={:?}",
+        config.action, config.page_index, mode, bbox
+    );
+
+    // Mapeia a ação para os assets que ela efetivamente modifica.
+    // Sem isso o frontend não invalida o cache dos bitmaps recém gravados
+    // pelo Python (bug histórico: changed_assets vinha sempre só ProjectJson).
+    let changed_assets: Vec<ChangedAsset> = match config.action.as_str() {
         "detect" => {
             detect_page(app, config.project_path.clone(), page_index_u32).await?;
+            // detect re-renderiza a página ao final (render_page_image em main.py)
+            vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
         }
         "ocr" => {
             ocr_page(app, config.project_path.clone(), page_index_u32).await?;
+            // ocr_page também re-renderiza ao final
+            vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
         }
         "translate" => {
             translate_page(app, config.project_path.clone(), page_index_u32).await?;
+            // translate atualiza texto traduzido e re-renderiza
+            vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
         }
         "inpaint" => {
             reinpaint_page(
@@ -1427,15 +1441,29 @@ pub async fn run_page_action_with_optional_mask(
                 },
             )
             .await?;
+            // inpaint regrava a layer inpaint e o render final
+            vec![
+                ChangedAsset::ProjectJson,
+                ChangedAsset::Inpaint,
+                ChangedAsset::Rendered,
+            ]
         }
-        other => return Err(format!("Ação desconhecida: {other}")),
-    }
+        other => {
+            eprintln!("[EditorAction] error  page_action ação desconhecida: {other}");
+            return Err(format!("Ação desconhecida: {other}"));
+        }
+    };
+
+    eprintln!(
+        "[EditorAction] success page_action action={} page={} changed={:?}",
+        config.action, config.page_index, changed_assets
+    );
 
     Ok(PageActionResult {
         action: config.action,
         mode,
         bbox,
-        changed_assets: vec![ChangedAsset::ProjectJson],
+        changed_assets,
         changed_layers: vec![],
         message: "Ação concluída".to_string(),
     })

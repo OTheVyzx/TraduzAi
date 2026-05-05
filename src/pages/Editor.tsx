@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Brush,
-  Check,
   ChevronLeft,
   Eraser,
   Eye,
@@ -13,10 +12,7 @@ import {
   GripHorizontal,
   Image,
   Layers,
-  LocateFixed,
-  Minus,
   PenTool,
-  Plus,
   SquareDashedMousePointer,
   Undo2,
   ScanText,
@@ -28,7 +24,9 @@ import { EditorStage } from "../components/editor/stage/EditorStage";
 import { LayersPanel } from "../components/editor/LayersPanel";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
 import { useEditorStore, type EditorToolMode } from "../lib/stores/editorStore";
-import { EDITOR_PROFESSIONAL_SHORTCUTS, EDITOR_PROFESSIONAL_TOOLS } from "../lib/editorProfessionalTools";
+import { ZoomControls } from "../components/editor/toolbar/ZoomControls";
+import { AutoSaveIndicator } from "../components/editor/toolbar/AutoSaveIndicator";
+import { preloadEditorFonts } from "../lib/fonts";
 
 const VIEW_MODES = [
   { key: "original" as const, label: "Original", icon: Image, hotkey: "1" },
@@ -66,7 +64,6 @@ export function Editor() {
     toolMode,
     viewMode,
     showOverlays,
-    zoom,
     brushSize,
     pendingEdits,
     pendingStructuralEdits,
@@ -80,9 +77,7 @@ export function Editor() {
     toggleOverlays,
     zoomIn,
     zoomOut,
-    setZoom,
     resetViewport,
-    setPan,
     commitEdits,
     discardEdits,
     undoEditor,
@@ -94,6 +89,10 @@ export function Editor() {
     setBrushSize,
     activePageAction,
     runMaskedAction,
+    pageActionError,
+    clearPageActionError,
+    runAutoSave,
+    flushAutoSave,
   } = useEditorStore();
 
   const totalPages = project?.paginas.length ?? 0;
@@ -105,13 +104,53 @@ export function Editor() {
     (pendingStructuralEdits.order ? 1 : 0);
   const pagePipelineBusy = isRetypesetting || isReinpainting;
   const pageKey = currentPageKey();
-  const renderPreviewState = renderPreviewCacheByPageKey[pageKey];
-  const previewRendering = renderPreviewState?.status === "rendering";
+  // renderPreviewState é mantido em escopo para a Fase 6 (RenderStatusBadge),
+  // mas o flag previewRendering antigo (do botão removido) saiu junto.
+  void renderPreviewCacheByPageKey;
+  void pageKey;
 
   useEffect(() => {
     if (!project || totalPages === 0) return;
     void loadCurrentPage();
   }, [loadCurrentPage, projectId, totalPages]);
+
+  // Fase 2A: preload das fontes bundle antes do primeiro draw do Konva.
+  // Sem isto, o canvas pode renderizar com fonte fallback do sistema enquanto
+  // o navegador ainda baixa o TTF — o usuário via "Comic Neue" no select mas
+  // o canvas mostrava Arial. Aguarda document.fonts.ready depois.
+  useEffect(() => {
+    void preloadEditorFonts().catch((err) => {
+      console.warn("[fonts] preloadEditorFonts falhou:", err);
+    });
+  }, []);
+
+  // Fase 3: auto-save híbrido — interval 3s + flush em saída do app.
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      void runAutoSave();
+    }, 3000);
+    const onBeforeUnload = () => {
+      // Best-effort: o browser não espera Promise, mas patches HTTP em curso
+      // costumam concluir. Para garantia real, usar Tauri close-requested.
+      void flushAutoSave().catch(() => {});
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        void flushAutoSave().catch(() => {});
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onBeforeUnload);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onBeforeUnload);
+      document.removeEventListener("visibilitychange", onVisibility);
+      // Unmount também faz flush.
+      void flushAutoSave().catch(() => {});
+    };
+  }, [runAutoSave, flushAutoSave]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -168,6 +207,23 @@ export function Editor() {
         event.preventDefault();
         void commitEdits();
       }
+      // Fase 1.2: atalhos de fallback para preview/render que perderam o botão
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "r"
+      ) {
+        event.preventDefault();
+        void retypesetCurrentPage();
+      }
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "p"
+      ) {
+        event.preventDefault();
+        void renderPreviewPage(currentPageKey());
+      }
     };
 
     window.addEventListener("keydown", handler);
@@ -215,294 +271,246 @@ export function Editor() {
     <div className="flex h-screen bg-bg-primary">
       <PageThumbnails />
 
-      <div className="flex min-w-0 flex-1 flex-col border-r border-border">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))] px-4 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <button
-              onClick={() => navigate("/preview")}
-              className="rounded p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Voltar ao preview"
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{project.obra}</p>
-              <p className="truncate text-[11px] text-text-secondary">
-                Cap. {project.capitulo} | Pag. {currentPageIndex + 1}/{totalPages} | {currentPageSummary}
-              </p>
-            </div>
-            <div
-              data-tauri-drag-region
-              className="hidden h-6 w-16 shrink-0 cursor-grab items-center justify-center rounded-full border border-border bg-bg-tertiary/70 text-text-muted md:flex"
-              title="Arrastar janela"
-            >
-              <GripHorizontal size={14} />
-            </div>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* ── Row 1: Header ── */}
+        <div className="flex items-center gap-3 border-b border-border bg-bg-secondary/60 px-3 py-2">
+          <button
+            onClick={() => navigate("/preview")}
+            className="rounded-lg p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary"
+            title="Voltar ao preview"
+          >
+            <ChevronLeft size={16} />
+          </button>
+
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-semibold tracking-tight text-text-primary">{project.obra}</p>
+            <p className="truncate text-[11px] text-text-muted">
+              Cap. {project.capitulo} · {currentPageSummary}
+            </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-view-${key}`}
-                onClick={() => setViewMode(key)}
-                className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
-                  viewMode === key
-                    ? "border-brand/35 bg-brand/15 text-brand"
-                    : "border-transparent text-text-secondary hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={13} />
-                {label}
-              </button>
-            ))}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            {TOOL_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-tool-${key}`}
-                onClick={() => setToolMode(key)}
-                className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
-                  toolMode === key
-                    ? "border-accent-cyan/35 bg-accent-cyan/12 text-accent-cyan"
-                    : "border-transparent text-text-secondary hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={13} />
-                {label}
-              </button>
-            ))}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            <button
-              onClick={toggleOverlays}
-              className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
-                showOverlays
-                  ? "border-accent-cyan/25 bg-accent-cyan/10 text-accent-cyan"
-                  : "border-transparent text-text-muted"
-              }`}
-              title="Guias de seleção (O)"
-            >
-              {showOverlays ? <Eye size={13} /> : <EyeOff size={13} />}
-              Guias
-            </button>
-
-            {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") && (
-              <div className="flex items-center gap-2 rounded-xl border border-border bg-bg-tertiary/50 px-2 py-1">
-                <span className="text-[11px] text-text-muted">Pincel</span>
-                <input
-                  type="range"
-                  min={4}
-                  max={96}
-                  value={brushSize}
-                  title="Tamanho do pincel"
-                  aria-label="Tamanho do pincel"
-                  onChange={(event) => setBrushSize(Number(event.target.value))}
-                />
-                <span className="w-8 text-right text-[11px] text-text-secondary">{brushSize}px</span>
-              </div>
-            )}
+          <div
+            data-tauri-drag-region
+            className="hidden h-5 w-10 shrink-0 cursor-grab items-center justify-center rounded-full bg-white/[0.03] text-text-muted/50 md:flex"
+            title="Arrastar janela"
+          >
+            <GripHorizontal size={12} />
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => void commitEdits()}
-              disabled={pendingCount === 0}
-              className="flex items-center gap-1 rounded-xl border border-transparent px-2.5 py-1.5 text-xs text-status-success transition-smooth hover:bg-status-success/10 disabled:opacity-35"
-              title="Salvar alterações (Ctrl+S)"
-            >
-              <Check size={13} />
-              Salvar
-            </button>
-            <button
-              onClick={discardEdits}
-              disabled={pendingCount === 0}
-              className="flex items-center gap-1 rounded-xl border border-transparent px-2.5 py-1.5 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary disabled:opacity-35"
-              title="Descartar alterações pendentes"
-            >
-              <Undo2 size={13} />
-              Descartar
-            </button>
-            {pendingCount > 0 && (
-              <span className="rounded-full bg-brand/12 px-2 py-1 text-[11px] text-brand">
-                {pendingCount} alteração(ões)
-              </span>
-            )}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            <div className="flex items-center gap-1.5 rounded-xl border border-border bg-bg-tertiary/30 px-1.5 py-1">
-              {activePageAction === null && (
-                <span className="text-[11px] text-text-muted px-1 hidden md:inline">
-                  {currentPage?.image_layers?.mask?.path
-                    ? "Escopo: Região mascarada"
-                    : "Escopo: Página inteira"}
-                </span>
-              )}
-              {activePageAction !== null && (
-                <span className="text-[11px] text-brand px-1 hidden md:inline">
-                  Executando: {activePageAction}...
-                </span>
-              )}
-              <button
-                disabled={pagePipelineBusy || activePageAction !== null}
-                onClick={() => void runMaskedAction("detect")}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Detectar balões na página"
-              >
-                <ScanText size={13} className={activePageAction === "detect" ? "animate-pulse" : ""} />
-                Detectar
-              </button>
-              <button
-                disabled={pagePipelineBusy || activePageAction !== null}
-                onClick={() => void runMaskedAction("ocr")}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Executar OCR em todos os blocos"
-              >
-                <FileText size={13} className={activePageAction === "ocr" ? "animate-pulse" : ""} />
-                OCR
-              </button>
-              <button
-                disabled={pagePipelineBusy || activePageAction !== null}
-                onClick={() => void runMaskedAction("translate")}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Traduzir todos os textos da página"
-              >
-                <Languages size={13} className={activePageAction === "translate" ? "animate-pulse" : ""} />
-                Traduzir
-              </button>
-              <button
-                disabled={pagePipelineBusy || activePageAction !== null}
-                onClick={() => void runMaskedAction("inpaint")}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Limpar a imagem com inpaint"
-              >
-                <Eraser size={13} className={activePageAction === "inpaint" ? "animate-pulse" : ""} />
-                Inpaint
-              </button>
-              <button
-                disabled={pagePipelineBusy || previewRendering}
-                onClick={() => void renderPreviewPage(pageKey)}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Renderizar preview final sem salvar alteracoes"
-              >
-                <FileText size={13} className={previewRendering ? "animate-pulse" : ""} />
-                Preview fiel
-              </button>
-              <button
-                disabled={pagePipelineBusy || previewRendering}
-                onClick={() => void retypesetCurrentPage()}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Salvar alterações e renderizar o preview final"
-              >
-                <FileText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
-                Salvar+Render
-              </button>
-            </div>
-
-            {(isRetypesetting || isReinpainting) && !!pipeline && (
-              <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-brand/10 border border-brand/20">
-                <Loader2 size={12} className="text-brand animate-spin" />
-                <span className="text-[11px] text-brand font-medium truncate max-w-[120px]">
-                  {pipeline.message || "Processando..."}
-                </span>
-                <span className="text-[10px] text-brand/70 font-mono">
-                  {Math.round(pipeline.step_progress)}%
-                </span>
-              </div>
-            )}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            <button
-              onClick={zoomOut}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Diminuir zoom (-)"
-            >
-              <Minus size={14} />
-            </button>
-            <button
-              onClick={zoomIn}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Aumentar zoom (+)"
-            >
-              <Plus size={14} />
-            </button>
-            <button
-              onClick={resetViewport}
-              className="rounded-xl bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
-              title="Resetar zoom e posição (0)"
-            >
-              Ajustar
-            </button>
-            <button
-              onClick={() => setZoom(2)}
-              className="rounded-xl bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
-              title="Zoom 2x"
-            >
-              2x
-            </button>
-            <button
-              onClick={() => setPan({ x: 0, y: 0 })}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Centralizar (pan)"
-            >
-              <LocateFixed size={14} />
-            </button>
-            <span className="w-12 text-right font-mono text-[11px] text-text-muted">
-              {Math.round(zoom * 100)}%
-            </span>
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
+          {/* Page navigation */}
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-bg-tertiary/40 px-1 py-0.5">
             <button
               onClick={() => void setCurrentPage(Math.max(0, currentPageIndex - 1))}
               disabled={currentPageIndex === 0}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
-              title="Página anterior (Alt+Left)"
+              className="rounded p-1 text-text-muted transition-smooth hover:text-text-primary disabled:opacity-25"
+              title="Página anterior (Alt+←)"
             >
-              <ArrowLeft size={14} />
+              <ArrowLeft size={12} />
             </button>
-            <span className="min-w-[56px] text-center font-mono text-xs text-text-secondary">
+            <span className="min-w-[40px] text-center font-mono text-[11px] text-text-secondary">
               {currentPageIndex + 1}/{totalPages}
             </span>
             <button
               onClick={() => void setCurrentPage(Math.min(totalPages - 1, currentPageIndex + 1))}
               disabled={currentPageIndex >= totalPages - 1}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
-              title="Próxima página (Alt+Right)"
+              className="rounded p-1 text-text-muted transition-smooth hover:text-text-primary disabled:opacity-25"
+              title="Próxima página (Alt+→)"
             >
-              <ArrowRight size={14} />
+              <ArrowRight size={12} />
+            </button>
+          </div>
+
+          {/* Auto-save indicator + descartar (Fase 3 substitui o botão Salvar). */}
+          <div className="flex items-center gap-1">
+            <AutoSaveIndicator />
+            <button
+              onClick={discardEdits}
+              disabled={pendingCount === 0}
+              className="rounded-lg p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-30"
+              title="Descartar alterações"
+            >
+              <Undo2 size={13} />
             </button>
           </div>
         </div>
 
-        <div
-          data-testid="editor-professional-toolbar"
-          className="flex flex-wrap items-center gap-2 border-b border-border bg-bg-secondary/45 px-4 py-2 text-[11px] text-text-secondary"
-        >
-          <span className="font-medium text-text-primary">Ferramentas</span>
-          {EDITOR_PROFESSIONAL_TOOLS.map((tool) => (
-            <span
-              key={tool.key}
-              className="rounded-full border border-border bg-bg-tertiary/45 px-2 py-1"
-              title={`${tool.label} - ${tool.hotkey}`}
+        {/* ── Row 2: Tools ── */}
+        <div className="flex items-center gap-2 border-b border-border bg-bg-primary px-3 py-1.5">
+          {/* View modes — segmented control */}
+          <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+            {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
+              <button
+                key={key}
+                data-testid={`editor-view-${key}`}
+                onClick={() => setViewMode(key)}
+                className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-smooth ${
+                  viewMode === key
+                    ? "bg-brand/15 text-brand shadow-sm"
+                    : "text-text-muted hover:text-text-primary"
+                }`}
+                title={`${label} (${hotkey})`}
+              >
+                <Icon size={12} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="h-4 w-px bg-border" />
+
+          {/* Tool modes — segmented control */}
+          <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+            {TOOL_MODES.map(({ key, label, icon: Icon, hotkey }) => (
+              <button
+                key={key}
+                data-testid={`editor-tool-${key}`}
+                onClick={() => setToolMode(key)}
+                className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-smooth ${
+                  toolMode === key
+                    ? "bg-accent-cyan/12 text-accent-cyan shadow-sm"
+                    : "text-text-muted hover:text-text-primary"
+                }`}
+                title={`${label} (${hotkey})`}
+              >
+                <Icon size={12} />
+                <span className="hidden lg:inline">{label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Overlays toggle */}
+          <button
+            onClick={toggleOverlays}
+            className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition-smooth ${
+              showOverlays
+                ? "bg-accent-cyan/10 text-accent-cyan"
+                : "text-text-muted hover:text-text-primary"
+            }`}
+            title="Guias de seleção (O)"
+          >
+            {showOverlays ? <Eye size={12} /> : <EyeOff size={12} />}
+          </button>
+
+          {/* Brush size — contextual */}
+          {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">
+              <span className="text-[10px] text-text-muted">Pincel</span>
+              <input
+                type="range"
+                min={4}
+                max={96}
+                value={brushSize}
+                title="Tamanho do pincel"
+                aria-label="Tamanho do pincel"
+                onChange={(event) => setBrushSize(Number(event.target.value))}
+                className="w-20"
+              />
+              <span className="w-7 text-right font-mono text-[10px] text-text-secondary">{brushSize}</span>
+            </div>
+          )}
+
+          <div className="flex-1" />
+
+          {/* Pipeline actions */}
+          <div className="flex items-center gap-0.5 rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+            {activePageAction !== null && (
+              <span className="px-1.5 text-[10px] font-medium text-brand animate-pulse">
+                {activePageAction}...
+              </span>
+            )}
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("detect")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Detectar balões"
             >
-              {tool.label}
-            </span>
-          ))}
-          <span className="mx-1 h-4 w-px bg-white/[0.05]" />
-          {EDITOR_PROFESSIONAL_SHORTCUTS.map((shortcut) => (
-            <span key={shortcut} className="text-text-muted">
-              {shortcut}
-            </span>
-          ))}
+              <ScanText size={12} className={activePageAction === "detect" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Detectar</span>
+            </button>
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("ocr")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Executar OCR"
+            >
+              <FileText size={12} className={activePageAction === "ocr" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">OCR</span>
+            </button>
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("translate")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Traduzir textos"
+            >
+              <Languages size={12} className={activePageAction === "translate" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Traduzir</span>
+            </button>
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("inpaint")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Limpar imagem (Inpaint)"
+            >
+              <Eraser size={12} className={activePageAction === "inpaint" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Inpaint</span>
+            </button>
+
+            {/* Fase 1.2: Preview/Render removidos da UI principal.
+                Auto-render da Fase 6 (debounce 1.5s) faz o trabalho automaticamente.
+                Ctrl+Shift+R força render fiel; Ctrl+Shift+P força preview. */}
+          </div>
+
+          {/* Pipeline progress indicator */}
+          {(isRetypesetting || isReinpainting) && !!pipeline && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-brand/8 px-2.5 py-1 border border-brand/15">
+              <Loader2 size={11} className="text-brand animate-spin" />
+              <span className="text-[10px] text-brand font-medium truncate max-w-[100px]">
+                {pipeline.message || "Processando"}
+              </span>
+              <span className="text-[10px] text-brand/60 font-mono">
+                {Math.round(pipeline.step_progress)}%
+              </span>
+            </div>
+          )}
+
+          {/* Zoom controls — Fase 1: movido do canto inferior direito do canvas
+              para ficar próximo das ações pipeline e liberar área visual */}
+          <div className="ml-auto">
+            <ZoomControls />
+          </div>
         </div>
+
+        {/* Banner de erro de ação pipeline (Fase 0 - sem falhas silenciosas) */}
+        {pageActionError && (
+          <div className="flex items-start gap-2 border-b border-status-error/30 bg-status-error/10 px-3 py-2">
+            <span className="mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-status-error/20 text-[10px] font-bold text-status-error">
+              !
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-medium text-status-error">
+                Falha em {pageActionError.action.toUpperCase()}
+              </p>
+              <p className="mt-0.5 max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-text-muted font-mono">
+                {pageActionError.message}
+              </p>
+            </div>
+            <button
+              onClick={() => void runMaskedAction(pageActionError.action)}
+              disabled={activePageAction !== null}
+              className="rounded-md border border-border bg-bg-secondary px-2 py-0.5 text-[10px] text-text-primary hover:bg-bg-tertiary disabled:opacity-40"
+              title="Tentar novamente"
+            >
+              Retry
+            </button>
+            <button
+              onClick={clearPageActionError}
+              className="rounded-md px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-white/[0.04]"
+              title="Fechar"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         <EditorStage />
       </div>

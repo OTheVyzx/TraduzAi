@@ -1,5 +1,46 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap");
 
+/* ── Fontes bundle do Editor (Fase 2A do refactor) ─────────────────────────
+ * Estes @font-face espelham FONT_REGISTRY em src/lib/fonts.ts. Mudar nome aqui
+ * sem mudar lá faz o navegador entrar em fallback silencioso para Konva.Text.
+ * Os arquivos vivem em public/fonts/ (servido pelo Vite em /fonts/*).
+ */
+@font-face {
+  font-family: "Comic Neue";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/ComicNeue-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Comic Neue";
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/ComicNeue-Bold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Newrotic";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/Newrotic.ttf") format("truetype");
+}
+@font-face {
+  font-family: "KOMIKAX";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/KOMIKAX_.ttf") format("truetype");
+}
+@font-face {
+  font-family: "CC Dave Gibbons";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/CCDaveGibbonsLower W00 Regular.ttf") format("truetype");
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -31,7 +72,7 @@ body {
 /* Focus ring (keyboard-only) */
 :focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px #0b0b10, 0 0 0 4px rgba(124, 92, 255, 0.6);
+  box-shadow: 0 0 0 2px #0b0b10, 0 0 0 4px rgba(108, 92, 231, 0.6);
   border-radius: 6px;
 }
 
@@ -92,7 +133,7 @@ body {
 
 /* Selection */
 ::selection {
-  background: rgba(124,92,255,0.4);
+  background: rgba(108,92,231,0.4);
   color: #f2f2f7;
 }
 
