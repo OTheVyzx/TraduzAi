@@ -342,6 +342,12 @@ interface EditorState {
   setMaskOp: (op: "replace" | "add" | "subtract") => void;
   setMaskInProgress: (progress: { points: Array<[number, number]> } | null) => void;
   clearMask: () => Promise<void>;
+  // ── Borracha Inteligente (Fase 9) ────────────────────────────────────────
+  /** Última camada pintada — usada pelo eraser para inferir alvo. */
+  lastPaintedLayer: "brush" | "mask";
+  /** Alvo explícito do eraser (nulo = inferência automática). */
+  eraserTarget: "brush" | "mask" | null;
+  setEraserTarget: (target: "brush" | "mask" | null) => void;
 
   // Cache-bust por camada — nunca persiste no project.json (runtime-only)
   bitmapLayerVersions: Partial<Record<BitmapLayerKey, number>>;
@@ -503,6 +509,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   maskShape: "freehand",
   maskOp: "replace",
   maskInProgress: null,
+  // Fase 9 — Eraser
+  lastPaintedLayer: "brush",
+  eraserTarget: null,
   bitmapLayerVersions: {},
   activePageAction: null,
   pageActionError: null,
@@ -811,6 +820,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setMaskShape: (shape) => set({ maskShape: shape }),
   setMaskOp: (op) => set({ maskOp: op }),
   setMaskInProgress: (progress) => set({ maskInProgress: progress }),
+
+  // Fase 9 — Eraser setter
+  setEraserTarget: (target) => set({ eraserTarget: target }),
   clearMask: async () => {
     const path = projectPath();
     const { currentPageIndex, bumpBitmapLayerVersion } = get();
@@ -1557,8 +1569,40 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const page = get().currentPage;
     if (!path || !page || strokes.length === 0) return;
 
-    const layerKey = get().toolMode === "brush" ? "brush" : "mask";
-    const erase = get().toolMode === "eraser";
+    const mode = get().toolMode;
+    const erase = mode === "eraser";
+
+    // Fase 9: Borracha inteligente — inferir alvo
+    let layerKey: "brush" | "mask";
+    if (mode === "eraser") {
+      // Alvo explícito > camada selecionada > última camada pintada > brush (default)
+      const explicit = get().eraserTarget;
+      const sel = get().selectedImageLayerKey;
+      if (explicit) {
+        layerKey = explicit;
+      } else if (sel === "brush" || sel === "mask") {
+        layerKey = sel;
+      } else {
+        layerKey = get().lastPaintedLayer;
+      }
+    } else if (mode === "brush") {
+      layerKey = "brush";
+    } else {
+      layerKey = "mask";
+    }
+
+    // Guardar última camada pintada (não apagada)
+    if (!erase) {
+      set({ lastPaintedLayer: layerKey });
+    }
+
+    // Bloquear stroke em camadas travadas
+    const layerMeta = page.image_layers?.[layerKey];
+    if (layerMeta?.locked) {
+      console.warn(`[Eraser/Brush] Camada "${layerKey}" está travada — stroke ignorado.`);
+      return;
+    }
+
     const fn = layerKey === "brush" ? updateBrushRegion : updateMaskRegion;
     const absolutePath = await fn({
       project_path: path,
@@ -1770,6 +1814,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       maskShape: "freehand",
       maskOp: "replace",
       maskInProgress: null,
+      lastPaintedLayer: "brush",
+      eraserTarget: null,
       dirty: false,
       autoSaveStatus: "idle",
       renderStatus: "idle",

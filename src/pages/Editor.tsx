@@ -140,6 +140,9 @@ export function Editor() {
     runAutoSave,
     flushAutoSave,
     forceFidelityRender,
+    eraserTarget,
+    lastPaintedLayer,
+    setEraserTarget,
   } = useEditorStore();
 
   const totalPages = project?.paginas.length ?? 0;
@@ -223,6 +226,11 @@ export function Editor() {
         if (event.key.toLowerCase() === "b") setToolMode("brush");
         if (event.key.toLowerCase() === "e") setToolMode("eraser");
         if (event.key.toLowerCase() === "l") setToolMode("mask");
+        // Tab: cicla alvo da borracha quando eraser ativo
+        if (event.key === "Tab" && toolMode === "eraser") {
+          event.preventDefault();
+          setEraserTarget(eraserTarget === "brush" || eraserTarget === null ? "mask" : "brush");
+        }
         // Legacy aliases
         if (event.key.toLowerCase() === "n") setToolMode("brush");
         if (event.key.toLowerCase() === "m") setToolMode("mask");
@@ -282,15 +290,18 @@ export function Editor() {
     commitEdits,
     currentPageIndex,
     deleteSelectedLayer,
+    eraserTarget,
     forceFidelityRender,
     redoEditor,
     renderPreviewPage,
     resetViewport,
     selectedLayerId,
     setCurrentPage,
+    setEraserTarget,
     setToolMode,
     setViewMode,
     toggleOverlays,
+    toolMode,
     totalPages,
     undoEditor,
     zoomIn,
@@ -443,6 +454,26 @@ export function Editor() {
                 className="w-20"
               />
               <span className="w-7 text-right font-mono text-[10px] text-text-secondary">{brushSize}</span>
+            </div>
+          )}
+          {/* Fase 9: Indicador de alvo da borracha */}
+          {toolMode === "eraser" && (
+            <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+              {(["brush", "mask"] as const).map((t) => {
+                const active = eraserTarget === t || (eraserTarget === null && lastPaintedLayer === t);
+                return (
+                  <button
+                    key={t}
+                    onClick={() => setEraserTarget(active ? null : t)}
+                    title={`Apagar: ${t === "brush" ? "Pintura" : "Máscara"} (Tab para ciclar)`}
+                    className={`rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+                      active ? "bg-accent-cyan/15 text-accent-cyan" : "text-text-muted hover:text-text-primary"
+                    }`}
+                  >
+                    {t === "brush" ? "Pintura" : "Máscara"}
+                  </button>
+                );
+              })}
             </div>
           )}
 
