@@ -215,6 +215,7 @@ export function useEditorStageController() {
     return () => window.removeEventListener("lasso:commit-polygon", handleCommitPolygon);
   }, []);
 
+
   useEffect(() => {
     const node = containerRef.current;
     if (!node) return;
@@ -258,6 +259,35 @@ export function useEditorStageController() {
   const baseImage = useImageElement(baseImageSrc);
   const maskImage = useImageElement(maskOverlaySrc);
   const brushImage = useImageElement(brushOverlaySrc);
+
+  // Fallback DOM-level: garante que cursorPoint atualize mesmo quando os
+  // eventos Konva não disparam (ex: entrar via canto, HMR). Procura o
+  // <canvas> do Konva Stage dentro do container e usa seu rect.
+  useEffect(() => {
+    if (toolMode !== "brush" && toolMode !== "repairBrush" && toolMode !== "eraser") {
+      setCursorPoint(null);
+      return;
+    }
+    const node = containerRef.current;
+    if (!node) return;
+
+    const onMove = (event: MouseEvent) => {
+      const stageCanvas = node.querySelector("canvas");
+      if (!stageCanvas || !baseImage.size.width || !baseImage.size.height) return;
+      const rect = stageCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const x = ((event.clientX - rect.left) / rect.width) * baseImage.size.width;
+      const y = ((event.clientY - rect.top) / rect.height) * baseImage.size.height;
+      if (x < 0 || y < 0 || x > baseImage.size.width || y > baseImage.size.height) {
+        if (paintStroke.length === 0) setCursorPoint(null);
+        return;
+      }
+      setCursorPoint({ x: Math.round(x), y: Math.round(y) });
+    };
+
+    window.addEventListener("mousemove", onMove);
+    return () => window.removeEventListener("mousemove", onMove);
+  }, [toolMode, baseImage.size.width, baseImage.size.height, paintStroke.length]);
 
   const stageScale = useMemo(() => {
     if (!baseImage.size.width || !baseImage.size.height || !containerSize.width || !containerSize.height) return 1;

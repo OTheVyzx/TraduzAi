@@ -24,10 +24,13 @@ export function EditorTransformer({ selectedNodeName }: { selectedNodeName: stri
         width: Math.max(20, nextBox.width),
         height: Math.max(20, nextBox.height),
       })}
-      borderStroke="rgba(124, 92, 255, 0.95)"
+      borderStroke="rgba(108, 92, 231, 0.95)"
+      borderStrokeWidth={2}
       anchorFill="#f8fbff"
-      anchorStroke="rgba(124, 92, 255, 0.95)"
-      anchorSize={8}
+      anchorStroke="rgba(108, 92, 231, 0.95)"
+      anchorStrokeWidth={2}
+      anchorSize={16}
+      anchorCornerRadius={3}
     />
   );
 }

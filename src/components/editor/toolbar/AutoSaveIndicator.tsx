@@ -69,14 +69,14 @@ export function AutoSaveIndicator() {
     );
   }
 
-  // pending / dirty mas ainda não disparou
+  // pending / dirty
   return (
     <div
       className="flex items-center gap-1.5 rounded-lg border border-status-warning/25 bg-status-warning/10 px-2 py-1 text-[10px] text-status-warning"
-      title="Alterações ainda não salvas — auto-save em até 3s"
+      title="Alterações não salvas — Ctrl+S ou clique em Salvar"
     >
       <Clock size={11} />
-      Alterações pendentes
+      Não salvo
     </div>
   );
 }

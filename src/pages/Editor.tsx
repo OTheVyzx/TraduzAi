@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowRight,
+  Check,
   ChevronLeft,
   Eraser,
   Eye,
@@ -138,8 +139,6 @@ export function Editor() {
     runMaskedAction,
     pageActionError,
     clearPageActionError,
-    runAutoSave,
-    flushAutoSave,
     forceFidelityRender,
     eraserTarget,
     lastPaintedLayer,
@@ -175,33 +174,9 @@ export function Editor() {
     });
   }, []);
 
-  // Fase 3: auto-save híbrido — interval 3s + flush em saída do app.
-  useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      void runAutoSave();
-    }, 3000);
-    const onBeforeUnload = () => {
-      // Best-effort: o browser não espera Promise, mas patches HTTP em curso
-      // costumam concluir. Para garantia real, usar Tauri close-requested.
-      void flushAutoSave().catch(() => {});
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        void flushAutoSave().catch(() => {});
-      }
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    window.addEventListener("pagehide", onBeforeUnload);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener("beforeunload", onBeforeUnload);
-      window.removeEventListener("pagehide", onBeforeUnload);
-      document.removeEventListener("visibilitychange", onVisibility);
-      // Unmount também faz flush.
-      void flushAutoSave().catch(() => {});
-    };
-  }, [runAutoSave, flushAutoSave]);
+  // Auto-save desligado — usuário salva manualmente via botão ou Ctrl+S
+  // (estilo Photoshop). markDirty continua funcionando para alimentar o
+  // indicador "Alterações não salvas".
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -384,11 +359,20 @@ export function Editor() {
             </button>
           </div>
 
-          {/* Auto-save indicator + Render badge + Undo/Redo + descartar */}
+          {/* Render badge + Undo/Redo + Salvar manual + descartar */}
           <div className="flex items-center gap-1.5">
             <UndoRedoControls />
             <RenderStatusBadge />
             <AutoSaveIndicator />
+            <button
+              onClick={() => void commitEdits()}
+              disabled={pendingCount === 0}
+              className="flex items-center gap-1 rounded-lg border border-status-success/30 bg-status-success/10 px-2.5 py-1 text-[11px] font-medium text-status-success transition-smooth hover:bg-status-success/15 disabled:opacity-30"
+              title="Salvar alterações (Ctrl+S)"
+            >
+              <Check size={12} />
+              Salvar
+            </button>
             <button
               onClick={discardEdits}
               disabled={pendingCount === 0}

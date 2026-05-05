@@ -773,13 +773,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setCurrentPage: async (index) => {
-    // Fase 3: flush obrigatório antes de descartar pendingEdits da página
-    // anterior — sem isso, edições não-salvas seriam perdidas em silêncio.
-    try {
-      await get().flushAutoSave();
-    } catch {
-      /* erro registrado em lastSaveError; ainda assim trocamos de página */
-    }
+    // Auto-save desligado — usuário é responsável por salvar antes de trocar.
+    // Se houver pendingEdits, o indicador "Não salvo" alerta o usuário.
     set({
       currentPageIndex: index,
       currentPage: null,

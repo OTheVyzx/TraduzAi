@@ -9,6 +9,7 @@
  */
 
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   AlignLeft,
   AlignCenter,
@@ -41,22 +42,39 @@ function EffectPopover({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  // Recalcula posição abaixo do botão sempre que abre
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPos({
+      left: rect.left,
+      top: rect.bottom + 4, // 4px gap abaixo do botão
+    });
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     function onClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      if (
+        buttonRef.current?.contains(target) ||
+        popoverRef.current?.contains(target)
+      )
+        return;
+      setOpen(false);
     }
     document.addEventListener("mousedown", onClickOutside);
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, [open]);
 
   return (
-    <div className="relative" ref={ref}>
+    <>
       <button
+        ref={buttonRef}
         onClick={() => setOpen((v) => !v)}
         className={`flex items-center gap-0.5 rounded-md px-2 py-1 text-[11px] font-medium transition-smooth ${
           active
@@ -68,12 +86,18 @@ function EffectPopover({
         {label}
         <ChevronDown size={10} className={`transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
-      {open && (
-        <div className="absolute top-full left-0 z-50 mt-1 min-w-[200px] rounded-xl border border-border bg-bg-secondary shadow-lg p-3 space-y-2.5">
-          {children}
-        </div>
-      )}
-    </div>
+      {open && pos &&
+        createPortal(
+          <div
+            ref={popoverRef}
+            style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 9999 }}
+            className="min-w-[220px] rounded-xl border border-border bg-bg-secondary shadow-[0_8px_32px_rgba(0,0,0,0.45)] backdrop-blur-md p-3 space-y-2.5"
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 
@@ -135,7 +159,7 @@ export function TypesettingBar() {
   const sombraOffsetY = estilo.sombra_offset?.[1] ?? 2;
 
   return (
-    <div className="flex items-center gap-1 border-b border-border bg-bg-secondary/80 px-3 py-1 overflow-x-auto">
+    <div className="flex items-center gap-1 border-b border-border bg-bg-secondary/80 px-3 py-1 overflow-x-auto overflow-y-visible">
       {/* Fonte */}
       <select
         value={fonte}
