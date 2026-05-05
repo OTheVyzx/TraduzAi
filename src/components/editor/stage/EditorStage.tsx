@@ -51,6 +51,7 @@ export function EditorStage() {
   const controller = useEditorStageController();
   const brushColor = useEditorStore((s) => s.brushColor);
   const brushOpacity = useEditorStore((s) => s.brushOpacity);
+  const imageLayers = useEditorStore((s) => s.currentPage?.image_layers ?? {});
   const {
     containerRef,
     containerSize,
@@ -201,7 +202,7 @@ export function EditorStage() {
                     width={width}
                     height={height}
                     color="#6C5CE7"
-                    opacity={0.65}
+                    opacity={(imageLayers.mask?.opacity ?? 1) * 0.65}
                   />
                 )}
                 {brushImage.image && (
@@ -210,7 +211,7 @@ export function EditorStage() {
                     width={width}
                     height={height}
                     color={brushColor}
-                    opacity={brushOpacity}
+                    opacity={(imageLayers.brush?.opacity ?? 1) * brushOpacity}
                   />
                 )}
                 <Rect width={width} height={height} fill="rgba(0,0,0,0)" />

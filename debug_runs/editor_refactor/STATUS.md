@@ -172,8 +172,8 @@
 | 7 | Brush Photoshop (cor/opacidade/dureza + BrushOptionsPopover) | ✅ Concluída |
 | 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | ✅ Concluída |
 | 9 | Borracha inteligente (alvo paint/mask) | ✅ Concluída |
-| 10 | BITMAP como Layers MVP (drag reorder, opacity, lock, thumbnails) | 🔲 Próxima |
-| 11 | Undo/Redo | 🔲 Pendente |
+| 10 | BITMAP como Layers MVP (drag reorder, opacity, lock, thumbnails) | ✅ Concluída |
+| 11 | Undo/Redo | 🔲 Próxima |
 | 12 | E2E final + relatório | 🔲 Pendente |
 
 ---

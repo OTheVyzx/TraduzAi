@@ -349,6 +349,14 @@ interface EditorState {
   eraserTarget: "brush" | "mask" | null;
   setEraserTarget: (target: "brush" | "mask" | null) => void;
 
+  // ── Layers MVP (Fase 10) ────────────────────────────────────────────────
+  /** Thumbnails por camada bitmap (dataURL, cache runtime). */
+  layerThumbnails: Partial<Record<ImageLayerKey, string>>;
+  setImageLayerOpacity: (key: ImageLayerKey, opacity: number) => Promise<void>;
+  setImageLayerLocked: (key: ImageLayerKey, locked: boolean) => Promise<void>;
+  reorderImageLayers: (orderedKeys: ImageLayerKey[]) => Promise<void>;
+  generateLayerThumbnail: (key: ImageLayerKey) => Promise<void>;
+
   // Cache-bust por camada — nunca persiste no project.json (runtime-only)
   bitmapLayerVersions: Partial<Record<BitmapLayerKey, number>>;
   bumpBitmapLayerVersion: (layerKey: MutableBitmapLayerKey) => void;
@@ -512,6 +520,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // Fase 9 — Eraser
   lastPaintedLayer: "brush",
   eraserTarget: null,
+  // Fase 10 — Layers MVP
+  layerThumbnails: {},
   bitmapLayerVersions: {},
   activePageAction: null,
   pageActionError: null,
@@ -843,6 +853,93 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       bumpBitmapLayerVersion("mask");
     } catch (_e) {
       // silencia falha de limpeza
+    }
+  },
+
+  // ── Fase 10 — Layers MVP ─────────────────────────────────────────────────
+  setImageLayerOpacity: async (key, opacity) => {
+    const page = get().currentPage;
+    if (!page) return;
+    const clamped = Math.max(0, Math.min(1, opacity));
+    const existingLayer = page.image_layers?.[key];
+    if (!existingLayer) return;
+    const updatedPage: PageData = {
+      ...page,
+      image_layers: {
+        ...page.image_layers,
+        [key]: { ...existingLayer, opacity: clamped },
+      },
+    };
+    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
+    set({ currentPage: updatedPage });
+    get().markDirty();
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
+    // Auto-save será responsável por persistir opacity via commitEdits
+    void get().runAutoSave();
+  },
+
+  setImageLayerLocked: async (key, locked) => {
+    const page = get().currentPage;
+    if (!page) return;
+    const existingLayer = page.image_layers?.[key];
+    if (!existingLayer) return;
+    const updatedPage: PageData = {
+      ...page,
+      image_layers: {
+        ...page.image_layers,
+        [key]: { ...existingLayer, locked },
+      },
+    };
+    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
+    set({ currentPage: updatedPage });
+    get().markDirty();
+  },
+
+  reorderImageLayers: async (orderedKeys) => {
+    const page = get().currentPage;
+    if (!page) return;
+    const imageLayers = { ...page.image_layers };
+    orderedKeys.forEach((key, index) => {
+      if (imageLayers[key]) {
+        imageLayers[key] = { ...imageLayers[key]!, order: index };
+      }
+    });
+    const updatedPage: PageData = { ...page, image_layers: imageLayers };
+    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
+    set({ currentPage: updatedPage });
+    get().markDirty();
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
+  },
+
+  generateLayerThumbnail: async (key) => {
+    const page = get().currentPage;
+    const layer = page?.image_layers?.[key];
+    if (!layer?.path) return;
+    try {
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const bytes = await readFile(layer.path);
+      const blob = new Blob([bytes], { type: "image/png" });
+      const srcUrl = URL.createObjectURL(blob);
+      await new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 32;
+          canvas.height = 32;
+          const ctx = canvas.getContext("2d");
+          ctx?.drawImage(img, 0, 0, 32, 32);
+          const dataUrl = canvas.toDataURL("image/png");
+          URL.revokeObjectURL(srcUrl);
+          set((state) => ({ layerThumbnails: { ...state.layerThumbnails, [key]: dataUrl } }));
+          resolve();
+        };
+        img.onerror = () => { URL.revokeObjectURL(srcUrl); resolve(); };
+        img.src = srcUrl;
+      });
+    } catch {
+      // silencia falha de thumbnail
     }
   },
 
@@ -1816,6 +1913,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       maskInProgress: null,
       lastPaintedLayer: "brush",
       eraserTarget: null,
+      layerThumbnails: {},
       dirty: false,
       autoSaveStatus: "idle",
       renderStatus: "idle",

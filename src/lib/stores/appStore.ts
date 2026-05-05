@@ -72,6 +72,12 @@ export interface ImageLayer {
   path: string | null;
   visible: boolean;
   locked: boolean;
+  /** 0..1, padrão 1. Afeta renderização Konva e exportação. */
+  opacity?: number;
+  /** Posição na pilha (ascendente = mais abaixo). Menor = mais ao fundo. */
+  order?: number;
+  /** Se true, a camada é técnica (ex: mask) e não aparece no export final. */
+  technical?: boolean;
 }
 
 export interface InpaintBlock {
