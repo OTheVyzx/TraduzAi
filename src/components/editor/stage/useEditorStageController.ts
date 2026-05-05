@@ -406,6 +406,7 @@ export function useEditorStageController() {
 
   return {
     containerRef,
+    containerSize,
     currentPage,
     viewMode,
     toolMode,

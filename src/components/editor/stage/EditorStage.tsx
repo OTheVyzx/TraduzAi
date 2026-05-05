@@ -5,6 +5,7 @@ import { EditorPaintCursor } from "./EditorPaintCursor";
 import { EditorStageBackground } from "./EditorStageBackground";
 import { EditorTextLayer } from "./EditorTextLayer";
 import { EditorTransformer } from "./EditorTransformer";
+import { FloatingTextEditor } from "./FloatingTextEditor";
 import { useEditorStageController } from "./useEditorStageController";
 
 function StageStatusBadge() {
@@ -49,6 +50,7 @@ export function EditorStage() {
   const controller = useEditorStageController();
   const {
     containerRef,
+    containerSize,
     currentPage,
     toolMode,
     showOverlays,
@@ -128,6 +130,15 @@ export function EditorStage() {
           </div>
         </div>
       )}
+
+      {/* Fase 5: FloatingTextEditor — painel flutuante para edição rápida */}
+      <FloatingTextEditor
+        stageScale={stageScale}
+        panOffset={panOffset}
+        imageWidth={baseImage.size.width}
+        imageHeight={baseImage.size.height}
+        containerSize={containerSize}
+      />
 
       {/* Hidden state for tests */}
       <div

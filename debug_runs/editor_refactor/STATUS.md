@@ -118,12 +118,34 @@
 
 ---
 
+---
+
+### ✅ Fase 5 — FloatingTextEditor
+**Concluída em:** 2026-05-05
+
+**O que foi feito:**
+- `FloatingTextEditor.tsx` criado — painel flutuante com Original (readonly) + Tradução (editável) + botão Restaurar + fechar (Esc/Ctrl+Enter/X)
+- Posicionamento dinâmico: topo-direito do bbox → à direita; se não couber → à esquerda; senão → abaixo
+- Clamp na viewport com margem de 12px
+- Coordenadas via `imageToContainer()` usando stageScale + panOffset + containerSize
+- `containerSize` adicionado ao return do `useEditorStageController`
+- `FloatingTextEditor` montado dentro de `EditorStage.tsx` com acesso ao controller
+- `npm run check` ✓ · `npm run test` 50/50 ✓
+
+**Arquivos modificados:**
+- `src/components/editor/stage/EditorStage.tsx`
+- `src/components/editor/stage/useEditorStageController.ts`
+
+**Arquivos novos:**
+- `src/components/editor/stage/FloatingTextEditor.tsx`
+
+---
+
 ## Fases pendentes
 
 | Fase | Descrição | Status |
 |------|-----------|--------|
-| 5 | FloatingTextEditor | 🔲 Próxima |
-| 6 | Live Preview + Auto Fidelity Render + RenderStatusBadge | 🔲 Pendente |
+| 6 | Live Preview + Auto Fidelity Render + RenderStatusBadge | 🔲 Próxima |
 | 7 | Brush Photoshop (layer `paint`, cor/opacidade/dureza) | 🔲 Pendente |
 | 8 | Máscara Lasso (freehand + poligonal + ops add/subtract/replace) | 🔲 Pendente |
 | 9 | Borracha inteligente (alvo paint/mask) | 🔲 Pendente |
