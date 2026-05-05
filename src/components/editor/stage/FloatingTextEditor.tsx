@@ -20,6 +20,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { RotateCcw, X } from "lucide-react";
 import { useEditorStore } from "../../../lib/stores/editorStore";
+import { useTextEditSession } from "../../../lib/useTextEditSession";
 
 interface FloatingTextEditorProps {
   stageScale: number;
@@ -61,17 +62,17 @@ export function FloatingTextEditor({
 }: FloatingTextEditorProps) {
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   const currentPage = useEditorStore((s) => s.currentPage);
-  const pendingEdits = useEditorStore((s) => s.pendingEdits);
   const updateEdit = useEditorStore((s) => s.updatePendingEdit);
   const selectLayer = useEditorStore((s) => s.selectLayer);
 
   const panelRef = useRef<HTMLDivElement>(null);
 
   const entry = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
-  const edit = selectedLayerId ? pendingEdits[selectedLayerId] : undefined;
-
-  const traduzido = edit?.traduzido ?? edit?.translated ?? entry?.traduzido ?? entry?.translated ?? "";
   const original = entry?.original ?? "";
+
+  // Fase 11: usa session de edição para gravar undo/redo automaticamente
+  const textSession = useTextEditSession(selectedLayerId ?? "");
+  const traduzido = textSession.value;
 
   // Fechar ao clicar fora do painel
   useEffect(() => {
@@ -103,11 +104,14 @@ export function FloatingTextEditor({
 
   const handleRestore = useCallback(() => {
     if (!selectedLayerId || !entry) return;
+    // Registra undo: mudança de volta para o original
+    textSession.onFocus();
     updateEdit(selectedLayerId, {
       traduzido: entry.original,
       translated: entry.original,
     });
-  }, [selectedLayerId, entry, updateEdit]);
+    textSession.onBlur();
+  }, [selectedLayerId, entry, updateEdit, textSession]);
 
   if (!entry || !selectedLayerId || containerSize.width === 0 || imageWidth === 0) {
     return null;
@@ -211,21 +215,22 @@ export function FloatingTextEditor({
               autoFocus
               rows={4}
               placeholder="Tradução..."
-              onChange={(e) =>
-                updateEdit(selectedLayerId, {
-                  traduzido: e.target.value,
-                  translated: e.target.value,
-                })
-              }
+              onFocus={textSession.onFocus}
+              onBlur={textSession.onBlur}
+              onCompositionStart={textSession.onCompositionStart}
+              onCompositionEnd={textSession.onCompositionEnd}
+              onChange={(e) => textSession.onChange(e.target.value)}
               onKeyDown={(e) => {
                 // Ctrl+Enter confirma e fecha
                 if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault();
+                  textSession.onBlur();
                   selectLayer(null);
                 }
                 // Impede ESC de se propagar para o handler global quando foco aqui
                 if (e.key === "Escape") {
                   e.stopPropagation();
+                  textSession.onBlur();
                   selectLayer(null);
                 }
               }}

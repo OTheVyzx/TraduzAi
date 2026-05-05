@@ -27,6 +27,7 @@ import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
 import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
 import { RenderStatusBadge } from "../components/editor/toolbar/RenderStatusBadge";
 import { BrushOptionsInline } from "../components/editor/toolbar/BrushOptionsPopover";
+import { UndoRedoControls } from "../components/editor/toolbar/UndoRedoControls";
 import { preloadEditorFonts } from "../lib/fonts";
 
 const VIEW_MODES = [
@@ -383,8 +384,9 @@ export function Editor() {
             </button>
           </div>
 
-          {/* Auto-save indicator + Render badge + descartar */}
+          {/* Auto-save indicator + Render badge + Undo/Redo + descartar */}
           <div className="flex items-center gap-1.5">
+            <UndoRedoControls />
             <RenderStatusBadge />
             <AutoSaveIndicator />
             <button
