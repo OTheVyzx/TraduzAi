@@ -174,13 +174,23 @@
 | 9 | Borracha inteligente (alvo paint/mask) | ✅ Concluída |
 | 10 | BITMAP como Layers MVP (drag reorder, opacity, lock, thumbnails) | ✅ Concluída |
 | 11 | Undo/Redo | ✅ Concluída |
-| 12 | E2E final + relatório | 🔲 Próxima |
+| 12 | E2E final + relatório | ✅ Concluída |
 
 ---
 
 ## Onde parei
 
-**Próximo passo:** Iniciar **Fase 9 — Borracha Inteligente**.
+**Estado atual:** ✅ Todas as 12 fases concluídas. Ver `final_report.md`.
+
+**Verificação final:**
+- `npm run check` ✓
+- `npm run test` 50/50 ✓
+- `npm run build` ✓ (908 KB JS · 267 KB gzip)
+
+**Pendente fora do escopo principal:**
+- Fase 2B — Importação manual de fontes (`import_font_to_project`)
+- Fase 2C — Fontes do sistema (`queryLocalFonts` + Rust fallback)
+- Code-splitting do bundle (warning vite >500KB)
 
 ---
 
