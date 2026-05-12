@@ -1,34 +1,28 @@
-import { Circle } from "react-konva";
-
 type Props = {
   x: number;
   y: number;
-  /** Raio em pixels do canvas (brushSize / 2). */
+  /** Raio em pixels do viewport. */
   radius: number;
-  toolMode: "brush" | "repairBrush" | "eraser";
+  toolMode: "brush" | "repairBrush" | "reinpaintBrush" | "eraser";
 };
 
-/**
- * Cursor circular que acompanha o mouse em modos de pintura.
- * Cor varia por ferramenta: brush=azul, repairBrush=roxo, eraser=branco.
- */
 export function EditorPaintCursor({ x, y, radius, toolMode }: Props) {
-  const stroke =
-    toolMode === "brush"
-      ? "rgba(72, 176, 255, 0.9)"
-      : toolMode === "eraser"
-        ? "rgba(255, 255, 255, 0.75)"
-        : "rgba(108, 92, 231, 0.9)";
+  const cursorRadius = Math.max(4, radius);
+  const strokeWidth = Math.max(3, Math.min(6, cursorRadius * 0.12));
 
   return (
-    <Circle
-      x={x}
-      y={y}
-      radius={Math.max(2, radius)}
-      stroke={stroke}
-      strokeWidth={1.5}
-      fill="transparent"
-      listening={false}
+    <div
+      className="pointer-events-none absolute z-30 rounded-full"
+      style={{
+        left: x,
+        top: y,
+        width: cursorRadius * 2,
+        height: cursorRadius * 2,
+        transform: "translate(-50%, -50%)",
+        border: `${strokeWidth}px solid #ffffff`,
+        opacity: toolMode === "repairBrush" || toolMode === "reinpaintBrush" ? 0.96 : 1,
+        mixBlendMode: "difference",
+      }}
     />
   );
 }

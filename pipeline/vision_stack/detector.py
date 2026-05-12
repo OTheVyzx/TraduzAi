@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,13 @@ def _default_models_dir() -> Path:
 MODELS_DIR = _default_models_dir()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PK_CTD_DIR = PROJECT_ROOT / "pk" / "huggingface" / "mayocream" / "comic-text-detector"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _pop_module_namespace(prefixes: tuple[str, ...]) -> dict[str, types.ModuleType]:
@@ -111,11 +119,20 @@ class _ComicTextSegHead(nn.Module):
         f20: torch.Tensor,
         f3: torch.Tensor,
     ) -> torch.Tensor:
+        def match_spatial(tensor: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+            if tensor.shape[-2:] == reference.shape[-2:]:
+                return tensor
+            return F.interpolate(tensor, size=reference.shape[-2:], mode="nearest")
+
         d10 = self.down_conv1(f3)
         u20 = self.upconv0(d10)
+        u20 = match_spatial(u20, f20)
         u40 = self.upconv2(torch.cat([f20, u20], dim=1))
+        u40 = match_spatial(u40, f40)
         u80 = self.upconv3(torch.cat([f40, u40], dim=1))
+        u80 = match_spatial(u80, f80)
         u160 = self.upconv4(torch.cat([f80, u80], dim=1))
+        u160 = match_spatial(u160, f160)
         u320 = self.upconv5(torch.cat([f160, u160], dim=1))
         return self.upconv6(u320)
 
@@ -329,7 +346,7 @@ class TextDetector:
             self._ctd_input_size = 1024
             self._ctd_feature_indices = (1, 4, 6, 8, 9)
             self._ctd_seg_threshold = 0.35
-            self._ctd_attach_masks = False
+            self._ctd_attach_masks = _env_flag("TRADUZAI_CTD_PIXEL_MASK", False)
             self._ctd_weight_source = weight_source
             logger.info("Detector carregado via comic-text-detector native (%s)", self.device)
             return True

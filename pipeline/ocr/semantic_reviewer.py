@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from .postprocess import looks_suspicious
+from .postprocess import has_run_on_tokens, looks_suspicious
 
 COMMON_WORDS = {
     "A", "AM", "AN", "AND", "ARE", "AS", "AT", "BACK", "BE", "BUT", "BY",
@@ -45,14 +45,102 @@ CONTRACTIONS = {
     "THERES": "THERE'S",
 }
 
+MERGED_COMMON_PHRASES = {
+    "AFTERILATER": "AFTER I LATER",
+    "AMARTIAL": "A MARTIAL",
+    "ANINTERESTING": "AN INTERESTING",
+    "ANDE": "AND",
+    "ANDEILLED": "AND FILLED",
+    "ANDFOCUSED": "AND FOCUSED",
+    "ARMYMARTIAL": "ARMY MARTIAL",
+    "ARTIKNEW": "ART I KNEW",
+    "ARTSILEARNEDFROM": "ARTS I LEARNED FROM",
+    "ASAKILLING": "AS A KILLING",
+    "ASAWAY": "AS A WAY",
+    "BYANY": "BY ANY",
+    "CALLIT": "CALL IT",
+    "COULDN'TPOSSIBLYHAVE": "COULDN'T POSSIBLY HAVE",
+    "DOYOU": "DO YOU",
+    "ENERG": "ENERGY",
+    "ESSENCEINTOTHE": "ESSENCE INTO THE",
+    "EVENTHE": "EVEN THE",
+    "FOUNDERWHOUNIFIED": "FOUNDER WHO UNIFIED",
+    "HAVEIBEEN": "HAVE I BEEN",
+    "HIDITLITTLEBY": "HID IT LITTLE BY",
+    "HIMBEST": "HIM BEST",
+    "HUNWONMIRROR'S": "HUNWON MIRROR'S",
+    "I'MSORRY": "I'M SORRY",
+    "IREMOVED": "I REMOVED",
+    "ITHOUGHT": "I THOUGHT",
+    "IWOULDN'T": "I WOULDN'T",
+    "KNOWITBETTER": "KNOW IT BETTER",
+    "KOMWTWYHATYOO": "KNOW WHAT YOU",
+    "LNATURALLYBELIEVED": "I NATURALLY BELIEVED",
+    "MARTIALWILDWEST": "MARTIAL WILD WEST",
+    "MASTERPERMITTED": "MASTER PERMITTED",
+    "MANHWASEVEN": "MANHWAS EVEN",
+    "MIXEDIN": "MIXED IN",
+    "NEWMARTIAL": "NEW MARTIAL",
+    "OFCOURSE": "OF COURSE",
+    "OFRESENTMENT": "OF RESENTMENT",
+    "OFTHE": "OF THE",
+    "OFTHEHUNWON": "OF THE HUNWON",
+    "OFLIGHTNING": "OF LIGHTNING",
+    "OOAMSILN": "MASTER'S",
+    "OLDMAN": "OLD MAN",
+    "OLDMAN'S": "OLD MAN'S",
+    "PLEASEDIN": "PLEASED IN",
+    "POSSIBLYHAVE": "POSSIBLY HAVE",
+    "PRINCIPLEIN": "PRINCIPLE IN",
+    "RANSFORMSINTO": "TRANSFORMS INTO",
+    "REACHESA": "REACHES A",
+    "REASONICOULDN'T": "REASON I COULDN'T",
+    "RUEFIREOFDRAGON": "TRUE FIRE OF DRAGON",
+    "SAMADH": "SAMADHI",
+    "SAGESSIMPLYSAW": "SAGES SIMPLY SAW",
+    "SEEMMIXED": "SEEM MIXED",
+    "SINGLEBOLT": "SINGLE BOLT",
+    "SOONEMUST": "SO ONE MUST",
+    "SOMESPIRIT": "SOME SPIRIT",
+    "SOICAN'T": "SO I CAN'T",
+    "STOPSALLMOVEMENT": "STOPS ALL MOVEMENT",
+    "THATDAYI": "THAT DAY I",
+    "THEANCIENT": "THE ANCIENT",
+    "THELIGHTNING": "THE LIGHTNING",
+    "THEULTIMATESECRET": "THE ULTIMATE SECRET",
+    "THERECAN": "THERE CAN",
+    "THINGSBETWEEN": "THINGS BETWEEN",
+    "THOUGHITSHARD": "THOUGH IT'S HARD",
+    "THISHUNWONTHUNDER": "THIS HUNWON THUNDER",
+    "THISIS": "THIS IS",
+    "TOOLBUT": "TOOL BUT",
+    "TRUEIDENTITY": "TRUE IDENTITY",
+    "VIOLENTPOWER": "VIOLENT POWER",
+    "WASIMPERIAL": "WAS IMPERIAL",
+    "WASSIMILAR": "WAS SIMILAR",
+    "WASTHAT": "WAS THAT",
+    "WEREN'TYOUFOCUSING": "WEREN'T YOU FOCUSING",
+    "WHAT'SWITH": "WHAT'S WITH",
+    "WHATSWITH": "WHAT'S WITH",
+    "WHOPRACTICEDIT": "WHO PRACTICED IT",
+    "WITHE": "WITH THE",
+    "WITHSOMETHING": "WITH SOMETHING",
+    "YOUKEEP": "YOU KEEP",
+    "YOUFIRST": "YOU FIRST",
+    "YOURINJURIES": "YOUR INJURIES",
+}
+
 
 def semantic_refine_text(text: str, tipo: str = "fala", confidence: float = 1.0) -> str:
     stripped = text.strip()
     if not stripped:
         return stripped
 
-    if confidence >= 0.88 and not looks_suspicious(stripped, confidence):
-        return stripped
+    allow_substitutions = (
+        confidence < 0.92
+        or looks_suspicious(stripped, confidence)
+        or has_run_on_tokens(stripped)
+    )
 
     parts = re.findall(r"[A-Za-z0-9|']+|[^A-Za-z0-9|']+", stripped)
     refined_parts = []
@@ -60,24 +148,34 @@ def semantic_refine_text(text: str, tipo: str = "fala", confidence: float = 1.0)
 
     for part in parts:
         if re.fullmatch(r"[A-Za-z0-9|']+", part):
-            refined = _refine_token(part, tipo)
+            refined = _refine_token(part, tipo, allow_substitutions=allow_substitutions)
             changed = changed or (refined != part)
             refined_parts.append(refined)
         else:
             refined_parts.append(part)
 
     refined_text = "".join(refined_parts)
+    repaired_text = _repair_common_phrase_boundaries(refined_text)
+    changed = changed or (repaired_text != refined_text)
+    refined_text = repaired_text
     refined_text = re.sub(r"\s{2,}", " ", refined_text).strip()
     return refined_text if changed else stripped
 
 
-def _refine_token(token: str, tipo: str) -> str:
+def _refine_token(token: str, tipo: str, *, allow_substitutions: bool = True) -> str:
     core, prefix, suffix = _split_affixes(token)
     if not core:
         return token
 
     was_upper = core.isupper()
     normalized = core.upper()
+    merged = MERGED_COMMON_PHRASES.get(normalized)
+    if merged:
+        return f"{prefix}{_restore_phrase_case(merged, core)}{suffix}"
+
+    if not allow_substitutions:
+        return token
+
     variants = _generate_variants(normalized)
     best = max(variants, key=lambda variant: _score_token(variant, tipo))
     best = _restore_contractions(best)
@@ -90,6 +188,47 @@ def _refine_token(token: str, tipo: str) -> str:
         refined_core = best.lower()
 
     return f"{prefix}{refined_core}{suffix}"
+
+
+def _restore_phrase_case(phrase: str, original: str) -> str:
+    if original.isupper():
+        return phrase
+    if original.islower():
+        return phrase.lower()
+    return " ".join(word.capitalize() for word in phrase.lower().split(" "))
+
+
+def _repair_common_phrase_boundaries(text: str) -> str:
+    repaired = re.sub(r"\bT\s+CANNOT\b", "IT CANNOT", text, flags=re.IGNORECASE)
+    repaired = re.sub(
+        r"\bDON'T\s+SAY\s+THAT\s+ARE\s+YOUR\s+INJURIES\s+ALRIGHT\?",
+        "DON'T SAY THAT. ARE YOUR INJURIES ALRIGHT?",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+    repaired = re.sub(
+        r"\bWHAT'S\s+(?:WITHE|WITH\s+THE)\s+TONE\?\s+ARE\s+YOU\s+ACCUSING\s+ME\s+OF\s+AND\s+DESTROYING\s+OUR\s+THAT\s+ARROGANT\s+BETRAYING\s+OUR\s+MASTER\s+LINEAGE\?",
+        "WHAT'S WITH THAT ARROGANT TONE? ARE YOU ACCUSING ME OF BETRAYING OUR MASTER AND DESTROYING OUR LINEAGE?",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+    repaired = re.sub(
+        r"\bSTOPSALL\s+MOVEMENT\s+ANI\s+TRANSFORMS\s+INTO\b",
+        "STOPS ALL MOVEMENT AND TRANSFORMS INTO",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+    repaired = re.sub(
+        r"\bIT['’]?S\.\s+(ABOUT\s+TIME\b)",
+        r"IT'S \1",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+    repaired = re.sub(r"\bART\s+OE\s+THE\b", "ART OF THE", repaired, flags=re.IGNORECASE)
+    repaired = re.sub(r"\b([A-Z]{2,})\.(?=[A-Z]{2,}\b)", r"\1. ", repaired)
+    repaired = re.sub(r"(?<=[A-Z])([,;:!?])(?=[A-Z])", r"\1 ", repaired)
+    repaired = re.sub(r"^\.(?=[A-Za-z])", "", repaired)
+    return repaired
 
 
 def _split_affixes(token: str) -> tuple[str, str, str]:

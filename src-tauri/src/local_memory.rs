@@ -386,7 +386,8 @@ impl LocalMemoryService {
                 }))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     fn query_json_table(&self, table: &str) -> Result<Vec<Value>, String> {
@@ -423,7 +424,8 @@ impl LocalMemoryService {
                 }))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     fn query_ocr_corrections(&self) -> Result<Vec<Value>, String> {
@@ -451,7 +453,8 @@ impl LocalMemoryService {
                 }))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     fn query_user_corrections(&self) -> Result<Vec<Value>, String> {
@@ -478,7 +481,8 @@ impl LocalMemoryService {
                 }))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 }
 

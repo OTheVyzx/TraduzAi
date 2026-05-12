@@ -3,7 +3,10 @@ use crate::export::psd::engine_data::{TextEngineSpec, TextJustification, TextOri
 use crate::export::psd::{export_psd, PsdLayer};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
-use image::{open, GrayImage, ImageBuffer, ImageReader, Luma, RgbaImage};
+use image::imageops::FilterType;
+use image::{
+    open, DynamicImage, GrayImage, ImageBuffer, ImageFormat, ImageReader, Luma, RgbaImage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -301,6 +304,14 @@ pub struct BitmapLayerUpdateConfig {
     pub erase: bool,
     #[serde(default)]
     pub strokes: Vec<Vec<[i32; 2]>>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub opacity: Option<f32>,
+    #[serde(default)]
+    pub hardness: Option<f32>,
+    #[serde(default)]
+    pub dirty_bbox: Option<[u32; 4]>,
 }
 
 #[tauri::command]
@@ -319,8 +330,9 @@ fn load_project_for_editing(project_path: &str) -> Result<(PathBuf, Value), Stri
     Ok((project_file, project))
 }
 
-fn save_project_after_edit(project_file: &Path, project: &mut Value) -> Result<(), String> {
-    project_schema::save_project_value(project_file, project)
+fn resolve_project_file(project_path: &str) -> PathBuf {
+    let base_path = normalize_path(project_path);
+    project_schema::resolve_project_file(&base_path)
 }
 
 #[tauri::command]
@@ -346,45 +358,46 @@ pub async fn load_editor_page(config: LoadEditorPageConfig) -> Result<Value, Str
 
 #[tauri::command]
 pub async fn create_text_layer(config: CreateTextLayerConfig) -> Result<Value, String> {
-    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
-    let layer =
-        project_schema::create_text_layer(&mut project, config.page_index, config.layout_bbox)?;
-    save_project_after_edit(&project_file, &mut project)?;
-    Ok(layer)
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        project_schema::create_text_layer(project, config.page_index, config.layout_bbox)
+    })
 }
 
 #[tauri::command]
 pub async fn patch_text_layer(config: PatchTextLayerConfig) -> Result<Value, String> {
-    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
-    let layer = project_schema::patch_text_layer(
-        &mut project,
-        config.page_index,
-        &config.layer_id,
-        &config.patch,
-    )?;
-    save_project_after_edit(&project_file, &mut project)?;
-    Ok(layer)
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        project_schema::patch_text_layer(
+            project,
+            config.page_index,
+            &config.layer_id,
+            &config.patch,
+        )
+    })
 }
 
 #[tauri::command]
 pub async fn delete_text_layer(config: DeleteTextLayerConfig) -> Result<(), String> {
-    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
-    project_schema::delete_text_layer(&mut project, config.page_index, &config.layer_id)?;
-    save_project_after_edit(&project_file, &mut project)
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        project_schema::delete_text_layer(project, config.page_index, &config.layer_id)
+    })
 }
 
 #[tauri::command]
 pub async fn set_layer_visibility(config: SetLayerVisibilityConfig) -> Result<(), String> {
-    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
-    project_schema::set_layer_visibility(
-        &mut project,
-        config.page_index,
-        &config.layer_kind,
-        config.layer_key.as_deref(),
-        config.layer_id.as_deref(),
-        config.visible,
-    )?;
-    save_project_after_edit(&project_file, &mut project)
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        project_schema::set_layer_visibility(
+            project,
+            config.page_index,
+            &config.layer_kind,
+            config.layer_key.as_deref(),
+            config.layer_id.as_deref(),
+            config.visible,
+        )
+    })
 }
 
 fn paint_circle(bitmap: &mut GrayImage, center_x: i32, center_y: i32, radius: i32, value: u8) {
@@ -474,45 +487,623 @@ fn save_bitmap_layer(path: &Path, bitmap: &GrayImage) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_hex_rgb(value: Option<&str>) -> [u8; 3] {
+    let raw = value.unwrap_or("#000000").trim().trim_start_matches('#');
+    if raw.len() != 6 {
+        return [0, 0, 0];
+    }
+    let r = u8::from_str_radix(&raw[0..2], 16).unwrap_or(0);
+    let g = u8::from_str_radix(&raw[2..4], 16).unwrap_or(0);
+    let b = u8::from_str_radix(&raw[4..6], 16).unwrap_or(0);
+    [r, g, b]
+}
+
+fn looks_like_legacy_grayscale_brush(image: &RgbaImage) -> bool {
+    image
+        .pixels()
+        .all(|pixel| pixel[3] == 255 && pixel[0] == pixel[1] && pixel[1] == pixel[2])
+}
+
+fn load_or_create_rgba_brush_layer(
+    path: &Path,
+    width: u32,
+    height: u32,
+    clear: bool,
+) -> Result<RgbaImage, String> {
+    if !clear && path.exists() {
+        let decoded = ImageReader::open(path)
+            .map_err(|e| format!("Erro ao abrir brush bitmap: {e}"))?
+            .decode()
+            .map_err(|e| format!("Erro ao decodificar brush bitmap: {e}"))?;
+        let mut existing = decoded.to_rgba8();
+        if existing.width() == width && existing.height() == height {
+            if looks_like_legacy_grayscale_brush(&existing) {
+                for pixel in existing.pixels_mut() {
+                    let alpha = pixel[0];
+                    *pixel = image::Rgba([0, 0, 0, alpha]);
+                }
+            }
+            return Ok(existing);
+        }
+    }
+    Ok(ImageBuffer::from_pixel(
+        width,
+        height,
+        image::Rgba([0, 0, 0, 0]),
+    ))
+}
+
+fn paint_circle_rgba(
+    bitmap: &mut RgbaImage,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    color: [u8; 3],
+    alpha: u8,
+    erase: bool,
+) {
+    let radius_sq = radius * radius;
+    for y in (center_y - radius)..=(center_y + radius) {
+        if y < 0 || y >= bitmap.height() as i32 {
+            continue;
+        }
+        for x in (center_x - radius)..=(center_x + radius) {
+            if x < 0 || x >= bitmap.width() as i32 {
+                continue;
+            }
+            let dx = x - center_x;
+            let dy = y - center_y;
+            if dx * dx + dy * dy <= radius_sq {
+                if erase {
+                    bitmap.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 0, 0]));
+                } else {
+                    bitmap.put_pixel(
+                        x as u32,
+                        y as u32,
+                        image::Rgba([color[0], color[1], color[2], alpha]),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn paint_stroke_rgba(
+    bitmap: &mut RgbaImage,
+    stroke: &[[i32; 2]],
+    radius: i32,
+    color: [u8; 3],
+    alpha: u8,
+    erase: bool,
+) {
+    if stroke.is_empty() {
+        return;
+    }
+    if stroke.len() == 1 {
+        paint_circle_rgba(
+            bitmap,
+            stroke[0][0],
+            stroke[0][1],
+            radius,
+            color,
+            alpha,
+            erase,
+        );
+        return;
+    }
+    for window in stroke.windows(2) {
+        let [x1, y1] = window[0];
+        let [x2, y2] = window[1];
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let steps = dx.abs().max(dy.abs()).max(1);
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let x = x1 as f32 + dx as f32 * t;
+            let y = y1 as f32 + dy as f32 * t;
+            paint_circle_rgba(
+                bitmap,
+                x.round() as i32,
+                y.round() as i32,
+                radius,
+                color,
+                alpha,
+                erase,
+            );
+        }
+    }
+}
+
+fn save_rgba_bitmap_layer(path: &Path, bitmap: &RgbaImage) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Erro ao preparar diretório da layer bitmap: {e}"))?;
+    }
+    let mut temp_path = path.to_path_buf();
+    let original_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "layer.png".to_string());
+    temp_path.set_file_name(format!("{original_name}.tmp.png"));
+    bitmap
+        .save_with_format(&temp_path, ImageFormat::Png)
+        .map_err(|e| format!("Erro ao salvar layer brush temporária: {e}"))?;
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Erro ao substituir layer brush anterior: {e}"))?;
+    }
+    std::fs::rename(&temp_path, path)
+        .map_err(|e| format!("Erro ao finalizar gravação da layer brush: {e}"))?;
+    Ok(())
+}
+
+fn update_brush_rgba_layer(config: BitmapLayerUpdateConfig) -> Result<String, String> {
+    if config.width == 0 || config.height == 0 {
+        return Err("Dimensões da layer bitmap inválidas".to_string());
+    }
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        let relative_layer_path =
+            project_schema::ensure_bitmap_layer_path(project, config.page_index, "brush")?;
+        let project_dir = project_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let absolute_layer_path = project_dir.join(&relative_layer_path);
+        let mut bitmap = load_or_create_rgba_brush_layer(
+            &absolute_layer_path,
+            config.width,
+            config.height,
+            config.clear,
+        )?;
+        let radius = (config.brush_size.max(1) as i32 / 2).max(1);
+        let color = parse_hex_rgb(config.color.as_deref());
+        let alpha = ((config.opacity.unwrap_or(1.0).clamp(0.0, 1.0)) * 255.0).round() as u8;
+        let _hardness = config.hardness.unwrap_or(1.0).clamp(0.0, 1.0);
+        for stroke in &config.strokes {
+            paint_stroke_rgba(&mut bitmap, stroke, radius, color, alpha, config.erase);
+        }
+        save_rgba_bitmap_layer(&absolute_layer_path, &bitmap)?;
+        project_schema::set_layer_visibility(
+            project,
+            config.page_index,
+            "image",
+            Some("brush"),
+            None,
+            true,
+        )?;
+        Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
+    })
+}
+
 fn update_bitmap_layer(config: BitmapLayerUpdateConfig, layer_key: &str) -> Result<String, String> {
     if config.width == 0 || config.height == 0 {
         return Err("Dimensões da layer bitmap inválidas".to_string());
     }
 
-    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
-    let relative_layer_path =
-        project_schema::ensure_bitmap_layer_path(&mut project, config.page_index, layer_key)?;
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        let relative_layer_path =
+            project_schema::ensure_bitmap_layer_path(project, config.page_index, layer_key)?;
+        let project_dir = project_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let absolute_layer_path = project_dir.join(&relative_layer_path);
+
+        let mut bitmap = load_or_create_bitmap_layer(
+            &absolute_layer_path,
+            config.width,
+            config.height,
+            config.clear,
+        )?;
+
+        let radius = (config.brush_size.max(1) as i32 / 2).max(1);
+        let value = if config.erase { 0 } else { 255 };
+        for stroke in &config.strokes {
+            paint_stroke(&mut bitmap, stroke, radius, value);
+        }
+
+        save_bitmap_layer(&absolute_layer_path, &bitmap)?;
+        project_schema::set_layer_visibility(
+            project,
+            config.page_index,
+            "image",
+            Some(layer_key),
+            None,
+            !config.erase || !config.strokes.is_empty(),
+        )?;
+
+        Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
+    })
+}
+
+fn resolve_project_relative_path(project_dir: &Path, rel_path: &str) -> PathBuf {
+    let path = Path::new(rel_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_dir.join(path)
+    }
+}
+
+fn page_image_layer_path(page: &Value, layer_key: &str) -> Option<String> {
+    page.get("image_layers")
+        .and_then(|value| value.as_object())
+        .and_then(|layers| layers.get(layer_key))
+        .and_then(|layer| layer.get("path"))
+        .and_then(|path| path.as_str())
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn default_inpaint_cache_rel(page: &Value, page_index: usize) -> String {
+    let page_number = page
+        .get("numero")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or((page_index + 1) as u64);
+    format!("layers/inpaint-cache/{page_number:03}.png")
+}
+
+fn page_editor_cache_path(page: &Value, key: &str) -> Option<String> {
+    page.get("editor_cache")
+        .and_then(Value::as_object)
+        .and_then(|cache| cache.get(key))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn ensure_inpaint_cache_rel(page: &mut Value, page_index: usize) -> Result<String, String> {
+    if let Some(existing) = page_editor_cache_path(page, "inpaint") {
+        return Ok(existing);
+    }
+    let rel = default_inpaint_cache_rel(page, page_index);
+    let page_obj = page
+        .as_object_mut()
+        .ok_or_else(|| "pagina invalida para cache de inpaint".to_string())?;
+    let cache_value = page_obj
+        .entry("editor_cache".to_string())
+        .or_insert_with(|| json!({}));
+    let cache = cache_value
+        .as_object_mut()
+        .ok_or_else(|| "editor_cache invalido".to_string())?;
+    cache.insert("inpaint".to_string(), Value::from(rel.clone()));
+    Ok(rel)
+}
+
+fn ensure_inpaint_cache_snapshot(
+    page: &mut Value,
+    page_index: usize,
+    project_dir: &Path,
+    source: &RgbaImage,
+) -> Result<PathBuf, String> {
+    let cache_rel = ensure_inpaint_cache_rel(page, page_index)?;
+    let cache_path = resolve_project_relative_path(project_dir, &cache_rel);
+    if !cache_path.exists() {
+        save_rgba_image_preserving_format(&cache_path, source)?;
+    }
+    Ok(cache_path)
+}
+
+fn load_rgba_image(path: &Path, label: &str) -> Result<RgbaImage, String> {
+    Ok(ImageReader::open(path)
+        .map_err(|e| format!("Erro ao abrir {label}: {e}"))?
+        .decode()
+        .map_err(|e| format!("Erro ao decodificar {label}: {e}"))?
+        .to_rgba8())
+}
+
+pub fn clear_inpaint_cache_for_page(project_file: &Path, page_index: usize) -> Result<(), String> {
     let project_dir = project_file
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let absolute_layer_path = project_dir.join(&relative_layer_path);
+    let cache_rel = project_schema::edit_project_value(project_file, |project| {
+        let pages = project
+            .get_mut("paginas")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| "Projeto sem paginas".to_string())?;
+        let Some(page) = pages.get_mut(page_index) else {
+            return Ok(None);
+        };
+        let rel = page_editor_cache_path(page, "inpaint")
+            .unwrap_or_else(|| default_inpaint_cache_rel(page, page_index));
+        let Some(page_obj) = page.as_object_mut() else {
+            return Ok(Some(rel));
+        };
+        let remove_editor_cache = if let Some(cache_value) = page_obj.get_mut("editor_cache") {
+            if let Some(cache) = cache_value.as_object_mut() {
+                cache.remove("inpaint");
+                cache.is_empty()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if remove_editor_cache {
+            page_obj.remove("editor_cache");
+        }
+        Ok(Some(rel))
+    })?;
+    if let Some(rel) = cache_rel {
+        let cache_path = resolve_project_relative_path(&project_dir, &rel);
+        if cache_path.exists() {
+            std::fs::remove_file(&cache_path)
+                .map_err(|e| format!("Erro ao limpar cache de inpaint: {e}"))?;
+        }
+    }
+    Ok(())
+}
 
-    let mut bitmap = load_or_create_bitmap_layer(
-        &absolute_layer_path,
-        config.width,
-        config.height,
-        config.clear,
-    )?;
-
-    let radius = (config.brush_size.max(1) as i32 / 2).max(1);
-    let value = if config.erase { 0 } else { 255 };
-    for stroke in &config.strokes {
-        paint_stroke(&mut bitmap, stroke, radius, value);
+fn save_rgba_image_preserving_format(path: &Path, image: &RgbaImage) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Erro ao preparar imagem de destino: {e}"))?;
     }
 
-    save_bitmap_layer(&absolute_layer_path, &bitmap)?;
-    project_schema::set_layer_visibility(
-        &mut project,
-        config.page_index,
-        "image",
-        Some(layer_key),
-        None,
-        !config.erase || !config.strokes.is_empty(),
-    )?;
-    save_project_after_edit(&project_file, &mut project)?;
+    let format = ImageFormat::from_path(path).unwrap_or(ImageFormat::Png);
+    let dynamic = match format {
+        ImageFormat::Jpeg => {
+            DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(image.clone()).to_rgb8())
+        }
+        _ => DynamicImage::ImageRgba8(image.clone()),
+    };
 
-    Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
+    let mut temp_path = path.to_path_buf();
+    let original_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "inpaint.png".to_string());
+    temp_path.set_file_name(format!("{original_name}.tmp"));
+
+    dynamic
+        .save_with_format(&temp_path, format)
+        .map_err(|e| format!("Erro ao salvar imagem temporária recuperada: {e}"))?;
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Erro ao substituir inpaint anterior: {e}"))?;
+    }
+    std::fs::rename(&temp_path, path)
+        .map_err(|e| format!("Erro ao finalizar inpaint recuperado: {e}"))?;
+    Ok(())
+}
+
+fn load_inpaint_or_history_source(inpaint_path: &Path, history_source: &RgbaImage) -> RgbaImage {
+    if !inpaint_path.exists() {
+        return history_source.clone();
+    }
+    let decoded = ImageReader::open(inpaint_path)
+        .map_err(|error| error.to_string())
+        .and_then(|reader| reader.decode().map_err(|error| error.to_string()));
+    match decoded {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => {
+            eprintln!(
+                "[recovery] inpaint inválido em {}; usando snapshot base como fallback: {error}",
+                inpaint_path.display()
+            );
+            history_source.clone()
+        }
+    }
+}
+
+fn build_stroke_mask(
+    width: u32,
+    height: u32,
+    brush_size: u32,
+    strokes: &[Vec<[i32; 2]>],
+) -> GrayImage {
+    let mut mask = ImageBuffer::from_pixel(width, height, Luma([0]));
+    let radius = (brush_size.max(1) as i32 / 2).max(1);
+    for stroke in strokes {
+        paint_stroke(&mut mask, stroke, radius, 255);
+    }
+    mask
+}
+
+fn apply_history_brush_to_inpaint(
+    project: &mut Value,
+    page_index: usize,
+    project_dir: &Path,
+    stroke_mask: &GrayImage,
+    dirty_bbox: Option<[u32; 4]>,
+) -> Result<PathBuf, String> {
+    let pages = project
+        .get_mut("paginas")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "Projeto sem páginas".to_string())?;
+    let page = pages
+        .get_mut(page_index)
+        .ok_or_else(|| "Página inválida".to_string())?;
+
+    let base_rel = page_image_layer_path(page, "base")
+        .or_else(|| {
+            page.get("arquivo_original")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| "Layer base não encontrada para recovery".to_string())?;
+    let base_path = resolve_project_relative_path(project_dir, &base_rel);
+    if !base_path.exists() {
+        return Err(format!(
+            "Imagem original não encontrada para recovery: {}",
+            base_path.display()
+        ));
+    }
+
+    let inpaint_rel = resolve_inpaint_rel(page)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let name = Path::new(&base_rel)
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| "001.png".to_string());
+            format!("images/{name}")
+        });
+    let inpaint_path = resolve_project_relative_path(project_dir, &inpaint_rel);
+    if let Some(parent) = inpaint_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Erro ao preparar layer inpaint: {e}"))?;
+    }
+
+    let original = ImageReader::open(&base_path)
+        .map_err(|e| format!("Erro ao abrir imagem original para recovery: {e}"))?
+        .decode()
+        .map_err(|e| format!("Erro ao decodificar imagem original para recovery: {e}"))?
+        .to_rgba8();
+    let mut inpaint = load_inpaint_or_history_source(&inpaint_path, &original);
+
+    if inpaint.dimensions() != original.dimensions() {
+        inpaint = image::imageops::resize(
+            &inpaint,
+            original.width(),
+            original.height(),
+            FilterType::Lanczos3,
+        );
+    }
+    ensure_inpaint_cache_snapshot(page, page_index, project_dir, &inpaint)?;
+    let mask = if stroke_mask.dimensions() == original.dimensions() {
+        stroke_mask.clone()
+    } else {
+        image::imageops::resize(
+            stroke_mask,
+            original.width(),
+            original.height(),
+            FilterType::Nearest,
+        )
+    };
+
+    let [min_x, min_y, max_x, max_y] =
+        dirty_bbox.unwrap_or([0, 0, original.width(), original.height()]);
+    let min_x = min_x.min(original.width());
+    let min_y = min_y.min(original.height());
+    let max_x = max_x.min(original.width()).max(min_x);
+    let max_y = max_y.min(original.height()).max(min_y);
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            if mask.get_pixel(x, y)[0] > 0 {
+                inpaint.put_pixel(x, y, *original.get_pixel(x, y));
+            }
+        }
+    }
+    if page_image_layer_path(page, "inpaint").is_none() {
+        let layers = page
+            .get_mut("image_layers")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "image_layers inválido".to_string())?;
+        layers.insert(
+            "inpaint".to_string(),
+            json!({
+                "key": "inpaint",
+                "path": inpaint_rel,
+                "visible": true,
+                "locked": false
+            }),
+        );
+    }
+    save_rgba_image_preserving_format(&inpaint_path, &inpaint)?;
+
+    project_schema::set_layer_visibility(
+        project,
+        page_index,
+        "image",
+        Some("inpaint"),
+        None,
+        true,
+    )?;
+    Ok(inpaint_path)
+}
+
+fn apply_cached_inpaint_brush_to_inpaint(
+    project: &mut Value,
+    page_index: usize,
+    project_dir: &Path,
+    stroke_mask: &GrayImage,
+    dirty_bbox: Option<[u32; 4]>,
+) -> Result<PathBuf, String> {
+    let pages = project
+        .get_mut("paginas")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "Projeto sem paginas".to_string())?;
+    let page = pages
+        .get_mut(page_index)
+        .ok_or_else(|| "Pagina invalida".to_string())?;
+
+    let inpaint_rel = resolve_inpaint_rel(page)
+        .map(str::to_owned)
+        .or_else(|| {
+            page.get("arquivo_original")
+                .and_then(Value::as_str)
+                .and_then(|original| {
+                    Path::new(original)
+                        .file_name()
+                        .map(|name| format!("images/{}", name.to_string_lossy()))
+                })
+        })
+        .ok_or_else(|| "Layer inpaint nao encontrada para reinpaint".to_string())?;
+    let inpaint_path = resolve_project_relative_path(project_dir, &inpaint_rel);
+    if !inpaint_path.exists() {
+        return Err(format!(
+            "Imagem inpaint atual nao encontrada para reinpaint: {}",
+            inpaint_path.display()
+        ));
+    }
+
+    let mut inpaint = load_rgba_image(&inpaint_path, "imagem inpaint atual")?;
+    let cache_rel = ensure_inpaint_cache_rel(page, page_index)?;
+    let cache_path = resolve_project_relative_path(project_dir, &cache_rel);
+    if !cache_path.exists() {
+        save_rgba_image_preserving_format(&cache_path, &inpaint)?;
+    }
+    let mut inpaint_cache = load_rgba_image(&cache_path, "cache de inpaint")?;
+    if inpaint_cache.dimensions() != inpaint.dimensions() {
+        inpaint_cache = image::imageops::resize(
+            &inpaint_cache,
+            inpaint.width(),
+            inpaint.height(),
+            FilterType::Lanczos3,
+        );
+    }
+    let mask = if stroke_mask.dimensions() == inpaint.dimensions() {
+        stroke_mask.clone()
+    } else {
+        image::imageops::resize(
+            stroke_mask,
+            inpaint.width(),
+            inpaint.height(),
+            FilterType::Nearest,
+        )
+    };
+
+    let [min_x, min_y, max_x, max_y] =
+        dirty_bbox.unwrap_or([0, 0, inpaint.width(), inpaint.height()]);
+    let min_x = min_x.min(inpaint.width());
+    let min_y = min_y.min(inpaint.height());
+    let max_x = max_x.min(inpaint.width()).max(min_x);
+    let max_y = max_y.min(inpaint.height()).max(min_y);
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            if mask.get_pixel(x, y)[0] > 0 {
+                inpaint.put_pixel(x, y, *inpaint_cache.get_pixel(x, y));
+            }
+        }
+    }
+
+    save_rgba_image_preserving_format(&inpaint_path, &inpaint)?;
+    project_schema::set_layer_visibility(
+        project,
+        page_index,
+        "image",
+        Some("inpaint"),
+        None,
+        true,
+    )?;
+    Ok(inpaint_path)
 }
 
 #[tauri::command]
@@ -522,7 +1113,94 @@ pub async fn update_mask_region(config: BitmapLayerUpdateConfig) -> Result<Strin
 
 #[tauri::command]
 pub async fn update_brush_region(config: BitmapLayerUpdateConfig) -> Result<String, String> {
-    update_bitmap_layer(config, "brush")
+    update_brush_rgba_layer(config)
+}
+
+#[tauri::command]
+pub async fn update_recovery_region(config: BitmapLayerUpdateConfig) -> Result<String, String> {
+    if config.width == 0 || config.height == 0 {
+        return Err("Dimensões da layer bitmap inválidas".to_string());
+    }
+
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        let project_dir = project_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let updated_path = if config.erase {
+            let relative_layer_path =
+                project_schema::ensure_bitmap_layer_path(project, config.page_index, "recovery")?;
+            let absolute_layer_path = project_dir.join(&relative_layer_path);
+            let mut bitmap = load_or_create_bitmap_layer(
+                &absolute_layer_path,
+                config.width,
+                config.height,
+                config.clear,
+            )?;
+            let radius = (config.brush_size.max(1) as i32 / 2).max(1);
+            for stroke in &config.strokes {
+                paint_stroke(&mut bitmap, stroke, radius, 0);
+            }
+            save_bitmap_layer(&absolute_layer_path, &bitmap)?;
+            absolute_layer_path
+        } else {
+            let stroke_mask = build_stroke_mask(
+                config.width,
+                config.height,
+                config.brush_size,
+                &config.strokes,
+            );
+            apply_history_brush_to_inpaint(
+                project,
+                config.page_index,
+                &project_dir,
+                &stroke_mask,
+                config.dirty_bbox,
+            )?
+        };
+        project_schema::set_layer_visibility(
+            project,
+            config.page_index,
+            "image",
+            Some("recovery"),
+            None,
+            false,
+        )?;
+
+        Ok(updated_path.to_string_lossy().replace('\\', "/"))
+    })
+}
+
+#[tauri::command]
+pub async fn update_reinpaint_region(config: BitmapLayerUpdateConfig) -> Result<String, String> {
+    if config.width == 0 || config.height == 0 {
+        return Err("Dimensoes da layer bitmap invalidas".to_string());
+    }
+
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        let project_dir = project_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stroke_mask = build_stroke_mask(
+            config.width,
+            config.height,
+            config.brush_size,
+            &config.strokes,
+        );
+        let updated_path = apply_cached_inpaint_brush_to_inpaint(
+            project,
+            config.page_index,
+            &project_dir,
+            &stroke_mask,
+            config.dirty_bbox,
+        )?;
+
+        Ok(updated_path.to_string_lossy().replace('\\', "/"))
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,86 +1224,92 @@ pub struct WriteMaskFromPngConfig {
 /// Usado pelo lasso tool (Fase 8) para polygon fill.
 #[tauri::command]
 pub async fn write_mask_from_png(config: WriteMaskFromPngConfig) -> Result<String, String> {
-    let (project_file, mut project) = load_project_for_editing(&config.project_path)?;
+    let project_file = resolve_project_file(&config.project_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        let project_dir = project_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
 
-    let project_dir = project_file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        let layer_key = config.layer_key.as_str();
 
-    let layer_key = config.layer_key.as_str();
+        // Obtém (ou cria) o path relativo da camada
+        let relative_layer_path =
+            project_schema::ensure_bitmap_layer_path(project, config.page_index, layer_key)?;
+        let absolute_layer_path = project_dir.join(&relative_layer_path);
+        if let Some(parent) = absolute_layer_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Erro ao criar diretório: {e}"))?;
+        }
 
-    // Obtém (ou cria) o path relativo da camada
-    let relative_layer_path =
-        project_schema::ensure_bitmap_layer_path(&mut project, config.page_index, layer_key)?;
-    let absolute_layer_path = project_dir.join(&relative_layer_path);
-    if let Some(parent) = absolute_layer_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Erro ao criar diretório: {e}"))?;
-    }
+        // Decodificar base64
+        let b64 = config
+            .png_data
+            .trim_start_matches("data:image/png;base64,")
+            .trim_start_matches("data:image/webp;base64,");
+        let png_bytes = BASE64
+            .decode(b64)
+            .map_err(|e| format!("Base64 inválido: {e}"))?;
 
-    // Decodificar base64
-    let b64 = config
-        .png_data
-        .trim_start_matches("data:image/png;base64,")
-        .trim_start_matches("data:image/webp;base64,");
-    let png_bytes = BASE64.decode(b64).map_err(|e| format!("Base64 inválido: {e}"))?;
+        // Resolver op: campo "op" tem prioridade; senão interpreta "compose"
+        let effective_op = if !config.op.is_empty() {
+            config.op.as_str()
+        } else if config.compose {
+            "add"
+        } else {
+            "replace"
+        };
 
-    // Resolver op: campo "op" tem prioridade; senão interpreta "compose"
-    let effective_op = if !config.op.is_empty() {
-        config.op.as_str()
-    } else if config.compose {
-        "add"
-    } else {
-        "replace"
-    };
-
-    if (effective_op == "add" || effective_op == "subtract") && absolute_layer_path.exists() {
-        let existing = image::load_from_memory(
-            &std::fs::read(&absolute_layer_path).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?
-        .into_luma8();
-
-        let incoming = image::load_from_memory(&png_bytes)
+        if (effective_op == "add" || effective_op == "subtract") && absolute_layer_path.exists() {
+            let existing = image::load_from_memory(
+                &std::fs::read(&absolute_layer_path).map_err(|e| e.to_string())?,
+            )
             .map_err(|e| e.to_string())?
             .into_luma8();
 
-        let (w, h) = (existing.width(), existing.height());
-        let mut composed = existing.clone();
-        for y in 0..h.min(incoming.height()) {
-            for x in 0..w.min(incoming.width()) {
-                let ev = existing.get_pixel(x, y)[0];
-                let iv = incoming.get_pixel(x, y)[0];
-                let result = if effective_op == "add" {
-                    ev.max(iv) // union
-                } else {
-                    // subtract: apaga pixels onde incoming é branco
-                    if iv > 127 { 0u8 } else { ev }
-                };
-                composed.put_pixel(x, y, Luma([result]));
+            let incoming = image::load_from_memory(&png_bytes)
+                .map_err(|e| e.to_string())?
+                .into_luma8();
+
+            let (w, h) = (existing.width(), existing.height());
+            let mut composed = existing.clone();
+            for y in 0..h.min(incoming.height()) {
+                for x in 0..w.min(incoming.width()) {
+                    let ev = existing.get_pixel(x, y)[0];
+                    let iv = incoming.get_pixel(x, y)[0];
+                    let result = if effective_op == "add" {
+                        ev.max(iv) // union
+                    } else {
+                        // subtract: apaga pixels onde incoming é branco
+                        if iv > 127 {
+                            0u8
+                        } else {
+                            ev
+                        }
+                    };
+                    composed.put_pixel(x, y, Luma([result]));
+                }
             }
+            composed
+                .save(&absolute_layer_path)
+                .map_err(|e| format!("Erro ao salvar máscara composta: {e}"))?;
+        } else {
+            // replace (ou arquivo não existe): escrita direta
+            std::fs::write(&absolute_layer_path, &png_bytes)
+                .map_err(|e| format!("Erro ao escrever PNG: {e}"))?;
         }
-        composed
-            .save(&absolute_layer_path)
-            .map_err(|e| format!("Erro ao salvar máscara composta: {e}"))?;
-    } else {
-        // replace (ou arquivo não existe): escrita direta
-        std::fs::write(&absolute_layer_path, &png_bytes)
-            .map_err(|e| format!("Erro ao escrever PNG: {e}"))?;
-    }
 
-    // Atualizar visibilidade no project.json
-    project_schema::set_layer_visibility(
-        &mut project,
-        config.page_index,
-        "image",
-        Some(layer_key),
-        None,
-        true,
-    )?;
-    save_project_after_edit(&project_file, &mut project)?;
+        // Atualizar visibilidade no project.json
+        project_schema::set_layer_visibility(
+            project,
+            config.page_index,
+            "image",
+            Some(layer_key),
+            None,
+            true,
+        )?;
 
-    Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
+        Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,7 +1355,9 @@ pub async fn export_project(config: ExportConfig) -> Result<Value, String> {
     let quality_bundle = if matches!(config.format.as_str(), "zip_full") {
         project_value
             .as_ref()
-            .map(|project| build_export_quality_bundle(&project_dir, project, config.export_mode.as_deref()))
+            .map(|project| {
+                build_export_quality_bundle(&project_dir, project, config.export_mode.as_deref())
+            })
             .transpose()?
     } else {
         None
@@ -1032,13 +1718,13 @@ fn sha256_hex(data: &[u8]) -> String {
 fn export_flag_label(flag: &str) -> &'static str {
     match flag {
         "critical_error" => "erros criticos",
-        "glossary_violation" | "forbidden_term" | "missing_protected_term" => {
-            "glossario violado"
-        }
-        "visual_text_leak" | "page_not_processed" => "ingles restante",
-        "ocr_gibberish" | "ocr_suspect" => "ocr suspeito",
+        "glossary_violation" | "forbidden_term" | "missing_protected_term" => "glossario violado",
+        "visual_text_leak" | "page_not_processed" | "untranslated_english" => "ingles restante",
+        "ocr_gibberish" | "ocr_suspect" | "suspected_ocr_error" => "ocr suspeito",
         "typesetting_overflow" | "text_too_large" => "texto grande demais",
-        "inpaint_suspicious" => "inpaint suspeito",
+        "inpaint_suspicious" | "inpaint_artifact" => "inpaint suspeito",
+        "entity_mistranslated" => "nome proprio alterado",
+        "scanlation_credit" => "creditos/scanlation",
         "invalid_mask" | "missing_mask" => "mascara ausente",
         _ => "warning",
     }
@@ -1046,11 +1732,20 @@ fn export_flag_label(flag: &str) -> &'static str {
 
 fn export_flag_severity(flag: &str) -> &'static str {
     match flag {
-        "critical_error" | "visual_text_leak" | "page_not_processed" => "critical",
-        "glossary_violation" | "forbidden_term" | "missing_protected_term" | "invalid_mask"
+        "critical_error" | "visual_text_leak" | "page_not_processed" | "untranslated_english" => "critical",
+        "glossary_violation"
+        | "forbidden_term"
+        | "missing_protected_term"
+        | "entity_mistranslated"
+        | "invalid_mask"
         | "missing_mask" => "high",
-        "ocr_gibberish" | "ocr_suspect" | "typesetting_overflow" | "text_too_large"
-        | "inpaint_suspicious" => "medium",
+        "ocr_gibberish"
+        | "ocr_suspect"
+        | "suspected_ocr_error"
+        | "typesetting_overflow"
+        | "text_too_large"
+        | "inpaint_suspicious"
+        | "inpaint_artifact" => "medium",
         _ => "low",
     }
 }
@@ -1065,6 +1760,248 @@ fn ignored_export_flag(layer: &Value, flag: &str) -> bool {
             action.get("flag_id").and_then(Value::as_str) == Some(flag)
                 && action.get("status").and_then(Value::as_str) == Some("ignored")
         })
+}
+
+fn normalized_export_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect()
+}
+
+fn ascii_words_upper(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphabetic() {
+            current.push(ch.to_ascii_uppercase());
+        } else if !current.is_empty() {
+            words.push(current.clone());
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn is_scanlation_credit_text(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    let compact: String = upper
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    compact.contains("ASURA")
+        || compact.contains("ASURASOANS")
+        || compact.contains("ILEAFSKY")
+        || upper.contains("FASTEST RELEASES")
+        || upper.contains(". COM")
+        || upper.ends_with(".COM")
+        || upper.contains("DISCORD")
+}
+
+fn looks_like_untranslated_english(source: &str, translated: &str) -> bool {
+    if is_scanlation_credit_text(source) || is_scanlation_credit_text(translated) {
+        return false;
+    }
+    let source_norm = normalized_export_text(source);
+    if source_norm.is_empty() || source_norm != normalized_export_text(translated) {
+        return false;
+    }
+    const ENGLISH_LEAK_WORDS: &[&str] = &[
+        "ALREADY",
+        "COMMANDER",
+        "UNCONTROLLABLE",
+        "YOUNG",
+        "MASTER",
+        "WHAT",
+        "WHY",
+        "WHEN",
+        "WHERE",
+        "WHO",
+        "THE",
+        "YOU",
+        "YOUR",
+        "ARE",
+        "THIS",
+        "THAT",
+        "DO",
+        "NOT",
+        "PANIC",
+        "DEFENSE",
+        "FORMATION",
+        "KINGDOM",
+        "ESTATE",
+    ];
+    ascii_words_upper(source)
+        .iter()
+        .any(|word| ENGLISH_LEAK_WORDS.contains(&word.as_str()))
+}
+
+fn looks_like_ocr_suspect(source: &str) -> bool {
+    const OCR_SUSPECT_TOKENS: &[&str] = &[
+        "CARBAGE",
+        "TRAE",
+        "SOUAD",
+        "OEFENSE",
+        "OOWN",
+        "KINGDOME",
+        "REJDICE",
+        "HOUSEHOID",
+        "TEDQNG",
+        "AGOE",
+        "DRCS",
+        "RDC",
+    ];
+    let words = ascii_words_upper(source);
+    words
+        .iter()
+        .any(|word| OCR_SUSPECT_TOKENS.contains(&word.as_str()))
+        || source.to_ascii_uppercase().contains("TS TO EARLY")
+}
+
+fn is_common_source_word(word: &str) -> bool {
+    const COMMON_WORDS: &[&str] = &[
+        "ALREADY",
+        "ATTACK",
+        "COMMANDER",
+        "CONTINENT",
+        "CONTINENTS",
+        "CRUSHED",
+        "DAY",
+        "DEFENSE",
+        "DIE",
+        "DUST",
+        "ESTATE",
+        "EVERYTHING",
+        "FORMATION",
+        "GARBAGE",
+        "HOUSEHOLD",
+        "INTO",
+        "KINGDOM",
+        "KNIGHT",
+        "LOST",
+        "MASTER",
+        "MOST",
+        "NOBLE",
+        "PANIC",
+        "PEOPLE",
+        "RAID",
+        "RELEASES",
+        "RETURNED",
+        "SOLDIER",
+        "SQUAD",
+        "THAT",
+        "THE",
+        "THIS",
+        "UNCONTROLLABLE",
+        "WHAT",
+        "WHEN",
+        "WHERE",
+        "WHO",
+        "WHY",
+        "WITH",
+        "YOUNG",
+        "YOUR",
+    ];
+    COMMON_WORDS.contains(&word)
+}
+
+fn protected_source_tokens(source: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for word in ascii_words_upper(source) {
+        if word.len() < 4 || word.len() > 24 || is_common_source_word(&word) {
+            continue;
+        }
+        if !tokens.contains(&word) {
+            tokens.push(word);
+        }
+    }
+    tokens
+}
+
+fn looks_like_entity_mistranslated(source: &str, translated: &str) -> bool {
+    if looks_like_ocr_suspect(source) {
+        return false;
+    }
+    let tokens = protected_source_tokens(source);
+    if tokens.len() < 2 && !tokens.iter().any(|token| token.ends_with("IUM")) {
+        return false;
+    }
+    let translated_upper = normalized_export_text(translated);
+    tokens
+        .iter()
+        .any(|token| !translated_upper.contains(&normalized_export_text(token)))
+}
+
+fn layer_background_luma(layer: &Value) -> Option<f64> {
+    let values = layer.get("background_rgb")?.as_array()?;
+    if values.len() != 3 {
+        return None;
+    }
+    let mut sum = 0.0;
+    for value in values {
+        sum += value.as_f64()?;
+    }
+    Some(sum / 3.0)
+}
+
+fn looks_like_inpaint_artifact_risk(layer: &Value) -> bool {
+    let balloon_type = layer
+        .get("balloon_type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if balloon_type != "textured" {
+        return false;
+    }
+    let bbox = parse_layer_bbox_array(layer.get("text_pixel_bbox"))
+        .or_else(|| parse_layer_bbox_array(layer.get("bbox")));
+    let Some([x1, y1, x2, y2]) = bbox else {
+        return false;
+    };
+    let area = i64::from(x2 - x1) * i64::from(y2 - y1);
+    if area < 80_000 {
+        return false;
+    }
+    if let Some(luma) = layer_background_luma(layer) {
+        if !(24.0..=220.0).contains(&luma) {
+            return false;
+        }
+    }
+    let line_count = layer
+        .get("line_polygons")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    line_count >= 3 || (y2 - y1) >= 220
+}
+
+fn infer_export_flags(layer: &Value) -> Vec<&'static str> {
+    let source = layer.get("original").and_then(Value::as_str).unwrap_or("");
+    let translated = layer
+        .get("traduzido")
+        .and_then(Value::as_str)
+        .or_else(|| layer.get("translated").and_then(Value::as_str))
+        .unwrap_or("");
+    let mut flags = Vec::new();
+    if is_scanlation_credit_text(source) {
+        flags.push("scanlation_credit");
+    }
+    if looks_like_untranslated_english(source, translated) {
+        flags.push("untranslated_english");
+    }
+    if looks_like_ocr_suspect(source) {
+        flags.push("ocr_suspect");
+    }
+    if looks_like_entity_mistranslated(source, translated) {
+        flags.push("entity_mistranslated");
+    }
+    if looks_like_inpaint_artifact_risk(layer) {
+        flags.push("inpaint_artifact");
+    }
+    flags
 }
 
 fn collect_export_issues(project: &Value) -> Vec<Value> {
@@ -1086,12 +2023,22 @@ fn collect_export_issues(project: &Value) -> Vec<Value> {
             .unwrap_or(&Vec::new())
         {
             let region_id = layer.get("id").and_then(Value::as_str).unwrap_or("region");
-            for flag in layer
+            let mut flags: Vec<String> = layer
                 .get("qa_flags")
                 .and_then(Value::as_array)
                 .unwrap_or(&Vec::new())
                 .iter()
                 .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            for inferred in infer_export_flags(layer) {
+                if !flags.iter().any(|flag| flag == inferred) {
+                    flags.push(inferred.to_string());
+                }
+            }
+            for flag in flags
+                .iter()
+                .map(String::as_str)
             {
                 if ignored_export_flag(layer, flag) {
                     continue;
@@ -1216,13 +2163,21 @@ fn build_issues_csv(issues: &[Value]) -> String {
     rows.join("\n")
 }
 
-fn build_qa_markdown_report(project: &Value, status: &str, issues: &[Value], user_actions: &[Value]) -> String {
+fn build_qa_markdown_report(
+    project: &Value,
+    status: &str,
+    issues: &[Value],
+    user_actions: &[Value],
+) -> String {
     let critical = issues
         .iter()
         .filter(|issue| issue.get("severity").and_then(Value::as_str) == Some("critical"))
         .count();
     let warnings = issues.len().saturating_sub(critical);
-    let title = project.get("obra").and_then(Value::as_str).unwrap_or("Projeto");
+    let title = project
+        .get("obra")
+        .and_then(Value::as_str)
+        .unwrap_or("Projeto");
 
     let mut lines = vec![
         format!("# Relatorio QA - {title}"),
@@ -1259,7 +2214,10 @@ fn build_qa_markdown_report(project: &Value, status: &str, issues: &[Value], use
     for action in user_actions {
         lines.push(format!(
             "- {}: {}",
-            action.get("flag_id").and_then(Value::as_str).unwrap_or("flag"),
+            action
+                .get("flag_id")
+                .and_then(Value::as_str)
+                .unwrap_or("flag"),
             action
                 .get("ignored_reason")
                 .and_then(Value::as_str)
@@ -1337,7 +2295,10 @@ fn build_export_quality_bundle(
                 "qa_report.json".to_string(),
                 serde_json::to_vec_pretty(&qa_report_json).map_err(|e| e.to_string())?,
             ),
-            ("issues.csv".to_string(), build_issues_csv(&issues_ref).into_bytes()),
+            (
+                "issues.csv".to_string(),
+                build_issues_csv(&issues_ref).into_bytes(),
+            ),
             (
                 "glossary_used.json".to_string(),
                 serde_json::to_vec_pretty(&glossary_used).map_err(|e| e.to_string())?,
@@ -1477,6 +2438,10 @@ pub struct PageActionConfig {
     pub project_path: String,
     pub page_index: usize,
     pub action: String,
+    #[serde(default)]
+    pub bbox: Option<[i64; 4]>,
+    #[serde(default)]
+    pub mask_path: Option<String>,
 }
 
 /// Detecta se a página corrente tem uma máscara com pixels ativos e executa a ação
@@ -1490,22 +2455,46 @@ pub async fn run_page_action_with_optional_mask(
     config: PageActionConfig,
 ) -> Result<PageActionResult, String> {
     use crate::commands::pipeline::{
-        detect_page, ocr_page, reinpaint_page, translate_page, ReinpaintConfig,
+        detect_page_with_region, ocr_page_with_region, reinpaint_page_with_region,
+        translate_page_with_region, PageRegionConfig,
     };
 
-    // Carregar project.json para encontrar o caminho da máscara desta página
-    let project_str = std::fs::read_to_string(&config.project_path)
-        .map_err(|e| format!("Erro ao ler project.json: {e}"))?;
-    let project: serde_json::Value =
-        serde_json::from_str(&project_str).map_err(|e| format!("Erro ao parsear project.json: {e}"))?;
+    // Carregar project.json pelo mesmo caminho normalizado dos demais commands do editor.
+    let project_file = resolve_project_file(&config.project_path);
+    let project = project_schema::load_project_value(&project_file)?;
 
-    let mask_path_str = project["paginas"]
-        .get(config.page_index)
-        .and_then(|p| p["image_layers"]["mask"]["path"].as_str())
-        .map(str::to_owned);
+    let mask_path_str = config.mask_path.clone().or_else(|| {
+        if config.bbox.is_some() {
+            return None;
+        }
+        project["paginas"]
+            .get(config.page_index)
+            .and_then(|p| p["image_layers"]["mask"]["path"].as_str())
+            .map(str::to_owned)
+    });
+    let resolved_mask_path = mask_path_str.as_ref().map(|raw| {
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            project_file
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(path)
+        }
+    });
 
-    let (mode, bbox) = if let Some(ref mp) = mask_path_str {
-        let mp = Path::new(mp);
+    let (mode, bbox) = if let Some(bbox) = config.bbox {
+        (
+            PageActionMode::Regional,
+            Some([
+                bbox[0].max(0) as u32,
+                bbox[1].max(0) as u32,
+                bbox[2].max(0) as u32,
+                bbox[3].max(0) as u32,
+            ]),
+        )
+    } else if let Some(ref mp) = resolved_mask_path {
         if mp.exists() && mask_has_nonzero_pixels(mp)? {
             let b = mask_bounding_box(mp)?;
             (PageActionMode::Regional, b)
@@ -1517,6 +2506,10 @@ pub async fn run_page_action_with_optional_mask(
     };
 
     let page_index_u32 = config.page_index as u32;
+    let region = PageRegionConfig {
+        bbox,
+        mask_path: resolved_mask_path.map(|path| path.to_string_lossy().to_string()),
+    };
 
     eprintln!(
         "[EditorAction] start  page_action action={} page={} mode={:?} bbox={:?}",
@@ -1528,27 +2521,44 @@ pub async fn run_page_action_with_optional_mask(
     // pelo Python (bug histórico: changed_assets vinha sempre só ProjectJson).
     let changed_assets: Vec<ChangedAsset> = match config.action.as_str() {
         "detect" => {
-            detect_page(app, config.project_path.clone(), page_index_u32).await?;
+            detect_page_with_region(
+                app,
+                config.project_path.clone(),
+                page_index_u32,
+                Some(region.clone()),
+            )
+            .await?;
             // detect re-renderiza a página ao final (render_page_image em main.py)
             vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
         }
         "ocr" => {
-            ocr_page(app, config.project_path.clone(), page_index_u32).await?;
+            ocr_page_with_region(
+                app,
+                config.project_path.clone(),
+                page_index_u32,
+                Some(region.clone()),
+            )
+            .await?;
             // ocr_page também re-renderiza ao final
             vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
         }
         "translate" => {
-            translate_page(app, config.project_path.clone(), page_index_u32).await?;
+            translate_page_with_region(
+                app,
+                config.project_path.clone(),
+                page_index_u32,
+                Some(region.clone()),
+            )
+            .await?;
             // translate atualiza texto traduzido e re-renderiza
             vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
         }
         "inpaint" => {
-            reinpaint_page(
+            reinpaint_page_with_region(
                 app,
-                ReinpaintConfig {
-                    project_path: config.project_path.clone(),
-                    page_index: page_index_u32,
-                },
+                config.project_path.clone(),
+                page_index_u32,
+                Some(region.clone()),
             )
             .await?;
             // inpaint regrava a layer inpaint e o render final
@@ -1659,6 +2669,119 @@ mod tests {
         .to_string()
     }
 
+    #[test]
+    fn collect_export_issues_infers_untranslated_english_without_existing_flags() {
+        let project = json!({
+            "paginas": [{
+                "numero": 48,
+                "text_layers": [{
+                    "id": "region-already",
+                    "original": "ALREADY?",
+                    "traduzido": "ALREADY?",
+                    "qa_flags": []
+                }]
+            }]
+        });
+
+        let issues = collect_export_issues(&project);
+
+        assert!(issues.iter().any(|issue| {
+            issue["type"] == "untranslated_english"
+                && issue["severity"] == "critical"
+                && issue["page"] == 48
+        }));
+    }
+
+    #[test]
+    fn collect_export_issues_infers_ocr_and_entity_problems_without_existing_flags() {
+        let project = json!({
+            "paginas": [{
+                "numero": 3,
+                "text_layers": [
+                    {
+                        "id": "region-ocr",
+                        "original": "DO NOT PANIC GET INTO OEFENSE FORMATION!",
+                        "traduzido": "Nao entrem em panico!",
+                        "qa_flags": []
+                    },
+                    {
+                        "id": "region-name",
+                        "original": "GHISLAIN PERDIUM.",
+                        "traduzido": "PERDIO GHISLAIN.",
+                        "qa_flags": []
+                    }
+                ]
+            }]
+        });
+
+        let issues = collect_export_issues(&project);
+        let issue_types: Vec<&str> = issues
+            .iter()
+            .filter_map(|issue| issue["type"].as_str())
+            .collect();
+
+        assert!(issue_types.contains(&"ocr_suspect"));
+        assert!(issue_types.contains(&"entity_mistranslated"));
+    }
+
+    #[test]
+    fn collect_export_issues_infers_textured_large_inpaint_risk() {
+        let project = json!({
+            "paginas": [{
+                "numero": 18,
+                "text_layers": [{
+                    "id": "region-textured",
+                    "original": "One of the continents top seven Noble Knight Idun",
+                    "traduzido": "Um dos sete principais cavaleiros nobres do continente, Idun",
+                    "balloon_type": "textured",
+                    "background_rgb": [61, 71, 94],
+                    "text_pixel_bbox": [270, 3629, 906, 4010],
+                    "line_polygons": [
+                        [[421, 3633], [754, 3629], [755, 3721], [422, 3726]],
+                        [[271, 3733], [908, 3740], [907, 3819], [270, 3812]],
+                        [[374, 3825], [800, 3830], [799, 3926], [373, 3921]]
+                    ],
+                    "qa_flags": []
+                }]
+            }]
+        });
+
+        let issues = collect_export_issues(&project);
+
+        assert!(issues.iter().any(|issue| {
+            issue["type"] == "inpaint_artifact"
+                && issue["label"] == "inpaint suspeito"
+                && issue["page"] == 18
+        }));
+    }
+
+    #[test]
+    fn collect_export_issues_does_not_treat_common_caps_words_as_entities() {
+        let project = json!({
+            "paginas": [{
+                "numero": 43,
+                "text_layers": [
+                    {
+                        "id": "region-raid",
+                        "original": "IS THE DAY MOST PEOPLE IN THE RAID SQUAD WILL DIE",
+                        "traduzido": "E o dia em que a maioria das pessoas do esquadrao de ataque vai morrer",
+                        "qa_flags": []
+                    },
+                    {
+                        "id": "region-lost",
+                        "original": "LOST EVERYTHING",
+                        "traduzido": "Perdi tudo",
+                        "qa_flags": []
+                    }
+                ]
+            }]
+        });
+
+        let issues = collect_export_issues(&project);
+
+        assert!(!issues.iter().any(|issue| issue["type"] == "entity_mistranslated"));
+    }
+
     #[tokio::test]
     async fn export_zip_full_includes_originals_project_and_translated() {
         let root = unique_temp_dir();
@@ -1740,8 +2863,14 @@ mod tests {
             &project_dir.join("translated").join("001.jpg"),
             b"translated",
         );
-        write_file(&project_dir.join("layers").join("masks").join("001.png"), b"mask");
-        write_file(&project_dir.join("structured_log.jsonl"), br#"{"event":"done"}"#);
+        write_file(
+            &project_dir.join("layers").join("masks").join("001.png"),
+            b"mask",
+        );
+        write_file(
+            &project_dir.join("structured_log.jsonl"),
+            br#"{"event":"done"}"#,
+        );
         write_file(
             &project_dir.join("project.json"),
             quality_project_json(vec!["ocr_gibberish"]).as_bytes(),
@@ -1769,7 +2898,10 @@ mod tests {
             "structured_log.jsonl",
             "layers/masks/001.png",
         ] {
-            assert!(entries.contains(&required.to_string()), "missing {required}");
+            assert!(
+                entries.contains(&required.to_string()),
+                "missing {required}"
+            );
         }
 
         let manifest: Value =
@@ -1876,6 +3008,136 @@ mod tests {
         });
 
         assert_eq!(resolve_inpaint_rel(&page), Some("images/001.jpg"));
+    }
+
+    #[test]
+    fn save_rgba_image_preserving_format_writes_jpeg_without_alpha_error() {
+        let root = unique_temp_dir();
+        let path = root.join("images").join("001.jpg");
+        let image = ImageBuffer::from_pixel(3, 3, image::Rgba([255, 0, 0, 128]));
+
+        save_rgba_image_preserving_format(&path, &image).unwrap();
+
+        let decoded = ImageReader::open(&path).unwrap().decode().unwrap();
+        assert_eq!(decoded.width(), 3);
+        assert_eq!(decoded.height(), 3);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn history_brush_restores_only_masked_pixels_from_base_snapshot() {
+        let root = unique_temp_dir();
+        let base_path = root.join("originals").join("001.png");
+        let inpaint_path = root.join("images").join("001.png");
+        let base = ImageBuffer::from_pixel(4, 4, image::Rgba([240, 10, 10, 255]));
+        let inpaint = ImageBuffer::from_pixel(4, 4, image::Rgba([10, 20, 240, 255]));
+        save_rgba_image_preserving_format(&base_path, &base).unwrap();
+        save_rgba_image_preserving_format(&inpaint_path, &inpaint).unwrap();
+
+        let mut project = serde_json::json!({
+            "paginas": [{
+                "arquivo_original": "originals/001.png",
+                "image_layers": {
+                    "base": { "key": "base", "path": "originals/001.png", "visible": true },
+                    "inpaint": { "key": "inpaint", "path": "images/001.png", "visible": true }
+                }
+            }]
+        });
+        let mut mask = ImageBuffer::from_pixel(4, 4, Luma([0]));
+        mask.put_pixel(2, 1, Luma([255]));
+        mask.put_pixel(3, 3, Luma([255]));
+
+        apply_history_brush_to_inpaint(&mut project, 0, &root, &mask, Some([2, 1, 3, 2])).unwrap();
+
+        let decoded = ImageReader::open(&inpaint_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(2, 1), base.get_pixel(2, 1));
+        assert_eq!(decoded.get_pixel(0, 0), inpaint.get_pixel(0, 0));
+        assert_eq!(decoded.get_pixel(3, 3), inpaint.get_pixel(3, 3));
+        assert_eq!(
+            project["paginas"][0]["image_layers"]["inpaint"]["visible"],
+            true
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reinpaint_brush_reapplies_only_masked_pixels_from_inpaint_cache() {
+        let root = unique_temp_dir();
+        let base_path = root.join("originals").join("001.png");
+        let inpaint_path = root.join("images").join("001.png");
+        let base = ImageBuffer::from_pixel(4, 4, image::Rgba([240, 10, 10, 255]));
+        let inpaint = ImageBuffer::from_pixel(4, 4, image::Rgba([10, 20, 240, 255]));
+        save_rgba_image_preserving_format(&base_path, &base).unwrap();
+        save_rgba_image_preserving_format(&inpaint_path, &inpaint).unwrap();
+
+        let mut project = serde_json::json!({
+            "paginas": [{
+                "numero": 1,
+                "arquivo_original": "originals/001.png",
+                "image_layers": {
+                    "base": { "key": "base", "path": "originals/001.png", "visible": true },
+                    "inpaint": { "key": "inpaint", "path": "images/001.png", "visible": true }
+                }
+            }]
+        });
+        let mut recovery_mask = ImageBuffer::from_pixel(4, 4, Luma([0]));
+        recovery_mask.put_pixel(1, 1, Luma([255]));
+        apply_history_brush_to_inpaint(&mut project, 0, &root, &recovery_mask, Some([1, 1, 2, 2])).unwrap();
+
+        let after_recovery = ImageReader::open(&inpaint_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(after_recovery.get_pixel(1, 1), base.get_pixel(1, 1));
+        assert!(root.join("layers").join("inpaint-cache").join("001.png").exists());
+
+        let mut reinpaint_mask = ImageBuffer::from_pixel(4, 4, Luma([0]));
+        reinpaint_mask.put_pixel(1, 1, Luma([255]));
+        reinpaint_mask.put_pixel(2, 2, Luma([255]));
+        apply_cached_inpaint_brush_to_inpaint(
+            &mut project,
+            0,
+            &root,
+            &reinpaint_mask,
+            Some([1, 1, 2, 2]),
+        )
+        .unwrap();
+
+        let decoded = ImageReader::open(&inpaint_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(1, 1), inpaint.get_pixel(1, 1));
+        assert_eq!(decoded.get_pixel(2, 2), inpaint.get_pixel(2, 2));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rgba_brush_keeps_previous_stroke_color_after_color_change() {
+        let root = unique_temp_dir();
+        let path = root.join("layers").join("brush").join("001.png");
+        let mut first = load_or_create_rgba_brush_layer(&path, 8, 8, false).unwrap();
+        paint_stroke_rgba(&mut first, &[[2, 2]], 1, [255, 0, 0], 255, false);
+        save_rgba_bitmap_layer(&path, &first).unwrap();
+
+        let mut second = load_or_create_rgba_brush_layer(&path, 8, 8, false).unwrap();
+        paint_stroke_rgba(&mut second, &[[5, 5]], 1, [0, 0, 255], 255, false);
+        save_rgba_bitmap_layer(&path, &second).unwrap();
+
+        let decoded = ImageReader::open(&path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(2, 2), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(decoded.get_pixel(5, 5), &image::Rgba([0, 0, 255, 255]));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

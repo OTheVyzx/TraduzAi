@@ -17,7 +17,10 @@ export function EditorTransformer({ selectedNodeName }: { selectedNodeName: stri
   return (
     <Transformer
       ref={transformerRef}
-      rotateEnabled={false}
+      rotateEnabled
+      rotateAnchorOffset={34}
+      rotationSnaps={[-180, -90, -45, -30, -15, 0, 15, 30, 45, 90, 180]}
+      rotationSnapTolerance={5}
       enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right", "middle-left", "middle-right", "top-center", "bottom-center"]}
       boundBoxFunc={(_, nextBox) => ({
         ...nextBox,

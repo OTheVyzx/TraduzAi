@@ -87,6 +87,31 @@ class MainEmitTests(unittest.TestCase):
         self.assertTrue(parsed["strict"])
         self.assertEqual(parsed["export_mode"], "clean")
 
+    def test_glossary_used_report_shadow_collects_hits_and_blocks(self) -> None:
+        report = main.build_glossary_used_report(
+            {"obra": "Demo", "idioma_origem": "ko", "idioma_destino": "pt-BR", "glossario": {"A": "B"}},
+            {"personagens": ["Hero"], "memoria_lexical": {"Clan": "Cla"}},
+            [
+                {
+                    "texts": [
+                        {
+                            "id": "t1",
+                            "original": "src",
+                            "glossary_hits": [{"source": "A", "target": "B"}],
+                            "translation_blocked_text": "texto original",
+                            "qa_flags": ["translation_fallback_phrase"],
+                        }
+                    ]
+                }
+            ],
+        )
+
+        self.assertEqual(report["mode"], "shadow")
+        self.assertEqual(report["summary"]["entry_count"], 3)
+        self.assertEqual(report["summary"]["used_hit_count"], 1)
+        self.assertEqual(report["summary"]["blocked_translation_count"], 1)
+        self.assertEqual(report["qa_flags"]["translation_fallback_phrase"], 1)
+
     def test_runner_cli_mock_generates_project_and_reports_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             input_dir = Path(tmp) / "original"
@@ -138,6 +163,15 @@ class MainEmitTests(unittest.TestCase):
             self.assertNotEqual(exit_code, 0)
             qa = json.loads((output_dir / "qa_report.json").read_text(encoding="utf-8"))
             self.assertEqual(qa["summary"]["critical"], 1)
+
+    def test_load_json_file_accepts_utf8_bom_from_windows_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text('{"work_dir":"D:/tmp/traduzai"}', encoding="utf-8-sig")
+
+            loaded = main._load_json_file(config_path)
+
+        self.assertEqual(loaded["work_dir"], "D:/tmp/traduzai")
 
     def test_select_local_venv_python_prefers_project_venv_when_current_is_global(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -693,6 +727,40 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(blocks[0].get("balloon_subregions"), ocr_text["balloon_subregions"])
         self.assertEqual(blocks[0].get("connected_position_bboxes"), ocr_text["connected_position_bboxes"])
 
+    def test_build_text_layer_sanitizes_auto_style_before_project_json(self) -> None:
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "id": "tl_001_001",
+                "text": "HELLO",
+                "bbox": [0, 0, 100, 100],
+                "layout_bbox": [0, 0, 100, 100],
+                "tipo": "fala",
+                "confidence": 0.92,
+                "background_rgb": [250, 250, 250],
+                "estilo": {
+                    "fonte": "Newrotic.ttf",
+                    "cor": "#FFFFFF",
+                    "contorno": "#000000",
+                    "contorno_px": 2,
+                    "glow": True,
+                    "sombra": True,
+                },
+            },
+            translated="OLA",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["cor"], "#000000")
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
+        self.assertFalse(layer["estilo"]["glow"])
+        self.assertFalse(layer["estilo"]["sombra"])
+
     def test_build_text_layer_preserves_entity_metadata_for_project_json(self) -> None:
         layer = main.build_text_layer(
             page_number=2,
@@ -732,6 +800,29 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["glossary_hits"][0]["target"], "Núcleo de Mana")
         self.assertEqual(layer["qa_flags"], ["entity_suspect"])
 
+
+    def test_build_text_layer_preserves_smart_skip_audit_for_project_json(self) -> None:
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "text": "FOR FASTER UPDATE",
+                "bbox": [10, 10, 180, 40],
+                "skip_processing": True,
+                "skip_reason": "smart_skip",
+                "smart_skip_decision": {
+                    "category": "credit_or_watermark",
+                    "reason": "opening-page credit or reader/update notice",
+                },
+            },
+            translated="FOR FASTER UPDATE",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertTrue(layer["skip_processing"])
+        self.assertEqual(layer["skip_reason"], "smart_skip")
+        self.assertEqual(layer["smart_skip_decision"]["category"], "credit_or_watermark")
 
     def test_sync_page_legacy_aliases_prefers_render_bbox(self) -> None:
         page = {

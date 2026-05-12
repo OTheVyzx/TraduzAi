@@ -1,6 +1,7 @@
 import unittest
 import builtins
 import importlib
+import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
+from vision_stack import detector as detector_module
 from vision_stack.detector import TextBlock, TextDetector
 
 
@@ -257,6 +259,37 @@ class VisionStackDetectorTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 1)
         self.assertIsNone(blocks[0].mask)
+
+    def test_ctd_pixel_mask_env_flag_is_opt_in(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(detector_module._env_flag("TRADUZAI_CTD_PIXEL_MASK", False))
+
+        with patch.dict(os.environ, {"TRADUZAI_CTD_PIXEL_MASK": "1"}):
+            self.assertTrue(detector_module._env_flag("TRADUZAI_CTD_PIXEL_MASK", False))
+
+    def test_comic_text_seg_head_handles_odd_feature_shapes(self):
+        class FakeC3(torch.nn.Module):
+            def __init__(self, in_channels, out_channels):
+                super().__init__()
+                self.proj = torch.nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        head = detector_module._ComicTextSegHead(FakeC3).eval()
+
+        with torch.inference_mode():
+            output = head(
+                torch.zeros((1, 64, 47, 55), dtype=torch.float32),
+                torch.zeros((1, 128, 23, 27), dtype=torch.float32),
+                torch.zeros((1, 256, 11, 13), dtype=torch.float32),
+                torch.zeros((1, 512, 5, 6), dtype=torch.float32),
+                torch.zeros((1, 512, 9, 11), dtype=torch.float32),
+            )
+
+        self.assertEqual(output.shape[0], 1)
+        self.assertEqual(output.shape[1], 1)
+        self.assertGreater(output.shape[-1], 0)
 
     def test_load_comic_text_detector_native_falls_back_to_checkpoint_when_safetensors_missing(self):
         class FakeModel:

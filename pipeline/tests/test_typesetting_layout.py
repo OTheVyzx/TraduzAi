@@ -10,6 +10,7 @@ from typesetter.renderer import (
     _build_connected_children_candidates,
     _build_textpath_mask,
     _inscribe_bbox_in_polygon,
+    _infer_connected_orientation_from_subregions,
     _looks_like_connected_balloon_pair,
     _measure_safe_text_block_bbox,
     _resolve_english_anchor_bbox,
@@ -27,6 +28,12 @@ from typesetter.renderer import (
 
 
 class TypesettingLayoutTests(unittest.TestCase):
+    def test_connected_orientation_normalizes_horizontal_alias(self):
+        subregions = [[0, 0, 120, 100], [140, 0, 260, 100]]
+
+        self.assertEqual(_infer_connected_orientation_from_subregions(subregions, "horizontal"), "left-right")
+        self.assertEqual(_infer_connected_orientation_from_subregions(subregions, "vertical"), "top-bottom")
+
     def test_resolve_english_anchor_bbox_prefers_text_pixel_bbox(self):
         text_data = {
             "bbox": [20, 20, 280, 180],
@@ -197,6 +204,79 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertGreater(len(layout["lines"]), 1)
         self.assertGreaterEqual(layout["font_size"], 10)
+
+    def test_plan_text_layout_limits_overbroad_white_balloon_to_text_anchor(self):
+        text_data = {
+            "translated": "COMO PODERIA UM PEDACO DE MERDA FUTIL COMO VOCE QUERER-",
+            "bbox": [366, 2937, 838, 3126],
+            "balloon_bbox": [0, 2921, 1200, 3142],
+            "text_pixel_bbox": [371, 2942, 836, 3114],
+            "tipo": "fala",
+            "balloon_type": "white",
+            "layout_shape": "wide",
+            "layout_profile": "white_balloon",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 48,
+                "cor": "#000000",
+                "contorno": "",
+                "contorno_px": 0,
+                "alinhamento": "center",
+            },
+        }
+
+        plan = plan_text_layout(text_data)
+        layout = _resolve_text_layout(text_data, plan)
+
+        self.assertLessEqual(plan["max_width"], 465)
+        self.assertGreaterEqual(plan["safe_text_box"][0], 360)
+        self.assertLessEqual(plan["safe_text_box"][2], 850)
+        self.assertGreater(len(layout["lines"]), 2)
+
+    def test_plan_text_layout_uses_balloon_polygon_safe_area_for_cjk_balloon(self):
+        text_data = {
+            "translated": "AGORA EU SEI QUE BAGUNCA FOI.",
+            "bbox": [190, 95, 280, 130],
+            "text_pixel_bbox": [190, 95, 280, 130],
+            "balloon_bbox": [80, 40, 420, 240],
+            "balloon_polygon": [[80, 40], [420, 40], [420, 240], [80, 240]],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 32, "alinhamento": "center"},
+            "layout_shape": "wide",
+            "layout_profile": "white_balloon",
+            "page_profile": {"width": 500, "height": 320},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertFalse(plan["_anchor_capacity_locked"])
+        self.assertEqual(plan["layout_safe_reason"], "balloon_polygon")
+        self.assertGreater(plan["safe_text_box"][0], text_data["balloon_bbox"][0])
+        self.assertLess(plan["safe_text_box"][2], text_data["balloon_bbox"][2])
+        safe_center = (plan["safe_text_box"][0] + plan["safe_text_box"][2]) / 2.0
+        balloon_center = (text_data["balloon_bbox"][0] + text_data["balloon_bbox"][2]) / 2.0
+        self.assertLess(abs(safe_center - balloon_center), 12)
+
+    def test_plan_text_layout_ignores_textual_page_profile_for_safe_area(self):
+        text_data = {
+            "translated": "AGORA EU SEI QUE BAGUNCA FOI.",
+            "bbox": [190, 95, 280, 130],
+            "text_pixel_bbox": [190, 95, 280, 130],
+            "balloon_bbox": [80, 40, 420, 240],
+            "balloon_polygon": [[80, 40], [420, 40], [420, 240], [80, 240]],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 32, "alinhamento": "center"},
+            "layout_shape": "wide",
+            "layout_profile": "white_balloon",
+            "page_profile": "standard",
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["layout_safe_reason"], "balloon_polygon")
+        self.assertGreater(plan["safe_text_box"][0], text_data["balloon_bbox"][0])
 
     def test_resolve_text_layout_uses_fixed_non_overlapping_leading(self):
         text_data = {
@@ -720,7 +800,8 @@ class TypesettingLayoutTests(unittest.TestCase):
         adjusted = ensure_legible_plan(img, plan)
 
         self.assertEqual(adjusted["text_color"], "#111111")
-        self.assertGreaterEqual(adjusted["outline_px"], 2)
+        self.assertEqual(adjusted["outline_color"], "")
+        self.assertEqual(adjusted["outline_px"], 0)
         self.assertFalse(adjusted["glow"])
 
     def test_legibility_fallback_avoids_dark_text_on_dark_balloon(self):
@@ -884,6 +965,42 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(len(blocks[0].get("balloon_subregions", [])), 2)
 
+    def test_build_render_blocks_rejects_single_text_connected_false_positive(self):
+        base_text = {
+            "translated": "SEGURE A LINHA! O CHEFE ESTA VULNERAVEL!",
+            "bbox": [1363, 2295, 1598, 2426],
+            "tipo": "fala",
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "balloon_bbox": [1309, 2279, 1696, 2442],
+            "balloon_type": "white",
+            "balloon_subregions": [[1309, 2279, 1502, 2442], [1502, 2279, 1696, 2442]],
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "layout_group_size": 1,
+            "layout_profile": "connected_balloon",
+        }
+        sentinel_metadata = {
+            "connected_text_groups": [[1324, 2292, 1460, 2407], [1533, 2308, 1681, 2426]],
+            "connected_position_bboxes": [[1314, 2279, 1470, 2420], [1525, 2301, 1692, 2440]],
+            "connected_balloon_orientation": "left-right",
+            "connected_detection_confidence": 1.0,
+            "connected_group_confidence": 0.28,
+            "connected_position_confidence": 0.712,
+            "subregion_confidence": 1.0,
+        }
+
+        for extra in ({}, sentinel_metadata):
+            with self.subTest(extra=bool(extra)):
+                text = dict(base_text)
+                text.update(extra)
+
+                blocks = build_render_blocks([text])
+
+                self.assertEqual(len(blocks), 1)
+                self.assertEqual(blocks[0].get("balloon_subregions", []), [])
+                self.assertNotEqual(blocks[0].get("layout_profile"), "connected_balloon")
+                self.assertEqual(blocks[0].get("layout_group_size"), 1)
+
     def test_build_render_blocks_rejects_short_phrase_connected_false_positive(self):
         texts = [
             {
@@ -994,6 +1111,62 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertIn("Texto A", combined_text)
         self.assertIn("Texto B", combined_text)
         self.assertIn("Texto C", combined_text)
+
+
+    def test_mixed_type_connected_fragments_share_same_connected_group(self):
+        subregions = [[276, 1351, 581, 1743], [597, 1351, 986, 1743]]
+        shared = {
+            "balloon_bbox": [276, 1351, 986, 1743],
+            "balloon_subregions": subregions,
+            "connected_lobe_bboxes": subregions,
+            "connected_balloon_orientation": "left-right",
+            "layout_profile": "connected_balloon",
+            "layout_group_size": 2,
+            "connected_detection_confidence": 0.72,
+            "connected_group_confidence": 0.72,
+            "estilo": {"tamanho": 34, "alinhamento": "center"},
+        }
+        texts = [
+            {
+                "translated": "CLARO,",
+                "tipo": "narracao",
+                "bbox": [352, 1415, 578, 1492],
+                "balloon_bbox": [303, 1392, 627, 1515],
+                "layout_profile": "white_balloon",
+                "layout_group_size": 1,
+                "reading_order": 0,
+                "estilo": {"tamanho": 31, "alinhamento": "center"},
+            },
+            {
+                **shared,
+                "translated": "EU SEI. EU TRABALHEI TENTANDO RASTREAR",
+                "tipo": "fala",
+                "bbox": [384, 1367, 866, 1713],
+                "reading_order": 1,
+            },
+            {
+                **shared,
+                "translated": "CAI FORA HA MUITO TEMPO, VOCE CAIU.",
+                "tipo": "fala",
+                "bbox": [542, 1585, 878, 1727],
+                "reading_order": 2,
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertEqual(block.get("layout_profile"), "connected_balloon")
+        self.assertEqual(len(block.get("balloon_subregions", [])), 2)
+        children = block.get("connected_children") or []
+        self.assertEqual(len(children), 2)
+        self.assertEqual(children[0].get("translated"), "CLARO,\nEU SEI.")
+        self.assertIn("TRABALHEI TENTANDO RASTREAR", children[1].get("translated", ""))
+        combined = block.get("translated", "")
+        self.assertIn("CLARO", combined)
+        self.assertIn("RASTREAR", combined)
+        self.assertIn("VOCE CAIU", combined)
 
 
     def test_diagonal_assignment_matches_text_to_nearest_subregion(self):
@@ -1246,6 +1419,29 @@ class TypesettingLayoutTests(unittest.TestCase):
         off_center_score = _score_connected_group_candidate(off_center_items, children, plans, semantic_bonus=0.0)
 
         self.assertGreater(centered_score, off_center_score)
+
+    def test_connected_candidate_score_penalizes_overlapping_safe_text_boxes(self):
+        resolved_items = [
+            {"score": 10.0, "font_size": 24, "lines": ["UMA FRASE"], "width_ratio": 0.76, "height_ratio": 0.36},
+            {"score": 10.0, "font_size": 24, "lines": ["OUTRA FRASE"], "width_ratio": 0.76, "height_ratio": 0.36},
+        ]
+        children = [
+            {"translated": "UMA FRASE."},
+            {"translated": "OUTRA FRASE."},
+        ]
+        separated_plans = [
+            {"target_size": 24, "safe_text_box": [100, 100, 220, 180]},
+            {"target_size": 24, "safe_text_box": [250, 100, 370, 180]},
+        ]
+        overlapping_plans = [
+            {"target_size": 24, "safe_text_box": [100, 100, 240, 180]},
+            {"target_size": 24, "safe_text_box": [220, 100, 360, 180]},
+        ]
+
+        separated_score = _score_connected_group_candidate(resolved_items, children, separated_plans)
+        overlapping_score = _score_connected_group_candidate(resolved_items, children, overlapping_plans)
+
+        self.assertGreater(separated_score, overlapping_score)
 
     def test_connected_area_weights_prefer_text_groups_before_position_boxes(self):
         text_data = {

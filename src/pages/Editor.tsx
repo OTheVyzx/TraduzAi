@@ -21,7 +21,7 @@ import { useAppStore } from "../lib/stores/appStore";
 import { EditorStage } from "../components/editor/stage/EditorStage";
 import { LayersPanel } from "../components/editor/LayersPanel";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
-import { useEditorStore } from "../lib/stores/editorStore";
+import { getRenderPreviewStateForPage, useEditorStore } from "../lib/stores/editorStore";
 import { ZoomControls } from "../components/editor/toolbar/ZoomControls";
 import { AutoSaveIndicator } from "../components/editor/toolbar/AutoSaveIndicator";
 import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
@@ -101,7 +101,12 @@ function isEditableTarget(target: EventTarget | null) {
   );
 }
 
-export function Editor() {
+export interface EditorProps {
+  onBack?: () => void;
+  emptyBackLabel?: string;
+}
+
+export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorProps = {}) {
   const navigate = useNavigate();
   const project = useAppStore((s) => s.project);
   const pipeline = useAppStore((s) => s.pipeline);
@@ -153,10 +158,27 @@ export function Editor() {
     (pendingStructuralEdits.order ? 1 : 0);
   const pagePipelineBusy = isRetypesetting || isReinpainting;
   const pageKey = currentPageKey();
-  // renderPreviewState é mantido em escopo para a Fase 6 (RenderStatusBadge),
-  // mas o flag previewRendering antigo (do botão removido) saiu junto.
-  void renderPreviewCacheByPageKey;
-  void pageKey;
+  const renderPreviewState = useMemo(
+    () => getRenderPreviewStateForPage(pageKey, currentPage, renderPreviewCacheByPageKey),
+    [currentPage, pageKey, renderPreviewCacheByPageKey],
+  );
+  const saveDisabled =
+    !currentPage ||
+    pagePipelineBusy ||
+    (pendingCount === 0 && renderPreviewState.status === "fresh");
+
+  const saveAndRenderCurrentPage = async () => {
+    const targetPageKey = currentPageKey();
+    await commitEdits();
+    await renderPreviewPage(targetPageKey);
+  };
+  const handleBack = () => {
+    if (onBack) {
+      onBack();
+      return;
+    }
+    navigate("/preview");
+  };
 
   useEffect(() => {
     if (!project || totalPages === 0) return;
@@ -199,6 +221,8 @@ export function Editor() {
         if (event.key.toLowerCase() === "v") setToolMode("select");
         if (event.key.toLowerCase() === "t") setToolMode("block");
         if (event.key.toLowerCase() === "b") setToolMode("brush");
+        if (event.key.toLowerCase() === "r") setToolMode("repairBrush");
+        if (event.key.toLowerCase() === "i") setToolMode("reinpaintBrush");
         if (event.key.toLowerCase() === "e") setToolMode("eraser");
         if (event.key.toLowerCase() === "l") setToolMode("mask");
         // Tab: cicla alvo da borracha quando eraser ativo
@@ -238,7 +262,7 @@ export function Editor() {
       }
       if (event.key === "s" && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
-        void commitEdits();
+        void saveAndRenderCurrentPage();
       }
       // Fase 1.2: atalhos de fallback para preview/render que perderam o botão
       if (
@@ -262,8 +286,8 @@ export function Editor() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [
-    commitEdits,
     currentPageIndex,
+    currentPageKey,
     deleteSelectedLayer,
     eraserTarget,
     forceFidelityRender,
@@ -295,10 +319,10 @@ export function Editor() {
           <Layers size={32} className="mx-auto text-text-muted" />
           <p className="text-sm text-text-secondary">Nenhum projeto carregado</p>
           <button
-            onClick={() => navigate("/")}
+            onClick={onBack ?? (() => navigate("/"))}
             className="text-sm text-brand hover:underline"
           >
-            Voltar ao início
+            {emptyBackLabel}
           </button>
         </div>
       </div>
@@ -313,7 +337,7 @@ export function Editor() {
         {/* ── Row 1: Header ── */}
         <div className="flex items-center gap-3 border-b border-border bg-bg-secondary/60 px-3 py-2">
           <button
-            onClick={() => navigate("/preview")}
+            onClick={handleBack}
             className="rounded-lg p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary"
             title="Voltar ao preview"
           >
@@ -363,10 +387,10 @@ export function Editor() {
             <UndoRedoControls />
             <AutoSaveIndicator />
             <button
-              onClick={() => void commitEdits()}
-              disabled={pendingCount === 0}
+              onClick={() => void saveAndRenderCurrentPage()}
+              disabled={saveDisabled}
               className="flex items-center gap-1 rounded-lg border border-status-success/30 bg-status-success/10 px-2.5 py-1 text-[11px] font-medium text-status-success transition-smooth hover:bg-status-success/15 disabled:opacity-30"
-              title="Salvar alterações (Ctrl+S)"
+              title="Salvar e renderizar preview final (Ctrl+S)"
             >
               <Check size={12} />
               Salvar
@@ -423,8 +447,8 @@ export function Editor() {
           {toolMode === "brush" && <BrushOptionsInline />}
           {/* Máscara Lasso options — Fase 8 */}
           {toolMode === "mask" && <MaskLassoControls />}
-          {/* Brush size simples para repairBrush/eraser */}
-          {(toolMode === "repairBrush" || toolMode === "eraser") && (
+          {/* Brush size simples para repairBrush/reinpaintBrush/eraser */}
+          {(toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") && (
             <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">
               <span className="text-[10px] text-text-muted">Pincel</span>
               <input

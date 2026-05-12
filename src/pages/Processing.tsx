@@ -54,17 +54,13 @@ import {
 } from "lucide-react";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { useAppStore, PipelineStep } from "../lib/stores/appStore";
-import {
-  onPipelineComplete,
-  cancelPipeline,
-  pausePipeline,
-  resumePipeline,
-  startPipeline,
-  loadProjectJson,
-  openLogSaveDialog,
-  exportTextFile,
-} from "../lib/tauri";
-import type { PageData, PipelineLogEntry } from "../lib/stores/appStore";
+import type {
+  BatchCompletionChapter,
+  BatchCompletionSummary,
+  PageData,
+  PipelineLogEntry,
+} from "../lib/stores/appStore";
+import { loadImageSource } from "../lib/imageSource";
 import {
   blendRemainingSeconds,
   buildHardwareSummary,
@@ -73,7 +69,6 @@ import {
   formatEtaClock,
 } from "../lib/time-estimates";
 import {
-  formatFlaggedPages,
   summarizeProcessingQaReport,
   type ProcessingQaSummary,
 } from "./processingQa";
@@ -89,9 +84,20 @@ interface CompletionData {
   capitulo: number;
   pages: number;
   elapsedSeconds: number;
+  coverUrl: string | null;
   firstPagePath: string | null;
   paginas: PageData[];
   qaSummary: ProcessingQaSummary | null;
+}
+
+async function getTauriProcessingApi() {
+  return import("../lib/tauri");
+}
+
+function pickCoverUrl(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const coverUrl = (value as { cover_url?: unknown }).cover_url;
+  return typeof coverUrl === "string" && coverUrl.trim() ? coverUrl.trim() : null;
 }
 
 function sanitizeForFilename(value: string): string {
@@ -115,6 +121,11 @@ function buildLogFileName(obra?: string | null, capitulo?: number | null): strin
   }
   parts.push(nowIso);
   return `${parts.join("_")}.log`;
+}
+
+function fileNameFromPath(path?: string | null): string {
+  if (!path) return "project.json";
+  return path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 }
 
 function pad2(value: number): string {
@@ -199,17 +210,28 @@ export function Processing() {
     systemProfile,
     batchSources,
     setBatchSources,
+    batchCompletion,
+    setBatchCompletion,
     pipelineLog,
     appendPipelineLog,
   } = useAppStore();
-  const startedRef = useRef(false);
   const [started, setStarted] = useState(false);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
+  const startedAtMsRef = useRef<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [pauseState, setPauseState] = useState<"running" | "pausing" | "paused" | "resuming">("running");
   const [pausedDurationMs, setPausedDurationMs] = useState(0);
+  const pausedDurationMsRef = useRef(0);
   const pauseStartedAtRef = useRef<number | null>(null);
   const [completionData, setCompletionData] = useState<CompletionData | null>(null);
+  const batchCompletedRef = useRef<BatchCompletionChapter[]>([]);
+  const lastProgressLogRef = useRef<string | null>(null);
+  const startRequestKeyRef = useRef<string | null>(null);
+  const requestKey = project
+    ? `${project.id}|${project.mode}|${project.capitulo}|${
+        batchSources.length > 0 ? batchSources.join("|") : project.source_path
+      }`
+    : null;
 
   // Estados de Lote
   const [batchIndex, setBatchIndex] = useState(0);
@@ -226,14 +248,17 @@ export function Processing() {
   }, [startedAtMs]);
 
   useEffect(() => {
-    // Guard against StrictMode double-invoke
-    if (startedRef.current) return;
-    startedRef.current = true;
+    if (!project || !requestKey) return;
+    if (batchCompletion) return;
+    if (startRequestKeyRef.current === requestKey) return;
 
+    let disposed = false;
+    let unlistenProgress: (() => void) | undefined;
     let unlistenComplete: (() => void) | undefined;
 
     async function processChapter(index: number) {
-      if (!project) return;
+      if (!project || disposed) return;
+      const { startPipeline } = await getTauriProcessingApi();
       const isBatch = batchSources.length > 0;
       const currentPath = isBatch ? batchSources[index] : project.source_path;
       const currentChapter = project.capitulo + (isBatch ? index : 0);
@@ -268,9 +293,11 @@ export function Processing() {
             fontes_usadas: project.contexto.fontes_usadas,
           },
         });
+        if (disposed) return;
         updateProject({ status: "processing" });
         setStarted(true);
       } catch (err) {
+        if (disposed) return;
         appendPipelineLog({
           level: "error",
           message: `Erro ao iniciar capítulo ${currentChapter}: ${err}`,
@@ -282,7 +309,39 @@ export function Processing() {
 
     async function setup() {
       // 1. Registra listeners PRIMEIRO
+      const { onPipelineComplete, onPipelineProgress, loadProjectJson } = await getTauriProcessingApi();
+      unlistenProgress = (await onPipelineProgress((progress) => {
+        if (disposed) return;
+        setPipeline(progress);
+        const progressKey = [
+          progress.step,
+          progress.current_page,
+          progress.total_pages,
+          Math.round(progress.step_progress),
+          Math.round(progress.overall_progress),
+          progress.message,
+        ].join("|");
+        if (lastProgressLogRef.current !== progressKey) {
+          lastProgressLogRef.current = progressKey;
+          appendPipelineLog({
+            level: "info",
+            message: progress.message,
+            step: progress.step,
+            current_page: progress.current_page,
+            total_pages: progress.total_pages,
+            overall_progress: progress.overall_progress,
+            step_progress: progress.step_progress,
+          });
+        }
+      })) as unknown as () => void;
+
+      if (disposed) {
+        unlistenProgress?.();
+        return;
+      }
+
       unlistenComplete = (await onPipelineComplete(async (result) => {
+        if (disposed) return;
         appendPipelineLog({
           level: result.success ? "success" : "error",
           message: result.success
@@ -290,6 +349,7 @@ export function Processing() {
             : `Pipeline falhou: ${result.error ?? "erro desconhecido"}`,
         });
         if (result.success) {
+          setPipeline(null);
           try {
             const raw = await loadProjectJson(result.output_path);
             const outputDir = result.output_path.replace(/\\/g, "/");
@@ -297,34 +357,78 @@ export function Processing() {
             const paginas: PageData[] = raw.paginas ?? [];
 
             const chapterNum = raw.capitulo || project?.capitulo || 1;
+            const obra = raw.obra || project?.obra || "Projeto";
+            const coverUrl = pickCoverUrl(raw.work_context) ?? pickCoverUrl(project?.work_context);
+            const completedChapter: BatchCompletionChapter = {
+              id: `${outputDir}::${chapterNum}`,
+              obra,
+              capitulo: chapterNum,
+              pages: paginas.length,
+              project_path: outputDir,
+              output_path: outputDir,
+              first_page_path: paginas[0]?.arquivo_traduzido ?? null,
+              cover_url: coverUrl,
+              paginas,
+            };
 
             addRecentProject({
               id: crypto.randomUUID(),
-              obra: raw.obra || project?.obra || "Projeto sem nome",
+              obra,
               capitulo: chapterNum,
               pages: paginas.length,
               date: new Date().toISOString(),
               status: "done",
+              project_path: outputDir,
+              output_path: outputDir,
             });
 
             const isBatch = batchSources.length > 0;
             const currentBatchIndex = indexRef.current; // Usamos ref para ler o valor atual
+            if (isBatch) {
+              batchCompletedRef.current = [
+                ...batchCompletedRef.current.filter((item) => item.id !== completedChapter.id),
+                completedChapter,
+              ];
+            }
 
             if (isBatch && currentBatchIndex + 1 < batchSources.length) {
               // Avança para o próximo capítulo
               indexRef.current += 1;
               setBatchIndex(indexRef.current);
-              setBatchCompletedCount((prev) => prev + 1);
+              setBatchCompletedCount(batchCompletedRef.current.length);
               setTimeout(() => processChapter(indexRef.current), 1000);
             } else {
               // Finalizou tudo
+              const startedAt = startedAtMsRef.current;
+              const pausedAt = pauseStartedAtRef.current;
+              const pausedMs =
+                pausedDurationMsRef.current + (pausedAt ? Math.max(0, Date.now() - pausedAt) : 0);
+              const elapsed = startedAt
+                ? Math.max(1, Math.floor((Date.now() - startedAt - pausedMs) / 1000))
+                : 0;
               updateProject({
                 status: "done",
                 paginas,
                 output_path: outputDir,
-                obra: raw.obra || project?.obra || "",
+                obra,
                 capitulo: chapterNum,
               });
+              if (isBatch) {
+                const chapters = batchCompletedRef.current.length > 0
+                  ? batchCompletedRef.current
+                  : [completedChapter];
+                const summary: BatchCompletionSummary = {
+                  id: crypto.randomUUID(),
+                  obra,
+                  total_chapters: chapters.length,
+                  total_pages: chapters.reduce((total, chapter) => total + chapter.pages, 0),
+                  elapsed_seconds: elapsed,
+                  completed_at: new Date().toISOString(),
+                  chapters,
+                };
+                setBatchCompletedCount(chapters.length);
+                setBatchCompletion(summary);
+              }
               setBatchSources([]);
 
               if (project?.mode === "manual") {
@@ -332,9 +436,6 @@ export function Processing() {
                 return;
               }
 
-              const elapsed = startedAtMs
-                ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
-                : 0;
               if (qaSummary) {
                 appendPipelineLog({
                   level: "info",
@@ -343,11 +444,16 @@ export function Processing() {
                     `e ${qaSummary.totalDecisions} decisão(ões) registradas.`,
                 });
               }
+              if (isBatch) {
+                setCompletionData(null);
+                return;
+              }
               setCompletionData({
-                obra: raw.obra || project?.obra || "Projeto",
+                obra,
                 capitulo: chapterNum,
                 pages: paginas.length,
                 elapsedSeconds: elapsed,
+                coverUrl,
                 firstPagePath: paginas[0]?.arquivo_traduzido ?? null,
                 paginas,
                 qaSummary,
@@ -359,14 +465,26 @@ export function Processing() {
             navigate("/preview");
           }
         } else {
+          setPipeline(null);
           alert(`Erro no processamento: ${result.error}`);
           updateProject({ status: "error" });
           navigate("/");
         }
       })) as unknown as () => void;
 
+      if (disposed) {
+        unlistenComplete?.();
+        return;
+      }
+
       // 2. Inicia o primeiro
+      startRequestKeyRef.current = requestKey;
+      batchCompletedRef.current = [];
       const startedAt = Date.now();
+      startedAtMsRef.current = startedAt;
+      pausedDurationMsRef.current = 0;
+      pauseStartedAtRef.current = null;
+      setPausedDurationMs(0);
       setStartedAtMs(startedAt);
       setNowMs(startedAt);
       processChapter(0);
@@ -376,12 +494,15 @@ export function Processing() {
     setup();
 
     return () => {
+      disposed = true;
+      unlistenProgress?.();
       unlistenComplete?.();
     };
-  }, []);
+  }, [requestKey, batchCompletion]);
 
   async function handleCancel() {
     if (confirm("Cancelar tradução em andamento?")) {
+      const { cancelPipeline } = await getTauriProcessingApi();
       appendPipelineLog({ level: "info", message: "Tradução cancelada pelo usuário." });
       await cancelPipeline();
       updateProject({ status: "idle" });
@@ -391,14 +512,17 @@ export function Processing() {
 
   async function handleExportLog() {
     try {
+      const { exportTextFile, openLogSaveDialog } = await getTauriProcessingApi();
       const suggested = buildLogFileName(project?.obra, project?.capitulo);
       const target = await openLogSaveDialog(suggested);
       if (!target) return;
       const content = formatPipelineLog({
         obra: project?.obra ?? null,
         capitulo: project?.capitulo ?? null,
-        startedAtMs,
-        finishedAtMs: completionData ? startedAtMs ? startedAtMs + completionData.elapsedSeconds * 1000 : null : null,
+        startedAtMs: startedAtMsRef.current,
+        finishedAtMs: startedAtMsRef.current && (completionData || batchCompletion)
+          ? startedAtMsRef.current + (completionData?.elapsedSeconds ?? batchCompletion?.elapsed_seconds ?? 0) * 1000
+          : null,
         totalPages: project?.totalPages ?? null,
         hardware: hardwareSummary,
         entries: pipelineLog,
@@ -414,12 +538,15 @@ export function Processing() {
 
     try {
       if (pauseState === "paused") {
+        const { resumePipeline } = await getTauriProcessingApi();
         setPauseState("resuming");
         await resumePipeline();
         const resumedAt = Date.now();
         const pausedAt = pauseStartedAtRef.current;
         if (pausedAt) {
-          setPausedDurationMs((current) => current + (resumedAt - pausedAt));
+          const nextPausedDuration = pausedDurationMsRef.current + (resumedAt - pausedAt);
+          pausedDurationMsRef.current = nextPausedDuration;
+          setPausedDurationMs(nextPausedDuration);
         }
         pauseStartedAtRef.current = null;
         setNowMs(resumedAt);
@@ -427,6 +554,7 @@ export function Processing() {
         return;
       }
 
+      const { pausePipeline } = await getTauriProcessingApi();
       setPauseState("pausing");
       await pausePipeline();
       pauseStartedAtRef.current = Date.now();
@@ -481,6 +609,31 @@ export function Processing() {
       : "Pausar tradução";
 
   const isBatch = batchSources.length > 1;
+
+  function openBatchChapter(chapter: BatchCompletionChapter, route: "/preview" | "/editor") {
+    updateProject({
+      status: "done",
+      obra: chapter.obra,
+      capitulo: chapter.capitulo,
+      paginas: chapter.paginas,
+      totalPages: chapter.pages,
+      source_path: chapter.project_path,
+      output_path: chapter.output_path,
+    });
+    navigate(route);
+  }
+
+  if (batchCompletion) {
+    return (
+      <BatchCompletionScreen
+        data={batchCompletion}
+        onPreview={(chapter) => openBatchChapter(chapter, "/preview")}
+        onEditor={(chapter) => openBatchChapter(chapter, "/editor")}
+        onExportLog={handleExportLog}
+        logCount={pipelineLog.length}
+      />
+    );
+  }
 
   if (completionData) {
     return (
@@ -735,6 +888,167 @@ export function Processing() {
   );
 }
 
+function BatchCompletionScreen({
+  data,
+  onPreview,
+  onEditor,
+  onExportLog,
+  logCount,
+}: {
+  data: BatchCompletionSummary;
+  onPreview: (chapter: BatchCompletionChapter) => void;
+  onEditor: (chapter: BatchCompletionChapter) => void;
+  onExportLog: () => void;
+  logCount: number;
+}) {
+  const lastChapter = data.chapters[data.chapters.length - 1] ?? null;
+
+  return (
+    <div className="relative min-h-full overflow-y-auto px-6 py-8">
+      <style>{`
+        @keyframes successPop {
+          from { opacity: 0; transform: scale(0.35); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes fadeSlideUp {
+          from { opacity: 0; transform: translateY(14px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(ellipse_at_top,_rgba(72,225,120,0.10),_transparent_55%)]" />
+
+      <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-6">
+        <AnimContainer
+          name="fadeSlideUp"
+          dur="0.4s"
+          ease="ease-out"
+          fill="both"
+          className="flex flex-col gap-5 dynamic-animation"
+        >
+          <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+            <div className="flex items-center gap-4">
+              <AnimContainer
+                name="successPop"
+                dur="0.55s"
+                ease="cubic-bezier(0.34,1.56,0.64,1)"
+                fill="forwards"
+                className="flex h-14 w-14 shrink-0 items-center justify-center rounded-pill bg-status-success/15 shadow-[0_0_32px_rgba(72,225,120,0.18)] dynamic-animation"
+              >
+                <CheckCircle2 size={30} className="text-status-success" />
+              </AnimContainer>
+              <div>
+                <h2 className="text-2xl font-semibold text-text-primary">Lote concluido!</h2>
+                <p className="mt-1 text-sm text-text-secondary">
+                  {data.obra} - {data.total_chapters} capitulos traduzidos
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => lastChapter && onPreview(lastChapter)}
+                disabled={!lastChapter}
+                className="flex items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-medium text-white transition-smooth hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Eye size={16} />
+                Ver ultimo preview
+              </button>
+              <button
+                data-testid="export-report-link"
+                onClick={onExportLog}
+                disabled={logCount === 0}
+                className="flex items-center justify-center gap-2 rounded-xl border border-border bg-bg-secondary px-4 py-2.5 text-sm text-text-secondary transition-smooth hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                title={logCount === 0 ? "Sem registros" : `Exportar ${logCount} eventos`}
+              >
+                <FileDown size={16} />
+                Exportar log
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3">
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">Capitulos</p>
+              <p className="mt-1 text-2xl font-semibold tabular text-text-primary">{data.total_chapters}</p>
+            </div>
+            <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3">
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">Paginas</p>
+              <p className="mt-1 text-2xl font-semibold tabular text-text-primary">{data.total_pages}</p>
+            </div>
+            <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3">
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">Tempo total</p>
+              <p data-testid="completion-total-time" className="mt-1 text-2xl font-semibold tabular text-text-primary">
+                {formatDuration(data.elapsed_seconds)}
+              </p>
+            </div>
+          </div>
+        </AnimContainer>
+
+        <div data-testid="batch-completion-grid" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {data.chapters.map((chapter, index) => (
+            <AnimContainer
+              key={chapter.id}
+              name="fadeSlideUp"
+              dur="0.35s"
+              delay={`${Math.min(index * 0.04, 0.24)}s`}
+              ease="ease-out"
+              fill="both"
+              className="dynamic-animation"
+            >
+              <article
+                data-testid="batch-completion-card"
+                className="flex h-full flex-col justify-between gap-4 rounded-xl border border-border bg-bg-secondary p-4 shadow-[0_18px_45px_rgba(0,0,0,0.24)]"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wide text-brand-300">Cap. {chapter.capitulo}</p>
+                    <h3 className="mt-2 line-clamp-2 text-base font-semibold text-text-primary">{chapter.obra}</h3>
+                  </div>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-pill border border-status-success/25 bg-status-success/10 text-status-success">
+                    <CheckCircle2 size={17} />
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-text-muted">Paginas</p>
+                    <p className="mt-1 font-semibold tabular text-text-primary">{chapter.pages}</p>
+                  </div>
+                  <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-text-muted">Arquivo</p>
+                    <p className="mt-1 truncate text-text-secondary" title={chapter.output_path}>
+                      {fileNameFromPath(chapter.output_path)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    data-testid="batch-chapter-preview"
+                    onClick={() => onPreview(chapter)}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-brand px-3 py-2 text-sm font-medium text-white transition-smooth hover:bg-brand/90"
+                  >
+                    <Eye size={15} />
+                    Preview
+                  </button>
+                  <button
+                    onClick={() => onEditor(chapter)}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary transition-smooth hover:border-border-strong"
+                  >
+                    <Edit3 size={15} />
+                    Editor
+                  </button>
+                </div>
+              </article>
+            </AnimContainer>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChapterCompletionScreen({
   data,
   onPreview,
@@ -749,32 +1063,66 @@ function ChapterCompletionScreen({
   logCount: number;
 }) {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const prevBlobRef = useRef<string | null>(null);
+  const loadedImageRevokeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    const path = data.firstPagePath;
-    if (!path) return;
     let cancelled = false;
-    readFile(path)
-      .then((bytes) => {
-        if (cancelled) return;
-        const blob = new Blob([bytes], { type: "image/jpeg" });
-        const url = URL.createObjectURL(blob);
-        if (prevBlobRef.current) URL.revokeObjectURL(prevBlobRef.current);
-        prevBlobRef.current = url;
-        setImageSrc(url);
-      })
-      .catch(() => {
+
+    function clearLoadedImage() {
+      loadedImageRevokeRef.current?.();
+      loadedImageRevokeRef.current = null;
+    }
+
+    async function loadFallbackPage() {
+      const path = data.firstPagePath;
+      if (!path) {
         if (!cancelled) setImageSrc(null);
-      });
+        return;
+      }
+      try {
+        const loaded = await loadImageSource(path);
+        if (cancelled) {
+          loaded.revoke?.();
+          return;
+        }
+        clearLoadedImage();
+        loadedImageRevokeRef.current = loaded.revoke ?? null;
+        setImageSrc(loaded.src);
+      } catch {
+        if (!cancelled) setImageSrc(null);
+      }
+    }
+
+    async function loadCover() {
+      if (data.coverUrl) {
+        clearLoadedImage();
+        setImageSrc(data.coverUrl);
+        return;
+      }
+      await loadFallbackPage();
+      try {
+        const { searchWork } = await getTauriProcessingApi();
+        const result = await searchWork(data.obra);
+        const coverUrl = result.candidates.find((candidate) => !!candidate.cover_url)?.cover_url;
+        if (cancelled) return;
+        if (coverUrl) {
+          clearLoadedImage();
+          setImageSrc(coverUrl);
+        }
+      } catch {
+        // Mantem a primeira pagina renderizada quando nao houver capa online.
+      }
+    }
+
+    void loadCover();
     return () => {
       cancelled = true;
     };
-  }, [data.firstPagePath]);
+  }, [data.coverUrl, data.firstPagePath, data.obra]);
 
   useEffect(() => {
     return () => {
-      if (prevBlobRef.current) URL.revokeObjectURL(prevBlobRef.current);
+      loadedImageRevokeRef.current?.();
     };
   }, []);
 
@@ -841,63 +1189,26 @@ function ChapterCompletionScreen({
             <p className="mt-1 text-xs text-text-secondary">páginas traduzidas</p>
           </div>
           <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3 text-center">
-            <p className="text-2xl font-semibold tabular text-text-primary">{formatDuration(data.elapsedSeconds)}</p>
+            <p data-testid="completion-total-time" className="text-2xl font-semibold tabular text-text-primary">{formatDuration(data.elapsedSeconds)}</p>
             <p className="mt-1 text-xs text-text-secondary">tempo total</p>
           </div>
         </AnimContainer>
 
-        {data.qaSummary && (
-          <AnimContainer
-            name="fadeSlideUp"
-            dur="0.4s"
-            delay="0.28s"
-            ease="ease-out"
-            fill="both"
-            className="mb-5 dynamic-animation"
-          >
-            <div
-              data-testid="qa-panel"
-              className="rounded-2xl border border-amber-400/15 bg-[linear-gradient(180deg,rgba(245,158,11,0.09),rgba(255,255,255,0.02))] px-4 py-4"
-            >
-              <div className="flex items-center gap-2 text-sm font-medium text-text-primary">
-                <Flag size={15} className="text-amber-300" />
-                RevisÃ£o sugerida
-              </div>
-              <p className="mt-2 text-xs text-text-secondary">
-                {data.qaSummary.totalDecisions} decisÃ£o(Ãµes) registradas. PÃ¡ginas sinalizadas:{" "}
-                {formatFlaggedPages(data.qaSummary.flaggedPages)}.
-              </p>
-              {data.qaSummary.topReasons.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {data.qaSummary.topReasons.map((item) => (
-                    <span
-                      data-testid="qa-flag-item"
-                      key={item.reason}
-                      className="rounded-pill border border-border bg-bg-secondary/70 px-3 py-1 text-[11px] text-text-secondary"
-                    >
-                      {item.label}: {item.count}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          </AnimContainer>
-        )}
-
-        {/* First page preview with zoom animation */}
+        {/* Cover preview with page fallback */}
         {imageSrc && (
           <AnimContainer
             name="pageZoomIn"
             dur="0.65s"
-            delay="0.32s"
+            delay="0.28s"
             ease="cubic-bezier(0.34,1.56,0.64,1)"
             fill="both"
-            className="mb-5 overflow-hidden rounded-2xl border border-border shadow-[0_20px_50px_rgba(0,0,0,0.5)] dynamic-animation"
+            className="mb-5 flex h-72 items-center justify-center overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-[0_20px_50px_rgba(0,0,0,0.5)] dynamic-animation"
           >
             <img
+              data-testid="completion-cover"
               src={imageSrc}
               alt="Primeira página traduzida"
-              className="max-h-64 w-full object-contain"
+              className="h-full w-full object-contain"
             />
           </AnimContainer>
         )}
@@ -906,7 +1217,7 @@ function ChapterCompletionScreen({
         <AnimContainer
           name="fadeSlideUp"
           dur="0.4s"
-          delay="0.42s"
+          delay="0.38s"
           ease="ease-out"
           fill="both"
           className="flex gap-3 dynamic-animation"
@@ -930,7 +1241,7 @@ function ChapterCompletionScreen({
         <AnimContainer
           name="fadeSlideUp"
           dur="0.4s"
-          delay="0.52s"
+          delay="0.48s"
           ease="ease-out"
           fill="both"
           className="mt-3 flex justify-center dynamic-animation"

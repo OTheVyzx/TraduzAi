@@ -24,6 +24,8 @@ import {
   ShieldPlus,
 } from "lucide-react";
 import { readFile } from "@tauri-apps/plugin-fs";
+import { loadImageSource } from "../lib/imageSource";
+import { getPageKey } from "../lib/editorHistory";
 import { useAppStore } from "../lib/stores/appStore";
 import {
   buildQaReviewSummary,
@@ -33,7 +35,7 @@ import {
   qaIssueGroup,
   type QaIssue,
 } from "../lib/qaPanel";
-import { getStaleRenderPreviewPages, useEditorStore } from "../lib/stores/editorStore";
+import { useEditorStore } from "../lib/stores/editorStore";
 import {
   exportPagePsd,
   exportProject,
@@ -51,11 +53,33 @@ import {
 } from "./previewZoom";
 import { getPreviewImageCandidates, getPreviewToggleLabel } from "./previewImage";
 import { EXPORT_MODE_OPTIONS, exportBlockReason, exportModeForBackend, type ExportMode } from "../lib/exportModes";
+import { renderPageWithKonvaToDataUrl, shouldUseKonvaPreviewRenderer } from "../lib/konvaExportRenderer";
+
+function waitForImageLoad(src: string) {
+  return new Promise<void>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("imagem indisponivel"));
+    image.src = src;
+  });
+}
+
+type PreviewScrollAxis = "vertical" | "horizontal";
+type PreviewReaderImage = {
+  pageIndex: number;
+  pageNumber: number;
+  src: string | null;
+  status: "loading" | "ready" | "error";
+};
 
 export function Preview() {
   const navigate = useNavigate();
-  const { project, updateProject } = useAppStore();
+  const { project, updateProject, batchCompletion } = useAppStore();
   const renderPreviewCacheByPageKey = useEditorStore((s) => s.renderPreviewCacheByPageKey);
+  const renderPreviewPageForPage = useEditorStore((s) => s.renderPreviewPageForPage);
+  const getStaleRenderPreviewPages = useEditorStore((s) => s.getStaleRenderPreviewPages);
+  const pendingEdits = useEditorStore((s) => s.pendingEdits);
+  const pendingStructuralEdits = useEditorStore((s) => s.pendingStructuralEdits);
   const [currentPage, setCurrentPage] = useState(0);
   const [showOriginal, setShowOriginal] = useState(false);
   const [exportFormat, setExportFormat] = useState<"zip_full" | "jpg_only" | "cbz" | "psd">("zip_full");
@@ -67,17 +91,40 @@ export function Preview() {
   const [panOffset, setPanOffset] = useState<PreviewPanOffset>({ x: 0, y: 0 });
   const [panSession, setPanSession] = useState<PreviewPanSession | null>(null);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [scrollAxis, setScrollAxis] = useState<PreviewScrollAxis>("vertical");
+  const [readerImages, setReaderImages] = useState<PreviewReaderImage[]>([]);
   const [ignoreIssueId, setIgnoreIssueId] = useState<string | null>(null);
   const [ignoreReason, setIgnoreReason] = useState("");
   const [ignoreError, setIgnoreError] = useState<string | null>(null);
   const [lastIgnoredReason, setLastIgnoredReason] = useState<string | null>(null);
   const [exportBlockMessage, setExportBlockMessage] = useState<string | null>(null);
-  const prevBlobRef = useRef<string | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const prevImageRevokeRef = useRef<(() => void) | null>(null);
+  const readerRevokesRef = useRef<(() => void)[]>([]);
+  const readerPageRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const scrollToPageRef = useRef(false);
+  const scrollSyncFrameRef = useRef<number | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   const totalPages = project?.paginas.length || 0;
   const page = project?.paginas[currentPage] ?? null;
-  const staleRenderPages = getStaleRenderPreviewPages(project, renderPreviewCacheByPageKey);
+  const pageKey = project ? getPageKey(project, currentPage) : "";
+  const renderPreviewState = pageKey ? renderPreviewCacheByPageKey[pageKey] : null;
+  const useKonvaPreviewRenderer = !showOriginal && shouldUseKonvaPreviewRenderer();
+  const faithfulPreviewPath =
+    !useKonvaPreviewRenderer && renderPreviewState?.status === "fresh" ? renderPreviewState.previewPath : null;
+  const projectImageBasePath = project
+    ? project.output_path ||
+      project.source_path ||
+      (project as typeof project & { _work_dir?: string | null })._work_dir ||
+      null
+    : null;
+  const staleRenderPages = useKonvaPreviewRenderer ? [] : getStaleRenderPreviewPages();
+  const hasUncommittedEditorEdits =
+    Object.keys(pendingEdits).length > 0 ||
+    pendingStructuralEdits.created.length > 0 ||
+    Object.keys(pendingStructuralEdits.deleted).length > 0 ||
+    Boolean(pendingStructuralEdits.order);
   const qaIssues = collectQaIssues(project);
   const ignoredQaActions = collectIgnoredQaActions(project);
   const qaReviewSummary = buildQaReviewSummary(project);
@@ -85,39 +132,68 @@ export function Preview() {
   const qaGroups = Object.entries(qaReviewSummary.groups);
 
   useEffect(() => {
+    if (!project || !page || showOriginal || !pageKey || useKonvaPreviewRenderer) return;
+    const cached = renderPreviewCacheByPageKey[pageKey];
+    if (cached?.status === "rendering" || cached?.status === "error") return;
+    if (cached?.status === "fresh" && cached.previewPath) return;
+
+    void renderPreviewPageForPage(pageKey, currentPage, page).catch(() => {
+      // O JPG final antigo continua como fallback visual se a renderizacao fiel falhar.
+    });
+  }, [currentPage, page, pageKey, project, renderPreviewCacheByPageKey, renderPreviewPageForPage, showOriginal, useKonvaPreviewRenderer]);
+
+  useEffect(() => {
     if (!page) {
-      if (prevBlobRef.current) {
-        URL.revokeObjectURL(prevBlobRef.current);
-        prevBlobRef.current = null;
-      }
+      prevImageRevokeRef.current?.();
+      prevImageRevokeRef.current = null;
       setImageSrc(null);
       return;
     }
 
     let cancelled = false;
-    const candidatePaths = getPreviewImageCandidates(page, showOriginal);
-
-    const loadImage = (path: string) =>
-      readFile(path).then((bytes) => {
-        if (cancelled) return;
-        const blob = new Blob([bytes], { type: "image/jpeg" });
-        const url = URL.createObjectURL(blob);
-        if (prevBlobRef.current) URL.revokeObjectURL(prevBlobRef.current);
-        prevBlobRef.current = url;
-        setImageSrc(url);
-      });
+    const candidatePaths = getPreviewImageCandidates(page, showOriginal, projectImageBasePath, faithfulPreviewPath);
+    setImageSrc(null);
 
     const loadFirstAvailable = async () => {
-      for (const candidatePath of candidatePaths) {
+      if (useKonvaPreviewRenderer) {
         try {
-          await loadImage(candidatePath);
+          const src = await renderPageWithKonvaToDataUrl({ page, projectImageBasePath });
+          if (!cancelled) {
+            prevImageRevokeRef.current?.();
+            prevImageRevokeRef.current = null;
+            setImageSrc(src);
+            return;
+          }
+        } catch {
+          if (cancelled) return;
+        }
+      }
+      for (const candidatePath of candidatePaths) {
+        let loaded: Awaited<ReturnType<typeof loadImageSource>> | null = null;
+        try {
+          loaded = await loadImageSource(candidatePath, "image/jpeg");
+          if (cancelled) {
+            loaded.revoke?.();
+            return;
+          }
+          await waitForImageLoad(loaded.src);
+          if (cancelled) {
+            loaded.revoke?.();
+            return;
+          }
+          prevImageRevokeRef.current?.();
+          prevImageRevokeRef.current = loaded.revoke ?? null;
+          setImageSrc(loaded.src);
           return;
         } catch {
+          loaded?.revoke?.();
           if (cancelled) return;
         }
       }
 
       if (!cancelled) {
+        prevImageRevokeRef.current?.();
+        prevImageRevokeRef.current = null;
         setImageSrc(null);
       }
     };
@@ -127,21 +203,174 @@ export function Preview() {
     return () => {
       cancelled = true;
     };
-  }, [page, showOriginal]);
+  }, [page, showOriginal, projectImageBasePath, faithfulPreviewPath, useKonvaPreviewRenderer]);
 
   useEffect(() => {
     return () => {
-      if (prevBlobRef.current) {
-        URL.revokeObjectURL(prevBlobRef.current);
+      prevImageRevokeRef.current?.();
+      if (scrollSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollSyncFrameRef.current);
       }
     };
   }, []);
 
   useEffect(() => {
+    readerRevokesRef.current.forEach((revoke) => revoke());
+    readerRevokesRef.current = [];
+
+    if (scrollAxis !== "vertical" || !project?.paginas.length) {
+      setReaderImages([]);
+      return;
+    }
+
+    let cancelled = false;
+    setReaderImages(
+      project.paginas.map((readerPage, pageIndex) => ({
+        pageIndex,
+        pageNumber: readerPage.numero,
+        src: null,
+        status: "loading",
+      })),
+    );
+
+    const loadReaderImages = async () => {
+      for (const [pageIndex, readerPage] of project.paginas.entries()) {
+        const readerPageKey = getPageKey(project, pageIndex);
+        const readerPreviewState = renderPreviewCacheByPageKey[readerPageKey];
+        const readerFaithfulPreviewPath =
+          !showOriginal && readerPreviewState?.status === "fresh" ? readerPreviewState.previewPath : null;
+        const candidatePaths = getPreviewImageCandidates(
+          readerPage,
+          showOriginal,
+          projectImageBasePath,
+          readerFaithfulPreviewPath,
+        );
+        let loaded: Awaited<ReturnType<typeof loadImageSource>> | null = null;
+        try {
+          if (useKonvaPreviewRenderer) {
+            try {
+              const konvaSrc = await renderPageWithKonvaToDataUrl({ page: readerPage, projectImageBasePath });
+              if (cancelled) return;
+              setReaderImages((current) =>
+                current.map((item) =>
+                  item.pageIndex === pageIndex ? { ...item, src: konvaSrc, status: "ready" } : item,
+                ),
+              );
+              continue;
+            } catch {
+              if (cancelled) return;
+            }
+          }
+          for (const candidatePath of candidatePaths) {
+            try {
+              loaded = await loadImageSource(candidatePath, "image/jpeg");
+              await waitForImageLoad(loaded.src);
+              break;
+            } catch {
+              loaded?.revoke?.();
+              loaded = null;
+            }
+          }
+
+          if (cancelled) {
+            loaded?.revoke?.();
+            return;
+          }
+
+          if (loaded?.src) {
+            const readerSrc = loaded.src;
+            if (loaded.revoke) readerRevokesRef.current.push(loaded.revoke);
+            setReaderImages((current) =>
+              current.map((item) =>
+                item.pageIndex === pageIndex ? { ...item, src: readerSrc, status: "ready" } : item,
+              ),
+            );
+          } else {
+            setReaderImages((current) =>
+              current.map((item) => (item.pageIndex === pageIndex ? { ...item, status: "error" } : item)),
+            );
+          }
+        } catch {
+          loaded?.revoke?.();
+          if (!cancelled) {
+            setReaderImages((current) =>
+              current.map((item) => (item.pageIndex === pageIndex ? { ...item, status: "error" } : item)),
+            );
+          }
+        }
+      }
+    };
+
+    void loadReaderImages();
+
+    return () => {
+      cancelled = true;
+      readerRevokesRef.current.forEach((revoke) => revoke());
+      readerRevokesRef.current = [];
+    };
+  }, [project, project?.paginas, projectImageBasePath, renderPreviewCacheByPageKey, scrollAxis, showOriginal, useKonvaPreviewRenderer]);
+
+  useEffect(() => {
+    if (
+      scrollAxis !== "vertical" ||
+      showOriginal ||
+      !faithfulPreviewPath ||
+      useKonvaPreviewRenderer
+    ) return;
+
+    let cancelled = false;
+    const loadFaithfulReaderPage = async () => {
+      let loaded: Awaited<ReturnType<typeof loadImageSource>> | null = null;
+      try {
+        loaded = await loadImageSource(faithfulPreviewPath, "image/jpeg");
+        await waitForImageLoad(loaded.src);
+        if (cancelled) {
+          loaded.revoke?.();
+          return;
+        }
+        if (loaded.revoke) readerRevokesRef.current.push(loaded.revoke);
+        setReaderImages((current) =>
+          current.map((item) =>
+            item.pageIndex === currentPage ? { ...item, src: loaded?.src ?? item.src, status: "ready" } : item,
+          ),
+        );
+      } catch {
+        loaded?.revoke?.();
+      }
+    };
+
+    void loadFaithfulReaderPage();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPage, faithfulPreviewPath, scrollAxis, showOriginal, useKonvaPreviewRenderer]);
+
+  useEffect(() => {
+    if (scrollAxis !== "vertical") return;
+    if (!scrollToPageRef.current) return;
+    scrollToPageRef.current = false;
+    readerPageRefs.current[currentPage]?.scrollIntoView({ block: "start", inline: "nearest", behavior: "smooth" });
+  }, [currentPage, readerImages.length, scrollAxis]);
+
+  useEffect(() => {
+    if (scrollAxis !== "vertical") return;
+    setPanOffset({ x: 0, y: 0 });
+    viewportRef.current?.scrollTo({ left: 0 });
+  }, [scrollAxis]);
+
+  useEffect(() => {
+    if (scrollAxis !== "horizontal") return;
     setZoom(PREVIEW_ZOOM_DEFAULT);
     setPanOffset({ x: 0, y: 0 });
     setPanSession(null);
-  }, [currentPage, showOriginal]);
+  }, [currentPage, scrollAxis]);
+
+  useEffect(() => {
+    setZoom(PREVIEW_ZOOM_DEFAULT);
+    setPanOffset({ x: 0, y: 0 });
+    setPanSession(null);
+  }, [showOriginal]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -227,7 +456,58 @@ export function Preview() {
     });
   }
 
+  function goToPreviewPage(index: number) {
+    const nextPage = Math.max(0, Math.min(totalPages - 1, index));
+    scrollToPageRef.current = scrollAxis === "vertical";
+    setCurrentPage(nextPage);
+  }
+
+  function syncCurrentPageFromScroll() {
+    const viewport = viewportRef.current;
+    if (!viewport || scrollAxis !== "vertical") return;
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const viewportMiddleY = viewportRect.top + viewportRect.height / 2;
+    let nearestPage = currentPage;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (const item of readerImages) {
+      const node = readerPageRefs.current[item.pageIndex];
+      if (!node) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.top <= viewportMiddleY && rect.bottom >= viewportMiddleY) {
+        nearestPage = item.pageIndex;
+        break;
+      }
+      const distance = Math.min(Math.abs(rect.top - viewportMiddleY), Math.abs(rect.bottom - viewportMiddleY));
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestPage = item.pageIndex;
+      }
+    }
+
+    if (nearestPage !== currentPage) {
+      setCurrentPage(nearestPage);
+    }
+  }
+
+  function handleViewportScroll() {
+    if (scrollAxis !== "vertical" || scrollSyncFrameRef.current !== null) return;
+    scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+      scrollSyncFrameRef.current = null;
+      syncCurrentPageFromScroll();
+    });
+  }
+
   function handleViewportWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!event.ctrlKey && !event.metaKey) {
+      if (scrollAxis === "horizontal") {
+        event.preventDefault();
+        const node = viewportRef.current;
+        if (node) node.scrollLeft += event.deltaX || event.deltaY;
+      }
+      return;
+    }
     event.preventDefault();
 
     const nextState = getPreviewWheelState({
@@ -259,11 +539,27 @@ export function Preview() {
       return;
     }
     if (staleRenderPages.length > 0) {
-      alert(
-        `Preview final desatualizado nas paginas: ${staleRenderPages.join(", ")}. ` +
-          "Abra o editor e use Salvar+Render para renderizar antes de exportar.",
-      );
-      return;
+      if (hasUncommittedEditorEdits) {
+        alert(
+          `Preview final desatualizado nas paginas: ${staleRenderPages.join(", ")}. ` +
+            "Salve as edicoes abertas no editor antes de exportar.",
+        );
+        return;
+      }
+      try {
+        for (const pageNumber of staleRenderPages) {
+          const pageIndex = pageNumber - 1;
+          const stalePage = project.paginas[pageIndex];
+          if (!stalePage) continue;
+          const stalePageKey = getPageKey(project, pageIndex);
+          const cached = renderPreviewCacheByPageKey[stalePageKey];
+          if (cached?.status === "fresh" && cached.previewPath) continue;
+          await renderPreviewPageForPage(stalePageKey, pageIndex, stalePage);
+        }
+      } catch (err) {
+        alert(`Erro ao renderizar preview final: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
     }
     setExporting(true);
 
@@ -272,7 +568,7 @@ export function Preview() {
       if (!outputPath) return;
 
       if (exportFormat === "psd") {
-        const projectPath = project.output_path ?? project.source_path;
+        const projectPath = project.output_path || project.source_path;
         const baseOutputPath = outputPath.replace(/[/\\][^/\\]+$/, "");
 
         for (let i = 0; i < project.paginas.length; i++) {
@@ -292,7 +588,7 @@ export function Preview() {
         }
       } else {
         await exportProject({
-          project_path: project.output_path ?? project.source_path,
+          project_path: project.output_path || project.source_path,
           format: exportFormat,
           output_path: outputPath,
           export_mode: exportModeForBackend(activeMode),
@@ -327,7 +623,7 @@ export function Preview() {
   }
 
   function goToQaIssue(issue: QaIssue) {
-    setCurrentPage(issue.pageIndex);
+    goToPreviewPage(issue.pageIndex);
   }
 
   function startIgnoreIssue(issue: QaIssue) {
@@ -385,17 +681,41 @@ export function Preview() {
   }
 
   const viewportCursor = panSession ? "cursor-grabbing" : isSpacePressed ? "cursor-grab" : "cursor-default";
+  const viewportOverflowClass =
+    scrollAxis === "vertical" ? "overflow-y-auto overflow-x-hidden" : "overflow-x-auto overflow-y-hidden";
+  const previewFrameClass =
+    scrollAxis === "vertical"
+      ? "flex min-h-full items-start justify-center overflow-visible p-0"
+      : "flex min-h-full min-w-max items-center justify-start overflow-visible px-8 py-6";
+  const previewTransformClass =
+    scrollAxis === "vertical" ? "flex w-full flex-col items-center gap-0 leading-none" : "will-change-transform";
+  const previewImageClass =
+    scrollAxis === "vertical"
+      ? "w-auto max-w-full select-none rounded-2xl border border-border object-contain shadow-[0_20px_60px_rgba(0,0,0,0.55)]"
+      : "h-auto max-h-[calc(100vh-180px)] w-auto max-w-none select-none rounded-2xl border border-border object-contain shadow-[0_20px_60px_rgba(0,0,0,0.55)]";
+  const scrollHint =
+    scrollAxis === "vertical"
+      ? "Scroll: rolar vertical • Ctrl+scroll: zoom • Space+drag: mover"
+      : "Scroll: rolar horizontal • Ctrl+scroll: zoom • Space+drag: mover";
+  const previewTransformOrigin = scrollAxis === "vertical" ? "top center" : "center center";
+  const previewTransform =
+    scrollAxis === "vertical" ? "translate(0px, 0px)" : `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`;
+  const readerImageWidth = `${Math.round(zoom * 10000) / 100}%`;
+  const hasPreviewImage = scrollAxis === "vertical" ? readerImages.some((item) => item.src) : Boolean(page && imageSrc);
+  const hasBatchReturn = Boolean(batchCompletion);
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-border bg-bg-secondary px-6 py-3">
         <div className="flex items-center gap-3">
           <button
-            onClick={() => navigate("/")}
-            title="Voltar para o inicio"
-            className="p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
+            data-testid={hasBatchReturn ? "preview-return-batch" : undefined}
+            onClick={() => navigate(hasBatchReturn ? "/processing" : "/")}
+            title={hasBatchReturn ? "Voltar para o lote concluido" : "Voltar para o inicio"}
+            className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary"
           >
             <ChevronLeft size={18} />
+            {hasBatchReturn && <span className="text-xs font-medium">Lote</span>}
           </button>
           <div>
             <p className="text-sm font-medium">{project?.obra}</p>
@@ -447,13 +767,12 @@ export function Preview() {
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        <div
-          className={`relative flex-1 overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(72,176,255,0.08),_transparent_38%),linear-gradient(180deg,_rgba(255,255,255,0.02),_transparent_28%)] ${viewportCursor}`}
-          onWheel={handleViewportWheel}
-          onMouseDown={handleViewportMouseDown}
-        >
-          {page && imageSrc ? (
-            <div className="absolute right-4 top-4 z-10 flex items-center gap-1.5 rounded-xl border border-border bg-bg-secondary/90 px-2 py-2 shadow-lg backdrop-blur">
+        <div className="relative flex-1 overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(72,176,255,0.08),_transparent_38%),linear-gradient(180deg,_rgba(255,255,255,0.02),_transparent_28%)]">
+          {hasPreviewImage ? (
+            <div
+              data-testid="preview-zoom-toolbar"
+              className="absolute right-4 top-4 z-30 flex items-center gap-1.5 rounded-xl border border-border bg-bg-secondary/90 px-2 py-2 shadow-lg backdrop-blur"
+            >
               <button
                 onClick={() => setZoom((currentZoom) => getNextPreviewZoom(currentZoom, "out"))}
                 className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
@@ -489,42 +808,105 @@ export function Preview() {
               >
                 <LocateFixed size={14} />
               </button>
-              <span className="w-12 text-right font-mono text-[11px] text-text-muted">
+              <span data-testid="preview-zoom-value" className="w-12 text-right font-mono text-[11px] text-text-muted">
                 {Math.round(zoom * 100)}%
               </span>
+              <div className="ml-1 flex rounded-xl border border-border bg-bg-primary/70 p-0.5">
+                <button
+                  onClick={() => setScrollAxis("vertical")}
+                  aria-pressed={scrollAxis === "vertical"}
+                  className={`rounded-lg px-2 py-1 text-[11px] transition-smooth ${
+                    scrollAxis === "vertical"
+                      ? "bg-brand/20 text-brand-200"
+                      : "text-text-secondary hover:text-text-primary"
+                  }`}
+                  title="Rolagem vertical"
+                >
+                  Vertical
+                </button>
+                <button
+                  onClick={() => setScrollAxis("horizontal")}
+                  aria-pressed={scrollAxis === "horizontal"}
+                  className={`rounded-lg px-2 py-1 text-[11px] transition-smooth ${
+                    scrollAxis === "horizontal"
+                      ? "bg-brand/20 text-brand-200"
+                      : "text-text-secondary hover:text-text-primary"
+                  }`}
+                  title="Rolagem horizontal"
+                >
+                  Horizontal
+                </button>
+              </div>
             </div>
           ) : null}
 
-          <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-4">
-            <div className="rounded-full border border-border bg-black/45 px-3 py-1 text-[11px] text-text-secondary backdrop-blur">
-              Ctrl+scroll: zoom • Scroll: mover • Space+drag: mover
+          {scrollAxis === "horizontal" ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-4">
+              <div className="rounded-full border border-border bg-black/45 px-3 py-1 text-[11px] text-text-secondary backdrop-blur">
+                {scrollHint}
+              </div>
             </div>
-          </div>
+          ) : null}
 
-          <div className="flex h-full items-center justify-center overflow-hidden px-6 py-4">
-            <div
-              className="will-change-transform"
-              style={{
-                transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`,
-                transformOrigin: "center center",
-                transition: panSession ? "none" : "transform 0.12s ease-out",
-              }}
-            >
-              {page && imageSrc ? (
-                <div className="relative inline-block">
-                  <img
-                    ref={imgRef}
-                    src={imageSrc}
-                    alt={`Pagina ${page.numero}`}
-                    draggable={false}
-                    className="max-h-[calc(100vh-180px)] w-auto select-none rounded-2xl border border-border object-contain shadow-[0_20px_60px_rgba(0,0,0,0.55)]"
-                  />
-                </div>
-              ) : page ? (
-                <p className="text-sm text-text-secondary">Carregando imagem...</p>
-              ) : (
-                <p className="text-text-secondary">Nenhuma pagina para exibir</p>
-              )}
+          <div
+            ref={viewportRef}
+            data-testid="preview-viewport"
+            className={`h-full ${viewportOverflowClass} ${viewportCursor}`}
+            onScroll={handleViewportScroll}
+            onWheel={handleViewportWheel}
+            onMouseDown={handleViewportMouseDown}
+          >
+            <div className={previewFrameClass}>
+              <div
+                className={previewTransformClass}
+                style={{
+                  transform: previewTransform,
+                  transformOrigin: previewTransformOrigin,
+                  transition: panSession ? "none" : "transform 0.12s ease-out",
+                }}
+              >
+                {scrollAxis === "vertical" ? (
+                  readerImages.some((item) => item.src) ? (
+                    readerImages.map((item) =>
+                      item.src ? (
+                        <div
+                          key={item.pageIndex}
+                          ref={(node) => {
+                            readerPageRefs.current[item.pageIndex] = node;
+                          }}
+                          className="m-0 flex w-full min-w-0 justify-center p-0 leading-none"
+                        >
+                          <img
+                            src={item.src}
+                            alt={`Pagina ${item.pageNumber}`}
+                            draggable={false}
+                            className="block h-auto max-w-none select-none"
+                            style={{ width: readerImageWidth }}
+                          />
+                        </div>
+                      ) : null,
+                    )
+                  ) : page ? (
+                    <p className="px-6 py-8 text-sm text-text-secondary">Carregando imagens...</p>
+                  ) : (
+                    <p className="px-6 py-8 text-text-secondary">Nenhuma pagina para exibir</p>
+                  )
+                ) : page && imageSrc ? (
+                  <div className="relative inline-block">
+                    <img
+                      ref={imgRef}
+                      src={imageSrc}
+                      alt={`Pagina ${page.numero}`}
+                      draggable={false}
+                      className={previewImageClass}
+                    />
+                  </div>
+                ) : page ? (
+                  <p className="text-sm text-text-secondary">Carregando imagem...</p>
+                ) : (
+                  <p className="text-text-secondary">Nenhuma pagina para exibir</p>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -819,7 +1201,7 @@ export function Preview() {
 
       <div className="flex items-center justify-center gap-4 border-t border-border bg-bg-secondary px-6 py-3">
         <button
-          onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
+          onClick={() => goToPreviewPage(currentPage - 1)}
           disabled={currentPage === 0}
           title="Pagina anterior"
           className="rounded-lg bg-bg-tertiary p-2 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
@@ -832,7 +1214,7 @@ export function Preview() {
         </span>
 
         <button
-          onClick={() => setCurrentPage(Math.min(totalPages - 1, currentPage + 1))}
+          onClick={() => goToPreviewPage(currentPage + 1)}
           disabled={currentPage >= totalPages - 1}
           title="Proxima pagina"
           className="rounded-lg bg-bg-tertiary p-2 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"

@@ -61,6 +61,7 @@ function makeLayer(id: string, overrides: Partial<TextEntry> = {}): TextEntry {
 
 class Draft implements WorkingStateDraft {
   layers = new Map<string, TextEntry>();
+  bitmapPaths = new Map<string, string>();
 
   constructor(layers: TextEntry[] = [makeLayer("a")]) {
     for (const layer of layers) this.layers.set(layer.id, layer);
@@ -112,8 +113,13 @@ class Draft implements WorkingStateDraft {
     this.layers = new Map(next.map((layer) => [layer.id, layer]));
   }
 
-  applyWorkingBitmapRegion(): void {
-    return;
+  applyWorkingBitmapRegion(
+    _pageKey: string,
+    layerKey: "brush" | "mask" | "inpaint",
+    _bbox: Bbox,
+    bytes: Uint8Array,
+  ): void {
+    this.bitmapPaths.set(layerKey, new TextDecoder().decode(bytes));
   }
 
   setWorkingVisibility(_pageKey: string, layerId: string, visible: boolean): void {
@@ -191,6 +197,45 @@ describe("editorHistory", () => {
     expect(stack.commands).toHaveLength(0);
   });
 
+  it("undoes and redoes bbox plus rotation as one batch command", () => {
+    const draft = new Draft();
+    const stack = createHistoryStack(pageKey, "base-a");
+    const command: EditorCommand = {
+      ...meta("cmd1"),
+      type: "batch",
+      label: "Transformar texto",
+      commands: [
+        {
+          ...meta("cmd2"),
+          type: "edit-bbox",
+          layerId: "a",
+          before: [0, 0, 100, 100],
+          after: [10, 20, 140, 160],
+        },
+        {
+          ...meta("cmd3"),
+          type: "edit-estilo",
+          layerId: "a",
+          before: { rotacao: 0 },
+          after: { rotacao: 15 },
+          touchedKeys: ["rotacao"],
+        },
+      ],
+    };
+
+    expect(executeCommand(command, draft, stack)).toEqual({ ok: true });
+    expect(draft.getLayer(pageKey, "a")?.bbox).toEqual([10, 20, 140, 160]);
+    expect(draft.getLayer(pageKey, "a")?.estilo.rotacao).toBe(15);
+
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.getLayer(pageKey, "a")?.bbox).toEqual([0, 0, 100, 100]);
+    expect(draft.getLayer(pageKey, "a")?.estilo.rotacao).toBe(0);
+
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.getLayer(pageKey, "a")?.bbox).toEqual([10, 20, 140, 160]);
+    expect(draft.getLayer(pageKey, "a")?.estilo.rotacao).toBe(15);
+  });
+
   it("discards redo commands and disposes their bitmap cache after a new command", () => {
     disposeAll();
     const draft = new Draft();
@@ -203,9 +248,13 @@ describe("editorHistory", () => {
       byteLength: 2,
     });
 
-    expect(executeCommand({ ...meta("bitmap1"), type: "bitmap-stroke", bbox: [0, 0, 1, 1] }, draft, stack)).toEqual({
-      ok: true,
-    });
+    expect(
+      executeCommand(
+        { ...meta("bitmap1"), type: "bitmap-stroke", layerKey: "brush", bbox: [0, 0, 1, 1] },
+        draft,
+        stack,
+      ),
+    ).toEqual({ ok: true });
     expect(undo(stack, draft)).toEqual({ ok: true });
 
     expect(
@@ -218,6 +267,32 @@ describe("editorHistory", () => {
 
     expect(bitmapCache.has("bitmap1")).toBe(false);
     expect(stack.commands.map((cmd) => cmd.commandId)).toEqual(["cmd2"]);
+  });
+
+  it("undoes and redoes bitmap-stroke snapshots", () => {
+    disposeAll();
+    const draft = new Draft();
+    const stack = createHistoryStack(pageKey, "base-a");
+    bitmapCache.set("bitmap1", {
+      pageKey,
+      commandId: "bitmap1",
+      before: new TextEncoder().encode("before-data-url"),
+      after: new TextEncoder().encode("after-data-url"),
+      byteLength: 29,
+    });
+    const command = {
+      ...meta("bitmap1"),
+      type: "bitmap-stroke" as const,
+      layerKey: "inpaint" as const,
+      bbox: [0, 0, 4, 4] as Bbox,
+    };
+
+    expect(executeCommand(command, draft, stack)).toEqual({ ok: true });
+    expect(draft.bitmapPaths.get("inpaint")).toBe("after-data-url");
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.bitmapPaths.get("inpaint")).toBe("before-data-url");
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.bitmapPaths.get("inpaint")).toBe("after-data-url");
   });
 
   it("prunes oldest commands when a stack exceeds 200 commands", () => {

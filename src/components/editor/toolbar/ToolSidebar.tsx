@@ -18,6 +18,8 @@ import {
   Hand,
   PenTool,
   Brush,
+  RotateCcw,
+  Sparkles,
   Eraser,
   Scissors,
 } from "lucide-react";
@@ -33,6 +35,8 @@ const TOOLS: {
   { key: "select", label: "V", icon: MousePointer2, hotkey: "V", title: "Selecionar (V)" },
   { key: "block", label: "T", icon: PenTool, hotkey: "T", title: "Novo bloco de texto (T)" },
   { key: "brush", label: "B", icon: Brush, hotkey: "B", title: "Brush (B)" },
+  { key: "repairBrush", label: "R", icon: RotateCcw, hotkey: "R", title: "Pincel de recuperação (R)" },
+  { key: "reinpaintBrush", label: "I", icon: Sparkles, hotkey: "I", title: "Pincel de reinpaint (I)" },
   { key: "eraser", label: "E", icon: Eraser, hotkey: "E", title: "Borracha (E)" },
   { key: "mask", label: "L", icon: Scissors, hotkey: "L", title: "Máscara Lasso (L)" },
 ];

@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from context.internet_context.models import ContextCandidate, InternetContextRequest, SourceResult
 from context.internet_context.resolver import InternetContextResolver
+from glossary.builder import build_glossary_entries, merge_internet_context_into_context
 
 
 class FakeSource:
@@ -75,3 +76,17 @@ def test_reviewed_glossary_is_not_overwritten(tmp_path):
     candidate = next(item for item in result.glossary_candidates if item.source == "mana technique")
     assert candidate.target == "Arte de mana"
     assert candidate.status == "reviewed"
+
+
+def test_internet_context_merges_into_work_glossary_context(tmp_path):
+    resolver = InternetContextResolver(cache_dir=tmp_path, sources=[FakeSource()])
+    result = resolver.resolve(InternetContextRequest(title="The Regressed Mercenary Has a Plan"))
+
+    context = merge_internet_context_into_context({}, result, {"mana technique": "Arte de mana"})
+    entries = build_glossary_entries(context, {})
+
+    assert context["sinopse"] == "A mercenary returns with memories and a plan."
+    assert "Ghislain Perdium" in context["personagens"]
+    assert context["memoria_lexical"]["mana technique"] == "Arte de mana"
+    assert any(entry["source"] == "Ghislain Perdium" and entry["locked"] for entry in entries)
+    assert any(entry["source"] == "mana technique" and entry["target"] == "Arte de mana" for entry in entries)

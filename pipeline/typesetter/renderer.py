@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import unicodedata
+from functools import lru_cache
 from itertools import product
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,7 @@ if matplotlib.get_backend().lower() != "agg":
     matplotlib.use("agg")
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,67 @@ DEFAULT_FONTS = {
     "sfx":       "ComicNeue-Bold.ttf",
     "pensamento": "ComicNeue-Bold.ttf",
 }
+CANONICAL_FONT_FILE = "ComicNeue-Bold.ttf"
+
+
+def _canonical_render_style(estilo: dict | None) -> dict:
+    style = dict(estilo or {})
+    style.setdefault("fonte", CANONICAL_FONT_FILE)
+    style.setdefault("bold", True)
+    style.setdefault("italico", False)
+    style.setdefault("cor", "#000000")
+    style.setdefault("cor_gradiente", [])
+    style.setdefault("contorno", "")
+    if not style.get("contorno") and int(style.get("contorno_px", 0) or 0) > 0:
+        style["contorno"] = "#000000"
+    if not style.get("contorno"):
+        style["contorno_px"] = 0
+    else:
+        style.setdefault("contorno_px", 0)
+    style.setdefault("sombra", False)
+    style.setdefault("sombra_cor", "")
+    style.setdefault("sombra_offset", [0, 0])
+    style.setdefault("glow", False)
+    style.setdefault("glow_cor", "")
+    style.setdefault("glow_px", 0)
+    style.setdefault("rotacao", 0)
+    return style
+
+
+def _normalize_rotation_deg(value) -> float:
+    try:
+        numeric = float(value or 0)
+    except Exception:
+        return 0.0
+    normalized = numeric % 360.0
+    if normalized > 180.0:
+        normalized -= 360.0
+    if normalized <= -180.0:
+        normalized += 360.0
+    if abs(normalized) < 0.01:
+        return 0.0
+    return round(normalized, 2)
+
+
+def _should_apply_auto_style_policy(text_data: dict) -> bool:
+    return text_data.get("style_origin") in {None, "auto", "legacy_auto"}
+
+
+def _auto_style_sample_bbox(text_data: dict) -> list[int]:
+    for key in ("safe_text_box", "balloon_bbox", "layout_bbox", "bbox"):
+        value = text_data.get(key)
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            return [int(value[0]), int(value[1]), int(value[2]), int(value[3])]
+    return [0, 0, 32, 32]
+
+
+def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
+    if not _should_apply_auto_style_policy(text_data):
+        return
+    image_rgb = np.array(img.convert("RGB"))
+    background_rgb = sample_text_background_rgb(image_rgb, _auto_style_sample_bbox(text_data))
+    text_data["estilo"] = normalize_auto_typesetting_style(text_data.get("estilo", {}), background_rgb)
+    text_data["style"] = text_data["estilo"]
 
 SAFE_PATH_FORCE_KEYWORDS = (
     "newrotic",
@@ -114,6 +177,7 @@ _FALLBACK_FONTS = [
 ]
 
 
+@lru_cache(maxsize=8192)
 def _font_has_glyph(font_path: str, char: str) -> bool:
     """Verifica se a fonte tem o glyph para um caractere."""
     try:
@@ -124,6 +188,7 @@ def _font_has_glyph(font_path: str, char: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=2048)
 def _find_fallback_font_path(char: str, original_path: str) -> str | None:
     """Encontra uma fonte fallback que tenha o glyph para o caractere."""
     for font_dir in FONT_DIRS:
@@ -437,6 +502,46 @@ def _recenter_safe_text_positions(
         elif shifted_right > x2:
             dx -= int(shifted_right - x2)
 
+    return [(lx + dx, ly + dy) for lx, ly in corrected]
+
+
+def _clamp_safe_text_positions_to_bbox(
+    font: SafeTextPathFont,
+    lines: list[str],
+    positions: list[tuple[int, int]],
+    bounds: list[int] | None,
+) -> list[tuple[int, int]]:
+    corrected = list(positions)
+    if not corrected or not bounds or len(bounds) != 4:
+        return corrected
+
+    measured_bbox = _measure_safe_text_block_bbox(font, lines, corrected)
+    if not measured_bbox:
+        return corrected
+
+    glyph_left, glyph_top, glyph_right, glyph_bottom = measured_bbox
+    x1, y1, x2, y2 = [int(v) for v in bounds]
+    bounds_width = max(1, x2 - x1)
+    bounds_height = max(1, y2 - y1)
+    glyph_width = max(1, glyph_right - glyph_left)
+    glyph_height = max(1, glyph_bottom - glyph_top)
+    dx = 0
+    dy = 0
+
+    if glyph_width <= bounds_width:
+        if glyph_left < x1:
+            dx += x1 - glyph_left
+        if glyph_right + dx > x2:
+            dx -= (glyph_right + dx) - x2
+
+    if glyph_height <= bounds_height:
+        if glyph_top < y1:
+            dy += y1 - glyph_top
+        if glyph_bottom + dy > y2:
+            dy -= (glyph_bottom + dy) - y2
+
+    if dx == 0 and dy == 0:
+        return corrected
     return [(lx + dx, ly + dy) for lx, ly in corrected]
 
 
@@ -917,7 +1022,12 @@ def _infer_connected_orientation_from_subregions(
     explicit_orientation: str = "",
 ) -> str:
     if explicit_orientation:
-        return explicit_orientation
+        normalized = str(explicit_orientation).strip().lower().replace("_", "-")
+        if normalized in {"horizontal", "left-right", "leftright"}:
+            return "left-right"
+        if normalized in {"vertical", "top-bottom", "topbottom"}:
+            return "top-bottom"
+        return normalized
     if len(subregions) < 2:
         return ""
 
@@ -1157,9 +1267,10 @@ def _resolve_connected_position_bbox(
                 y2 - bottom_focus,
             ]
         else:
+            right_top_focus = max(top_focus, int(height * 0.26))
             pos = [
                 x1 + seam_margin,
-                y1 + top_focus,
+                y1 + right_top_focus,
                 x2 - pad_x,
                 y2 - max(4, pad_y // 2),
             ]
@@ -1340,6 +1451,71 @@ def _build_connected_group_block_from_fragment_groups(
     return parent
 
 
+def _build_mixed_connected_group_block(
+    group_texts: list[dict],
+    ordered_subregions: list[list[int]],
+    balloon_bbox: list[int],
+    orientation: str,
+) -> dict | None:
+    if len(ordered_subregions) < 2:
+        return None
+
+    grouped_texts: list[list[dict]] = [[] for _ in ordered_subregions]
+    area_weights = _resolve_connected_area_weights({"balloon_subregions": ordered_subregions}, ordered_subregions)
+
+    for text in sorted(
+        group_texts,
+        key=lambda t: (
+            int(t.get("reading_order") if t.get("reading_order") is not None else 9999),
+            0 if str(t.get("tipo", "") or "").strip().lower() == "narracao" else 1,
+            t.get("bbox", [0, 0, 0, 0])[1],
+            t.get("bbox", [0, 0, 0, 0])[0],
+        ),
+    ):
+        translated = str(text.get("translated", "") or "").strip()
+        if not translated:
+            continue
+
+        text_bbox = text.get("bbox", [0, 0, 0, 0])
+        overlap_scores: list[tuple[float, int]] = []
+        if isinstance(text_bbox, (list, tuple)) and len(text_bbox) == 4:
+            tx1, ty1, tx2, ty2 = [int(v) for v in text_bbox]
+            text_area = max(1, (tx2 - tx1) * (ty2 - ty1))
+            for idx, (sx1, sy1, sx2, sy2) in enumerate(ordered_subregions):
+                ix1 = max(tx1, sx1)
+                iy1 = max(ty1, sy1)
+                ix2 = min(tx2, sx2)
+                iy2 = min(ty2, sy2)
+                overlap = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                overlap_scores.append((overlap / float(text_area), idx))
+        overlap_scores.sort(reverse=True)
+        if overlap_scores:
+            best_ratio, best_idx = overlap_scores[0]
+            second_ratio = overlap_scores[1][0] if len(overlap_scores) > 1 else 0.0
+            if best_ratio >= 0.55 and second_ratio < 0.25:
+                grouped_texts[best_idx].append(text)
+                continue
+
+        candidates = _enumerate_connected_text_candidates(translated, len(ordered_subregions), area_weights)
+        chunks = candidates[0].get("chunks", []) if candidates else []
+        if len(chunks) != len(ordered_subregions):
+            return None
+        for idx, chunk in enumerate(chunks):
+            split_text = dict(text)
+            split_text["translated"] = chunk
+            split_text["source_text_count"] = 1
+            grouped_texts[idx].append(split_text)
+
+    if any(not group for group in grouped_texts):
+        return None
+    return _build_connected_group_block_from_fragment_groups(
+        grouped_texts,
+        ordered_subregions,
+        balloon_bbox,
+        orientation,
+    )
+
+
 def _pick_subregion_for_text(text_bbox: list[int], subregions: list[list[int]]) -> list[int] | None:
     if not isinstance(text_bbox, (list, tuple)) or len(text_bbox) != 4:
         return None
@@ -1487,7 +1663,8 @@ def _group_texts_by_subregions(
 
 def _has_confident_connected_subregions(text: dict) -> bool:
     normalized_subregions = _normalize_balloon_subregions(text.get("balloon_subregions", []))
-    if len(normalized_subregions) >= 2 and int(text.get("layout_group_size", 1) or 1) <= len(normalized_subregions):
+    layout_group_size = int(text.get("layout_group_size", 1) or 1)
+    if len(normalized_subregions) >= 2 and 1 < layout_group_size <= len(normalized_subregions):
         return True
     return any(
         float(text.get(key, 0.0) or 0.0) >= 0.5
@@ -1508,6 +1685,15 @@ def _clear_connected_balloon_metadata(text: dict) -> dict:
         sanitized["layout_profile"] = "standard"
     sanitized.pop("connected_children", None)
     sanitized.pop("connected_balloon_orientation", None)
+    sanitized.pop("connected_text_groups", None)
+    sanitized.pop("connected_position_bboxes", None)
+    sanitized.pop("connected_focus_bboxes", None)
+    sanitized.pop("connected_lobe_bboxes", None)
+    sanitized.pop("connected_lobe_polygons", None)
+    sanitized["connected_detection_confidence"] = 0.0
+    sanitized["connected_group_confidence"] = 0.0
+    sanitized["connected_position_confidence"] = 0.0
+    sanitized["subregion_confidence"] = 0.0
     return sanitized
 
 
@@ -1524,6 +1710,7 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
 
     words = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'’-]*", translated)
     word_count = len(words)
+    layout_group_size = int(text.get("layout_group_size", 1) or 1)
     has_explicit_connected_signal = bool(text.get("connected_text_groups")) or bool(text.get("connected_position_bboxes")) or any(
         float(text.get(key, 0.0) or 0.0) > 0.0
         for key in (
@@ -1534,7 +1721,7 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
         )
     )
     if not has_explicit_connected_signal:
-        if str(text.get("layout_profile", "") or "") == "connected_balloon" and word_count <= 2:
+        if str(text.get("layout_profile", "") or "") == "connected_balloon" and layout_group_size <= 1:
             return True
         return False
 
@@ -1548,6 +1735,13 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
         for bbox in (text.get("connected_text_groups") or text.get("connected_position_bboxes") or [])
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
+
+    if (
+        layout_group_size <= 1
+        and "connected_group_confidence" in text
+        and confidence <= 0.28
+    ):
+        return True
 
     if orientation == "left-right" and word_count <= 3 and confidence < 0.45:
         return True
@@ -1757,6 +1951,27 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
 
     # Fase 1: Pré-agrupar textos multi-texto que compartilham subregions
     multi_sub_groups: dict[tuple[str, tuple], list[dict]] = {}
+    connected_targets: list[tuple[tuple[int, int, int, int], list[list[int]], str]] = []
+    for candidate in texts:
+        candidate_balloon = candidate.get("balloon_bbox")
+        candidate_subregions = (
+            _normalize_balloon_subregions(candidate.get("balloon_subregions", []))
+            if _has_confident_connected_subregions(candidate)
+            else []
+        )
+        if (
+            len(candidate_subregions) >= 2
+            and isinstance(candidate_balloon, (list, tuple))
+            and len(candidate_balloon) == 4
+            and int(candidate.get("layout_group_size", 1) or 1) > 1
+        ):
+            connected_targets.append(
+                (
+                    tuple(int(v) for v in candidate_balloon),
+                    candidate_subregions,
+                    str(candidate.get("connected_balloon_orientation", "") or ""),
+                )
+            )
     for text in texts:
         if _should_reject_connected_false_positive(
             text,
@@ -1770,8 +1985,36 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             if _has_confident_connected_subregions(text)
             else []
         )
+        if not subregions and balloon_bbox and connected_targets:
+            anchor = text.get("balloon_bbox") or text.get("bbox") or []
+            for target_bbox, target_subregions, target_orientation in connected_targets:
+                if (
+                    isinstance(anchor, (list, tuple))
+                    and len(anchor) == 4
+                    and _bbox_containment_ratio(anchor, target_bbox) >= 0.72
+                ):
+                    source_text_id = id(text)
+                    text = dict(text)
+                    text["_source_text_id"] = source_text_id
+                    text["balloon_bbox"] = list(target_bbox)
+                    text["balloon_subregions"] = [list(sub) for sub in target_subregions]
+                    text["connected_lobe_bboxes"] = [list(sub) for sub in target_subregions]
+                    text["connected_balloon_orientation"] = target_orientation
+                    text["layout_profile"] = "connected_balloon"
+                    text["layout_group_size"] = max(
+                        len(target_subregions),
+                        int(text.get("layout_group_size", 1) or 1),
+                    )
+                    balloon_bbox = text["balloon_bbox"]
+                    subregions = text["balloon_subregions"]
+                    break
         if len(subregions) >= 2 and balloon_bbox and int(text.get("layout_group_size", 1)) > 1:
-            key = (tipo, tuple(int(v) for v in balloon_bbox))
+            group_tipo = (
+                "__connected_mixed__"
+                if str(text.get("layout_profile", "") or "") == "connected_balloon"
+                else tipo
+            )
+            key = (group_tipo, tuple(int(v) for v in balloon_bbox))
             multi_sub_groups.setdefault(key, []).append(text)
 
     # Fase 2: Atribuir textos a subregions quando as contagens casam.
@@ -1796,9 +2039,30 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             )
             for text in group_texts:
                 assigned_ids.add(id(text))
+                source_text_id = text.get("_source_text_id")
+                if isinstance(source_text_id, int):
+                    assigned_ids.add(source_text_id)
         else:
+            mixed_connected_types = (
+                str(key[0]) == "__connected_mixed__"
+                and len({str(text.get("tipo", "") or "") for text in group_texts}) > 1
+            )
             grouped_by_lobe = _group_texts_by_subregions(group_texts, ordered_subregions)
-            if grouped_by_lobe:
+            mixed_block = (
+                _build_mixed_connected_group_block(
+                    group_texts,
+                    ordered_subregions,
+                    list(key[1]),
+                    _infer_connected_orientation_from_subregions(ordered_subregions, orientation),
+                )
+                if mixed_connected_types
+                else None
+            )
+            if mixed_block is not None:
+                passthrough.append(mixed_block)
+            elif grouped_by_lobe and mixed_connected_types:
+                grouped_by_lobe = []
+            elif grouped_by_lobe:
                 passthrough.append(
                     _build_connected_group_block_from_fragment_groups(
                         grouped_by_lobe,
@@ -1832,6 +2096,9 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
                 passthrough.append(merged)
             for text in group_texts:
                 assigned_ids.add(id(text))
+                source_text_id = text.get("_source_text_id")
+                if isinstance(source_text_id, int):
+                    assigned_ids.add(source_text_id)
 
     # Fase 3: Processar textos restantes normalmente
     for text in texts:
@@ -1913,7 +2180,7 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
         combined = dict(ordered[0])
         combined.pop("_resolved_subregion", None)
         combined["balloon_bbox"] = list(bbox_tuple)
-        combined["translated"] = " ".join(
+        combined["translated"] = "\n".join(
             " ".join(text.get("translated", "").split()).strip()
             for text in ordered
             if str(text.get("translated", "")).strip()
@@ -1942,9 +2209,12 @@ def merge_group_style(group: list[dict]) -> dict:
     largest = max(styles, key=lambda style: int(style.get("tamanho", 0)))
     merged = dict(styles[0]) if styles else {}
     merged["tamanho"] = largest.get("tamanho", merged.get("tamanho", 16))
-    merged["contorno"] = best_outlined.get("contorno", merged.get("contorno", "#000000"))
-    merged["contorno_px"] = best_outlined.get("contorno_px", merged.get("contorno_px", 2))
-    merged["cor"] = best_outlined.get("cor", merged.get("cor", "#FFFFFF"))
+    merged["contorno"] = best_outlined.get("contorno", merged.get("contorno", ""))
+    merged["contorno_px"] = best_outlined.get("contorno_px", merged.get("contorno_px", 0))
+    if not merged.get("contorno") and int(merged.get("contorno_px", 0) or 0) <= 0:
+        merged["contorno"] = "#000000"
+        merged["contorno_px"] = 2
+    merged["cor"] = best_outlined.get("cor", merged.get("cor", "#000000"))
     merged["alinhamento"] = merged.get("alinhamento", "center")
     # Gradient: take the first style that has one
     merged["cor_gradiente"] = next(
@@ -1960,7 +2230,7 @@ def merge_group_style(group: list[dict]) -> dict:
     merged["sombra_offset"] = next(
         (s.get("sombra_offset", [0, 0]) for s in styles if s.get("sombra")), [0, 0]
     )
-    return merged
+    return _canonical_render_style(merged)
 
 
 def _detect_balloon_geometry(text_data: dict) -> str:
@@ -1971,7 +2241,7 @@ def _detect_balloon_geometry(text_data: dict) -> str:
     if tipo in ("narracao", "sfx"):
         return "rect"
     # Balões texturizados usam Newrotic → retangular
-    estilo = text_data.get("estilo", {})
+    estilo = _canonical_render_style(text_data.get("estilo", {}))
     fonte = estilo.get("fonte", "")
     if fonte and fonte != "ComicNeue-Bold.ttf":
         return "rect"
@@ -1981,7 +2251,7 @@ def _detect_balloon_geometry(text_data: dict) -> str:
 def _category_font_bounds(text_data: dict) -> tuple[int, int]:
     tipo = str(text_data.get("tipo", "fala") or "fala").strip().lower()
     balloon_type = str(text_data.get("balloon_type", "") or "").strip().lower()
-    font_name = str((text_data.get("estilo") or {}).get("fonte", "") or "").lower()
+    font_name = str(_canonical_render_style(text_data.get("estilo", {})).get("fonte", "") or "").lower()
 
     if tipo == "sfx":
         return (24, 96)
@@ -2007,6 +2277,73 @@ def _resolve_english_anchor_bbox(text_data: dict) -> list[int] | None:
     if source_bbox and len(source_bbox) == 4:
         return source_bbox
     return None
+
+
+def _layout_bbox(value) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _bbox_intersection(a: list[int], b: list[int]) -> list[int] | None:
+    x1 = max(int(a[0]), int(b[0]))
+    y1 = max(int(a[1]), int(b[1]))
+    x2 = min(int(a[2]), int(b[2]))
+    y2 = min(int(a[3]), int(b[3]))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _page_dimensions_for_layout(text_data: dict, target_bbox: list[int]) -> tuple[int, int]:
+    profile = text_data.get("page_profile") or {}
+    if not isinstance(profile, dict):
+        profile = {}
+    page_width = profile.get("width") or text_data.get("page_width")
+    page_height = profile.get("height") or text_data.get("page_height")
+    try:
+        page_width = int(page_width)
+    except Exception:
+        page_width = 0
+    try:
+        page_height = int(page_height)
+    except Exception:
+        page_height = 0
+    page_width = max(page_width, int(target_bbox[2]) + 16)
+    page_height = max(page_height, int(target_bbox[3]) + 16)
+    return page_width, page_height
+
+
+def _resolve_balloon_safe_area(text_data: dict, target_bbox: list[int]) -> dict | None:
+    if not text_data.get("balloon_polygon") and not text_data.get("connected_lobe_bboxes"):
+        return None
+    try:
+        from layout.safe_area import build_safe_area
+    except Exception:
+        return None
+
+    page_width, page_height = _page_dimensions_for_layout(text_data, target_bbox)
+    try:
+        safe = build_safe_area(
+            balloon_bbox=target_bbox,
+            page_width=page_width,
+            page_height=page_height,
+            balloon_polygon=text_data.get("balloon_polygon"),
+            connected_lobe_bboxes=None if text_data.get("_is_lobe_subregion") else text_data.get("connected_lobe_bboxes"),
+            balloon_type=str(text_data.get("balloon_type") or "white"),
+        )
+    except Exception:
+        return None
+    safe_bbox = _layout_bbox(safe.get("safe_bbox") if isinstance(safe, dict) else None)
+    if safe_bbox is None:
+        return None
+    return {**safe, "safe_bbox": safe_bbox}
 
 
 def _should_limit_capacity_to_anchor(
@@ -2036,7 +2373,30 @@ def _should_limit_capacity_to_anchor(
     height_ratio = anchor_h / float(target_h)
 
     translated = re.sub(r"\s+", "", str(text_data.get("translated", "") or text_data.get("text", "") or ""))
+    edge_clipped_white = (
+        balloon_type == "white"
+        and tx1 <= 2
+        and ax1 <= tx1 + 24
+        and target_w >= anchor_w * 2.0
+        and target_h >= anchor_h * 1.15
+    )
+    if edge_clipped_white:
+        return False
+    if (
+        balloon_type == "white"
+        and text_data.get("balloon_polygon")
+        and target_w >= anchor_w * 1.45
+        and target_h >= anchor_h * 1.10
+    ):
+        return False
     if len(translated) <= 18:
+        return True
+    if (
+        balloon_type == "white"
+        and target_w >= anchor_w * 2.0
+        and height_ratio >= 0.45
+        and anchor_w >= 96
+    ):
         return True
     # Para fala/pensamento brancos: só bloquear quando a âncora realmente cobre
     # a maior parte do balão — âncoras pequenas no canto superior-esquerdo
@@ -2105,8 +2465,31 @@ def _looks_like_connected_balloon_pair(texts, target_bbox=None) -> bool:
     return diagonal_split or horizontal_split or vertical_split or asymmetric_pair
 
 
+def _center_span_within_bounds(center: float, span: int, lower: int, upper: int) -> tuple[int, int]:
+    bounds_width = max(1, int(upper) - int(lower))
+    width = min(max(1, int(span)), bounds_width)
+    left = int(round(float(center) - (width / 2.0)))
+    right = left + width
+
+    if left < lower:
+        right += int(lower) - left
+        left = int(lower)
+    if right > upper:
+        left -= right - int(upper)
+        right = int(upper)
+
+    left = max(int(lower), left)
+    right = min(int(upper), right)
+    if right <= left:
+        return int(lower), int(upper)
+    return int(left), int(right)
+
+
 def plan_text_layout(text_data: dict) -> dict:
     target_bbox = text_data.get("balloon_bbox") or text_data.get("bbox") or [0, 0, 0, 0]
+    target_bbox = _layout_bbox(target_bbox) or [0, 0, 0, 0]
+    layout_safe_area = _resolve_balloon_safe_area(text_data, target_bbox)
+    layout_safe_bbox = layout_safe_area.get("safe_bbox") if layout_safe_area else None
     # Check for original text anchor to keep translated text precisely where it was.
     anchor_bbox = _resolve_english_anchor_bbox(text_data)
 
@@ -2116,6 +2499,8 @@ def plan_text_layout(text_data: dict) -> dict:
         position_bbox = anchor_bbox
     else:
         position_bbox = _resolve_connected_position_bbox(text_data, target_bbox, lobe_polygon=_lobe_poly)
+        if layout_safe_bbox and not text_data.get("_is_lobe_subregion"):
+            position_bbox = _bbox_intersection(position_bbox, layout_safe_bbox) or layout_safe_bbox
     capacity_bbox = position_bbox
     if text_data.get("_is_lobe_subregion"):
         capacity_bbox = _resolve_connected_position_bbox(
@@ -2124,8 +2509,11 @@ def plan_text_layout(text_data: dict) -> dict:
             prefer_explicit_focus=False,
             lobe_polygon=_lobe_poly,
         )
+    elif layout_safe_bbox and not anchor_capacity_locked:
+        capacity_bbox = _bbox_intersection(capacity_bbox, layout_safe_bbox) or layout_safe_bbox
 
     x1, y1, x2, y2 = target_bbox
+    bounds_x1, bounds_y1, bounds_x2, bounds_y2 = layout_safe_bbox or target_bbox
     px1, py1, px2, py2 = [int(v) for v in position_bbox]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
@@ -2139,6 +2527,7 @@ def plan_text_layout(text_data: dict) -> dict:
     layout_shape = text_data.get("layout_shape", "square")
     layout_align = text_data.get("layout_align", "center")
     layout_profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "standard")
+    balloon_type = str(text_data.get("balloon_type", "") or "").strip().lower()
     group_size = max(1, int(text_data.get("layout_group_size", 1)))
     estilo = text_data.get("estilo", {})
     balloon_geo = _detect_balloon_geometry(text_data)
@@ -2224,7 +2613,8 @@ def plan_text_layout(text_data: dict) -> dict:
     )
 
     target_size = max(10, int(estilo.get("tamanho", 24)) + target_size_delta)
-    outline_px = max(int(estilo.get("contorno_px", 2)), outline_boost)
+    explicit_outline = bool(estilo.get("contorno")) or int(estilo.get("contorno_px", 0) or 0) > 0
+    outline_px = max(int(estilo.get("contorno_px", 0)), outline_boost) if explicit_outline else 0
 
     connected_orientation = str(text_data.get("connected_balloon_orientation", "") or "")
     raw_slot_index = text_data.get("_connected_slot_index", -1)
@@ -2233,7 +2623,7 @@ def plan_text_layout(text_data: dict) -> dict:
     vertical_bias_px = 0
     horizontal_bias_px = 0
     
-    if anchor_bbox and not text_data.get("_is_lobe_subregion"):
+    if anchor_bbox and not text_data.get("_is_lobe_subregion") and not (layout_safe_bbox and not anchor_capacity_locked):
         anchor_cx = (anchor_bbox[0] + anchor_bbox[2]) / 2.0
         anchor_cy = (anchor_bbox[1] + anchor_bbox[3]) / 2.0
         balloon_cx = (target_bbox[0] + target_bbox[2]) / 2.0
@@ -2245,6 +2635,8 @@ def plan_text_layout(text_data: dict) -> dict:
         max_h_bias = int(box_width * 0.25)
         vertical_bias_px = max(-max_v_bias, min(max_v_bias, vertical_bias_px))
         horizontal_bias_px = max(-max_h_bias, min(max_h_bias, horizontal_bias_px))
+        if balloon_type == "white" and x1 <= 2 and anchor_bbox[0] <= x1 + 24:
+            horizontal_bias_px = 0
 
     # Special logic for connected subregions
     raw_vertical_bias_ratio = text_data.get("_connected_vertical_bias_ratio")
@@ -2269,16 +2661,20 @@ def plan_text_layout(text_data: dict) -> dict:
     # safe_text_box: área explícita onde o texto será renderizado
     # Derivada da capacity_bbox com padding e width_ratio aplicados.
     # Usada para QA (detectar clipping) e debug visual.
-    cap_center_x = (cx1 + cx2) // 2
-    _stb_x1 = max(x1, cap_center_x - computed_max_width // 2)
-    _stb_x2 = min(x2, cap_center_x + computed_max_width // 2)
-    _stb_y1 = cy1 + padding_y
-    _stb_y2 = cy1 + padding_y + computed_max_height
+    cap_center_x = (cx1 + cx2) / 2.0
+    safe_center_x = cap_center_x
+    if not anchor_capacity_locked:
+        safe_center_x += float(horizontal_bias_px)
+    _stb_x1, _stb_x2 = _center_span_within_bounds(safe_center_x, computed_max_width, bounds_x1, bounds_x2)
+    _stb_y1 = max(bounds_y1, cy1 + padding_y)
+    _stb_y2 = min(bounds_y2, cy1 + padding_y + computed_max_height)
     safe_text_box = [_stb_x1, _stb_y1, _stb_x2, _stb_y2]
 
     return {
         "target_bbox": target_bbox,
         "position_bbox": position_bbox,
+        "layout_safe_bbox": layout_safe_bbox,
+        "layout_safe_reason": layout_safe_area.get("reason") if layout_safe_area else "",
         "safe_text_box": safe_text_box,
         "layout_shape": layout_shape,
         "balloon_geo": balloon_geo,
@@ -2291,9 +2687,9 @@ def plan_text_layout(text_data: dict) -> dict:
         "alignment": alignment,
         "font_name": estilo.get("fonte", DEFAULT_FONTS.get(tipo, "ComicNeue-Bold.ttf")),
         "target_size": target_size,
-        "text_color": estilo.get("cor", "#FFFFFF"),
+        "text_color": estilo.get("cor", "#000000"),
         "cor_gradiente": estilo.get("cor_gradiente", []),
-        "outline_color": estilo.get("contorno", "#000000"),
+        "outline_color": estilo.get("contorno", ""),
         "outline_px": outline_px,
         "glow": estilo.get("glow", False),
         "glow_cor": estilo.get("glow_cor", ""),
@@ -2301,6 +2697,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "sombra": estilo.get("sombra", False),
         "sombra_cor": estilo.get("sombra_cor", ""),
         "sombra_offset": estilo.get("sombra_offset", [0, 0]),
+        "rotation_deg": _normalize_rotation_deg(estilo.get("rotacao", text_data.get("rotation_deg", 0))),
         "line_spacing_ratio": line_spacing,
         "vertical_bias_px": vertical_bias_px,
         "horizontal_bias_px": horizontal_bias_px,
@@ -2671,7 +3068,7 @@ def _fits_in_box(text: str, font_name: str, size: int, max_width: int, max_heigh
     block_width = max(line_widths, default=0)
 
     # Margem de segurança de 4px para evitar redução agressiva por causa de acentos
-    return block_width <= max_width and total_height <= (max_height + 4)
+    return block_width <= max_width and total_height <= max_height
 
 
 def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
@@ -2762,7 +3159,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         # largest actually-fitting size rather than falling back to category_min.
         candidate_sizes = [max(category_min, best_fit)]
 
-    height_tolerance = 0 if plan.get("layout_profile") == "white_balloon" else 4
+    height_tolerance = 0
 
     for attempt_size in candidate_sizes:
         font = get_font(plan["font_name"], attempt_size)
@@ -2972,17 +3369,24 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
     bg_hex = "#{:02X}{:02X}{:02X}".format(*bg_rgb)
     bg_luma = _color_luminance(bg_hex)
 
-    text_color = adjusted.get("text_color", "#FFFFFF")
+    text_color = adjusted.get("text_color", "#000000")
     outline_color = adjusted.get("outline_color", "") or ""
     outline_px = int(adjusted.get("outline_px", 0) or 0)
     glow_color = adjusted.get("glow_cor", "") or ""
+    explicit_outline = outline_px > 0 or bool(outline_color)
 
     if bg_luma >= 180:
         if _contrast_gap(text_color, bg_hex) < 110:
             adjusted["text_color"] = "#111111"
-        if not outline_color or _contrast_gap(outline_color, bg_hex) < 55:
+            if not explicit_outline:
+                adjusted["outline_color"] = ""
+                adjusted["outline_px"] = 0
+        if explicit_outline and (not outline_color or _contrast_gap(outline_color, bg_hex) < 55):
             adjusted["outline_color"] = "#FFFFFF"
-        adjusted["outline_px"] = max(2, outline_px)
+            adjusted["outline_px"] = max(1, outline_px)
+        elif not explicit_outline and not adjusted.get("outline_color"):
+            adjusted["outline_color"] = ""
+            adjusted["outline_px"] = 0
         if adjusted.get("glow") and (not glow_color or _contrast_gap(glow_color, bg_hex) < 55):
             adjusted["glow"] = False
             adjusted["glow_px"] = 0
@@ -2990,15 +3394,27 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
     elif bg_luma <= 90:
         if _contrast_gap(text_color, bg_hex) < 110:
             adjusted["text_color"] = "#F5F5F5"
-        if not outline_color or _contrast_gap(outline_color, bg_hex) < 55:
+            if not explicit_outline:
+                adjusted["outline_color"] = "#000000"
+                adjusted["outline_px"] = max(2, outline_px)
+        if explicit_outline and (not outline_color or _contrast_gap(outline_color, bg_hex) < 55):
             adjusted["outline_color"] = "#000000"
-        adjusted["outline_px"] = max(2, outline_px)
+            adjusted["outline_px"] = max(1, outline_px)
+        elif not explicit_outline and not adjusted.get("outline_color"):
+            adjusted["outline_color"] = ""
+            adjusted["outline_px"] = 0
     else:
         if _contrast_gap(text_color, bg_hex) < 95:
             adjusted["text_color"] = "#111111" if bg_luma > 128 else "#F5F5F5"
-        if not outline_color or _contrast_gap(outline_color, bg_hex) < 45:
+            if not explicit_outline:
+                adjusted["outline_color"] = "#FFFFFF" if bg_luma > 128 else "#000000"
+                adjusted["outline_px"] = max(2, outline_px)
+        if explicit_outline and (not outline_color or _contrast_gap(outline_color, bg_hex) < 45):
             adjusted["outline_color"] = "#FFFFFF" if bg_luma < 128 else "#000000"
-        adjusted["outline_px"] = max(2, outline_px)
+            adjusted["outline_px"] = max(1, outline_px)
+        elif not explicit_outline and not adjusted.get("outline_color"):
+            adjusted["outline_color"] = ""
+            adjusted["outline_px"] = 0
 
     gradient = adjusted.get("cor_gradiente", []) or []
     if len(gradient) >= 2:
@@ -3047,6 +3463,12 @@ def _resolve_connected_target_sizes(children: list[dict], plans: list[dict]) -> 
             if line_count <= ideal_max_lines and width_ratio <= 0.90:
                 cap = int(size)
                 break
+        if (
+            child.get("_is_lobe_subregion")
+            and int(child.get("source_text_count", 1) or 1) > 1
+            and word_count >= 9
+        ):
+            cap = min(cap, max(common_floor, int(raw_size) - 8))
         preferred_caps.append(cap)
 
     def _score_child(child: dict, plan: dict, resolved: dict, raw_size: int) -> float:
@@ -3177,6 +3599,20 @@ def _score_connected_group_candidate(
     line_counts = [len(item.get("lines", [])) for item in resolved_items]
     if len(line_counts) >= 2:
         score -= abs(line_counts[0] - line_counts[1]) * 0.9
+
+    safe_boxes = [
+        plan.get("safe_text_box")
+        for plan in plans
+        if isinstance(plan.get("safe_text_box"), (list, tuple)) and len(plan.get("safe_text_box")) == 4
+    ]
+    for previous_box, current_box in zip(safe_boxes, safe_boxes[1:]):
+        ax1, ay1, ax2, ay2 = [int(v) for v in previous_box]
+        bx1, by1, bx2, by2 = [int(v) for v in current_box]
+        overlap_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+        overlap_h = max(0, min(ay2, by2) - max(ay1, by1))
+        overlap_area = overlap_w * overlap_h
+        if overlap_area > 0:
+            score -= min(24.0, overlap_area / 160.0)
 
     for item, child, plan in zip(resolved_items, children, plans):
         lines = item.get("lines", [])
@@ -3356,7 +3792,8 @@ def _render_connected_subregions(
         if len(children) != len(subregions):
             continue
         for child in children:
-            estilo = child.get("estilo", {})
+            _apply_auto_style_policy_if_needed(img, child)
+            estilo = _canonical_render_style(child.get("estilo", {}))
             if estilo.get("force_upper"):
                 child["translated"] = child.get("translated", "").upper()
 
@@ -3369,7 +3806,6 @@ def _render_connected_subregions(
             fixed_plan["target_size"] = max(8, int(target_size))
             fixed_plan["_font_search_cap"] = max(8, int(target_size))
             fixed_plan["_font_search_floor"] = max(8, int(target_size))
-            fixed_plan["outline_px"] = max(fixed_plan["outline_px"], 2 if target_size <= 22 else 3)
             resolved_items.append(_resolve_text_layout(child, fixed_plan))
             final_plans.append(fixed_plan)
 
@@ -3409,7 +3845,85 @@ def _render_connected_subregions(
         text_data["render_bbox"] = [int(total_min_rx), int(total_min_ry), int(total_max_rx), int(total_max_ry)]
 
 
+def _rotation_sentinel_rgb(plan: dict) -> tuple[int, int, int]:
+    used_colors = set()
+    for key in ("text_color", "outline_color", "glow_cor", "sombra_cor"):
+        value = plan.get(key)
+        if not value:
+            continue
+        try:
+            used_colors.add(tuple(int(v) for v in _parse_hex_color(str(value))[:3]))
+        except Exception:
+            continue
+    for value in plan.get("cor_gradiente") or []:
+        try:
+            used_colors.add(tuple(int(v) for v in _parse_hex_color(str(value))[:3]))
+        except Exception:
+            continue
+    for candidate in ((255, 0, 255), (0, 255, 0), (0, 255, 255), (255, 255, 0), (1, 2, 3)):
+        if candidate not in used_colors:
+            return candidate
+    return (253, 1, 251)
+
+
+def _alpha_bbox_to_list(bbox: tuple[int, int, int, int] | None, width: int, height: int) -> list[int] | None:
+    if not bbox:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
 def _render_single_text_block(
+    img: Image.Image, text_data: dict, plan: dict,
+) -> None:
+    rotation_deg = _normalize_rotation_deg(plan.get("rotation_deg", 0))
+    if rotation_deg == 0:
+        _render_single_text_block_unrotated(img, text_data, plan)
+        return
+
+    sentinel = _rotation_sentinel_rgb(plan)
+    scratch = Image.new("RGB", img.size, sentinel)
+    unrotated_plan = dict(plan)
+    unrotated_plan["rotation_deg"] = 0
+    _render_single_text_block_unrotated(scratch, text_data, unrotated_plan)
+
+    scratch_np = np.array(scratch)
+    alpha_mask = np.any(scratch_np != np.array(sentinel, dtype=np.uint8), axis=2).astype(np.uint8) * 255
+    if not np.any(alpha_mask):
+        return
+
+    ys, xs = np.where(alpha_mask > 0)
+    crop_box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    crop_rgb = scratch.crop(crop_box)
+    crop_alpha = Image.fromarray(alpha_mask[crop_box[1]:crop_box[3], crop_box[0]:crop_box[2]], mode="L")
+    crop_rgba = crop_rgb.convert("RGBA")
+    crop_rgba.putalpha(crop_alpha)
+
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    layer.paste(crop_rgba, crop_box[:2], crop_alpha)
+    x1, y1, x2, y2 = plan["target_bbox"]
+    center = ((float(x1) + float(x2)) / 2.0, (float(y1) + float(y2)) / 2.0)
+    resampling = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
+    rotated_layer = layer.rotate(-rotation_deg, resample=resampling, center=center, expand=False)
+
+    composed = img.convert("RGBA")
+    composed.alpha_composite(rotated_layer)
+    img.paste(composed.convert(img.mode))
+
+    render_bbox = _alpha_bbox_to_list(rotated_layer.getchannel("A").getbbox(), img.width, img.height)
+    if render_bbox:
+        text_data["render_bbox"] = render_bbox
+    text_data["rotation_deg"] = rotation_deg
+    _run_render_qa(text_data, plan)
+
+
+def _render_single_text_block_unrotated(
     img: Image.Image, text_data: dict, plan: dict,
 ) -> None:
     """Core rendering logic for a single text block (no subregion recursion)."""
@@ -3461,6 +3975,12 @@ def _render_single_text_block(
             vertical_bias_px=int(plan.get("vertical_bias_px", 0) or 0),
             horizontal_bias_px=int(plan.get("horizontal_bias_px", 0) or 0),
         )
+        positions = _clamp_safe_text_positions_to_bbox(
+            best_font,
+            best_lines,
+            positions,
+            plan.get("safe_text_box") or plan["target_bbox"],
+        )
 
         if plan["sombra"] and plan["sombra_cor"]:
             dx, dy = plan["sombra_offset"]
@@ -3492,19 +4012,11 @@ def _render_single_text_block(
                 outline_px=outline_px,
             )
 
-        # Atualizar render_bbox real para a UI
-        min_rx, min_ry, max_rx, max_ry = 99999, 99999, -99999, -99999
-        for line, (lx, ly) in zip(best_lines, positions):
-            mask = _build_textpath_mask(best_font, line, padding=0)
-            if mask.size > 1:
-                h_i, w_i = mask.shape
-                min_rx = min(min_rx, lx)
-                min_ry = min(min_ry, ly)
-                max_rx = max(max_rx, lx + w_i)
-                max_ry = max(max_ry, ly + h_i)
-        
-        if max_rx > min_rx:
-            text_data["render_bbox"] = [int(min_rx), int(min_ry), int(max_rx), int(max_ry)]
+        # Atualizar render_bbox real para a UI/QA usando pixels de tinta,
+        # não a célula completa da linha FreeType.
+        ink_bbox = _measure_safe_text_block_bbox(best_font, best_lines, positions)
+        if ink_bbox:
+            text_data["render_bbox"] = [int(v) for v in ink_bbox]
         img.paste(Image.fromarray(image_np))
         # QA pós-render (SafeTextPathFont path)
         _run_render_qa(text_data, plan)
@@ -3551,10 +4063,10 @@ def _render_single_text_block(
 
 
 def _run_render_qa(text_data: dict, plan: dict) -> None:
-    """Verifica se o texto renderizado ultrapassa safe_text_box ou toca suas bordas.
+    """Verifica se o texto renderizado ultrapassa safe_text_box.
 
     Gera issues TEXT_CLIPPED ou TEXT_OVERFLOW em text_data["qa_flags"].
-    TEXT_CLIPPED  — ink_bbox toca ou cruza a borda da safe_text_box (texto cortado)
+    TEXT_CLIPPED  — ink_bbox cruza a borda da safe_text_box (texto cortado)
     TEXT_OVERFLOW — ink_bbox ultrapassa target_bbox (texto fora do balão)
     """
     render_bbox = text_data.get("render_bbox")
@@ -3567,15 +4079,14 @@ def _run_render_qa(text_data: dict, plan: dict) -> None:
 
     qa_flags: list = list(text_data.get("qa_flags") or [])
 
-    # TEXT_CLIPPED: ink_bbox toca a borda da safe_text_box (margem ≤ 1px)
+    # TEXT_CLIPPED: ink_bbox cruza a borda da safe_text_box.
     if safe and len(safe) == 4:
         sx1, sy1, sx2, sy2 = [int(v) for v in safe]
-        CLIP_MARGIN = 2  # px — menos que isso é clipping
         if (
-            rx1 <= sx1 + CLIP_MARGIN
-            or rx2 >= sx2 - CLIP_MARGIN
-            or ry1 <= sy1 + CLIP_MARGIN
-            or ry2 >= sy2 - CLIP_MARGIN
+            rx1 < sx1
+            or rx2 > sx2
+            or ry1 < sy1
+            or ry2 > sy2
         ):
             if "TEXT_CLIPPED" not in qa_flags:
                 qa_flags.append("TEXT_CLIPPED")
@@ -3723,6 +4234,8 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
         for bbox in text_data.get("balloon_subregions", []) or []
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
+    if len(subregions) >= 2 and _should_reject_connected_false_positive(text_data, subregions):
+        subregions = []
     should_render_connected = len(subregions) >= 2 and (
         int(text_data.get("layout_group_size", 1) or 1) > 1
         or str(text_data.get("layout_profile", "") or "") == "connected_balloon"
@@ -3732,10 +4245,12 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
     if should_render_connected:
         text_data = dict(text_data)
         text_data["translated"] = text
+        _apply_auto_style_policy_if_needed(img, text_data)
         _render_connected_subregions(img, text_data, text, subregions)
         return
 
-    estilo = text_data.get("estilo", {})
+    _apply_auto_style_policy_if_needed(img, text_data)
+    estilo = _canonical_render_style(text_data.get("estilo", {}))
     if estilo.get("force_upper"):
         text = text.upper()
         text_data = dict(text_data)

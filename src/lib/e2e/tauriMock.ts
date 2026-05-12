@@ -1,5 +1,5 @@
 import type { EditorPagePayload, ProjectJson } from "../tauri";
-import type { ImageLayerKey, PageData, Project, TextEntry } from "../stores/appStore";
+import { useAppStore, type ImageLayerKey, type PageData, type Project, type TextEntry } from "../stores/appStore";
 import { getE2EFixtureProject, setE2EFixtureProject } from "./fixtureProject";
 
 function clone<T>(value: T): T {
@@ -13,9 +13,26 @@ function updatePage(pageIndex: number, updater: (page: PageData) => PageData) {
   setE2EFixtureProject({ ...project, paginas });
 }
 
+let pipelineCompleteCallback: ((result: { success: boolean; output_path: string }) => void) | null = null;
+const pipelineOutputs = new Map<string, Project>();
+
 export const tauriMock = {
-  async loadProjectJson(): Promise<ProjectJson> {
-    return clone(getE2EFixtureProject()) as ProjectJson;
+  async openFiles(): Promise<string | null> {
+    return "e2e/source.zip";
+  },
+
+  async validateImport(): Promise<{
+    valid: boolean;
+    pages: number;
+    has_project_json: boolean;
+    error?: string;
+  }> {
+    return { valid: true, pages: getE2EFixtureProject().paginas.length, has_project_json: true };
+  },
+
+  async loadProjectJson(path?: string): Promise<ProjectJson> {
+    const project = path ? pipelineOutputs.get(path) : null;
+    return clone(project ?? getE2EFixtureProject()) as ProjectJson;
   },
 
   async saveProjectJson(config: { project_json: Project }): Promise<void> {
@@ -24,12 +41,15 @@ export const tauriMock = {
 
   async loadEditorPage(config: { page_index: number }): Promise<EditorPagePayload> {
     const project = getE2EFixtureProject();
+    const appProject = useAppStore.getState().project;
+    const page = project.paginas[config.page_index] ?? appProject?.paginas[config.page_index];
+    if (!page) throw new Error(`Pagina mock nao encontrada: ${config.page_index}`);
     return {
       project_file: "e2e/project-basic.json",
       project_dir: "e2e",
       page_index: config.page_index,
-      total_pages: project.paginas.length,
-      page: clone(project.paginas[config.page_index]),
+      total_pages: appProject?.paginas.length ?? project.paginas.length,
+      page: clone(page),
     };
   },
 
@@ -109,5 +129,49 @@ export const tauriMock = {
 
   async updateBrushRegion(): Promise<string> {
     return "/e2e-brush.png";
+  },
+
+  async updateRecoveryRegion(): Promise<string> {
+    return getE2EFixtureProject().paginas[0].image_layers?.inpaint?.path ?? "/e2e-recovery.png";
+  },
+
+  async updateReinpaintRegion(): Promise<string> {
+    return getE2EFixtureProject().paginas[0].image_layers?.inpaint?.path ?? "/e2e-reinpaint.png";
+  },
+
+  async startPipeline(config?: { source_path?: string; obra?: string; capitulo?: number }): Promise<{ job_id: string }> {
+    const capitulo = Number(config?.capitulo ?? getE2EFixtureProject().capitulo);
+    const outputPath = `e2e/project-cap-${capitulo}.json`;
+    const project = clone(getE2EFixtureProject());
+    const outputProject: Project = {
+      ...project,
+      id: `${project.id}-cap-${capitulo}`,
+      obra: config?.obra ?? project.obra,
+      capitulo,
+      source_path: config?.source_path ?? project.source_path,
+      output_path: outputPath,
+      status: "done",
+    };
+    pipelineOutputs.set(outputPath, outputProject);
+    window.setTimeout(() => {
+      pipelineCompleteCallback?.({
+        success: true,
+        output_path: outputPath,
+      });
+    }, 25);
+    return { job_id: "e2e-job" };
+  },
+
+  async onPipelineProgress(_callback?: unknown): Promise<() => void> {
+    return () => {};
+  },
+
+  async onPipelineComplete(callback?: unknown): Promise<() => void> {
+    if (typeof callback === "function") {
+      pipelineCompleteCallback = callback as (result: { success: boolean; output_path: string }) => void;
+    }
+    return () => {
+      pipelineCompleteCallback = null;
+    };
   },
 };

@@ -1,7 +1,6 @@
 """
 Traducao EN->PT-BR.
 Primario: Google Translate via deep-translator.
-Fallback: Ollama (traduzai-translator ou qualquer modelo disponivel).
 Agora com consciencia de tipo de texto, contexto local e memoria curta.
 """
 
@@ -59,6 +58,24 @@ OCR_DEDICATED_GOOGLE_CODES = {
     "zh-TW",
 }
 
+SOURCE_SCRIPT_PATTERN = re.compile(
+    r"[\u1100-\u11FF\u3000-\u303F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]"
+)
+KOREAN_LATIN_OCR_ARTIFACT_PATTERN = re.compile(
+    r"(?i)(?:\bTCH\b|[A-Za-zÀ-ÖØ-öø-ÿ]+TCH\b|\bTCH[A-Za-zÀ-ÖØ-öø-ÿ]+|\bULL\b|[A-Za-zÀ-ÖØ-öø-ÿ]+ULL\b|\bHFOR\b)"
+)
+TRANSLATION_FALLBACK_PHRASE_PATTERN = re.compile(
+    r"\b(?:texto\s+original|texto\s+fonte|original\s+text|source\s+text|"
+    r"nao\s+consigo\s+encontrar\s+o\s+texto\s+original|"
+    r"nao\s+foi\s+possivel\s+traduzir|texto\s+nao\s+encontrado|"
+    r"cannot\s+translate|can't\s+translate|i\s+cannot\s+translate)\b",
+    re.IGNORECASE,
+)
+LITERAL_OCR_TRANSLATION_PATTERN = re.compile(
+    r"\b(?:madreperola|madrep[eé]rola)\b",
+    re.IGNORECASE,
+)
+
 ADAPTATIONS: list[tuple[str, str, int]] = []
 
 PRE_TRANSLATION_GLOSSARY: list[tuple[str, str, int]] = [
@@ -96,19 +113,24 @@ _COMMON_EN_CAPS_WORDS = frozenset({
     "NONE",
     "HEY", "HI", "HELLO", "BYE", "GO", "STOP", "WAIT", "RUN", "LOOK", "SEE",
     "WHY", "HOW", "WHAT", "WHO", "WHERE", "WHEN", "WHICH", "DAMN", "GOD",
+    "ALREADY", "UNCONTROLLABLE",
     "WELL", "WHOA", "WOW", "UGH", "ARGH", "GAH", "TSK", "HUSH", "QUIET",
     "OFF", "ON", "OUT", "IN", "UP", "DOWN", "BACK", "FORTH", "AWAY",
     "ALL", "AGAIN", "OUR", "MY", "YOUR", "HIS", "HER", "ITS", "THE",
     "THIS", "THAT", "THESE", "THOSE", "AND", "BUT", "OR", "FOR", "WITH",
     "TODO", "AGAIN", "DONE", "SAFE", "TRUE", "FALSE", "REAL", "GOOD", "BAD",
+    "HOUSEHOLD", "CRUSHED", "DUST", "RETURNED", "LOST", "EVERYTHING",
     "PLEASE", "SORRY", "THANKS", "WAKE", "SLEEP", "EAT", "DRINK", "FIGHT",
     "ATTACK", "DEFEND", "RETREAT", "CHARGE", "FIRE", "WATER", "EARTH", "AIR",
     "LIGHT", "DARK", "LIFE", "DEATH", "LOVE", "HATE", "WAR", "PEACE",
     "ENEMY", "FRIEND", "HELP", "SAVE", "KILL", "DIE", "LIVE",
     "MAGIC", "SPELL", "POWER", "FORCE", "WILL", "MIND", "SOUL", "HEART",
     "MERCY", "JUSTICE", "HONOR", "GLORY", "SHAME", "PRIDE",
+    "DAY", "PEOPLE", "MOST",
+    "BECAUSE", "AMAZING", "REALLY",
     "MASTER", "LORD", "LADY", "SIR", "SIRE", "MILORD", "KING", "QUEEN",
     "PRINCE", "PRINCESS", "KNIGHT", "LIAR", "FOOL", "IDIOT",
+    "COMMANDER", "RAID", "SQUAD", "SOLDIER",
     # Sons curtos comuns
     "HMM", "HMPH", "HRRG", "HRGH", "HRRR", "GRR", "RAWR", "ROAR",
 })
@@ -231,6 +253,66 @@ def _fix_infinitive_to_imperative(translated: str, source: str, tipo: str) -> st
     elif token[0].isupper():
         replacement = replacement[0].upper() + replacement[1:]
     return replacement + suffix
+
+
+def _source_has_initial_stutter(source: str) -> bool:
+    match = re.match(r"^\s*([A-Za-z])\s*[-‐‑‒–—]\s*([A-Za-z])", source or "")
+    if not match:
+        return False
+    return match.group(1).lower() == match.group(2).lower()
+
+
+def _repair_translated_stutter_prefix(translated: str, source: str, tipo: str) -> str:
+    if tipo not in {"fala", "narracao"} or not _source_has_initial_stutter(source):
+        return translated
+    match = re.match(r"^(\s*)([A-Za-zÀ-ÖØ-öø-ÿ])(\s*[-‐‑‒–—]\s*)([A-Za-zÀ-ÖØ-öø-ÿ])", translated or "")
+    if not match:
+        return translated
+    leading, current, separator, next_letter = match.groups()
+    if current.lower() == next_letter.lower():
+        return translated
+    replacement = next_letter.upper() if current.isupper() or next_letter.isupper() else next_letter.lower()
+    return f"{leading}{replacement}{separator}{translated[match.end(4) - 1:]}"
+
+
+def _source_multiword_caps_name(source_text: str) -> str | None:
+    stripped = (source_text or "").strip()
+    if not stripped:
+        return None
+    match = re.fullmatch(r"([A-Za-z][A-Za-z' -]{2,80})([.!?;:]*)", stripped)
+    if not match:
+        return None
+    core, suffix = match.groups()
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", core)
+    if len(words) < 2 or len(words) > 4:
+        return None
+    if not all(_is_likely_proper_noun(word) for word in words):
+        return None
+    canonical = " ".join(word[:1].upper() + word[1:].lower() for word in words)
+    return canonical + suffix
+
+
+def _repair_translated_proper_name(
+    source_text: str,
+    translated_text: str,
+    tipo: str = "fala",
+) -> tuple[str, list[dict]]:
+    if tipo == "sfx":
+        return translated_text, []
+    canonical = _source_multiword_caps_name(source_text)
+    if not canonical:
+        return translated_text, []
+    if _normalize_entity_key(translated_text) == _normalize_entity_key(canonical):
+        return translated_text, []
+    fixed = canonical.upper() if translated_text.strip().isupper() else canonical
+    return fixed, [
+        {
+            "phase": "target",
+            "kind": "proper_name",
+            "from": translated_text,
+            "to": fixed,
+        }
+    ]
 
 
 def normalize_google_language_code(language_code: str) -> str:
@@ -425,6 +507,37 @@ def _pick_ollama_model(models: list[str], preferred: str) -> str:
     return models[0] if models else ""
 
 
+def _pick_ollama_model_for_language_pair(
+    models: list[str],
+    preferred: str,
+    source_lang: str,
+    target_lang: str,
+) -> str:
+    source_lang = normalize_google_language_code(source_lang)
+    target_lang = normalize_google_language_code(target_lang)
+
+    preferred_match = ""
+    preferred_text = (preferred or "").strip()
+    if preferred_text:
+        for model in models:
+            if preferred_text in model:
+                preferred_match = model
+                break
+    if preferred_match and not any(
+        default_name in preferred_text
+        for default_name in ("traduzai-translator", "mangatl-translator")
+    ):
+        return preferred_match
+
+    if source_lang == "ko" and target_lang == "pt":
+        for candidate in ("gemma4:e4b", "qwen2.5:3b"):
+            for model in models:
+                if candidate in model:
+                    return model
+
+    return preferred_match or _pick_ollama_model(models, preferred)
+
+
 def _call_ollama(model: str, system: str, user_msg: str, host: str) -> list[dict]:
     payload = json.dumps(
         {
@@ -459,7 +572,19 @@ def _call_ollama(model: str, system: str, user_msg: str, host: str) -> list[dict
             if isinstance(value, list):
                 parsed = value
                 break
-    return parsed if isinstance(parsed, list) else []
+    if not isinstance(parsed, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        translated = item.get("translated")
+        if not item_id or not isinstance(translated, str):
+            continue
+        normalized.append({"id": item_id, "translated": translated})
+    return normalized
 
 
 def _postprocess(
@@ -479,6 +604,7 @@ def _postprocess(
     # Conserta infinitivo -> imperativo quando o source \u00e9 claramente um comando curto.
     # Precisa rodar antes do upper() final para casar a tabela em min\u00fasculas.
     if source_text:
+        result = _repair_translated_stutter_prefix(result, source_text, tipo)
         result = _fix_infinitive_to_imperative(result, source_text, tipo)
 
     if tipo == "sfx":
@@ -593,6 +719,168 @@ def _normalize_memory_key(text: str, tipo: str) -> str:
 
 def _normalized_translation_key(text: str) -> str:
     return re.sub(r"[\W_]+", "", text.lower())
+
+
+def _merge_qa_flags(*flag_lists: list[str] | tuple[str, ...] | None) -> list[str]:
+    merged: list[str] = []
+    for flags in flag_lists:
+        for flag in flags or []:
+            if flag and flag not in merged:
+                merged.append(str(flag))
+    return merged
+
+
+def _build_protection_glossary_entries(context: dict, glossario: dict) -> list[dict]:
+    try:
+        from glossary.builder import build_glossary_entries
+    except Exception:
+        return []
+    try:
+        entries = build_glossary_entries(context or {}, glossario or {})
+    except Exception as exc:
+        logger.debug("Falha ao montar entradas de glossario para protecao: %s", exc)
+        return []
+    protected_types = {
+        "manual_glossary",
+        "context_glossary",
+        "memory",
+        "corpus_memory",
+        "term",
+        "faction",
+    }
+    return [entry for entry in entries if entry.get("type") in protected_types]
+
+
+def _protect_source_for_translation(text: str, tipo: str, context: dict, glossario: dict) -> dict:
+    if tipo == "sfx" or not text:
+        return {"protected_source": text, "terms": []}
+    entries = _build_protection_glossary_entries(context, glossario)
+    if not entries:
+        return {"protected_source": text, "terms": []}
+    try:
+        from translator.term_protection import protect_terms
+    except Exception:
+        return {"protected_source": text, "terms": []}
+    try:
+        protected = protect_terms(text, entries)
+    except Exception as exc:
+        logger.debug("Falha ao proteger termos da traducao: %s", exc)
+        return {"protected_source": text, "terms": []}
+    return protected if isinstance(protected, dict) else {"protected_source": text, "terms": []}
+
+
+def _restore_protected_translation(translated: str, terms: list[dict]) -> tuple[str, list[str], list[dict]]:
+    if not terms:
+        return translated, [], []
+    if not any(str(term.get("placeholder", "")) in str(translated or "") for term in terms):
+        return translated, [], []
+    try:
+        from translator.term_protection import restore_terms
+    except Exception:
+        return translated, [], []
+    restored = restore_terms(translated or "", terms)
+    flags = []
+    for flag in restored.get("flags", []) or []:
+        reason = str(flag.get("reason", ""))
+        if reason in {"placeholder_missing", "placeholder_leftover", "placeholder_corrupted"}:
+            flags.append("placeholder_lost")
+        elif reason == "forbidden_translation":
+            flags.append("forbidden_translation")
+        else:
+            flags.append(reason or "glossary_violation")
+    hits = [
+        {"phase": "placeholder", "source": term.get("source", ""), "target": term.get("target", "")}
+        for term in terms
+        if term.get("source") and term.get("target")
+    ]
+    return str(restored.get("text", translated)), _merge_qa_flags(flags), hits
+
+
+def _missing_protected_terms_after_lock(translated: str, terms: list[dict]) -> list[dict]:
+    if not terms:
+        return []
+    translated_key = _normalize_entity_key(translated)
+    missing = []
+    for term in terms:
+        target_key = _normalize_entity_key(str(term.get("target", "") or ""))
+        if target_key and target_key in translated_key:
+            continue
+        missing.append(term)
+    return missing
+
+
+def _fold_for_quality_match(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text or "")
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.lower()
+
+
+def _translation_quality_flags(source_text: str, translated_text: str, source_lang: str) -> list[str]:
+    flags: list[str] = []
+    normalized_source_lang = normalize_google_language_code(source_lang)
+    if normalized_source_lang in {"ja", "ko", "zh-CN", "zh-TW"}:
+        if SOURCE_SCRIPT_PATTERN.search(translated_text or ""):
+            flags.append("source_script_leak")
+        folded_translation = _fold_for_quality_match(translated_text)
+        if TRANSLATION_FALLBACK_PHRASE_PATTERN.search(folded_translation):
+            flags.append("translation_fallback_phrase")
+        if LITERAL_OCR_TRANSLATION_PATTERN.search(folded_translation):
+            flags.append("literal_ocr_translation")
+    if normalized_source_lang == "ko" and KOREAN_LATIN_OCR_ARTIFACT_PATTERN.search(
+        f"{source_text} {translated_text}"
+    ):
+        flags.append("suspected_ocr_error")
+    return flags
+
+
+def is_translation_fallback_phrase(text: str) -> bool:
+    return bool(TRANSLATION_FALLBACK_PHRASE_PATTERN.search(_fold_for_quality_match(text or "")))
+
+
+def _should_block_translation_render(
+    source_text: str,
+    translated_text: str,
+    source_lang: str,
+    tipo: str,
+    qa_flags: list[str],
+) -> bool:
+    del source_text
+    normalized_source_lang = normalize_google_language_code(source_lang)
+    if normalized_source_lang not in {"ja", "ko", "zh-CN", "zh-TW"}:
+        return bool({"placeholder_lost", "glossary_violation", "forbidden_translation"} & set(qa_flags))
+    if tipo == "sfx":
+        return False
+    if {"placeholder_lost", "glossary_violation", "forbidden_translation"} & set(qa_flags):
+        return True
+    if "translation_fallback_phrase" in qa_flags:
+        return True
+    if "source_script_leak" in qa_flags and SOURCE_SCRIPT_PATTERN.search(translated_text or ""):
+        return True
+    return False
+
+
+def _apply_translation_render_blocks(
+    translated_pages: list[dict],
+    source_lang: str,
+) -> list[dict]:
+    for page in translated_pages:
+        for item in page.get("texts", []) or []:
+            translated = str(item.get("translated", "") or "")
+            qa_flags = list(item.get("qa_flags") or [])
+            if not translated:
+                continue
+            if not _should_block_translation_render(
+                str(item.get("original", "") or item.get("text", "") or ""),
+                translated,
+                source_lang,
+                str(item.get("tipo", "fala")),
+                qa_flags,
+            ):
+                continue
+            item["translation_blocked_text"] = translated
+            item["translated"] = ""
+            item["qa_flags"] = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
+    return translated_pages
 
 
 def _normalize_entity_key(text: str) -> str:
@@ -1004,12 +1292,28 @@ def _lookup_memory_translation(text: str, tipo: str, context: dict, glossario: d
 def _lookup_special_literal_translation(text: str, tipo: str) -> str | None:
     del tipo
     stripped = str(text or "").strip()
-    normalized = re.sub(r"[\W_]+", "", stripped.lower())
-    if normalized != "none":
+    phrase_key = re.sub(r"[\W_]+", "", stripped.lower())
+    phrase_literal_map = {
+        "anoisano": "Um n\u00e3o \u00e9 um n\u00e3o",
+    }
+    if phrase_key in phrase_literal_map:
+        punct_match = re.search(r"([!?.,]+)$", stripped)
+        punct = punct_match.group(1) if punct_match else "."
+        return f"{phrase_literal_map[phrase_key]}{punct}"
+    match = re.fullmatch(r"([\"'“”‘’]*)([A-Za-z]+)([\"'“”‘’]*)([!?.,]*)", stripped)
+    if not match:
         return None
-    suffix = stripped[len(stripped.rstrip("!?.")):] if stripped else ""
-    punct = suffix or "."
-    return f"Nenhuma{punct}"
+    prefix, token, suffix_quote, punct = match.groups()
+    normalized = token.lower()
+    literal_map = {
+        "none": "Nenhuma",
+        "we": "N\u00f3s",
+    }
+    if normalized not in literal_map:
+        return None
+    if normalized == "none":
+        punct = punct or "."
+    return f"{prefix}{literal_map[normalized]}{suffix_quote}{punct}"
 
 
 def _build_text_payload(texts: list[dict], index: int, history_tail: list[dict]) -> dict:
@@ -1027,6 +1331,25 @@ def _build_text_payload(texts: list[dict], index: int, history_tail: list[dict])
 
 
 _google: Optional[_GoogleTranslator] = None
+_google_health_key: tuple[str, str] | None = None
+_google_health_ok = False
+_google_health_failed_at: dict[tuple[str, str], float] = {}
+_GOOGLE_FAILURE_RETRY_SECONDS = 300.0
+_SEMANTIC_REVIEW_MAX_ITEMS_PER_BATCH = 16
+
+_GOOGLE_HEALTH_PROBES = {
+    "ko": "안녕하세요",
+    "ja": "こんにちは",
+    "zh-CN": "你好",
+    "zh-TW": "你好",
+    "en": "hello",
+    "es": "hola",
+    "fr": "bonjour",
+    "de": "hallo",
+    "it": "ciao",
+    "pt": "olá",
+    "ru": "привет",
+}
 
 
 def _prefer_local_translation_backend() -> bool:
@@ -1038,19 +1361,197 @@ def _prefer_local_translation_backend() -> bool:
     return str(flag).strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _preserve_caps_proper_nouns_enabled() -> bool:
+    flag = os.getenv("TRADUZAI_PRESERVE_CAPS_PROPER_NOUNS", "0")
+    return str(flag).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _probe_google_backend(translator: _GoogleTranslator, source_lang: str, target_lang: str) -> None:
+    probe = _GOOGLE_HEALTH_PROBES.get(source_lang, "hello")
+    backend = getattr(translator, "_translator", translator)
+    result = backend.translate(probe)
+    if not result or not str(result).strip():
+        raise RuntimeError("Google Translate retornou resposta vazia no health check")
+    if source_lang != target_lang and str(result).strip() == probe:
+        raise RuntimeError("Google Translate retornou a source sem traduzir no health check")
+
+
 def _resolve_translation_backend(google_ok: bool, ollama_status: dict) -> str:
-    ollama_ready = bool(ollama_status.get("running")) and bool(ollama_status.get("models"))
-
-    if _prefer_local_translation_backend() and ollama_ready:
-        return "ollama"
-
-    # Caminho padrao: Google primeiro, Ollama como fallback local.
     if google_ok:
         return "google"
-
-    if ollama_ready:
-        return "ollama"
     return "passthrough"
+
+
+def _google_health_retry_blocked(health_key: tuple[str, str]) -> bool:
+    failed_at = _google_health_failed_at.get(health_key)
+    if failed_at is None:
+        return False
+    return (time.time() - failed_at) < _GOOGLE_FAILURE_RETRY_SECONDS
+
+
+def _should_use_semantic_review(source_lang: str, target_lang: str) -> bool:
+    if os.getenv("TRADUZAI_SEMANTIC_REVIEW", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    return (
+        normalize_google_language_code(source_lang) == "ko"
+        and normalize_google_language_code(target_lang) == "pt"
+    )
+
+
+def _is_valid_semantic_review_output(source_text: str, draft_text: str, candidate_text: str) -> bool:
+    candidate = candidate_text.strip()
+    if not candidate:
+        return False
+    if candidate in {"...", "…", "?", "??", "???", "-", "--"}:
+        return False
+    if _normalized_translation_key(candidate) == _normalized_translation_key(source_text):
+        return False
+    if len(candidate) < 3 and len(draft_text.strip()) >= 3:
+        return False
+    return True
+
+
+def _needs_semantic_review_candidate(item: dict, source_lang: str) -> bool:
+    original = str(item.get("original", "")).strip()
+    translated = str(item.get("translated", "")).strip()
+    tipo = str(item.get("tipo", "fala"))
+    if tipo == "sfx" or not original or not translated:
+        return False
+    normalized_source_lang = normalize_google_language_code(source_lang)
+    if normalized_source_lang not in {"ja", "ko", "zh-CN", "zh-TW"}:
+        return False
+    if not SOURCE_SCRIPT_PATTERN.search(original):
+        return False
+
+    flags = set(item.get("qa_flags") or [])
+    if flags & {
+        "source_script_leak",
+        "suspected_ocr_error",
+        "translation_fallback_phrase",
+        "literal_ocr_translation",
+        "entity_suspect",
+        "entity_mistranslated",
+    }:
+        return True
+    folded_translation = _fold_for_quality_match(translated)
+    return bool(
+        TRANSLATION_FALLBACK_PHRASE_PATTERN.search(folded_translation)
+        or LITERAL_OCR_TRANSLATION_PATTERN.search(folded_translation)
+    )
+
+
+def _refine_google_translations_with_semantic_llm(
+    translated_pages: list[dict],
+    context: dict,
+    glossario: dict,
+    source_lang: str,
+    target_lang: str,
+    model: str,
+    host: str,
+    translation_context: dict | None = None,
+) -> list[dict]:
+    candidates: list[tuple[int, int, dict]] = []
+    for page_idx, page in enumerate(translated_pages):
+        for index, item in enumerate(page.get("texts", [])):
+            original = str(item.get("original", "")).strip()
+            translated = str(item.get("translated", "")).strip()
+            tipo = str(item.get("tipo", "fala"))
+            if tipo == "sfx" or not original or not translated:
+                continue
+            if not re.search(r"[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]", original):
+                continue
+            if not _needs_semantic_review_candidate(item, source_lang):
+                continue
+            candidates.append((page_idx, index, item))
+
+    if not candidates:
+        return translated_pages
+
+    system = (
+        f"Voce revisa semanticamente traducoes de manga {source_lang}->{target_lang}. "
+        "Use o source original e o draft do Google apenas para melhorar naturalidade e sentido em pt-BR. "
+        "Preserve nomes proprios, titulos, tecnicas e termos do glossario. "
+        "Nao explique nada. Responda SOMENTE JSON no formato "
+        '{"items":[{"id":"t1","translated":"texto"}]}. '
+        "Se o draft ja estiver bom, devolva-o sem grandes mudancas."
+    )
+    hints = _build_context_hints(context, glossario)
+    tc_header = build_translation_context_header(translation_context)
+
+    for start in range(0, len(candidates), _SEMANTIC_REVIEW_MAX_ITEMS_PER_BATCH):
+        batch = candidates[start : start + _SEMANTIC_REVIEW_MAX_ITEMS_PER_BATCH]
+        items = []
+        for page_idx, index, item in batch:
+            items.append(
+                {
+                    "id": f"p{page_idx + 1}_t{index + 1}",
+                    "source": item.get("original", ""),
+                    "draft": item.get("translated", ""),
+                    "tipo": item.get("tipo", "fala"),
+                    "context_before": item.get("context_before", ""),
+                    "context_after": item.get("context_after", ""),
+                }
+            )
+
+        try:
+            reviewed = _call_ollama(
+                model=model,
+                system=system,
+                user_msg=(
+                    f"CONTEXTO:\n{hints}\n"
+                    + (f"{tc_header}\n" if tc_header else "")
+                    + f"\nRevise os itens:\n{json.dumps({'items': items}, ensure_ascii=False)}"
+                ),
+                host=host,
+            )
+        except Exception as exc:
+            logger.debug("Revisao semantica local falhou no lote iniciado em %s: %s", start, exc)
+            continue
+
+        reviewed_map = {
+            str(entry.get("id")): str(entry.get("translated", "")).strip()
+            for entry in reviewed
+            if isinstance(entry, dict) and entry.get("id")
+        }
+
+        for page_idx, index, item in batch:
+            item_id = f"p{page_idx + 1}_t{index + 1}"
+            candidate = reviewed_map.get(item_id, "")
+            draft = str(item.get("translated", ""))
+            original = str(item.get("original", ""))
+            if not _is_valid_semantic_review_output(original, draft, candidate):
+                continue
+            if candidate.strip() == draft.strip():
+                continue
+            translated_pages[page_idx]["texts"][index]["translated"] = candidate.strip()
+            existing_flags = [
+                flag
+                for flag in translated_pages[page_idx]["texts"][index].get("qa_flags", []) or []
+                if flag
+                not in {
+                    "source_script_leak",
+                    "suspected_ocr_error",
+                    "translation_fallback_phrase",
+                    "literal_ocr_translation",
+                    "translation_failed",
+                    "translation_render_blocked",
+                }
+            ]
+            translated_pages[page_idx]["texts"][index]["qa_flags"] = _merge_qa_flags(
+                existing_flags,
+                _translation_quality_flags(original, candidate.strip(), source_lang),
+            )
+            record_decision(
+                stage="translate",
+                action="semantic_review",
+                reason="google_plus_small_llm",
+                page=page_idx + 1,
+                layer=item_id,
+                text=original,
+                details={"before": draft, "after": candidate.strip(), "model": model},
+            )
+
+    return translated_pages
 
 
 def translate_pages(
@@ -1069,30 +1570,46 @@ def translate_pages(
 ) -> list[dict]:
     del qualidade
 
-    global _google
+    global _google, _google_health_key, _google_health_ok
     idioma_origem = normalize_google_language_code(idioma_origem)
     idioma_destino = normalize_google_language_code(idioma_destino)
 
     persistent_cache = _open_persistent_cache(models_dir, idioma_origem, idioma_destino)
 
     google_ok = False
+    google_health_key = (idioma_origem, idioma_destino)
     try:
         if (
             _google is None
+            or not hasattr(_google, "_translator")
             or getattr(_google, "_source_lang", "en") != idioma_origem
             or getattr(_google, "_target_lang", "pt") != idioma_destino
         ):
             _google = _GoogleTranslator(source=idioma_origem, target=idioma_destino)
             _google._source_lang = idioma_origem
             _google._target_lang = idioma_destino
+            _google_health_key = None
+            _google_health_ok = False
         if persistent_cache is not None:
             _google.attach_persistent_cache(persistent_cache)
-        _google.translate("test")
-        google_ok = True
+        if _google_health_key == google_health_key and _google_health_ok:
+            google_ok = True
+        elif _google_health_retry_blocked(google_health_key):
+            google_ok = False
+        else:
+            _probe_google_backend(_google, idioma_origem, idioma_destino)
+            _google_health_key = google_health_key
+            _google_health_ok = True
+            _google_health_failed_at.pop(google_health_key, None)
+            google_ok = True
     except Exception as exc:
+        _google_health_key = google_health_key
+        _google_health_ok = False
+        _google_health_failed_at[google_health_key] = time.time()
         logger.warning(f"Google Translate indisponivel: {exc}")
 
-    ollama = _check_ollama(ollama_host)
+    semantic_review_requested = False
+    ollama = {"running": False, "models": [], "has_translator": False, "skipped": True}
     backend = _resolve_translation_backend(google_ok=google_ok, ollama_status=ollama)
 
     logger.info(f"--- TRADUCAO INICIADA ---")
@@ -1116,10 +1633,33 @@ def translate_pages(
     try:
         if backend == "google":
             logger.info("Traducao usando Google Translate.")
-            return _translate_with_google(ocr_results, context, glossario, progress_callback, idioma_origem=idioma_origem)
+            semantic_model = None
+            if semantic_review_requested and bool(ollama.get("running")) and bool(ollama.get("models")):
+                semantic_model = _pick_ollama_model_for_language_pair(
+                    ollama["models"],
+                    ollama_model,
+                    idioma_origem,
+                    idioma_destino,
+                )
+            return _translate_with_google(
+                ocr_results,
+                context,
+                glossario,
+                progress_callback,
+                idioma_origem=idioma_origem,
+                idioma_destino=idioma_destino,
+                semantic_reviewer_model=semantic_model,
+                semantic_reviewer_host=ollama_host,
+                translation_context=translation_context,
+            )
 
         if backend == "ollama":
-            model = _pick_ollama_model(ollama["models"], ollama_model)
+            model = _pick_ollama_model_for_language_pair(
+                ollama["models"],
+                ollama_model,
+                idioma_origem,
+                idioma_destino,
+            )
             logger.info("Traducao usando backend local Ollama: %s", model)
             return _translate_with_ollama(
                 ocr_results,
@@ -1170,6 +1710,10 @@ def _translate_with_google(
     glossario: dict,
     progress_callback: Callable | None,
     idioma_origem: str = "en",
+    idioma_destino: str = "pt",
+    semantic_reviewer_model: str | None = None,
+    semantic_reviewer_host: str = OLLAMA_HOST,
+    translation_context: dict | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     translated_pages = []
@@ -1184,12 +1728,28 @@ def _translate_with_google(
             context=context,
             glossario=glossario,
             idioma_origem=idioma_origem,
+            idioma_destino=idioma_destino,
             history_memory=history_memory,
             history_tail=history_tail,
             progress_callback=progress_callback,
+            semantic_reviewer_model=semantic_reviewer_model,
+            semantic_reviewer_host=semantic_reviewer_host,
         )
         translated_pages.append(translated)
 
+    if semantic_reviewer_model:
+        translated_pages = _refine_google_translations_with_semantic_llm(
+            translated_pages=translated_pages,
+            context=context,
+            glossario=glossario,
+            source_lang=idioma_origem,
+            target_lang=idioma_destino,
+            model=semantic_reviewer_model,
+            host=semantic_reviewer_host,
+            translation_context=translation_context,
+        )
+
+    translated_pages = _apply_translation_render_blocks(translated_pages, idioma_origem)
     return translated_pages
 
 
@@ -1200,9 +1760,12 @@ def _translate_google_single_page(
     context: dict,
     glossario: dict,
     idioma_origem: str,
+    idioma_destino: str,
     history_memory: dict[str, str],
     history_tail: list[dict],
     progress_callback: Callable | None,
+    semantic_reviewer_model: str | None,
+    semantic_reviewer_host: str,
 ) -> tuple[dict, list[dict]]:
     """Translate a single page using Google backend with shared history state.
 
@@ -1238,6 +1801,7 @@ def _translate_google_single_page(
         was_uppers = [text == text.upper() and any(c.isalpha() for c in text) for text in raw_texts]
 
     preprocessed: list[str] = []
+    protected_terms_by_index: list[list[dict]] = []
     for repaired_text, tipo in zip(repaired_sources, tipos):
         prepared_text = _prepare_source_text_for_translation(repaired_text, tipo, lang=idioma_origem)
         prepared_text, _, _ = _repair_source_entities(prepared_text, context, glossario)
@@ -1247,7 +1811,9 @@ def _translate_google_single_page(
             lang=idioma_origem,
         )
         normalized_text, _, _ = _repair_source_entities(normalized_text, context, glossario)
-        preprocessed.append(normalized_text)
+        protected = _protect_source_for_translation(normalized_text, tipo, context, glossario)
+        preprocessed.append(str(protected.get("protected_source") or normalized_text))
+        protected_terms_by_index.append(list(protected.get("terms") or []))
 
     translations = [""] * len(texts)
     pending_indices = []
@@ -1256,11 +1822,12 @@ def _translate_google_single_page(
         if texts[index].get("skip_processing"):
             translations[index] = source
             continue
-        # Proteção de nome próprio: se o source é um único token CAPS fora do
-        # vocabulário comum, preserva como estava (Title-case) para evitar
-        # "GILLION" -> "UM BILHÃO", "WILLOW" -> "SALGUEIRO", etc.
+        # Legacy proper-name preservation is opt-in. By default every CAPS
+        # token goes through translation so dialogue is not left in English.
         proper_noun_token = source.strip().rstrip(".,!?;:'\"")
-        if _is_likely_proper_noun(source) or _is_likely_proper_noun(proper_noun_token):
+        if _preserve_caps_proper_nouns_enabled() and (
+            _is_likely_proper_noun(source) or _is_likely_proper_noun(proper_noun_token)
+        ):
             preserved = proper_noun_token.title()
             # Reanexa a pontuação final, se houver
             tail = source.strip()[len(proper_noun_token):]
@@ -1296,8 +1863,13 @@ def _translate_google_single_page(
     for index, (original, translated, was_upper, tipo) in enumerate(
         zip(raw_texts, translations, was_uppers, tipos)
     ):
-        final = _postprocess(
+        protected_terms = protected_terms_by_index[index] if index < len(protected_terms_by_index) else []
+        restored_translation, protection_flags, protection_hits = _restore_protected_translation(
             translated or original,
+            protected_terms,
+        )
+        final = _postprocess(
+            restored_translation or original,
             was_upper,
             tipo,
             source_text=repaired_sources[index] or original,
@@ -1309,19 +1881,59 @@ def _translate_google_single_page(
             context,
             glossario,
         )
-        entity_flags = list(dict.fromkeys([*source_entity_flags[index], *target_flags]))
+        locked_final, target_name_repairs = _repair_translated_proper_name(
+            repaired_sources[index] or original,
+            locked_final,
+            tipo,
+        )
+        missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
+        if missing_protected_terms:
+            protection_flags = _merge_qa_flags(protection_flags, ["placeholder_lost"])
+        name_flags = ["target_proper_name_repaired"] if target_name_repairs else []
+        entity_flags = list(dict.fromkeys([*source_entity_flags[index], *target_flags, *name_flags]))
         entity_repairs = list(source_repairs[index])
-        qa_flags = ["entity_suspect"] if entity_repairs else []
+        entity_repairs.extend(target_name_repairs)
+        glossary_hits = list(glossary_hits)
+        for hit in protection_hits:
+            if hit not in glossary_hits:
+                glossary_hits.append(hit)
+        qa_flags = _merge_qa_flags(
+            texts[index].get("qa_flags"),
+            ["entity_suspect"] if source_repairs[index] else [],
+            protection_flags,
+            _translation_quality_flags(repaired_sources[index] or original, locked_final, idioma_origem),
+        )
+        blocked_translation = ""
+        if _should_block_translation_render(
+            repaired_sources[index] or original,
+            locked_final,
+            idioma_origem,
+            tipo,
+            qa_flags,
+        ) and not semantic_reviewer_model:
+            blocked_translation = locked_final
+            locked_final = ""
+            qa_flags = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
+            record_decision(
+                stage="translate",
+                action="block_render",
+                reason="bad_cjk_translation",
+                page=page_idx + 1,
+                layer=texts[index].get("id") or f"t{index + 1}",
+                text=original,
+                details={"blocked_translation": blocked_translation, "qa_flags": qa_flags},
+            )
         texts[index]["entity_flags"] = entity_flags
         texts[index]["entity_repairs"] = entity_repairs
         texts[index]["glossary_hits"] = glossary_hits
         texts[index]["qa_flags"] = qa_flags
         if entity_repairs:
             for repair in entity_repairs:
+                repair_phase = repair.get("phase") if isinstance(repair, dict) else ""
                 record_decision(
                     stage="translate",
                     action="repair_entity",
-                    reason="source_entity_match",
+                    reason="target_proper_name" if repair_phase == "target" else "source_entity_match",
                     page=page_idx + 1,
                     layer=texts[index].get("id") or f"t{index + 1}",
                     text=original,
@@ -1338,20 +1950,25 @@ def _translate_google_single_page(
                 details={"hits": glossary_hits},
             )
         memory_key = _normalize_memory_key(original, tipo)
-        history_memory[memory_key] = locked_final
+        if locked_final:
+            history_memory[memory_key] = locked_final
         payload = _build_text_payload(texts, index, history_tail)
-        page_texts.append(
-            {
-                **texts[index],
-                "original": original,
-                "translated": locked_final,
-                "tipo": tipo,
-                "context_before": payload["context_before"],
-                "context_after": payload["context_after"],
-            }
-        )
+        text_payload = {
+            **texts[index],
+            "original": original,
+            "translated": locked_final,
+            "tipo": tipo,
+            "context_before": payload["context_before"],
+            "context_after": payload["context_after"],
+        }
+        if blocked_translation:
+            text_payload["translation_blocked_text"] = blocked_translation
+        page_texts.append(text_payload)
         history_tail.append({"source": original, "translated": locked_final, "tipo": tipo})
         history_tail = history_tail[-8:]
+
+    if semantic_reviewer_model:
+        pass
 
     if progress_callback:
         progress_callback(
@@ -1385,7 +2002,7 @@ def _translate_with_ollama(
         f"GLOSSARIO: {json.dumps(glossario, ensure_ascii=False)}\n"
         f"{_build_context_hints(context, glossario)}\n"
         + (f"{tc_header}\n" if tc_header else "")
-        + "Formato: [{\"id\":\"t1\",\"translated\":\"texto\"}]"
+        + "Cada item de entrada tera o campo source com o texto original. Preserve o mesmo id e responda apenas [{\"id\":\"t1\",\"translated\":\"texto\"}]. Nao ecoe source, tipo, context_before ou context_after."
     )
 
     translated_pages = []
@@ -1400,11 +2017,27 @@ def _translate_with_ollama(
                 progress_callback(page_idx + 1, total, f"Pagina {page_idx + 1}: sem texto")
             continue
 
-        text_list = [
-            _build_text_payload(texts, i, history_tail)
-            for i, t in enumerate(texts)
-            if not t.get("skip_processing")
-        ]
+        text_list = []
+        for i, t in enumerate(texts):
+            if t.get("skip_processing"):
+                continue
+            payload = _build_text_payload(texts, i, history_tail)
+            protected = _protect_source_for_translation(
+                payload.get("text", ""),
+                payload.get("tipo", "fala"),
+                context,
+                glossario,
+            )
+            t["_protected_terms"] = list(protected.get("terms") or [])
+            text_list.append(
+                {
+                    "id": payload["id"],
+                    "source": protected.get("protected_source") or payload.get("text", ""),
+                    "tipo": payload.get("tipo", "fala"),
+                    "context_before": payload.get("context_before", ""),
+                    "context_after": payload.get("context_after", ""),
+                }
+            )
         user_msg = f"Traduza:\n{json.dumps(text_list, ensure_ascii=False)}"
 
         try:
@@ -1448,6 +2081,11 @@ def _translate_with_ollama(
             tipo = text_data.get("tipo", "fala")
             repaired_source, entity_repairs, source_entity_flags = _repair_source_entities(original, context, glossario)
             if text_data.get("skip_processing"):
+                qa_flags = _merge_qa_flags(
+                    text_data.get("qa_flags"),
+                    ["entity_suspect"] if entity_repairs else [],
+                    _translation_quality_flags(repaired_source or original, original, idioma_origem),
+                )
                 page_texts.append(
                     {
                         **text_data,
@@ -1457,7 +2095,7 @@ def _translate_with_ollama(
                         "entity_flags": list(source_entity_flags),
                         "entity_repairs": list(entity_repairs),
                         "glossary_hits": [],
-                        "qa_flags": ["entity_suspect"] if entity_repairs else [],
+                        "qa_flags": qa_flags,
                     }
                 )
                 history_tail.append({"source": original, "translated": original, "tipo": tipo})
@@ -1471,9 +2109,14 @@ def _translate_with_ollama(
                 translated = special_literal
             is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
             was_upper = False if is_cjk else (original == original.upper() and any(c.isalpha() for c in original))
+            protected_terms = list(text_data.get("_protected_terms") or [])
+            restored_translation, protection_flags, protection_hits = _restore_protected_translation(
+                translated,
+                protected_terms,
+            )
 
             final = _postprocess(
-                translated,
+                restored_translation,
                 was_upper,
                 tipo,
                 source_text=repaired_source or original,
@@ -1485,18 +2128,61 @@ def _translate_with_ollama(
                 context,
                 glossario,
             )
-            entity_flags = list(dict.fromkeys([*source_entity_flags, *target_flags]))
-            qa_flags = ["entity_suspect"] if entity_repairs else []
+            locked_final, target_name_repairs = _repair_translated_proper_name(
+                repaired_source or original,
+                locked_final,
+                tipo,
+            )
+            missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
+            if missing_protected_terms:
+                protection_flags = _merge_qa_flags(protection_flags, ["placeholder_lost"])
+            name_flags = ["target_proper_name_repaired"] if target_name_repairs else []
+            entity_flags = list(dict.fromkeys([*source_entity_flags, *target_flags, *name_flags]))
+            qa_flags = _merge_qa_flags(
+                text_data.get("qa_flags"),
+                ["entity_suspect"] if entity_repairs else [],
+                protection_flags,
+                _translation_quality_flags(repaired_source or original, locked_final, idioma_origem),
+            )
+            glossary_hits = list(glossary_hits)
+            for hit in protection_hits:
+                if hit not in glossary_hits:
+                    glossary_hits.append(hit)
+            blocked_translation = ""
+            if _should_block_translation_render(
+                repaired_source or original,
+                locked_final,
+                idioma_origem,
+                tipo,
+                qa_flags,
+            ):
+                blocked_translation = locked_final
+                locked_final = ""
+                qa_flags = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
+                record_decision(
+                    stage="translate",
+                    action="block_render",
+                    reason="bad_cjk_translation",
+                    page=page_idx + 1,
+                    layer=text_data.get("id") or f"t{index + 1}",
+                    text=original,
+                    details={"blocked_translation": blocked_translation, "qa_flags": qa_flags},
+                )
+            entity_repairs = list(entity_repairs)
+            entity_repairs.extend(target_name_repairs)
             text_data["entity_flags"] = entity_flags
-            text_data["entity_repairs"] = list(entity_repairs)
+            text_data["entity_repairs"] = entity_repairs
             text_data["glossary_hits"] = glossary_hits
             text_data["qa_flags"] = qa_flags
+            if blocked_translation:
+                text_data["translation_blocked_text"] = blocked_translation
             if entity_repairs:
                 for repair in entity_repairs:
+                    repair_phase = repair.get("phase") if isinstance(repair, dict) else ""
                     record_decision(
                         stage="translate",
                         action="repair_entity",
-                        reason="source_entity_match",
+                        reason="target_proper_name" if repair_phase == "target" else "source_entity_match",
                         page=page_idx + 1,
                         layer=text_data.get("id") or f"t{index + 1}",
                         text=original,
@@ -1585,6 +2271,15 @@ def translate_single_block(block: dict, project: dict):
     was_upper = False if is_cjk else (text == text.upper() and any(c.isalpha() for c in text))
     
     final = _postprocess(translated, was_upper, tipo, source_text=text, lang=source_lang)
-    
+
+    qa_flags = _merge_qa_flags(
+        block.get("qa_flags"),
+        _translation_quality_flags(text, final, source_lang),
+    )
+    if _should_block_translation_render(text, final, source_lang, tipo, qa_flags):
+        block["translation_blocked_text"] = final
+        final = ""
+        qa_flags = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
+    block["qa_flags"] = qa_flags
     block["translated"] = final
     block["traduzido"] = final

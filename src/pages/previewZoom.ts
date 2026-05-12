@@ -13,7 +13,7 @@ export interface PreviewPanSession {
 export const PREVIEW_ZOOM_DEFAULT = 1;
 
 const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 6;
+const MAX_ZOOM = 10;
 const ZOOM_STEP = 0.15;
 
 function clamp(value: number, min: number, max: number): number {

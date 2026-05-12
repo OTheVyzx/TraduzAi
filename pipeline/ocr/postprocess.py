@@ -36,6 +36,9 @@ WATERMARK_PATTERNS = [
     for pattern in [
         r"LAGOONSCANS?\.COM",
         r"ASURASCANS?\.COM",
+        r"ASURA[A-Z0-9._\-\s]{0,16}\.?\s*COM",
+        r"ASURA\.GG",
+        r"ASURACOMIC\.NET",
         r"MEDIOCRESCAN\.COM",
         r"\b[\w.-]*(?:SCAN|SCANS|SCANLATOR|SCANLATIONS)[\w.-]*\b",
         r"\b[\w.-]*TOONS?[\w.-]*\b",
@@ -44,6 +47,7 @@ WATERMARK_PATTERNS = [
         r"mangaball",
         r"ursaring",
         r"READ\s*ONLY\s*AT",
+        r"FOR\s+THE\s+FASTEST\s+RELEASES",
         r"WARNING\s*!",
         r"BETTER\s*QUALITY",
         r"MORE\s*CHAPTERS",
@@ -60,10 +64,51 @@ EDITORIAL_CREDIT_PATTERNS = [
         r"^(?:QC|TS|PR|RD|RAW)\s+[A-Z]{2,}$",
         r"\bORIGINAL\s+GOLD\s+LINE\s+ART\b",
         r"\b(?:SCAN|SCANS|SCANLATOR|SCANLATIONS|TOON|TOONS)\b",
+        r"\bROUGH\s*S[TY]UDIO\b",
     ]
 ]
 
+EDITORIAL_CREDIT_PHRASE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\bHELP\s*US\b.*\bDONATIONS?\b",
+        r"\bSUPPORT\s+US\b.*\bDONATIONS?\b",
+        r"\bWE\s+ARE\s+RECRUITING\b",
+        r"\bJOIN\s+OUR\s+(?:DISCORD|STAFF|TEAM)\b",
+    ]
+]
+
+EDITORIAL_ROLE_WORDS = {
+    "CLEANER",
+    "EDITOR",
+    "LETTERER",
+    "PR",
+    "PROOFREADER",
+    "QC",
+    "QUALITYCHECKER",
+    "RAW",
+    "RD",
+    "REDRAWER",
+    "STAFF",
+    "TRANSLATOR",
+    "TS",
+    "TYPESETTER",
+}
+AMBIGUOUS_SINGLE_EDITORIAL_ROLE_WORDS = {
+    "RAW",
+    "STAFF",
+}
+EDITORIAL_MULTIWORD_ROLES = (
+    ("PROOF", "READER"),
+    ("QUALITY", "CHECKER"),
+    ("RAW", "PROVIDER"),
+    ("TYPE", "SETTER"),
+)
+
 KOREAN_PATTERN = re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]")
+CJK_PATTERN = re.compile(
+    r"[\u1100-\u11FF\u3000-\u303F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]"
+)
 
 NON_LATIN_PATTERN = re.compile(
     r"[\u0400-\u04FF"   # Cirílico
@@ -89,6 +134,61 @@ KOREAN_FIX = {
     "\uB9AC": "LL",
     "\uD130": "T",
 }
+
+RUN_ON_WORDS = {
+    "A", "ABOUT", "AFTER", "ALL", "AM", "AN", "AND", "ARE", "AS", "AT",
+    "BE", "BECAUSE", "BEFORE", "BLADE", "BRAND", "BUT", "BY", "CAN",
+    "COME", "DID", "DO", "DOES", "DON", "FOR", "FROM", "HAD", "HAS",
+    "HAVE", "HE", "HER", "HIM", "HIS", "I", "IN", "IS", "IT", "JUST",
+    "LET", "LIKE", "LINE", "ME", "MERELY", "MY", "NO", "NOT", "OF",
+    "ON", "ONE", "OR", "OUR", "PEACE", "SAID", "SHE", "SO", "THAT",
+    "THE", "THEIR", "THEM", "THEN", "THERE", "THEY", "THIS", "TIME",
+    "TIMES", "TITLE", "TO", "WAS", "WE", "WHAT", "WHEN", "WHO", "WHY",
+    "WITH", "YOU", "YOUR",
+}
+
+
+def _dictionary_split_yields_words(token: str, min_words: int = 2) -> bool:
+    token = re.sub(r"[^A-Z]", "", str(token or "").upper())
+    if len(token) < 8:
+        return False
+    n = len(token)
+    scores = [-10**9] * (n + 1)
+    counts = [0] * (n + 1)
+    scores[0] = 0
+    for i in range(n):
+        if scores[i] < 0:
+            continue
+        for j in range(i + 1, min(n, i + 14) + 1):
+            piece = token[i:j]
+            if piece not in RUN_ON_WORDS:
+                continue
+            score = scores[i] + len(piece)
+            if score > scores[j]:
+                scores[j] = score
+                counts[j] = counts[i] + 1
+    return counts[n] >= min_words and scores[n] / max(1, n) >= 0.80
+
+
+def has_run_on_tokens(text: str) -> bool:
+    """Detects long OCR tokens that likely merged multiple English words."""
+    for token in re.findall(r"\b[A-Za-z]{12,}\b", str(text or "")):
+        normalized = token.upper()
+        if _dictionary_split_yields_words(normalized, min_words=2):
+            return True
+        vowels = sum(1 for char in normalized if char in "AEIOU")
+        consonants = sum(1 for char in normalized if char.isalpha() and char not in "AEIOU")
+        transitions = 0
+        previous = None
+        for char in normalized:
+            current = "v" if char in "AEIOU" else "c"
+            if previous and current != previous:
+                transitions += 1
+            previous = current
+        rare_clusters = len(re.findall(r"(?:[BCDFGHJKLMNPQRSTVWXYZ]{4,})", normalized))
+        if vowels >= 3 and consonants >= 6 and rare_clusters >= 1 and transitions >= 4:
+            return True
+    return False
 
 
 _DIGIT_TO_LETTER = {
@@ -178,8 +278,9 @@ def fix_ocr_errors(text: str, idioma_origem: str = "en") -> str:
     if not text:
         return ""
 
-    for korean, latin in KOREAN_FIX.items():
-        text = text.replace(korean, latin)
+    if idioma_origem != "ko":
+        for korean, latin in KOREAN_FIX.items():
+            text = text.replace(korean, latin)
 
     text = re.sub(r"([A-Za-z])\1{2,}", r"\1\1", text)
     meaningful = re.sub(r"[\s\W]", "", text)
@@ -207,11 +308,75 @@ def is_watermark(text: str) -> bool:
     return any(pattern.search(text) for pattern in WATERMARK_PATTERNS)
 
 
+def _editorial_words(text: str) -> list[str]:
+    return [
+        re.sub(r"[^A-Z]", "", token.upper())
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9._-]*", text)
+        if re.sub(r"[^A-Z]", "", token.upper())
+    ]
+
+
+def _consume_editorial_role(words: list[str], index: int) -> int:
+    if index >= len(words):
+        return index
+    if words[index] in EDITORIAL_ROLE_WORDS:
+        return index + 1
+    for role in EDITORIAL_MULTIWORD_ROLES:
+        end = index + len(role)
+        if tuple(words[index:end]) == role:
+            return end
+    return index
+
+
+def _is_editorial_role_sequence(words: list[str]) -> bool:
+    if not words:
+        return False
+    index = 0
+    role_count = 0
+    while index < len(words):
+        next_index = _consume_editorial_role(words, index)
+        if next_index == index:
+            return False
+        role_count += 1
+        index = next_index
+    if role_count == 1 and len(words) == 1 and words[0] in AMBIGUOUS_SINGLE_EDITORIAL_ROLE_WORDS:
+        return False
+    return True
+
+
+def _looks_like_credit_name_token(token: str) -> bool:
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", token)
+    if len(cleaned) < 2 or not any(char.isalpha() for char in cleaned):
+        return False
+    letters = "".join(char for char in cleaned if char.isalpha())
+    return bool(letters) and letters.upper() == letters
+
+
+def _starts_with_editorial_role_credit(text: str, words: list[str]) -> bool:
+    role_end = _consume_editorial_role(words, 0)
+    if role_end == 0 or role_end >= len(words):
+        return False
+    if tuple(words[:role_end]) in {("EDITOR",), ("STAFF",)}:
+        return False
+    name_count = len(words) - role_end
+    if name_count > 3:
+        return False
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9._-]*", text)
+    if len(raw_tokens) != len(words):
+        return False
+    return all(_looks_like_credit_name_token(token) for token in raw_tokens[role_end:])
+
+
 def is_editorial_credit(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    return any(pattern.search(stripped) for pattern in EDITORIAL_CREDIT_PATTERNS)
+    if any(pattern.search(stripped) for pattern in EDITORIAL_CREDIT_PATTERNS):
+        return True
+    if any(pattern.search(stripped) for pattern in EDITORIAL_CREDIT_PHRASE_PATTERNS):
+        return True
+    words = _editorial_words(stripped)
+    return _is_editorial_role_sequence(words) or _starts_with_editorial_role_credit(stripped, words)
 
 
 def is_non_english(text: str) -> bool:
@@ -231,7 +396,27 @@ def is_korean_sfx(text: str) -> bool:
     meaningful = re.sub(r"[\s\W]", "", text)
     if not meaningful:
         return False
-    return len(KOREAN_PATTERN.findall(text)) / len(meaningful) > 0.3
+    korean_ratio = len(KOREAN_PATTERN.findall(text)) / len(meaningful)
+    if korean_ratio <= 0.3:
+        return False
+
+    # Frases coreanas longas ou com espacos tendem a ser fala/narracao normal.
+    if len(meaningful) >= 7 or " " in text.strip():
+        return False
+
+    compact = text.strip()
+    core = re.sub(r"[^\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]", "", compact)
+    if not core:
+        return False
+    if "?" in compact and len(core) <= 2:
+        return False
+
+    # Onomatopeias curtas costumam vir com repeticao forte e/ou pontuacao enfatica.
+    repeated_chars = len(set(core)) <= max(1, len(core) // 3)
+    repeated_bigrams = len(core) >= 4 and core[:2] == core[2:4]
+    emphatic_punctuation = bool(re.search(r"[!?~…]+$", compact))
+    elongated = bool(re.search(r"(.)\1{1,}", core))
+    return repeated_chars or repeated_bigrams or (elongated and (emphatic_punctuation or len(core) <= 4))
 
 
 def is_structured_ocr_payload(text: str) -> bool:
@@ -255,10 +440,29 @@ _HALLUCINATION_PHRASES: list[re.Pattern] = [
         r"\bjumps? over the lazy\b",
     ]
 ]
+_VLM_FAILURE_PHRASES: list[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\b(?:the\s+)?image\s+is\s+too\s+blurry\s+to\s+recognize\s+any\s+text(?:\s+content)?\b",
+        r"\b(?:i\s+)?(?:cannot|can't|can\s+not)\s+(?:read|recognize|detect)\s+(?:any\s+)?text\b",
+        r"\b(?:no|not\s+any)\s+text\s+(?:was\s+)?(?:detected|found|recognized)\b",
+        r"\bunable\s+to\s+(?:read|recognize|detect)\s+(?:any\s+)?text\b",
+    ]
+]
 
 # Characters-per-pixel threshold: above this, a bbox is implausibly dense
 # for manhwa/manga text (30 chars in 200×22 px ≈ 0.0068 chars/px).
 _HALLUCINATION_CHARS_PER_PX = 0.006
+_TRUSTED_VERY_LOW_CONFIDENCE_PHRASES = {
+    "THAT ARROGANT",
+}
+
+
+def is_vlm_failure_phrase(text: str) -> bool:
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+    return any(pattern.search(stripped) for pattern in _VLM_FAILURE_PHRASES)
 
 
 def is_hallucination(text: str, bbox: list[int], confidence: float) -> bool:
@@ -285,6 +489,9 @@ def is_hallucination(text: str, bbox: list[int], confidence: float) -> bool:
     if not stripped:
         return False
 
+    if is_vlm_failure_phrase(stripped):
+        return True
+
     # 1. Known hallucination phrases at non-high confidence
     if confidence < 0.85:
         for pattern in _HALLUCINATION_PHRASES:
@@ -302,6 +509,47 @@ def is_hallucination(text: str, bbox: list[int], confidence: float) -> bool:
         if bbox_h <= 30 and char_count > 30 and density > _HALLUCINATION_CHARS_PER_PX:
             return True
 
+    return False
+
+
+def is_ghost_ocr_noise(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    *,
+    is_white_balloon: bool,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+) -> bool:
+    if is_white_balloon:
+        return False
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+    compact = re.sub(r"\s+", "", stripped)
+    if not compact:
+        return False
+
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return False
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        image_h = int(image_shape[0])
+        image_w = int(image_shape[1])
+    except Exception:
+        return False
+
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    area_ratio = (width * height) / float(max(1, image_h * image_w))
+    alnum = re.sub(r"[^A-Za-z0-9]", "", compact)
+    cjk = "".join(CJK_PATTERN.findall(compact))
+
+    if compact in {"|", "/", "\\", "-", "_"} and area_ratio <= 0.003:
+        return True
+    if alnum and len(alnum) <= 2 and not cjk and (confidence < 0.93 or area_ratio <= 0.0025):
+        return True
+    if len(cjk) == 1 and len(compact) <= 2 and area_ratio <= 0.002:
+        return True
     return False
 
 
@@ -329,6 +577,21 @@ def is_short_textured_sfx_or_noise(
     vowel_count = sum(char in "AEIOU" for char in upper_core)
     known_short_sfx = {"HMPH", "HUH", "KEUK", "UGH", "GASP", "SNIF", "SNIFF", "XEV", "ULM", "XUF", "SH"}
 
+    quoted_short_dialogue = (
+        bool(re.search(r"[\"'“”‘’]", stripped))
+        and bool(re.search(r"[?!]", stripped))
+        and upper_core in {"I", "ME", "US", "WE", "YOU", "NO", "YES", "OK"}
+    )
+    if quoted_short_dialogue:
+        return False
+
+    unquoted_short_caps_dialogue = (
+        bool(re.search(r"[?!]", stripped))
+        and upper_core in {"I", "ME", "US", "WE", "YOU", "NO", "YES", "OK"}
+    )
+    if unquoted_short_caps_dialogue:
+        return False
+
     if upper_core in known_short_sfx:
         return True
 
@@ -339,6 +602,9 @@ def is_short_textured_sfx_or_noise(
         return True
 
     if len(core) == 2:
+        return True
+
+    if len(core) <= 3 and core.islower() and vowel_count >= len(core) - 1:
         return True
 
     # Tokens muito curtos e soltos em fundo texturizado costumam ser SFX/ruído
@@ -365,6 +631,88 @@ def is_short_textured_sfx_or_noise(
         return True
 
     return False
+
+
+def _is_cjk_source_lang(source_lang: str) -> bool:
+    lang = (source_lang or "").strip().lower().replace("_", "-")
+    return lang.startswith(("ko", "ja", "zh"))
+
+
+def _has_repeated_latin_sfx_shape(core: str) -> bool:
+    upper = core.upper()
+    if not upper:
+        return False
+    if len(set(upper)) <= 3 and len(upper) <= 7:
+        return True
+    if re.search(r"([A-Z])\1{2,}", upper):
+        return True
+    if len(upper) >= 4 and upper[:2] == upper[2:4]:
+        return True
+    return False
+
+
+def should_preserve_cjk_sfx_candidate(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    *,
+    is_white_balloon: bool,
+    source_lang: str,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    block_profile: str = "standard",
+) -> bool:
+    """Return True when a CJK OCR item should stay as original art.
+
+    This is intentionally source-language gated so English all-caps dialogue is
+    not skipped.  It catches short stylized CJK/Latin OCR artifacts before they
+    become translation and inpaint layers.
+    """
+    if not _is_cjk_source_lang(source_lang):
+        return False
+
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+
+    compact_cjk = "".join(CJK_PATTERN.findall(stripped))
+    if compact_cjk:
+        normalized_block_profile = str(block_profile or "").strip().lower()
+        inside_speech_balloon = is_white_balloon or normalized_block_profile in {
+            "white_balloon",
+            "speech_balloon",
+            "top_narration",
+        }
+        if is_korean_sfx(stripped):
+            return not inside_speech_balloon
+        # A short CJK token outside a detected white balloon is usually drawn SFX
+        # or a loose reaction, not normal dialogue that should be cleaned.
+        if (
+            not inside_speech_balloon
+            and len(compact_cjk) <= 4
+            and "?" not in stripped
+        ):
+            return True
+        return False
+
+    latin_core = re.sub(r"[^A-Za-z]", "", stripped)
+    if not latin_core:
+        return False
+
+    upper_core = latin_core.upper()
+    known_sfx = {"HMPH", "HUH", "KEUK", "UGH", "GASP", "SNIF", "SNIFF", "XEV", "ULM", "XUF", "SH"}
+    if upper_core in known_sfx:
+        return True
+
+    if len(latin_core) <= 4 and latin_core.islower():
+        return True
+
+    if not is_white_balloon and len(latin_core) <= 6 and latin_core.islower():
+        return True
+
+    if _has_repeated_latin_sfx_shape(latin_core):
+        return True
+
+    return is_short_textured_sfx_or_noise(stripped, bbox, confidence, is_white_balloon=False)
 
 
 def is_short_ornamental_text(
@@ -479,6 +827,55 @@ def is_cover_title_logo(
     )
 
 
+def is_textured_top_narration_cover_logo(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    tipo: str,
+    page_profile: str = "standard",
+) -> bool:
+    if page_profile != "cover_opening" or tipo != "narracao" or confidence < 0.85:
+        return False
+
+    stripped = " ".join((text or "").split()).strip()
+    if not stripped:
+        return False
+
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'’-]*", stripped)
+    if not words or re.findall(r"[.!?…,:;]", stripped):
+        return False
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    image_h = int(image_shape[0])
+    image_w = int(image_shape[1])
+    page_area = max(1, image_w * image_h)
+    area_ratio = (box_w * box_h) / float(page_area)
+    width_ratio = box_w / float(max(1, image_w))
+    height_ratio = box_h / float(max(1, image_h))
+    alpha_chars = [char for char in stripped if char.isalpha()]
+    uppercase_ratio = (
+        sum(1 for char in alpha_chars if char.isupper()) / float(len(alpha_chars))
+        if alpha_chars
+        else 0.0
+    )
+    title_case_ratio = sum(1 for word in words if word[:1].isupper()) / float(max(1, len(words)))
+    compact_len = len(re.sub(r"\s+", "", stripped))
+    word_count = len(words)
+
+    return (
+        tipo == "narracao"
+        and 2 <= word_count <= 8
+        and compact_len >= 14
+        and 0.22 <= width_ratio <= 0.46
+        and 0.025 <= height_ratio <= 0.32
+        and area_ratio <= 0.09
+        and (uppercase_ratio >= 0.58 or title_case_ratio >= 0.72)
+    )
+
+
 def infer_block_profile(
     text: str,
     bbox: list[int],
@@ -527,10 +924,58 @@ def suspicious_confidence_threshold(block_profile: str, page_profile: str = "sta
     return 0.60
 
 
+def _looks_like_clean_latin_phrase(text: str, alpha: int, digits: int, weird: int) -> bool:
+    if digits > 0 or weird > 0:
+        return False
+    if alpha < 5:
+        return False
+    words = [
+        token.strip("'")
+        for token in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']+", text)
+        if any(char.isalpha() for char in token)
+    ]
+    if len(words) < 2:
+        return False
+    one_letter_words = sum(1 for word in words if len(word) <= 1)
+    if one_letter_words > max(1, len(words) // 2):
+        return False
+    return True
+
+
+def _looks_like_clean_latin_word(text: str, alpha: int, digits: int, weird: int) -> bool:
+    if digits > 0 or weird > 0:
+        return False
+    if alpha < 5:
+        return False
+    words = [
+        token.strip("'")
+        for token in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']+", text)
+        if any(char.isalpha() for char in token)
+    ]
+    if len(words) != 1:
+        return False
+    word = words[0]
+    if not word.isalpha() or len(word) > 14:
+        return False
+    vowels = sum(1 for char in word.upper() if char in "AEIOUY")
+    return vowels >= max(1, len(word) // 4)
+
+
+def _is_trusted_very_low_confidence_phrase(text: str) -> bool:
+    normalized = " ".join(
+        token.upper()
+        for token in re.findall(r"[A-Za-z']+", text)
+        if any(char.isalpha() for char in token)
+    )
+    return normalized in _TRUSTED_VERY_LOW_CONFIDENCE_PHRASES
+
+
 def looks_suspicious(text: str, confidence: float) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
+    if CJK_PATTERN.search(stripped) and confidence >= 0.35:
+        return False
 
     alnum = sum(char.isalnum() for char in stripped)
     alpha = sum(char.isalpha() for char in stripped)
@@ -538,8 +983,28 @@ def looks_suspicious(text: str, confidence: float) -> bool:
     punctuation = sum(char in "'!?.,-:;" for char in stripped)
     weird = max(0, len(stripped) - alnum - punctuation - stripped.count(" "))
     repeated = bool(re.search(r"(.)\1{3,}", stripped))
+    clean_latin = _looks_like_clean_latin_phrase(
+        stripped,
+        alpha,
+        digits,
+        weird,
+    ) or _looks_like_clean_latin_word(stripped, alpha, digits, weird)
+    latin_words = [
+        token.strip("'")
+        for token in re.findall(r"[A-Za-z']+", stripped)
+        if any(char.isalpha() for char in token)
+    ]
+    long_clean_latin_phrase = clean_latin and len(latin_words) >= 6 and alpha >= 24
 
-    if confidence < 0.55:
+    if confidence < 0.35:
+        if _is_trusted_very_low_confidence_phrase(stripped):
+            return False
+        if confidence >= 0.25 and long_clean_latin_phrase:
+            return False
+        if confidence >= 0.28 and clean_latin:
+            return False
+        return True
+    if confidence < 0.55 and not clean_latin:
         return True
     if alnum == 0:
         return True
@@ -598,19 +1063,19 @@ def classify_text_type(text: str, bbox: list[int], page_width: int) -> str:
 
 def default_style() -> dict:
     return {
-        "fonte": "KOMIKAX_.ttf",
+        "fonte": "ComicNeue-Bold.ttf",
         "tamanho": 16,
-        "cor": "#FFFFFF",
+        "cor": "#000000",
         "cor_gradiente": [],
-        "contorno": "#000000",
-        "contorno_px": 2,
+        "contorno": "",
+        "contorno_px": 0,
         "glow": False,
         "glow_cor": "",
         "glow_px": 0,
         "sombra": False,
         "sombra_cor": "",
         "sombra_offset": [0, 0],
-        "bold": False,
+        "bold": True,
         "italico": False,
         "rotacao": 0,
         "alinhamento": "center",

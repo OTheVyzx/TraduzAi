@@ -46,6 +46,8 @@ pub fn run() {
             commands::project::set_layer_visibility,
             commands::project::update_mask_region,
             commands::project::update_brush_region,
+            commands::project::update_recovery_region,
+            commands::project::update_reinpaint_region,
             commands::project::write_mask_from_png,
             commands::project::export_project,
             commands::project::export_page_psd,

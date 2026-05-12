@@ -17,6 +17,8 @@ import {
   Bold,
   Italic,
   ChevronDown,
+  RotateCcw,
+  RotateCw,
 } from "lucide-react";
 import { useEditorStore } from "../../../lib/stores/editorStore";
 import { BUNDLE_FONTS } from "../../../lib/fonts";
@@ -130,6 +132,16 @@ function NumInput({
   );
 }
 
+function clampRotation(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(-180, Math.min(180, Math.round(value)));
+}
+
+function colorInputValue(value: unknown, fallback: string) {
+  const color = typeof value === "string" ? value.trim() : "";
+  return /^#[0-9a-fA-F]{6}$/.test(color) ? color : fallback;
+}
+
 export function TypesettingBar() {
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   const currentPage = useEditorStore((s) => s.currentPage);
@@ -142,21 +154,22 @@ export function TypesettingBar() {
   const edit = pendingEdits[selectedLayerId];
   const estilo = edit?.estilo ? { ...selectedLayer.estilo, ...edit.estilo } : (selectedLayer.estilo ?? {});
 
-  const fonte = estilo.fonte ?? "CCDaveGibbonsLower W00 Regular.ttf";
+  const fonte = estilo.fonte ?? "ComicNeue-Bold.ttf";
   const tamanho = estilo.tamanho ?? 28;
-  const cor = estilo.cor ?? "#000000";
+  const cor = colorInputValue(estilo.cor, "#000000");
   const alinhamento = estilo.alinhamento ?? "center";
-  const bold = estilo.bold ?? false;
+  const bold = estilo.bold ?? true;
   const italico = estilo.italico ?? false;
   const contornoPx = estilo.contorno_px ?? 0;
-  const contornoCor = estilo.contorno ?? "#000000";
+  const contornoCor = colorInputValue(estilo.contorno, "#000000");
   const glow = estilo.glow ?? false;
-  const glowCor = estilo.glow_cor ?? "#FFFFFF";
+  const glowCor = colorInputValue(estilo.glow_cor, "#FFFFFF");
   const glowPx = estilo.glow_px ?? 0;
   const sombra = estilo.sombra ?? false;
-  const sombraCor = estilo.sombra_cor ?? "#000000";
+  const sombraCor = colorInputValue(estilo.sombra_cor, "#000000");
   const sombraOffsetX = estilo.sombra_offset?.[0] ?? 2;
   const sombraOffsetY = estilo.sombra_offset?.[1] ?? 2;
+  const rotacao = clampRotation(Number(estilo.rotacao ?? 0));
 
   return (
     <div className="flex items-center gap-1 border-b border-border bg-bg-secondary/80 px-3 py-1 overflow-x-auto overflow-y-visible">
@@ -200,6 +213,44 @@ export function TypesettingBar() {
           title="Aumentar tamanho"
         >
           +
+        </button>
+      </div>
+
+      <div className="h-4 w-px bg-border mx-0.5 shrink-0" />
+
+      {/* Rotacao */}
+      <div className="flex items-center gap-0.5 rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+        <button
+          onClick={() => updateEstilo(selectedLayerId, { rotacao: clampRotation(rotacao - 15) })}
+          className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary"
+          title="Girar -15 graus"
+        >
+          <RotateCcw size={12} />
+        </button>
+        <input
+          type="number"
+          value={rotacao}
+          min={-180}
+          max={180}
+          title="Rotacao"
+          onChange={(e) => updateEstilo(selectedLayerId, { rotacao: clampRotation(Number(e.target.value)) })}
+          className="h-6 w-12 rounded-md border border-border bg-bg-tertiary/60 text-center text-[11px] text-text-primary focus:border-brand/40 focus:outline-none [appearance:textfield]"
+        />
+        <button
+          onClick={() => updateEstilo(selectedLayerId, { rotacao: 0 })}
+          className={`h-6 w-6 rounded-md text-[10px] font-semibold transition-smooth ${
+            rotacao === 0 ? "bg-brand/15 text-brand" : "text-text-muted hover:bg-white/[0.04] hover:text-text-primary"
+          }`}
+          title="Zerar rotacao"
+        >
+          0
+        </button>
+        <button
+          onClick={() => updateEstilo(selectedLayerId, { rotacao: clampRotation(rotacao + 15) })}
+          className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary"
+          title="Girar +15 graus"
+        >
+          <RotateCw size={12} />
         </button>
       </div>
 

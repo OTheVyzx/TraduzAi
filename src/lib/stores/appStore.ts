@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { sanitizeFavoriteWorks, upsertFavoriteWork } from "../favoriteWorks";
 import type { WorkContext } from "../workContext";
 
-export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "rendered";
+export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" | "rendered";
 
 export interface TextLayerStyle {
   fonte: string;
@@ -34,6 +34,7 @@ export interface QaAction {
 export interface TextEntry {
   id: string;
   kind?: "text";
+  style_origin?: "auto" | "editor" | "legacy" | "legacy_auto";
   source_bbox?: [number, number, number, number];
   layout_bbox?: [number, number, number, number];
   render_bbox?: [number, number, number, number] | null;
@@ -85,11 +86,16 @@ export interface InpaintBlock {
   confidence?: number;
 }
 
+export interface EditorPageCache {
+  inpaint?: string | null;
+}
+
 export interface PageData {
   numero: number;
   arquivo_original: string;
   arquivo_traduzido: string;
   image_layers?: Partial<Record<ImageLayerKey, ImageLayer>>;
+  editor_cache?: EditorPageCache;
   inpaint_blocks?: InpaintBlock[];
   text_layers: TextEntry[];
   textos: TextEntry[];
@@ -125,6 +131,7 @@ export interface WorkContextSummary {
   glossary_loaded: boolean;
   glossary_entries_count: number;
   internet_context_loaded?: boolean;
+  cover_url?: string;
   risk_level: "high" | "medium" | "low";
   user_ignored_warning: boolean;
 }
@@ -201,7 +208,38 @@ export interface PipelineTimeEstimate {
   hardware_summary: string;
 }
 
-export type RecentProject = { id: string; obra: string; capitulo: number; pages: number; date: string; status: string };
+export type RecentProject = {
+  id: string;
+  obra: string;
+  capitulo: number;
+  pages: number;
+  date: string;
+  status: string;
+  project_path?: string;
+  output_path?: string;
+};
+
+export interface BatchCompletionChapter {
+  id: string;
+  obra: string;
+  capitulo: number;
+  pages: number;
+  project_path: string;
+  output_path: string;
+  first_page_path: string | null;
+  cover_url: string | null;
+  paginas: PageData[];
+}
+
+export interface BatchCompletionSummary {
+  id: string;
+  obra: string;
+  total_chapters: number;
+  total_pages: number;
+  elapsed_seconds: number;
+  completed_at: string;
+  chapters: BatchCompletionChapter[];
+}
 
 export type PipelineLogLevel = "info" | "step" | "progress" | "error" | "success";
 
@@ -225,19 +263,46 @@ function sanitizeRecentProjects(value: unknown): RecentProject[] {
       const candidate = item as Partial<RecentProject>;
       return typeof candidate.id === "string";
     })
-    .map((item) => ({
-      id: item.id,
-      obra: typeof item.obra === "string" ? item.obra : "Projeto sem nome",
-      capitulo: typeof item.capitulo === "number" ? item.capitulo : 1,
-      pages: typeof item.pages === "number" ? item.pages : 0,
-      date: typeof item.date === "string" ? item.date : new Date(0).toISOString(),
-      status: typeof item.status === "string" ? item.status : "done",
-    }))
+    .map((item) => {
+      const projectPath =
+        typeof item.project_path === "string" && item.project_path.trim()
+          ? item.project_path.trim().replace(/\\/g, "/")
+          : undefined;
+      const outputPath =
+        typeof item.output_path === "string" && item.output_path.trim()
+          ? item.output_path.trim().replace(/\\/g, "/")
+          : undefined;
+
+      return {
+        id: item.id,
+        obra: typeof item.obra === "string" ? item.obra : "Projeto sem nome",
+        capitulo: typeof item.capitulo === "number" ? item.capitulo : 1,
+        pages: typeof item.pages === "number" ? item.pages : 0,
+        date: typeof item.date === "string" ? item.date : new Date(0).toISOString(),
+        status: typeof item.status === "string" ? item.status : "done",
+        ...(projectPath ? { project_path: projectPath } : {}),
+        ...(outputPath ? { output_path: outputPath } : {}),
+      };
+    })
     .filter((item) => !(item.obra === "Projeto sem nome" && item.pages <= 1));
 
   const deduped: RecentProject[] = [];
   for (const item of recent) {
     if (deduped.some((existing) => existing.id === item.id)) continue;
+    const itemPath = (item.project_path ?? item.output_path ?? "").toLocaleLowerCase("pt-BR");
+    const itemMeta = `${item.obra.toLocaleLowerCase("pt-BR")}::${item.capitulo}::${item.pages}`;
+    if (
+      deduped.some((existing) => {
+        const existingPath = (existing.project_path ?? existing.output_path ?? "").toLocaleLowerCase("pt-BR");
+        const existingMeta = `${existing.obra.toLocaleLowerCase("pt-BR")}::${existing.capitulo}::${existing.pages}`;
+        return (
+          (itemPath && existingPath && existingPath === itemPath) ||
+          ((!itemPath || !existingPath) && existingMeta === itemMeta)
+        );
+      })
+    ) {
+      continue;
+    }
     deduped.push(item);
   }
   return deduped.slice(0, 12);
@@ -264,10 +329,8 @@ interface AppState {
   gpuAvailable: boolean;
   gpuName: string;
   modelsReady: boolean;
-  ollamaRunning: boolean;
-  ollamaModels: string[];
-  ollamaHasTranslator: boolean;
   batchSources: string[];
+  batchCompletion: BatchCompletionSummary | null;
   pipelineLog: PipelineLogEntry[];
 
   setProject: (project: Project | null) => void;
@@ -280,8 +343,9 @@ interface AppState {
   useFreePages: (pages: number) => void;
   setGpu: (available: boolean, name: string) => void;
   setModelsReady: (ready: boolean) => void;
-  setOllamaStatus: (running: boolean, models: string[], hasTranslator: boolean) => void;
   setBatchSources: (sources: string[]) => void;
+  setBatchCompletion: (summary: BatchCompletionSummary | null) => void;
+  clearBatchCompletion: () => void;
   addRecentProject: (p: RecentProject) => void;
   removeRecentProject: (id: string) => void;
   addFavoriteWork: (title: string) => void;
@@ -329,13 +393,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   gpuAvailable: true,
   gpuName: "Verificando CUDA...",
   modelsReady: false,
-  ollamaRunning: false,
-  ollamaModels: [],
-  ollamaHasTranslator: false,
   batchSources: [],
+  batchCompletion: null,
   pipelineLog: [],
 
-  setProject: (project) => set({ project, pipeline: null, setupEstimate: null, pipelineLog: [] }),
+  setProject: (project) => set({ project, pipeline: null, setupEstimate: null, pipelineLog: [], batchCompletion: null }),
   updateProject: (updates) =>
     set((s) => ({
       project: s.project ? { ...s.project, ...updates } : null,
@@ -358,9 +420,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ weeklyFreeUsed: s.weeklyFreeUsed + pages })),
   setGpu: (available, name) => set({ gpuAvailable: available, gpuName: name }),
   setModelsReady: (ready) => set({ modelsReady: ready }),
-  setOllamaStatus: (ollamaRunning, ollamaModels, ollamaHasTranslator) =>
-    set({ ollamaRunning, ollamaModels, ollamaHasTranslator }),
-  setBatchSources: (batchSources) => set({ batchSources }),
+  setBatchSources: (batchSources) =>
+    set({
+      batchSources,
+      ...(batchSources.length > 0 ? { batchCompletion: null } : {}),
+    }),
+  setBatchCompletion: (batchCompletion) => set({ batchCompletion }),
+  clearBatchCompletion: () => set({ batchCompletion: null }),
   addRecentProject: (p) => {
     const updated = sanitizeRecentProjects([p, ...get().recentProjects]);
     persistRecentProjects(updated);

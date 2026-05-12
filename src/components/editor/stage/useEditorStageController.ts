@@ -1,15 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
-import { readFile } from "@tauri-apps/plugin-fs";
-import { getRenderPreviewStateForPage, useEditorStore } from "../../../lib/stores/editorStore";
-import type { TextEntry } from "../../../lib/stores/appStore";
-import { displayImagePathForMode, isBitmapInspectionLayer, isFaithfulPreviewMode } from "./renderModeUtils";
+import { bitmapCache } from "../../../lib/editorHistory";
+import { loadImageSource } from "../../../lib/imageSource";
+import {
+  getRenderPreviewStateForPage,
+  useEditorStore,
+  type TextTransformSnapshot,
+} from "../../../lib/stores/editorStore";
+import { useAppStore, type PageData, type TextEntry } from "../../../lib/stores/appStore";
+import { createBitmapStrokePreviewOnCanvas, encodeDataUrl } from "./bitmapStrokePreview";
+import {
+  applyInpaintCacheStrokeToCanvas,
+  createInpaintCacheStrokePreviewPatch,
+  type InpaintCacheStrokePreviewPatch,
+} from "./inpaintCacheComposite";
+import {
+  applyRecoveryStrokeToCanvas,
+  createRecoveryStrokePreviewPatch,
+  type RecoveryStrokePreviewPatch,
+} from "./recoveryComposite";
+import { displayImagePathForMode, isFaithfulPreviewMode, originalImagePath } from "./renderModeUtils";
 import { mergePendingTextEntry } from "./textLayerStyleUtils";
 
-function isE2E() {
-  const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
-  return (meta.env?.VITE_E2E ?? "") === "1";
-}
+const EMPTY_PAGES: PageData[] = [];
 
 function useObjectUrl(path: string | null | undefined, type = "image/png", version = 0) {
   const [src, setSrc] = useState<string | null>(null);
@@ -20,19 +33,17 @@ function useObjectUrl(path: string | null | undefined, type = "image/png", versi
       return;
     }
 
-    if (isE2E() || path.startsWith("data:") || path.startsWith("/") || /^https?:\/\//.test(path)) {
-      setSrc(path);
-      return;
-    }
-
     let cancelled = false;
-    let objectUrl: string | null = null;
+    let revokeSource: (() => void) | null = null;
 
-    readFile(path)
-      .then((bytes) => {
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(new Blob([bytes], { type }));
-        setSrc(objectUrl);
+    loadImageSource(path, type, version)
+      .then((loaded) => {
+        if (cancelled) {
+          loaded.revoke?.();
+          return;
+        }
+        revokeSource = loaded.revoke ?? null;
+        setSrc(loaded.src);
       })
       .catch((error) => {
         console.error("Falha ao carregar imagem do editor:", error);
@@ -41,9 +52,9 @@ function useObjectUrl(path: string | null | undefined, type = "image/png", versi
 
     return () => {
       cancelled = true;
-      if (objectUrl) {
-        const url = objectUrl;
-        window.setTimeout(() => URL.revokeObjectURL(url), 100);
+      if (revokeSource) {
+        const revoke = revokeSource;
+        window.setTimeout(revoke, 100);
       }
     };
   }, [path, type, version]);
@@ -76,31 +87,38 @@ function useImageElement(src: string | null) {
   return { image, size };
 }
 
+function preventContextMenu(event: MouseEvent) {
+  event.preventDefault();
+}
+
 export function useEditorStageController() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const projectPages = useAppStore((state) => state.project?.paginas ?? EMPTY_PAGES);
   const currentPage = useEditorStore((state) => state.currentPage);
+  const currentPageIndex = useEditorStore((state) => state.currentPageIndex);
   const viewMode = useEditorStore((state) => state.viewMode);
   const toolMode = useEditorStore((state) => state.toolMode);
   const showOverlays = useEditorStore((state) => state.showOverlays);
   const brushSize = useEditorStore((state) => state.brushSize);
+  const brushColor = useEditorStore((state) => state.brushColor);
+  const brushOpacity = useEditorStore((state) => state.brushOpacity);
+  const brushHardness = useEditorStore((state) => state.brushHardness);
   const zoom = useEditorStore((state) => state.zoom);
   const panOffset = useEditorStore((state) => state.panOffset);
   const lastRetypesetTime = useEditorStore((state) => state.lastRetypesetTime);
   const bitmapLayerVersions = useEditorStore((state) => state.bitmapLayerVersions);
   const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
-  const selectedImageLayerKey = useEditorStore((state) => state.selectedImageLayerKey);
   const hoveredLayerId = useEditorStore((state) => state.hoveredLayerId);
   const pendingEdits = useEditorStore((state) => state.pendingEdits);
   const currentPageKey = useEditorStore((state) => state.currentPageKey());
   const renderPreviewCacheByPageKey = useEditorStore((state) => state.renderPreviewCacheByPageKey);
 
   const selectLayer = useEditorStore((state) => state.selectLayer);
-  const selectImageLayer = useEditorStore((state) => state.selectImageLayer);
   const hoverLayer = useEditorStore((state) => state.hoverLayer);
-  const setZoom = useEditorStore((state) => state.setZoom);
   const setPan = useEditorStore((state) => state.setPan);
-  const setWorkingBbox = useEditorStore((state) => state.setWorkingBbox);
-  const recordEditorCommand = useEditorStore((state) => state.recordEditorCommand);
+  const setBrushSize = useEditorStore((state) => state.setBrushSize);
+  const commitTextTransform = useEditorStore((state) => state.commitTextTransform);
+  const executeEditorCommand = useEditorStore((state) => state.executeEditorCommand);
   const createTextLayer = useEditorStore((state) => state.createTextLayer);
   const applyBitmapStroke = useEditorStore((state) => state.applyBitmapStroke);
   // Fase 8 — Lasso
@@ -116,15 +134,30 @@ export function useEditorStageController() {
     current: { x: number; y: number };
   } | null>(null);
   const [paintStroke, setPaintStroke] = useState<[number, number][]>([]);
+  const [recoveryPreviewPatches, setRecoveryPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
+  const [reinpaintPreviewPatches, setReinpaintPreviewPatches] = useState<InpaintCacheStrokePreviewPatch[]>([]);
   const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null);
+  const [cursorViewportPoint, setCursorViewportPoint] = useState<{ x: number; y: number } | null>(null);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   // Ref para garantir acesso ao finishPaintStroke mais recente sem criar stale closure
   const finishPaintStrokeRef = useRef<(() => Promise<void>) | null>(null);
+  const recoveryPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const bitmapPersistQueueRef = useRef<Partial<Record<"brush" | "mask", Promise<void>>>>({});
+  const activeRecoveryPreviewIdsRef = useRef<Set<string>>(new Set());
+  const activeReinpaintPreviewIdsRef = useRef<Set<string>>(new Set());
+  const bitmapWorkingCanvasRef = useRef<Partial<Record<"brush" | "mask", HTMLCanvasElement>>>({});
+  const recoveryWorkingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const reinpaintWorkingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sessionInpaintCacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [panSession, setPanSession] = useState<{
     startX: number;
     startY: number;
     originX: number;
     originY: number;
+  } | null>(null);
+  const [brushSizeDragSession, setBrushSizeDragSession] = useState<{
+    startX: number;
+    startSize: number;
   } | null>(null);
 
   useEffect(() => {
@@ -139,6 +172,21 @@ export function useEditorStageController() {
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    setRecoveryPreviewPatches([]);
+    setReinpaintPreviewPatches([]);
+    bitmapWorkingCanvasRef.current = {};
+    bitmapPersistQueueRef.current = {};
+    recoveryWorkingCanvasRef.current = null;
+    reinpaintWorkingCanvasRef.current = null;
+    sessionInpaintCacheCanvasRef.current = null;
+  }, [currentPageKey]);
+
+  useEffect(() => {
+    recoveryWorkingCanvasRef.current = null;
+    reinpaintWorkingCanvasRef.current = null;
+  }, [bitmapLayerVersions.inpaint, currentPage?.image_layers?.inpaint?.path]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -200,6 +248,24 @@ export function useEditorStageController() {
     };
   }, [panSession, setPan]);
 
+  useEffect(() => {
+    if (!brushSizeDragSession) return;
+    const handleMouseMove = (event: MouseEvent) => {
+      event.preventDefault();
+      const delta = Math.round((event.clientX - brushSizeDragSession.startX) / 2);
+      setBrushSize(brushSizeDragSession.startSize + delta);
+    };
+    const handleMouseUp = () => setBrushSizeDragSession(null);
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    window.addEventListener("contextmenu", preventContextMenu);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("contextmenu", preventContextMenu);
+    };
+  }, [brushSizeDragSession, setBrushSize]);
+
   // Ref para commitLasso mais recente (evita stale closure no event listener)
   const commitLassoRef = useRef<((pts: Array<[number, number]>) => Promise<void>) | null>(null);
 
@@ -217,33 +283,42 @@ export function useEditorStageController() {
 
 
   useEffect(() => {
-    const node = containerRef.current;
-    if (!node) return;
     const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      const node = containerRef.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      const withinStage =
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom;
+      if (!withinStage) return;
+
       event.preventDefault();
-      if (event.ctrlKey || event.metaKey) {
-        setZoom(zoom + (event.deltaY > 0 ? -0.12 : 0.12));
-        return;
-      }
-      setPan({
-        x: panOffset.x - event.deltaX * 0.65,
-        y: panOffset.y - event.deltaY * 0.65,
-      });
+      const state = useEditorStore.getState();
+      state.setZoom(state.zoom + (event.deltaY > 0 ? -0.12 : 0.12));
     };
-    node.addEventListener("wheel", handleWheel, { passive: false });
-    return () => node.removeEventListener("wheel", handleWheel);
-  }, [panOffset.x, panOffset.y, setPan, setZoom, zoom]);
+    window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => window.removeEventListener("wheel", handleWheel, true);
+  }, []);
 
   const renderPreviewState = useMemo(
     () => getRenderPreviewStateForPage(currentPageKey, currentPage, renderPreviewCacheByPageKey),
     [currentPage, currentPageKey, renderPreviewCacheByPageKey],
   );
   const displayImagePath = useMemo(
-    () => displayImagePathForMode(currentPage, viewMode, renderPreviewState, selectedImageLayerKey),
-    [currentPage, renderPreviewState, selectedImageLayerKey, viewMode],
+    () => displayImagePathForMode(currentPage, viewMode, renderPreviewState),
+    [currentPage, renderPreviewState, viewMode],
   );
 
+  const originalImageSrc = useObjectUrl(originalImagePath(currentPage), "image/png", 0);
   const baseImageSrc = useObjectUrl(displayImagePath, "image/png", lastRetypesetTime);
+  const inpaintCacheSrc = useObjectUrl(
+    currentPage?.editor_cache?.inpaint ?? null,
+    "image/png",
+    bitmapLayerVersions.inpaint ?? 0,
+  );
   // Usar versão dedicada por camada para garantir re-load imediato após stroke
   const maskOverlaySrc = useObjectUrl(
     currentPage?.image_layers?.mask?.visible ? currentPage.image_layers.mask.path : null,
@@ -255,23 +330,129 @@ export function useEditorStageController() {
     "image/png",
     bitmapLayerVersions.brush ?? 0,
   );
-
   const baseImage = useImageElement(baseImageSrc);
+  const originalImage = useImageElement(originalImageSrc);
+  const inpaintCacheImage = useImageElement(inpaintCacheSrc);
   const maskImage = useImageElement(maskOverlaySrc);
   const brushImage = useImageElement(brushOverlaySrc);
+
+  const bitmapTargetForTool = (mode: typeof toolMode) => {
+    const state = useEditorStore.getState();
+    if (mode === "repairBrush") return "recovery" as const;
+    if (mode === "reinpaintBrush") return "reinpaint" as const;
+    if (mode === "brush") return "brush" as const;
+    if (mode === "mask") return "mask" as const;
+    if (mode === "eraser") {
+      const target = state.eraserTarget ?? state.lastPaintedLayer;
+      if (target === "mask") return "mask" as const;
+      return "brush" as const;
+    }
+    return "brush" as const;
+  };
+
+  const getBitmapWorkingCanvas = (layerKey: "brush" | "mask") => {
+    const existing = bitmapWorkingCanvasRef.current[layerKey];
+    if (existing?.width === baseImage.size.width && existing.height === baseImage.size.height) {
+      return existing;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = baseImage.size.width;
+    canvas.height = baseImage.size.height;
+    const ctx = canvas.getContext("2d");
+    const image = layerKey === "brush" ? brushImage.image : maskImage.image;
+    if (ctx && image?.naturalWidth && image?.naturalHeight) {
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    }
+    bitmapWorkingCanvasRef.current[layerKey] = canvas;
+    return canvas;
+  };
+
+  const getRecoveryWorkingCanvas = () => {
+    const existing = recoveryWorkingCanvasRef.current;
+    if (existing?.width === baseImage.size.width && existing.height === baseImage.size.height) {
+      return existing;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = baseImage.size.width;
+    canvas.height = baseImage.size.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx && baseImage.image?.naturalWidth && baseImage.image?.naturalHeight) {
+      ctx.drawImage(baseImage.image, 0, 0, canvas.width, canvas.height);
+    }
+    recoveryWorkingCanvasRef.current = canvas;
+    return canvas;
+  };
+
+  const rememberInpaintCacheSource = () => {
+    if (sessionInpaintCacheCanvasRef.current || !baseImage.image?.naturalWidth || !baseImage.image.naturalHeight) {
+      return sessionInpaintCacheCanvasRef.current;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = baseImage.size.width;
+    canvas.height = baseImage.size.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(baseImage.image, 0, 0, canvas.width, canvas.height);
+    sessionInpaintCacheCanvasRef.current = canvas;
+    return canvas;
+  };
+
+  const getInpaintCacheSource = () => {
+    if (inpaintCacheImage.image?.naturalWidth && inpaintCacheImage.image.naturalHeight) {
+      return inpaintCacheImage.image;
+    }
+    return sessionInpaintCacheCanvasRef.current;
+  };
+
+  const getReinpaintWorkingCanvas = () => {
+    const existing = reinpaintWorkingCanvasRef.current;
+    if (existing?.width === baseImage.size.width && existing.height === baseImage.size.height) {
+      return existing;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = baseImage.size.width;
+    canvas.height = baseImage.size.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx && baseImage.image?.naturalWidth && baseImage.image?.naturalHeight) {
+      ctx.drawImage(baseImage.image, 0, 0, canvas.width, canvas.height);
+    }
+    reinpaintWorkingCanvasRef.current = canvas;
+    return canvas;
+  };
 
   // Fallback DOM-level: garante que cursorPoint atualize mesmo quando os
   // eventos Konva não disparam (ex: entrar via canto, HMR). Procura o
   // <canvas> do Konva Stage dentro do container e usa seu rect.
   useEffect(() => {
-    if (toolMode !== "brush" && toolMode !== "repairBrush" && toolMode !== "eraser") {
+    if (toolMode !== "brush" && toolMode !== "repairBrush" && toolMode !== "reinpaintBrush" && toolMode !== "eraser") {
       setCursorPoint(null);
+      setCursorViewportPoint(null);
       return;
     }
     const node = containerRef.current;
     if (!node) return;
 
     const onMove = (event: MouseEvent) => {
+      const containerRect = node.getBoundingClientRect();
+      const viewportX = event.clientX - containerRect.left;
+      const viewportY = event.clientY - containerRect.top;
+      if (
+        viewportX < 0 ||
+        viewportY < 0 ||
+        viewportX > containerRect.width ||
+        viewportY > containerRect.height
+      ) {
+        if (paintStroke.length === 0) {
+          setCursorPoint(null);
+          setCursorViewportPoint(null);
+        }
+        return;
+      }
+      setCursorViewportPoint({ x: viewportX, y: viewportY });
+
       const stageCanvas = node.querySelector("canvas");
       if (!stageCanvas || !baseImage.size.width || !baseImage.size.height) return;
       const rect = stageCanvas.getBoundingClientRect();
@@ -291,11 +472,7 @@ export function useEditorStageController() {
 
   const stageScale = useMemo(() => {
     if (!baseImage.size.width || !baseImage.size.height || !containerSize.width || !containerSize.height) return 1;
-    const fit = Math.min(
-      (containerSize.width - 48) / baseImage.size.width,
-      (containerSize.height - 48) / baseImage.size.height,
-      1,
-    );
+    const fit = Math.min((containerSize.width - 48) / baseImage.size.width, 1);
     return Math.max(0.05, fit * zoom);
   }, [baseImage.size.height, baseImage.size.width, containerSize.height, containerSize.width, zoom]);
 
@@ -305,23 +482,17 @@ export function useEditorStageController() {
   );
 
   const faithfulPreview = isFaithfulPreviewMode(viewMode, renderPreviewState);
-  const bitmapInspection = isBitmapInspectionLayer(selectedImageLayerKey);
-  const translatedEditing = viewMode === "translated" && !faithfulPreview && !bitmapInspection;
+  const translatedEditing = viewMode === "translated" && !faithfulPreview;
   const selectedNodeName = selectedLayerId
     ? `text-layer-${selectedLayerId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
     : null;
 
-  const commitBbox = (entry: TextEntry, before: TextEntry["bbox"], after: TextEntry["bbox"]) => {
-    setWorkingBbox(currentPageKey, entry.id, after);
-    recordEditorCommand({
-      commandId: `edit-bbox-${crypto.randomUUID()}`,
-      pageKey: currentPageKey,
-      createdAt: Date.now(),
-      type: "edit-bbox",
-      layerId: entry.id,
-      before,
-      after,
-    });
+  const commitTextLayerTransform = (
+    entry: TextEntry,
+    before: TextTransformSnapshot,
+    after: TextTransformSnapshot,
+  ) => {
+    commitTextTransform(entry.id, before, after);
   };
 
   const beginPan = (clientX: number, clientY: number) => {
@@ -352,17 +523,15 @@ export function useEditorStageController() {
       if (!point) return;
       event.cancelBubble = true;
       selectLayer(null);
-      selectImageLayer(null);
       setBlockDraft({ start: point, current: point });
       return;
     }
 
-    if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") {
+    if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") {
       const point = pointFromStageEvent(event);
       if (!point) return;
       event.cancelBubble = true;
       selectLayer(null);
-      selectImageLayer(toolMode === "brush" ? "brush" : "mask");
       setPaintStroke([[point.x, point.y]]);
     }
 
@@ -371,7 +540,6 @@ export function useEditorStageController() {
       if (!point) return;
       event.cancelBubble = true;
       selectLayer(null);
-      selectImageLayer("mask");
 
       if (maskShape === "freehand") {
         // Inicia traço freehand
@@ -393,6 +561,13 @@ export function useEditorStageController() {
   };
 
   const handleStageMouseMove = (event: Konva.KonvaEventObject<MouseEvent>) => {
+    const containerRect = containerRef.current?.getBoundingClientRect();
+    if (containerRect && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser")) {
+      setCursorViewportPoint({
+        x: event.evt.clientX - containerRect.left,
+        y: event.evt.clientY - containerRect.top,
+      });
+    }
     const point = pointFromStageEvent(event);
     if (!point) return;
     if (blockDraft) {
@@ -415,20 +590,28 @@ export function useEditorStageController() {
       }
     }
     // Atualizar posição do cursor circular em modos de pintura
-    if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") {
+    if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") {
       setCursorPoint(point);
     }
   };
 
   const handleStageMouseEnter = (event: Konva.KonvaEventObject<MouseEvent>) => {
+    const containerRect = containerRef.current?.getBoundingClientRect();
+    if (containerRect && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser")) {
+      setCursorViewportPoint({
+        x: event.evt.clientX - containerRect.left,
+        y: event.evt.clientY - containerRect.top,
+      });
+    }
     const point = pointFromStageEvent(event);
-    if (point && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser")) {
+    if (point && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser")) {
       setCursorPoint(point);
     }
   };
 
   const handleStageMouseLeave = () => {
-    // Manter cursor visível enquanto está pintando (stroke ativo)
+    // Manter cursor visível enquanto está pintando (stroke ativo).
+    // O ponteiro visual continua via cursorViewportPoint mesmo fora da pagina.
     if (paintStroke.length === 0) setCursorPoint(null);
   };
 
@@ -446,12 +629,232 @@ export function useEditorStageController() {
 
   const finishPaintStroke = async () => {
     const stroke = paintStroke;
+    const strokeToolMode = toolMode;
+    const strokeBrushSize = brushSize;
+    const strokeBrushColor = brushColor;
+    const strokeBrushOpacity = brushOpacity;
+    const strokeBrushHardness = brushHardness;
     setPaintStroke([]);
     if (!baseImage.size.width || !baseImage.size.height || stroke.length === 0) return;
-    await applyBitmapStroke({
+    const pad = Math.max(1, Math.ceil(strokeBrushSize / 2) + 2);
+    const xs = stroke.map(([x]) => x);
+    const ys = stroke.map(([, y]) => y);
+    const dirty_bbox: [number, number, number, number] = [
+      Math.max(0, Math.floor(Math.min(...xs) - pad)),
+      Math.max(0, Math.floor(Math.min(...ys) - pad)),
+      Math.min(baseImage.size.width, Math.ceil(Math.max(...xs) + pad)),
+      Math.min(baseImage.size.height, Math.ceil(Math.max(...ys) + pad)),
+    ];
+    const payload = {
       width: baseImage.size.width,
       height: baseImage.size.height,
       strokes: [stroke],
+      dirty_bbox,
+    };
+
+    if (strokeToolMode === "repairBrush") {
+      rememberInpaintCacheSource();
+      const previewId = crypto.randomUUID();
+      activeRecoveryPreviewIdsRef.current.add(previewId);
+      let recoveryPngData: string | undefined;
+      let recoveryBeforeDataUrl: string | undefined;
+      if (baseImage.image && originalImage.image) {
+        const recoveryCanvas = getRecoveryWorkingCanvas();
+        recoveryBeforeDataUrl = recoveryCanvas.toDataURL("image/png");
+        recoveryPngData = applyRecoveryStrokeToCanvas(
+          recoveryCanvas,
+          originalImage.image,
+          stroke,
+          strokeBrushSize,
+        ) ?? undefined;
+      }
+
+      if (recoveryBeforeDataUrl && recoveryPngData) {
+        const commandId = `bitmap-${crypto.randomUUID()}`;
+        bitmapCache.set(commandId, {
+          pageKey: currentPageKey,
+          commandId,
+          before: encodeDataUrl(recoveryBeforeDataUrl),
+          after: encodeDataUrl(recoveryPngData),
+          byteLength: recoveryBeforeDataUrl.length + recoveryPngData.length,
+        });
+        executeEditorCommand({
+          commandId,
+          pageKey: currentPageKey,
+          createdAt: Date.now(),
+          type: "bitmap-stroke",
+          layerKey: "inpaint",
+          bbox: dirty_bbox,
+        });
+      } else if (originalImage.image) {
+        void createRecoveryStrokePreviewPatch(originalImage.image, stroke, strokeBrushSize, dirty_bbox)
+          .then((patch) => {
+            if (patch && activeRecoveryPreviewIdsRef.current.has(previewId)) {
+              setRecoveryPreviewPatches((patches) => [...patches, { ...patch, id: previewId }]);
+            }
+          })
+          .catch((error) => console.error("Erro ao criar preview local da recuperação:", error));
+      }
+
+      const persistRecoveryStroke = async () => {
+        try {
+          await applyBitmapStroke({
+            ...payload,
+            layerKey: "recovery",
+            erase: false,
+            brushSize: strokeBrushSize,
+            color: strokeBrushColor,
+            opacity: strokeBrushOpacity,
+            hardness: strokeBrushHardness,
+            pngData: recoveryPngData,
+            optimisticPath: recoveryPngData,
+          });
+          activeRecoveryPreviewIdsRef.current.delete(previewId);
+          window.setTimeout(() => {
+            setRecoveryPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
+          }, 500);
+          bumpBitmapLayerVersion("inpaint");
+        } catch (error) {
+          activeRecoveryPreviewIdsRef.current.delete(previewId);
+          setRecoveryPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
+          console.error("Erro ao persistir pincel de recuperação:", error);
+        }
+      };
+
+      recoveryPersistQueueRef.current = recoveryPersistQueueRef.current
+        .catch(() => undefined)
+        .then(persistRecoveryStroke);
+      void recoveryPersistQueueRef.current;
+      return;
+    }
+
+    if (strokeToolMode === "reinpaintBrush") {
+      const previewId = crypto.randomUUID();
+      activeReinpaintPreviewIdsRef.current.add(previewId);
+      const inpaintCacheSource = getInpaintCacheSource();
+      let reinpaintPngData: string | undefined;
+      let reinpaintBeforeDataUrl: string | undefined;
+
+      if (baseImage.image && inpaintCacheSource) {
+        const reinpaintCanvas = getReinpaintWorkingCanvas();
+        reinpaintBeforeDataUrl = reinpaintCanvas.toDataURL("image/png");
+        reinpaintPngData = applyInpaintCacheStrokeToCanvas(
+          reinpaintCanvas,
+          inpaintCacheSource,
+          stroke,
+          strokeBrushSize,
+        ) ?? undefined;
+      }
+
+      if (reinpaintBeforeDataUrl && reinpaintPngData) {
+        const commandId = `bitmap-${crypto.randomUUID()}`;
+        bitmapCache.set(commandId, {
+          pageKey: currentPageKey,
+          commandId,
+          before: encodeDataUrl(reinpaintBeforeDataUrl),
+          after: encodeDataUrl(reinpaintPngData),
+          byteLength: reinpaintBeforeDataUrl.length + reinpaintPngData.length,
+        });
+        executeEditorCommand({
+          commandId,
+          pageKey: currentPageKey,
+          createdAt: Date.now(),
+          type: "bitmap-stroke",
+          layerKey: "inpaint",
+          bbox: dirty_bbox,
+        });
+      } else if (inpaintCacheSource) {
+        void createInpaintCacheStrokePreviewPatch(inpaintCacheSource, stroke, strokeBrushSize, dirty_bbox)
+          .then((patch) => {
+            if (patch && activeReinpaintPreviewIdsRef.current.has(previewId)) {
+              setReinpaintPreviewPatches((patches) => [...patches, { ...patch, id: previewId }]);
+            }
+          })
+          .catch((error) => console.error("Erro ao criar preview local do reinpaint:", error));
+      }
+
+      const persistReinpaintStroke = async () => {
+        try {
+          await applyBitmapStroke({
+            ...payload,
+            layerKey: "reinpaint",
+            erase: false,
+            brushSize: strokeBrushSize,
+            color: strokeBrushColor,
+            opacity: strokeBrushOpacity,
+            hardness: strokeBrushHardness,
+            pngData: reinpaintPngData,
+            optimisticPath: reinpaintPngData,
+          });
+          activeReinpaintPreviewIdsRef.current.delete(previewId);
+          window.setTimeout(() => {
+            setReinpaintPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
+          }, 500);
+          bumpBitmapLayerVersion("inpaint");
+        } catch (error) {
+          activeReinpaintPreviewIdsRef.current.delete(previewId);
+          setReinpaintPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
+          console.error("Erro ao persistir pincel de reinpaint:", error);
+        }
+      };
+
+      recoveryPersistQueueRef.current = recoveryPersistQueueRef.current
+        .catch(() => undefined)
+        .then(persistReinpaintStroke);
+      void recoveryPersistQueueRef.current;
+      return;
+    }
+
+    const layerKey = bitmapTargetForTool(strokeToolMode);
+    if (layerKey === "recovery" || layerKey === "reinpaint") return;
+    const erase = strokeToolMode === "eraser";
+    const workingCanvas = getBitmapWorkingCanvas(layerKey);
+    const preview = createBitmapStrokePreviewOnCanvas(workingCanvas, {
+      layerKey,
+      stroke,
+      brushSize: strokeBrushSize,
+      color: strokeBrushColor,
+      opacity: strokeBrushOpacity,
+      erase,
+    });
+
+    if (preview) {
+      const commandId = `bitmap-${crypto.randomUUID()}`;
+      bitmapCache.set(commandId, {
+        pageKey: currentPageKey,
+        commandId,
+        before: encodeDataUrl(preview.beforeDataUrl),
+        after: encodeDataUrl(preview.afterDataUrl),
+        byteLength: preview.beforeDataUrl.length + preview.afterDataUrl.length,
+      });
+      executeEditorCommand({
+        commandId,
+        pageKey: currentPageKey,
+        createdAt: Date.now(),
+        type: "bitmap-stroke",
+        layerKey: preview.layerKey,
+        bbox: dirty_bbox,
+      });
+    }
+
+    const persistBitmapStroke = async () => {
+      await applyBitmapStroke({
+        ...payload,
+        layerKey,
+        erase,
+        brushSize: strokeBrushSize,
+        color: strokeBrushColor,
+        opacity: strokeBrushOpacity,
+        hardness: strokeBrushHardness,
+        optimisticPath: preview?.afterDataUrl,
+      });
+    };
+
+    bitmapPersistQueueRef.current[layerKey] = (bitmapPersistQueueRef.current[layerKey] ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(persistBitmapStroke);
+    void bitmapPersistQueueRef.current[layerKey]?.catch((error) => {
+      console.error("Erro ao persistir pincel:", error);
     });
   };
 
@@ -500,7 +903,6 @@ export function useEditorStageController() {
         layer_key: "mask",
         op: maskOp,
       });
-      selectImageLayer("mask");
       bumpBitmapLayerVersion("mask");
     } catch (e) {
       console.error("[Lasso] Falha ao escrever máscara:", e);
@@ -541,6 +943,16 @@ export function useEditorStageController() {
   };
 
   const handleViewportMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.altKey && event.button === 2) {
+      event.preventDefault();
+      event.stopPropagation();
+      setBrushSizeDragSession({
+        startX: event.clientX,
+        startSize: useEditorStore.getState().brushSize,
+      });
+      return;
+    }
+
     if (event.button === 1 || (event.button === 0 && isSpacePressed)) {
       event.preventDefault();
       event.stopPropagation();
@@ -550,57 +962,80 @@ export function useEditorStageController() {
 
     if (event.target === event.currentTarget) {
       selectLayer(null);
-      selectImageLayer(null);
+    }
+  };
+
+  const handleViewportContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.altKey || brushSizeDragSession) {
+      event.preventDefault();
+      event.stopPropagation();
     }
   };
 
   const viewportCursor = panSession
     ? "grabbing"
+    : brushSizeDragSession
+      ? "ew-resize"
     : isSpacePressed
       ? "grab"
       : toolMode === "block" || toolMode === "mask"
         ? "crosshair"
-        : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser"
+        : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser"
           ? "none"
           : "default";
+
+  const pageTurn = null as null | {
+    direction: number;
+    progress: number;
+    targetPageNumber: number;
+    lowRes?: boolean;
+    committing?: boolean;
+    previewSrc?: string | null;
+    currentOffsetY?: number;
+  };
 
   return {
     containerRef,
     containerSize,
+    projectPages,
     currentPage,
+    currentPageIndex,
     viewMode,
     toolMode,
     showOverlays,
     brushSize,
+    zoom,
     panOffset,
+    pageTurn,
     panSession,
     viewportCursor,
     renderPreviewState,
     baseImage,
     maskImage,
     brushImage,
+    recoveryPreviewPatches,
+    reinpaintPreviewPatches,
     blockDraft,
     paintStroke,
     layers,
     selectedLayerId,
-    selectedImageLayerKey,
     hoveredLayerId,
     selectedNodeName,
     stageScale,
     faithfulPreview,
-    bitmapInspection,
     translatedEditing,
     selectLayer,
-    selectImageLayer,
     hoverLayer,
-    commitBbox,
+    commitTextLayerTransform,
     handleViewportMouseDown,
+    handleViewportContextMenu,
     handleStageMouseDown,
     handleStageMouseMove,
     handleStageMouseUp,
     handleStageMouseEnter,
     handleStageMouseLeave,
     cursorPoint,
+    cursorViewportPoint,
     // Fase 8 — Lasso
     maskInProgress,
     maskShape,

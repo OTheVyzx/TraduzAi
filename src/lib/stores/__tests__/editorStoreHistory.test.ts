@@ -108,6 +108,7 @@ describe("editorStore history working state", () => {
 
     expect(useEditorStore.getState().pendingEdits).toEqual({
       "layer-a": {
+        style_origin: "editor",
         estilo: {
           tamanho: 34,
         },
@@ -224,6 +225,53 @@ describe("editorStore history working state", () => {
 
     expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
     expect(useEditorStore.getState().getLayer(pageKey, "layer-b")?.locked).toBe(false);
+  });
+
+  it("records bbox and rotation transform as one undoable history command", () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+
+    expect(
+      useEditorStore.getState().commitTextTransform("layer-a", {
+        bbox: [0, 0, 100, 100],
+        rotacao: 0,
+      }, {
+        bbox: [10, 20, 140, 160],
+        rotacao: 15,
+      }),
+    ).toEqual({ ok: true });
+
+    expect(useEditorStore.getState().getLayer(pageKey, "layer-a")).toMatchObject({
+      bbox: [10, 20, 140, 160],
+      estilo: expect.objectContaining({ rotacao: 15 }),
+    });
+    expect(useEditorStore.getState().pendingEdits["layer-a"]).toEqual({
+      bbox: [10, 20, 140, 160],
+      style_origin: "editor",
+      estilo: { rotacao: 15 },
+    });
+    expect(useEditorStore.getState().historyByPageKey[pageKey].commands).toEqual([
+      expect.objectContaining({
+        type: "batch",
+        label: "Transformar texto",
+        commands: [
+          expect.objectContaining({ type: "edit-bbox" }),
+          expect.objectContaining({ type: "edit-estilo", touchedKeys: ["rotacao"] }),
+        ],
+      }),
+    ]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().getLayer(pageKey, "layer-a")).toMatchObject({
+      bbox: [0, 0, 100, 100],
+      estilo: expect.objectContaining({ rotacao: 0 }),
+    });
+    expect(useEditorStore.getState().pendingEdits).toEqual({});
+
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().getLayer(pageKey, "layer-a")).toMatchObject({
+      bbox: [10, 20, 140, 160],
+      estilo: expect.objectContaining({ rotacao: 15 }),
+    });
   });
 
   it("uses history-backed working state for public create, delete and visibility actions", async () => {

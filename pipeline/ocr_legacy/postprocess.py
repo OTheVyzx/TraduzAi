@@ -83,8 +83,9 @@ def fix_ocr_errors(text: str, **kwargs) -> str:
     if not text:
         return ""
 
-    for korean, latin in KOREAN_FIX.items():
-        text = text.replace(korean, latin)
+    if kwargs.get("idioma_origem") != "ko":
+        for korean, latin in KOREAN_FIX.items():
+            text = text.replace(korean, latin)
 
     text = re.sub(r"([A-Za-z])\1{2,}", r"\1\1", text)
     meaningful = re.sub(r"[\s\W]", "", text)
@@ -197,17 +198,17 @@ def default_style() -> dict:
     return {
         "fonte": "ComicNeue-Bold.ttf",
         "tamanho": 16,
-        "cor": "#FFFFFF",
+        "cor": "#000000",
         "cor_gradiente": [],
-        "contorno": "#000000",
-        "contorno_px": 2,
+        "contorno": "",
+        "contorno_px": 0,
         "glow": False,
         "glow_cor": "",
         "glow_px": 0,
         "sombra": False,
         "sombra_cor": "",
         "sombra_offset": [0, 0],
-        "bold": False,
+        "bold": True,
         "italico": False,
         "rotacao": 0,
         "alinhamento": "center",

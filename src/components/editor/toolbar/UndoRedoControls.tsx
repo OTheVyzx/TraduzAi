@@ -31,7 +31,10 @@ function labelForAction(cmd: ReturnType<typeof getTopAction>): string {
     case "create-layer": return "Criar camada";
     case "delete-layer": return "Excluir camada";
     case "reorder-layers": return "Reordenar camadas";
-    case "bitmap-stroke": return "Pincelada";
+    case "bitmap-stroke":
+      if (cmd.layerKey === "inpaint") return "Recuperacao";
+      if (cmd.layerKey === "mask") return "Mascara";
+      return "Pincel";
     case "toggle-visibility": return "Alternar visibilidade";
     case "toggle-lock": return "Alternar bloqueio";
     case "batch": return cmd.label;

@@ -123,6 +123,8 @@ pub struct PipelineWorkContextSummary {
     pub context_loaded: bool,
     pub glossary_loaded: bool,
     pub glossary_entries_count: u32,
+    #[serde(default)]
+    pub cover_url: String,
     pub risk_level: String,
     pub user_ignored_warning: bool,
 }
@@ -297,10 +299,6 @@ pub(crate) fn sidecar_env_overrides(_program: &str) -> Vec<(String, OsString)> {
     let mut envs = Vec::new();
     envs.push(("PYTHONIOENCODING".into(), OsString::from("utf-8")));
     envs.push(("PYTHONUTF8".into(), OsString::from("1")));
-    envs.push((
-        "TRADUZAI_PREFER_LOCAL_TRANSLATION".into(),
-        OsString::from("1"),
-    ));
     envs
 }
 
@@ -354,7 +352,6 @@ pub async fn start_pipeline(
         *cur = Some(pause_path.clone());
     }
 
-    let settings = crate::commands::settings::load_settings_sync(&app);
     let worker_path = get_vision_worker_path(&app).unwrap_or_default();
 
     let config_json = serde_json::to_string(&serde_json::json!({
@@ -372,7 +369,6 @@ pub async fn start_pipeline(
         "preset": config.preset,
         "models_dir": storage_paths.models.to_string_lossy(),
         "logs_dir": storage_paths.logs.to_string_lossy(),
-        "ollama_host": settings.ollama_host, "ollama_model": settings.ollama_model,
         "vision_worker_path": worker_path, "pause_file": pause_path.to_string_lossy()
     })).map_err(|e| e.to_string())?;
 
@@ -525,6 +521,10 @@ pub struct RenderPreviewConfig {
 pub struct ReinpaintConfig {
     pub project_path: String,
     pub page_index: u32,
+    #[serde(default)]
+    pub bbox: Option<[i64; 4]>,
+    #[serde(default)]
+    pub mask_path: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct ProcessBlockConfig {
@@ -532,6 +532,29 @@ pub struct ProcessBlockConfig {
     pub page_index: u32,
     pub block_id: String,
     pub mode: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageRegionConfig {
+    pub bbox: Option<[u32; 4]>,
+    pub mask_path: Option<String>,
+}
+
+fn append_page_region_args(cmd: &mut Command, region: Option<&PageRegionConfig>) {
+    let Some(region) = region else {
+        return;
+    };
+    if let Some(bbox) = region.bbox {
+        cmd.arg("--region-bbox")
+            .arg(format!("{},{},{},{}", bbox[0], bbox[1], bbox[2], bbox[3]));
+    }
+    if let Some(mask_path) = region
+        .mask_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        cmd.arg("--external-mask").arg(mask_path);
+    }
 }
 
 fn safe_render_preview_key(raw: &str) -> String {
@@ -644,7 +667,11 @@ fn format_pipeline_error(action: &str, base: &str, stderr: &str) -> String {
     } else {
         // Limita stderr a 4KB para evitar mensagens enormes na UI.
         let truncated = if trimmed.len() > 4096 {
-            format!("{}\n... (truncado, {} bytes total)", &trimmed[trimmed.len() - 4096..], trimmed.len())
+            format!(
+                "{}\n... (truncado, {} bytes total)",
+                &trimmed[trimmed.len() - 4096..],
+                trimmed.len()
+            )
         } else {
             trimmed.to_string()
         };
@@ -664,10 +691,7 @@ pub async fn retypeset_page(app: AppHandle, config: RetypesetConfig) -> Result<S
         .arg(pf.to_string_lossy().to_string())
         .arg(config.page_index.to_string());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    eprintln!(
-        "[EditorAction] start  retypeset page={}",
-        config.page_index
-    );
+    eprintln!("[EditorAction] start  retypeset page={}", config.page_index);
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "retypeset")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
@@ -865,7 +889,27 @@ pub async fn process_block(app: AppHandle, config: ProcessBlockConfig) -> Result
 
 #[tauri::command]
 pub async fn reinpaint_page(app: AppHandle, config: ReinpaintConfig) -> Result<String, String> {
-    let pf = resolve_project_json_path(&config.project_path)?;
+    let region = PageRegionConfig {
+        bbox: config.bbox.map(|bbox| {
+            [
+                bbox[0].max(0) as u32,
+                bbox[1].max(0) as u32,
+                bbox[2].max(0) as u32,
+                bbox[3].max(0) as u32,
+            ]
+        }),
+        mask_path: config.mask_path.clone(),
+    };
+    reinpaint_page_with_region(app, config.project_path, config.page_index, Some(region)).await
+}
+
+pub async fn reinpaint_page_with_region(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    region: Option<PageRegionConfig>,
+) -> Result<String, String> {
+    let pf = resolve_project_json_path(&project_path)?;
     let sidecar = get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
     if let Some(s) = &sidecar.script {
@@ -873,12 +917,10 @@ pub async fn reinpaint_page(app: AppHandle, config: ReinpaintConfig) -> Result<S
     }
     cmd.arg("--reinpaint-page")
         .arg(pf.to_string_lossy().to_string())
-        .arg(config.page_index.to_string());
+        .arg(page_index.to_string());
+    append_page_region_args(&mut cmd, region.as_ref());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
-    eprintln!(
-        "[EditorAction] start  inpaint page={}",
-        config.page_index
-    );
+    eprintln!("[EditorAction] start  inpaint page={}", page_index);
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "inpaint")?;
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
@@ -911,8 +953,13 @@ pub async fn reinpaint_page(app: AppHandle, config: ReinpaintConfig) -> Result<S
     }
     eprintln!(
         "[EditorAction] success inpaint page={} out={}",
-        config.page_index, out
+        page_index, out
     );
+    if let Err(error) =
+        crate::commands::project::clear_inpaint_cache_for_page(&pf, page_index as usize)
+    {
+        eprintln!("[EditorAction] warn   inpaint cache cleanup failed: {error}");
+    }
     Ok(out)
 }
 
@@ -921,6 +968,15 @@ pub async fn detect_page(
     app: AppHandle,
     project_path: String,
     page_index: u32,
+) -> Result<String, String> {
+    detect_page_with_region(app, project_path, page_index, None).await
+}
+
+pub async fn detect_page_with_region(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    region: Option<PageRegionConfig>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
     let sidecar = get_sidecar_info(&app)?;
@@ -931,6 +987,7 @@ pub async fn detect_page(
     cmd.arg("--detect-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
+    append_page_region_args(&mut cmd, region.as_ref());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  detect page={page_index}");
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "detect")?;
@@ -989,6 +1046,15 @@ pub async fn ocr_page(
     project_path: String,
     page_index: u32,
 ) -> Result<String, String> {
+    ocr_page_with_region(app, project_path, page_index, None).await
+}
+
+pub async fn ocr_page_with_region(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    region: Option<PageRegionConfig>,
+) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
     let sidecar = get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
@@ -998,6 +1064,7 @@ pub async fn ocr_page(
     cmd.arg("--ocr-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
+    append_page_region_args(&mut cmd, region.as_ref());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  ocr page={page_index}");
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "ocr")?;
@@ -1056,6 +1123,15 @@ pub async fn translate_page(
     project_path: String,
     page_index: u32,
 ) -> Result<String, String> {
+    translate_page_with_region(app, project_path, page_index, None).await
+}
+
+pub async fn translate_page_with_region(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    region: Option<PageRegionConfig>,
+) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
     let sidecar = get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
@@ -1065,6 +1141,7 @@ pub async fn translate_page(
     cmd.arg("--translate-page")
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
+    append_page_region_args(&mut cmd, region.as_ref());
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  translate page={page_index}");
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "translate")?;
@@ -1289,8 +1366,54 @@ pub async fn enrich_work_context(
 }
 
 #[tauri::command]
-pub async fn warmup_visual_stack(_app: AppHandle) -> Result<String, String> {
-    Ok("ready".into())
+pub async fn warmup_visual_stack(app: AppHandle) -> Result<String, String> {
+    {
+        let mut state = VISION_WORKER_WARMUP_STATE.lock().await;
+        match *state {
+            VisualWarmupState::Ready => return Ok("ready".into()),
+            VisualWarmupState::Running => return Ok("warming".into()),
+            VisualWarmupState::Idle => {
+                *state = VisualWarmupState::Running;
+            }
+        }
+    }
+
+    let result = async {
+        let worker_path = get_vision_worker_path(&app)?;
+        if worker_path.trim().is_empty() {
+            return Ok("ready:no-worker".to_string());
+        }
+        let storage = crate::storage::service_for_app(&app)?;
+        let paths = storage.ensure_base_dirs()?;
+        let runtime_root = paths
+            .models
+            .parent()
+            .map(|path| path.to_path_buf())
+            .unwrap_or_else(|| paths.root.clone());
+
+        let mut cmd = Command::new(&worker_path);
+        cmd.arg("--warmup")
+            .arg("--runtime-root")
+            .arg(runtime_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apply_sidecar_env(&mut cmd, &worker_path)?;
+        let status = cmd.status().await.map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok("ready".to_string())
+        } else {
+            Err(format!("vision worker warmup saiu com status {status}"))
+        }
+    }
+    .await;
+
+    let mut state = VISION_WORKER_WARMUP_STATE.lock().await;
+    *state = if result.is_ok() {
+        VisualWarmupState::Ready
+    } else {
+        VisualWarmupState::Idle
+    };
+    result
 }
 
 #[derive(Debug, Serialize)]
@@ -1331,7 +1454,9 @@ pub struct SystemProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_preview_paths, resolve_project_json_path, HardwareFacts};
+    use super::{
+        render_preview_paths, resolve_project_json_path, sidecar_env_overrides, HardwareFacts,
+    };
 
     #[test]
     fn resolve_project_json_path_accepts_directory() {
@@ -1366,6 +1491,17 @@ mod tests {
 
         assert!(override_path.ends_with("render-cache/preview/002-abc_123_unsafe.json"));
         assert!(output_path.ends_with("render-cache/preview/002-abc_123_unsafe.jpg"));
+    }
+
+    #[test]
+    fn sidecar_env_does_not_force_local_translation_by_default() {
+        let envs = sidecar_env_overrides("python");
+        let keys: Vec<&str> = envs.iter().map(|(key, _)| key.as_str()).collect();
+
+        assert!(keys.contains(&"PYTHONIOENCODING"));
+        assert!(keys.contains(&"PYTHONUTF8"));
+        assert!(!keys.contains(&"TRADUZAI_PREFER_LOCAL_TRANSLATION"));
+        assert!(!keys.contains(&"MANGATL_PREFER_LOCAL_TRANSLATION"));
     }
 
     #[test]

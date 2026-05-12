@@ -61,6 +61,8 @@ import {
 import { buildWorkMemorySummary } from "../lib/workMemory";
 import { buildOnboardingChecklist } from "../lib/onboarding";
 
+const SHOW_CONTEXT_ASSISTANT_UI = false;
+
 export function Setup() {
   const navigate = useNavigate();
   const {
@@ -92,6 +94,7 @@ export function Setup() {
   const [customPresets, setCustomPresets] = useState<ProjectPreset[]>([]);
   const [customPresetName, setCustomPresetName] = useState("");
   const [memoryStatus, setMemoryStatus] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const obraInputRef = useRef<HTMLInputElement | null>(null);
   const glossaryEditorRef = useRef<HTMLDivElement | null>(null);
 
@@ -196,6 +199,7 @@ export function Setup() {
     setSearchError("");
     try {
       const result = await enrichWorkContext(candidate);
+      const selectedCoverUrl = result.cover_url?.trim() || candidate.cover_url?.trim() || undefined;
       const internetResult: InternetContextResult = {
         title: result.title,
         synopsis: result.synopsis,
@@ -263,6 +267,7 @@ export function Setup() {
           title: result.title,
           context_quality: result.context_quality,
           internet_context_loaded: filteredInternetResult.internet_context_loaded,
+          cover_url: selectedCoverUrl,
         },
         glossaryCount,
       );
@@ -274,6 +279,7 @@ export function Setup() {
           title: result.title,
           context_quality: result.context_quality,
           internet_context_loaded: internetResult.internet_context_loaded,
+          cover_url: selectedCoverUrl,
         },
         savedGlossaryCount,
       );
@@ -607,6 +613,15 @@ export function Setup() {
   const onlineGlossaryCandidates = glossaryCandidates.filter(
     (candidate) => candidate.status !== "reviewed" && candidate.status !== "rejected",
   );
+  const hasPendingGlossarySuggestions = onlineGlossaryCandidates.length > 0;
+  const hasLoadedWorkContext = Boolean(
+    contextSummary?.context_loaded ||
+      contextSummary?.internet_context_loaded ||
+      project.contexto.sinopse.trim() ||
+      project.contexto.personagens.length > 0 ||
+      memoryActive,
+  );
+  const isGlossaryOnlyWarning = contextWarningKind === "empty_glossary" && hasLoadedWorkContext;
   const rejectedGlossaryCandidates = glossaryCandidates.filter((candidate) => candidate.status === "rejected");
   const detectedChapterTerms = project.contexto.termos.filter((term) => !project.contexto.glossario[term]);
   const conflictCandidates = glossaryConflicts(project.contexto.glossario, glossaryCandidates);
@@ -651,6 +666,18 @@ export function Setup() {
           ))}
         </div>
       </div>
+
+      <details
+        data-testid="setup-advanced-panel"
+        open={advancedOpen}
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+        className="mb-5 rounded-xl border border-border bg-bg-secondary p-4 shadow-card"
+      >
+        <summary className="cursor-pointer text-sm font-medium text-text-primary">Avancado</summary>
+        <p className="mt-2 text-xs text-text-muted">
+          Presets customizados, memoria da obra e glossario aparecem abaixo.
+        </p>
+      </details>
 
       {/* Obra search */}
       <div className="mb-5">
@@ -736,7 +763,7 @@ export function Setup() {
         <p className="text-xs text-status-warning mb-4">{searchError}</p>
       )}
 
-      <div data-testid="internet-context-panel" className="mb-5 rounded-xl border border-border bg-bg-secondary p-4 shadow-card">
+      <div data-testid="internet-context-panel" className={`${SHOW_CONTEXT_ASSISTANT_UI ? "mb-5" : "hidden"} rounded-xl border border-border bg-bg-secondary p-4 shadow-card`}>
         <div className="mb-3 flex items-start justify-between gap-3">
           <div>
             <p className="text-sm font-medium text-text-primary">Contexto online</p>
@@ -817,13 +844,13 @@ export function Setup() {
 
       <div
         data-testid="work-context-summary"
-        className="bg-bg-secondary border border-border rounded-xl p-4 mb-5 shadow-card"
+        className={`${SHOW_CONTEXT_ASSISTANT_UI ? "mb-5" : "hidden"} bg-bg-secondary border border-border rounded-xl p-4 shadow-card`}
       >
         <div className="flex items-center gap-2 mb-3">
           <BookOpen size={14} className="text-brand-300" />
           <span className="text-sm font-medium text-text-primary">Estado do contexto da obra</span>
         </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-6">
           <div className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2">
             <p className="text-[11px] text-text-muted">Obra</p>
             <p className="truncate text-sm text-text-primary">{displayWorkTitle}</p>
@@ -835,6 +862,12 @@ export function Setup() {
           <div className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2">
             <p className="text-[11px] text-text-muted">Glossario</p>
             <p className="text-sm text-text-primary">{displayGlossaryCount} termos</p>
+          </div>
+          <div className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2">
+            <p className="text-[11px] text-text-muted">Sugestoes</p>
+            <p className="text-sm text-text-primary">
+              Sugestoes: {onlineGlossaryCandidates.length} · Aceitos: {displayGlossaryCount}
+            </p>
           </div>
           <div className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2">
             <p className="text-[11px] text-text-muted">Memoria da obra</p>
@@ -943,7 +976,7 @@ export function Setup() {
         </div>
       </div>
 
-      {internetContextResult && (
+      {SHOW_CONTEXT_ASSISTANT_UI && internetContextResult && (
         <div data-testid="internet-context-results" className="mb-5 rounded-xl border border-border bg-bg-secondary p-4 shadow-card">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
@@ -1180,7 +1213,7 @@ export function Setup() {
           Glossario (termos consistentes)
         </label>
         <div ref={glossaryEditorRef} data-testid="glossary-editor" className="bg-bg-secondary border border-border rounded-xl p-3 shadow-card">
-          <div className="mb-3 flex flex-wrap gap-1.5">
+          <div className={`${SHOW_CONTEXT_ASSISTANT_UI ? "mb-3 flex" : "hidden"} flex-wrap gap-1.5`}>
             {glossaryTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -1198,7 +1231,7 @@ export function Setup() {
             ))}
           </div>
 
-          {glossaryTab === "reviewed" && (
+          {(!SHOW_CONTEXT_ASSISTANT_UI || glossaryTab === "reviewed") && (
             <div data-testid="glossary-reviewed-list">
               {Object.entries(project.contexto.glossario).map(([key, value]) => (
                 <div data-testid="glossary-reviewed-row" key={key} className="flex items-center gap-2 py-1.5 border-b border-border last:border-0">
@@ -1227,10 +1260,10 @@ export function Setup() {
             </div>
           )}
 
-          {glossaryTab === "online" && (
-            <div data-testid="glossary-online-list" className="space-y-2">
+          {SHOW_CONTEXT_ASSISTANT_UI && glossaryTab === "online" && (
+            <div data-testid="glossary-suggestions" className="space-y-2">
               {onlineGlossaryCandidates.map((candidate) => (
-                <div data-testid="glossary-candidate-row" key={`${candidate.kind}-${candidate.source}`} className="rounded-lg border border-border bg-bg-tertiary/70 p-2">
+                <div data-testid="glossary-suggestion-row" key={`${candidate.kind}-${candidate.source}`} className="rounded-lg border border-border bg-bg-tertiary/70 p-2">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm text-text-primary">{candidate.source}</p>
@@ -1242,13 +1275,13 @@ export function Setup() {
                     <p className="mt-1 text-[11px] text-status-warning">Candidato usado sem revisao gera warning.</p>
                   )}
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    <button data-testid="glossary-confirm-candidate" type="button" onClick={() => confirmGlossaryCandidate(candidate)} className="rounded-md bg-brand px-2 py-1 text-[11px] font-medium text-white">
+                    <button data-testid="glossary-suggestion-accept" type="button" onClick={() => confirmGlossaryCandidate(candidate)} className="rounded-md bg-brand px-2 py-1 text-[11px] font-medium text-white">
                       Confirmar
                     </button>
-                    <button type="button" onClick={() => editGlossaryCandidate(candidate)} className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary">
+                    <button data-testid="glossary-suggestion-edit" type="button" onClick={() => editGlossaryCandidate(candidate)} className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary">
                       Editar
                     </button>
-                    <button data-testid="glossary-reject-candidate" type="button" onClick={() => rejectGlossaryCandidate(candidate)} className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-status-error">
+                    <button data-testid="glossary-suggestion-ignore" type="button" onClick={() => rejectGlossaryCandidate(candidate)} className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-status-error">
                       Rejeitar
                     </button>
                     <button type="button" onClick={handleApplyHighConfidenceCandidates} className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-brand-300">
@@ -1269,7 +1302,7 @@ export function Setup() {
             </div>
           )}
 
-          {glossaryTab === "detected" && (
+          {SHOW_CONTEXT_ASSISTANT_UI && glossaryTab === "detected" && (
             <div data-testid="glossary-detected-list" className="space-y-1">
               {detectedChapterTerms.map((term) => (
                 <div key={term} className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2 text-sm text-text-primary">
@@ -1282,7 +1315,7 @@ export function Setup() {
             </div>
           )}
 
-          {glossaryTab === "rejected" && (
+          {SHOW_CONTEXT_ASSISTANT_UI && glossaryTab === "rejected" && (
             <div data-testid="glossary-rejected-list" className="space-y-1">
               {rejectedGlossaryCandidates.map((candidate) => (
                 <div data-testid="glossary-rejected-row" key={`${candidate.kind}-${candidate.source}`} className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2 text-sm text-text-secondary">
@@ -1295,7 +1328,7 @@ export function Setup() {
             </div>
           )}
 
-          {glossaryTab === "conflicts" && (
+          {SHOW_CONTEXT_ASSISTANT_UI && glossaryTab === "conflicts" && (
             <div data-testid="glossary-conflicts-list" className="space-y-1">
               {conflictCandidates.map((candidate) => (
                 <div key={`${candidate.kind}-${candidate.source}`} className="rounded-lg border border-status-warning/25 bg-status-warning/5 px-3 py-2 text-sm text-text-primary">
@@ -1355,6 +1388,7 @@ export function Setup() {
         </div>
 
         <button
+          data-testid="setup-start-button"
           onClick={() => {
             void handleStart();
           }}
@@ -1378,13 +1412,21 @@ export function Setup() {
           <div className="w-full max-w-md rounded-xl border border-border bg-bg-secondary p-5 shadow-2xl">
             <h3 className="text-base font-semibold text-text-primary mb-2">
               {contextWarningKind === "missing_work"
-                ? "Nenhuma obra selecionada."
-                : "Obra selecionada, mas glossario vazio."}
+                ? "Escolha uma obra antes de iniciar"
+                : hasPendingGlossarySuggestions
+                  ? "Revise as sugestoes de glossario"
+                  : isGlossaryOnlyWarning
+                    ? "Glossario da obra vazio"
+                  : "Contexto da obra nao encontrado"}
             </h3>
             <p className="text-sm text-text-secondary mb-4">
               {contextWarningKind === "missing_work"
-                ? "A traducao sera feita sem contexto. Isso pode causar erros em nomes, lugares e termos de lore."
-                : "Busque contexto online ou adicione termos manualmente."}
+                ? "Informe o nome da obra para carregar contexto antes de iniciar."
+                : hasPendingGlossarySuggestions
+                  ? "Confirme, edite ou ignore os termos sugeridos antes de iniciar."
+                  : isGlossaryOnlyWarning
+                    ? "A memoria da obra foi carregada, mas ainda nao ha termos revisados no glossario."
+                  : "Busque contexto online ou adicione termos manualmente."}
             </p>
             <div className="grid grid-cols-1 gap-2">
               <button
@@ -1417,11 +1459,13 @@ export function Setup() {
                 type="button"
                 onClick={() => {
                   setShowContextWarning(false);
+                  setAdvancedOpen(true);
+                  setGlossaryTab(hasPendingGlossarySuggestions ? "online" : "reviewed");
                   glossaryEditorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
                 }}
                 className="rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary hover:border-brand/30 transition-smooth"
               >
-                Revisar glossario
+                {hasPendingGlossarySuggestions ? "Revisar sugestoes" : "Revisar glossario"}
               </button>
               <button
                 data-testid="work-context-continue-without-context"
@@ -1432,7 +1476,7 @@ export function Setup() {
                 }}
                 className="rounded-lg bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand-400 transition-smooth"
               >
-                Continuar sem contexto
+                {isGlossaryOnlyWarning ? "Continuar sem glossario" : "Continuar sem contexto"}
               </button>
             </div>
           </div>

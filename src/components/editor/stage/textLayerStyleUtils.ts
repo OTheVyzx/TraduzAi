@@ -2,7 +2,7 @@ import type { TextEntry, TextLayerStyle } from "../../../lib/stores/appStore";
 import { resolveLegacyFontFamily } from "../../../lib/fonts";
 
 const DEFAULT_STYLE: TextLayerStyle = {
-  fonte: "CCDaveGibbonsLower W00 Regular.ttf",
+  fonte: "ComicNeue-Bold.ttf",
   tamanho: 28,
   cor: "#000000",
   cor_gradiente: [],
@@ -14,7 +14,7 @@ const DEFAULT_STYLE: TextLayerStyle = {
   sombra: false,
   sombra_cor: "",
   sombra_offset: [0, 0],
-  bold: false,
+  bold: true,
   italico: false,
   rotacao: 0,
   alinhamento: "center",

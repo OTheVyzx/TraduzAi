@@ -12,11 +12,12 @@ import type {
   SystemProfile,
 } from "./stores/appStore";
 import type { InternetContextCandidate, InternetContextSourceResult } from "./internetContext";
+import { canonicalizeTextStyle } from "./editorTextStylePolicy";
 
-function isE2E() {
+export function isE2E() {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
   if ((meta.env?.VITE_E2E ?? "") === "1") return true;
-  return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
+  return typeof navigator !== "undefined" && navigator.webdriver === true;
 }
 
 export interface ProjectJson {
@@ -100,6 +101,7 @@ export interface WorkContextSummary {
   glossary_loaded: boolean;
   glossary_entries_count: number;
   internet_context_loaded?: boolean;
+  cover_url?: string;
   risk_level: WorkContextRisk;
   user_ignored_warning: boolean;
 }
@@ -126,7 +128,7 @@ export interface Glossary {
   entries: GlossaryEntry[];
 }
 
-const IMAGE_LAYER_KEYS: ImageLayerKey[] = ["base", "mask", "inpaint", "brush", "rendered"];
+const IMAGE_LAYER_KEYS: ImageLayerKey[] = ["base", "mask", "inpaint", "brush", "recovery", "rendered"];
 
 function isAbsolutePath(path: string) {
   return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/");
@@ -150,31 +152,8 @@ export function buildPlainPageCommandArgs(args: { project_path: string; page_ind
 }
 
 function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry {
-  const rawStyle = (layer.style ?? layer.estilo ?? {
-    fonte: "CCDaveGibbonsLower W00 Regular.ttf",
-    tamanho: 28,
-    cor: "#000000",
-    cor_gradiente: [],
-    contorno: "",
-    contorno_px: 0,
-    glow: false,
-    glow_cor: "",
-    glow_px: 0,
-    sombra: false,
-    sombra_cor: "",
-    sombra_offset: [0, 0],
-    bold: false,
-    italico: false,
-    rotacao: 0,
-    alinhamento: "center",
-    force_upper: false,
-  }) as TextEntry["estilo"];
-  const style: TextEntry["estilo"] = {
-    ...rawStyle,
-    cor: "#000000",
-    contorno: "",
-    contorno_px: 0,
-  };
+  const rawStyle = (layer.style ?? layer.estilo ?? {}) as Partial<TextEntry["estilo"]>;
+  const style: TextEntry["estilo"] = canonicalizeTextStyle(rawStyle, { mode: "hydrate" });
   const bbox =
     layer.render_bbox ?? layer.layout_bbox ?? layer.bbox ?? layer.source_bbox ?? layer.balloon_bbox ?? [0, 0, 32, 32];
 
@@ -182,6 +161,7 @@ function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry
     ...layer,
     kind: "text",
     id: layer.id ?? crypto.randomUUID(),
+    style_origin: layer.style_origin ?? "legacy",
     bbox,
     source_bbox: layer.source_bbox ?? layer.bbox ?? bbox,
     layout_bbox: layer.layout_bbox ?? bbox,
@@ -238,6 +218,12 @@ export function hydratePageData(page: Partial<PageData>, baseDir: string): PageD
 
   const rawLayers = (page.text_layers?.length ? page.text_layers : page.textos) ?? [];
   const textLayers = rawLayers.map((layer) => hydrateTextLayer(layer, baseDir));
+  const editorCache = page.editor_cache
+    ? {
+        ...page.editor_cache,
+        inpaint: joinProjectPath(baseDir, page.editor_cache.inpaint ?? null),
+      }
+    : undefined;
 
   return {
     ...page,
@@ -247,6 +233,7 @@ export function hydratePageData(page: Partial<PageData>, baseDir: string): PageD
     arquivo_traduzido:
       imageLayers.rendered?.path ?? joinProjectPath(baseDir, page.arquivo_traduzido) ?? "",
     image_layers: imageLayers,
+    editor_cache: editorCache,
     inpaint_blocks: page.inpaint_blocks ?? [],
     text_layers: [...textLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
     textos: [...textLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
@@ -552,6 +539,7 @@ export async function warmupVisualStack(): Promise<string> {
 }
 
 export async function checkModels(): Promise<{ ready: boolean; size_mb: number }> {
+  if (isE2E()) return { ready: false, size_mb: 0 };
   return invoke("check_models");
 }
 
@@ -575,23 +563,27 @@ export async function getStoragePaths(): Promise<StoragePaths> {
 }
 
 export async function downloadModels(): Promise<void> {
+  if (isE2E()) return;
   return invoke("download_models");
 }
 
 export async function onModelsProgress(
   callback: (data: { step: string; message: string }) => void
 ) {
+  if (isE2E()) return () => {};
   return listen<{ step: string; message: string }>("models-progress", (e) => callback(e.payload));
 }
 
 export async function onModelsReady(
   callback: (data: { success: boolean }) => void
 ) {
+  if (isE2E()) return () => {};
   return listen<{ success: boolean }>("models-ready", (e) => callback(e.payload));
 }
 
 // Project management
 export async function openFiles(): Promise<string | null> {
+  if (isE2E()) return tauriMock.openFiles();
   return invoke("open_source_dialog");
 }
 
@@ -609,11 +601,12 @@ export async function validateImport(path: string): Promise<{
   has_project_json: boolean;
   error?: string;
 }> {
+  if (isE2E()) return tauriMock.validateImport();
   return invoke("validate_import", { path });
 }
 
 export async function loadProjectJson(path: string): Promise<ProjectJson> {
-  if (isE2E()) return tauriMock.loadProjectJson();
+  if (isE2E()) return tauriMock.loadProjectJson(path);
   const project = await invoke<ProjectJson>("load_project_json", { path });
   return hydrateProjectJson(project, path);
 }
@@ -684,6 +677,7 @@ export async function updateMaskRegion(config: {
   clear?: boolean;
   erase?: boolean;
   strokes: [number, number][][];
+  dirty_bbox?: [number, number, number, number];
 }): Promise<string> {
   if (isE2E()) return tauriMock.updateMaskRegion();
   return invoke("update_mask_region", { config });
@@ -698,9 +692,51 @@ export async function updateBrushRegion(config: {
   clear?: boolean;
   erase?: boolean;
   strokes: [number, number][][];
+  color?: string;
+  opacity?: number;
+  hardness?: number;
+  dirty_bbox?: [number, number, number, number];
 }): Promise<string> {
   if (isE2E()) return tauriMock.updateBrushRegion();
   return invoke("update_brush_region", { config });
+}
+
+export async function updateRecoveryRegion(config: {
+  project_path: string;
+  page_index: number;
+  width: number;
+  height: number;
+  brush_size: number;
+  clear?: boolean;
+  erase?: boolean;
+  strokes: [number, number][][];
+  color?: string;
+  opacity?: number;
+  hardness?: number;
+  png_data?: string;
+  dirty_bbox?: [number, number, number, number];
+}): Promise<string> {
+  if (isE2E()) return tauriMock.updateRecoveryRegion();
+  return invoke("update_recovery_region", { config });
+}
+
+export async function updateReinpaintRegion(config: {
+  project_path: string;
+  page_index: number;
+  width: number;
+  height: number;
+  brush_size: number;
+  clear?: boolean;
+  erase?: boolean;
+  strokes: [number, number][][];
+  color?: string;
+  opacity?: number;
+  hardness?: number;
+  png_data?: string;
+  dirty_bbox?: [number, number, number, number];
+}): Promise<string> {
+  if (isE2E()) return tauriMock.updateReinpaintRegion();
+  return invoke("update_reinpaint_region", { config });
 }
 
 export async function writeMaskFromPng(config: {
@@ -736,7 +772,7 @@ export async function searchWork(query: string): Promise<WorkSearchResponse> {
           synopsis: "A mercenary returns with memories, allies and a plan.",
           source: "anilist",
           source_url: "https://anilist.co/manga/fixture",
-          cover_url: "",
+          cover_url: "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20120%20180%22%3E%3Crect%20width%3D%22120%22%20height%3D%22180%22%20fill%3D%22%236c5ce7%22%2F%3E%3Ctext%20x%3D%2260%22%20y%3D%2294%22%20fill%3D%22white%22%20font-size%3D%2218%22%20text-anchor%3D%22middle%22%3ECAPA%3C%2Ftext%3E%3C%2Fsvg%3E",
           score: 98,
         },
       ],
@@ -763,7 +799,7 @@ export async function enrichWorkContext(selection: WorkSearchCandidate): Promise
         { source: "anilist", title: selection.title, url: selection.source_url, snippet: selection.synopsis },
         { source: "fandom", title: "Fan Wiki", url: "https://example.test/wiki", snippet: "baixa confianca" },
       ],
-      cover_url: "",
+      cover_url: selection.cover_url ?? "",
       context_quality: "partial",
       risk_level: "medium",
       glossary_entries_count: 0,
@@ -895,6 +931,7 @@ export async function startPipeline(config: {
     fontes_usadas: ContextSourceRef[];
   };
 }): Promise<{ job_id: string }> {
+  if (isE2E()) return tauriMock.startPipeline(config);
   return invoke("start_pipeline", { config });
 }
 
@@ -953,6 +990,7 @@ export async function resumePipeline(): Promise<void> {
 export async function onPipelineProgress(
   callback: (progress: PipelineProgress) => void
 ) {
+  if (isE2E()) return tauriMock.onPipelineProgress(callback);
   return listen<PipelineProgress>("pipeline-progress", (event) => {
     callback(event.payload);
   });
@@ -961,6 +999,7 @@ export async function onPipelineProgress(
 export async function onPipelineComplete(
   callback: (result: { success: boolean; output_path: string; error?: string }) => void
 ) {
+  if (isE2E()) return tauriMock.onPipelineComplete(callback);
   return listen<{ success: boolean; output_path: string; error?: string }>("pipeline-complete", (event) => {
     callback(event.payload);
   });
@@ -1252,8 +1291,8 @@ export async function getCredits(): Promise<{ credits: number; weekly_used: numb
 
 // Settings
 export interface AppSettings {
-  ollama_model: string;
-  ollama_host: string;
+  ollama_model?: string;
+  ollama_host?: string;
   idioma_origem: string;
   idioma_destino: string;
 }
@@ -1269,27 +1308,20 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
 }
 
 export async function loadSettings(): Promise<AppSettings> {
+  if (isE2E()) {
+    return {
+      ollama_model: "traduzai-translator",
+      ollama_host: "http://localhost:11434",
+      idioma_origem: "en",
+      idioma_destino: "pt-BR",
+    };
+  }
   return invoke("load_settings");
 }
 
 export async function loadSupportedLanguages(): Promise<SupportedLanguage[]> {
   if (isE2E()) return [];
   return invoke("load_supported_languages");
-}
-
-// Ollama
-export interface OllamaStatus {
-  running: boolean;
-  models: string[];
-  has_translator: boolean;
-}
-
-export async function checkOllama(): Promise<OllamaStatus> {
-  return invoke("check_ollama");
-}
-
-export async function createTranslatorModel(): Promise<string> {
-  return invoke("create_translator_model");
 }
 
 export async function restartApp(): Promise<void> {
@@ -1314,6 +1346,8 @@ export async function runPageActionWithOptionalMask(config: {
   project_path: string;
   page_index: number;
   action: "detect" | "ocr" | "translate" | "inpaint";
+  bbox?: [number, number, number, number] | null;
+  mask_path?: string | null;
 }): Promise<PageActionResult> {
   return invoke("run_page_action_with_optional_mask", { config });
 }

@@ -24,9 +24,11 @@ if str(pipeline_root) not in sys.path:
 # Lazy imports are moved inside functions to allow fast --hardware-info and --list-supported-languages calls
 
 from utils.decision_log import configure_decision_trace, finalize_decision_trace
+from typesetter.style_policy import normalize_auto_typesetting_style
 
 _EMIT_STDOUT_FAILED = False
 _PIPELINE_FILE_HANDLER: logging.Handler | None = None
+logger = logging.getLogger(__name__)
 
 
 class _AutoClosingFileHandler(logging.Handler):
@@ -309,13 +311,36 @@ def _write_mock_runner_reports(work_dir: Path, project: dict, issues: list[dict]
     )
 
 
+def _load_json_file(path: str | Path) -> dict:
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        return json.load(handle)
+
+
+def _apply_runtime_profile_config(config: dict):
+    from runtime_profiles import apply_runtime_profile_environment, resolve_runtime_profile
+
+    decision = resolve_runtime_profile(config)
+    applied_env = apply_runtime_profile_environment(decision)
+    config["runtime_profile"] = decision.profile
+    config["runtime_profile_decision"] = decision.to_dict()
+    config["runtime_profile_env"] = applied_env
+    return decision
+
+
 def _run_mock_pipeline_runner(config: dict) -> int:
     source_path = Path(config["source_path"])
     work_dir = Path(config["work_dir"])
     originals_dir = work_dir / "originals"
     images_dir = work_dir / "images"
     translated_dir = work_dir / "translated"
-    for directory in [originals_dir, images_dir, translated_dir, work_dir / "layers" / "mask"]:
+    for directory in [
+        originals_dir,
+        images_dir,
+        translated_dir,
+        work_dir / "layers" / "mask",
+        work_dir / "layers" / "brush",
+        work_dir / "layers" / "recovery",
+    ]:
         directory.mkdir(parents=True, exist_ok=True)
 
     image_files = _list_input_images(source_path)
@@ -325,7 +350,16 @@ def _run_mock_pipeline_runner(config: dict) -> int:
         output_name = f"{index:03}{image_path.suffix.lower()}"
         for directory in [originals_dir, images_dir, translated_dir]:
             shutil.copy2(image_path, directory / output_name)
-        (work_dir / "layers" / "mask" / f"{index:03}.png").write_bytes(b"")
+        from PIL import Image
+        try:
+            with Image.open(image_path) as src_img:
+                empty_size = src_img.size
+        except Exception:
+            empty_size = (1, 1)
+        empty_layer = Image.new("RGBA", empty_size, (0, 0, 0, 0))
+        empty_layer.save(work_dir / "layers" / "mask" / f"{index:03}.png")
+        empty_layer.save(work_dir / "layers" / "brush" / f"{index:03}.png")
+        empty_layer.save(work_dir / "layers" / "recovery" / f"{index:03}.png")
 
         text_layers = []
         if index == 1 and config.get("mock_critical"):
@@ -360,6 +394,8 @@ def _run_mock_pipeline_runner(config: dict) -> int:
                     "inpaint": {"key": "inpaint", "path": f"images/{output_name}", "visible": True, "locked": True},
                     "rendered": {"key": "rendered", "path": f"translated/{output_name}", "visible": True, "locked": True},
                     "mask": {"key": "mask", "path": f"layers/mask/{index:03}.png", "visible": True, "locked": False},
+                    "brush": {"key": "brush", "path": f"layers/brush/{index:03}.png", "visible": False, "locked": False},
+                    "recovery": {"key": "recovery", "path": f"layers/recovery/{index:03}.png", "visible": False, "locked": False},
                 },
                 "inpaint_blocks": [],
                 "text_layers": text_layers,
@@ -432,6 +468,12 @@ def main():
             sys.exit(exit_code)
         return
 
+    if sys.argv[1] == "--serve-fast-page":
+        from fast_page_server import serve_stdio
+
+        serve_stdio(pipeline_runner=_run_pipeline)
+        return
+
     if sys.argv[1] == "--warmup-visual":
         from vision_stack.runtime import warmup_visual_stack
         models_dir = ""
@@ -495,9 +537,10 @@ def main():
         action_name, handler = _ACTION_DISPATCH[sys.argv[1]]
         project_json_path = Path(sys.argv[2])
         page_idx = int(sys.argv[3])
+        region = _page_action_region_from_args(sys.argv[4:])
         log_editor_action("start", action_name, page=page_idx)
         try:
-            handler(project_json_path, page_idx)
+            handler(project_json_path, page_idx, region)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -574,6 +617,43 @@ def _resolve_strip_target_pages(config: dict, total_pages: int | None = None) ->
     return target
 
 
+def _build_connected_reasoner_config(config: dict, *, ollama_status: dict | None = None) -> dict:
+    provider = str(config.get("connected_balloon_reasoner", "ollama") or "ollama").strip().lower()
+    enabled = bool(config.get("connected_balloon_reasoner_enabled", True))
+    host = config.get(
+        "connected_balloon_ollama_host",
+        config.get("ollama_host", "http://localhost:11434"),
+    )
+    result = {
+        "provider": provider,
+        "enabled": enabled,
+        "host": host,
+        "model": config.get("connected_balloon_ollama_model", "qwen2.5"),
+        "use_image": config.get("connected_balloon_ollama_use_image", True),
+        "timeout_sec": int(config.get("connected_balloon_ollama_timeout_sec", 12) or 12),
+    }
+    if provider != "ollama" or not enabled:
+        result["provider"] = "disabled"
+        result["enabled"] = False
+        return result
+
+    status = ollama_status if isinstance(ollama_status, dict) else None
+    if not status:
+        try:
+            from translator.translate import _check_ollama as _check_connected_ollama
+
+            status = _check_connected_ollama(str(host))
+        except Exception:
+            status = {"running": False, "models": [], "has_translator": False}
+    if not status.get("running") or not status.get("models"):
+        result["provider"] = "disabled"
+        result["enabled"] = False
+        return result
+
+    result["_ollama_status"] = status
+    return result
+
+
 def _run_pipeline(config_path: str):
     from corpus.runtime import extract_expected_terms, load_corpus_bundle, merge_corpus_into_context
     from extractor.extractor import cleanup, extract
@@ -585,8 +665,8 @@ def _run_pipeline(config_path: str):
     from translator.translate import translate_pages
     from typesetter.renderer import run_typesetting
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    config = _load_json_file(config_path)
+    runtime_profile_decision = _apply_runtime_profile_config(config)
 
     wait_if_paused(config)
     work_dir = Path(config["work_dir"])
@@ -674,11 +754,28 @@ def _run_pipeline(config_path: str):
         if not context.get("sinopse") and config.get("obra"):
             from concurrent.futures import ThreadPoolExecutor as _CtxTPE
             _ctx_pool = _CtxTPE(max_workers=1)
-            _context_future = _ctx_pool.submit(fetch_context, config["obra"])
+            _context_future = _ctx_pool.submit(
+                fetch_context,
+                config["obra"],
+                work_dir / "context_cache",
+                config.get("glossario", {}),
+                config.get("context_sources") or [],
+            )
 
         # Warmup models
         emit_progress("ocr", 0, 9, total=total_pages, message="Carregando modelos...")
-        _warmup_visual_stack(str(models_dir), "max")
+        if runtime_profile_decision.visual_stack_warmup:
+            _warmup_visual_stack(
+                str(models_dir),
+                "max",
+                run_sample=False,
+                lang=config.get("idioma_origem", "en"),
+            )
+        else:
+            logger.info(
+                "Warmup visual opcional desativado pelo perfil runtime=%s",
+                runtime_profile_decision.profile,
+            )
 
         # Resolve AniList context
         if _context_future:
@@ -689,16 +786,7 @@ def _run_pipeline(config_path: str):
             _ctx_pool.shutdown(wait=False)
 
         # Bridges
-        connected_reasoner_config = {
-            "provider": config.get("connected_balloon_reasoner", "ollama"),
-            "enabled": config.get("connected_balloon_reasoner_enabled", True),
-            "host": config.get(
-                "connected_balloon_ollama_host",
-                config.get("ollama_host", "http://localhost:11434"),
-            ),
-            "model": config.get("connected_balloon_ollama_model", "qwen2.5"),
-            "use_image": config.get("connected_balloon_ollama_use_image", True),
-        }
+        connected_reasoner_config = _build_connected_reasoner_config(config)
 
         class StripDetector:
             def detect(self, img, conf_threshold=None):
@@ -709,6 +797,51 @@ def _run_pipeline(config_path: str):
         class StripRuntime:
             def run_ocr_stage(self, img, page_dict):
                 return run_ocr_stage(img, page_dict, profile="max", idioma_origem=config.get("idioma_origem", "en"))
+
+            def run_koharu_cjk_page(self, img, image_path):
+                from vision_stack.runtime import _run_koharu_cjk_http_detect_ocr
+
+                return _run_koharu_cjk_http_detect_ocr(
+                    image_rgb=img,
+                    image_label=str(image_path),
+                    models_dir=str(models_dir),
+                    profile="max",
+                    idioma_origem=config.get("idioma_origem", "en"),
+                )
+
+            def run_koharu_cjk_pages(self, jobs, models_dir="", idioma_origem="en", _models_dir=str(models_dir)):
+                resolved_models_dir = str(models_dir or _models_dir)
+                resolved_idioma = idioma_origem or config.get("idioma_origem", "en")
+                worker_path = str(config.get("vision_worker_path") or config.get("_vision_worker_path") or "").strip()
+                worker_batch_enabled = os.getenv("TRADUZAI_KOHARU_WORKER_BATCH", "1").strip().lower() not in {
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                    "disabled",
+                }
+                if worker_path and worker_batch_enabled:
+                    try:
+                        from vision_stack.runtime import _run_koharu_worker_detect_ocr_batch
+
+                        return _run_koharu_worker_detect_ocr_batch(
+                            jobs,
+                            vision_worker_path=worker_path,
+                            models_dir=resolved_models_dir,
+                            profile="max",
+                            idioma_origem=resolved_idioma,
+                        )
+                    except Exception as exc:
+                        logger.warning("Koharu worker batch falhou; fallback para Koharu HTTP batch: %s", exc)
+
+                from vision_stack.runtime import _run_koharu_cjk_http_detect_ocr_batch
+
+                return _run_koharu_cjk_http_detect_ocr_batch(
+                    jobs,
+                    models_dir=resolved_models_dir,
+                    profile="max",
+                    idioma_origem=resolved_idioma,
+                )
         
         def progress_cb(stage, current, total, message=""):
             # Mapeamento de estágios para o progresso global (Tauri UI)
@@ -740,6 +873,10 @@ def _run_pipeline(config_path: str):
             idioma_destino=config.get("idioma_destino", "pt-BR"),
             obra=config.get("obra", ""),
             connected_reasoner_config=connected_reasoner_config,
+            models_dir=str(models_dir),
+            ollama_host=config.get("ollama_host", "http://localhost:11434"),
+            ollama_model=config.get("ollama_model", "traduzai-translator"),
+            translation_context=config.get("translation_context") or None,
         )
 
 
@@ -758,24 +895,30 @@ def _run_pipeline(config_path: str):
             else:
                 shutil.copy2(p.path, inpaint_target)
 
-        # Substituir originals/ (que tem os splits brutos do .cbz) pelas paginas
-        # reassembladas originais. Sem isso, project.json aponta para originals/NNN.jpg
-        # que nao existem (disco mantem nomes originais como originals/002__001.jpg).
-        for stale in originals_dir.glob("*"):
-            if stale.is_file():
-                stale.unlink()
+        # Substituir originals/ pelos nomes reassemblados esperados pelo editor.
+        # O overwrite direto evita falhar em ACLs/locks temporarios de arquivos ja
+        # extraidos, e a limpeza residual fica como best-effort.
+        expected_original_names = {p.path.name for p in output_pages}
         for p in output_pages:
             original_target = originals_dir / p.path.name
             if getattr(p, "original_image", None) is not None:
                 cv2.imwrite(str(original_target), p.original_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
             else:
                 shutil.copy2(p.path, original_target)
+        for stale in originals_dir.glob("*"):
+            if not stale.is_file() or stale.name in expected_original_names:
+                continue
+            try:
+                stale.unlink()
+            except PermissionError:
+                logger.warning("Nao foi possivel remover original temporario residual: %s", stale)
 
         # Garantir diretorios de camadas + PNGs transparentes 1x1 para mask/brush
         # (UI Tauri reclama de 404 quando layers/mask/NNN.png nao existe).
         layers_root = work_dir / "layers"
         (layers_root / "mask").mkdir(parents=True, exist_ok=True)
         (layers_root / "brush").mkdir(parents=True, exist_ok=True)
+        (layers_root / "recovery").mkdir(parents=True, exist_ok=True)
         (layers_root / "text-preview").mkdir(parents=True, exist_ok=True)
         try:
             from PIL import Image as _PILImage
@@ -783,10 +926,13 @@ def _run_pipeline(config_path: str):
             for i in range(1, len(output_pages) + 1):
                 mask_path = layers_root / "mask" / f"{i:03}.png"
                 brush_path = layers_root / "brush" / f"{i:03}.png"
+                recovery_path = layers_root / "recovery" / f"{i:03}.png"
                 if not mask_path.exists():
                     _empty_png.save(mask_path)
                 if not brush_path.exists():
                     _empty_png.save(brush_path)
+                if not recovery_path.exists():
+                    _empty_png.save(recovery_path)
         except Exception:
             pass
 
@@ -796,6 +942,18 @@ def _run_pipeline(config_path: str):
     # Wrap up
     emit_progress("typeset", 100, 98, message="Finalizando projeto...")
     project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
+    try:
+        from runtime_profiles import build_chapter_route_shadow
+
+        project_data["chapter_route_decision"] = build_chapter_route_shadow(ocr_results)
+    except Exception as exc:
+        logger.warning("Falha ao montar chapter_route_decision: %s", exc)
+    glossary_used_report = build_glossary_used_report(config, context, page_text_layers)
+    project_data["glossary_shadow"] = glossary_used_report["summary"]
+    (work_dir / "glossary_used.json").write_text(
+        json.dumps(glossary_used_report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     from structured_logger import StructuredLogger, build_log_summary
     structured_logger = StructuredLogger(config.get("logs_dir") or (work_dir / "logs"), config.get("job_id", "run"))
     log_summary = build_log_summary(project_data)
@@ -804,6 +962,17 @@ def _run_pipeline(config_path: str):
         "structured_log_path": str(structured_logger.path),
         "summary": log_summary,
     }
+    try:
+        from qa.export_gate import evaluate_export_gate
+
+        export_gate = evaluate_export_gate(
+            project_data,
+            override=bool(config.get("allow_p0_export_override")),
+        )
+        project_data["qa"]["export_gate"] = export_gate
+        project_data["needs_review"] = export_gate["status"] == "BLOCK"
+    except Exception as exc:
+        logger.warning("Falha ao avaliar export gate: %s", exc)
     _save_project_json(work_dir / "project.json", project_data)
     finalize_decision_trace(
         {
@@ -821,17 +990,17 @@ def _default_text_style() -> dict:
     return {
         "fonte": "ComicNeue-Bold.ttf",
         "tamanho": 28,
-        "cor": "#FFFFFF",
+        "cor": "#000000",
         "cor_gradiente": [],
-        "contorno": "#000000",
-        "contorno_px": 2,
+        "contorno": "",
+        "contorno_px": 0,
         "glow": False,
         "glow_cor": "",
         "glow_px": 0,
         "sombra": False,
         "sombra_cor": "",
         "sombra_offset": [0, 0],
-        "bold": False,
+        "bold": True,
         "italico": False,
         "rotacao": 0,
         "alinhamento": "center",
@@ -844,6 +1013,15 @@ def _merge_style(style: dict | None) -> dict:
     if isinstance(style, dict):
         merged.update(style)
     return merged
+
+
+def _coerce_background_rgb(value) -> tuple[int, int, int]:
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return tuple(max(0, min(255, int(round(float(channel))))) for channel in value[:3])  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            pass
+    return (255, 255, 255)
 
 
 def _bbox4(value, fallback=None) -> list[int]:
@@ -887,6 +1065,89 @@ def _bbox_iou(left, right) -> float:
     area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
     union = area_a + area_b - inter
     return inter / float(max(1, union))
+
+
+def _bbox_intersects(left, right) -> bool:
+    a = _optional_bbox4(left)
+    b = _optional_bbox4(right)
+    if a is None or b is None:
+        return False
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+def _parse_region_bbox(raw: str | None) -> list[int] | None:
+    if not raw:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    if len(parts) != 4:
+        return None
+    try:
+        bbox = [int(float(part)) for part in parts]
+    except ValueError:
+        return None
+    x1, y1, x2, y2 = bbox
+    x1, x2 = sorted((max(0, x1), max(0, x2)))
+    y1, y2 = sorted((max(0, y1), max(0, y2)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _mask_bounding_box(mask_path: str | Path | None) -> list[int] | None:
+    if not mask_path:
+        return None
+    path = Path(mask_path)
+    if not path.exists():
+        return None
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            bbox = img.convert("L").getbbox()
+            if not bbox:
+                return None
+            return [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])]
+    except Exception:
+        return None
+
+
+def _page_action_region_from_args(args: list[str]) -> dict:
+    region: dict = {"bbox": None, "mask_path": None}
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--region-bbox" and idx + 1 < len(args):
+            region["bbox"] = _parse_region_bbox(args[idx + 1])
+            idx += 2
+            continue
+        if arg == "--external-mask" and idx + 1 < len(args):
+            region["mask_path"] = args[idx + 1]
+            idx += 2
+            continue
+        idx += 1
+    if region["bbox"] is None:
+        region["bbox"] = _mask_bounding_box(region.get("mask_path"))
+    return region
+
+
+def _region_bbox(region: dict | None) -> list[int] | None:
+    if not isinstance(region, dict):
+        return None
+    return _optional_bbox4(region.get("bbox"))
+
+
+def _bbox_in_region(bbox, region: dict | None) -> bool:
+    region_bbox = _region_bbox(region)
+    if region_bbox is None:
+        return True
+    return _bbox_intersects(bbox, region_bbox)
+
+
+def _layer_in_region(layer: dict, region: dict | None) -> bool:
+    return _bbox_in_region(_resolved_layer_bbox(layer), region)
+
+
+def _block_in_region(block: dict, region: dict | None) -> bool:
+    return _bbox_in_region(block.get("bbox"), region)
 
 
 def _bbox_center_distance(left, right) -> float:
@@ -1157,7 +1418,10 @@ def build_text_layer(
         _normalize_relative_y_bbox(ocr_text.get("text_pixel_bbox"), source_bbox),
         source_bbox,
     )
-    style = _merge_style(ocr_text.get("estilo"))
+    style = normalize_auto_typesetting_style(
+        _merge_style(ocr_text.get("estilo")),
+        _coerce_background_rgb(ocr_text.get("background_rgb")),
+    )
     balloon_subregions = _normalize_relative_y_bbox_list(ocr_text.get("balloon_subregions"), layout_bbox)
     connected_lobe_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_lobe_bboxes"), layout_bbox)
     connected_text_groups = _normalize_relative_y_bbox_list(ocr_text.get("connected_text_groups"), layout_bbox)
@@ -1184,6 +1448,7 @@ def build_text_layer(
         "ocr_source": ocr_text.get("ocr_source"),
         "style": style,
         "estilo": style,
+        "style_origin": "auto",
         "visible": True,
         "locked": False,
         "order": layer_index,
@@ -1196,6 +1461,8 @@ def build_text_layer(
         "rotation_deg": float(ocr_text.get("rotation_deg", 0) or 0),
         "detected_font_size_px": ocr_text.get("detected_font_size_px"),
         "skip_processing": bool(ocr_text.get("skip_processing", False)),
+        "skip_reason": ocr_text.get("skip_reason"),
+        "smart_skip_decision": ocr_text.get("smart_skip_decision"),
         "balloon_type": ocr_text.get("balloon_type"),
         "inpaint_mode": ocr_text.get("inpaint_mode"),
         "inpaint_strategy": ocr_text.get("inpaint_strategy"),
@@ -1265,6 +1532,7 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
         "ocr_source": raw_layer.get("ocr_source"),
         "style": style,
         "estilo": style,
+        "style_origin": raw_layer.get("style_origin", "legacy"),
         "visible": bool(raw_layer.get("visible", True)),
         "locked": bool(raw_layer.get("locked", False)),
         "order": int(raw_layer.get("order", layer_index) or layer_index),
@@ -1277,6 +1545,8 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
         "rotation_deg": float(raw_layer.get("rotation_deg", 0) or 0),
         "detected_font_size_px": raw_layer.get("detected_font_size_px"),
         "skip_processing": bool(raw_layer.get("skip_processing", False)),
+        "skip_reason": raw_layer.get("skip_reason"),
+        "smart_skip_decision": raw_layer.get("smart_skip_decision"),
         "balloon_type": raw_layer.get("balloon_type"),
         "inpaint_mode": raw_layer.get("inpaint_mode"),
         "inpaint_strategy": raw_layer.get("inpaint_strategy"),
@@ -1362,12 +1632,15 @@ def _sync_page_legacy_aliases(page: dict) -> None:
                 _bbox4(layer.get("source_bbox"), layer.get("bbox")),
             ),
             "estilo": _merge_style(layer.get("style") or layer.get("estilo")),
+            "style_origin": layer.get("style_origin", "legacy"),
             "qa_flags": list(layer.get("qa_flags") or []),
             "balloon_bbox": _bbox4(layer.get("balloon_bbox"), layer.get("layout_bbox") or layer.get("bbox")),
             "balloon_type": layer.get("balloon_type"),
             "layout_profile": layer.get("layout_profile") or layer.get("block_profile"),
             "layout_group_size": int(layer.get("layout_group_size", 1) or 1),
             "skip_processing": bool(layer.get("skip_processing", False)),
+            "skip_reason": layer.get("skip_reason"),
+            "smart_skip_decision": layer.get("smart_skip_decision"),
             "balloon_subregions": _bbox4_list(layer.get("balloon_subregions")),
         }
         for layer in text_layers
@@ -1396,6 +1669,34 @@ def _ensure_image_layer(page: dict, layer_key: str, path: str, *, visible: bool,
     layer["locked"] = bool(layer.get("locked", locked))
 
 
+def _apply_recovery_layer_for_page(project: dict, page: dict, rendered_path: Path) -> None:
+    work_dir = Path(project.get("_work_dir", "."))
+    original_rel = _resolve_image_layer_path(page, "base", page.get("arquivo_original", ""))
+    recovery_rel = _resolve_image_layer_path(page, "recovery", "")
+    if not recovery_rel:
+        return
+
+    original_path = work_dir / original_rel
+    if not original_path.exists():
+        original_path = work_dir / "originals" / Path(original_rel).name
+    if not original_path.exists():
+        candidate = Path(original_rel)
+        if candidate.exists():
+            original_path = candidate
+
+    recovery_path = work_dir / recovery_rel
+    if not recovery_path.exists():
+        candidate = Path(recovery_rel)
+        if candidate.exists():
+            recovery_path = candidate
+
+    try:
+        from recovery import apply_recovery_layer
+        apply_recovery_layer(rendered_path, original_path, recovery_path)
+    except Exception as exc:
+        logger.warning("Falha ao aplicar recovery na pagina renderizada: %s", exc)
+
+
 def render_page_image(project, page_idx, output_path):
     """Auxiliar para renderizar a versao final da pagina para visualizacao."""
     from typesetter.renderer import _typeset_single_page
@@ -1421,11 +1722,107 @@ def render_page_image(project, page_idx, output_path):
     
     try:
         _typeset_single_page((str(bg_path), trans_page_dict, str(out_dir)))
+        rendered_path = Path(output_path)
+        renderer_output = out_dir / Path(bg_path).name
+        if renderer_output.exists() and renderer_output.resolve() != rendered_path.resolve():
+            if rendered_path.exists():
+                rendered_path.unlink()
+            shutil.move(str(renderer_output), str(rendered_path))
+        _apply_recovery_layer_for_page(project, page, rendered_path)
     except Exception as e:
         sys.stderr.write(f"Falha ao renderizar imagem da pagina: {e}\n")
 
+
+def _merge_regional_inpaint_output(
+    *,
+    generated_path: Path,
+    base_path: Path,
+    fallback_path: Path,
+    bbox: list[int] | None,
+) -> None:
+    if bbox is None or not generated_path.exists():
+        return
+    try:
+        from PIL import Image
+        target_path = base_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        base_source = target_path if target_path.exists() else fallback_path
+        with Image.open(base_source).convert("RGB") as base_img:
+            with Image.open(generated_path).convert("RGB") as generated_img:
+                if generated_img.size != base_img.size:
+                    generated_img = generated_img.resize(base_img.size, Image.Resampling.LANCZOS)
+                x1, y1, x2, y2 = bbox
+                x1 = max(0, min(base_img.width, x1))
+                y1 = max(0, min(base_img.height, y1))
+                x2 = max(0, min(base_img.width, x2))
+                y2 = max(0, min(base_img.height, y2))
+                if x2 <= x1 or y2 <= y1:
+                    return
+                base_img.paste(generated_img.crop((x1, y1, x2, y2)), (x1, y1))
+                base_img.save(target_path)
+    except Exception as exc:
+        logger.warning("Falha ao mesclar inpaint regional: %s", exc)
+
+
 def _visible_render_texts(texts: list[dict]) -> list[dict]:
     return [text for text in texts if text.get("visible", True) is not False]
+
+
+def _text_requires_final_cleanup(text: dict) -> bool:
+    if not isinstance(text, dict) or text.get("skip_processing"):
+        return False
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    if not translated:
+        return False
+    original = str(text.get("original") or text.get("text") or "").strip()
+    if original and translated == original:
+        return False
+    return True
+
+
+def _texts_requiring_final_cleanup(texts: list[dict]) -> list[dict]:
+    return [text for text in _visible_render_texts(texts) if _text_requires_final_cleanup(text)]
+
+
+def _prepare_inpaint_base_for_render(
+    *,
+    original_path: Path,
+    inpainted_path: Path,
+    texts: list[dict],
+    temp_output_path: Path | None = None,
+    update_inpaint: bool = False,
+) -> Path:
+    cleanup_texts = _texts_requiring_final_cleanup(texts)
+    if not cleanup_texts or not original_path.exists() or not inpainted_path.exists():
+        return inpainted_path
+
+    try:
+        import cv2
+        from vision_stack.runtime import (
+            _apply_white_balloon_text_box_cleanup,
+            _has_white_balloon_text_residual,
+        )
+
+        original_bgr = cv2.imread(str(original_path))
+        inpaint_bgr = cv2.imread(str(inpainted_path))
+        if original_bgr is None or inpaint_bgr is None:
+            return inpainted_path
+        original_rgb = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2RGB)
+        inpaint_rgb = cv2.cvtColor(inpaint_bgr, cv2.COLOR_BGR2RGB)
+        if not _has_white_balloon_text_residual(original_rgb, inpaint_rgb, cleanup_texts):
+            return inpainted_path
+
+        cleaned_rgb = _apply_white_balloon_text_box_cleanup(original_rgb, inpaint_rgb, cleanup_texts)
+        target_path = inpainted_path if update_inpaint else temp_output_path
+        if target_path is None:
+            return inpainted_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(target_path), cv2.cvtColor(cleaned_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        return target_path
+    except Exception as exc:
+        logger.warning("Falha na limpeza final antes do render: %s", exc)
+        return inpainted_path
+
 
 def _run_render_preview_page(
     project_json_path: Path,
@@ -1473,16 +1870,29 @@ def _run_render_preview_page(
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         trans_texts = _visible_render_texts(_page_text_layers_for_renderer(page, page_idx))
+        original_path = work_dir / original_rel
+        if not original_path.exists():
+            candidate = Path(original_rel)
+            if candidate.exists():
+                original_path = candidate
+        render_base_path = _prepare_inpaint_base_for_render(
+            original_path=original_path,
+            inpainted_path=inpainted_path,
+            texts=trans_texts,
+            temp_output_path=output_path.parent / f"{output_path.stem}-base{output_path.suffix}",
+            update_inpaint=False,
+        )
         trans_page_dict = {"texts": trans_texts}
 
         from typesetter.renderer import _typeset_single_page
 
-        _typeset_single_page((str(inpainted_path), trans_page_dict, str(output_path.parent)))
-        renderer_output = output_path.parent / Path(inpainted_path).name
+        _typeset_single_page((str(render_base_path), trans_page_dict, str(output_path.parent)))
+        renderer_output = output_path.parent / Path(render_base_path).name
         if renderer_output.exists() and renderer_output.resolve() != output_path.resolve():
             if output_path.exists():
                 output_path.unlink()
             shutil.move(str(renderer_output), str(output_path))
+        _apply_recovery_layer_for_page(project, page, output_path)
 
         emit("complete", output_path=str(output_path))
     except Exception as e:
@@ -1521,27 +1931,41 @@ def _run_retypeset(project_json_path: Path, page_idx: int):
 
     trans_texts = _page_text_layers_for_renderer(page, page_idx)
     trans_page_dict = {"texts": _visible_render_texts(trans_texts)}
+    original_path = work_dir / original_rel
+    if not original_path.exists():
+        candidate = Path(original_rel)
+        if candidate.exists():
+            original_path = candidate
+    inpainted_path = _prepare_inpaint_base_for_render(
+        original_path=original_path,
+        inpainted_path=inpainted_path,
+        texts=trans_page_dict["texts"],
+        update_inpaint=True,
+    )
 
     try:
         from typesetter.renderer import _typeset_single_page
         _typeset_single_page((str(inpainted_path), trans_page_dict, str(output_dir)))
+        rendered_path = output_dir / img_name
+        _apply_recovery_layer_for_page(project, page, rendered_path)
         page["text_layers"] = trans_texts
         _ensure_image_layer(page, "base", original_rel, visible=True, locked=True)
         _ensure_image_layer(page, "mask", _resolve_image_layer_path(page, "mask", f"layers/mask/{page_number:03}.png"), visible=False, locked=False)
         _ensure_image_layer(page, "inpaint", inpaint_rel, visible=False, locked=True)
         _ensure_image_layer(page, "brush", _resolve_image_layer_path(page, "brush", f"layers/brush/{page_number:03}.png"), visible=False, locked=False)
+        _ensure_image_layer(page, "recovery", _resolve_image_layer_path(page, "recovery", f"layers/recovery/{page_number:03}.png"), visible=False, locked=False)
         _ensure_image_layer(page, "rendered", rendered_rel, visible=True, locked=True)
         _sync_page_legacy_aliases(page)
         project["versao"] = "2.0"
         _save_project_json(project_json_path, project)
-        emit("complete", output_path=str(output_dir / img_name))
+        emit("complete", output_path=str(rendered_path))
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         emit("error", message=f"Falha no retypeset: {e}\n{tb}")
 
 
-def _run_reinpaint(project_json_path: Path, page_idx: int):
+def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None = None):
     with open(project_json_path, "r", encoding="utf-8") as f:
         project = json.load(f)
 
@@ -1573,6 +1997,8 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
         return
 
     page_texts = _page_text_layers_for_renderer(page, page_idx)
+    is_regional = _region_bbox(region) is not None
+    regional_texts = [layer for layer in page_texts if _layer_in_region(layer, region)] if is_regional else page_texts
 
     inpaint_blocks = page.get("inpaint_blocks") or [
         {
@@ -1581,6 +2007,20 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
         }
         for t in page_texts
     ]
+    if is_regional:
+        inpaint_blocks = [
+            block
+            for block in inpaint_blocks
+            if isinstance(block, dict) and _block_in_region(block, region)
+        ]
+        if not inpaint_blocks:
+            inpaint_blocks = [
+                {
+                    "bbox": _resolved_layer_bbox(layer),
+                    "confidence": float(layer.get("ocr_confidence", layer.get("confianca_ocr", 1.0)) or 1.0),
+                }
+                for layer in regional_texts
+            ]
 
     try:
         from inpainter.lama import run_inpainting
@@ -1588,7 +2028,7 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
             "image": str(original_path),
             "width": 0,
             "height": 0,
-            "texts": page_texts,
+            "texts": regional_texts,
             "_vision_blocks": inpaint_blocks,
         }
         outputs = run_inpainting(
@@ -1597,10 +2037,18 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
             output_dir=str(output_dir),
             models_dir=str(Path("D:/traduzai_data/models")),
         )
+        if is_regional and outputs:
+            _merge_regional_inpaint_output(
+                generated_path=Path(outputs[0]),
+                base_path=work_dir / inpaint_rel,
+                fallback_path=original_path,
+                bbox=_region_bbox(region),
+            )
         _ensure_image_layer(page, "base", original_rel, visible=True, locked=True)
         _ensure_image_layer(page, "mask", _resolve_image_layer_path(page, "mask", f"layers/mask/{page_number:03}.png"), visible=False, locked=False)
         _ensure_image_layer(page, "inpaint", inpaint_rel, visible=False, locked=True)
         _ensure_image_layer(page, "brush", _resolve_image_layer_path(page, "brush", f"layers/brush/{page_number:03}.png"), visible=False, locked=False)
+        _ensure_image_layer(page, "recovery", _resolve_image_layer_path(page, "recovery", f"layers/recovery/{page_number:03}.png"), visible=False, locked=False)
         if isinstance(page.get("text_layers"), list):
             page["text_layers"] = page_texts
         _sync_page_legacy_aliases(page)
@@ -1611,6 +2059,130 @@ def _run_reinpaint(project_json_path: Path, page_idx: int):
         import traceback
         tb = traceback.format_exc()
         emit("error", message=f"Falha no reinpaint: {e}\n{tb}")
+
+
+def _append_glossary_entry(entries: list[dict], seen: set[tuple[str, str]], source: str, target: str, kind: str, status: str) -> None:
+    source = " ".join(str(source or "").split()).strip()
+    target = " ".join(str(target or "").split()).strip()
+    if not source:
+        return
+    key = (kind, source.lower())
+    if key in seen:
+        return
+    seen.add(key)
+    entries.append(
+        {
+            "source": source,
+            "target": target or source,
+            "kind": kind,
+            "status": status,
+        }
+    )
+
+
+def build_glossary_used_report(config: dict, context: dict, page_text_layers: list[dict]) -> dict:
+    """Build a passive glossary report without enforcing new terms yet."""
+    entries: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for source, target in (config.get("glossario") or {}).items():
+        _append_glossary_entry(entries, seen, source, target, "manual_glossary", "locked")
+    for source, target in ((context or {}).get("glossario") or {}).items():
+        _append_glossary_entry(entries, seen, source, target, "context_glossary", "locked")
+    for source, target in ((context or {}).get("memoria_lexical") or {}).items():
+        _append_glossary_entry(entries, seen, source, target, "memory", "suggested")
+    for name in (context or {}).get("personagens") or []:
+        _append_glossary_entry(entries, seen, name, name, "character", "suggested")
+    for term in (context or {}).get("termos") or []:
+        _append_glossary_entry(entries, seen, term, term, "term", "suggested")
+    for faction in (context or {}).get("faccoes") or []:
+        _append_glossary_entry(entries, seen, faction, faction, "faction", "suggested")
+
+    used_hits: list[dict] = []
+    blocked_translations: list[dict] = []
+    violations: list[dict] = []
+    qa_flags: dict[str, int] = {}
+    for page_index, page in enumerate(page_text_layers, start=1):
+        for layer_index, text in enumerate(page.get("texts", []) or [], start=1):
+            for flag in text.get("qa_flags") or []:
+                qa_flags[str(flag)] = qa_flags.get(str(flag), 0) + 1
+                if str(flag) in {"glossary_violation", "placeholder_lost", "forbidden_translation"}:
+                    violations.append(
+                        {
+                            "page": page_index,
+                            "layer": text.get("id") or f"t{layer_index}",
+                            "type": str(flag),
+                            "severity": "critical",
+                        }
+                    )
+            for hit in text.get("glossary_hits") or []:
+                source_term = hit.get("source") or hit.get("source_term") or ""
+                canonical = hit.get("target") or hit.get("canonical") or source_term
+                used_hits.append(
+                    {
+                        "page": page_index,
+                        "layer": text.get("id") or f"t{layer_index}",
+                        "block_id": text.get("id") or f"t{layer_index}",
+                        "source_term": source_term,
+                        "canonical": canonical,
+                        "policy": hit.get("policy") or "locked",
+                        "hit": hit,
+                    }
+                )
+            if text.get("translation_blocked_text"):
+                blocked_translations.append(
+                    {
+                        "page": page_index,
+                        "layer": text.get("id") or f"t{layer_index}",
+                        "original": text.get("original") or text.get("text") or "",
+                        "blocked_translation": text.get("translation_blocked_text"),
+                        "qa_flags": list(text.get("qa_flags") or []),
+                    }
+                )
+
+    locked_terms_used = sum(
+        1
+        for hit in used_hits
+        if str((hit.get("hit") or {}).get("phase") or "").lower() in {"target", "placeholder"}
+    )
+    empty_reason = ""
+    if not entries:
+        empty_reason = "work_identity_unresolved" if not ((context or {}).get("title") or config.get("obra")) else "no_terms_mined"
+
+    return {
+        "mode": "shadow",
+        "work_identity": {
+            "title": config.get("obra") or (context or {}).get("title") or "",
+            "source_language": config.get("idioma_origem", "en"),
+            "target_language": config.get("idioma_destino", "pt-BR"),
+            "resolved": bool((context or {}).get("fontes_usadas") or entries),
+        },
+        "work": {
+            "title": config.get("obra") or (context or {}).get("title") or "",
+            "source_language": config.get("idioma_origem", "en"),
+            "target_language": config.get("idioma_destino", "pt-BR"),
+            "synopsis_available": bool((context or {}).get("sinopse")),
+            "genres": list((context or {}).get("genero") or []),
+            "sources": list((context or {}).get("fontes_usadas") or []),
+        },
+        "entries": entries,
+        "used_hits": used_hits,
+        "hits": used_hits,
+        "violations": violations,
+        "blocked_translations": blocked_translations,
+        "qa_flags": qa_flags,
+        "summary": {
+            "entry_count": len(entries),
+            "used_hit_count": len(used_hits),
+            "blocked_translation_count": len(blocked_translations),
+            "terms_loaded": len(entries),
+            "terms_used": len(used_hits),
+            "locked_terms_used": locked_terms_used,
+            "violations": len(violations),
+            "review_required": len(blocked_translations) + len(violations),
+            "empty_reason": empty_reason,
+        },
+    }
 
 
 def build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, elapsed):
@@ -1651,6 +2223,12 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
                     "visible": False,
                     "locked": False,
                 },
+                "recovery": {
+                    "key": "recovery",
+                    "path": f"layers/recovery/{i + 1:03}.png",
+                    "visible": False,
+                    "locked": False,
+                },
                 "rendered": {
                     "key": "rendered",
                     "path": f"translated/{img.name}",
@@ -1666,6 +2244,8 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
                 for block in ocr.get("_vision_blocks", [])
             ],
             "page_profile": ocr.get("page_profile"),
+            "page_quality": ocr.get("page_quality"),
+            "route_history": ocr.get("route_history") or [],
             "text_layers": text_layers,
         }
         _sync_page_legacy_aliases(page)
@@ -1686,6 +2266,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "contexto": context,
         "work_context": config.get("work_context") or {},
         "preset": config.get("preset") or {},
+        "runtime_profile": config.get("runtime_profile_decision") or {},
         "paginas": pages,
         "estatisticas": {
             "total_paginas": total_pages,
@@ -1773,7 +2354,7 @@ def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: s
 
     emit("complete", output_path=str(out_img))
 
-def _run_detect_page(project_path: Path, page_idx: int):
+def _run_detect_page(project_path: Path, page_idx: int, region: dict | None = None):
     from ocr.detector import run_ocr
     from ocr.contextual_reviewer import contextual_review_page
     from layout.balloon_layout import enrich_page_layout
@@ -1817,21 +2398,31 @@ def _run_detect_page(project_path: Path, page_idx: int):
 
     existing_layers = _page_text_layers_for_renderer(page, page_idx)
     context = project.get("contexto", {}) or {}
-    reviewed_texts = reviewed.get("texts") or []
-    carried_translations = _carry_translations_for_detected_layers(existing_layers, reviewed_texts)
-    page["text_layers"] = [
+    reviewed_texts = [text for text in (reviewed.get("texts") or []) if isinstance(text, dict)]
+    is_regional = _region_bbox(region) is not None
+    if is_regional:
+        detected_texts = [text for text in reviewed_texts if _bbox_in_region(text.get("bbox"), region)]
+        outside_layers = [layer for layer in existing_layers if not _layer_in_region(layer, region)]
+        translation_source_layers = [layer for layer in existing_layers if _layer_in_region(layer, region)]
+    else:
+        detected_texts = reviewed_texts
+        outside_layers = []
+        translation_source_layers = existing_layers
+    carried_translations = _carry_translations_for_detected_layers(translation_source_layers, detected_texts)
+    detected_layers = [
         build_text_layer(
             page_number=page_number,
-            layer_index=idx,
+            layer_index=len(outside_layers) + idx,
             ocr_text=text,
             translated=carried_translations[idx] if idx < len(carried_translations) else "",
             corpus_visual_benchmark=context.get("corpus_visual_benchmark", {}),
             corpus_textual_benchmark=context.get("corpus_textual_benchmark", {}),
         )
-        for idx, text in enumerate(reviewed_texts)
-        if isinstance(text, dict)
+        for idx, text in enumerate(detected_texts)
     ]
-    page["inpaint_blocks"] = [
+    page["text_layers"] = outside_layers + detected_layers
+
+    detected_blocks = [
         {
             "bbox": _bbox4(block.get("bbox")),
             "confidence": float(block.get("confidence", 0.0) or 0.0),
@@ -1839,11 +2430,21 @@ def _run_detect_page(project_path: Path, page_idx: int):
         for block in reviewed.get("_vision_blocks", [])
         if isinstance(block, dict)
     ]
+    if is_regional:
+        outside_blocks = [
+            block for block in (page.get("inpaint_blocks") or [])
+            if isinstance(block, dict) and not _block_in_region(block, region)
+        ]
+        detected_blocks = [block for block in detected_blocks if _block_in_region(block, region)]
+        page["inpaint_blocks"] = outside_blocks + detected_blocks
+    else:
+        page["inpaint_blocks"] = detected_blocks
     
     _ensure_image_layer(page, "base", original_rel, visible=True, locked=True)
     _ensure_image_layer(page, "mask", _resolve_image_layer_path(page, "mask", f"layers/mask/{page_number:03}.png"), visible=False, locked=False)
     _ensure_image_layer(page, "inpaint", _resolve_image_layer_path(page, "inpaint", f"images/{img_name}"), visible=False, locked=True)
     _ensure_image_layer(page, "brush", _resolve_image_layer_path(page, "brush", f"layers/brush/{page_number:03}.png"), visible=False, locked=False)
+    _ensure_image_layer(page, "recovery", _resolve_image_layer_path(page, "recovery", f"layers/recovery/{page_number:03}.png"), visible=False, locked=False)
     _ensure_image_layer(page, "rendered", _resolve_image_layer_path(page, "rendered", f"translated/{img_name}"), visible=True, locked=True)
     _sync_page_legacy_aliases(page)
     _save_project_json(project_path, project)
@@ -1855,7 +2456,7 @@ def _run_detect_page(project_path: Path, page_idx: int):
     emit_progress("render", 100, 100, message="Detecção concluída!")
     emit("complete", output_path=str(out_img))
 
-def _run_ocr_page(project_path: Path, page_idx: int):
+def _run_ocr_page(project_path: Path, page_idx: int, region: dict | None = None):
     from ocr.detector import run_ocr_on_block
     with open(project_path, "r", encoding="utf-8") as f:
         project = json.load(f)
@@ -1897,10 +2498,12 @@ def _run_ocr_page(project_path: Path, page_idx: int):
             if isinstance(block, dict)
         ]
     page["text_layers"] = layers
-    total = len(layers)
+    target_layers = [layer for layer in layers if _layer_in_region(layer, region)]
+    total = len(target_layers)
     
-    for i, layer in enumerate(layers):
-        emit_progress("ocr", int((i / total) * 100), 10, message=f"OCR em bloco {i+1}/{total}...")
+    for i, layer in enumerate(target_layers):
+        progress = int((i / max(1, total)) * 100)
+        emit_progress("ocr", progress, 10, message=f"OCR em bloco {i+1}/{total}...")
         block_bbox = _resolved_layer_bbox(layer)
         layer["bbox"] = block_bbox
         text, conf = run_ocr_on_block(str(orig_img), block_bbox)
@@ -1919,7 +2522,7 @@ def _run_ocr_page(project_path: Path, page_idx: int):
     emit_progress("render", 100, 100, message="OCR concluído!")
     emit("complete", output_path=str(out_img))
 
-def _run_translate_page(project_path: Path, page_idx: int):
+def _run_translate_page(project_path: Path, page_idx: int, region: dict | None = None):
     from translator.translate import translate_pages
     with open(project_path, "r", encoding="utf-8") as f:
         project = json.load(f)
@@ -1937,34 +2540,45 @@ def _run_translate_page(project_path: Path, page_idx: int):
     
     context = project.get("contexto", {}) or {}
     source_layers = page.get("text_layers") or page.get("textos") or []
+    indexed_layers = list(enumerate(source_layers))
+    target_indexed_layers = [
+        (idx, layer)
+        for idx, layer in indexed_layers
+        if isinstance(layer, dict) and _layer_in_region(layer, region)
+    ]
     page_to_translate = {
         "texts": [
             {
                 **layer,
                 "text": layer.get("text") or layer.get("original") or "",
             }
-            for layer in source_layers
+            for _, layer in target_indexed_layers
         ]
     }
     
-    translated_pages = translate_pages(
-        ocr_results=[page_to_translate],
-        obra=project.get("obra", ""),
-        context=context,
-        glossario=context.get("glossario", {}) or {},
-        idioma_origem=project.get("idioma_origem", "en"),
-        idioma_destino=project.get("idioma_destino", "pt-BR"),
-        ollama_host=project.get("_ollama_host") or "http://localhost:11434",
-        ollama_model=project.get("_ollama_model") or "traduzai-translator",
-        translation_context=project.get("translation_context") or None,
-    )
-    
-    translated_layers = (
-        translated_pages[0].get("texts", page_to_translate["texts"])
-        if translated_pages else page_to_translate["texts"]
-    )
-    page["text_layers"] = translated_layers
-    page["textos"] = translated_layers
+    if target_indexed_layers:
+        translated_pages = translate_pages(
+            ocr_results=[page_to_translate],
+            obra=project.get("obra", ""),
+            context=context,
+            glossario=context.get("glossario", {}) or {},
+            idioma_origem=project.get("idioma_origem", "en"),
+            idioma_destino=project.get("idioma_destino", "pt-BR"),
+            ollama_host=project.get("_ollama_host") or "http://localhost:11434",
+            ollama_model=project.get("_ollama_model") or "traduzai-translator",
+            translation_context=project.get("translation_context") or None,
+        )
+        translated_targets = (
+            translated_pages[0].get("texts", page_to_translate["texts"])
+            if translated_pages else page_to_translate["texts"]
+        )
+        merged_layers = list(source_layers)
+        for (source_idx, _), translated_layer in zip(target_indexed_layers, translated_targets):
+            merged_layers[source_idx] = translated_layer
+    else:
+        merged_layers = list(source_layers)
+    page["text_layers"] = merged_layers
+    page["textos"] = merged_layers
     _sync_page_legacy_aliases(page)
     _save_project_json(project_path, project)
         
@@ -1992,6 +2606,7 @@ def _build_cli_help() -> str:
             "  --ocr-page <project> <page>         Reprocessa OCR da pagina",
             "  --translate-page <project> <page>   Reprocessa traducao da pagina",
             "  --reinpaint-page <project> <page>   Reprocessa limpeza/inpaint da pagina",
+            "  page actions aceitam: --region-bbox x1,y1,x2,y2 --external-mask <path>",
             "  --process-block <mode> <project> <page> <block_id>  Reprocessa um bloco",
             "  --input <pasta|imagem>                Roda o pipeline runner/CLI debug",
             "  --mode mock|real                      Define runner offline mock ou pipeline real",
