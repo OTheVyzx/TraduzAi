@@ -5,6 +5,8 @@ Used as fallback when context is not provided by the user.
 
 import urllib.request
 import json
+import os
+from pathlib import Path
 
 
 ANILIST_URL = "https://graphql.anilist.co"
@@ -23,7 +25,56 @@ query ($search: String) {
 """
 
 
-def fetch_context(obra: str) -> dict:
+def _default_context_cache_dir() -> Path:
+    return Path(os.getenv("TRADUZAI_CONTEXT_CACHE_DIR") or Path.home() / ".traduzai" / "context_cache")
+
+
+def _fetch_context_via_resolver(
+    obra: str,
+    cache_dir: str | Path | None,
+    reviewed_glossary: dict | None,
+    enabled_sources: list[str] | None,
+) -> dict | None:
+    try:
+        from context.internet_context.models import InternetContextRequest
+        from context.internet_context.resolver import InternetContextResolver
+        from context.internet_context.sources import default_sources
+        from glossary.builder import merge_internet_context_into_context
+    except Exception:
+        return None
+
+    resolver = InternetContextResolver(cache_dir=cache_dir or _default_context_cache_dir(), sources=default_sources())
+    result = resolver.resolve(
+        InternetContextRequest(
+            title=obra,
+            enabled_sources=list(enabled_sources or []),
+            use_cache=True,
+            reviewed_glossary=dict(reviewed_glossary or {}),
+        )
+    )
+    if result.context_quality == "empty":
+        return None
+    base = {
+        "sinopse": "",
+        "genero": [],
+        "personagens": [],
+        "aliases": [],
+        "termos": [],
+        "relacoes": [],
+        "faccoes": [],
+        "resumo_por_arco": [],
+        "memoria_lexical": {},
+        "fontes_usadas": [],
+    }
+    return merge_internet_context_into_context(base, result, reviewed_glossary or {})
+
+
+def fetch_context(
+    obra: str,
+    cache_dir: str | Path | None = None,
+    reviewed_glossary: dict | None = None,
+    enabled_sources: list[str] | None = None,
+) -> dict:
     """Fetch manga context from AniList API."""
     empty_context = {
         "sinopse": "",
@@ -37,6 +88,10 @@ def fetch_context(obra: str) -> dict:
         "memoria_lexical": {},
         "fontes_usadas": [],
     }
+
+    resolved = _fetch_context_via_resolver(obra, cache_dir, reviewed_glossary, enabled_sources)
+    if resolved:
+        return merge_context(empty_context, resolved)
 
     payload = json.dumps({
         "query": QUERY,

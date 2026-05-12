@@ -1,24 +1,102 @@
+use once_cell::sync::Lazy;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 pub const PROJECT_VERSION_V2: &str = "2.0";
+const PROJECT_IO_BACKOFF_MS: [u64; 4] = [25, 75, 150, 300];
+
+static PROJECT_JSON_LOCKS: Lazy<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn retry_permission_denied<T>(
+    path: &Path,
+    action: &str,
+    mut op: impl FnMut() -> io::Result<T>,
+) -> Result<T, String> {
+    let mut last_err: Option<io::Error> = None;
+    for attempt in 0..=PROJECT_IO_BACKOFF_MS.len() {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err)
+                if err.kind() == io::ErrorKind::PermissionDenied
+                    && attempt < PROJECT_IO_BACKOFF_MS.len() =>
+            {
+                last_err = Some(err);
+                thread::sleep(Duration::from_millis(PROJECT_IO_BACKOFF_MS[attempt]));
+            }
+            Err(err) => {
+                return Err(format!("{action}: {} ({})", path.display(), err));
+            }
+        }
+    }
+    let err = last_err
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "acesso negado".to_string());
+    Err(format!("{action}: {} ({err})", path.display()))
+}
+
+fn project_lock_key(project_file: &Path) -> PathBuf {
+    if let Ok(canonical) = project_file.canonicalize() {
+        return canonical;
+    }
+    if let (Some(parent), Some(name)) = (project_file.parent(), project_file.file_name()) {
+        if let Ok(parent) = parent.canonicalize() {
+            return parent.join(name);
+        }
+    }
+    project_file.to_path_buf()
+}
+
+fn project_json_lock(project_file: &Path) -> Result<Arc<Mutex<()>>, String> {
+    let key = project_lock_key(project_file);
+    let mut locks = PROJECT_JSON_LOCKS
+        .lock()
+        .map_err(|_| "Lock global de project.json envenenado".to_string())?;
+    Ok(locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+fn read_project_string(project_file: &Path) -> Result<String, String> {
+    if project_file.is_dir() {
+        return Err(format!(
+            "Erro ao ler project.json: caminho aponta para diretorio ({})",
+            project_file.display()
+        ));
+    }
+    if !project_file.exists() {
+        return Err(format!(
+            "Erro ao ler project.json: arquivo nao encontrado ({})",
+            project_file.display()
+        ));
+    }
+    retry_permission_denied(project_file, "Erro ao ler project.json", || {
+        fs::read_to_string(project_file)
+    })
+}
 
 fn default_text_style() -> Value {
     json!({
-        "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+        "fonte": "ComicNeue-Bold.ttf",
         "tamanho": 28,
-        "cor": "#FFFFFF",
+        "cor": "#000000",
         "cor_gradiente": [],
-        "contorno": "#000000",
-        "contorno_px": 2,
+        "contorno": "",
+        "contorno_px": 0,
         "glow": false,
         "glow_cor": "",
         "glow_px": 0,
         "sombra": false,
         "sombra_cor": "",
         "sombra_offset": [0, 0],
-        "bold": false,
+        "bold": true,
         "italico": false,
         "rotacao": 0,
         "alinhamento": "center",
@@ -26,7 +104,10 @@ fn default_text_style() -> Value {
     })
 }
 
-fn as_object_mut<'a>(value: &'a mut Value, context: &str) -> Result<&'a mut Map<String, Value>, String> {
+fn as_object_mut<'a>(
+    value: &'a mut Value,
+    context: &str,
+) -> Result<&'a mut Map<String, Value>, String> {
     value
         .as_object_mut()
         .ok_or_else(|| format!("{context} precisa ser um objeto JSON"))
@@ -41,7 +122,8 @@ fn as_array_mut<'a>(value: &'a mut Value, context: &str) -> Result<&'a mut Vec<V
 fn get_bbox(value: Option<&Value>) -> Option<Vec<Value>> {
     value.and_then(|bbox| {
         bbox.as_array().map(|items| {
-            items.iter()
+            items
+                .iter()
                 .take(4)
                 .map(|item| Value::from(item.as_i64().unwrap_or_default()))
                 .collect::<Vec<_>>()
@@ -66,7 +148,9 @@ fn infer_inpaint_path(page: &Map<String, Value>) -> Option<String> {
         return Some(path.to_string());
     }
 
-    let original = page.get("arquivo_original").and_then(|value| value.as_str())?;
+    let original = page
+        .get("arquivo_original")
+        .and_then(|value| value.as_str())?;
     let filename = Path::new(original).file_name()?.to_string_lossy();
     Some(format!("images/{filename}"))
 }
@@ -90,7 +174,12 @@ fn normalize_text_layer_object(
         .get("original")
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned)
-        .or_else(|| layer_obj.get("text").and_then(|value| value.as_str()).map(ToOwned::to_owned))
+        .or_else(|| {
+            layer_obj
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_default();
     let translated = layer_obj
         .get("translated")
@@ -106,13 +195,18 @@ fn normalize_text_layer_object(
     let ocr_confidence = layer_obj
         .get("ocr_confidence")
         .and_then(|value| value.as_f64())
-        .or_else(|| layer_obj.get("ocr_confidence").and_then(|value| value.as_i64()).map(|v| v as f64))
-        .or_else(|| layer_obj.get("confianca_ocr").and_then(|value| value.as_f64()))
         .or_else(|| {
             layer_obj
-                .get("confidence")
+                .get("ocr_confidence")
+                .and_then(|value| value.as_i64())
+                .map(|v| v as f64)
+        })
+        .or_else(|| {
+            layer_obj
+                .get("confianca_ocr")
                 .and_then(|value| value.as_f64())
         })
+        .or_else(|| layer_obj.get("confidence").and_then(|value| value.as_f64()))
         .unwrap_or(0.0);
     let style = layer_obj
         .get("style")
@@ -120,9 +214,23 @@ fn normalize_text_layer_object(
         .or_else(|| layer_obj.get("estilo").cloned())
         .unwrap_or_else(default_text_style);
 
-    layer_obj.insert("id".into(), Value::from(layer_obj.get("id").and_then(|value| value.as_str()).unwrap_or(&default_id)));
+    layer_obj.insert(
+        "id".into(),
+        Value::from(
+            layer_obj
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&default_id),
+        ),
+    );
     layer_obj.insert("kind".into(), Value::from("text"));
-    layer_obj.insert("source_bbox".into(), Value::Array(source_bbox.unwrap_or_else(|| layout_bbox.clone())));
+    if !layer_obj.contains_key("style_origin") {
+        layer_obj.insert("style_origin".into(), Value::from("legacy"));
+    }
+    layer_obj.insert(
+        "source_bbox".into(),
+        Value::Array(source_bbox.unwrap_or_else(|| layout_bbox.clone())),
+    );
     layer_obj.insert("layout_bbox".into(), Value::Array(layout_bbox.clone()));
     if !layer_obj.contains_key("render_bbox") {
         layer_obj.insert("render_bbox".into(), Value::Null);
@@ -133,19 +241,39 @@ fn normalize_text_layer_object(
     layer_obj.insert("style".into(), style);
     layer_obj.insert(
         "visible".into(),
-        Value::from(layer_obj.get("visible").and_then(|value| value.as_bool()).unwrap_or(true)),
+        Value::from(
+            layer_obj
+                .get("visible")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true),
+        ),
     );
     layer_obj.insert(
         "locked".into(),
-        Value::from(layer_obj.get("locked").and_then(|value| value.as_bool()).unwrap_or(false)),
+        Value::from(
+            layer_obj
+                .get("locked")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        ),
     );
     layer_obj.insert(
         "order".into(),
-        Value::from(layer_obj.get("order").and_then(|value| value.as_i64()).unwrap_or(layer_index as i64)),
+        Value::from(
+            layer_obj
+                .get("order")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(layer_index as i64),
+        ),
     );
     layer_obj.insert(
         "tipo".into(),
-        Value::from(layer_obj.get("tipo").and_then(|value| value.as_str()).unwrap_or("fala")),
+        Value::from(
+            layer_obj
+                .get("tipo")
+                .and_then(|value| value.as_str())
+                .unwrap_or("fala"),
+        ),
     );
     if !layer_obj.contains_key("render_preview_path") {
         layer_obj.insert("render_preview_path".into(), Value::Null);
@@ -188,7 +316,9 @@ fn ensure_image_layer_entry(
     visible: bool,
     locked: bool,
 ) {
-    let existing = layers_obj.entry(key.to_string()).or_insert_with(|| json!({}));
+    let existing = layers_obj
+        .entry(key.to_string())
+        .or_insert_with(|| json!({}));
     let entry = existing.as_object_mut().unwrap();
     entry.insert("key".into(), Value::from(key));
     if !entry.contains_key("path") {
@@ -201,11 +331,21 @@ fn ensure_image_layer_entry(
     }
     entry.insert(
         "visible".into(),
-        Value::from(entry.get("visible").and_then(|value| value.as_bool()).unwrap_or(visible)),
+        Value::from(
+            entry
+                .get("visible")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(visible),
+        ),
     );
     entry.insert(
         "locked".into(),
-        Value::from(entry.get("locked").and_then(|value| value.as_bool()).unwrap_or(locked)),
+        Value::from(
+            entry
+                .get("locked")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(locked),
+        ),
     );
 }
 
@@ -265,6 +405,7 @@ fn sync_legacy_aliases(page: &mut Value) -> Result<(), String> {
                 "traduzido": layer.get("translated").cloned().unwrap_or_else(|| Value::from("")),
                 "confianca_ocr": layer.get("ocr_confidence").cloned().unwrap_or_else(|| Value::from(0.0)),
                 "estilo": layer.get("style").cloned().unwrap_or_else(default_text_style),
+                "style_origin": layer.get("style_origin").cloned().unwrap_or_else(|| Value::from("legacy")),
             })
         })
         .collect::<Vec<_>>();
@@ -278,7 +419,12 @@ fn migrate_page(page: &mut Value, page_index: usize) -> Result<(), String> {
     let number = page_number(page_obj, page_index);
     page_obj.insert(
         "numero".into(),
-        Value::from(page_obj.get("numero").and_then(|value| value.as_u64()).unwrap_or(number as u64)),
+        Value::from(
+            page_obj
+                .get("numero")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(number as u64),
+        ),
     );
 
     let original_path = page_obj
@@ -317,6 +463,7 @@ fn migrate_page(page: &mut Value, page_index: usize) -> Result<(), String> {
     ensure_image_layer_entry(image_layers, "mask", None, false, false);
     ensure_image_layer_entry(image_layers, "inpaint", inferred_inpaint_path, false, true);
     ensure_image_layer_entry(image_layers, "brush", None, false, false);
+    ensure_image_layer_entry(image_layers, "recovery", None, false, false);
     ensure_image_layer_entry(image_layers, "rendered", rendered_path, true, true);
 
     let legacy_texts = page_obj
@@ -331,7 +478,8 @@ fn migrate_page(page: &mut Value, page_index: usize) -> Result<(), String> {
 
     if layers.is_empty() && !legacy_texts.is_empty() {
         for (layer_index, legacy_text) in legacy_texts.iter().enumerate() {
-            let bbox = get_bbox(legacy_text.get("bbox")).unwrap_or_else(|| vec![0.into(), 0.into(), 32.into(), 32.into()]);
+            let bbox = get_bbox(legacy_text.get("bbox"))
+                .unwrap_or_else(|| vec![0.into(), 0.into(), 32.into(), 32.into()]);
             let style = legacy_text
                 .get("estilo")
                 .cloned()
@@ -413,8 +561,7 @@ pub fn migrate_project_value(project: &mut Value) -> Result<(), String> {
 }
 
 pub fn load_project_value(project_file: &Path) -> Result<Value, String> {
-    let content =
-        fs::read_to_string(project_file).map_err(|e| format!("Erro ao ler project.json: {e}"))?;
+    let content = read_project_string(project_file)?;
     let mut project: Value =
         serde_json::from_str(&content).map_err(|e| format!("JSON inválido: {e}"))?;
     migrate_project_value(&mut project)?;
@@ -430,15 +577,39 @@ pub fn save_project_value(project_file: &Path, project: &mut Value) -> Result<()
             .map_err(|e| format!("Erro ao preparar diretório do projeto: {e}"))?;
     }
     let temp_file = project_file.with_extension("json.tmp");
-    fs::write(&temp_file, content)
-        .map_err(|e| format!("Erro ao salvar project.json temporário: {e}"))?;
+    retry_permission_denied(&temp_file, "Erro ao salvar project.json temporario", || {
+        fs::write(&temp_file, &content)
+    })?;
     if project_file.exists() {
-        fs::remove_file(project_file)
-            .map_err(|e| format!("Erro ao substituir project.json anterior: {e}"))?;
+        retry_permission_denied(
+            project_file,
+            "Erro ao substituir project.json anterior",
+            || fs::remove_file(project_file),
+        )?;
     }
-    fs::rename(&temp_file, project_file)
-        .map_err(|e| format!("Erro ao finalizar gravação atômica do project.json: {e}"))?;
+    retry_permission_denied(
+        project_file,
+        "Erro ao finalizar gravacao atomica do project.json",
+        || fs::rename(&temp_file, project_file),
+    )?;
     Ok(())
+}
+
+pub fn edit_project_value<T>(
+    project_file: &Path,
+    edit: impl FnOnce(&mut Value) -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = project_json_lock(project_file)?;
+    let _guard = lock.lock().map_err(|_| {
+        format!(
+            "Lock de project.json envenenado: {}",
+            project_file.display()
+        )
+    })?;
+    let mut project = load_project_value(project_file)?;
+    let result = edit(&mut project)?;
+    save_project_value(project_file, &mut project)?;
+    Ok(result)
 }
 
 pub fn default_bitmap_layer_path(page_number: usize, layer_key: &str) -> Option<String> {
@@ -446,6 +617,7 @@ pub fn default_bitmap_layer_path(page_number: usize, layer_key: &str) -> Option<
     match layer_key {
         "mask" => Some(format!("layers/mask/{page_name}")),
         "brush" => Some(format!("layers/brush/{page_name}")),
+        "recovery" => Some(format!("layers/recovery/{page_name}")),
         _ => None,
     }
 }
@@ -485,8 +657,24 @@ pub fn ensure_bitmap_layer_path(
         .unwrap_or(fallback);
     entry_obj.insert("key".into(), Value::from(layer_key));
     entry_obj.insert("path".into(), Value::from(path.clone()));
-    entry_obj.insert("visible".into(), Value::from(entry_obj.get("visible").and_then(|value| value.as_bool()).unwrap_or(false)));
-    entry_obj.insert("locked".into(), Value::from(entry_obj.get("locked").and_then(|value| value.as_bool()).unwrap_or(false)));
+    entry_obj.insert(
+        "visible".into(),
+        Value::from(
+            entry_obj
+                .get("visible")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        ),
+    );
+    entry_obj.insert(
+        "locked".into(),
+        Value::from(
+            entry_obj
+                .get("locked")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        ),
+    );
     Ok(path)
 }
 
@@ -515,6 +703,7 @@ pub fn create_text_layer(
     let layer = json!({
         "id": format!("tl_{number:03}_{:03}", order + 1),
         "kind": "text",
+        "style_origin": "editor",
         "source_bbox": layout_bbox,
         "layout_bbox": layout_bbox,
         "render_bbox": Value::Null,
@@ -656,7 +845,8 @@ pub fn set_layer_visibility(
 
     match layer_kind {
         "image" => {
-            let key = layer_key.ok_or_else(|| "layer_key é obrigatório para image layer".to_string())?;
+            let key =
+                layer_key.ok_or_else(|| "layer_key é obrigatório para image layer".to_string())?;
             let image_layers = page_obj
                 .get_mut("image_layers")
                 .and_then(|value| value.as_object_mut())
@@ -668,7 +858,8 @@ pub fn set_layer_visibility(
             entry.insert("visible".into(), Value::from(visible));
         }
         "text" => {
-            let id = layer_id.ok_or_else(|| "layer_id é obrigatório para text layer".to_string())?;
+            let id =
+                layer_id.ok_or_else(|| "layer_id é obrigatório para text layer".to_string())?;
             let layers = page_obj
                 .get_mut("text_layers")
                 .and_then(|value| value.as_array_mut())
@@ -712,6 +903,8 @@ pub fn resolve_project_file(base_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Error, ErrorKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn legacy_project() -> Value {
         json!({
@@ -758,15 +951,43 @@ mod tests {
     }
 
     #[test]
+    fn retry_permission_denied_retries_then_succeeds() {
+        let calls = AtomicUsize::new(0);
+        let result = retry_permission_denied(Path::new("project.json"), "read", || {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                Err(Error::new(ErrorKind::PermissionDenied, "locked"))
+            } else {
+                Ok("ok")
+            }
+        });
+
+        assert_eq!(result.expect("retry should succeed"), "ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
     fn migrate_project_value_creates_v2_layers_and_aliases() {
         let mut project = legacy_project();
         migrate_project_value(&mut project).expect("migration should succeed");
 
         assert_eq!(project["versao"], "2.0");
-        assert_eq!(project["paginas"][0]["image_layers"]["base"]["path"], "originals/001.jpg");
-        assert_eq!(project["paginas"][0]["image_layers"]["rendered"]["path"], "translated/001.jpg");
-        assert_eq!(project["paginas"][0]["image_layers"]["inpaint"]["path"], "images/001.jpg");
-        assert_eq!(project["paginas"][0]["text_layers"][0]["layout_bbox"], json!([10, 12, 80, 90]));
+        assert_eq!(
+            project["paginas"][0]["image_layers"]["base"]["path"],
+            "originals/001.jpg"
+        );
+        assert_eq!(
+            project["paginas"][0]["image_layers"]["rendered"]["path"],
+            "translated/001.jpg"
+        );
+        assert_eq!(
+            project["paginas"][0]["image_layers"]["inpaint"]["path"],
+            "images/001.jpg"
+        );
+        assert_eq!(
+            project["paginas"][0]["text_layers"][0]["layout_bbox"],
+            json!([10, 12, 80, 90])
+        );
         assert_eq!(project["paginas"][0]["text_layers"][0]["translated"], "Oi");
         assert_eq!(project["paginas"][0]["textos"][0]["traduzido"], "Oi");
         assert_eq!(project["estatisticas"]["total_textos"], 1);
@@ -775,9 +996,16 @@ mod tests {
     #[test]
     fn create_patch_delete_text_layer_updates_legacy_aliases() {
         let mut project = legacy_project();
-        let created = create_text_layer(&mut project, 0, [100, 110, 180, 220]).expect("layer should be created");
+        let created = create_text_layer(&mut project, 0, [100, 110, 180, 220])
+            .expect("layer should be created");
         let layer_id = created["id"].as_str().unwrap().to_string();
-        assert_eq!(project["paginas"][0]["text_layers"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            project["paginas"][0]["text_layers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
 
         let patched = patch_text_layer(
             &mut project,
@@ -789,7 +1017,8 @@ mod tests {
                 "style": {
                     "tamanho": 36,
                     "glow": true
-                }
+                },
+                "style_origin": "editor"
             }),
         )
         .expect("layer should be patched");
@@ -797,10 +1026,20 @@ mod tests {
         assert_eq!(patched["translated"], "Novo texto");
         assert_eq!(patched["tipo"], "narracao");
         assert_eq!(patched["style"]["tamanho"], 36);
-        assert_eq!(project["paginas"][0]["textos"][1]["traduzido"], "Novo texto");
+        assert_eq!(patched["style_origin"], "editor");
+        assert_eq!(
+            project["paginas"][0]["textos"][1]["traduzido"],
+            "Novo texto"
+        );
 
         delete_text_layer(&mut project, 0, &layer_id).expect("layer should be removed");
-        assert_eq!(project["paginas"][0]["text_layers"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            project["paginas"][0]["text_layers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(project["paginas"][0]["textos"].as_array().unwrap().len(), 1);
     }
 
@@ -809,6 +1048,23 @@ mod tests {
         let mut project = legacy_project();
         let path = ensure_bitmap_layer_path(&mut project, 0, "mask").expect("mask path");
         assert_eq!(path, "layers/mask/001.png");
-        assert_eq!(project["paginas"][0]["image_layers"]["mask"]["path"], "layers/mask/001.png");
+        assert_eq!(
+            project["paginas"][0]["image_layers"]["mask"]["path"],
+            "layers/mask/001.png"
+        );
+    }
+
+    #[test]
+    fn default_text_style_has_no_visual_effects() {
+        let style = default_text_style();
+        assert_eq!(style["fonte"], "ComicNeue-Bold.ttf");
+        assert_eq!(style["cor"], "#000000");
+        assert_eq!(style["contorno"], "");
+        assert_eq!(style["contorno_px"], 0);
+        assert_eq!(style["glow"], false);
+        assert_eq!(style["glow_px"], 0);
+        assert_eq!(style["sombra"], false);
+        assert_eq!(style["sombra_offset"], json!([0, 0]));
+        assert_eq!(style["bold"], true);
     }
 }

@@ -67,6 +67,7 @@ class Band:
     cleaned_slice: Optional[np.ndarray] = None
     rendered_slice: Optional[np.ndarray] = None
     ocr_result: Optional[dict] = None
+    perf: dict = field(default_factory=dict)
 
 
     @property

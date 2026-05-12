@@ -16,10 +16,12 @@ export function riskLevel(contextQuality: string, glossaryCount: number): WorkCo
 export function summarizeWorkContext(
   profile: Pick<WorkContextProfile, "work_id" | "title" | "context_quality"> & {
     internet_context_loaded?: boolean;
+    cover_url?: string;
   },
   glossaryCount: number,
   userIgnoredWarning = false,
 ): WorkContextSummary {
+  const coverUrl = profile.cover_url?.trim();
   return {
     selected: true,
     work_id: profile.work_id,
@@ -28,6 +30,7 @@ export function summarizeWorkContext(
     glossary_loaded: glossaryCount > 0,
     glossary_entries_count: glossaryCount,
     internet_context_loaded: profile.internet_context_loaded ?? false,
+    ...(coverUrl ? { cover_url: coverUrl } : {}),
     risk_level: riskLevel(profile.context_quality, glossaryCount),
     user_ignored_warning: userIgnoredWarning,
   };

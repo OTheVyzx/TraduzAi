@@ -14,8 +14,7 @@ use zip::ZipArchive;
 
 static LAB_CANCEL: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 static LAB_PAUSE_MARKER: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
-static LAB_SNAPSHOT: Lazy<Mutex<LabSnapshot>> =
-    Lazy::new(|| Mutex::new(LabSnapshot::default()));
+static LAB_SNAPSHOT: Lazy<Mutex<LabSnapshot>> = Lazy::new(|| Mutex::new(LabSnapshot::default()));
 const LAB_STOPPING_STALE_MS: u64 = 5_000;
 const LAB_WINDOW_LABEL: &str = "lab";
 const LAB_WINDOW_APP_PATH: &str = "index.html?window=lab";
@@ -382,7 +381,10 @@ fn count_cbz_pages(path: &Path) -> Result<u32, String> {
     Ok(count)
 }
 
-fn discover_reference_pairs(source_dir: &Path, reference_dir: &Path) -> Result<Vec<LabChapterPair>, String> {
+fn discover_reference_pairs(
+    source_dir: &Path,
+    reference_dir: &Path,
+) -> Result<Vec<LabChapterPair>, String> {
     let mut source_by_chapter: BTreeMap<u32, PathBuf> = BTreeMap::new();
     let mut reference_by_chapter: BTreeMap<u32, PathBuf> = BTreeMap::new();
 
@@ -390,8 +392,16 @@ fn discover_reference_pairs(source_dir: &Path, reference_dir: &Path) -> Result<V
         for entry in std::fs::read_dir(source_dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
-            let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
-            if path.extension().and_then(|value| value.to_str()).unwrap_or_default().eq_ignore_ascii_case("cbz") {
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("cbz")
+            {
                 if let Some(chapter) = extract_chapter_number(file_name) {
                     source_by_chapter.insert(chapter, path);
                 }
@@ -403,8 +413,16 @@ fn discover_reference_pairs(source_dir: &Path, reference_dir: &Path) -> Result<V
         for entry in std::fs::read_dir(reference_dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
-            let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
-            if path.extension().and_then(|value| value.to_str()).unwrap_or_default().eq_ignore_ascii_case("cbz") {
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("cbz")
+            {
                 if let Some(chapter) = extract_chapter_number(file_name) {
                     reference_by_chapter.insert(chapter, path);
                 }
@@ -455,9 +473,9 @@ fn apply_chapter_scope(
 
     match mode.as_str() {
         "first_n" => {
-            let count = scope
-                .first_n
-                .ok_or_else(|| "Informe quantos capitulos iniciais deseja processar.".to_string())?;
+            let count = scope.first_n.ok_or_else(|| {
+                "Informe quantos capitulos iniciais deseja processar.".to_string()
+            })?;
             if count == 0 {
                 return Err("A quantidade inicial de capitulos precisa ser maior que zero.".into());
             }
@@ -497,7 +515,9 @@ fn apply_chapter_scope(
             }
             Ok(selected)
         }
-        other => Err(format!("Modo de selecao de capitulos nao suportado: {other}")),
+        other => Err(format!(
+            "Modo de selecao de capitulos nao suportado: {other}"
+        )),
     }
 }
 
@@ -515,7 +535,10 @@ fn describe_chapter_scope(
         return format!("Capitulo {}", selected_pairs[0].chapter_number);
     }
 
-    let numbers: Vec<u32> = selected_pairs.iter().map(|pair| pair.chapter_number).collect();
+    let numbers: Vec<u32> = selected_pairs
+        .iter()
+        .map(|pair| pair.chapter_number)
+        .collect();
     let contiguous = numbers
         .iter()
         .enumerate()
@@ -545,13 +568,12 @@ fn resolve_preferred_lab_dirs(root: &Path) -> (PathBuf, PathBuf) {
     let fallback_reference = root.join("exemplos").join("exemploptbr");
 
     let prefs = load_lab_preferences().unwrap_or_default();
-    let source = if !prefs.last_source_dir.trim().is_empty()
-        && Path::new(&prefs.last_source_dir).exists()
-    {
-        PathBuf::from(prefs.last_source_dir)
-    } else {
-        fallback_source
-    };
+    let source =
+        if !prefs.last_source_dir.trim().is_empty() && Path::new(&prefs.last_source_dir).exists() {
+            PathBuf::from(prefs.last_source_dir)
+        } else {
+            fallback_source
+        };
     let reference = if !prefs.last_reference_dir.trim().is_empty()
         && Path::new(&prefs.last_reference_dir).exists()
     {
@@ -623,8 +645,10 @@ fn load_persisted_snapshot() -> Option<LabSnapshot> {
 }
 
 fn reconcile_stale_snapshot(snapshot: &mut LabSnapshot, now: u64) -> bool {
-    let terminal_status =
-        matches!(snapshot.status.as_str(), "idle" | "stopped" | "completed" | "error");
+    let terminal_status = matches!(
+        snapshot.status.as_str(),
+        "idle" | "stopped" | "completed" | "error"
+    );
     if terminal_status && !snapshot.agents.is_empty() {
         snapshot.agents.clear();
         snapshot.updated_at_ms = now;
@@ -641,7 +665,12 @@ fn reconcile_stale_snapshot(snapshot: &mut LabSnapshot, now: u64) -> bool {
         snapshot.message = "Laboratorio interrompido. Pronto para iniciar nova rodada.".into();
         snapshot.updated_at_ms = now;
 
-        if let Some(history_entry) = snapshot.history.iter_mut().rev().find(|entry| entry.run_id == snapshot.run_id) {
+        if let Some(history_entry) = snapshot
+            .history
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.run_id == snapshot.run_id)
+        {
             history_entry.status = "stopped".into();
             history_entry.summary = "Rodada anterior interrompida".into();
             if history_entry.finished_at_ms == 0 {
@@ -695,7 +724,8 @@ async fn ensure_snapshot_seeded() -> Result<LabSnapshot, String> {
             let _ = persist_snapshot(&snapshot);
         }
     } else if let Some(persisted) = load_persisted_snapshot() {
-        if persisted.updated_at_ms >= snapshot.updated_at_ms || persisted.run_id != snapshot.run_id {
+        if persisted.updated_at_ms >= snapshot.updated_at_ms || persisted.run_id != snapshot.run_id
+        {
             *snapshot = persisted;
             if reconcile_stale_snapshot(&mut snapshot, now_ms()) {
                 let _ = persist_snapshot(&snapshot);
@@ -741,9 +771,10 @@ fn resolve_lab_output_preview(
         return None;
     }
 
-    let candidate = project_json_path
-        .parent()?
-        .join(page.arquivo_traduzido.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let candidate = project_json_path.parent()?.join(
+        page.arquivo_traduzido
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
 
     if candidate.exists() {
         Some(candidate)
@@ -807,7 +838,11 @@ fn get_lab_sidecar_info() -> Result<LabSidecarInfo, String> {
     let root = project_root()?;
     Ok(LabSidecarInfo {
         program: python_program_for_lab()?,
-        script: root.join("lab").join("runner.py").to_string_lossy().to_string(),
+        script: root
+            .join("lab")
+            .join("runner.py")
+            .to_string_lossy()
+            .to_string(),
         cwd: root,
     })
 }
@@ -1027,8 +1062,11 @@ async fn handle_lab_message(app: &AppHandle, message: serde_json::Value) -> Resu
                 .unwrap_or(snapshot.total_pairs as u64) as u32;
             snapshot.processed_pairs = message["processed_pairs"]
                 .as_u64()
-                .unwrap_or(snapshot.processed_pairs as u64) as u32;
-            snapshot.eta_seconds = message["eta_seconds"].as_f64().unwrap_or(snapshot.eta_seconds);
+                .unwrap_or(snapshot.processed_pairs as u64)
+                as u32;
+            snapshot.eta_seconds = message["eta_seconds"]
+                .as_f64()
+                .unwrap_or(snapshot.eta_seconds);
             snapshot.active_batch_id = message["active_batch_id"]
                 .as_str()
                 .unwrap_or(snapshot.active_batch_id.as_str())
@@ -1101,9 +1139,8 @@ async fn handle_lab_message(app: &AppHandle, message: serde_json::Value) -> Resu
             app.emit("lab_state", snapshot.clone()).ok();
         }
         "review_result" => {
-            let mut review =
-                serde_json::from_value::<LabReviewResult>(message["review"].clone())
-                    .map_err(|e| e.to_string())?;
+            let mut review = serde_json::from_value::<LabReviewResult>(message["review"].clone())
+                .map_err(|e| e.to_string())?;
             review.reviewed_at_ms = now_ms();
 
             let mut snapshot = LAB_SNAPSHOT.lock().await;
@@ -1127,9 +1164,8 @@ async fn handle_lab_message(app: &AppHandle, message: serde_json::Value) -> Resu
             app.emit("lab_state", snapshot.clone()).ok();
         }
         "proposal_promoted" => {
-            let event =
-                serde_json::from_value::<LabPromotionEvent>(message["promotion"].clone())
-                    .map_err(|e| e.to_string())?;
+            let event = serde_json::from_value::<LabPromotionEvent>(message["promotion"].clone())
+                .map_err(|e| e.to_string())?;
 
             let mut snapshot = LAB_SNAPSHOT.lock().await;
             apply_promotion(&mut snapshot, &event);
@@ -1149,10 +1185,7 @@ async fn run_lab_sidecar(
     sidecar: &LabSidecarInfo,
     config_path: &Path,
 ) -> Result<(), String> {
-    let log_path = config_path
-        .parent()
-        .unwrap_or(config_path)
-        .join("lab.log");
+    let log_path = config_path.parent().unwrap_or(config_path).join("lab.log");
     let log_file = File::create(&log_path).map_err(|e| format!("Erro ao criar log do lab: {e}"))?;
 
     let mut command = Command::new(&sidecar.program);
@@ -1354,7 +1387,9 @@ pub async fn start_lab(
     let vision_worker_path = match crate::commands::pipeline::get_vision_worker_path(&app) {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("[TraduzAi Lab] Vision worker indisponivel, seguindo com fallback atual: {err}");
+            eprintln!(
+                "[TraduzAi Lab] Vision worker indisponivel, seguindo com fallback atual: {err}"
+            );
             String::new()
         }
     };
@@ -1622,7 +1657,10 @@ pub async fn reject_lab_proposal(
 }
 
 #[tauri::command]
-pub async fn approve_lab_batch(app: AppHandle, batch_id: String) -> Result<Vec<LabProposal>, String> {
+pub async fn approve_lab_batch(
+    app: AppHandle,
+    batch_id: String,
+) -> Result<Vec<LabProposal>, String> {
     let proposal_ids = {
         let snapshot = LAB_SNAPSHOT.lock().await;
         snapshot
@@ -1671,7 +1709,9 @@ pub async fn get_lab_reference_preview(
         })
         .ok_or_else(|| "Capitulo nao encontrado no corpus do Lab.".to_string())?;
 
-    let cache_dir = data_root().join("preview-cache").join(format!("chapter-{chapter_number}"));
+    let cache_dir = data_root()
+        .join("preview-cache")
+        .join(format!("chapter-{chapter_number}"));
     let source_entries = image_entries_from_archive(Path::new(&pair.source_path))?;
     let reference_entries = image_entries_from_archive(Path::new(&pair.reference_path))?;
     let page_index = page_index as usize;
@@ -1703,7 +1743,10 @@ pub async fn get_lab_reference_preview(
     let (output_path, output_kind) = if let Some(real_output) =
         resolve_lab_output_preview(&snapshot, chapter_number, page_index)
     {
-        (real_output.to_string_lossy().to_string(), "lab_output".to_string())
+        (
+            real_output.to_string_lossy().to_string(),
+            "lab_output".to_string(),
+        )
     } else {
         (
             source_preview.to_string_lossy().to_string(),
@@ -1913,8 +1956,12 @@ pub async fn propose_lab_patch(
     let host = ollama_host.unwrap_or_else(|| "http://localhost:11434".to_string());
 
     // Localiza a proposta no disco
-    let run_dir = find_run_dir_for_proposal(&proposal_id)
-        .ok_or_else(|| format!("Proposta '{}' nao encontrada em nenhuma rodada do Lab.", proposal_id))?;
+    let run_dir = find_run_dir_for_proposal(&proposal_id).ok_or_else(|| {
+        format!(
+            "Proposta '{}' nao encontrada em nenhuma rodada do Lab.",
+            proposal_id
+        )
+    })?;
 
     let proposals = find_proposals_json(&run_dir)
         .ok_or_else(|| format!("proposals.json nao encontrado em {:?}", run_dir))?;
@@ -1961,8 +2008,12 @@ pub async fn propose_lab_patch(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let patch: LabPatchProposal = serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("Resposta invalida do coder: {e}\n---\n{}", &stdout[..stdout.len().min(500)]))?;
+    let patch: LabPatchProposal = serde_json::from_str(stdout.trim()).map_err(|e| {
+        format!(
+            "Resposta invalida do coder: {e}\n---\n{}",
+            &stdout[..stdout.len().min(500)]
+        )
+    })?;
 
     // Salva patch no disco para referencia futura
     let patch_path = run_dir.join(format!("patch_{}.json", proposal_id));
@@ -2061,10 +2112,7 @@ async fn run_git(args: &[&str], cwd: &Path) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn export_lab_patch_json(
-    output_path: String,
-    content: String,
-) -> Result<String, String> {
+pub async fn export_lab_patch_json(output_path: String, content: String) -> Result<String, String> {
     let path = PathBuf::from(&output_path);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -2121,8 +2169,12 @@ pub async fn apply_lab_patch(
 
     // Com git disponivel
     // 1. Verifica se ha mudancas nao comitadas que conflitariam
-    let status_out = run_git(&["status", "--porcelain"], &root).await.unwrap_or_default();
-    let _has_unstaged = status_out.lines().any(|l| l.starts_with(" M") || l.starts_with("??"));
+    let status_out = run_git(&["status", "--porcelain"], &root)
+        .await
+        .unwrap_or_default();
+    let _has_unstaged = status_out
+        .lines()
+        .any(|l| l.starts_with(" M") || l.starts_with("??"));
 
     // 2. Cria branch se solicitado
     let mut branch_created = String::new();
@@ -2184,11 +2236,7 @@ pub async fn apply_lab_patch(
     }
 
     // Aplica de verdade
-    let apply_result = run_git(
-        &["apply", patch_tmp.to_string_lossy().as_ref()],
-        &root,
-    )
-    .await;
+    let apply_result = run_git(&["apply", patch_tmp.to_string_lossy().as_ref()], &root).await;
     let _ = std::fs::remove_file(&patch_tmp);
 
     if let Err(e) = apply_result {
@@ -2287,7 +2335,8 @@ fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
             if let Some(ref path) = current_file {
                 if !cur_removes.is_empty() || !cur_adds.is_empty() {
                     if let Some(fp) = file_patches.iter_mut().find(|f| &f.path == path) {
-                        fp.hunks.push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
+                        fp.hunks
+                            .push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
                     }
                     cur_removes.clear();
                     cur_adds.clear();
@@ -2296,14 +2345,18 @@ fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
             let rel = line.trim_start_matches("+++ b/").trim();
             let abs_path = repo_root.join(rel);
             current_file = Some(abs_path.clone());
-            file_patches.push(FilePatch { path: abs_path, hunks: Vec::new() });
+            file_patches.push(FilePatch {
+                path: abs_path,
+                hunks: Vec::new(),
+            });
             in_hunk = false;
         } else if line.starts_with("@@ ") {
             // Flush hunk anterior
             if !cur_removes.is_empty() || !cur_adds.is_empty() {
                 if let Some(ref path) = current_file {
                     if let Some(fp) = file_patches.iter_mut().find(|f| &f.path == path) {
-                        fp.hunks.push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
+                        fp.hunks
+                            .push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
                     }
                 }
                 cur_removes.clear();
@@ -2313,7 +2366,9 @@ fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
             let parts: Vec<&str> = line.splitn(5, ' ').collect();
             if parts.len() >= 2 {
                 let orig_part = parts[1].trim_start_matches('-');
-                cur_hunk_start = orig_part.split(',').next()
+                cur_hunk_start = orig_part
+                    .split(',')
+                    .next()
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(1)
                     .saturating_sub(1); // converte para 0-indexed
@@ -2331,7 +2386,8 @@ fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
     if !cur_removes.is_empty() || !cur_adds.is_empty() {
         if let Some(ref path) = current_file {
             if let Some(fp) = file_patches.iter_mut().find(|f| &f.path == path) {
-                fp.hunks.push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
+                fp.hunks
+                    .push((cur_hunk_start, cur_removes.clone(), cur_adds.clone()));
             }
         }
     }
@@ -2354,7 +2410,8 @@ fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
             if end > file_lines.len() {
                 return Err(format!(
                     "Hunk fora dos limites em {} (linha {end} > {})",
-                    fp.path.display(), file_lines.len()
+                    fp.path.display(),
+                    file_lines.len()
                 ));
             }
             // Verifica contexto
@@ -2363,7 +2420,10 @@ fn apply_diff_without_git(diff: &str, repo_root: &Path) -> Result<(), String> {
                 if exp != got {
                     return Err(format!(
                         "Contexto nao bate em {} linha {}: esperado {:?}, encontrado {:?}",
-                        fp.path.display(), start + i + 1, exp, got
+                        fp.path.display(),
+                        start + i + 1,
+                        exp,
+                        got
                     ));
                 }
             }
@@ -2414,7 +2474,10 @@ mod tests {
         .expect("scope all");
 
         assert_eq!(scoped.len(), 3);
-        assert_eq!(describe_chapter_scope(&pairs, &scoped), "Todos os capitulos");
+        assert_eq!(
+            describe_chapter_scope(&pairs, &scoped),
+            "Todos os capitulos"
+        );
     }
 
     #[test]
@@ -2445,7 +2508,10 @@ mod tests {
         .expect("scope first_n");
 
         assert_eq!(
-            scoped.iter().map(|pair| pair.chapter_number).collect::<Vec<_>>(),
+            scoped
+                .iter()
+                .map(|pair| pair.chapter_number)
+                .collect::<Vec<_>>(),
             vec![1, 2]
         );
         assert_eq!(describe_chapter_scope(&pairs, &scoped), "Capitulos 1-2");
@@ -2483,7 +2549,10 @@ mod tests {
         .expect("scope explicit");
 
         assert_eq!(
-            scoped.iter().map(|pair| pair.chapter_number).collect::<Vec<_>>(),
+            scoped
+                .iter()
+                .map(|pair| pair.chapter_number)
+                .collect::<Vec<_>>(),
             vec![5, 23]
         );
     }
@@ -2558,7 +2627,10 @@ mod tests {
         .expect("scope range");
 
         assert_eq!(
-            scoped.iter().map(|pair| pair.chapter_number).collect::<Vec<_>>(),
+            scoped
+                .iter()
+                .map(|pair| pair.chapter_number)
+                .collect::<Vec<_>>(),
             vec![2, 3]
         );
         assert_eq!(describe_chapter_scope(&pairs, &scoped), "Capitulos 2-3");
@@ -2694,10 +2766,7 @@ mod tests {
             ..LabSnapshot::default()
         };
 
-        let changed = reconcile_stale_snapshot(
-            &mut snapshot,
-            10_000 + LAB_STOPPING_STALE_MS + 1,
-        );
+        let changed = reconcile_stale_snapshot(&mut snapshot, 10_000 + LAB_STOPPING_STALE_MS + 1);
 
         assert!(changed);
         assert_eq!(snapshot.status, "stopped");
@@ -2822,18 +2891,24 @@ mod tests {
     #[test]
     fn apply_diff_without_git_patches_simple_file() {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("lab_test_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "lab_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let file_path = dir.join("f.py");
         fs::write(&file_path, "a = 1\nb = 2\nc = 3\n").unwrap();
 
-        let diff = format!(
-            "--- a/f.py\n+++ b/f.py\n@@ -2,1 +2,1 @@\n-b = 2\n+b = 99\n"
-        );
+        let diff = format!("--- a/f.py\n+++ b/f.py\n@@ -2,1 +2,1 @@\n-b = 2\n+b = 99\n");
         apply_diff_without_git(&diff, &dir).unwrap();
         let result = fs::read_to_string(&file_path).unwrap();
-        assert!(result.contains("b = 99"), "esperava b = 99, obteve: {result}");
+        assert!(
+            result.contains("b = 99"),
+            "esperava b = 99, obteve: {result}"
+        );
         assert!(!result.contains("b = 2"), "nao deveria conter b = 2");
     }
 

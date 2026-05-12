@@ -105,7 +105,7 @@ function toneForStatus(status: string): string {
   if (status === "error" || status === "block" || status === "rejected" || status === "benchmark_failed") {
     return "border-status-error/25 bg-status-error/10 text-status-error";
   }
-  return "border-white/10 bg-white/5 text-text-secondary";
+  return "border-border bg-white/[0.03] text-text-secondary";
 }
 
 function labelForVerdict(verdict: string): string {
@@ -737,7 +737,7 @@ export function Lab() {
             <button
               onClick={handleStartLab}
               disabled={running || snapshot?.status === "stopping" || busyAction !== null || catalogChapterPairs.length === 0}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-accent-purple text-white text-sm font-medium hover:bg-accent-purple-dark transition-smooth disabled:opacity-40"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-brand text-white text-sm font-medium hover:bg-brand-600 transition-smooth disabled:opacity-40"
             >
               <Play size={15} />
               Iniciar Lab
@@ -769,7 +769,7 @@ export function Lab() {
             <button
               onClick={() => refreshSnapshot()}
               disabled={busyAction !== null}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl border border-white/10 bg-white/5 text-text-secondary text-sm font-medium hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl border border-border bg-white/[0.03] text-text-secondary text-sm font-medium hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
             >
               <RefreshCw size={15} />
               Atualizar
@@ -807,7 +807,7 @@ export function Lab() {
                 <button
                   onClick={handlePickReferenceDir}
                   disabled={running || busyAction !== null}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-2xl border border-accent-purple/25 bg-accent-purple/10 text-accent-purple text-xs font-medium hover:bg-accent-purple/15 transition-smooth disabled:opacity-40"
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-2xl border border-brand/25 bg-brand/10 text-brand text-xs font-medium hover:bg-brand/15 transition-smooth disabled:opacity-40"
                 >
                   <FolderSearch size={14} />
                   Selecionar pasta PT-BR
@@ -928,7 +928,7 @@ export function Lab() {
                     <button
                       onClick={selectAllExplicitChapters}
                       disabled={running || busyAction !== null}
-                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/[0.03] text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
                     >
                       <CheckSquare size={13} />
                       Todos
@@ -936,14 +936,14 @@ export function Lab() {
                     <button
                       onClick={clearExplicitChapters}
                       disabled={running || busyAction !== null}
-                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/[0.03] text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
                     >
                       Nenhum
                     </button>
                     <button
                       onClick={invertExplicitChapters}
                       disabled={running || busyAction !== null}
-                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/5 text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/8 bg-white/[0.03] text-xs text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-40"
                     >
                       Inverter
                     </button>
@@ -1037,7 +1037,7 @@ export function Lab() {
                 <p className="text-xs uppercase tracking-[0.24em] text-text-secondary">Estado</p>
                 <p className="text-xl font-semibold text-text-primary mt-2">{snapshot?.status ?? "carregando"}</p>
               </div>
-              <Bot size={20} className="text-accent-purple" />
+              <Bot size={20} className="text-brand" />
             </div>
             <p className="text-sm text-text-secondary mt-3">{snapshot?.message ?? "Lendo estado inicial do laboratorio..."}</p>
           </div>
@@ -1119,8 +1119,8 @@ export function Lab() {
                 }}
                 className={`px-4 py-3 rounded-2xl text-sm font-medium transition-smooth ${
                   activeSection === section
-                    ? "bg-accent-purple/14 text-accent-purple border border-accent-purple/25"
-                    : "bg-transparent text-text-secondary border border-transparent hover:bg-white/5 hover:text-text-primary"
+                    ? "bg-brand/14 text-brand border border-brand/25"
+                    : "bg-transparent text-text-secondary border border-transparent hover:bg-white/[0.03] hover:text-text-primary"
                 }`}
               >
                 {SECTION_LABELS[section]}
@@ -1171,7 +1171,7 @@ export function Lab() {
                     </div>
                     <div className="h-2 rounded-full bg-white/6 overflow-hidden">
                       <div
-                        className="h-full rounded-full bg-gradient-to-r from-accent-cyan to-accent-purple"
+                        className="h-full rounded-full bg-gradient-to-r from-accent-cyan to-brand"
                         style={{ width: `${Math.max(0, Math.min(100, agent.confidence * 100))}%` }}
                       />
                     </div>
@@ -1197,7 +1197,7 @@ export function Lab() {
                 </div>
                 <button
                   onClick={() => navigate("/lab/decisions")}
-                  className="inline-flex items-center gap-2 text-xs text-accent-cyan hover:text-accent-purple transition-smooth"
+                  className="inline-flex items-center gap-2 text-xs text-accent-cyan hover:text-brand transition-smooth"
                 >
                   Abrir decisoes
                   <ChevronRight size={13} />
@@ -1225,7 +1225,7 @@ export function Lab() {
                     <button
                       onClick={() => setSelectedPage(Math.max(0, selectedPage - 1))}
                       disabled={selectedPage <= 0}
-                      className="h-[42px] px-3 rounded-xl border border-white/10 bg-white/5 text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-30"
+                      className="h-[42px] px-3 rounded-xl border border-border bg-white/[0.03] text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-30"
                     >
                       <ArrowLeft size={16} />
                     </button>
@@ -1235,7 +1235,7 @@ export function Lab() {
                     <button
                       onClick={() => setSelectedPage(Math.min(maxPageIndex, selectedPage + 1))}
                       disabled={selectedPage >= maxPageIndex}
-                      className="h-[42px] px-3 rounded-xl border border-white/10 bg-white/5 text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-30"
+                      className="h-[42px] px-3 rounded-xl border border-border bg-white/[0.03] text-text-secondary hover:text-text-primary hover:bg-white/8 transition-smooth disabled:opacity-30"
                     >
                       <ArrowRight size={16} />
                     </button>
@@ -1348,7 +1348,7 @@ export function Lab() {
                           }}
                           className="text-left"
                         >
-                          <p className="text-lg font-semibold text-text-primary hover:text-accent-purple transition-smooth">{proposal.title}</p>
+                          <p className="text-lg font-semibold text-text-primary hover:text-brand transition-smooth">{proposal.title}</p>
                         </button>
                         <p className="text-sm text-text-secondary mt-2">{proposal.summary}</p>
                       </div>
@@ -1419,17 +1419,17 @@ export function Lab() {
                         )}
                         <div className="flex flex-wrap gap-2 pt-1">
                           {proposal.change_kind && (
-                            <span className="px-2 py-0.5 rounded-full bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-[10px]">
+                            <span className="px-2 py-0.5 rounded-full bg-brand/10 border border-brand/20 text-brand text-[10px]">
                               {proposal.change_kind}
                             </span>
                           )}
                           {proposal.issue_type && (
-                            <span className="px-2 py-0.5 rounded-full bg-white/6 border border-white/10 text-text-secondary text-[10px]">
+                            <span className="px-2 py-0.5 rounded-full bg-white/6 border border-border text-text-secondary text-[10px]">
                               {proposal.issue_type}
                             </span>
                           )}
                           {proposal.target_file && (
-                            <span className="px-2 py-0.5 rounded-full bg-white/6 border border-white/10 text-accent-cyan text-[10px] font-mono">
+                            <span className="px-2 py-0.5 rounded-full bg-white/6 border border-border text-accent-cyan text-[10px] font-mono">
                               {proposal.target_file}
                             </span>
                           )}
@@ -1470,7 +1470,7 @@ export function Lab() {
                       <button
                         onClick={() => handleGeneratePatch(proposal.proposal_id)}
                         disabled={busyAction !== null}
-                        className="px-3 py-2 rounded-xl bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-xs font-medium hover:bg-accent-purple/15 transition-smooth disabled:opacity-40"
+                        className="px-3 py-2 rounded-xl bg-brand/10 border border-brand/20 text-brand text-xs font-medium hover:bg-brand/15 transition-smooth disabled:opacity-40"
                         title={`Estrategia: ${patchCoderStrategy}`}
                       >
                         {busyAction === `patch:${proposal.proposal_id}` ? "Gerando…" : "Gerar patch"}
@@ -1605,7 +1605,7 @@ export function Lab() {
           onClick={() => setPatchModal(null)}
         >
           <div
-            className="relative w-full max-w-3xl max-h-[90vh] rounded-3xl border border-white/10 bg-bg-surface flex flex-col overflow-hidden"
+            className="relative w-full max-w-3xl max-h-[90vh] rounded-3xl border border-border bg-bg-surface flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
@@ -1631,7 +1631,7 @@ export function Lab() {
                 <button
                   key={s}
                   onClick={() => setPatchCoderStrategy(s)}
-                  className={`px-2.5 py-1 rounded-full border text-[11px] transition-smooth ${patchCoderStrategy === s ? "border-accent-purple/50 bg-accent-purple/15 text-accent-purple" : "border-white/10 bg-white/4 text-text-secondary"}`}
+                  className={`px-2.5 py-1 rounded-full border text-[11px] transition-smooth ${patchCoderStrategy === s ? "border-brand/50 bg-brand/15 text-brand" : "border-border bg-white/4 text-text-secondary"}`}
                 >
                   {s === "local" ? "Local (sem LLM)" : s === "ollama" ? "Ollama" : s === "claude_code" ? "Claude Code" : "Claude SDK"}
                 </button>
@@ -1639,7 +1639,7 @@ export function Lab() {
               <button
                 onClick={() => handleGeneratePatch(patchModal.proposalId)}
                 disabled={busyAction !== null}
-                className="ml-auto px-3 py-1.5 rounded-xl bg-accent-purple/10 border border-accent-purple/20 text-accent-purple text-[11px] font-medium hover:bg-accent-purple/18 disabled:opacity-40 transition-smooth"
+                className="ml-auto px-3 py-1.5 rounded-xl bg-brand/10 border border-brand/20 text-brand text-[11px] font-medium hover:bg-brand/18 disabled:opacity-40 transition-smooth"
               >
                 {busyAction === `patch:${patchModal.proposalId}` ? "Gerando…" : "Regenerar"}
               </button>
@@ -1740,7 +1740,7 @@ export function Lab() {
                     <button
                       onClick={() => handleApplyPatch(patchModal.proposalId, patchModal.patch.patch_unified_diff, false)}
                       disabled={busyAction !== null}
-                      className="px-3 py-1.5 rounded-xl bg-white/6 border border-white/10 text-text-secondary text-[11px] hover:bg-white/10 disabled:opacity-40 transition-smooth"
+                      className="px-3 py-1.5 rounded-xl bg-white/[0.04] border border-border text-text-secondary text-[11px] hover:bg-white/[0.06] disabled:opacity-40 transition-smooth"
                     >
                       Aplicar direto (sem branch)
                     </button>

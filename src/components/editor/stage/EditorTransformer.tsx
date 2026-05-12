@@ -17,17 +17,23 @@ export function EditorTransformer({ selectedNodeName }: { selectedNodeName: stri
   return (
     <Transformer
       ref={transformerRef}
-      rotateEnabled={false}
+      rotateEnabled
+      rotateAnchorOffset={34}
+      rotationSnaps={[-180, -90, -45, -30, -15, 0, 15, 30, 45, 90, 180]}
+      rotationSnapTolerance={5}
       enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right", "middle-left", "middle-right", "top-center", "bottom-center"]}
       boundBoxFunc={(_, nextBox) => ({
         ...nextBox,
         width: Math.max(20, nextBox.width),
         height: Math.max(20, nextBox.height),
       })}
-      borderStroke="rgba(124, 92, 255, 0.95)"
+      borderStroke="rgba(108, 92, 231, 0.95)"
+      borderStrokeWidth={2}
       anchorFill="#f8fbff"
-      anchorStroke="rgba(124, 92, 255, 0.95)"
-      anchorSize={8}
+      anchorStroke="rgba(108, 92, 231, 0.95)"
+      anchorStrokeWidth={2}
+      anchorSize={16}
+      anchorCornerRadius={3}
     />
   );
 }

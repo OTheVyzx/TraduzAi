@@ -6,6 +6,9 @@ Batching para máxima performance na GPU
 
 import logging
 import os
+import hashlib
+from collections import OrderedDict
+from difflib import SequenceMatcher
 from typing import Optional, Union
 import cv2
 import numpy as np
@@ -29,6 +32,24 @@ PADDLE_CYRILLIC_LANGUAGE_CODES = {
 PADDLE_DEVANAGARI_LANGUAGE_CODES = {
     "hi", "mr", "ne", "bh", "mai", "ang", "bho", "mah", "sck", "new", "gom", "sa", "bgc",
 }
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
 
 PADDLE_LANGUAGE_ALIASES = {
     "en-gb": "en",
@@ -231,6 +252,37 @@ def _derive_text_pixel_bbox(
     return polygon_bbox or bbox
 
 
+def _paddle_full_page_max_side() -> int:
+    raw = os.getenv("TRADUZAI_PADDLE_FULL_PAGE_MAX_SIDE", "0")
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        return 0
+    return max(0, value)
+
+
+def _scale_bbox(bbox: list[int], scale_x: float, scale_y: float) -> list[int]:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    return [
+        int(round(x1 * scale_x)),
+        int(round(y1 * scale_y)),
+        int(round(x2 * scale_x)),
+        int(round(y2 * scale_y)),
+    ]
+
+
+def _scale_polygon_points(points: list[list[int]], scale_x: float, scale_y: float) -> list[list[int]]:
+    scaled: list[list[int]] = []
+    for point in points or []:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        scaled.append([
+            int(round(float(point[0]) * scale_x)),
+            int(round(float(point[1]) * scale_y)),
+        ])
+    return scaled
+
+
 class OCREngine:
     """
     Motor de OCR com suporte a batching.
@@ -254,10 +306,15 @@ class OCREngine:
         self.model_name = model
         self.device = self._resolve_device(device)
         self.half = half and self.device.type == "cuda"
-        self.batch_size = batch_size
+        if _env_bool("TRADUZAI_OCR_ADAPTIVE_BATCH", False):
+            self.batch_size = 16 if self.device.type == "cuda" else 4
+        else:
+            self.batch_size = batch_size
         self.lang = lang
         self._model = None
         self._processor = None
+        self._ocr_cache: OrderedDict[str, str] = OrderedDict()
+        self._last_batch_cache_stats = {"ocr_cache_hits": 0, "ocr_cache_misses": 0}
         self._load_model()
 
     def _resolve_device(self, device: str) -> torch.device:
@@ -326,10 +383,14 @@ class OCREngine:
         mapped_lang = normalize_paddleocr_language(self.lang)
         
         use_gpu = self.device.type == "cuda"
+        show_log = _env_bool("TRADUZAI_PADDLE_SHOW_LOG", False)
+        use_angle_cls = False
+        self._paddle_use_angle_cls = use_angle_cls
         self._model = PaddleOCR(
-            use_angle_cls=False,
+            use_angle_cls=use_angle_cls,
             lang=mapped_lang,
             enable_mkldnn=not use_gpu,  # MKL-DNN acelera CPU
+            show_log=show_log,
         )
         self._backend = "paddleocr"
         logger.info(f"PaddleOCR carregado (lang={mapped_lang}, gpu={use_gpu})")
@@ -356,23 +417,88 @@ class OCREngine:
         if not crops:
             return []
 
-        results = []
-        for i in range(0, len(crops), self.batch_size):
-            batch = crops[i : i + self.batch_size]
-            batch_results = self._recognize_batch_impl(batch)
-            results.extend(batch_results)
-        return results
+        cache_enabled = _env_bool("TRADUZAI_OCR_CACHE", False)
+        if not hasattr(self, "_ocr_cache") or not isinstance(getattr(self, "_ocr_cache", None), OrderedDict):
+            self._ocr_cache = OrderedDict()
 
-    def recognize_blocks_from_page(self, page_rgb: np.ndarray, blocks: list) -> list[str | dict]:
+        hits = 0
+        misses = 0
+        results: list[str | None] = [None] * len(crops)
+        pending: list[np.ndarray] = []
+        pending_indices: list[int] = []
+        pending_keys: list[str] = []
+
+        for index, crop in enumerate(crops):
+            cache_key = self._crop_cache_key(crop) if cache_enabled else ""
+            if cache_enabled and cache_key in self._ocr_cache:
+                hits += 1
+                self._ocr_cache.move_to_end(cache_key)
+                results[index] = self._ocr_cache[cache_key]
+                continue
+            misses += 1
+            pending.append(crop)
+            pending_indices.append(index)
+            pending_keys.append(cache_key)
+
+        for i in range(0, len(pending), self.batch_size):
+            batch = pending[i : i + self.batch_size]
+            batch_results = self._recognize_batch_impl(batch)
+            for offset, text in enumerate(batch_results):
+                result_index = pending_indices[i + offset]
+                results[result_index] = text
+                key = pending_keys[i + offset]
+                if cache_enabled and key:
+                    self._ocr_cache[key] = text
+                    self._ocr_cache.move_to_end(key)
+                    while len(self._ocr_cache) > 256:
+                        self._ocr_cache.popitem(last=False)
+
+        self._last_batch_cache_stats = {
+            "ocr_cache_hits": int(hits),
+            "ocr_cache_misses": int(misses),
+        }
+        return [str(text or "") for text in results]
+
+    @staticmethod
+    def _crop_cache_key(crop: np.ndarray) -> str:
+        if not isinstance(crop, np.ndarray) or crop.size == 0:
+            return "empty"
+        try:
+            resized = cv2.resize(crop, (64, 64), interpolation=cv2.INTER_AREA)
+        except Exception:
+            resized = np.zeros((64, 64, 3), dtype=np.uint8)
+        return hashlib.blake2b(resized.tobytes(), digest_size=8).hexdigest()
+
+    def recognize_blocks_from_page(
+        self,
+        page_rgb: np.ndarray,
+        blocks: list,
+        allow_sparse_mapping: bool = False,
+        crop_fallback_max: int | None = None,
+    ) -> list[str | dict]:
         """Reconhece texto para cada bloco detectado, alinhando o resultado ao `blocks`.
 
         Otimiza o backend PaddleOCR: evita rodar detecção repetidamente por crop.
         Faz 1 pass de OCR na página inteira e associa as linhas reconhecidas aos blocos.
         """
         if not blocks:
+            self._last_recognize_blocks_stats = {
+                "block_count": 0,
+                "full_page_mapped": 0,
+                "crop_fallback_max": 0,
+                "crop_fallback_attempts": 0,
+                "crop_fallback_recovered": 0,
+            }
             return []
 
         if not isinstance(page_rgb, np.ndarray) or page_rgb.size == 0:
+            self._last_recognize_blocks_stats = {
+                "block_count": len(blocks),
+                "full_page_mapped": 0,
+                "crop_fallback_max": 0,
+                "crop_fallback_attempts": 0,
+                "crop_fallback_recovered": 0,
+            }
             return [""] * len(blocks)
 
         if getattr(self, "_backend", "") != "paddleocr":
@@ -385,15 +511,65 @@ class OCREngine:
             except Exception:
                 page_bgr = page_rgb
 
-        texts = self._paddle_ocr_full_page_to_blocks(page_bgr, blocks)
+        texts = self._paddle_ocr_full_page_to_blocks(
+            page_bgr,
+            blocks,
+            allow_sparse_mapping=allow_sparse_mapping,
+        )
+        if crop_fallback_max is None:
+            crop_fallback_max = _env_int("TRADUZAI_PADDLE_CROP_FALLBACK_MAX", 3)
+        max_fallback = max(0, int(crop_fallback_max))
         if texts is None:
-            return [
-                self._recognize_single_paddle_with_retry(self._crop_block_from_page(page_rgb, block))
-                for block in blocks
-            ]
+            recovered_by_crop: list[str] = [""] * len(blocks)
+            attempts = 0
+            recovered_count = 0
+            for index, block in enumerate(blocks):
+                if attempts >= max_fallback:
+                    break
+                try:
+                    block_confidence = float(getattr(block, "confidence", 1.0) or 0.0)
+                except Exception:
+                    block_confidence = 1.0
+                if block_confidence < 0.45:
+                    continue
+                crop = self._crop_block_from_page(page_rgb, block)
+                if not self._crop_might_have_text(crop):
+                    continue
+                attempts += 1
+                recovered = self._recognize_single_paddle_with_retry(crop)
+                recovered_by_crop[index] = recovered
+                if str(recovered or "").strip():
+                    recovered_count += 1
+            self._last_recognize_blocks_stats = {
+                "block_count": len(blocks),
+                "full_page_mapping_failed": True,
+                "full_page_mapped": 0,
+                "crop_fallback_max": int(max_fallback),
+                "crop_fallback_attempts": int(attempts),
+                "crop_fallback_recovered": int(recovered_count),
+            }
+            if _env_bool("TRADUZAI_OCR_DEDUP", False):
+                self._last_recognize_blocks_stats["ocr_dedup_removed"] = int(
+                    self._dedupe_ocr_records_in_place(recovered_by_crop, blocks)
+                )
+            else:
+                self._last_recognize_blocks_stats["ocr_dedup_removed"] = 0
+            return recovered_by_crop
 
         # Fallback por crop apenas para casos prováveis, evitando custo alto em falsos positivos.
-        max_fallback = 3
+        full_page_mapped = sum(
+            1
+            for text in texts
+            if str(text.get("text", "") if isinstance(text, dict) else text or "").strip()
+        )
+        stats = {
+            "block_count": len(blocks),
+            "full_page_mapping_failed": False,
+            "full_page_mapped": int(full_page_mapped),
+            "crop_fallback_max": int(max_fallback),
+            "crop_fallback_attempts": 0,
+            "crop_fallback_recovered": 0,
+        }
         attempted = 0
         for index, text in enumerate(texts):
             if attempted >= max_fallback:
@@ -411,7 +587,10 @@ class OCREngine:
             if not self._crop_might_have_text(crop):
                 continue
             attempted += 1
+            stats["crop_fallback_attempts"] += 1
             recovered = self._recognize_single_paddle_with_retry(crop)
+            if str(recovered or "").strip():
+                stats["crop_fallback_recovered"] += 1
             if isinstance(texts[index], dict):
                 updated = dict(texts[index])
                 updated["text"] = recovered
@@ -419,7 +598,93 @@ class OCREngine:
             else:
                 texts[index] = recovered
 
+        if _env_bool("TRADUZAI_OCR_DEDUP", False):
+            stats["ocr_dedup_removed"] = int(self._dedupe_ocr_records_in_place(texts, blocks))
+        else:
+            stats["ocr_dedup_removed"] = 0
+        self._last_recognize_blocks_stats = stats
         return texts
+
+    @staticmethod
+    def _record_text(record) -> str:
+        if isinstance(record, dict):
+            return str(record.get("text") or "")
+        return str(record or "")
+
+    @staticmethod
+    def _clear_record_text(record):
+        if isinstance(record, dict):
+            updated = dict(record)
+            updated["text"] = ""
+            return updated
+        return ""
+
+    @staticmethod
+    def _block_bbox(block) -> tuple[int, int, int, int]:
+        try:
+            xyxy = getattr(block, "xyxy")
+            return tuple(int(v) for v in xyxy[:4])  # type: ignore[index]
+        except Exception:
+            return (
+                int(getattr(block, "x1", 0)),
+                int(getattr(block, "y1", 0)),
+                int(getattr(block, "x2", 0)),
+                int(getattr(block, "y2", 0)),
+            )
+
+    @staticmethod
+    def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+        ix1 = max(a[0], b[0])
+        iy1 = max(a[1], b[1])
+        ix2 = min(a[2], b[2])
+        iy2 = min(a[3], b[3])
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        inter = (ix2 - ix1) * (iy2 - iy1)
+        area_a = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+        area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+        return inter / float(area_a + area_b - inter)
+
+    def _dedupe_ocr_records_in_place(self, records: list, blocks: list) -> int:
+        removed = 0
+        kept: list[int] = []
+        for index, record in enumerate(records):
+            text = self._record_text(record).strip()
+            if not text:
+                continue
+            bbox = self._block_bbox(blocks[index])
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            duplicate_of: int | None = None
+            for kept_index in kept:
+                kept_text = self._record_text(records[kept_index]).strip()
+                if not kept_text:
+                    continue
+                kept_bbox = self._block_bbox(blocks[kept_index])
+                kept_cx = (kept_bbox[0] + kept_bbox[2]) / 2.0
+                kept_cy = (kept_bbox[1] + kept_bbox[3]) / 2.0
+                center_distance = ((cx - kept_cx) ** 2 + (cy - kept_cy) ** 2) ** 0.5
+                similar = SequenceMatcher(None, text.upper(), kept_text.upper()).ratio()
+                if (self._bbox_iou(bbox, kept_bbox) >= 0.85 or center_distance < 8.0) and similar >= 0.9:
+                    duplicate_of = kept_index
+                    break
+            if duplicate_of is None:
+                kept.append(index)
+                continue
+            try:
+                current_conf = float(getattr(blocks[index], "confidence", 0.0) or 0.0)
+                kept_conf = float(getattr(blocks[duplicate_of], "confidence", 0.0) or 0.0)
+            except Exception:
+                current_conf = 0.0
+                kept_conf = 0.0
+            if current_conf > kept_conf:
+                records[duplicate_of] = self._clear_record_text(records[duplicate_of])
+                kept.remove(duplicate_of)
+                kept.append(index)
+            else:
+                records[index] = self._clear_record_text(record)
+            removed += 1
+        return removed
 
     def recognize_single(self, crop: np.ndarray) -> str:
         """Reconhece texto em uma única imagem."""
@@ -599,14 +864,15 @@ class OCREngine:
         return "." * len(components)
 
     def _recognize_single_paddle_with_retry(self, crop: np.ndarray) -> str:
-        text = self._recognize_single_paddle(crop, cls=True)
+        use_angle_cls = bool(getattr(self, "_paddle_use_angle_cls", False))
+        text = self._recognize_single_paddle(crop, cls=use_angle_cls)
         if text:
             return text
 
         best_text = ""
         best_score = self._score_ocr_candidate("")
         for variant in self._build_paddle_retry_variants(crop):
-            candidate = self._recognize_single_paddle(variant, cls=True)
+            candidate = self._recognize_single_paddle(variant, cls=use_angle_cls)
             score = self._score_ocr_candidate(candidate)
             if score > best_score:
                 best_score = score
@@ -630,7 +896,12 @@ class OCREngine:
             xyxy = getattr(block, "xyxy", (0, 0, 0, 0))
             x1, y1, x2, y2 = [int(v) for v in xyxy]
 
-        pad = int(padding)
+        box_w = max(1, x2 - x1)
+        box_h = max(1, y2 - y1)
+        if _env_bool("TRADUZAI_OCR_ADAPTIVE_CROP_PADDING", False):
+            pad = max(2, int(round(min(box_w, box_h) * 0.04)))
+        else:
+            pad = int(padding)
         x1 = max(0, x1 - pad)
         y1 = max(0, y1 - pad)
         x2 = min(width, x2 + pad)
@@ -687,9 +958,28 @@ class OCREngine:
             return 0
         return int((ix2 - ix1) * (iy2 - iy1))
 
-    def _paddle_ocr_full_page_to_blocks(self, page_bgr: np.ndarray, blocks: list) -> list[dict] | None:
+    def _paddle_ocr_full_page_to_blocks(
+        self,
+        page_bgr: np.ndarray,
+        blocks: list,
+        allow_sparse_mapping: bool = False,
+    ) -> list[dict] | None:
+        model_input = page_bgr
+        input_h, input_w = page_bgr.shape[:2]
+        scale_x = 1.0
+        scale_y = 1.0
+        max_side = _paddle_full_page_max_side()
+        longest_side = max(input_h, input_w)
+        if max_side > 0 and longest_side > max_side:
+            downscale = max_side / float(longest_side)
+            scaled_w = max(1, int(round(input_w * downscale)))
+            scaled_h = max(1, int(round(input_h * downscale)))
+            if scaled_w < input_w or scaled_h < input_h:
+                model_input = cv2.resize(page_bgr, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+                scale_x = scaled_w / float(max(1, input_w))
+                scale_y = scaled_h / float(max(1, input_h))
         try:
-            result = self._model.ocr(page_bgr, det=True, rec=True, cls=False)
+            result = self._model.ocr(model_input, det=True, rec=True, cls=False)
         except Exception as exc:
             logger.warning("PaddleOCR full-page falhou; fallback por crop: %s", exc)
             return None
@@ -712,6 +1002,8 @@ class OCREngine:
             except Exception:
                 xyxy = getattr(block, "xyxy", (0, 0, 0, 0))
                 block_bboxes.append([int(v) for v in xyxy])
+        if scale_x != 1.0 or scale_y != 1.0:
+            block_bboxes = [_scale_bbox(bbox, scale_x, scale_y) for bbox in block_bboxes]
 
         page_rgb = page_bgr
         if len(page_bgr.shape) == 3 and page_bgr.shape[2] >= 3:
@@ -739,17 +1031,23 @@ class OCREngine:
             if not xs or not ys:
                 continue
 
-            line_bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
-            lx1, ly1, lx2, ly2 = line_bbox
+            scaled_line_bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+            score_line_bbox = scaled_line_bbox
+            line_bbox = scaled_line_bbox
+            if scale_x != 1.0 or scale_y != 1.0:
+                line_bbox = _scale_bbox(scaled_line_bbox, 1.0 / scale_x, 1.0 / scale_y)
+            lx1, ly1, lx2, ly2 = score_line_bbox
             line_area = max(1, (lx2 - lx1) * (ly2 - ly1))
             line_polygon = _normalize_line_polygons([box])
             normalized_polygon = line_polygon[0] if line_polygon else []
+            if normalized_polygon and (scale_x != 1.0 or scale_y != 1.0):
+                normalized_polygon = _scale_polygon_points(normalized_polygon, 1.0 / scale_x, 1.0 / scale_y)
 
             best_index = None
             best_score = 0.0
             for idx, block_bbox in enumerate(block_bboxes):
                 bx1, by1, bx2, by2 = block_bbox
-                inter = self._bbox_intersection_area(line_bbox, block_bbox)
+                inter = self._bbox_intersection_area(score_line_bbox, block_bbox)
                 if inter <= 0:
                     continue
                 block_area = max(1, (bx2 - bx1) * (by2 - by1))
@@ -800,7 +1098,11 @@ class OCREngine:
 
         # Se associou texto em poucos blocos, o mapeamento falhou e devemos preservar qualidade
         # voltando ao caminho antigo por crop.
-        if len(blocks) >= 3 and non_empty / max(1, len(blocks)) < 0.5:
+        if (
+            not allow_sparse_mapping
+            and len(blocks) >= 3
+            and non_empty / max(1, len(blocks)) < 0.5
+        ):
             return None
 
         return texts

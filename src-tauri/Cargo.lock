@@ -4584,6 +4584,7 @@ dependencies = [
 name = "traduzai"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "html-escape",
  "image",

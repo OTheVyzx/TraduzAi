@@ -12,6 +12,185 @@ import cv2
 import numpy as np
 
 
+def _image_hw(image_shape: tuple[int, ...]) -> tuple[int, int]:
+    return int(image_shape[0]), int(image_shape[1])
+
+
+def _normalize_bbox(value, width: int, height: int) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+    except Exception:
+        return None
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _normalize_polygon(value, width: int, height: int) -> list[list[int]] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    points: list[list[int]] = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            x = int(round(float(point[0])))
+            y = int(round(float(point[1])))
+        except Exception:
+            return None
+        points.append([max(0, min(width - 1, x)), max(0, min(height - 1, y))])
+    return points if len(points) >= 3 else None
+
+
+def _normalize_polygons(value, width: int, height: int) -> list[list[list[int]]]:
+    if not isinstance(value, (list, tuple)) or not value:
+        return []
+    first = value[0]
+    if isinstance(first, (list, tuple)) and len(first) >= 2 and not (
+        first and isinstance(first[0], (list, tuple))
+    ):
+        polygon = _normalize_polygon(value, width, height)
+        return [polygon] if polygon else []
+
+    polygons: list[list[list[int]]] = []
+    for item in value:
+        polygon = _normalize_polygon(item, width, height)
+        if polygon:
+            polygons.append(polygon)
+    return polygons
+
+
+def _bbox_to_polygon(bbox: list[int]) -> list[list[int]]:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    return [[x1, y1], [x2 - 1, y1], [x2 - 1, y2 - 1], [x1, y2 - 1]]
+
+
+def _font_size_from_block(block: dict) -> int | None:
+    for key in ("font_size_px", "font_size", "tamanho_fonte"):
+        value = block.get(key)
+        try:
+            if value is not None:
+                return int(round(float(value)))
+        except Exception:
+            pass
+    estilo = block.get("estilo")
+    if isinstance(estilo, dict):
+        for key in ("tamanho", "font_size", "font_size_px"):
+            try:
+                value = estilo.get(key)
+                if value is not None:
+                    return int(round(float(value)))
+            except Exception:
+                pass
+    return None
+
+
+def glyph_padding(font_size_px: int | float | None) -> int:
+    try:
+        font_size = int(round(float(font_size_px)))
+    except Exception:
+        font_size = 16
+    return max(3, int(font_size * 0.06))
+
+
+def polygon_to_mask(points, image_shape: tuple[int, ...]) -> np.ndarray:
+    height, width = _image_hw(image_shape)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    polygon = _normalize_polygon(points, width, height)
+    if not polygon:
+        return mask
+    cv2.fillPoly(mask, [np.asarray(polygon, dtype=np.int32)], 255)
+    return mask
+
+
+def balloon_mask_from_block(block: dict, image_shape: tuple[int, ...]) -> np.ndarray | None:
+    height, width = _image_hw(image_shape)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    polygons = _normalize_polygons(block.get("balloon_polygon"), width, height)
+    polygons.extend(_normalize_polygons(block.get("connected_lobe_polygons"), width, height))
+    if not polygons:
+        for key in ("balloon_subregions", "connected_lobe_bboxes"):
+            for bbox_value in block.get(key) or []:
+                bbox = _normalize_bbox(bbox_value, width, height)
+                if bbox:
+                    cv2.fillPoly(mask, [np.asarray(_bbox_to_polygon(bbox), dtype=np.int32)], 255)
+        if not np.any(mask):
+            bbox = _normalize_bbox(block.get("balloon_bbox"), width, height)
+            if bbox:
+                cv2.fillPoly(mask, [np.asarray(_bbox_to_polygon(bbox), dtype=np.int32)], 255)
+    else:
+        for polygon in polygons:
+            cv2.fillPoly(mask, [np.asarray(polygon, dtype=np.int32)], 255)
+    return mask if np.any(mask) else None
+
+
+def mask_from_text_geometry(block: dict, image_shape: tuple[int, ...]) -> np.ndarray | None:
+    height, width = _image_hw(image_shape)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    pad = glyph_padding(_font_size_from_block(block))
+    polygons = _normalize_polygons(block.get("line_polygons"), width, height)
+    if polygons:
+        for polygon in polygons:
+            cv2.fillPoly(mask, [np.asarray(polygon, dtype=np.int32)], 255)
+        if np.any(mask):
+            kernel_size = max(3, pad * 2 + 1)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            return cv2.dilate(mask, kernel, iterations=1)
+
+    bbox = (
+        _normalize_bbox(block.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(block.get("bbox"), width, height)
+    )
+    if not bbox:
+        return None
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(width, x2 + pad)
+    y2 = min(height, y2 + pad)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def build_inpaint_mask(
+    block: dict,
+    image_shape: tuple[int, ...],
+    image_rgb: np.ndarray | None = None,
+) -> np.ndarray | None:
+    text_mask = mask_from_text_geometry(block, image_shape)
+    if text_mask is None or not np.any(text_mask):
+        return None
+
+    balloon_mask = balloon_mask_from_block(block, image_shape)
+    if balloon_mask is None or not np.any(balloon_mask):
+        return text_mask
+
+    interior = cv2.erode(
+        balloon_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    clipped = cv2.bitwise_and(text_mask, interior if np.any(interior) else balloon_mask)
+    if not np.any(clipped):
+        clipped = cv2.bitwise_and(text_mask, balloon_mask)
+    if not np.any(clipped):
+        return text_mask
+
+    if image_rgb is not None and image_rgb.size:
+        outline_band = cv2.subtract(balloon_mask, interior)
+        if np.any(outline_band):
+            clipped = cv2.bitwise_and(clipped, cv2.bitwise_not(outline_band))
+    return clipped
+
+
 def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> list[dict]:
     image_height, image_width = image_shape[:2]
     seeds = []

@@ -1,0 +1,1593 @@
+{
+  "versao": "2.0",
+  "app": "traduzai",
+  "obra": "",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt",
+  "_ollama_host": "http://localhost:11434",
+  "_ollama_model": "traduzai-translator",
+  "_models_dir": "D:\\TraduzAi\\data\\models",
+  "_vision_worker_path": "D:\\TraduzAi\\vision-worker/target/debug/traduzai-vision.exe",
+  "_work_dir": "D:\\TraduzAi\\data\\works\\53dcb04c-4bba-43be-b638-4a39d20b0ac2",
+  "contexto": {
+    "aliases": [],
+    "faccoes": [],
+    "fontes_usadas": [],
+    "genero": [],
+    "memoria_lexical": {},
+    "personagens": [],
+    "relacoes": [],
+    "resumo_por_arco": [],
+    "sinopse": "",
+    "termos": []
+  },
+  "work_context": {
+    "context_loaded": false,
+    "glossary_entries_count": 0,
+    "glossary_loaded": false,
+    "risk_level": "high",
+    "selected": false,
+    "title": "",
+    "user_ignored_warning": true,
+    "work_id": ""
+  },
+  "preset": {
+    "description": "Ideal para capitulos coloridos verticais. Traducao natural, fonte maior, revisao de SFX manual.",
+    "id": "manhwa_webtoon_color",
+    "name": "Manhwa/Webtoon colorido",
+    "quality": "alta",
+    "settings": {
+      "balloon_margin": 0.12,
+      "inpaint_mode": "normal",
+      "ocr_cleanup": "normal",
+      "ocr_sensitivity": "high",
+      "qa_mode": "review",
+      "sfx_mode": "preserve",
+      "translation_style": "natural_br",
+      "typesetting_font_scale": 1.08
+    }
+  },
+  "paginas": [
+    {
+      "numero": 1,
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "originals/001.jpg",
+          "visible": true,
+          "locked": true
+        },
+        "mask": {
+          "key": "mask",
+          "path": "layers/mask/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "images/001.jpg",
+          "visible": false,
+          "locked": true
+        },
+        "brush": {
+          "key": "brush",
+          "path": "layers/brush/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "translated/001.jpg",
+          "visible": true,
+          "locked": true
+        }
+      },
+      "inpaint_blocks": [
+        {
+          "bbox": [
+            172,
+            945,
+            545,
+            1134
+          ],
+          "confidence": 0.95947265625
+        },
+        {
+          "bbox": [
+            74,
+            2329,
+            376,
+            2425
+          ],
+          "confidence": 0.91748046875
+        },
+        {
+          "bbox": [
+            204,
+            2954,
+            484,
+            3157
+          ],
+          "confidence": 0.94482421875
+        },
+        {
+          "bbox": [
+            180,
+            5098,
+            540,
+            5248
+          ],
+          "confidence": 0.95751953125
+        },
+        {
+          "bbox": [
+            82,
+            6781,
+            624,
+            7069
+          ],
+          "confidence": 0.861328125
+        }
+      ],
+      "page_profile": null,
+      "text_layers": [
+        {
+          "text": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+          "bbox": [
+            172,
+            945,
+            545,
+            1134
+          ],
+          "confidence": 0.959,
+          "tipo": "fala",
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#202020",
+            "cor_gradiente": [],
+            "contorno": "#EFEFEF",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                208,
+                952
+              ],
+              [
+                508,
+                952
+              ],
+              [
+                508,
+                981
+              ],
+              [
+                208,
+                981
+              ]
+            ],
+            [
+              [
+                176,
+                1003
+              ],
+              [
+                541,
+                1003
+              ],
+              [
+                541,
+                1030
+              ],
+              [
+                176,
+                1030
+              ]
+            ],
+            [
+              [
+                201,
+                1050
+              ],
+              [
+                512,
+                1050
+              ],
+              [
+                512,
+                1080
+              ],
+              [
+                201,
+                1080
+              ]
+            ],
+            [
+              [
+                252,
+                1099
+              ],
+              [
+                461,
+                1099
+              ],
+              [
+                461,
+                1132
+              ],
+              [
+                252,
+                1132
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            176,
+            952,
+            538,
+            1132
+          ],
+          "balloon_type": "white",
+          "page_profile": "standard",
+          "block_profile": "white_balloon",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            0,
+            929,
+            572,
+            1150
+          ],
+          "layout_shape": "wide",
+          "layout_align": "center",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            172,
+            16,
+            545,
+            205
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+          "normalized_ocr": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+          "translated": "O RELÂMPAGO DO ESPELHO HUNWONE ERA SEMELHANTE AO VERDADEIRO FOGO SAMADH DA PALMA SUBJUGADORA DE DRAGÕES, MAS DIFERENTE",
+          "reading_order": 0,
+          "group_id": "g001",
+          "grouping_status": "separated"
+        },
+        {
+          "text": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+          "bbox": [
+            74,
+            2329,
+            376,
+            2425
+          ],
+          "confidence": 0.917,
+          "tipo": "narracao",
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#1B1B1B",
+            "cor_gradiente": [],
+            "contorno": "#F8F8F8",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                81,
+                2334
+              ],
+              [
+                370,
+                2334
+              ],
+              [
+                370,
+                2364
+              ],
+              [
+                81,
+                2364
+              ]
+            ],
+            [
+              [
+                121,
+                2384
+              ],
+              [
+                328,
+                2386
+              ],
+              [
+                328,
+                2421
+              ],
+              [
+                121,
+                2419
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            81,
+            2334,
+            370,
+            2421
+          ],
+          "balloon_type": "white",
+          "page_profile": "standard",
+          "block_profile": "top_narration",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            38,
+            2313,
+            424,
+            2441
+          ],
+          "layout_shape": "wide",
+          "layout_align": "top",
+          "layout_profile": "top_narration",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            74,
+            16,
+            376,
+            112
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+          "normalized_ocr": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+          "translated": "AMBOS DIVIDEM A ENERGIA INTERNA EM YIN E YANG",
+          "reading_order": 1,
+          "group_id": "g002",
+          "grouping_status": "separated"
+        },
+        {
+          "text": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+          "bbox": [
+            204,
+            2954,
+            484,
+            3157
+          ],
+          "confidence": 0.945,
+          "tipo": "fala",
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#F4F4F4",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                281,
+                2958
+              ],
+              [
+                410,
+                2958
+              ],
+              [
+                410,
+                2995
+              ],
+              [
+                281,
+                2995
+              ]
+            ],
+            [
+              [
+                205,
+                3012
+              ],
+              [
+                482,
+                3015
+              ],
+              [
+                482,
+                3047
+              ],
+              [
+                204,
+                3045
+              ]
+            ],
+            [
+              [
+                212,
+                3066
+              ],
+              [
+                479,
+                3066
+              ],
+              [
+                479,
+                3099
+              ],
+              [
+                212,
+                3099
+              ]
+            ],
+            [
+              [
+                264,
+                3115
+              ],
+              [
+                424,
+                3118
+              ],
+              [
+                423,
+                3155
+              ],
+              [
+                264,
+                3153
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            204,
+            2961,
+            482,
+            3153
+          ],
+          "balloon_type": "white",
+          "page_profile": "standard",
+          "block_profile": "white_balloon",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            149,
+            2938,
+            545,
+            3173
+          ],
+          "layout_shape": "wide",
+          "layout_align": "center",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            204,
+            16,
+            484,
+            219
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+          "normalized_ocr": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+          "translated": "MAS, AO CONTRÁRIO DA PALMA SUBJUGADORA DE DRAGÕES, ONDE AS DUAS FORÇAS GIRAM FEROZMENTE,",
+          "reading_order": 2,
+          "group_id": "g003",
+          "grouping_status": "separated"
+        },
+        {
+          "text": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+          "bbox": [
+            180,
+            5098,
+            540,
+            5248
+          ],
+          "confidence": 0.958,
+          "tipo": "fala",
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 34,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFB",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                207,
+                5104
+              ],
+              [
+                504,
+                5106
+              ],
+              [
+                504,
+                5139
+              ],
+              [
+                207,
+                5137
+              ]
+            ],
+            [
+              [
+                185,
+                5159
+              ],
+              [
+                531,
+                5159
+              ],
+              [
+                531,
+                5188
+              ],
+              [
+                185,
+                5188
+              ]
+            ],
+            [
+              [
+                212,
+                5210
+              ],
+              [
+                497,
+                5210
+              ],
+              [
+                497,
+                5242
+              ],
+              [
+                212,
+                5242
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            185,
+            5104,
+            531,
+            5242
+          ],
+          "balloon_type": "white",
+          "page_profile": "standard",
+          "block_profile": "white_balloon",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            0,
+            5082,
+            590,
+            5264
+          ],
+          "layout_shape": "wide",
+          "layout_align": "center",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            180,
+            16,
+            540,
+            166
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+          "normalized_ocr": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+          "translated": "ESTE TROVÃO, NO MOMENTO EM QUE A ENERGIA INTERNA ATINGE UM CERTO PONTO",
+          "reading_order": 3,
+          "group_id": "g004",
+          "grouping_status": "separated"
+        },
+        {
+          "text": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+          "bbox": [
+            82,
+            6781,
+            624,
+            7069
+          ],
+          "confidence": 0.861,
+          "tipo": "fala",
+          "estilo": {
+            "fonte": "Newrotic.ttf",
+            "tamanho": 37,
+            "cor": "#FFFFFF",
+            "cor_gradiente": [
+              "#EFEFEF",
+              "#D8D8D8"
+            ],
+            "contorno": "#161514",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                145,
+                6801
+              ],
+              [
+                563,
+                6804
+              ],
+              [
+                562,
+                6845
+              ],
+              [
+                145,
+                6842
+              ]
+            ],
+            [
+              [
+                95,
+                6876
+              ],
+              [
+                621,
+                6876
+              ],
+              [
+                621,
+                6916
+              ],
+              [
+                95,
+                6916
+              ]
+            ],
+            [
+              [
+                109,
+                6949
+              ],
+              [
+                600,
+                6951
+              ],
+              [
+                600,
+                6992
+              ],
+              [
+                108,
+                6990
+              ]
+            ],
+            [
+              [
+                208,
+                7024
+              ],
+              [
+                498,
+                7024
+              ],
+              [
+                498,
+                7065
+              ],
+              [
+                208,
+                7065
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            95,
+            6801,
+            621,
+            7065
+          ],
+          "balloon_type": "textured",
+          "page_profile": "standard",
+          "block_profile": "standard",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            82,
+            6781,
+            624,
+            7069
+          ],
+          "layout_shape": "wide",
+          "layout_align": "center",
+          "layout_profile": "standard",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            82,
+            16,
+            624,
+            304
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+          "normalized_ocr": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+          "translated": "INTERROMPE TODO O MOVIMENTO E SE TRANSFORMA EM UM ÚNICO RAIO QUE LIBERA PODER EXPLOSIVO",
+          "reading_order": 4,
+          "group_id": "g005",
+          "grouping_status": "separated"
+        }
+      ],
+      "arquivo_original": "originals/001.jpg",
+      "arquivo_traduzido": "translated/001.jpg",
+      "textos": [
+        {
+          "id": null,
+          "bbox": [
+            172,
+            945,
+            545,
+            1134
+          ],
+          "tipo": "fala",
+          "original": "THELIGHTNING OF THEHUNWONE MIRROR WAS SIMILAR TO THE SAMADH TRUE FIRE OF DRAGON-SUBDUINGE PALM, YET DIFFERENT",
+          "translated": "O RELÂMPAGO DO ESPELHO HUNWONE ERA SEMELHANTE AO VERDADEIRO FOGO SAMADH DA PALMA SUBJUGADORA DE DRAGÕES, MAS DIFERENTE",
+          "traduzido": "O RELÂMPAGO DO ESPELHO HUNWONE ERA SEMELHANTE AO VERDADEIRO FOGO SAMADH DA PALMA SUBJUGADORA DE DRAGÕES, MAS DIFERENTE",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            172,
+            945,
+            545,
+            1134
+          ],
+          "text_pixel_bbox": [
+            176,
+            952,
+            538,
+            1132
+          ],
+          "line_polygons": [
+            [
+              [
+                208,
+                952
+              ],
+              [
+                508,
+                952
+              ],
+              [
+                508,
+                981
+              ],
+              [
+                208,
+                981
+              ]
+            ],
+            [
+              [
+                176,
+                1003
+              ],
+              [
+                541,
+                1003
+              ],
+              [
+                541,
+                1030
+              ],
+              [
+                176,
+                1030
+              ]
+            ],
+            [
+              [
+                201,
+                1050
+              ],
+              [
+                512,
+                1050
+              ],
+              [
+                512,
+                1080
+              ],
+              [
+                201,
+                1080
+              ]
+            ],
+            [
+              [
+                252,
+                1099
+              ],
+              [
+                461,
+                1099
+              ],
+              [
+                461,
+                1132
+              ],
+              [
+                252,
+                1132
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#202020",
+            "cor_gradiente": [],
+            "contorno": "#EFEFEF",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            0,
+            929,
+            572,
+            1150
+          ],
+          "balloon_type": "white",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        },
+        {
+          "id": null,
+          "bbox": [
+            74,
+            2329,
+            376,
+            2425
+          ],
+          "tipo": "narracao",
+          "original": "BOTHDIVIDE INNERENERGY INTO YIN AND YANG",
+          "translated": "AMBOS DIVIDEM A ENERGIA INTERNA EM YIN E YANG",
+          "traduzido": "AMBOS DIVIDEM A ENERGIA INTERNA EM YIN E YANG",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            74,
+            2329,
+            376,
+            2425
+          ],
+          "text_pixel_bbox": [
+            81,
+            2334,
+            370,
+            2421
+          ],
+          "line_polygons": [
+            [
+              [
+                81,
+                2334
+              ],
+              [
+                370,
+                2334
+              ],
+              [
+                370,
+                2364
+              ],
+              [
+                81,
+                2364
+              ]
+            ],
+            [
+              [
+                121,
+                2384
+              ],
+              [
+                328,
+                2386
+              ],
+              [
+                328,
+                2421
+              ],
+              [
+                121,
+                2419
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#1B1B1B",
+            "cor_gradiente": [],
+            "contorno": "#F8F8F8",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            38,
+            2313,
+            424,
+            2441
+          ],
+          "balloon_type": "white",
+          "layout_profile": "top_narration",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        },
+        {
+          "id": null,
+          "bbox": [
+            204,
+            2954,
+            484,
+            3157
+          ],
+          "tipo": "fala",
+          "original": "BUT UNLIKE DRAGON-SUBDUING PALM WHERE THE TWO FORCES SPIN FIERCELY,",
+          "translated": "MAS, AO CONTRÁRIO DA PALMA SUBJUGADORA DE DRAGÕES, ONDE AS DUAS FORÇAS GIRAM FEROZMENTE,",
+          "traduzido": "MAS, AO CONTRÁRIO DA PALMA SUBJUGADORA DE DRAGÕES, ONDE AS DUAS FORÇAS GIRAM FEROZMENTE,",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            204,
+            2954,
+            484,
+            3157
+          ],
+          "text_pixel_bbox": [
+            204,
+            2961,
+            482,
+            3153
+          ],
+          "line_polygons": [
+            [
+              [
+                281,
+                2958
+              ],
+              [
+                410,
+                2958
+              ],
+              [
+                410,
+                2995
+              ],
+              [
+                281,
+                2995
+              ]
+            ],
+            [
+              [
+                205,
+                3012
+              ],
+              [
+                482,
+                3015
+              ],
+              [
+                482,
+                3047
+              ],
+              [
+                204,
+                3045
+              ]
+            ],
+            [
+              [
+                212,
+                3066
+              ],
+              [
+                479,
+                3066
+              ],
+              [
+                479,
+                3099
+              ],
+              [
+                212,
+                3099
+              ]
+            ],
+            [
+              [
+                264,
+                3115
+              ],
+              [
+                424,
+                3118
+              ],
+              [
+                423,
+                3155
+              ],
+              [
+                264,
+                3153
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#F4F4F4",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            149,
+            2938,
+            545,
+            3173
+          ],
+          "balloon_type": "white",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        },
+        {
+          "id": null,
+          "bbox": [
+            180,
+            5098,
+            540,
+            5248
+          ],
+          "tipo": "fala",
+          "original": "THISHUNWONTHUNDER,AT THE MOMENT THE INNER ENERG REACHESA CERTAIN POINT",
+          "translated": "ESTE TROVÃO, NO MOMENTO EM QUE A ENERGIA INTERNA ATINGE UM CERTO PONTO",
+          "traduzido": "ESTE TROVÃO, NO MOMENTO EM QUE A ENERGIA INTERNA ATINGE UM CERTO PONTO",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            180,
+            5098,
+            540,
+            5248
+          ],
+          "text_pixel_bbox": [
+            185,
+            5104,
+            531,
+            5242
+          ],
+          "line_polygons": [
+            [
+              [
+                207,
+                5104
+              ],
+              [
+                504,
+                5106
+              ],
+              [
+                504,
+                5139
+              ],
+              [
+                207,
+                5137
+              ]
+            ],
+            [
+              [
+                185,
+                5159
+              ],
+              [
+                531,
+                5159
+              ],
+              [
+                531,
+                5188
+              ],
+              [
+                185,
+                5188
+              ]
+            ],
+            [
+              [
+                212,
+                5210
+              ],
+              [
+                497,
+                5210
+              ],
+              [
+                497,
+                5242
+              ],
+              [
+                212,
+                5242
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 34,
+            "cor": "#1D1D1D",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFB",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            0,
+            5082,
+            590,
+            5264
+          ],
+          "balloon_type": "white",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        },
+        {
+          "id": null,
+          "bbox": [
+            82,
+            6781,
+            624,
+            7069
+          ],
+          "tipo": "fala",
+          "original": "STOPSALLMOVEMENT AND TRANSFORMSINTO A SINGLE BOLT OF LIGHTNING THAT UNLEASHES EXPLOSIVE POWER",
+          "translated": "INTERROMPE TODO O MOVIMENTO E SE TRANSFORMA EM UM ÚNICO RAIO QUE LIBERA PODER EXPLOSIVO",
+          "traduzido": "INTERROMPE TODO O MOVIMENTO E SE TRANSFORMA EM UM ÚNICO RAIO QUE LIBERA PODER EXPLOSIVO",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            82,
+            6781,
+            624,
+            7069
+          ],
+          "text_pixel_bbox": [
+            95,
+            6801,
+            621,
+            7065
+          ],
+          "line_polygons": [
+            [
+              [
+                145,
+                6801
+              ],
+              [
+                563,
+                6804
+              ],
+              [
+                562,
+                6845
+              ],
+              [
+                145,
+                6842
+              ]
+            ],
+            [
+              [
+                95,
+                6876
+              ],
+              [
+                621,
+                6876
+              ],
+              [
+                621,
+                6916
+              ],
+              [
+                95,
+                6916
+              ]
+            ],
+            [
+              [
+                109,
+                6949
+              ],
+              [
+                600,
+                6951
+              ],
+              [
+                600,
+                6992
+              ],
+              [
+                108,
+                6990
+              ]
+            ],
+            [
+              [
+                208,
+                7024
+              ],
+              [
+                498,
+                7024
+              ],
+              [
+                498,
+                7065
+              ],
+              [
+                208,
+                7065
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "Newrotic.ttf",
+            "tamanho": 37,
+            "cor": "#FFFFFF",
+            "cor_gradiente": [
+              "#EFEFEF",
+              "#D8D8D8"
+            ],
+            "contorno": "#161514",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            82,
+            6781,
+            624,
+            7069
+          ],
+          "balloon_type": "textured",
+          "layout_profile": "standard",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        }
+      ]
+    }
+  ],
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 5,
+    "tempo_processamento_seg": 70.0,
+    "data_criacao": "2026-05-05T18:09:28Z"
+  },
+  "qa": {
+    "summary": {
+      "flags": [],
+      "counts": {},
+      "highest_severity": "none",
+      "critical_count": 0,
+      "total": 0
+    }
+  },
+  "log": {
+    "structured_log_path": "D:\\TraduzAi\\data\\logs\\53dcb04c-4bba-43be-b638-4a39d20b0ac2\\structured_log.jsonl",
+    "summary": {
+      "actual_pages": 1,
+      "processed_pages": 1,
+      "translated_regions": 5,
+      "qa_flags": 0,
+      "critical_flags": 0,
+      "glossary_hits": 0,
+      "entity_flags": 0,
+      "export_status": "clean"
+    }
+  }
+}

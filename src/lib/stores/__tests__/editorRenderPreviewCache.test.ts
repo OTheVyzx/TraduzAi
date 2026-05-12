@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageData, Project, TextEntry, TextLayerStyle } from "../appStore";
 import { useAppStore } from "../appStore";
 import { useEditorStore } from "../editorStore";
+import { getPageKey } from "../../editorHistory";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -203,5 +204,73 @@ describe("editor render preview cache", () => {
       previewPath: "D:/tmp/project/render-cache/preview/001-preview.png",
     });
     expect(useEditorStore.getState().getStaleRenderPreviewPages()).toEqual([1]);
+  });
+
+  it("renders a faithful preview for an explicit page outside the editor current page", async () => {
+    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/002-preview.png");
+    const firstPage = makePage(1);
+    const secondPage = makePage(2, [makeLayer({ id: "layer-b", translated: "Pagina dois", traduzido: "Pagina dois" })]);
+    const project = makeProject([firstPage, secondPage]);
+    useAppStore.setState({ project });
+    useEditorStore.setState({
+      currentPageIndex: 0,
+      currentPage: firstPage,
+      pendingEdits: {},
+      pendingStructuralEdits: { created: [], deleted: {}, order: undefined },
+      renderPreviewCacheByPageKey: {},
+    });
+
+    const secondPageKey = getPageKey(project, 1);
+    await useEditorStore.getState().renderPreviewPageForPage(secondPageKey, 1, secondPage);
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "render_preview_page",
+      expect.objectContaining({
+        config: expect.objectContaining({
+          project_path: "D:/tmp/project",
+          page_index: 1,
+          fingerprint: expect.any(String),
+          page: expect.objectContaining({
+            numero: 2,
+            text_layers: [expect.objectContaining({ id: "layer-b", translated: "Pagina dois" })],
+          }),
+        }),
+      }),
+    );
+    expect(useEditorStore.getState().renderPreviewCacheByPageKey[secondPageKey]).toMatchObject({
+      status: "fresh",
+      path: "translated/002.png",
+      previewPath: "D:/tmp/project/render-cache/preview/002-preview.png",
+    });
+    expect(useEditorStore.getState().currentPageIndex).toBe(0);
+  });
+
+  it("includes rotation style changes in the faithful preview payload and fingerprint", async () => {
+    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/001-preview.png");
+    const pageKey = useEditorStore.getState().currentPageKey();
+    const before = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
+
+    useEditorStore.getState().setWorkingEstiloPatch(pageKey, "layer-a", { rotacao: 15 }, ["rotacao"]);
+    const after = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
+    await useEditorStore.getState().renderPreviewPage(pageKey);
+
+    expect(after).not.toBe(before);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "render_preview_page",
+      expect.objectContaining({
+        config: expect.objectContaining({
+          page: expect.objectContaining({
+            text_layers: [
+              expect.objectContaining({
+                id: "layer-a",
+                estilo: expect.objectContaining({ rotacao: 15 }),
+                style: expect.objectContaining({ rotacao: 15 }),
+                style_origin: "editor",
+              }),
+            ],
+          }),
+        }),
+      }),
+    );
   });
 });

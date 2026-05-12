@@ -10,9 +10,10 @@ import { Lab } from "./pages/Lab";
 import { Layout } from "./components/ui/Layout";
 import { BootSplash } from "./components/ui/BootSplash";
 import { useAppStore } from "./lib/stores/appStore";
-import { checkModels, getCredits, checkOllama, getSystemProfile, onPipelineProgress } from "./lib/tauri";
+import { checkModels, getCredits, getSystemProfile, onPipelineProgress } from "./lib/tauri";
 import { installE2EFixtureProject } from "./lib/e2e/fixtureProject";
 import { FEATURES } from "./lib/features";
+import { applyAppPreferences, getAppPreferences, watchSystemTheme } from "./lib/appPreferences";
 
 const LAB_WINDOW_MODE_KEY = "traduzai-window-mode";
 
@@ -96,7 +97,6 @@ export default function App() {
   const setSystemProfile = useAppStore((s) => s.setSystemProfile);
   const setModelsReady = useAppStore((s) => s.setModelsReady);
   const setCredits = useAppStore((s) => s.setCredits);
-  const setOllamaStatus = useAppStore((s) => s.setOllamaStatus);
   const [bootState, setBootState] = useState({
     ready: e2eMode,
     progress: e2eMode ? 1 : 0.08,
@@ -105,6 +105,12 @@ export default function App() {
 
   const setPipeline = useAppStore((s) => s.setPipeline);
   const appendPipelineLog = useAppStore((s) => s.appendPipelineLog);
+
+  useEffect(() => {
+    const preferences = getAppPreferences();
+    applyAppPreferences(preferences);
+    return watchSystemTheme(preferences);
+  }, []);
 
   useEffect(() => {
     if (e2eMode) {
@@ -139,7 +145,7 @@ export default function App() {
     let cancelled = false;
     let revealTimer: number | null = null;
     let completedSteps = 0;
-    const totalSteps = 4;
+    const totalSteps = 3;
 
     const markStep = (message: string) => {
       completedSteps += 1;
@@ -190,16 +196,6 @@ export default function App() {
               console.error("[TraduzAi] Credits init error:", error);
               markStep("Creditos indisponiveis");
             }),
-          checkOllama()
-            .then((ollama) => {
-              if (cancelled) return;
-              setOllamaStatus(ollama.running, ollama.models, ollama.has_translator);
-              markStep(ollama.running ? "Ollama verificado" : "Ollama offline");
-            })
-            .catch((error) => {
-              console.error("[TraduzAi] Ollama init error:", error);
-              markStep("Ollama indisponivel");
-            }),
         ];
 
         await Promise.allSettled(tasks);
@@ -245,7 +241,7 @@ export default function App() {
         window.clearTimeout(revealTimer);
       }
     };
-  }, [e2eMode, setCredits, setModelsReady, setOllamaStatus, setSystemProfile]);
+  }, [e2eMode, setCredits, setModelsReady, setSystemProfile]);
 
   if (!bootState.ready) {
     return <BootSplash progress={bootState.progress} message={bootState.message} />;

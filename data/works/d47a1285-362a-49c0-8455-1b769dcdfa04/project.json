@@ -1,0 +1,231 @@
+{
+  "app": "traduzai",
+  "capitulo": 1,
+  "contexto": {
+    "aliases": [],
+    "faccoes": [],
+    "fontes_usadas": [],
+    "genero": [],
+    "glossario": {},
+    "memoria_lexical": {},
+    "personagens": [],
+    "relacoes": [],
+    "resumo_por_arco": [],
+    "sinopse": "",
+    "termos": []
+  },
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 1
+  },
+  "id": "5d644690-91d2-404b-9a65-7194a777624c",
+  "idioma_destino": "pt",
+  "idioma_origem": "en",
+  "mode": "manual",
+  "obra": "",
+  "output_path": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04",
+  "paginas": [
+    {
+      "arquivo_original": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/originals/003.webp",
+      "arquivo_traduzido": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/translated/003.webp",
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "locked": true,
+          "path": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/originals/003.webp",
+          "visible": true
+        },
+        "brush": {
+          "key": "brush",
+          "locked": false,
+          "path": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/layers/brush/001.png",
+          "visible": false
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "locked": true,
+          "path": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/images/003.webp",
+          "visible": false
+        },
+        "mask": {
+          "key": "mask",
+          "locked": false,
+          "path": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/layers/mask/001.png",
+          "visible": false
+        },
+        "rendered": {
+          "key": "rendered",
+          "locked": true,
+          "path": "D:/TraduzAi/data/works/d47a1285-362a-49c0-8455-1b769dcdfa04/translated/003.webp",
+          "visible": true
+        }
+      },
+      "inpaint_blocks": [],
+      "numero": 1,
+      "page_profile": null,
+      "text_layers": [
+        {
+          "balloon_bbox": [
+            202,
+            633,
+            511,
+            1085
+          ],
+          "balloon_subregions": [],
+          "bbox": [
+            202,
+            633,
+            511,
+            1085
+          ],
+          "confianca_ocr": 1,
+          "detected_font_size_px": null,
+          "detector": null,
+          "estilo": {
+            "alinhamento": "center",
+            "bold": false,
+            "contorno": "",
+            "contorno_px": 0,
+            "cor": "#000000",
+            "cor_gradiente": [],
+            "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+            "force_upper": false,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "italico": false,
+            "rotacao": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "tamanho": 28
+          },
+          "id": "tl_local_morwjawg_77k9uh",
+          "kind": "text",
+          "layout_bbox": [
+            202,
+            633,
+            511,
+            1085
+          ],
+          "layout_group_size": 1,
+          "line_polygons": null,
+          "locked": false,
+          "ocr_confidence": 1.0,
+          "order": 0,
+          "original": "",
+          "render_bbox": null,
+          "render_preview_path": null,
+          "rendered_direction": null,
+          "rotation_deg": 0,
+          "source_bbox": [
+            74,
+            722,
+            383,
+            1174
+          ],
+          "source_direction": null,
+          "source_language": null,
+          "style": {
+            "alinhamento": "center",
+            "bold": false,
+            "contorno": "",
+            "contorno_px": 0,
+            "cor": "#000000",
+            "cor_gradiente": [],
+            "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+            "force_upper": false,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "italico": false,
+            "rotacao": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "tamanho": 28
+          },
+          "tipo": "fala",
+          "traduzido": "",
+          "translated": "é isso ",
+          "visible": true
+        }
+      ],
+      "textos": [
+        {
+          "bbox": [
+            202,
+            633,
+            511,
+            1085
+          ],
+          "confianca_ocr": 1.0,
+          "estilo": {
+            "alinhamento": "center",
+            "bold": false,
+            "contorno": "",
+            "contorno_px": 0,
+            "cor": "#000000",
+            "cor_gradiente": [],
+            "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+            "force_upper": false,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "italico": false,
+            "rotacao": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "tamanho": 28
+          },
+          "id": "tl_local_morwjawg_77k9uh",
+          "original": "",
+          "tipo": "fala",
+          "traduzido": "é isso "
+        }
+      ]
+    }
+  ],
+  "preset": {
+    "description": "Ideal para capitulos coloridos verticais. Traducao natural, fonte maior, revisao de SFX manual.",
+    "id": "manhwa_webtoon_color",
+    "name": "Manhwa/Webtoon colorido",
+    "quality": "alta",
+    "settings": {
+      "balloon_margin": 0.12,
+      "inpaint_mode": "normal",
+      "ocr_cleanup": "normal",
+      "ocr_sensitivity": "high",
+      "qa_mode": "review",
+      "sfx_mode": "preserve",
+      "translation_style": "natural_br",
+      "typesetting_font_scale": 1.08
+    }
+  },
+  "qualidade": "alta",
+  "source_path": "D:\\TraduzAi\\outapp\\traduzido4\\originals\\003.webp",
+  "status": "done",
+  "totalPages": 1,
+  "versao": "2.0",
+  "work_context": {
+    "context_loaded": false,
+    "glossary_entries_count": 0,
+    "glossary_loaded": false,
+    "internet_context_loaded": false,
+    "risk_level": "high",
+    "selected": false,
+    "title": "",
+    "user_ignored_warning": true,
+    "work_id": ""
+  }
+}

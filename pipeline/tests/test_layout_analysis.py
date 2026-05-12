@@ -14,11 +14,13 @@ from layout.balloon_layout import (
     _apply_geometric_fallback_subregions,
     _build_balloon_subregions_from_groups,
     _detect_connected_balloon_subregions_from_fill,
+    _detect_connected_balloon_subregions_rich,
     _detect_connected_lobes_from_outline,
     _detect_lobes_via_distance_transform,
     _enforce_min_lobe_size,
     _extract_balloon_outline_polygon,
     _geometric_fallback_subregions,
+    _promote_shared_connected_balloon_pairs,
     _refine_connected_position_bboxes_with_ollama,
     _score_subregion_quality,
     enrich_page_layout,
@@ -38,6 +40,63 @@ def _fixture_image_path(name: str) -> Path:
 
 
 class LayoutAnalysisTests(unittest.TestCase):
+    def test_enrich_page_layout_skips_dense_single_cluster_phrase_before_connected_detection(self):
+        page = {
+            "width": 320,
+            "height": 260,
+            "texts": [
+                {
+                    "text": "IT'S TIME FOR YOU TO LEARN...",
+                    "bbox": [80, 80, 240, 180],
+                    "ocr_text_bbox": [80, 80, 240, 180],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "block_profile": "white_balloon",
+                    "confidence": 0.9,
+                }
+            ],
+        }
+
+        with patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((260, 320, 3), 245, dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            return_value=[70, 70, 250, 190],
+        ), patch(
+            "layout.balloon_layout._extract_text_cluster_components",
+            return_value=[{"bbox": [80, 80, 240, 180], "area": 16000}],
+        ), patch(
+            "layout.balloon_layout._merge_text_cluster_components",
+            return_value=[{"bbox": [80, 80, 240, 180], "area": 16000}],
+        ), patch(
+            "layout.balloon_layout._detect_connected_balloon_subregions_rich",
+        ) as rich_detector:
+            enriched = enrich_page_layout(page)
+
+        rich_detector.assert_not_called()
+        self.assertEqual(enriched["texts"][0].get("balloon_subregions"), [])
+
+    def test_connected_subregions_rich_skips_outline_for_dense_simple_candidate(self):
+        image = np.full((260, 320, 3), 245, dtype=np.uint8)
+
+        with patch(
+            "layout.balloon_layout._detect_connected_lobes_from_outline",
+        ) as outline_detector, patch(
+            "layout.balloon_layout._detect_connected_balloon_subregions_plain",
+            return_value=[[70, 70, 160, 190], [160, 70, 250, 190]],
+        ) as plain_detector:
+            rich = _detect_connected_balloon_subregions_rich(
+                image,
+                [80, 80, 240, 180],
+                [70, 70, 250, 190],
+                "fala",
+            )
+
+        outline_detector.assert_not_called()
+        plain_detector.assert_called_once()
+        self.assertEqual([item["bbox"] for item in rich], [[70, 70, 160, 190], [160, 70, 250, 190]])
+
     def test_connected_reasoner_accepts_valid_ollama_position_boxes(self):
         image = np.full((240, 420, 3), 245, dtype=np.uint8)
         settings = {
@@ -174,6 +233,41 @@ class LayoutAnalysisTests(unittest.TestCase):
         self.assertEqual(texts[0]["balloon_bbox"], texts[1]["balloon_bbox"])
         self.assertEqual(texts[0]["layout_shape"], "tall")
         self.assertEqual(texts[0]["layout_group_size"], 2)
+
+    def test_diagonal_connected_balloon_texts_keep_separate_lobe_bboxes(self):
+        page = {
+            "width": 1200,
+            "height": 344,
+            "texts": [
+                {
+                    "text": "WELL, THERE'S NO POINT IN EXPLAINING IT FURTHER SINCE YOU'RE GONNA BE DEAD SOON.",
+                    "bbox": [329, 16, 716, 179],
+                    "text_pixel_bbox": [339, 23, 670, 174],
+                    "tipo": "fala",
+                    "confidence": 0.251,
+                    "balloon_type": "white",
+                    "block_profile": "white_balloon",
+                },
+                {
+                    "text": "JUST ACCEPT YOUR FATE NOW.",
+                    "bbox": [500, 212, 903, 328],
+                    "text_pixel_bbox": [568, 238, 842, 300],
+                    "tipo": "narracao",
+                    "confidence": 0.56,
+                    "balloon_type": "white",
+                    "block_profile": "white_balloon",
+                },
+            ],
+        }
+
+        enriched = enrich_page_layout(page)
+        first, second = enriched["texts"]
+
+        self.assertNotEqual(first["balloon_bbox"], second["balloon_bbox"])
+        self.assertEqual(first["layout_group_size"], 1)
+        self.assertEqual(second["layout_group_size"], 1)
+        self.assertLess(first["balloon_bbox"][2], 820)
+        self.assertGreater(second["balloon_bbox"][0], 430)
 
     def test_prefers_detected_bubble_region_for_single_dialogue(self):
         page = {
@@ -1036,6 +1130,35 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
 
         self.assertEqual(texts[0].get("balloon_subregions", []), [])
 
+    def test_geometric_fallback_rejects_single_text_sentences_when_groups_are_not_separable(self):
+        image = np.full((2460, 1800, 3), 245, dtype=np.uint8)
+        text = {
+            "text": "Hold the line! The boss is vulnerable!",
+            "translated": "Segure a linha! O chefe esta vulneravel!",
+            "bbox": [1363, 2295, 1598, 2426],
+            "text_pixel_bbox": [1371, 2308, 1599, 2425],
+            "ocr_text_bbox": [1363, 2295, 1598, 2426],
+            "line_polygons": [
+                [[1371, 2306], [1599, 2306], [1599, 2340], [1371, 2340]],
+                [[1385, 2349], [1586, 2349], [1586, 2384], [1385, 2384]],
+                [[1390, 2389], [1578, 2389], [1578, 2425], [1390, 2425]],
+            ],
+            "tipo": "fala",
+            "confidence": 0.9,
+            "balloon_bbox": [1309, 2279, 1696, 2442],
+            "layout_group_size": 1,
+            "layout_shape": "wide",
+            "balloon_type": "white",
+            "block_profile": "white_balloon",
+        }
+
+        texts = [text]
+        _apply_geometric_fallback_subregions(texts, {}, image)
+
+        self.assertEqual(texts[0].get("balloon_subregions", []), [])
+        self.assertNotEqual(texts[0].get("layout_profile"), "connected_balloon")
+        self.assertEqual(texts[0].get("layout_group_size"), 1)
+
     def test_geometric_fallback_splits_diagonal_shared_group_even_with_aspect_below_one_point_seven(self):
         """Grupo diagonal real pode dividir mesmo quando o balão compartilhado não é tão largo."""
         texts = [
@@ -1610,6 +1733,43 @@ class MergeConnectedNearbyTextsTests(unittest.TestCase):
         self.assertLess(texts[0]["balloon_bbox"][3], texts[1]["balloon_bbox"][1] + 4)
         self.assertLess(texts[0]["balloon_bbox"][2] - texts[0]["balloon_bbox"][0], 700)
         self.assertLess(texts[1]["balloon_bbox"][2] - texts[1]["balloon_bbox"][0], 850)
+
+    def test_promotes_overlapping_texts_in_shared_connected_balloon(self):
+        texts = [
+            {
+                "text": "OF COURSE, I KNOW.",
+                "translated": "CLARO, EU SEI.",
+                "bbox": [350, 1414, 580, 1492],
+                "text_pixel_bbox": [350, 1414, 580, 1492],
+                "balloon_bbox": [321, 1365, 938, 1744],
+                "tipo": "narracao",
+                "balloon_type": "white",
+                "layout_profile": "white_balloon",
+                "layout_group_size": 1,
+                "connected_lobe_bboxes": [],
+            },
+            {
+                "text": "I WORKED MY ASS OFF LONG AGO TRYING TO TRACK YOU DOWN.",
+                "translated": "EU TRABALHEI DURO HA MUITO TEMPO TENTANDO RASTREAR VOCE.",
+                "bbox": [417, 1381, 889, 1728],
+                "text_pixel_bbox": [417, 1381, 889, 1728],
+                "balloon_bbox": [321, 1365, 938, 1744],
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "layout_profile": "standard",
+                "layout_group_size": 1,
+                "connected_lobe_bboxes": [],
+            },
+        ]
+
+        _promote_shared_connected_balloon_pairs(texts)
+
+        for text in texts:
+            self.assertEqual(text["layout_profile"], "connected_balloon")
+            self.assertEqual(text["layout_group_size"], 2)
+            self.assertEqual(len(text["balloon_subregions"]), 2)
+            self.assertEqual(len(text["connected_lobe_bboxes"]), 2)
+            self.assertGreaterEqual(text["connected_group_confidence"], 0.68)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 import { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  Bot,
   Coins,
   FlaskConical,
   Home,
@@ -23,13 +22,12 @@ type NavItem = {
 export function Layout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const workspaceMode = location.pathname.startsWith("/preview");
   const {
     credits,
     freeRemaining,
     gpuAvailable,
     gpuName,
-    ollamaRunning,
-    ollamaHasTranslator,
   } = useAppStore();
   const free = freeRemaining();
 
@@ -58,16 +56,32 @@ export function Layout({ children }: { children: ReactNode }) {
     navigate(item.path);
   }
 
-  const ollamaStatus = ollamaHasTranslator
-    ? { label: "LLM pronto", color: "text-status-success", dot: "bg-status-success" }
-    : ollamaRunning
-      ? { label: "Sem modelo", color: "text-status-warning", dot: "bg-status-warning" }
-      : { label: "Ollama offline", color: "text-status-error", dot: "bg-status-error" };
+  if (workspaceMode) {
+    return (
+      <div
+        data-testid="app-shell"
+        className="app-workspace-shell flex h-screen overflow-hidden text-text-primary"
+      >
+        <main
+          data-testid="app-main"
+          className="app-main-workspace relative z-10 flex-1 overflow-hidden"
+        >
+          {children}
+        </main>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex h-screen bg-bg-primary">
+    <div
+      data-testid="app-shell"
+      className="app-gradient-shell flex h-screen overflow-hidden text-text-primary"
+    >
       {/* Sidebar */}
-      <aside className="w-64 bg-bg-secondary border-r border-border flex flex-col">
+      <aside
+        data-testid="app-sidebar"
+        className="app-sidebar-minimal relative z-10 flex w-64 flex-col"
+      >
         {/* Brand */}
         <div
           className="px-5 pt-5 pb-5 cursor-pointer select-none"
@@ -75,7 +89,7 @@ export function Layout({ children }: { children: ReactNode }) {
           onClick={() => navigate("/")}
         >
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-400 to-brand-700 flex items-center justify-center shadow-glow-brand">
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-300 via-brand to-[#00A3FF] flex items-center justify-center shadow-glow-brand">
               <span className="text-white font-bold text-sm tracking-tight">T</span>
             </div>
             <div>
@@ -88,9 +102,6 @@ export function Layout({ children }: { children: ReactNode }) {
             </div>
           </div>
         </div>
-
-        {/* Divider */}
-        <div className="mx-4 h-px bg-border" />
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-0.5">
@@ -108,11 +119,12 @@ export function Layout({ children }: { children: ReactNode }) {
             return (
               <button
                 key={item.path}
+                data-active={active ? "true" : "false"}
                 onClick={() => void handleNavClick(item)}
                 className={`group w-full flex items-center gap-3 px-3 h-9 rounded-lg text-sm
                   transition-all duration-200 ease-out-expo focus-visible:outline-none
                   ${active
-                    ? "bg-brand/10 text-brand-200 shadow-[inset_3px_0_0_0_theme(colors.brand.DEFAULT)]"
+                    ? "text-brand-200"
                     : "text-text-secondary hover:text-text-primary hover:bg-white/[0.03]"
                   }`}
               >
@@ -128,7 +140,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </nav>
 
         {/* Status block */}
-        <div className="px-3 pb-3 pt-4 border-t border-border space-y-3">
+        <div className="px-3 pb-3 pt-4 space-y-3">
           <p className="px-2 text-2xs text-text-muted uppercase tracking-wider font-medium">
             Status
           </p>
@@ -149,28 +161,10 @@ export function Layout({ children }: { children: ReactNode }) {
             label={gpuAvailable ? gpuName : "CPU (sem GPU)"}
             valueClass="text-text-secondary truncate"
           />
-          <StatusRow
-            icon={
-              <span className="relative flex w-2 h-2">
-                <span
-                  className={`absolute inset-0 rounded-full ${ollamaStatus.dot} ${
-                    ollamaHasTranslator ? "animate-pulse-glow" : ""
-                  }`}
-                />
-              </span>
-            }
-            label={
-              <span className="flex items-center gap-1.5">
-                <Bot size={12} className={ollamaStatus.color} strokeWidth={1.75} />
-                <span className={ollamaStatus.color}>{ollamaStatus.label}</span>
-              </span>
-            }
-            valueClass=""
-          />
         </div>
 
         {/* Footer */}
-        <div className="px-3 pb-4 pt-2 border-t border-border">
+        <div className="px-3 pb-4 pt-2">
           <button
             onClick={() => restartApp()}
             title="Reiniciar app"
@@ -183,7 +177,12 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-y-auto overflow-x-hidden">{children}</main>
+      <main
+        data-testid="app-main"
+        className="app-main-unified relative z-10 flex-1 overflow-y-auto overflow-x-hidden"
+      >
+        {children}
+      </main>
     </div>
   );
 }

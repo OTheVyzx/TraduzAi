@@ -50,7 +50,7 @@ export type NonBatchCommand = BaseCmdMeta &
     | { type: "toggle-visibility"; layerId: string; before: boolean; after: boolean }
     | { type: "toggle-lock"; layerId: string; before: boolean; after: boolean }
     | { type: "reorder-layers"; before: string[]; after: string[] }
-    | { type: "bitmap-stroke"; bbox: Bbox }
+    | { type: "bitmap-stroke"; layerKey: "brush" | "mask" | "inpaint"; bbox: Bbox }
   );
 
 export type BatchCommand = BaseCmdMeta & {
@@ -83,7 +83,12 @@ export interface WorkingStateDraft {
   insertWorkingLayer(pageKey: string, layer: TextEntry, insertIndex: number): void;
   deleteWorkingLayer(pageKey: string, layerId: string): void;
   reorderWorkingLayers(pageKey: string, orderedIds: string[]): void;
-  applyWorkingBitmapRegion(pageKey: string, bbox: Bbox, bytes: Uint8Array): void;
+  applyWorkingBitmapRegion(
+    pageKey: string,
+    layerKey: "brush" | "mask" | "inpaint",
+    bbox: Bbox,
+    bytes: Uint8Array,
+  ): void;
   setWorkingVisibility(pageKey: string, layerId: string, visible: boolean): void;
   setWorkingLocked(pageKey: string, layerId: string, locked: boolean): void;
   hasLayer(pageKey: string, layerId: string): boolean;
@@ -291,7 +296,7 @@ export function applyCommand(cmd: EditorCommand, draft: WorkingStateDraft): void
       break;
     case "bitmap-stroke": {
       const entry = bitmapCache.get(cmd.commandId);
-      if (entry) draft.applyWorkingBitmapRegion(cmd.pageKey, cmd.bbox, entry.after);
+      if (entry) draft.applyWorkingBitmapRegion(cmd.pageKey, cmd.layerKey, cmd.bbox, entry.after);
       break;
     }
     case "toggle-visibility":
@@ -332,7 +337,7 @@ export function revertCommand(cmd: EditorCommand, draft: WorkingStateDraft): voi
       break;
     case "bitmap-stroke": {
       const entry = bitmapCache.get(cmd.commandId);
-      if (entry) draft.applyWorkingBitmapRegion(cmd.pageKey, cmd.bbox, entry.before);
+      if (entry) draft.applyWorkingBitmapRegion(cmd.pageKey, cmd.layerKey, cmd.bbox, entry.before);
       break;
     }
     case "toggle-visibility":
@@ -412,6 +417,15 @@ export function disposeAllForPage(pageKey: string): void {
 
 export function disposeAll(): void {
   bitmapCache.clear();
+}
+
+export function styleValueEquals(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    return a.every((value, index) => styleValueEquals(value, b[index]));
+  }
+  return a === b;
 }
 
 export function pruneHistoryStacksByGlobalCap(stacks: HistoryStack[]): void {

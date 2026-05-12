@@ -1,0 +1,3359 @@
+{
+  "run": {
+    "obra": "The Regressed Mercenary Has a Plan",
+    "capitulo": 39,
+    "idioma_origem": "en",
+    "idioma_destino": "pt",
+    "total_paginas": 60,
+    "total_textos": 72
+  },
+  "summary": {
+    "total_decisions": 475,
+    "by_stage": {
+      "ocr": 286,
+      "layout": 86,
+      "translate": 103
+    },
+    "by_action": {
+      "classify_page_profile": 103,
+      "classify_block_profile": 62,
+      "accept_block": 72,
+      "drop_block": 48,
+      "assign_balloon_bbox": 72,
+      "select_backend": 103,
+      "clamp_balloon_bbox": 7,
+      "split_balloon_subregions": 4,
+      "keep_block_separate": 1,
+      "veto_connected_split": 3
+    },
+    "by_reason": {
+      "standard": 103,
+      "top_narration": 27,
+      "ready_for_layout": 72,
+      "suspicious_low_confidence": 12,
+      "watermark": 26,
+      "editorial_credit": 1,
+      "refined_from_image": 39,
+      "ollama": 103,
+      "white_balloon": 35,
+      "refined_same_as_cluster": 33,
+      "top_caption_overexpand": 7,
+      "punctuation_only": 3,
+      "structured_payload": 3,
+      "connected_lobes_detected": 4,
+      "textured_sfx_or_noise": 3,
+      "cluster_not_line_merge": 1,
+      "group_confidence_sentinel": 3
+    }
+  },
+  "flagged_pages": [
+    100,
+    101,
+    102,
+    103
+  ],
+  "entries_preview": [
+    {
+      "ts": "2026-05-04T14:11:09.581025+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 10,
+        "image_path": "band_1"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.583543+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "THE REGRESSED MERCENARYS MACHINATIONS",
+      "bbox": [
+        592,
+        16,
+        981,
+        98
+      ],
+      "details": {
+        "confidence": 0.905,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.586553+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THE REGRESSED MERCENARYS MACHINATIONS",
+      "bbox": [
+        592,
+        16,
+        981,
+        98
+      ],
+      "details": {
+        "confidence": 0.905,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.588763+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_002",
+      "text": "PR",
+      "bbox": [
+        961,
+        147,
+        993,
+        170
+      ],
+      "details": {
+        "confidence": 0.406,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.589768+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_003",
+      "text": "KIRO",
+      "bbox": [
+        1032,
+        148,
+        1096,
+        176
+      ],
+      "details": {
+        "confidence": 0.536,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.591784+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_004",
+      "text": "CLORICA",
+      "bbox": [
+        656,
+        158,
+        818,
+        195
+      ],
+      "details": {
+        "confidence": 0.677,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.591784+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_005",
+      "text": "AsuraScans",
+      "bbox": [
+        196,
+        187,
+        390,
+        236
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:09.594294+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_006",
+      "text": "BRAHIM",
+      "bbox": [
+        930,
+        230,
+        1024,
+        260
+      ],
+      "details": {
+        "confidence": 0.682,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.595799+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_007",
+      "text": "BRAHIM",
+      "bbox": [
+        636,
+        252,
+        726,
+        280
+      ],
+      "details": {
+        "confidence": 0.624,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.596804+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_008",
+      "text": "Discord.gg/asuran Asuracomic.net",
+      "bbox": [
+        277,
+        289,
+        498,
+        383
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:09.597809+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_009",
+      "text": "MED OO",
+      "bbox": [
+        948,
+        309,
+        1118,
+        351
+      ],
+      "details": {
+        "confidence": 0.344,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.598311+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "editorial_credit",
+      "layer": "ocr_010",
+      "text": "TS MED",
+      "bbox": [
+        645,
+        326,
+        840,
+        364
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:09.604845+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THE REGRESSED MERCENARYS MACHINATIONS",
+      "bbox": [
+        521,
+        0,
+        1186,
+        117
+      ],
+      "details": {
+        "source_bbox": [
+          592,
+          16,
+          981,
+          98
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.607346+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_002",
+      "text": "CLORICA",
+      "bbox": [
+        621,
+        146,
+        853,
+        207
+      ],
+      "details": {
+        "source_bbox": [
+          656,
+          158,
+          818,
+          195
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.608853+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_003",
+      "text": "BRAHIM",
+      "bbox": [
+        910,
+        218,
+        1044,
+        272
+      ],
+      "details": {
+        "source_bbox": [
+          930,
+          230,
+          1024,
+          260
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:09.610358+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_004",
+      "text": "BRAHIM",
+      "bbox": [
+        617,
+        240,
+        745,
+        292
+      ],
+      "details": {
+        "source_bbox": [
+          636,
+          252,
+          726,
+          280
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:10.065800+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:25.625830+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_2"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:25.665024+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "Theregressed Machinations",
+      "bbox": [
+        306,
+        16,
+        858,
+        313
+      ],
+      "details": {
+        "confidence": 0.584,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:25.711825+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "Theregressed Machinations",
+      "bbox": [
+        306,
+        16,
+        858,
+        313
+      ],
+      "details": {
+        "confidence": 0.584,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:25.720374+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "Theregressed Machinations",
+      "bbox": [
+        306,
+        16,
+        858,
+        313
+      ],
+      "details": {
+        "source_bbox": [
+          306,
+          16,
+          858,
+          313
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:25.757896+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:29.205639+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_3"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:29.213045+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "WHO ARE YOu...?",
+      "bbox": [
+        493,
+        16,
+        698,
+        96
+      ],
+      "details": {
+        "confidence": 0.919,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:29.221094+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "WHO ARE YOu...?",
+      "bbox": [
+        493,
+        16,
+        698,
+        96
+      ],
+      "details": {
+        "confidence": 0.919,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:29.228644+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "WHO ARE YOu...?",
+      "bbox": [
+        493,
+        16,
+        698,
+        96
+      ],
+      "details": {
+        "source_bbox": [
+          493,
+          16,
+          698,
+          96
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:29.233157+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:38.887116+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 2,
+        "image_path": "band_4"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:38.887617+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "OASURASCANS.COM",
+      "bbox": [
+        748,
+        16,
+        988,
+        48
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:38.928763+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_002",
+      "text": "THE CAPTAIN OF THE CERBERYS MERCENARIES KAOR.",
+      "bbox": [
+        384,
+        96,
+        829,
+        262
+      ],
+      "details": {
+        "confidence": 0.921,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:38.969598+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_002",
+      "text": "THE CAPTAIN OF THE CERBERYS MERCENARIES KAOR.",
+      "bbox": [
+        384,
+        96,
+        829,
+        262
+      ],
+      "details": {
+        "confidence": 0.921,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:38.980657+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "THE CAPTAIN OF THE CERBERYS MERCENARIES KAOR.",
+      "bbox": [
+        384,
+        96,
+        829,
+        262
+      ],
+      "details": {
+        "source_bbox": [
+          384,
+          96,
+          829,
+          262
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:38.986180+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:41.686649+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_5"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:41.697238+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "LBT PLAY",
+      "bbox": [
+        393,
+        16,
+        790,
+        76
+      ],
+      "details": {
+        "confidence": 0.495,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:41.697739+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "LBT PLAY",
+      "bbox": [
+        393,
+        16,
+        790,
+        76
+      ],
+      "details": {
+        "confidence": 0.495,
+        "threshold": 0.58,
+        "block_profile": "top_narration",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:41.702749+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.118464+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_6"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.128578+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "Hmp",
+      "bbox": [
+        356,
+        16,
+        521,
+        133
+      ],
+      "details": {
+        "confidence": 0.323,
+        "threshold": 0.6,
+        "block_profile": "standard",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.133088+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.235127+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_7"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.235629+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        748,
+        16,
+        985,
+        51
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:42.239342+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.345979+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_8"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.346982+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "OASURASCANS.COM",
+      "bbox": [
+        752,
+        16,
+        994,
+        48
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:42.374640+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.634722+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_9"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.652514+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "WHAt The...?HE MANAGED TO BLOCK ALL THAT?",
+      "bbox": [
+        397,
+        16,
+        842,
+        144
+      ],
+      "details": {
+        "confidence": 0.921,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.671608+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "WHAt The...?HE MANAGED TO BLOCK ALL THAT?",
+      "bbox": [
+        397,
+        16,
+        842,
+        144
+      ],
+      "details": {
+        "confidence": 0.921,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.676625+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "WHAt The...?HE MANAGED TO BLOCK ALL THAT?",
+      "bbox": [
+        295,
+        0,
+        939,
+        160
+      ],
+      "details": {
+        "source_bbox": [
+          397,
+          16,
+          842,
+          144
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:42.681138+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:45.893370+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_10"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:45.915496+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "I'VE MET A TON OF PEOPLE LIKE YOU.",
+      "bbox": [
+        366,
+        16,
+        849,
+        179
+      ],
+      "details": {
+        "confidence": 0.631,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:45.921545+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "I'VE MET A TON OF PEOPLE LIKE YOU.",
+      "bbox": [
+        366,
+        16,
+        849,
+        179
+      ],
+      "details": {
+        "confidence": 0.631,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:45.927088+00:00",
+      "stage": "layout",
+      "action": "clamp_balloon_bbox",
+      "reason": "top_caption_overexpand",
+      "layer": "ocr_001",
+      "text": "I'VE MET A TON OF PEOPLE LIKE YOU.",
+      "bbox": [
+        164,
+        0,
+        1051,
+        195
+      ],
+      "details": {
+        "expansion_ratio": 2.484,
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:45.927088+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "I'VE MET A TON OF PEOPLE LIKE YOU.",
+      "bbox": [
+        164,
+        0,
+        1051,
+        195
+      ],
+      "details": {
+        "source_bbox": [
+          366,
+          16,
+          849,
+          179
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:45.949372+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:52.102550+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_11"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:52.103056+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        746,
+        16,
+        997,
+        50
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:52.132231+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:52.495141+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_12"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:52.526986+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "MEDIOCRE MERCENARIES WHO JUST USE BRUTE FORCE.",
+      "bbox": [
+        440,
+        16,
+        837,
+        180
+      ],
+      "details": {
+        "confidence": 0.89,
+        "tipo": "fala",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:52.535042+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "MEDIOCRE MERCENARIES WHO JUST USE BRUTE FORCE.",
+      "bbox": [
+        440,
+        16,
+        837,
+        180
+      ],
+      "details": {
+        "source_bbox": [
+          440,
+          16,
+          837,
+          180
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:52.541070+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:55.994346+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_13"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:55.994346+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        746,
+        16,
+        989,
+        51
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:55.999876+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:56.498162+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_14"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:56.499169+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "punctuation_only",
+      "layer": "ocr_001",
+      "text": "!?",
+      "bbox": [
+        738,
+        16,
+        829,
+        101
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:11:56.503684+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:57.330364+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_15"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:57.355627+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "THERE'S NOTHING EASIER TO DEAL WITH THAN Beasts WHO Just Swing THEIR FRONT PAWS INSTINCTUALLY.",
+      "bbox": [
+        365,
+        16,
+        850,
+        192
+      ],
+      "details": {
+        "confidence": 0.741,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:57.361143+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THERE'S NOTHING EASIER TO DEAL WITH THAN Beasts WHO Just Swing THEIR FRONT PAWS INSTINCTUALLY.",
+      "bbox": [
+        365,
+        16,
+        850,
+        192
+      ],
+      "details": {
+        "confidence": 0.741,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:57.366669+00:00",
+      "stage": "layout",
+      "action": "clamp_balloon_bbox",
+      "reason": "top_caption_overexpand",
+      "layer": "ocr_001",
+      "text": "THERE'S NOTHING EASIER TO DEAL WITH THAN Beasts WHO Just Swing THEIR FRONT PAWS INSTINCTUALLY.",
+      "bbox": [
+        162,
+        0,
+        1053,
+        208
+      ],
+      "details": {
+        "expansion_ratio": 2.474,
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:57.366669+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THERE'S NOTHING EASIER TO DEAL WITH THAN Beasts WHO Just Swing THEIR FRONT PAWS INSTINCTUALLY.",
+      "bbox": [
+        162,
+        0,
+        1053,
+        208
+      ],
+      "details": {
+        "source_bbox": [
+          365,
+          16,
+          850,
+          192
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:11:57.371182+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:00.234366+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 2,
+        "image_path": "band_16"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:00.245427+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "THAT BASTARD...!",
+      "bbox": [
+        480,
+        16,
+        736,
+        104
+      ],
+      "details": {
+        "confidence": 0.83,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:00.256893+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THAT BASTARD...!",
+      "bbox": [
+        480,
+        16,
+        736,
+        104
+      ],
+      "details": {
+        "confidence": 0.83,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:00.257903+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_002",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        749,
+        148,
+        994,
+        183
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:12:00.262429+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THAT BASTARD...!",
+      "bbox": [
+        390,
+        0,
+        830,
+        183
+      ],
+      "details": {
+        "source_bbox": [
+          480,
+          16,
+          736,
+          104
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:00.266436+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:03.244268+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_17"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:03.255844+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "HE'S STRONG!",
+      "bbox": [
+        484,
+        16,
+        737,
+        129
+      ],
+      "details": {
+        "confidence": 0.87,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:03.268430+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "HE'S STRONG!",
+      "bbox": [
+        484,
+        16,
+        737,
+        129
+      ],
+      "details": {
+        "confidence": 0.87,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:03.271955+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "HE'S STRONG!",
+      "bbox": [
+        379,
+        0,
+        835,
+        145
+      ],
+      "details": {
+        "source_bbox": [
+          484,
+          16,
+          737,
+          129
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:03.294597+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:05.704967+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_18"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:05.721162+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "IT'S JUST AS THE CAPTAIN SAID...!.",
+      "bbox": [
+        417,
+        16,
+        817,
+        165
+      ],
+      "details": {
+        "confidence": 0.941,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:05.739296+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "IT'S JUST AS THE CAPTAIN SAID...!.",
+      "bbox": [
+        417,
+        16,
+        817,
+        165
+      ],
+      "details": {
+        "confidence": 0.941,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:05.744836+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "IT'S JUST AS THE CAPTAIN SAID...!.",
+      "bbox": [
+        299,
+        0,
+        933,
+        181
+      ],
+      "details": {
+        "source_bbox": [
+          417,
+          16,
+          817,
+          165
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:05.750117+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:08.042155+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_19"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:08.054707+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "HIS NAME Is victor.",
+      "bbox": [
+        456,
+        16,
+        765,
+        140
+      ],
+      "details": {
+        "confidence": 0.871,
+        "tipo": "fala",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:08.059296+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "HIS NAME Is victor.",
+      "bbox": [
+        351,
+        0,
+        877,
+        156
+      ],
+      "details": {
+        "source_bbox": [
+          456,
+          16,
+          765,
+          140
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:08.077666+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:10.412611+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_20"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:10.430323+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "HE'S THE HIDDEN JOKER CARD OF DESMOND,ONE OF THE POWERS ROOTING FOR PERDIUM'S FALL.",
+      "bbox": [
+        356,
+        16,
+        865,
+        144
+      ],
+      "details": {
+        "confidence": 0.596,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:10.454184+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "HE'S THE HIDDEN JOKER CARD OF DESMOND,ONE OF THE POWERS ROOTING FOR PERDIUM'S FALL.",
+      "bbox": [
+        356,
+        16,
+        865,
+        144
+      ],
+      "details": {
+        "confidence": 0.596,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:10.459720+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "HE'S THE HIDDEN JOKER CARD OF DESMOND,ONE OF THE POWERS ROOTING FOR PERDIUM'S FALL.",
+      "bbox": [
+        299,
+        0,
+        931,
+        160
+      ],
+      "details": {
+        "source_bbox": [
+          356,
+          16,
+          865,
+          144
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:10.464741+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:12.870678+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_21"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:12.878234+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "IS HE Stronger THAN YOU?",
+      "bbox": [
+        368,
+        16,
+        594,
+        139
+      ],
+      "details": {
+        "confidence": 0.796,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:12.890345+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "IS HE Stronger THAN YOU?",
+      "bbox": [
+        368,
+        16,
+        594,
+        139
+      ],
+      "details": {
+        "confidence": 0.796,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:12.893878+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "IS HE Stronger THAN YOU?",
+      "bbox": [
+        306,
+        0,
+        653,
+        155
+      ],
+      "details": {
+        "source_bbox": [
+          368,
+          16,
+          594,
+          139
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:12.901472+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:14.407964+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_22"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:14.420211+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "HE IS STRONGER THAN ANYONE YOU'VE FACED BEFORE EXCEPT",
+      "bbox": [
+        372,
+        16,
+        878,
+        181
+      ],
+      "details": {
+        "confidence": 0.49,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:14.420719+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "suspicious_low_confidence",
+      "layer": "ocr_001",
+      "text": "HE IS STRONGER THAN ANYONE YOU'VE FACED BEFORE EXCEPT",
+      "bbox": [
+        372,
+        16,
+        878,
+        181
+      ],
+      "details": {
+        "confidence": 0.49,
+        "threshold": 0.58,
+        "block_profile": "top_narration",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:14.425012+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:15.419271+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_23"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:15.434498+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "HE WILL USE THE OVERWHELMING ADVANTAGE INNUMBERSTOFORCE US TO FOCUS ALL OUR ATTENTION ON DEFENDING THE WALLS.E",
+      "bbox": [
+        286,
+        16,
+        721,
+        192
+      ],
+      "details": {
+        "confidence": 0.682,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:15.454339+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "HE WILL USE THE OVERWHELMING ADVANTAGE INNUMBERSTOFORCE US TO FOCUS ALL OUR ATTENTION ON DEFENDING THE WALLS.E",
+      "bbox": [
+        286,
+        16,
+        721,
+        192
+      ],
+      "details": {
+        "confidence": 0.682,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:15.462325+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "HE WILL USE THE OVERWHELMING ADVANTAGE INNUMBERSTOFORCE US TO FOCUS ALL OUR ATTENTION ON DEFENDING THE WALLS.E",
+      "bbox": [
+        235,
+        0,
+        780,
+        208
+      ],
+      "details": {
+        "source_bbox": [
+          286,
+          16,
+          721,
+          192
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:15.499643+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:18.270061+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_24"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:18.282156+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "AT THATMOMENT,HE'S PROBABLYPLANNINGTOBREAK THROUGH THE WEAKENEDGATE AND LAUNCH AN ALL-OUT ATTACK.",
+      "bbox": [
+        530,
+        16,
+        928,
+        145
+      ],
+      "details": {
+        "confidence": 0.962,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:18.298320+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "AT THATMOMENT,HE'S PROBABLYPLANNINGTOBREAK THROUGH THE WEAKENEDGATE AND LAUNCH AN ALL-OUT ATTACK.",
+      "bbox": [
+        530,
+        16,
+        928,
+        145
+      ],
+      "details": {
+        "confidence": 0.962,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:18.303342+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "AT THATMOMENT,HE'S PROBABLYPLANNINGTOBREAK THROUGH THE WEAKENEDGATE AND LAUNCH AN ALL-OUT ATTACK.",
+      "bbox": [
+        485,
+        0,
+        971,
+        161
+      ],
+      "details": {
+        "source_bbox": [
+          530,
+          16,
+          928,
+          145
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:18.307999+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.068077+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_25"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.069081+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        744,
+        16,
+        989,
+        59
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:12:21.073740+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.589449+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_26"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.604855+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "BUT THAT IS EXACTLY AS I PLANNED",
+      "bbox": [
+        402,
+        16,
+        802,
+        208
+      ],
+      "details": {
+        "confidence": 0.633,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.626517+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "BUT THAT IS EXACTLY AS I PLANNED",
+      "bbox": [
+        402,
+        16,
+        802,
+        208
+      ],
+      "details": {
+        "confidence": 0.633,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.634757+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "BUT THAT IS EXACTLY AS I PLANNED",
+      "bbox": [
+        300,
+        0,
+        905,
+        224
+      ],
+      "details": {
+        "source_bbox": [
+          402,
+          16,
+          802,
+          208
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:21.670474+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:23.917809+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_27"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:23.922323+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "HOWEVER...",
+      "bbox": [
+        509,
+        16,
+        701,
+        51
+      ],
+      "details": {
+        "confidence": 0.799,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:23.927873+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "HOWEVER...",
+      "bbox": [
+        509,
+        16,
+        701,
+        51
+      ],
+      "details": {
+        "confidence": 0.799,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:23.929884+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "HOWEVER...",
+      "bbox": [
+        482,
+        0,
+        730,
+        67
+      ],
+      "details": {
+        "source_bbox": [
+          509,
+          16,
+          701,
+          51
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:23.934262+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:25.744672+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_28"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:25.761745+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "IF VICTOR MAKES IT OUT OF THE CASTLE GATE, THE PLAN WILL FAIL IN THE WORST-CASE SCENARIO",
+      "bbox": [
+        366,
+        16,
+        817,
+        195
+      ],
+      "details": {
+        "confidence": 0.961,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:25.783522+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "IF VICTOR MAKES IT OUT OF THE CASTLE GATE, THE PLAN WILL FAIL IN THE WORST-CASE SCENARIO",
+      "bbox": [
+        366,
+        16,
+        817,
+        195
+      ],
+      "details": {
+        "confidence": 0.961,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:25.789545+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "IF VICTOR MAKES IT OUT OF THE CASTLE GATE, THE PLAN WILL FAIL IN THE WORST-CASE SCENARIO",
+      "bbox": [
+        265,
+        0,
+        922,
+        211
+      ],
+      "details": {
+        "source_bbox": [
+          366,
+          16,
+          817,
+          195
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:25.793711+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:28.751357+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_29"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:28.757387+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "KAOR",
+      "bbox": [
+        486,
+        16,
+        732,
+        96
+      ],
+      "details": {
+        "confidence": 0.84,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:28.764912+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "KAOR",
+      "bbox": [
+        486,
+        16,
+        732,
+        96
+      ],
+      "details": {
+        "confidence": 0.84,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:28.767964+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "KAOR",
+      "bbox": [
+        390,
+        0,
+        845,
+        112
+      ],
+      "details": {
+        "source_bbox": [
+          486,
+          16,
+          732,
+          96
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:28.772984+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:30.579943+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_30"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:30.596885+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "I NEED YOU TO HOLD VICTOR DOWN.",
+      "bbox": [
+        412,
+        16,
+        796,
+        149
+      ],
+      "details": {
+        "confidence": 0.94,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:30.616029+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "I NEED YOU TO HOLD VICTOR DOWN.",
+      "bbox": [
+        412,
+        16,
+        796,
+        149
+      ],
+      "details": {
+        "confidence": 0.94,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:30.621585+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "I NEED YOU TO HOLD VICTOR DOWN.",
+      "bbox": [
+        316,
+        0,
+        889,
+        165
+      ],
+      "details": {
+        "source_bbox": [
+          412,
+          16,
+          796,
+          149
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:30.625600+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.569370+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_31"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.569869+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        752,
+        16,
+        997,
+        48
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:12:32.575186+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.784631+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 2,
+        "image_path": "band_32"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.796252+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "HAHA FUCK.",
+      "bbox": [
+        389,
+        16,
+        568,
+        176
+      ],
+      "details": {
+        "confidence": 0.694,
+        "tipo": "fala",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.797255+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "structured_payload",
+      "layer": "ocr_002",
+      "bbox": [
+        381,
+        107,
+        600,
+        174
+      ],
+      "details": {
+        "raw_kind": "dict_without_text"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.808339+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "HAHA FUCK.",
+      "bbox": [
+        389,
+        16,
+        568,
+        176
+      ],
+      "details": {
+        "source_bbox": [
+          389,
+          16,
+          568,
+          176
+        ],
+        "layout_shape": "square",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:32.813360+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:34.927384+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_33"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:34.928387+00:00",
+      "stage": "ocr",
+      "action": "drop_block",
+      "reason": "watermark",
+      "layer": "ocr_001",
+      "text": "ASURASCANS.COM",
+      "bbox": [
+        746,
+        16,
+        994,
+        51
+      ]
+    },
+    {
+      "ts": "2026-05-04T14:12:34.933400+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:35.095565+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_34"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:35.109154+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "YOU'RE ASKING FOR TOO MUCH!",
+      "bbox": [
+        429,
+        16,
+        805,
+        138
+      ],
+      "details": {
+        "confidence": 0.86,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:35.124291+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "YOU'RE ASKING FOR TOO MUCH!",
+      "bbox": [
+        429,
+        16,
+        805,
+        138
+      ],
+      "details": {
+        "confidence": 0.86,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:35.128895+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "YOU'RE ASKING FOR TOO MUCH!",
+      "bbox": [
+        429,
+        16,
+        805,
+        138
+      ],
+      "details": {
+        "source_bbox": [
+          429,
+          16,
+          805,
+          138
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:35.134903+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:36.755419+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_35"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:36.765464+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "A-ADON...!",
+      "bbox": [
+        564,
+        16,
+        825,
+        76
+      ],
+      "details": {
+        "confidence": 0.642,
+        "tipo": "narracao",
+        "balloon_type": "textured",
+        "page_profile": "standard",
+        "block_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:36.772487+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "A-ADON...!",
+      "bbox": [
+        564,
+        16,
+        825,
+        76
+      ],
+      "details": {
+        "source_bbox": [
+          564,
+          16,
+          825,
+          76
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:36.777262+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:38.952105+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_36"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:38.966181+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "STEP BACK My LORD! BE CAREFUL!",
+      "bbox": [
+        600,
+        16,
+        874,
+        176
+      ],
+      "details": {
+        "confidence": 0.729,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:38.983315+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "STEP BACK My LORD! BE CAREFUL!",
+      "bbox": [
+        600,
+        16,
+        874,
+        176
+      ],
+      "details": {
+        "confidence": 0.729,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:38.997466+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_same_as_cluster",
+      "layer": "ocr_001",
+      "text": "STEP BACK My LORD! BE CAREFUL!",
+      "bbox": [
+        600,
+        16,
+        874,
+        176
+      ],
+      "details": {
+        "source_bbox": [
+          600,
+          16,
+          874,
+          176
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:39.005520+00:00",
+      "stage": "layout",
+      "action": "split_balloon_subregions",
+      "reason": "connected_lobes_detected",
+      "layer": "ocr_001",
+      "text": "STEP BACK My LORD! BE CAREFUL!",
+      "bbox": [
+        600,
+        16,
+        874,
+        176
+      ],
+      "details": {
+        "count": 2,
+        "orientation": "left-right",
+        "layout_profile": "connected_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:39.010634+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:41.570969+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_37"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:41.583052+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "REDUCE THETR NUMBERS AS MUCH AS POSSIBLe!",
+      "bbox": [
+        322,
+        16,
+        669,
+        155
+      ],
+      "details": {
+        "confidence": 0.943,
+        "tipo": "fala",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:41.599140+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "REDUCE THETR NUMBERS AS MUCH AS POSSIBLe!",
+      "bbox": [
+        322,
+        16,
+        669,
+        155
+      ],
+      "details": {
+        "confidence": 0.943,
+        "tipo": "fala",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:41.603811+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "REDUCE THETR NUMBERS AS MUCH AS POSSIBLe!",
+      "bbox": [
+        0,
+        0,
+        751,
+        171
+      ],
+      "details": {
+        "source_bbox": [
+          322,
+          16,
+          669,
+          155
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:41.624099+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:43.646055+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_38"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:43.661730+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "MAKE SURE NOT TO GET IN GIlLIOn'S WAY!",
+      "bbox": [
+        517,
+        16,
+        898,
+        160
+      ],
+      "details": {
+        "confidence": 0.927,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:43.680401+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "MAKE SURE NOT TO GET IN GIlLIOn'S WAY!",
+      "bbox": [
+        517,
+        16,
+        898,
+        160
+      ],
+      "details": {
+        "confidence": 0.927,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:43.686444+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "MAKE SURE NOT TO GET IN GIlLIOn'S WAY!",
+      "bbox": [
+        471,
+        0,
+        1200,
+        176
+      ],
+      "details": {
+        "source_bbox": [
+          517,
+          16,
+          898,
+          160
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:43.690446+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:45.561690+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_39"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:45.571246+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "white_balloon",
+      "layer": "ocr_001",
+      "text": "ANNOYING",
+      "bbox": [
+        454,
+        16,
+        766,
+        75
+      ],
+      "details": {
+        "confidence": 0.711,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:45.581299+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "ANNOYING",
+      "bbox": [
+        454,
+        16,
+        766,
+        75
+      ],
+      "details": {
+        "confidence": 0.711,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:45.583811+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "ANNOYING",
+      "bbox": [
+        374,
+        0,
+        840,
+        91
+      ],
+      "details": {
+        "source_bbox": [
+          454,
+          16,
+          766,
+          75
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "white_balloon"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:45.606377+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:47.640499+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_40"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:47.651051+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "THERE'S NO TIME TO WASTE Here..",
+      "bbox": [
+        393,
+        16,
+        817,
+        110
+      ],
+      "details": {
+        "confidence": 0.821,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:47.664848+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THERE'S NO TIME TO WASTE Here..",
+      "bbox": [
+        393,
+        16,
+        817,
+        110
+      ],
+      "details": {
+        "confidence": 0.821,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:47.669037+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THERE'S NO TIME TO WASTE Here..",
+      "bbox": [
+        276,
+        0,
+        940,
+        126
+      ],
+      "details": {
+        "source_bbox": [
+          393,
+          16,
+          817,
+          110
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:47.674043+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:49.681519+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_41"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:49.697617+00:00",
+      "stage": "ocr",
+      "action": "classify_block_profile",
+      "reason": "top_narration",
+      "layer": "ocr_001",
+      "text": "THAT SHIELD CAN TAKE ATTACKS FROM ALL ANGLES, AND I CAN'T PIERCE THROUGHIT",
+      "bbox": [
+        380,
+        16,
+        804,
+        157
+      ],
+      "details": {
+        "confidence": 0.859,
+        "tipo": "narracao",
+        "page_profile": "standard"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:49.716458+00:00",
+      "stage": "ocr",
+      "action": "accept_block",
+      "reason": "ready_for_layout",
+      "layer": "ocr_001",
+      "text": "THAT SHIELD CAN TAKE ATTACKS FROM ALL ANGLES, AND I CAN'T PIERCE THROUGHIT",
+      "bbox": [
+        380,
+        16,
+        804,
+        157
+      ],
+      "details": {
+        "confidence": 0.859,
+        "tipo": "narracao",
+        "balloon_type": "white",
+        "page_profile": "standard",
+        "block_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:49.722007+00:00",
+      "stage": "layout",
+      "action": "assign_balloon_bbox",
+      "reason": "refined_from_image",
+      "layer": "ocr_001",
+      "text": "THAT SHIELD CAN TAKE ATTACKS FROM ALL ANGLES, AND I CAN'T PIERCE THROUGHIT",
+      "bbox": [
+        277,
+        0,
+        894,
+        173
+      ],
+      "details": {
+        "source_bbox": [
+          380,
+          16,
+          804,
+          157
+        ],
+        "layout_shape": "wide",
+        "layout_profile": "top_narration"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:49.751211+00:00",
+      "stage": "translate",
+      "action": "select_backend",
+      "reason": "ollama",
+      "details": {
+        "google_ok": true,
+        "ollama_running": true,
+        "idioma_origem": "en",
+        "idioma_destino": "pt"
+      }
+    },
+    {
+      "ts": "2026-05-04T14:12:52.381855+00:00",
+      "stage": "ocr",
+      "action": "classify_page_profile",
+      "reason": "standard",
+      "details": {
+        "block_count": 1,
+        "image_path": "band_42"
+      }
+    }
+  ]
+}

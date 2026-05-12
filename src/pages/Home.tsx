@@ -38,7 +38,7 @@ import {
   Sparkles,
   ArrowRight,
 } from "lucide-react";
-import { useAppStore } from "../lib/stores/appStore";
+import { useAppStore, type RecentProject } from "../lib/stores/appStore";
 import {
   loadProjectJson,
   loadSettings,
@@ -53,6 +53,7 @@ import { ONBOARDING_FLOW } from "../lib/onboarding";
 export function Home() {
   const navigate = useNavigate();
   const {
+    project: activeProject,
     recentProjects,
     freeRemaining,
     credits,
@@ -76,7 +77,10 @@ export function Home() {
     path: string,
     raw: Awaited<ReturnType<typeof loadProjectJson>>
   ) {
-    const outputDir = path.replace(/\\/g, "/");
+    const normalizedPath = path.replace(/\\/g, "/");
+    const outputDir = normalizedPath.toLocaleLowerCase("pt-BR").endsWith("/project.json")
+      ? normalizedPath.slice(0, -"/project.json".length)
+      : normalizedPath;
     return {
       id: crypto.randomUUID(),
       obra: raw.obra || "",
@@ -105,6 +109,8 @@ export function Home() {
             context_loaded: Boolean(raw.work_context.context_loaded),
             glossary_loaded: Boolean(raw.work_context.glossary_loaded),
             glossary_entries_count: Number(raw.work_context.glossary_entries_count ?? 0),
+            internet_context_loaded: Boolean(raw.work_context.internet_context_loaded),
+            cover_url: typeof raw.work_context.cover_url === "string" ? raw.work_context.cover_url : undefined,
             risk_level: (raw.work_context.risk_level as "high" | "medium" | "low") ?? "high",
             user_ignored_warning: Boolean(raw.work_context.user_ignored_warning),
           }
@@ -160,12 +166,12 @@ export function Home() {
           fontes_usadas: [],
         },
         paginas: [],
-        status: "setup",
+        status: mode === "manual" ? "processing" : "setup",
         source_path: path,
         totalPages: validation.pages,
         mode,
       });
-      navigate("/setup");
+      navigate(mode === "manual" ? "/processing" : "/setup");
     } catch (err) {
       console.error("Erro ao abrir arquivo:", err);
     } finally {
@@ -253,22 +259,54 @@ export function Home() {
     }
   }
 
+  async function openProjectFromPath(path: string) {
+    const raw = await loadProjectJson(path);
+    const project = buildProjectFromJson(path, raw);
+    if (project.paginas.length === 0) {
+      throw new Error("Projeto sem paginas traduzidas.");
+    }
+    setProject(project);
+    navigate("/preview");
+  }
+
   async function handleOpenProject() {
     setLoading(true);
     try {
       const path = await openProjectDialog();
       if (!path) return;
-      const raw = await loadProjectJson(path);
-      const project = buildProjectFromJson(path, raw);
-      if (project.paginas.length === 0) {
-        alert("Projeto sem páginas traduzidas.");
-        return;
-      }
-      setProject(project);
-      navigate("/preview");
+      await openProjectFromPath(path);
     } catch (err) {
       console.error("Erro ao abrir projeto:", err);
       alert("Não foi possível abrir o projeto. Selecione a pasta que contém o project.json.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleOpenRecentProject(proj: RecentProject) {
+    if (loading) return;
+
+    const recentPath = proj.project_path ?? proj.output_path;
+    const activeProjectMatches =
+      activeProject &&
+      activeProject.obra === proj.obra &&
+      activeProject.capitulo === proj.capitulo &&
+      activeProject.paginas.length > 0;
+
+    setLoading(true);
+    try {
+      if (recentPath) {
+        await openProjectFromPath(recentPath);
+        return;
+      }
+      if (activeProjectMatches) {
+        navigate("/preview");
+        return;
+      }
+      alert("Este projeto recente foi salvo antes do caminho do projeto. Use Abrir projeto uma vez para carregar a pasta.");
+    } catch (err) {
+      console.error("Erro ao abrir projeto recente:", err);
+      alert(err instanceof Error ? err.message : "Nao foi possivel abrir este projeto recente.");
     } finally {
       setLoading(false);
     }
@@ -278,12 +316,8 @@ export function Home() {
   const progressPercent = Math.min(100, (free / 40) * 100);
 
   return (
-    <div className="relative min-h-full">
-      {/* Ambient gradient — sutil e premium */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-[480px] bg-[radial-gradient(ellipse_at_top,_rgba(108,92,231,0.10),_transparent_55%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-noise" />
-
-      <div className="relative px-10 py-10 max-w-5xl mx-auto animate-fade-in">
+    <div className="relative flex min-h-full items-center">
+      <div data-testid="home-content" className="app-window-centered relative w-full px-10 py-10 max-w-5xl mx-auto animate-fade-in">
         {/* Header */}
         <header className="mb-10">
           <div className="flex items-center gap-2.5 mb-3">
@@ -299,7 +333,7 @@ export function Home() {
             </span>
           </h1>
           <p className="text-md text-text-secondary mt-2 max-w-lg">
-            Traduza mangá, manhwa e manhua automaticamente com IA 100% local.
+            OCR local com tradução via Google Translate.
           </p>
           <button
             data-testid="open-onboarding"
@@ -368,7 +402,7 @@ export function Home() {
               <div className="flex-1 min-w-0">
                 <p className="text-lg font-semibold text-white">Novo capítulo</p>
                 <p className="text-sm text-white/60 mt-0.5">
-                  Automático: OCR + Tradução IA
+                  Automático: OCR + Google Translate
                 </p>
               </div>
               <ArrowRight
@@ -444,9 +478,20 @@ export function Home() {
               {recentProjects.map((proj) => (
                 <Card
                   key={proj.id}
+                  role="button"
+                  tabIndex={0}
+                  data-testid="recent-project-card"
+                  aria-label={`Abrir ${proj.obra || "projeto recente"}`}
                   variant="interactive"
                   padding="md"
-                  className="group relative"
+                  className="group relative focus:outline-none focus:ring-2 focus:ring-brand/50"
+                  onClick={() => void handleOpenRecentProject(proj)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      void handleOpenRecentProject(proj);
+                    }
+                  }}
                 >
                   <div className="flex items-start justify-between gap-2 mb-3">
                     <div className="flex items-center gap-2 min-w-0">

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -45,4 +46,13 @@ def write_project_json_atomic(project_json_path: Path, project: dict[str, Any]) 
         json.dump(project, f, ensure_ascii=False, indent=2)
     loaded = json.loads(tmp_path.read_text(encoding="utf-8"))
     validate_project_consistency(loaded)
-    tmp_path.replace(project_json_path)
+    try:
+        tmp_path.replace(project_json_path)
+    except PermissionError:
+        # Alguns diretórios Windows permitem escrita, mas bloqueiam o rename atômico.
+        # Nesses casos, mantemos o conteúdo validado e fazemos fallback por cópia.
+        shutil.copyfile(tmp_path, project_json_path)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass

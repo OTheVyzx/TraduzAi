@@ -66,6 +66,49 @@ test("getPreviewImageCandidates usa inpaint antes do original quando o render fa
   ]);
 });
 
+test("getPreviewImageCandidates prioriza preview fiel quando disponivel", () => {
+  const page = makePage({
+    arquivo_original: "originals/001.jpg",
+    arquivo_traduzido: "translated/001.jpg",
+    image_layers: {
+      base: { key: "base", path: "originals/001.jpg", visible: true, locked: true },
+      inpaint: { key: "inpaint", path: "images/001.jpg", visible: false, locked: true },
+      rendered: { key: "rendered", path: "translated/001.jpg", visible: true, locked: true },
+    },
+  });
+
+  assert.deepEqual(
+    getPreviewImageCandidates(
+      page,
+      false,
+      "N:/TraduzAI/TraduzAi/data/works/abc/project.json",
+      "render-cache/preview/001-abcd.jpg",
+    ),
+    [
+      "N:/TraduzAI/TraduzAi/data/works/abc/render-cache/preview/001-abcd.jpg",
+      "N:/TraduzAI/TraduzAi/data/works/abc/translated/001.jpg",
+      "N:/TraduzAI/TraduzAi/data/works/abc/images/001.jpg",
+      "N:/TraduzAI/TraduzAi/data/works/abc/originals/001.jpg",
+    ],
+  );
+});
+
+test("getPreviewImageCandidates resolve caminhos relativos pelo diretorio do projeto", () => {
+  const page = makePage({
+    arquivo_original: "originals/001.jpg",
+    arquivo_traduzido: "translated/001.jpg",
+    image_layers: {
+      base: { key: "base", path: "originals/001.jpg", visible: true, locked: true },
+      rendered: { key: "rendered", path: "translated/001.jpg", visible: true, locked: true },
+    },
+  });
+
+  assert.deepEqual(getPreviewImageCandidates(page, false, "N:/TraduzAI/TraduzAi/data/works/abc/project.json"), [
+    "N:/TraduzAI/TraduzAi/data/works/abc/translated/001.jpg",
+    "N:/TraduzAI/TraduzAi/data/works/abc/originals/001.jpg",
+  ]);
+});
+
 test("getPreviewToggleLabel descreve a ação do botão", () => {
   assert.equal(getPreviewToggleLabel(false), "Ver original");
   assert.equal(getPreviewToggleLabel(true), "Ver traduzido");

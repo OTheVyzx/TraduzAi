@@ -10,7 +10,7 @@ interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 }
 
 const tones: Record<Tone, string> = {
-  neutral: "bg-white/5 text-text-secondary border border-border",
+  neutral: "bg-white/[0.03] text-text-secondary border border-border",
   brand: "bg-brand/10 text-brand-300 border border-brand/25",
   success: "bg-status-success/10 text-status-success border border-status-success/25",
   warning: "bg-status-warning/10 text-status-warning border border-status-warning/25",

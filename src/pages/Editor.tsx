@@ -3,7 +3,6 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowRight,
-  Brush,
   Check,
   ChevronLeft,
   Eraser,
@@ -13,11 +12,6 @@ import {
   GripHorizontal,
   Image,
   Layers,
-  LocateFixed,
-  Minus,
-  PenTool,
-  Plus,
-  SquareDashedMousePointer,
   Undo2,
   ScanText,
   Languages,
@@ -27,8 +21,14 @@ import { useAppStore } from "../lib/stores/appStore";
 import { EditorStage } from "../components/editor/stage/EditorStage";
 import { LayersPanel } from "../components/editor/LayersPanel";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
-import { useEditorStore, type EditorToolMode } from "../lib/stores/editorStore";
-import { EDITOR_PROFESSIONAL_SHORTCUTS, EDITOR_PROFESSIONAL_TOOLS } from "../lib/editorProfessionalTools";
+import { getRenderPreviewStateForPage, useEditorStore } from "../lib/stores/editorStore";
+import { ZoomControls } from "../components/editor/toolbar/ZoomControls";
+import { AutoSaveIndicator } from "../components/editor/toolbar/AutoSaveIndicator";
+import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
+import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
+import { BrushOptionsInline } from "../components/editor/toolbar/BrushOptionsPopover";
+import { UndoRedoControls } from "../components/editor/toolbar/UndoRedoControls";
+import { preloadEditorFonts } from "../lib/fonts";
 
 const VIEW_MODES = [
   { key: "original" as const, label: "Original", icon: Image, hotkey: "1" },
@@ -36,13 +36,59 @@ const VIEW_MODES = [
   { key: "translated" as const, label: "Camadas", icon: FileText, hotkey: "3" },
 ];
 
-const TOOL_MODES: { key: EditorToolMode; label: string; icon: typeof PenTool; hotkey: string }[] = [
-  { key: "select", label: "Selecionar", icon: PenTool, hotkey: "V" },
-  { key: "block", label: "Novo bloco", icon: SquareDashedMousePointer, hotkey: "B" },
-  { key: "brush", label: "Brush", icon: Brush, hotkey: "N" },
-  { key: "repairBrush", label: "Máscara", icon: Brush, hotkey: "M" },
-  { key: "eraser", label: "Borracha", icon: Eraser, hotkey: "E" },
-];
+
+/** Controles contextuais da ferramenta Lasso (Fase 8). */
+function MaskLassoControls() {
+  const maskShape = useEditorStore((s) => s.maskShape);
+  const maskOp = useEditorStore((s) => s.maskOp);
+  const setMaskShape = useEditorStore((s) => s.setMaskShape);
+  const setMaskOp = useEditorStore((s) => s.setMaskOp);
+  const clearMask = useEditorStore((s) => s.clearMask);
+
+  return (
+    <div className="flex items-center gap-2">
+      {/* Shape toggle */}
+      <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+        {(["freehand", "polygonal"] as const).map((shape) => (
+          <button
+            key={shape}
+            onClick={() => setMaskShape(shape)}
+            className={`rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+              maskShape === shape ? "bg-accent-cyan/15 text-accent-cyan" : "text-text-muted hover:text-text-primary"
+            }`}
+          >
+            {shape === "freehand" ? "Livre" : "Poligonal"}
+          </button>
+        ))}
+      </div>
+
+      {/* Op toggle */}
+      <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+        {(["replace", "add", "subtract"] as const).map((op) => (
+          <button
+            key={op}
+            onClick={() => setMaskOp(op)}
+            className={`rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+              maskOp === op ? "bg-accent-cyan/15 text-accent-cyan" : "text-text-muted hover:text-text-primary"
+            }`}
+            title={op === "replace" ? "Substituir (padrão)" : op === "add" ? "Adicionar (Shift)" : "Subtrair (Alt)"}
+          >
+            {op === "replace" ? "⊙" : op === "add" ? "+" : "−"}
+          </button>
+        ))}
+      </div>
+
+      {/* Clear mask */}
+      <button
+        onClick={() => void clearMask()}
+        className="flex items-center gap-1 rounded-lg border border-border bg-bg-tertiary/30 px-2 py-1 text-[10px] text-text-muted transition-smooth hover:border-status-error/30 hover:text-status-error"
+        title="Limpar máscara"
+      >
+        Limpar
+      </button>
+    </div>
+  );
+}
 
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
@@ -55,7 +101,12 @@ function isEditableTarget(target: EventTarget | null) {
   );
 }
 
-export function Editor() {
+export interface EditorProps {
+  onBack?: () => void;
+  emptyBackLabel?: string;
+}
+
+export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorProps = {}) {
   const navigate = useNavigate();
   const project = useAppStore((s) => s.project);
   const pipeline = useAppStore((s) => s.pipeline);
@@ -66,7 +117,6 @@ export function Editor() {
     toolMode,
     viewMode,
     showOverlays,
-    zoom,
     brushSize,
     pendingEdits,
     pendingStructuralEdits,
@@ -80,22 +130,23 @@ export function Editor() {
     toggleOverlays,
     zoomIn,
     zoomOut,
-    setZoom,
     resetViewport,
-    setPan,
     commitEdits,
     discardEdits,
     undoEditor,
     redoEditor,
     deleteSelectedLayer,
-    retypesetCurrentPage,
-    reinpaintCurrentPage,
-    detectInPage,
-    ocrInPage,
-    translateInPage,
     renderPreviewPage,
     currentPageKey,
     setBrushSize,
+    activePageAction,
+    runMaskedAction,
+    pageActionError,
+    clearPageActionError,
+    forceFidelityRender,
+    eraserTarget,
+    lastPaintedLayer,
+    setEraserTarget,
   } = useEditorStore();
 
   const totalPages = project?.paginas.length ?? 0;
@@ -107,13 +158,46 @@ export function Editor() {
     (pendingStructuralEdits.order ? 1 : 0);
   const pagePipelineBusy = isRetypesetting || isReinpainting;
   const pageKey = currentPageKey();
-  const renderPreviewState = renderPreviewCacheByPageKey[pageKey];
-  const previewRendering = renderPreviewState?.status === "rendering";
+  const renderPreviewState = useMemo(
+    () => getRenderPreviewStateForPage(pageKey, currentPage, renderPreviewCacheByPageKey),
+    [currentPage, pageKey, renderPreviewCacheByPageKey],
+  );
+  const saveDisabled =
+    !currentPage ||
+    pagePipelineBusy ||
+    (pendingCount === 0 && renderPreviewState.status === "fresh");
+
+  const saveAndRenderCurrentPage = async () => {
+    const targetPageKey = currentPageKey();
+    await commitEdits();
+    await renderPreviewPage(targetPageKey);
+  };
+  const handleBack = () => {
+    if (onBack) {
+      onBack();
+      return;
+    }
+    navigate("/preview");
+  };
 
   useEffect(() => {
     if (!project || totalPages === 0) return;
     void loadCurrentPage();
   }, [loadCurrentPage, projectId, totalPages]);
+
+  // Fase 2A: preload das fontes bundle antes do primeiro draw do Konva.
+  // Sem isto, o canvas pode renderizar com fonte fallback do sistema enquanto
+  // o navegador ainda baixa o TTF — o usuário via "Comic Neue" no select mas
+  // o canvas mostrava Arial. Aguarda document.fonts.ready depois.
+  useEffect(() => {
+    void preloadEditorFonts().catch((err) => {
+      console.warn("[fonts] preloadEditorFonts falhou:", err);
+    });
+  }, []);
+
+  // Auto-save desligado — usuário salva manualmente via botão ou Ctrl+S
+  // (estilo Photoshop). markDirty continua funcionando para alimentar o
+  // indicador "Alterações não salvas".
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -135,10 +219,20 @@ export function Editor() {
         if (event.key === "2") setViewMode("inpainted");
         if (event.key === "3") setViewMode("translated");
         if (event.key.toLowerCase() === "v") setToolMode("select");
-        if (event.key.toLowerCase() === "b") setToolMode("block");
-        if (event.key.toLowerCase() === "n") setToolMode("brush");
-        if (event.key.toLowerCase() === "m") setToolMode("repairBrush");
+        if (event.key.toLowerCase() === "t") setToolMode("block");
+        if (event.key.toLowerCase() === "b") setToolMode("brush");
+        if (event.key.toLowerCase() === "r") setToolMode("repairBrush");
+        if (event.key.toLowerCase() === "i") setToolMode("reinpaintBrush");
         if (event.key.toLowerCase() === "e") setToolMode("eraser");
+        if (event.key.toLowerCase() === "l") setToolMode("mask");
+        // Tab: cicla alvo da borracha quando eraser ativo
+        if (event.key === "Tab" && toolMode === "eraser") {
+          event.preventDefault();
+          setEraserTarget(eraserTarget === "brush" || eraserTarget === null ? "mask" : "brush");
+        }
+        // Legacy aliases
+        if (event.key.toLowerCase() === "n") setToolMode("brush");
+        if (event.key.toLowerCase() === "m") setToolMode("mask");
         if (event.key.toLowerCase() === "o") toggleOverlays();
         if (event.key === "=" || event.key === "+") {
           event.preventDefault();
@@ -168,23 +262,45 @@ export function Editor() {
       }
       if (event.key === "s" && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
-        void commitEdits();
+        void saveAndRenderCurrentPage();
+      }
+      // Fase 1.2: atalhos de fallback para preview/render que perderam o botão
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "r"
+      ) {
+        event.preventDefault();
+        void forceFidelityRender();
+      }
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "p"
+      ) {
+        event.preventDefault();
+        void renderPreviewPage(currentPageKey());
       }
     };
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [
-    commitEdits,
     currentPageIndex,
+    currentPageKey,
     deleteSelectedLayer,
+    eraserTarget,
+    forceFidelityRender,
     redoEditor,
+    renderPreviewPage,
     resetViewport,
     selectedLayerId,
     setCurrentPage,
+    setEraserTarget,
     setToolMode,
     setViewMode,
     toggleOverlays,
+    toolMode,
     totalPages,
     undoEditor,
     zoomIn,
@@ -203,10 +319,10 @@ export function Editor() {
           <Layers size={32} className="mx-auto text-text-muted" />
           <p className="text-sm text-text-secondary">Nenhum projeto carregado</p>
           <button
-            onClick={() => navigate("/")}
+            onClick={onBack ?? (() => navigate("/"))}
             className="text-sm text-brand hover:underline"
           >
-            Voltar ao início
+            {emptyBackLabel}
           </button>
         </div>
       </div>
@@ -217,284 +333,263 @@ export function Editor() {
     <div className="flex h-screen bg-bg-primary">
       <PageThumbnails />
 
-      <div className="flex min-w-0 flex-1 flex-col border-r border-border">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))] px-4 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <button
-              onClick={() => navigate("/preview")}
-              className="rounded p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Voltar ao preview"
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{project.obra}</p>
-              <p className="truncate text-[11px] text-text-secondary">
-                Cap. {project.capitulo} | Pag. {currentPageIndex + 1}/{totalPages} | {currentPageSummary}
-              </p>
-            </div>
-            <div
-              data-tauri-drag-region
-              className="hidden h-6 w-16 shrink-0 cursor-grab items-center justify-center rounded-full border border-border bg-bg-tertiary/70 text-text-muted md:flex"
-              title="Arrastar janela"
-            >
-              <GripHorizontal size={14} />
-            </div>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* ── Row 1: Header ── */}
+        <div className="flex items-center gap-3 border-b border-border bg-bg-secondary/60 px-3 py-2">
+          <button
+            onClick={handleBack}
+            className="rounded-lg p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary"
+            title="Voltar ao preview"
+          >
+            <ChevronLeft size={16} />
+          </button>
+
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-semibold tracking-tight text-text-primary">{project.obra}</p>
+            <p className="truncate text-[11px] text-text-muted">
+              Cap. {project.capitulo} · {currentPageSummary}
+            </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-view-${key}`}
-                onClick={() => setViewMode(key)}
-                className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
-                  viewMode === key
-                    ? "border-brand/35 bg-brand/15 text-brand"
-                    : "border-transparent text-text-secondary hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={13} />
-                {label}
-              </button>
-            ))}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            {TOOL_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-tool-${key}`}
-                onClick={() => setToolMode(key)}
-                className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
-                  toolMode === key
-                    ? "border-accent-cyan/35 bg-accent-cyan/12 text-accent-cyan"
-                    : "border-transparent text-text-secondary hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={13} />
-                {label}
-              </button>
-            ))}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            <button
-              onClick={toggleOverlays}
-              className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs transition-smooth ${
-                showOverlays
-                  ? "border-accent-cyan/25 bg-accent-cyan/10 text-accent-cyan"
-                  : "border-transparent text-text-muted"
-              }`}
-              title="Guias de seleção (O)"
-            >
-              {showOverlays ? <Eye size={13} /> : <EyeOff size={13} />}
-              Guias
-            </button>
-
-            {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "eraser") && (
-              <div className="flex items-center gap-2 rounded-xl border border-border bg-bg-tertiary/50 px-2 py-1">
-                <span className="text-[11px] text-text-muted">Pincel</span>
-                <input
-                  type="range"
-                  min={4}
-                  max={96}
-                  value={brushSize}
-                  title="Tamanho do pincel"
-                  aria-label="Tamanho do pincel"
-                  onChange={(event) => setBrushSize(Number(event.target.value))}
-                />
-                <span className="w-8 text-right text-[11px] text-text-secondary">{brushSize}px</span>
-              </div>
-            )}
+          <div
+            data-tauri-drag-region
+            className="hidden h-5 w-10 shrink-0 cursor-grab items-center justify-center rounded-full bg-white/[0.03] text-text-muted/50 md:flex"
+            title="Arrastar janela"
+          >
+            <GripHorizontal size={12} />
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => void commitEdits()}
-              disabled={pendingCount === 0}
-              className="flex items-center gap-1 rounded-xl border border-transparent px-2.5 py-1.5 text-xs text-status-success transition-smooth hover:bg-status-success/10 disabled:opacity-35"
-              title="Salvar alterações (Ctrl+S)"
-            >
-              <Check size={13} />
-              Salvar
-            </button>
-            <button
-              onClick={discardEdits}
-              disabled={pendingCount === 0}
-              className="flex items-center gap-1 rounded-xl border border-transparent px-2.5 py-1.5 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary disabled:opacity-35"
-              title="Descartar alterações pendentes"
-            >
-              <Undo2 size={13} />
-              Descartar
-            </button>
-            {pendingCount > 0 && (
-              <span className="rounded-full bg-brand/12 px-2 py-1 text-[11px] text-brand">
-                {pendingCount} alteração(ões)
-              </span>
-            )}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            <div className="flex items-center gap-1.5 rounded-xl border border-border bg-bg-tertiary/30 px-1.5 py-1">
-              <button
-                disabled={pagePipelineBusy}
-                onClick={() => void detectInPage()}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Detectar balões na página"
-              >
-                <ScanText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
-                Detectar
-              </button>
-              <button
-                disabled={pagePipelineBusy}
-                onClick={() => void ocrInPage()}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Executar OCR em todos os blocos"
-              >
-                <FileText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
-                OCR
-              </button>
-              <button
-                disabled={pagePipelineBusy}
-                onClick={() => void translateInPage()}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Traduzir todos os textos da página"
-              >
-                <Languages size={13} className={isRetypesetting ? "animate-pulse" : ""} />
-                Traduzir
-              </button>
-              <button
-                disabled={pagePipelineBusy}
-                onClick={() => void reinpaintCurrentPage()}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Limpar a imagem com inpaint"
-              >
-                <Eraser size={13} className={isReinpainting ? "animate-pulse" : ""} />
-                Inpaint
-              </button>
-              <button
-                disabled={pagePipelineBusy || previewRendering}
-                onClick={() => void renderPreviewPage(pageKey)}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Renderizar preview final sem salvar alteracoes"
-              >
-                <FileText size={13} className={previewRendering ? "animate-pulse" : ""} />
-                Preview fiel
-              </button>
-              <button
-                disabled={pagePipelineBusy || previewRendering}
-                onClick={() => void retypesetCurrentPage()}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition-smooth hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50"
-                title="Salvar alterações e renderizar o preview final"
-              >
-                <FileText size={13} className={isRetypesetting ? "animate-pulse" : ""} />
-                Salvar+Render
-              </button>
-            </div>
-
-            {(isRetypesetting || isReinpainting) && !!pipeline && (
-              <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-brand/10 border border-brand/20">
-                <Loader2 size={12} className="text-brand animate-spin" />
-                <span className="text-[11px] text-brand font-medium truncate max-w-[120px]">
-                  {pipeline.message || "Processando..."}
-                </span>
-                <span className="text-[10px] text-brand/70 font-mono">
-                  {Math.round(pipeline.step_progress)}%
-                </span>
-              </div>
-            )}
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
-            <button
-              onClick={zoomOut}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Diminuir zoom (-)"
-            >
-              <Minus size={14} />
-            </button>
-            <button
-              onClick={zoomIn}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Aumentar zoom (+)"
-            >
-              <Plus size={14} />
-            </button>
-            <button
-              onClick={resetViewport}
-              className="rounded-xl bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
-              title="Resetar zoom e posição (0)"
-            >
-              Ajustar
-            </button>
-            <button
-              onClick={() => setZoom(2)}
-              className="rounded-xl bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary transition-smooth hover:text-text-primary"
-              title="Zoom 2x"
-            >
-              2x
-            </button>
-            <button
-              onClick={() => setPan({ x: 0, y: 0 })}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary"
-              title="Centralizar (pan)"
-            >
-              <LocateFixed size={14} />
-            </button>
-            <span className="w-12 text-right font-mono text-[11px] text-text-muted">
-              {Math.round(zoom * 100)}%
-            </span>
-
-            <div className="mx-1 h-5 w-px bg-white/[0.03]" />
-
+          {/* Page navigation */}
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-bg-tertiary/40 px-1 py-0.5">
             <button
               onClick={() => void setCurrentPage(Math.max(0, currentPageIndex - 1))}
               disabled={currentPageIndex === 0}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
-              title="Página anterior (Alt+Left)"
+              className="rounded p-1 text-text-muted transition-smooth hover:text-text-primary disabled:opacity-25"
+              title="Página anterior (Alt+←)"
             >
-              <ArrowLeft size={14} />
+              <ArrowLeft size={12} />
             </button>
-            <span className="min-w-[56px] text-center font-mono text-xs text-text-secondary">
+            <span className="min-w-[40px] text-center font-mono text-[11px] text-text-secondary">
               {currentPageIndex + 1}/{totalPages}
             </span>
             <button
               onClick={() => void setCurrentPage(Math.min(totalPages - 1, currentPageIndex + 1))}
               disabled={currentPageIndex >= totalPages - 1}
-              className="rounded-xl bg-bg-tertiary p-1.5 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
-              title="Próxima página (Alt+Right)"
+              className="rounded p-1 text-text-muted transition-smooth hover:text-text-primary disabled:opacity-25"
+              title="Próxima página (Alt+→)"
             >
-              <ArrowRight size={14} />
+              <ArrowRight size={12} />
+            </button>
+          </div>
+
+          {/* Undo/Redo + indicador "Não salvo" + Salvar manual + descartar */}
+          <div className="flex items-center gap-1.5">
+            <UndoRedoControls />
+            <AutoSaveIndicator />
+            <button
+              onClick={() => void saveAndRenderCurrentPage()}
+              disabled={saveDisabled}
+              className="flex items-center gap-1 rounded-lg border border-status-success/30 bg-status-success/10 px-2.5 py-1 text-[11px] font-medium text-status-success transition-smooth hover:bg-status-success/15 disabled:opacity-30"
+              title="Salvar e renderizar preview final (Ctrl+S)"
+            >
+              <Check size={12} />
+              Salvar
+            </button>
+            <button
+              onClick={discardEdits}
+              disabled={pendingCount === 0}
+              className="rounded-lg p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-30"
+              title="Descartar alterações"
+            >
+              <Undo2 size={13} />
             </button>
           </div>
         </div>
 
-        <div
-          data-testid="editor-professional-toolbar"
-          className="flex flex-wrap items-center gap-2 border-b border-border bg-bg-secondary/45 px-4 py-2 text-[11px] text-text-secondary"
-        >
-          <span className="font-medium text-text-primary">Ferramentas</span>
-          {EDITOR_PROFESSIONAL_TOOLS.map((tool) => (
-            <span
-              key={tool.key}
-              className="rounded-full border border-border bg-bg-tertiary/45 px-2 py-1"
-              title={`${tool.label} - ${tool.hotkey}`}
+        {/* ── Row 2: View + Pipeline + Zoom ── */}
+        <div className="flex items-center gap-2 border-b border-border bg-bg-primary px-3 py-1.5">
+          {/* View modes — segmented control */}
+          <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+            {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
+              <button
+                key={key}
+                data-testid={`editor-view-${key}`}
+                onClick={() => setViewMode(key)}
+                className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-smooth ${
+                  viewMode === key
+                    ? "bg-brand/15 text-brand shadow-sm"
+                    : "text-text-muted hover:text-text-primary"
+                }`}
+                title={`${label} (${hotkey})`}
+              >
+                <Icon size={12} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="h-4 w-px bg-border" />
+
+          {/* Overlays toggle */}
+          <button
+            onClick={toggleOverlays}
+            className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition-smooth ${
+              showOverlays
+                ? "bg-accent-cyan/10 text-accent-cyan"
+                : "text-text-muted hover:text-text-primary"
+            }`}
+            title="Guias de seleção (O)"
+          >
+            {showOverlays ? <Eye size={12} /> : <EyeOff size={12} />}
+          </button>
+
+          {/* Brush options — contextual quando ferramenta brush ativa (Fase 7: inclui color picker) */}
+          {toolMode === "brush" && <BrushOptionsInline />}
+          {/* Máscara Lasso options — Fase 8 */}
+          {toolMode === "mask" && <MaskLassoControls />}
+          {/* Brush size simples para repairBrush/reinpaintBrush/eraser */}
+          {(toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">
+              <span className="text-[10px] text-text-muted">Pincel</span>
+              <input
+                type="range"
+                min={4}
+                max={96}
+                value={brushSize}
+                title="Tamanho do pincel"
+                aria-label="Tamanho do pincel"
+                onChange={(event) => setBrushSize(Number(event.target.value))}
+                className="w-20"
+              />
+              <span className="w-7 text-right font-mono text-[10px] text-text-secondary">{brushSize}</span>
+            </div>
+          )}
+          {/* Fase 9: Indicador de alvo da borracha */}
+          {toolMode === "eraser" && (
+            <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+              {(["brush", "mask"] as const).map((t) => {
+                const active = eraserTarget === t || (eraserTarget === null && lastPaintedLayer === t);
+                return (
+                  <button
+                    key={t}
+                    onClick={() => setEraserTarget(active ? null : t)}
+                    title={`Apagar: ${t === "brush" ? "Pintura" : "Máscara"} (Tab para ciclar)`}
+                    className={`rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+                      active ? "bg-accent-cyan/15 text-accent-cyan" : "text-text-muted hover:text-text-primary"
+                    }`}
+                  >
+                    {t === "brush" ? "Pintura" : "Máscara"}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex-1" />
+
+          {/* Pipeline actions */}
+          <div className="flex items-center gap-0.5 rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+            {activePageAction !== null && (
+              <span className="px-1.5 text-[10px] font-medium text-brand animate-pulse">
+                {activePageAction}...
+              </span>
+            )}
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("detect")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Detectar balões"
             >
-              {tool.label}
-            </span>
-          ))}
-          <span className="mx-1 h-4 w-px bg-white/[0.05]" />
-          {EDITOR_PROFESSIONAL_SHORTCUTS.map((shortcut) => (
-            <span key={shortcut} className="text-text-muted">
-              {shortcut}
-            </span>
-          ))}
+              <ScanText size={12} className={activePageAction === "detect" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Detectar</span>
+            </button>
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("ocr")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Executar OCR"
+            >
+              <FileText size={12} className={activePageAction === "ocr" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">OCR</span>
+            </button>
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("translate")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Traduzir textos"
+            >
+              <Languages size={12} className={activePageAction === "translate" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Traduzir</span>
+            </button>
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runMaskedAction("inpaint")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Limpar imagem (Inpaint)"
+            >
+              <Eraser size={12} className={activePageAction === "inpaint" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Inpaint</span>
+            </button>
+          </div>
+
+          {/* Pipeline progress indicator */}
+          {(isRetypesetting || isReinpainting) && !!pipeline && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-brand/8 px-2.5 py-1 border border-brand/15">
+              <Loader2 size={11} className="text-brand animate-spin" />
+              <span className="text-[10px] text-brand font-medium truncate max-w-[100px]">
+                {pipeline.message || "Processando"}
+              </span>
+              <span className="text-[10px] text-brand/60 font-mono">
+                {Math.round(pipeline.step_progress)}%
+              </span>
+            </div>
+          )}
+
+          {/* Zoom controls (movido do canvas para cá na Fase 1) */}
+          <ZoomControls />
         </div>
 
-        <EditorStage />
+        {/* ── Row 3: TypesettingBar — só quando texto selecionado (Fase 4) ── */}
+        <TypesettingBar />
+
+        {/* Banner de erro de ação pipeline (Fase 0 - sem falhas silenciosas) */}
+        {pageActionError && (
+          <div className="flex items-start gap-2 border-b border-status-error/30 bg-status-error/10 px-3 py-2">
+            <span className="mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-status-error/20 text-[10px] font-bold text-status-error">
+              !
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-medium text-status-error">
+                Falha em {pageActionError.action.toUpperCase()}
+              </p>
+              <p className="mt-0.5 max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-text-muted font-mono">
+                {pageActionError.message}
+              </p>
+            </div>
+            <button
+              onClick={() => void runMaskedAction(pageActionError.action)}
+              disabled={activePageAction !== null}
+              className="rounded-md border border-border bg-bg-secondary px-2 py-0.5 text-[10px] text-text-primary hover:bg-bg-tertiary disabled:opacity-40"
+              title="Tentar novamente"
+            >
+              Retry
+            </button>
+            <button
+              onClick={clearPageActionError}
+              className="rounded-md px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-white/[0.04]"
+              title="Fechar"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {/* ── Canvas area: ToolSidebar + Stage ── */}
+        <div className="flex min-h-0 flex-1">
+          {/* Fase 4: ToolSidebar vertical substituindo o segmented control horizontal */}
+          <ToolSidebar />
+          <EditorStage />
+        </div>
       </div>
 
       <LayersPanel />

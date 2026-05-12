@@ -1,0 +1,43 @@
+{
+  "page": {
+    "arquivo_original": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/originals/003.webp",
+    "arquivo_traduzido": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/translated/003.webp",
+    "image_layers": {
+      "base": {
+        "key": "base",
+        "locked": true,
+        "path": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/originals/003.webp",
+        "visible": true
+      },
+      "brush": {
+        "key": "brush",
+        "locked": false,
+        "path": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/layers/brush/001.png",
+        "visible": false
+      },
+      "inpaint": {
+        "key": "inpaint",
+        "locked": true,
+        "path": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/images/003.webp",
+        "visible": false
+      },
+      "mask": {
+        "key": "mask",
+        "locked": false,
+        "path": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/layers/mask/001.png",
+        "visible": false
+      },
+      "rendered": {
+        "key": "rendered",
+        "locked": true,
+        "path": "D:/TraduzAi/data/works/ef580878-58e8-4c92-9b45-5ea3a6fec398/translated/003.webp",
+        "visible": true
+      }
+    },
+    "inpaint_blocks": [],
+    "numero": 1,
+    "page_profile": null,
+    "text_layers": [],
+    "textos": []
+  }
+}

@@ -1,7 +1,11 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch
 
+import translator.translate as translate_module
+
+from translator.term_protection import PLACEHOLDER_TEMPLATE
 from translator.translate import (
+    build_translation_context_header,
     _build_context_hints,
     _build_text_payload,
     _fix_infinitive_to_imperative,
@@ -9,10 +13,13 @@ from translator.translate import (
     _lookup_special_literal_translation,
     _lookup_memory_translation,
     _postprocess,
+    _pick_ollama_model_for_language_pair,
     _preprocess_text,
+    _probe_google_backend,
     _prepare_source_text_for_translation,
     _resolve_translation_backend,
     _review_translation_grammar_semantics,
+    _translation_quality_flags,
     list_supported_google_languages,
     normalize_google_language_code,
     translate_pages,
@@ -20,6 +27,12 @@ from translator.translate import (
 
 
 class TranslateContextTests(unittest.TestCase):
+    def setUp(self):
+        translate_module._google = None
+        translate_module._google_health_key = None
+        translate_module._google_health_ok = False
+        translate_module._google_health_failed_at = {}
+
     def test_list_supported_google_languages_returns_sorted_metadata(self):
         class _FakeGoogleTranslator:
             def __init__(self, source="auto", target="en"):
@@ -56,9 +69,10 @@ class TranslateContextTests(unittest.TestCase):
             def __init__(self, source="en", target="pt"):
                 created.append((source, target))
                 self.target = target
+                self._translator = self
 
             def translate(self, text: str):
-                return "teste" if text == "test" else f"{self.target}:{text}"
+                return f"{self.target}:{text}"
 
             def translate_batch(self, texts: list[str]) -> list[str]:
                 return [f"{self.target}:{text}" for text in texts]
@@ -82,10 +96,112 @@ class TranslateContextTests(unittest.TestCase):
         self.assertEqual(created[0], ("en", "pt"))
         self.assertTrue(translated[0]["texts"][0]["translated"].lower().startswith("pt:"))
 
+    def test_translate_pages_skips_ollama_probe_when_google_is_available_by_default(self):
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                return f"pt:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return [f"pt:{text}" for text in texts]
+
+        ocr_results = [{"texts": [{"text": "Hello", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=_FakeGoogleTranslator()):
+                        with patch("translator.translate._check_ollama") as check_ollama:
+                            translated = translate_pages(
+                                ocr_results=ocr_results,
+                                obra="obra-teste",
+                                context={},
+                                glossario={},
+                            )
+
+        check_ollama.assert_not_called()
+        self.assertEqual(translated[0]["texts"][0]["translated"], "pt:Hello")
+
+    def test_translate_pages_reuses_successful_google_health_check_for_same_language_pair(self):
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self.health_checks = 0
+                self._translator = self
+
+            def translate(self, text: str):
+                if text == "hello":
+                    self.health_checks += 1
+                return f"pt:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return [f"pt:{text}" for text in texts]
+
+        fake = _FakeGoogleTranslator()
+        ocr_results = [{"texts": [{"text": "Hello", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=fake):
+                        with patch("translator.translate._check_ollama"):
+                            translate_pages(ocr_results=ocr_results, obra="obra-teste", context={}, glossario={})
+                            translate_pages(ocr_results=ocr_results, obra="obra-teste", context={}, glossario={})
+
+        self.assertEqual(fake.health_checks, 1)
+
+    def test_translate_pages_caches_google_failure_and_skips_reprobe_temporarily(self):
+        class _BrokenGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+                self.health_checks = 0
+
+            def translate(self, text: str):
+                self.health_checks += 1
+                raise RuntimeError("proxy down")
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                raise RuntimeError("proxy down")
+
+        fake = _BrokenGoogleTranslator()
+        ocr_results = [{"texts": [{"text": "Ã¬â€¢Ë†Ã«â€¦â€¢Ã­â€¢ËœÃ¬â€žÂ¸Ã¬Å¡â€", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._google_health_failed_at", {}):
+                        with patch("translator.translate._GoogleTranslator", return_value=fake):
+                            with patch(
+                                "translator.translate._check_ollama",
+                                return_value={"running": False, "models": [], "has_translator": False},
+                            ):
+                                translate_pages(
+                                    ocr_results=ocr_results,
+                                    obra="obra-teste",
+                                    context={},
+                                    glossario={},
+                                    idioma_origem="ko",
+                                    idioma_destino="pt-BR",
+                                )
+                                translate_pages(
+                                    ocr_results=ocr_results,
+                                    obra="obra-teste",
+                                    context={},
+                                    glossario={},
+                                    idioma_origem="ko",
+                                    idioma_destino="pt-BR",
+                                )
+
+        self.assertEqual(fake.health_checks, 1)
+
     def test_translate_pages_repairs_empty_or_unchanged_ollama_outputs_with_google_when_available(self):
         class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
             def translate(self, text: str):
-                return "teste" if text == "test" else f"pt:{text}"
+                return f"pt:{text}"
 
             def translate_batch(self, texts: list[str]) -> list[str]:
                 return [f"pt:{text}" for text in texts]
@@ -122,11 +238,110 @@ class TranslateContextTests(unittest.TestCase):
         self.assertEqual(texts[0]["translated"], "PT:HELLO")
         self.assertEqual(texts[1]["translated"], "PT:I'LL WIN.")
 
+    def test_probe_google_backend_rejects_unchanged_korean_probe(self):
+        class _EchoTranslator:
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+        fake = type("FakeGoogle", (), {"_translator": _EchoTranslator()})()
+
+        with self.assertRaisesRegex(RuntimeError, "source sem traduzir"):
+            _probe_google_backend(fake, "ko", "pt")
+
+    def test_translate_pages_falls_back_when_google_health_probe_fails(self):
+        class _BrokenGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                raise RuntimeError("proxy down")
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return [f"pt:{text}" for text in texts]
+
+        ocr_results = [{"texts": [{"text": "Ã¬â€¢Ë†Ã«â€¦â€¢Ã­â€¢ËœÃ¬â€žÂ¸Ã¬Å¡â€", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=_BrokenGoogleTranslator()):
+                        with patch(
+                            "translator.translate._check_ollama",
+                            return_value={"running": False, "models": [], "has_translator": False},
+                        ):
+                            translated = translate_pages(
+                                ocr_results=ocr_results,
+                                obra="obra-teste",
+                                context={},
+                                glossario={},
+                                idioma_origem="ko",
+                                idioma_destino="pt-BR",
+                            )
+
+        self.assertEqual(translated[0]["texts"][0]["translated"], "Ã¬â€¢Ë†Ã«â€¦â€¢Ã­â€¢ËœÃ¬â€žÂ¸Ã¬Å¡â€")
+
+    def test_translate_pages_does_not_call_ollama_when_google_health_fails(self):
+        class _BrokenGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                raise RuntimeError("proxy down")
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                raise RuntimeError("proxy down")
+
+
+        ocr_results = [{"texts": [{"text": "Ã¬â€¢Ë†Ã«â€¦â€¢Ã­â€¢ËœÃ¬â€žÂ¸Ã¬Å¡â€", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=_BrokenGoogleTranslator()):
+                        with patch("translator.translate._check_ollama") as check_ollama:
+                            with patch("translator.translate._call_ollama") as call_ollama:
+                                translated = translate_pages(
+                                    ocr_results=ocr_results,
+                                    obra="obra-teste",
+                                    context={},
+                                    glossario={},
+                                    idioma_origem="ko",
+                                    idioma_destino="pt-BR",
+                                )
+
+        check_ollama.assert_not_called()
+        call_ollama.assert_not_called()
+        self.assertEqual(translated[0]["texts"][0]["translated"], ocr_results[0]["texts"][0]["text"])
+
     def test_none_is_not_treated_as_proper_noun(self):
         self.assertFalse(_is_likely_proper_noun("NONE."))
 
+    def test_common_caps_dialogue_words_are_not_treated_as_proper_nouns(self):
+        for token in [
+            "UNCONTROLLABLE",
+            "ALREADY",
+            "COMMANDER",
+            "RAID",
+            "SQUAD",
+            "HOUSEHOLD",
+            "LOST",
+            "EVERYTHING",
+            "SOLDIER",
+        ]:
+            with self.subTest(token=token):
+                self.assertFalse(_is_likely_proper_noun(token))
+
     def test_none_gets_context_safe_literal_translation(self):
         self.assertEqual(_lookup_special_literal_translation("NONE.", "fala"), "Nenhuma.")
+
+    def test_short_quoted_dialogue_gets_literal_translation(self):
+        self.assertEqual(_lookup_special_literal_translation('"WE"?!', "fala"), '"N\u00f3s"?!')
+
+    def test_no_is_a_no_gets_context_safe_literal_translation(self):
+        self.assertEqual(
+            _lookup_special_literal_translation("A NO IS A NO!", "fala"),
+            "Um n\u00e3o \u00e9 um n\u00e3o!",
+        )
 
     def test_sfx_preprocess_preserves_uppercase(self):
         processed = _preprocess_text("BANG!!", tipo="sfx")
@@ -135,6 +350,26 @@ class TranslateContextTests(unittest.TestCase):
     def test_sfx_postprocess_keeps_uppercase(self):
         processed = _postprocess("estrondo!!", was_upper=True, tipo="sfx")
         self.assertEqual(processed, "ESTRONDO!!")
+
+    def test_postprocess_repairs_stutter_prefix_from_translated_word(self):
+        processed = _postprocess(
+            "S-jovem mestre...?",
+            was_upper=True,
+            tipo="fala",
+            source_text="y-YOUNG MASTER...?",
+        )
+
+        self.assertEqual(processed, "J-JOVEM MESTRE...?")
+
+    def test_postprocess_does_not_rewrite_non_stutter_rank_prefix(self):
+        processed = _postprocess(
+            "S-rank",
+            was_upper=False,
+            tipo="fala",
+            source_text="S-RANK",
+        )
+
+        self.assertEqual(processed, "S-rank")
 
     def test_build_text_payload_includes_local_context(self):
         texts = [
@@ -241,6 +476,132 @@ class TranslateContextTests(unittest.TestCase):
             )
         )
 
+    def test_translate_pages_preserves_multi_word_caps_name_when_google_translates_it(self):
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "test" else f"{self.target}:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return ["P\u00c9RDIO GHISLAIN."]
+
+        ocr_results = [{"texts": [{"text": "GHISLAIN PERDIUM.", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        result = translated[0]["texts"][0]["translated"]
+        self.assertIn("PERDIUM", result.upper())
+        self.assertNotIn("P\u00c9RDIO", result.upper())
+
+    def test_translate_pages_translates_common_caps_dialogue_instead_of_preserving_it(self):
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "test" else f"{self.target}:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.append(list(texts))
+                return [
+                    {
+                        "Uncontrollable": "Incontrolavel",
+                        "Already?": "Ja?",
+                        "Commander!": "Comandante!",
+                        "Raid squad commander skovan": "Comandante Skovan do esquadrao de ataque",
+                    }.get(text, f"pt:{text}")
+                    for text in texts
+                ]
+
+        ocr_results = [
+            {
+                "texts": [
+                    {"text": "UNCONTROLLABLE", "tipo": "fala"},
+                    {"text": "ALREADY?", "tipo": "fala"},
+                    {"text": "COMMANDER!", "tipo": "fala"},
+                    {"text": "RAID SQUAD COMMANDER SKOVAN", "tipo": "fala"},
+                ]
+            }
+        ]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertEqual(
+            captured_batches[0],
+            ["Uncontrollable", "Already?", "Commander!", "Raid squad commander skovan"],
+        )
+        outputs = [item["translated"] for item in translated[0]["texts"]]
+        self.assertEqual(outputs[0], "INCONTROLAVEL")
+        self.assertEqual(outputs[1], "JA?")
+        self.assertEqual(outputs[2], "COMANDANTE!")
+        self.assertEqual(outputs[3], "COMANDANTE SKOVAN DO ESQUADRAO DE ATAQUE")
+        self.assertFalse(translated[0]["texts"][0].get("proper_noun_preserved", False))
+
+    def test_translate_pages_does_not_preserve_arbitrary_single_caps_dialogue(self):
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "test" else f"{self.target}:{text}"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.append(list(texts))
+                return ["Seu bastardo!" if text == "Bastard!" else f"pt:{text}" for text in texts]
+
+        ocr_results = [{"texts": [{"text": "BASTARD!", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertEqual(captured_batches[0], ["Bastard!"])
+        self.assertEqual(translated[0]["texts"][0]["translated"], "SEU BASTARDO!")
+        self.assertFalse(translated[0]["texts"][0].get("proper_noun_preserved", False))
+
     def test_translate_pages_repairs_embedded_proper_name_inside_short_phrase(self):
         captured_batches = []
 
@@ -285,7 +646,11 @@ class TranslateContextTests(unittest.TestCase):
                 self.target = target
 
             def translate(self, text: str):
-                return "teste" if text == "test" else text
+                if text == "test":
+                    return "teste"
+                if text == "hello":
+                    return "ol\u00e1"
+                return text
 
             def translate_batch(self, texts: list[str]) -> list[str]:
                 return ["o nucleo de mana esta instavel."]
@@ -302,18 +667,59 @@ class TranslateContextTests(unittest.TestCase):
                         ocr_results=ocr_results,
                         obra="obra-teste",
                         context={},
-                        glossario={"Mana Core": "Núcleo de Mana"},
+                        glossario={"Mana Core": "N\u00facleo de Mana"},
                         idioma_origem="en",
                         idioma_destino="pt-BR",
                     )
 
         entity_meta = translated[0]["texts"][0]
-        self.assertIn("Núcleo de Mana", entity_meta["translated"])
+        self.assertIn("N\u00facleo de Mana", entity_meta["translated"])
         self.assertEqual(
             entity_meta["glossary_hits"],
-            [{"phase": "target", "source": "Mana Core", "target": "Núcleo de Mana"}],
+            [{"phase": "target", "source": "Mana Core", "target": "N\u00facleo de Mana"}],
         )
         self.assertIn("glossary_locked", entity_meta["entity_flags"])
+
+    def test_translate_pages_restores_glossary_placeholder_when_preserved(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=1)
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.extend(texts)
+                return [f"{placeholder} despertou."]
+
+        ocr_results = [{"texts": [{"text": "Ghislain woke up.", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={},
+                        glossario={"Ghislain": "Ghislain"},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertIn(placeholder, captured_batches[0])
+        entity_meta = translated[0]["texts"][0]
+        self.assertEqual(entity_meta["translated"], "Ghislain despertou.")
+        self.assertIn(
+            {"phase": "placeholder", "source": "Ghislain", "target": "Ghislain"},
+            entity_meta["glossary_hits"],
+        )
+        self.assertNotIn("placeholder_lost", entity_meta.get("qa_flags", []))
 
     def test_context_hints_include_corpus_candidates(self):
         hints = _build_context_hints(
@@ -335,10 +741,10 @@ class TranslateContextTests(unittest.TestCase):
     def test_review_translation_grammar_semantics_fixes_literal_combat_phrase(self):
         reviewed = _review_translation_grammar_semantics(
             source_text="YOU SAID YOU COULD SEE THROUGH ALL MY ATTACKS, RIGHT?",
-            translated_text="Vocę disse que podia ver através de todos os meus ataques, certo?",
+            translated_text="Voc\u0119 disse que podia ver atrav\u00e9s de todos os meus ataques, certo?",
             tipo="fala",
         )
-        self.assertEqual(reviewed, "Você disse que podia enxergar todos os meus golpes, certo?")
+        self.assertEqual(reviewed, "Voc\u00ea disse que podia enxergar todos os meus golpes, certo?")
 
     def test_postprocess_applies_source_aware_light_question_fix(self):
         processed = _postprocess(
@@ -352,10 +758,10 @@ class TranslateContextTests(unittest.TestCase):
     def test_review_translation_grammar_semantics_rewrites_trading_with_them_phrase(self):
         reviewed = _review_translation_grammar_semantics(
             source_text='YOU MEAN THE POWER HE GOT BY TRADING WITH "THEM"?',
-            translated_text='Você quer dizer o poder que ele obteve negociando com "eles"?',
+            translated_text='Voc\u00ea quer dizer o poder que ele obteve negociando com "eles"?',
             tipo="fala",
         )
-        self.assertEqual(reviewed, "Você quer dizer o poder que ele conseguiu em um acordo com eles?")
+        self.assertEqual(reviewed, "Voc\u00ea quer dizer o poder que ele conseguiu em um acordo com eles?")
 
     def test_review_translation_grammar_semantics_compacts_half_mana_technique_line(self):
         reviewed = _review_translation_grammar_semantics(
@@ -365,16 +771,16 @@ class TranslateContextTests(unittest.TestCase):
                 "THAT POWER LETS ONE INSTANTLY SURPASS THEIR OWN LIMITS."
             ),
             translated_text=(
-                "Mesmo sendo apenas metade de uma técnica de mana, "
-                "seus efeitos serão mais que suficientes. "
-                "Esse poder permite superar instantaneamente seus próprios limites."
+                "Mesmo sendo apenas metade de uma t\u00e9cnica de mana, "
+                "seus efeitos ser\u00e3o mais que suficientes. "
+                "Esse poder permite superar instantaneamente seus pr\u00f3prios limites."
             ),
             tipo="fala",
         )
         self.assertEqual(
             reviewed,
-            "Pode até ser só metade de uma técnica de mana, mas seus efeitos já são mais do que suficientes. "
-            "Esse poder permite ultrapassar instantaneamente os próprios limites.",
+            "Pode at\u00e9 ser s\u00f3 metade de uma t\u00e9cnica de mana, mas seus efeitos j\u00e1 s\u00e3o mais do que suficientes. "
+            "Esse poder permite ultrapassar instantaneamente os pr\u00f3prios limites.",
         )
 
     def test_review_translation_grammar_semantics_shortens_desmond_power_line(self):
@@ -388,18 +794,18 @@ class TranslateContextTests(unittest.TestCase):
     def test_review_translation_grammar_semantics_rewrites_vanessa_mana_line(self):
         reviewed = _review_translation_grammar_semantics(
             source_text="THE RAMPAGING VANESSA ALSO USED A SIMILAR MANA TECHNIQUE.",
-            translated_text="A violenta Vanessa também usou uma técnica de mana semelhante.",
+            translated_text="A violenta Vanessa tamb\u00e9m usou uma t\u00e9cnica de mana semelhante.",
             tipo="fala",
         )
         self.assertEqual(
             reviewed,
-            "A Vanessa em fúria também usava um método semelhante de circulação de mana.",
+            "A Vanessa em f\u00faria tamb\u00e9m usava um m\u00e9todo semelhante de circula\u00e7\u00e3o de mana.",
         )
 
     def test_review_translation_grammar_semantics_preserves_split_sentence_continuation(self):
         reviewed = _review_translation_grammar_semantics(
             source_text="YOU COULD SEE ALL OF MY ATTACKS?",
-            translated_text="Você pode ver todos os meus ataques?",
+            translated_text="VocÃƒÂª pode ver todos os meus ataques?",
             tipo="fala",
         )
         self.assertEqual(reviewed, "Que conseguia ver todos os meus ataques?")
@@ -417,7 +823,7 @@ class TranslateContextTests(unittest.TestCase):
 
         self.assertEqual(backend, "google")
 
-    def test_resolve_translation_backend_prefers_local_when_flag_enabled(self):
+    def test_resolve_translation_backend_ignores_local_flag(self):
         with patch.dict("os.environ", {"TRADUZAI_PREFER_LOCAL_TRANSLATION": "1"}, clear=False):
             backend = _resolve_translation_backend(
                 google_ok=True,
@@ -428,11 +834,218 @@ class TranslateContextTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(backend, "ollama")
+        self.assertEqual(backend, "google")
+
+    def test_resolve_translation_backend_does_not_fallback_to_ollama(self):
+        backend = _resolve_translation_backend(
+            google_ok=False,
+            ollama_status={
+                "running": True,
+                "models": ["mangatl-translator:latest"],
+                "has_translator": True,
+            },
+        )
+
+        self.assertEqual(backend, "passthrough")
+
+    def test_pick_ollama_model_for_korean_portuguese_prefers_gemma(self):
+        picked = _pick_ollama_model_for_language_pair(
+            ["qwen2.5:3b", "gemma4:e4b", "mangatl-translator:latest"],
+            "traduzai-translator",
+            "ko",
+            "pt-BR",
+        )
+
+        self.assertEqual(picked, "gemma4:e4b")
+
+    def test_pick_ollama_model_for_korean_portuguese_honors_explicit_hf_gemma(self):
+        hf_model = "hf.co/stduhpf/google-gemma-3-4b-it-qat-q4_0-gguf-small:Q4_0_S"
+        picked = _pick_ollama_model_for_language_pair(
+            ["gemma4:e4b", hf_model, "qwen2.5:3b"],
+            hf_model,
+            "ko",
+            "pt-BR",
+        )
+
+        self.assertEqual(picked, hf_model)
+
+    def test_translate_pages_uses_semantic_review_with_google_for_korean(self):
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                return "ok"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                mapping = {
+                    "Ã«Ââ€žÃ¬Â â‚¬Ã­Å¾Ë† Ã¬Æ’ÂÃ«Â¬Â¸Ã¬Ââ€ž Ã¬Â°Â¾Ã¬Ââ€ž Ã¬Ë†ËœÃªÂ°â‚¬ Ã¬â€”â€ Ã«â€¹Â¤": "NÃƒÂ£o consigo encontrar o texto original",
+                    "Ã¬Â§â€žÃ«Â²â€¢Ã¬Ââ‚¬ Ã¬ÂÂ´ ÃªÂ°Ë†Ã¬â€šÂ¬Ã«Å¸â€°Ã¬ÂËœ Ã¬Â§â€œÃ¬ÂÂ´ Ã«Â¶â€žÃ«Âªâ€¦Ã­â€¢Â©Ã«â€¹Ë†Ã«â€¹Â¤": "Ãƒâ€° claro que este ÃƒÂ© o trabalho desta garota.",
+                    "Ã­ÂÂ¬Ã¬â€¢â€žÃ¬â€¢â€žÃ¬â€¢â€¦!!": "UAU!!",
+                }
+                return [mapping.get(text, f"pt:{text}") for text in texts]
+
+        captured = {}
+
+        def _fake_call_ollama(model, system, user_msg, host):
+            captured["model"] = model
+            captured["system"] = system
+            captured["user_msg"] = user_msg
+            return [
+                {"id": "p1_t1", "translated": "NÃƒÂ£o consigo encontrar uma saÃƒÂ­da."},
+            ]
+
+        ocr_results = [
+            {
+                "texts": [
+                    {"text": "Ã«Ââ€žÃ¬Â â‚¬Ã­Å¾Ë† Ã¬Æ’ÂÃ«Â¬Â¸Ã¬Ââ€ž Ã¬Â°Â¾Ã¬Ââ€ž Ã¬Ë†ËœÃªÂ°â‚¬ Ã¬â€”â€ Ã«â€¹Â¤", "tipo": "fala"},
+                    {"text": "Ã¬Â§â€žÃ«Â²â€¢Ã¬Ââ‚¬ Ã¬ÂÂ´ ÃªÂ°Ë†Ã¬â€šÂ¬Ã«Å¸â€°Ã¬ÂËœ Ã¬Â§â€œÃ¬ÂÂ´ Ã«Â¶â€žÃ«Âªâ€¦Ã­â€¢Â©Ã«â€¹Ë†Ã«â€¹Â¤", "tipo": "fala"},
+                    {"text": "Ã­ÂÂ¬Ã¬â€¢â€žÃ¬â€¢â€žÃ¬â€¢â€¦!!", "tipo": "sfx"},
+                ]
+            }
+        ]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch.dict("os.environ", {"TRADUZAI_SEMANTIC_REVIEW": "1"}):
+                        with patch("translator.translate._GoogleTranslator", return_value=_FakeGoogleTranslator()):
+                            with patch(
+                                "translator.translate._check_ollama",
+                                return_value={"running": True, "models": ["gemma4:e4b"], "has_translator": False},
+                            ) as check_ollama:
+                                with patch("translator.translate._call_ollama", side_effect=_fake_call_ollama) as call_ollama:
+                                    translated = translate_pages(
+                                        ocr_results=ocr_results,
+                                        obra="obra-teste",
+                                        context={},
+                                        glossario={},
+                                        idioma_origem="ko",
+                                        idioma_destino="pt-BR",
+                                    )
+
+        check_ollama.assert_not_called()
+        call_ollama.assert_not_called()
+        self.assertEqual(captured, {})
+        texts = translated[0]["texts"]
+        self.assertEqual(len(texts), 3)
+
+    def test_translate_pages_rejects_invalid_semantic_review_output(self):
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                return "ok"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return ["NÃƒÂ£o consigo encontrar o texto original" for _ in texts]
+
+        ocr_results = [{"texts": [{"text": "Ã«Ââ€žÃ¬Â â‚¬Ã­Å¾Ë† Ã¬Æ’ÂÃ«Â¬Â¸Ã¬Ââ€ž Ã¬Â°Â¾Ã¬Ââ€ž Ã¬Ë†ËœÃªÂ°â‚¬ Ã¬â€”â€ Ã«â€¹Â¤", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch.dict("os.environ", {"TRADUZAI_SEMANTIC_REVIEW": "1"}):
+                        with patch("translator.translate._GoogleTranslator", return_value=_FakeGoogleTranslator()):
+                            with patch(
+                                "translator.translate._check_ollama",
+                                return_value={"running": True, "models": ["gemma4:e4b"], "has_translator": False},
+                            ):
+                                with patch(
+                                    "translator.translate._call_ollama",
+                                    return_value=[{"id": "p1_t1", "translated": "..."}],
+                                ):
+                                    translated = translate_pages(
+                                        ocr_results=ocr_results,
+                                        obra="obra-teste",
+                                        context={},
+                                        glossario={},
+                                        idioma_origem="ko",
+                                        idioma_destino="pt-BR",
+                                    )
+
+        self.assertEqual(
+            translated[0]["texts"][0]["translated"],
+            "",
+        )
+        self.assertEqual(
+            translated[0]["texts"][0]["translation_blocked_text"],
+            "NÃƒÂ£o consigo encontrar o texto original",
+        )
+        self.assertIn("translation_render_blocked", translated[0]["texts"][0]["qa_flags"])
+
+    def test_korean_google_translation_flags_ocr_artifacts_and_script_leaks(self):
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                return "ok"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return ["Bukmyeong TCH \u00e9 invenc\u00edvel", "Mu-\u8449!"]
+
+        ocr_results = [
+            {
+                "texts": [
+                    {"text": "\ubd81\uba85\ub300\ub294 \ubb34\uc801\uc785\ub2c8\ub2e4", "tipo": "fala"},
+                    {"text": "\ubb34\uc5fd!", "tipo": "fala"},
+                ]
+            }
+        ]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=_FakeGoogleTranslator()):
+                        translated = translate_pages(
+                            ocr_results=ocr_results,
+                            obra="obra-teste",
+                            context={},
+                            glossario={},
+                            idioma_origem="ko",
+                            idioma_destino="pt-BR",
+                        )
+
+        flags = [item["qa_flags"] for item in translated[0]["texts"]]
+        self.assertIn("suspected_ocr_error", flags[0])
+        self.assertIn("source_script_leak", flags[1])
+
+    def test_korean_translation_quality_flags_fallback_and_literal_ocr_phrases(self):
+        self.assertIn(
+            "translation_fallback_phrase",
+            _translation_quality_flags(
+                "\uB3C4\uC800\uD788 \uC0DD\uBB38\uC744 \uCC3E\uC744 \uC218\uAC00 \uC5C6\uB2E4.",
+                "Nao consigo encontrar o texto original.",
+                "ko",
+            ),
+        )
+        self.assertIn(
+            "literal_ocr_translation",
+            _translation_quality_flags(
+                "\uC800\uB807\uAC8C \uC80A\uC740 \uC790\uAC1C \uBC30\uD6C4\uC5D0",
+                "Quem poderia imaginar que uma madreperola tao jovem estaria por tras disso?",
+                "ko",
+            ),
+        )
+
+    def test_translation_context_header_includes_title_synopsis_and_genre(self):
+        header = build_translation_context_header(
+            {
+                "title": "Reincarnated Murim Lord",
+                "synopsis": "Um guerreiro retorna e tenta corrigir o passado.",
+                "genre": ["murim", "fantasia", "regressao"],
+            }
+        )
+
+        self.assertIn("TITULO_OBRA: Reincarnated Murim Lord", header)
+        self.assertIn("SINOPSE: Um guerreiro retorna", header)
+        self.assertIn("GENERO: murim, fantasia, regressao", header)
 
 
 class ProperNounProtectionTests(unittest.TestCase):
-    """Verifica que nomes próprios em CAPS isolados são preservados."""
+    """Verifica que nomes prÃƒÂ³prios em CAPS isolados sÃƒÂ£o preservados."""
 
     def test_single_word_caps_treated_as_proper_noun(self):
         # Casos reais do Cap 78: nomes que o Google estava traduzindo errado
@@ -450,7 +1063,7 @@ class ProperNounProtectionTests(unittest.TestCase):
         self.assertTrue(_is_likely_proper_noun("VANESSA!"))
 
     def test_common_caps_words_are_not_proper_nouns(self):
-        # Palavras comuns em CAPS que não devem ser preservadas
+        # Palavras comuns em CAPS que nÃƒÂ£o devem ser preservadas
         self.assertFalse(_is_likely_proper_noun("WAKE"))
         self.assertFalse(_is_likely_proper_noun("STOP"))
         self.assertFalse(_is_likely_proper_noun("HELP"))
@@ -458,6 +1071,9 @@ class ProperNounProtectionTests(unittest.TestCase):
         self.assertFalse(_is_likely_proper_noun("PLEASE"))
         self.assertFalse(_is_likely_proper_noun("LORD"))
         self.assertFalse(_is_likely_proper_noun("MASTER"))
+        self.assertFalse(_is_likely_proper_noun("BECAUSE."))
+        self.assertFalse(_is_likely_proper_noun("AMAZING."))
+        self.assertFalse(_is_likely_proper_noun("REALLY..."))
 
     def test_multi_word_text_is_not_proper_noun(self):
         self.assertFalse(_is_likely_proper_noun("WAKE UP"))
@@ -465,13 +1081,13 @@ class ProperNounProtectionTests(unittest.TestCase):
         self.assertFalse(_is_likely_proper_noun("MY LORD"))
 
     def test_short_words_are_not_proper_nouns(self):
-        # Curtas demais para serem nomes próprios confiáveis
+        # Curtas demais para serem nomes prÃƒÂ³prios confiÃƒÂ¡veis
         self.assertFalse(_is_likely_proper_noun("GO"))
         self.assertFalse(_is_likely_proper_noun("HI"))
         self.assertFalse(_is_likely_proper_noun("NGH"))
 
     def test_text_with_digits_is_not_proper_noun(self):
-        # OCR errors com dígitos (M9, i999) não são tratados como nomes
+        # OCR errors com dÃƒÂ­gitos (M9, i999) nÃƒÂ£o sÃƒÂ£o tratados como nomes
         self.assertFalse(_is_likely_proper_noun("M9"))
         self.assertFalse(_is_likely_proper_noun("i999"))
         self.assertFalse(_is_likely_proper_noun("R2D2"))
@@ -485,7 +1101,7 @@ class ImperativeFixTests(unittest.TestCase):
     """Verifica que infinitivos em comandos curtos viram imperativos."""
 
     def test_wake_up_becomes_imperative(self):
-        # Caso real do Cap 78 pág. 58: "WAKE UP." -> "ACORDAR." (errado)
+        # Caso real do Cap 78 pÃƒÂ¡g. 58: "WAKE UP." -> "ACORDAR." (errado)
         result = _fix_infinitive_to_imperative("Acordar.", "WAKE UP.", "fala")
         self.assertEqual(result, "Acorde.")
 
@@ -502,10 +1118,10 @@ class ImperativeFixTests(unittest.TestCase):
         self.assertEqual(result, "Espere...")
 
     def test_long_source_does_not_trigger_imperative_fix(self):
-        # Source com mais de 4 palavras não dispara o fix
+        # Source com mais de 4 palavras nÃƒÂ£o dispara o fix
         long_source = "I really need you to wake up right now."
         result = _fix_infinitive_to_imperative("Acordar.", long_source, "fala")
-        # Mantém infinitivo porque a frase é longa o suficiente para o Google
+        # MantÃƒÂ©m infinitivo porque a frase ÃƒÂ© longa o suficiente para o Google
         # ter contexto e traduzir corretamente como verbo principal.
         self.assertEqual(result, "Acordar.")
 
@@ -515,18 +1131,18 @@ class ImperativeFixTests(unittest.TestCase):
         self.assertEqual(result, "Acordar!")
 
     def test_multi_word_translation_does_not_trigger_fix(self):
-        # Tradução multi-palavra não bate na tabela; passa direto.
+        # TraduÃƒÂ§ÃƒÂ£o multi-palavra nÃƒÂ£o bate na tabela; passa direto.
         result = _fix_infinitive_to_imperative("Por favor, acordar.", "WAKE UP.", "fala")
         self.assertEqual(result, "Por favor, acordar.")
 
     def test_unknown_infinitive_passes_through(self):
-        # Verbo fora da tabela não é alterado
+        # Verbo fora da tabela nÃƒÂ£o ÃƒÂ© alterado
         result = _fix_infinitive_to_imperative("Discutir.", "DISCUSS.", "fala")
         self.assertEqual(result, "Discutir.")
 
 
 class OcrRepairExpansionTests(unittest.TestCase):
-    """Verifica que os novos padrões de OCR são aplicados em _preprocess_text."""
+    """Verifica que os novos padrÃƒÂµes de OCR sÃƒÂ£o aplicados em _preprocess_text."""
 
     def test_m9_repaired_to_my(self):
         result = _prepare_source_text_for_translation("M9 LORD", "fala", lang="en")
@@ -543,10 +1159,10 @@ class OcrRepairExpansionTests(unittest.TestCase):
 
 
 class PostprocessImperativeIntegrationTests(unittest.TestCase):
-    """Garante que o fix de imperativo é executado durante _postprocess."""
+    """Garante que o fix de imperativo ÃƒÂ© executado durante _postprocess."""
 
     def test_postprocess_converts_short_infinitive(self):
-        # Pipeline completo: source curta + tradução em infinitivo -> imperativo
+        # Pipeline completo: source curta + traduÃƒÂ§ÃƒÂ£o em infinitivo -> imperativo
         result = _postprocess(
             text="Acordar.",
             was_upper=True,
@@ -557,7 +1173,7 @@ class PostprocessImperativeIntegrationTests(unittest.TestCase):
         self.assertEqual(result, "ACORDE.")
 
     def test_postprocess_keeps_long_infinitive(self):
-        # Source longa: não aciona o fix de imperativo
+        # Source longa: nÃƒÂ£o aciona o fix de imperativo
         result = _postprocess(
             text="Eu preciso acordar agora.",
             was_upper=False,

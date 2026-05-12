@@ -14,6 +14,10 @@ vision-worker/.toolvenv/
 # Python
 *.pyc
 *.pyo
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
 pipeline/models/
 pipeline/teste/
 
@@ -43,6 +47,9 @@ pipeline/teste/
 Thumbs.db
 
 # App data
+data/saas/
+data/worker/
+data/fast-page-tests/
 *.log
 debug_runs/
 debug_pipeline_test/

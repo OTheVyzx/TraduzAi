@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+argon2-cffi
+slowapi
+psutil
+python-multipart
+sse-starlette
+pytest
+ruff

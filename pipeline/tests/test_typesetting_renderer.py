@@ -3,21 +3,180 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageChops
 
+from typesetter import renderer as renderer_mod
 from typesetter.renderer import (
     SafeTextPathFont,
     _build_textpath_mask,
+    _canonical_render_style,
     _category_font_bounds,
+    _font_has_glyph,
     _normalize_render_text,
+    _render_single_text_block,
     _resolve_text_layout,
     build_render_blocks,
+    ensure_legible_plan,
     plan_text_layout,
     render_text_block,
 )
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_canonical_render_style_preserves_explicit_font_and_effects(self):
+        style = _canonical_render_style(
+            {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 32,
+                "cor": "#ff00ff",
+                "italico": True,
+                "sombra": True,
+                "glow": True,
+                "contorno_px": 4,
+            }
+        )
+
+        self.assertEqual(style["fonte"], "Newrotic.ttf")
+        self.assertEqual(style["tamanho"], 32)
+        self.assertEqual(style["cor"], "#ff00ff")
+        self.assertTrue(style["bold"])
+        self.assertTrue(style["italico"])
+        self.assertTrue(style["sombra"])
+        self.assertTrue(style["glow"])
+        self.assertEqual(style["contorno_px"], 4)
+
+    def test_canonical_render_style_defaults_to_no_effects(self):
+        style = _canonical_render_style({})
+
+        self.assertEqual(style["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(style["cor"], "#000000")
+        self.assertEqual(style["contorno"], "")
+        self.assertEqual(style["contorno_px"], 0)
+        self.assertFalse(style["sombra"])
+        self.assertFalse(style["glow"])
+
+    def test_render_text_block_sanitizes_auto_style_as_last_defense(self):
+        img = Image.new("RGB", (260, 180), (255, 255, 255))
+        text_data = {
+            "style_origin": "auto",
+            "translated": "OLA",
+            "bbox": [40, 40, 220, 140],
+            "balloon_bbox": [40, 40, 220, 140],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 28,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 2,
+                "glow": True,
+                "glow_px": 3,
+                "sombra": True,
+                "sombra_offset": [2, 2],
+                "cor_gradiente": [],
+            },
+        }
+
+        render_text_block(img, text_data)
+
+        self.assertEqual(text_data["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(text_data["estilo"]["cor"], "#000000")
+        self.assertEqual(text_data["estilo"]["contorno"], "")
+        self.assertEqual(text_data["estilo"]["contorno_px"], 0)
+        self.assertFalse(text_data["estilo"]["glow"])
+        self.assertFalse(text_data["estilo"]["sombra"])
+
+    def test_render_text_block_preserves_editor_style(self):
+        img = Image.new("RGB", (260, 180), (20, 20, 24))
+        text_data = {
+            "style_origin": "editor",
+            "translated": "OLA",
+            "bbox": [40, 40, 220, 140],
+            "balloon_bbox": [40, 40, 220, 140],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 28,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 2,
+                "glow": True,
+                "glow_cor": "#ff00ff",
+                "glow_px": 3,
+                "sombra": True,
+                "sombra_cor": "#111111",
+                "sombra_offset": [2, 3],
+                "cor_gradiente": [],
+            },
+        }
+
+        render_text_block(img, text_data)
+
+        self.assertEqual(text_data["estilo"]["fonte"], "Newrotic.ttf")
+        self.assertEqual(text_data["estilo"]["contorno"], "#000000")
+        self.assertEqual(text_data["estilo"]["contorno_px"], 2)
+        self.assertTrue(text_data["estilo"]["glow"])
+        self.assertTrue(text_data["estilo"]["sombra"])
+
+    def test_render_text_block_sanitizes_missing_origin_as_legacy_auto(self):
+        img = Image.new("RGB", (260, 180), (255, 255, 255))
+        text_data = {
+            "translated": "OLA",
+            "bbox": [40, 40, 220, 140],
+            "balloon_bbox": [40, 40, 220, 140],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 28,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 2,
+                "glow": True,
+                "sombra": True,
+                "cor_gradiente": [],
+            },
+        }
+
+        render_text_block(img, text_data)
+
+        self.assertEqual(text_data["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(text_data["estilo"]["cor"], "#000000")
+        self.assertEqual(text_data["estilo"]["contorno_px"], 0)
+        self.assertFalse(text_data["estilo"]["glow"])
+        self.assertFalse(text_data["estilo"]["sombra"])
+
+    def test_ensure_legible_plan_does_not_add_outline_for_white_balloon(self):
+        img = Image.new("RGB", (200, 120), (255, 255, 255))
+        plan = {
+            "target_bbox": [20, 20, 180, 100],
+            "text_color": "#FFFFFF",
+            "outline_color": "",
+            "outline_px": 0,
+            "glow": False,
+            "glow_cor": "",
+            "glow_px": 0,
+            "cor_gradiente": [],
+        }
+
+        adjusted = ensure_legible_plan(img, plan)
+
+        self.assertEqual(adjusted["text_color"], "#111111")
+        self.assertEqual(adjusted["outline_color"], "")
+        self.assertEqual(adjusted["outline_px"], 0)
+
+    def test_font_glyph_lookup_is_cached_per_font_and_character(self):
+        fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
+        font_path = str(fonts_dir / "ComicNeue-Bold.ttf")
+        cache_clear = getattr(_font_has_glyph, "cache_clear", None)
+        if cache_clear:
+            cache_clear()
+
+        with patch("typesetter.renderer._get_ft2_font", wraps=renderer_mod._get_ft2_font) as get_font:
+            self.assertTrue(_font_has_glyph(font_path, "A"))
+            self.assertTrue(_font_has_glyph(font_path, "A"))
+
+        self.assertEqual(get_font.call_count, 1)
+
     def test_render_text_block_anchors_to_text_pixel_bbox_instead_of_balloon_center(self):
         img = Image.new("RGB", (420, 320), (255, 255, 255))
         text_data = {
@@ -90,6 +249,175 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertLess(ry1, ry2)
         self.assertGreaterEqual(rx1, 40)
         self.assertLessEqual(rx2, 380)
+
+    def test_render_text_block_rotates_editor_style_around_target_center(self):
+        def make_text(rotation: int) -> dict:
+            return {
+                "style_origin": "editor",
+                "translated": "ROTATE",
+                "bbox": [40, 40, 220, 140],
+                "balloon_bbox": [40, 40, 220, 140],
+                "tipo": "fala",
+                "estilo": {
+                    "fonte": "ComicNeue-Bold.ttf",
+                    "tamanho": 32,
+                    "cor": "#111111",
+                    "contorno": "",
+                    "contorno_px": 0,
+                    "alinhamento": "center",
+                    "sombra": False,
+                    "glow": False,
+                    "cor_gradiente": [],
+                    "rotacao": rotation,
+                },
+                "layout_shape": "wide",
+                "layout_align": "center",
+            }
+
+        unrotated = Image.new("RGB", (260, 180), (255, 255, 255))
+        rotated = Image.new("RGB", (260, 180), (255, 255, 255))
+        unrotated_text = make_text(0)
+        rotated_text = make_text(25)
+
+        render_text_block(unrotated, unrotated_text)
+        render_text_block(rotated, rotated_text)
+
+        diff = ImageChops.difference(unrotated, rotated)
+        self.assertIsNotNone(diff.getbbox())
+        self.assertIn("render_bbox", rotated_text)
+        rx1, ry1, rx2, ry2 = rotated_text["render_bbox"]
+        self.assertLess(rx1, rx2)
+        self.assertLess(ry1, ry2)
+        self.assertGreaterEqual(rx1, 0)
+        self.assertLessEqual(rx2, rotated.width)
+
+    def test_plan_text_layout_offsets_safe_box_for_horizontal_anchor_bias(self):
+        text_data = {
+            "translated": "ESTE TROVÃO, NO MOMENTO EM QUE A ENERGIA INTERNA ATINGE UM CERTO PONTO",
+            "bbox": [180, 16, 540, 166],
+            "source_bbox": [180, 16, 540, 166],
+            "text_pixel_bbox": [185, 22, 531, 160],
+            "balloon_bbox": [0, 0, 590, 182],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 34,
+                "cor": "#1D1D1D",
+                "contorno": "#FCFCFB",
+                "contorno_px": 4,
+                "alinhamento": "center",
+                "sombra": False,
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "layout_profile": "white_balloon",
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertGreater(plan["horizontal_bias_px"], 0)
+        self.assertGreaterEqual(plan["safe_text_box"][0], 90)
+        self.assertEqual(plan["safe_text_box"][2], 590)
+
+    def test_plan_text_layout_does_not_lock_short_white_balloon_text_to_page_edge(self):
+        text_data = {
+            "translated": "PARE!",
+            "bbox": [6, 744, 184, 830],
+            "source_bbox": [6, 744, 184, 830],
+            "text_pixel_bbox": [6, 744, 184, 830],
+            "balloon_bbox": [0, 730, 690, 860],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 38,
+                "cor": "#1D1D1D",
+                "alinhamento": "center",
+                "cor_gradiente": [],
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "layout_profile": "white_balloon",
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertFalse(plan["_anchor_capacity_locked"])
+        self.assertGreaterEqual(plan["safe_text_box"][0], 20)
+
+    def test_safe_text_path_render_bbox_uses_ink_not_line_cell_for_qa(self):
+        img = Image.new("RGB", (480, 180), (255, 255, 255))
+        text_data = {
+            "translated": "AMBOS DIVIDEM A ENERGIA INTERNA EM YIN E YANG",
+            "bbox": [74, 16, 376, 112],
+            "source_bbox": [74, 16, 376, 112],
+            "text_pixel_bbox": [81, 21, 370, 108],
+            "balloon_bbox": [38, 0, 424, 128],
+            "balloon_type": "white",
+            "tipo": "narracao",
+            "qa_flags": [],
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 25,
+                "cor": "#1B1B1B",
+                "contorno": "#F8F8F8",
+                "contorno_px": 4,
+                "alinhamento": "center",
+                "sombra": False,
+                "glow": False,
+                "cor_gradiente": [],
+            },
+            "layout_shape": "wide",
+            "layout_align": "top",
+            "layout_profile": "top_narration",
+        }
+
+        plan = plan_text_layout(text_data)
+        _render_single_text_block(img, text_data, plan)
+
+        self.assertNotIn("TEXT_CLIPPED", text_data.get("qa_flags", []))
+        self.assertGreaterEqual(text_data["render_bbox"][1], plan["safe_text_box"][1])
+
+    def test_safe_text_path_clamps_anchor_above_balloon_into_safe_box(self):
+        img = Image.new("RGB", (720, 220), (32, 32, 32))
+        text_data = {
+            "translated": "- revolução",
+            "bbox": [604, 16, 707, 45],
+            "source_bbox": [604, 16, 707, 45],
+            "text_pixel_bbox": [603, 2, 708, 41],
+            "balloon_bbox": [582, 4, 720, 57],
+            "balloon_type": "textured",
+            "tipo": "narracao",
+            "qa_flags": [],
+            "estilo": {
+                "fonte": "Newrotic.ttf",
+                "tamanho": 14,
+                "cor": "#FFFFFF",
+                "contorno": "",
+                "contorno_px": 0,
+                "alinhamento": "center",
+                "sombra": True,
+                "sombra_cor": "#000000",
+                "sombra_offset": [2, 2],
+                "glow": False,
+                "cor_gradiente": ["#CCEAFA", "#FDFDFD"],
+                "force_upper": True,
+            },
+            "layout_shape": "wide",
+            "layout_align": "top",
+            "layout_profile": "standard",
+        }
+
+        plan = plan_text_layout(text_data)
+        _render_single_text_block(img, text_data, plan)
+
+        self.assertNotIn("TEXT_CLIPPED", text_data.get("qa_flags", []))
+        self.assertNotIn("TEXT_OVERFLOW", text_data.get("qa_flags", []))
+        self.assertGreaterEqual(text_data["render_bbox"][1], plan["safe_text_box"][1])
+        self.assertGreaterEqual(text_data["render_bbox"][1], plan["target_bbox"][1])
 
     def test_resolve_text_layout_clamps_font_size_for_white_balloon_bounds(self):
         text_data = {
@@ -281,6 +609,41 @@ class TypesettingRendererTests(unittest.TestCase):
         arr = np.array(img)
         self.assertLess(int(arr.min()), 245)
 
+    def test_render_text_block_rejects_single_text_sentinel_connected_metadata(self):
+        img = Image.new("RGB", (500, 320), (255, 255, 255))
+        text_data = {
+            "translated": "NAO CONSIGO... NAO CONSIGO ENCONTRAR O TEXTO ORIGINAL.",
+            "bbox": [60, 70, 440, 250],
+            "balloon_bbox": [60, 70, 440, 250],
+            "balloon_subregions": [[60, 70, 250, 250], [250, 70, 440, 250]],
+            "layout_profile": "connected_balloon",
+            "layout_group_size": 1,
+            "connected_balloon_orientation": "left-right",
+            "connected_group_confidence": 0.28,
+            "connected_detection_confidence": 1.0,
+            "connected_position_confidence": 0.712,
+            "subregion_confidence": 1.0,
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 24,
+                "cor": "#111111",
+                "contorno": "",
+                "contorno_px": 0,
+                "alinhamento": "center",
+                "sombra": False,
+                "glow": False,
+                "cor_gradiente": [],
+            },
+        }
+
+        with patch("typesetter.renderer._render_connected_subregions") as connected_mock:
+            render_text_block(img, text_data)
+
+        connected_mock.assert_not_called()
+        arr = np.array(img)
+        self.assertLess(int(arr.min()), 245)
+
     def test_render_text_block_applies_safe_gradient_fill(self):
         img = Image.new("RGB", (360, 260), (255, 255, 255))
         text_data = {
@@ -312,6 +675,7 @@ class TypesettingRendererTests(unittest.TestCase):
 
     def test_render_text_block_applies_safe_glow(self):
         base_text_data = {
+            "style_origin": "editor",
             "translated": "ATTACKS",
             "bbox": [40, 40, 320, 180],
             "tipo": "fala",

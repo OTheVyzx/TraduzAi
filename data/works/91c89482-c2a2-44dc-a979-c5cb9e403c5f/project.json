@@ -1,0 +1,1012 @@
+{
+  "versao": "2.0",
+  "app": "traduzai",
+  "obra": "The Regressed Mercenary Has a Plan",
+  "capitulo": 1,
+  "idioma_origem": "en",
+  "idioma_destino": "pt",
+  "_ollama_host": "http://localhost:11434",
+  "_ollama_model": "traduzai-translator",
+  "_models_dir": "D:\\TraduzAi\\data\\models",
+  "_vision_worker_path": "D:\\TraduzAi\\vision-worker/target/debug/traduzai-vision.exe",
+  "_work_dir": "D:\\TraduzAi\\data\\works\\91c89482-c2a2-44dc-a979-c5cb9e403c5f",
+  "contexto": {
+    "aliases": [],
+    "faccoes": [],
+    "fontes_usadas": [
+      "corpus:the-regressed-mercenary-has-a-plan"
+    ],
+    "genero": [],
+    "memoria_lexical": {},
+    "personagens": [],
+    "relacoes": [],
+    "resumo_por_arco": [],
+    "sinopse": "Cecil Perdium, the Mercenary King, was killed in battle before he could avenge his family. As he faces death, he learns that Duke Delphine, the man who caused the downfall of his family, didn't work alone. Suddenly waking up as his teenage self, Cecil must work to both overcome his poor reputation and build up his strength to save his family. With their soldiers and knights defecting due to the harsh conditions they must endure, he has his work cut out for him. Can Cecil become the mighty warrior he once was and avert his family's fate?\n<br><br>\n(Source: WEBTOON)",
+    "termos": [],
+    "corpus_slug": "the-regressed-mercenary-has-a-plan",
+    "corpus_visual_benchmark": {
+      "work_slug": "the-regressed-mercenary-has-a-plan",
+      "sampled_pages": 498,
+      "page_geometry": {
+        "median_width": 800,
+        "median_height": 2500,
+        "median_aspect_ratio": 0.32
+      },
+      "luminance_profile": {
+        "light_pages": 18,
+        "mid_pages": 470,
+        "dark_pages": 10,
+        "mean_luminance": 162.93
+      }
+    },
+    "corpus_textual_benchmark": {
+      "work_slug": "the-regressed-mercenary-has-a-plan",
+      "sampled_page_pairs": 24,
+      "ocr_pages_processed": 48,
+      "en_stats": {
+        "pages_processed": 24,
+        "total_regions": 98,
+        "mean_regions_per_page": 4.08,
+        "mean_chars_per_region": 11.87,
+        "text_type_distribution": {
+          "fala": 95,
+          "narracao": 3
+        },
+        "ocr_source_distribution": {
+          "fallback-inverted": 6,
+          "fallback-threshold": 6,
+          "fallback-upscale": 2,
+          "primary": 44,
+          "primary-inverted": 40
+        }
+      },
+      "pt_stats": {
+        "pages_processed": 24,
+        "total_regions": 91,
+        "mean_regions_per_page": 3.79,
+        "mean_chars_per_region": 11.82,
+        "text_type_distribution": {
+          "fala": 89,
+          "sfx": 2
+        },
+        "ocr_source_distribution": {
+          "fallback-inverted": 2,
+          "fallback-threshold": 9,
+          "fallback-upscale": 9,
+          "primary": 31,
+          "primary-inverted": 40
+        }
+      },
+      "paired_text_stats": {
+        "paired_region_count": 57,
+        "mean_translation_length_ratio": 1.18
+      }
+    },
+    "corpus_memory_candidates": [
+      {
+        "source_text": "Actually WORKEDI",
+        "target_text": "REALMENTE Funcionou",
+        "occurrences": 1
+      },
+      {
+        "source_text": "DO YOU THINK",
+        "target_text": "voce ACHA QUE",
+        "occurrences": 1
+      },
+      {
+        "source_text": "DOING As YOU",
+        "target_text": "SUCESSOR",
+        "occurrences": 1
+      },
+      {
+        "source_text": "ONE FOR SURE",
+        "target_text": "CERTEZA E ALGLEM",
+        "occurrences": 1
+      }
+    ],
+    "corpus_memoria_lexical": {
+      "Actually WORKEDI": "REALMENTE Funcionou",
+      "DO YOU THINK": "voce ACHA QUE",
+      "DOING As YOU": "SUCESSOR",
+      "ONE FOR SURE": "CERTEZA E ALGLEM"
+    }
+  },
+  "work_context": {
+    "context_loaded": true,
+    "glossary_entries_count": 0,
+    "glossary_loaded": false,
+    "risk_level": "medium",
+    "selected": true,
+    "title": "The Regressed Mercenary Has a Plan",
+    "user_ignored_warning": true,
+    "work_id": "the-regressed-mercenary-has-a-plan"
+  },
+  "preset": {
+    "description": "Ideal para capitulos coloridos verticais. Traducao natural, fonte maior, revisao de SFX manual.",
+    "id": "manhwa_webtoon_color",
+    "name": "Manhwa/Webtoon colorido",
+    "quality": "alta",
+    "settings": {
+      "balloon_margin": 0.12,
+      "inpaint_mode": "normal",
+      "ocr_cleanup": "normal",
+      "ocr_sensitivity": "high",
+      "qa_mode": "review",
+      "sfx_mode": "preserve",
+      "translation_style": "natural_br",
+      "typesetting_font_scale": 1.08
+    }
+  },
+  "paginas": [
+    {
+      "numero": 1,
+      "image_layers": {
+        "base": {
+          "key": "base",
+          "path": "originals/001.jpg",
+          "visible": true,
+          "locked": true
+        },
+        "mask": {
+          "key": "mask",
+          "path": "layers/mask/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "inpaint": {
+          "key": "inpaint",
+          "path": "images/001.jpg",
+          "visible": false,
+          "locked": true
+        },
+        "brush": {
+          "key": "brush",
+          "path": "layers/brush/001.png",
+          "visible": false,
+          "locked": false
+        },
+        "rendered": {
+          "key": "rendered",
+          "path": "translated/001.jpg",
+          "visible": true,
+          "locked": true
+        }
+      },
+      "inpaint_blocks": [
+        {
+          "bbox": [
+            104,
+            436,
+            441,
+            512
+          ],
+          "confidence": 0.86572265625
+        },
+        {
+          "bbox": [
+            441,
+            1209,
+            710,
+            1319
+          ],
+          "confidence": 0.9091796875
+        },
+        {
+          "bbox": [
+            255,
+            2243,
+            570,
+            2370
+          ],
+          "confidence": 0.8134765625
+        }
+      ],
+      "page_profile": null,
+      "text_layers": [
+        {
+          "text": "IF DESMOND USES THAT POWER..",
+          "bbox": [
+            104,
+            436,
+            441,
+            512
+          ],
+          "confidence": 0.866,
+          "tipo": "narracao",
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 30,
+            "cor": "#0D0D0D",
+            "cor_gradiente": [],
+            "contorno": "#F1F1F1",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#D8D9D9",
+            "glow_px": 2,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                113,
+                442
+              ],
+              [
+                439,
+                442
+              ],
+              [
+                439,
+                468
+              ],
+              [
+                113,
+                468
+              ]
+            ],
+            [
+              [
+                152,
+                485
+              ],
+              [
+                397,
+                485
+              ],
+              [
+                397,
+                509
+              ],
+              [
+                152,
+                509
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            113,
+            442,
+            439,
+            509
+          ],
+          "balloon_type": "white",
+          "page_profile": "standard",
+          "block_profile": "top_narration",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            104,
+            436,
+            441,
+            512
+          ],
+          "layout_shape": "wide",
+          "layout_align": "top",
+          "layout_profile": "top_narration",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            104,
+            16,
+            441,
+            92
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "IF DESMOND USES THAT POWER..",
+          "normalized_ocr": "IF DESMOND USES THAT POWER..",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "IF DESMOND USES THAT POWER..",
+          "translated": "SE DESMOND USAR ESSE PODER...",
+          "reading_order": 0,
+          "group_id": "g001",
+          "grouping_status": "separated"
+        },
+        {
+          "text": "GHISLAIN WILL DEFINITELY STRUGGLE",
+          "bbox": [
+            441,
+            1209,
+            710,
+            1319
+          ],
+          "confidence": 0.909,
+          "tipo": "fala",
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#0E0E0E",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFC",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              -2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                502,
+                1213
+              ],
+              [
+                646,
+                1213
+              ],
+              [
+                646,
+                1240
+              ],
+              [
+                502,
+                1240
+              ]
+            ],
+            [
+              [
+                445,
+                1252
+              ],
+              [
+                704,
+                1252
+              ],
+              [
+                704,
+                1277
+              ],
+              [
+                445,
+                1277
+              ]
+            ],
+            [
+              [
+                477,
+                1290
+              ],
+              [
+                662,
+                1287
+              ],
+              [
+                662,
+                1314
+              ],
+              [
+                477,
+                1316
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            445,
+            1213,
+            704,
+            1316
+          ],
+          "balloon_type": "white",
+          "page_profile": "standard",
+          "block_profile": "white_balloon",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            441,
+            1209,
+            710,
+            1319
+          ],
+          "layout_shape": "wide",
+          "layout_align": "center",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            441,
+            16,
+            710,
+            126
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "GHISLAIN WILL DEFINITELY STRUGGLE",
+          "normalized_ocr": "GHISLAIN WILL DEFINITELY STRUGGLE",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "GHISLAIN WILL DEFINITELY STRUGGLE",
+          "translated": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+          "reading_order": 1,
+          "group_id": "g002",
+          "grouping_status": "separated"
+        },
+        {
+          "text": "THERE'S STILL ONE THING THAT BOTHERS ME",
+          "bbox": [
+            255,
+            2243,
+            570,
+            2370
+          ],
+          "confidence": 0.813,
+          "tipo": "fala",
+          "estilo": {
+            "fonte": "Newrotic.ttf",
+            "tamanho": 27,
+            "cor": "#FFFFFF",
+            "cor_gradiente": [],
+            "contorno": "#FAFAFA",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "ocr_source": "vision-paddleocr",
+          "ocr_reviewed": false,
+          "ocr_profile": "max",
+          "ocr_semantic_reviewed": false,
+          "ocr_mode": "paddleocr",
+          "skip_processing": false,
+          "line_polygons": [
+            [
+              [
+                265,
+                2251
+              ],
+              [
+                528,
+                2251
+              ],
+              [
+                528,
+                2278
+              ],
+              [
+                265,
+                2278
+              ]
+            ],
+            [
+              [
+                250,
+                2293
+              ],
+              [
+                563,
+                2293
+              ],
+              [
+                563,
+                2322
+              ],
+              [
+                250,
+                2322
+              ]
+            ],
+            [
+              [
+                265,
+                2337
+              ],
+              [
+                524,
+                2337
+              ],
+              [
+                524,
+                2364
+              ],
+              [
+                265,
+                2364
+              ]
+            ]
+          ],
+          "text_pixel_bbox": [
+            250,
+            2251,
+            563,
+            2364
+          ],
+          "balloon_type": "textured",
+          "page_profile": "standard",
+          "block_profile": "standard",
+          "qa_flags": [],
+          "ocr_context_reviewed": false,
+          "balloon_bbox": [
+            255,
+            2243,
+            570,
+            2370
+          ],
+          "layout_shape": "wide",
+          "layout_align": "center",
+          "layout_profile": "standard",
+          "layout_group_size": 1,
+          "ocr_text_bbox": [
+            255,
+            16,
+            570,
+            143
+          ],
+          "connected_text_groups": [],
+          "connected_lobe_bboxes": [],
+          "connected_lobe_polygons": [],
+          "connected_position_bboxes": [],
+          "connected_detection_confidence": 0.0,
+          "connected_group_confidence": 0.0,
+          "connected_position_confidence": 0.0,
+          "balloon_subregions": [],
+          "connected_balloon_orientation": "",
+          "connected_focus_bboxes": [],
+          "connected_position_reasoner": "heuristic",
+          "connected_reasoner_model": "",
+          "connected_reasoner_notes": "",
+          "subregion_confidence": 0.0,
+          "raw_ocr": "THERE'S STILL ONE THING THAT BOTHERS ME",
+          "normalized_ocr": "THERE'S STILL ONE THING THAT BOTHERS ME",
+          "normalization": {
+            "changed": false,
+            "corrections": [],
+            "is_gibberish": false
+          },
+          "entity_flags": [],
+          "entity_repairs": [],
+          "glossary_hits": [],
+          "original": "THERE'S STILL ONE THING THAT BOTHERS ME",
+          "translated": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+          "reading_order": 2,
+          "group_id": "g003",
+          "grouping_status": "separated"
+        }
+      ],
+      "arquivo_original": "originals/001.jpg",
+      "arquivo_traduzido": "translated/001.jpg",
+      "textos": [
+        {
+          "id": null,
+          "bbox": [
+            104,
+            436,
+            441,
+            512
+          ],
+          "tipo": "narracao",
+          "original": "IF DESMOND USES THAT POWER..",
+          "translated": "SE DESMOND USAR ESSE PODER...",
+          "traduzido": "SE DESMOND USAR ESSE PODER...",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            104,
+            436,
+            441,
+            512
+          ],
+          "text_pixel_bbox": [
+            113,
+            442,
+            439,
+            509
+          ],
+          "line_polygons": [
+            [
+              [
+                113,
+                442
+              ],
+              [
+                439,
+                442
+              ],
+              [
+                439,
+                468
+              ],
+              [
+                113,
+                468
+              ]
+            ],
+            [
+              [
+                152,
+                485
+              ],
+              [
+                397,
+                485
+              ],
+              [
+                397,
+                509
+              ],
+              [
+                152,
+                509
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 30,
+            "cor": "#0D0D0D",
+            "cor_gradiente": [],
+            "contorno": "#F1F1F1",
+            "contorno_px": 4,
+            "glow": true,
+            "glow_cor": "#D8D9D9",
+            "glow_px": 2,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            104,
+            436,
+            441,
+            512
+          ],
+          "balloon_type": "white",
+          "layout_profile": "top_narration",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        },
+        {
+          "id": null,
+          "bbox": [
+            441,
+            1209,
+            710,
+            1319
+          ],
+          "tipo": "fala",
+          "original": "GHISLAIN WILL DEFINITELY STRUGGLE",
+          "translated": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+          "traduzido": "GHISLAIN DEFINITIVAMENTE TERÁ DIFICULDADES",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            441,
+            1209,
+            710,
+            1319
+          ],
+          "text_pixel_bbox": [
+            445,
+            1213,
+            704,
+            1316
+          ],
+          "line_polygons": [
+            [
+              [
+                502,
+                1213
+              ],
+              [
+                646,
+                1213
+              ],
+              [
+                646,
+                1240
+              ],
+              [
+                502,
+                1240
+              ]
+            ],
+            [
+              [
+                445,
+                1252
+              ],
+              [
+                704,
+                1252
+              ],
+              [
+                704,
+                1277
+              ],
+              [
+                445,
+                1277
+              ]
+            ],
+            [
+              [
+                477,
+                1290
+              ],
+              [
+                662,
+                1287
+              ],
+              [
+                662,
+                1314
+              ],
+              [
+                477,
+                1316
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 25,
+            "cor": "#0E0E0E",
+            "cor_gradiente": [],
+            "contorno": "#FCFCFC",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": true,
+            "sombra_cor": "#000000",
+            "sombra_offset": [
+              -2,
+              2
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            441,
+            1209,
+            710,
+            1319
+          ],
+          "balloon_type": "white",
+          "layout_profile": "white_balloon",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        },
+        {
+          "id": null,
+          "bbox": [
+            255,
+            2243,
+            570,
+            2370
+          ],
+          "tipo": "fala",
+          "original": "THERE'S STILL ONE THING THAT BOTHERS ME",
+          "translated": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+          "traduzido": "AINDA HÁ UMA COISA QUE ME INCOMODA",
+          "confianca_ocr": 0.0,
+          "ocr_confidence": 0.0,
+          "ocr_source": "vision-paddleocr",
+          "source_bbox": [
+            255,
+            2243,
+            570,
+            2370
+          ],
+          "text_pixel_bbox": [
+            250,
+            2251,
+            563,
+            2364
+          ],
+          "line_polygons": [
+            [
+              [
+                265,
+                2251
+              ],
+              [
+                528,
+                2251
+              ],
+              [
+                528,
+                2278
+              ],
+              [
+                265,
+                2278
+              ]
+            ],
+            [
+              [
+                250,
+                2293
+              ],
+              [
+                563,
+                2293
+              ],
+              [
+                563,
+                2322
+              ],
+              [
+                250,
+                2322
+              ]
+            ],
+            [
+              [
+                265,
+                2337
+              ],
+              [
+                524,
+                2337
+              ],
+              [
+                524,
+                2364
+              ],
+              [
+                265,
+                2364
+              ]
+            ]
+          ],
+          "estilo": {
+            "fonte": "Newrotic.ttf",
+            "tamanho": 27,
+            "cor": "#FFFFFF",
+            "cor_gradiente": [],
+            "contorno": "#FAFAFA",
+            "contorno_px": 4,
+            "glow": false,
+            "glow_cor": "",
+            "glow_px": 0,
+            "sombra": false,
+            "sombra_cor": "",
+            "sombra_offset": [
+              0,
+              0
+            ],
+            "bold": true,
+            "italico": false,
+            "rotacao": 0,
+            "alinhamento": "center",
+            "force_upper": true
+          },
+          "qa_flags": [],
+          "balloon_bbox": [
+            255,
+            2243,
+            570,
+            2370
+          ],
+          "balloon_type": "textured",
+          "layout_profile": "standard",
+          "layout_group_size": 1,
+          "skip_processing": false,
+          "balloon_subregions": []
+        }
+      ]
+    }
+  ],
+  "estatisticas": {
+    "total_paginas": 1,
+    "total_textos": 3,
+    "tempo_processamento_seg": 51.2,
+    "data_criacao": "2026-05-03T20:19:17Z"
+  },
+  "qa": {
+    "summary": {
+      "flags": [],
+      "counts": {},
+      "highest_severity": "none",
+      "critical_count": 0,
+      "total": 0
+    }
+  },
+  "log": {
+    "structured_log_path": "D:\\TraduzAi\\data\\logs\\91c89482-c2a2-44dc-a979-c5cb9e403c5f\\structured_log.jsonl",
+    "summary": {
+      "actual_pages": 1,
+      "processed_pages": 1,
+      "translated_regions": 3,
+      "qa_flags": 0,
+      "critical_flags": 0,
+      "glossary_hits": 0,
+      "entity_flags": 0,
+      "export_status": "clean"
+    }
+  }
+}
