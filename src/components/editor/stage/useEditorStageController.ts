@@ -984,16 +984,6 @@ export function useEditorStageController() {
           ? "none"
           : "default";
 
-  const pageTurn = null as null | {
-    direction: number;
-    progress: number;
-    targetPageNumber: number;
-    lowRes?: boolean;
-    committing?: boolean;
-    previewSrc?: string | null;
-    currentOffsetY?: number;
-  };
-
   return {
     containerRef,
     containerSize,
@@ -1006,7 +996,6 @@ export function useEditorStageController() {
     brushSize,
     zoom,
     panOffset,
-    pageTurn,
     panSession,
     viewportCursor,
     renderPreviewState,
