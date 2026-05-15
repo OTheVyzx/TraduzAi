@@ -31,7 +31,7 @@ export type WorkSearchResult = {
 export type PresetOption = {
   id: string;
   label: string;
-  quality: "rapida" | "normal" | "alta";
+  quality: "normal" | "ultra";
   description: string;
 };
 

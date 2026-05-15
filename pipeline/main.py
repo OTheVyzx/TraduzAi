@@ -25,6 +25,7 @@ if str(pipeline_root) not in sys.path:
 # Lazy imports are moved inside functions to allow fast --hardware-info and --list-supported-languages calls
 
 from utils.decision_log import configure_decision_trace, finalize_decision_trace
+from engines.registry import normalize_pipeline_quality, resolve_engines
 from typesetter.style_policy import normalize_auto_typesetting_style
 from layout.simple_text_geometry import resolve_text_anchor_bbox, sanitize_simple_text_geometry
 
@@ -439,12 +440,15 @@ def _run_mock_pipeline_runner(config: dict) -> int:
             }
         )
 
+    pipeline_quality = normalize_pipeline_quality(config)
     project = {
         "obra": config.get("obra", ""),
         "capitulo": 1,
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
-        "qualidade": "normal",
+        "qualidade": pipeline_quality,
+        "pipeline_quality": pipeline_quality,
+        "engine_summary": {"quality": pipeline_quality},
         "contexto": {},
         "paginas": pages,
         "estatisticas": {"total_paginas": len(pages), "total_textos": sum(len(p["text_layers"]) for p in pages)},
@@ -466,6 +470,7 @@ def _run_pipeline_runner_cli(config: dict) -> int:
 
     work_dir = Path(config["work_dir"])
     work_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_quality = normalize_pipeline_quality(config)
     runtime_config = {
         "source_path": config["source_path"],
         "work_dir": str(work_dir),
@@ -474,6 +479,8 @@ def _run_pipeline_runner_cli(config: dict) -> int:
         "capitulo": 1,
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "qualidade": pipeline_quality,
+        "pipeline_quality": pipeline_quality,
         "mode": "manual" if config.get("skip_ocr") else "auto",
         "debug": config.get("debug", False),
         "skip_inpaint": config.get("skip_inpaint", False),
@@ -705,6 +712,11 @@ def _run_pipeline(config_path: str):
     start_time = time.time()
     with pipeline_timing.measure("load_config"):
         config = _load_json_file(config_path)
+    with pipeline_timing.measure("normalize_pipeline_quality"):
+        pipeline_quality = normalize_pipeline_quality(config)
+        config["qualidade"] = pipeline_quality
+        config["pipeline_quality"] = pipeline_quality
+        config.setdefault("engine_summary", {"quality": pipeline_quality})
     with pipeline_timing.measure("apply_runtime_profile"):
         runtime_profile_decision = _apply_runtime_profile_config(config)
 
@@ -791,11 +803,14 @@ def _run_pipeline(config_path: str):
         import cv2
         from strip.run import run_chapter
         from vision_stack.runtime import warmup_visual_stack as _warmup_visual_stack
-        from vision_stack.runtime import _get_detector, run_ocr_stage
+        from vision_stack.runtime import run_ocr_stage
         from translator import translate as translator_mod
-        from inpainter import inpaint_band_image
         from typesetter import renderer as typesetter_mod
         from translator.context import fetch_context, merge_context
+
+        with pipeline_timing.measure("resolve_engines"):
+            engines = resolve_engines(config)
+            config["engine_summary"] = engines.summary()
 
         # Start AniList context fetch in parallel
         _context_future = None
@@ -817,7 +832,7 @@ def _run_pipeline(config_path: str):
             with pipeline_timing.measure("visual_stack_warmup"):
                 _warmup_visual_stack(
                     str(models_dir),
-                    "max",
+                    engines.ocr_profile,
                     run_sample=False,
                     lang=config.get("idioma_origem", "en"),
                 )
@@ -840,14 +855,157 @@ def _run_pipeline(config_path: str):
         connected_reasoner_config = _build_connected_reasoner_config(config)
 
         class StripDetector:
+            def __init__(self, detector_engine):
+                self.detector_engine = detector_engine
+
             def detect(self, img, conf_threshold=None):
-                from vision_stack.runtime import _profile_to_detection_threshold
-                thresh = conf_threshold if conf_threshold is not None else _profile_to_detection_threshold("max")
-                return _get_detector("max").detect(img, conf_threshold=thresh)
+                return self.detector_engine.detect(img, conf_threshold=conf_threshold)
                 
         class StripRuntime:
+            def __init__(self, engine_bundle):
+                self.engines = engine_bundle
+
             def run_ocr_stage(self, img, page_dict):
-                return run_ocr_stage(img, page_dict, profile="max", idioma_origem=config.get("idioma_origem", "en"))
+                page_result = run_ocr_stage(
+                    img,
+                    page_dict,
+                    profile=self.engines.ocr_profile,
+                    idioma_origem=config.get("idioma_origem", "en"),
+                )
+                page_result = self._apply_text_refiner(img, page_result)
+                return self._apply_mask_engine(img, page_result)
+
+            def _apply_text_refiner(self, img, page_result):
+                refiner = getattr(self.engines, "text_refiner", None)
+                refiner_name = str(getattr(self.engines, "text_refiner_name", "") or getattr(refiner, "name", ""))
+                if refiner is None or refiner_name == "legacy_ocr_stage":
+                    return page_result
+
+                source_blocks = list(page_result.get("_vision_blocks") or [])
+                if not source_blocks:
+                    return page_result
+
+                blocks = []
+                for block in source_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    bbox = block.get("bbox")
+                    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                        continue
+                    try:
+                        blocks.append(
+                            SimpleNamespace(
+                                xyxy=tuple(int(round(float(v))) for v in bbox),
+                                confidence=float(block.get("confidence", 1.0) or 0.0),
+                                line_polygons=block.get("line_polygons"),
+                            )
+                        )
+                    except Exception:
+                        continue
+                if not blocks:
+                    return page_result
+
+                started = time.perf_counter()
+                try:
+                    refined = refiner.refine(img, blocks, quality=self.engines.quality)
+                except Exception as exc:
+                    logger.warning("Text refiner %s falhou; mantendo OCR legado: %s", refiner_name, exc)
+                    stats = dict(page_result.get("_ocr_stats") or {})
+                    stats["text_refiner"] = refiner_name
+                    stats["text_refiner_failed"] = True
+                    stats["text_refine_time_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+                    page_result["_ocr_stats"] = stats
+                    return page_result
+
+                if not isinstance(refined, list):
+                    return page_result
+
+                updated_texts = 0
+                texts = [dict(text) if isinstance(text, dict) else text for text in list(page_result.get("texts") or [])]
+                for index, text in enumerate(texts):
+                    if index >= len(refined) or not isinstance(text, dict) or not isinstance(refined[index], dict):
+                        continue
+                    record = refined[index]
+                    for key in ("source_bbox", "line_polygons", "text_pixel_bbox"):
+                        value = record.get(key)
+                        if value:
+                            text[key] = value
+                    text["text_refiner"] = refiner_name
+                    updated_texts += 1
+                if texts:
+                    page_result["texts"] = texts
+
+                updated_blocks = []
+                for index, block in enumerate(source_blocks):
+                    if isinstance(block, dict):
+                        next_block = dict(block)
+                        if index < len(refined) and isinstance(refined[index], dict):
+                            record = refined[index]
+                            for key in ("source_bbox", "line_polygons", "text_pixel_bbox"):
+                                value = record.get(key)
+                                if value:
+                                    next_block[key] = value
+                            next_block["text_refiner"] = refiner_name
+                        updated_blocks.append(next_block)
+                    else:
+                        updated_blocks.append(block)
+                page_result["_vision_blocks"] = updated_blocks
+
+                stats = dict(page_result.get("_ocr_stats") or {})
+                stats["text_refiner"] = refiner_name
+                stats["text_refiner_items"] = len(refined)
+                stats["text_refiner_updated_texts"] = updated_texts
+                stats["text_refine_time_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+                page_result["_ocr_stats"] = stats
+                return page_result
+
+            def _apply_mask_engine(self, img, page_result):
+                mask_engine = getattr(self.engines, "mask_engine", None)
+                mask_name = str(getattr(self.engines, "mask_name", "") or getattr(mask_engine, "name", ""))
+                if mask_engine is None or mask_name == "legacy_vision_blocks":
+                    return page_result
+                if not hasattr(mask_engine, "build_mask"):
+                    return page_result
+
+                source_blocks = [block for block in list(page_result.get("_vision_blocks") or []) if isinstance(block, dict)]
+                if not source_blocks:
+                    return page_result
+                started = time.perf_counter()
+                try:
+                    result = mask_engine.build_mask(img, source_blocks, quality=self.engines.quality)
+                except Exception as exc:
+                    logger.warning("Mask engine %s falhou; mantendo mascaras legadas: %s", mask_name, exc)
+                    stats = dict(page_result.get("_ocr_stats") or {})
+                    stats["mask_engine"] = mask_name
+                    stats["mask_engine_failed"] = True
+                    stats["mask_time_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+                    page_result["_ocr_stats"] = stats
+                    return page_result
+
+                entries = list(getattr(result, "entries", []) or [])
+                if entries:
+                    page_result["_vision_blocks"] = entries
+                    texts = [dict(text) if isinstance(text, dict) else text for text in list(page_result.get("texts") or [])]
+                    for index, text in enumerate(texts):
+                        if index >= len(entries) or not isinstance(text, dict) or not isinstance(entries[index], dict):
+                            continue
+                        for key in ("mask_bbox", "mask_source", "mask_confidence", "mask_pixels"):
+                            value = entries[index].get(key)
+                            if value is not None and value != [] and value != "":
+                                text[key] = value
+                        text["quality_mode"] = self.engines.quality
+                    if texts:
+                        page_result["texts"] = texts
+
+                stats = dict(page_result.get("_ocr_stats") or {})
+                mask_stats = dict(getattr(result, "stats", {}) or {})
+                stats["mask_engine"] = mask_name
+                stats["smart_mask_built"] = int(mask_stats.get("built", 0) or 0)
+                stats["smart_mask_failed"] = int(mask_stats.get("failed", 0) or 0)
+                stats["smart_mask_pixels"] = int(mask_stats.get("pixels", 0) or 0)
+                stats["mask_time_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+                page_result["_ocr_stats"] = stats
+                return page_result
 
             def run_koharu_cjk_page(self, img, image_path):
                 from vision_stack.runtime import _run_koharu_cjk_http_detect_ocr
@@ -856,7 +1014,7 @@ def _run_pipeline(config_path: str):
                     image_rgb=img,
                     image_label=str(image_path),
                     models_dir=str(models_dir),
-                    profile="max",
+                    profile=self.engines.ocr_profile,
                     idioma_origem=config.get("idioma_origem", "en"),
                 )
 
@@ -879,7 +1037,7 @@ def _run_pipeline(config_path: str):
                             jobs,
                             vision_worker_path=worker_path,
                             models_dir=resolved_models_dir,
-                            profile="max",
+                            profile=self.engines.ocr_profile,
                             idioma_origem=resolved_idioma,
                         )
                     except Exception as exc:
@@ -890,7 +1048,7 @@ def _run_pipeline(config_path: str):
                 return _run_koharu_cjk_http_detect_ocr_batch(
                     jobs,
                     models_dir=resolved_models_dir,
-                    profile="max",
+                    profile=self.engines.ocr_profile,
                     idioma_origem=resolved_idioma,
                 )
         
@@ -913,10 +1071,10 @@ def _run_pipeline(config_path: str):
             output_pages = run_chapter(
                 image_files=image_files,
                 output_dir=translated_dir,
-                detector=StripDetector(),
-                runtime=StripRuntime(),
+                detector=StripDetector(engines.detector),
+                runtime=StripRuntime(engines),
                 translator=translator_mod,
-                inpainter=SimpleNamespace(inpaint_band_image=inpaint_band_image),
+                inpainter=engines.inpaint_engine,
                 typesetter=typesetter_mod,
                 target_count=_resolve_strip_target_pages(config, total_pages),
                 progress_callback=progress_cb,
@@ -1836,6 +1994,12 @@ def _project_inpaint_block_from_vision_block(block: dict) -> dict | None:
         "tipo",
         "font_size_px",
         "font_size",
+        "mask_bbox",
+        "mask_source",
+        "mask_confidence",
+        "mask_pixels",
+        "text_refiner",
+        "detector",
     ):
         value = block.get(key)
         if value is not None and value != [] and value != "":
@@ -2542,6 +2706,9 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "capitulo": config.get("capitulo", 1),
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "qualidade": normalize_pipeline_quality(config),
+        "pipeline_quality": normalize_pipeline_quality(config),
+        "engine_summary": config.get("engine_summary") or {"quality": normalize_pipeline_quality(config)},
         "_ollama_host": config.get("ollama_host"),
         "_ollama_model": config.get("ollama_model"),
         "_models_dir": config.get("models_dir"),

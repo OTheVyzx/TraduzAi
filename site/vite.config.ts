@@ -1,8 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import prerender from "vite-plugin-prerender";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+
+const require = createRequire(import.meta.url);
+const prerenderModule = require("vite-plugin-prerender");
+const prerender = prerenderModule.default ?? prerenderModule;
 
 const siteRoot = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(siteRoot, "..");

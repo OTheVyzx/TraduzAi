@@ -89,8 +89,8 @@ def presets(_: User = Depends(current_user)):
     return {
         "presets": [
             {"id": "scan-clean", "label": "Padrão limpo", "quality": "normal", "description": "Equilibrado para mangá e manhwa."},
-            {"id": "fast-review", "label": "Rápido para revisão", "quality": "rapida", "description": "Mais leve para conferir no editor."},
-            {"id": "high-detail", "label": "Alta qualidade", "quality": "alta", "description": "Mais conservador para arte detalhada."},
+            {"id": "fast-review", "label": "Normal para revisão", "quality": "normal", "description": "Mais leve para conferir no editor."},
+            {"id": "high-detail", "label": "Ultra", "quality": "ultra", "description": "Mais conservador para arte detalhada."},
         ]
     }
 

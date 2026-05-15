@@ -1,0 +1,40 @@
+{
+  "detection.comic_layout_rtdetr": {
+    "path": "huggingface/models--ogkalu--comic-text-and-bubble-detector/snapshots/<revision>/model.safetensors",
+    "onnx_path": "detection/comic_layout_rtdetr/model.onnx",
+    "labels_path": "detection/comic_layout_rtdetr/labels.json",
+    "license": "apache-2.0",
+    "source": "huggingface:ogkalu/comic-text-and-bubble-detector",
+    "enabled": false,
+    "optional": true
+  },
+  "text_refiner.ppocrv5_server_det": {
+    "path": "text_refiner/ppocrv5_server_det",
+    "license": "apache-2.0",
+    "source": "PaddleOCR PP-OCRv5_server_det",
+    "enabled": false,
+    "optional": true
+  },
+  "text_refiner.ppocrv5_mobile_det": {
+    "path": "text_refiner/ppocrv5_mobile_det",
+    "license": "apache-2.0",
+    "source": "PaddleOCR PP-OCRv5_mobile_det",
+    "enabled": false,
+    "optional": true
+  },
+  "inpaint.lama_onnx": {
+    "path": "lama-manga-dynamic.onnx",
+    "fallback_path": "lama_manga_onnx/lama-manga.onnx",
+    "license": "apache-2.0",
+    "source": "LaMa ONNX",
+    "enabled": false,
+    "optional": true
+  },
+  "inpaint.aot_gan": {
+    "path": "inpaint/aot_gan/model.onnx",
+    "license": "apache-2.0",
+    "source": "AOT-GAN",
+    "enabled": false,
+    "optional": true
+  }
+}

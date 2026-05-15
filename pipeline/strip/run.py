@@ -155,7 +155,7 @@ def _shift_polygons_y(polygons, delta_y: int):
 def _shift_text_geometry_y(text: dict, delta_y: int) -> dict:
     shifted = dict(text)
 
-    for key in ("bbox", "source_bbox", "balloon_bbox", "text_pixel_bbox"):
+    for key in ("bbox", "source_bbox", "balloon_bbox", "text_pixel_bbox", "mask_bbox"):
         bbox = _shift_bbox_y(shifted.get(key), delta_y)
         if bbox is not None:
             shifted[key] = bbox

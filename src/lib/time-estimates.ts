@@ -4,6 +4,7 @@ import type {
   ProjectQuality,
   SystemProfile,
 } from "./stores/appStore";
+import { formatPipelineQualityLabel, normalizePipelineQuality } from "./pipelineQuality";
 
 export function formatDuration(seconds: number): string {
   const safeSeconds = Math.max(0, Math.round(seconds));
@@ -32,10 +33,8 @@ export function formatEtaClock(secondsFromNow: number): string {
   }).format(target);
 }
 
-export function formatQualityLabel(quality: ProjectQuality): string {
-  if (quality === "rapida") return "Rapida";
-  if (quality === "alta") return "Alta";
-  return "Normal";
+export function formatQualityLabel(quality: ProjectQuality | string): string {
+  return formatPipelineQualityLabel(quality);
 }
 
 export function formatTierLabel(tier: PerformanceTier): string {
@@ -62,18 +61,21 @@ export function buildHardwareSummary(profile: SystemProfile | null): string {
 export function buildPipelineTimeEstimate(
   profile: SystemProfile | null,
   totalPages: number,
-  quality: ProjectQuality
+  quality: ProjectQuality | string
 ): PipelineTimeEstimate | null {
   if (!profile || totalPages <= 0) {
     return null;
   }
 
-  const secondsPerPage = profile.seconds_per_page[quality];
+  const normalizedQuality = normalizePipelineQuality(quality);
+  const secondsPerPage =
+    profile.seconds_per_page[normalizedQuality] ??
+    profile.seconds_per_page.normal;
   const totalSeconds = profile.startup_seconds + secondsPerPage * totalPages;
 
   return {
     total_pages: totalPages,
-    quality,
+    quality: normalizedQuality,
     total_seconds: Math.round(totalSeconds),
     seconds_per_page: secondsPerPage,
     startup_seconds: profile.startup_seconds,

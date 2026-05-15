@@ -137,6 +137,36 @@ export const httpEditorBackend: EditorBackendApi = {
     return assetPathToUrl(id, response.asset_path) ?? response.url;
   },
 
+  async writeHealingMask(config) {
+    const id = projectId(config);
+    const response = await editorApi.writeMaskFromPng(id, config.page_index, {
+      png_data: config.png_data,
+      op: "replace",
+      dirty_bbox: config.bbox,
+    });
+    return assetPathToUrl(id, response.asset_path) ?? response.url;
+  },
+
+  async healInpaintRegion(config) {
+    const id = projectId(config);
+    await editorApi.runPageAction(id, config.page_index, {
+      action: "inpaint",
+      region: {
+        bbox: config.bbox,
+        mask_path: config.mask_path,
+      },
+    });
+    const payload = await editorApi.loadEditorPage(id, config.page_index);
+    const page = normalizeWebPage(id, payload.page, payload.page_index);
+    const inpaintPath = page.image_layers?.inpaint?.path ?? page.arquivo_traduzido;
+    return {
+      page_index: config.page_index,
+      inpaint_path: inpaintPath,
+      before_inpaint_path: null,
+      bbox: config.bbox,
+    };
+  },
+
   async renderPreviewPage(args) {
     const id = projectId(args);
     const response = await projectApi.renderPreview(id, args.page_index);

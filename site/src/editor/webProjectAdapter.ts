@@ -1,5 +1,6 @@
 import type { ImageLayerKey, PageData, Project, TextEntry, TextLayerStyle } from "../../../src/lib/stores/appStore";
 import { DEFAULT_TEXT_STYLE, canonicalizeTextStyle } from "../../../src/lib/editorTextStylePolicy";
+import { normalizeWebProjectQuality } from "../projectConfig";
 
 export const WEB_PROJECT_PATH_PREFIX = "web-project:";
 
@@ -172,7 +173,7 @@ export function normalizeWebProject(projectId: string, project: unknown): Projec
     capitulo: Number(raw.capitulo ?? 1),
     idioma_origem: String(raw.idioma_origem ?? raw.src_lang ?? "auto"),
     idioma_destino: String(raw.idioma_destino ?? raw.dst_lang ?? "pt-BR"),
-    qualidade: (raw.qualidade ?? "normal") as Project["qualidade"],
+    qualidade: normalizeWebProjectQuality(raw.pipeline_quality ?? raw.qualidade),
     contexto: isRecord(raw.contexto)
       ? raw.contexto as Project["contexto"]
       : {
@@ -222,6 +223,9 @@ function denormalizePage(projectId: string, page: PageData): PageData {
 
 export function denormalizeWebProject(projectId: string, project: unknown) {
   const raw = isRecord(project) ? { ...project } : {};
+  const pipelineQuality = normalizeWebProjectQuality(raw.pipeline_quality ?? raw.qualidade);
+  raw.qualidade = pipelineQuality;
+  raw.pipeline_quality = pipelineQuality;
   raw.paginas = (Array.isArray(raw.paginas) ? raw.paginas : []).map((page: PageData) =>
     denormalizePage(projectId, page),
   );

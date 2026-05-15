@@ -183,6 +183,7 @@ def test_run_fast_page_job_merges_project_config_into_request(tmp_path: Path):
             "contexto": {"sinopse": "ctx"},
             "idioma_origem": "ko",
             "idioma_destino": "pt",
+            "qualidade": "alta",
             "runtime_profile": "balanced",
         },
     }
@@ -208,4 +209,6 @@ def test_run_fast_page_job_merges_project_config_into_request(tmp_path: Path):
     assert request["contexto"] == {"sinopse": "ctx"}
     assert request["idioma_origem"] == "ko"
     assert request["idioma_destino"] == "pt"
+    assert request["qualidade"] == "ultra"
+    assert request["pipeline_quality"] == "ultra"
     assert request["runtime_profile"] == "balanced"

@@ -25,7 +25,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     id: "manhwa_webtoon_color",
     name: "Manhwa/Webtoon colorido",
     description: "Ideal para capitulos coloridos verticais. Traducao natural, fonte maior, revisao de SFX manual.",
-    quality: "alta",
+    quality: "ultra",
     settings: {
       ocr_sensitivity: "high",
       ocr_cleanup: "normal",
@@ -41,7 +41,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     id: "manga_bw",
     name: "Manga preto e branco",
     description: "Melhor para paginas P&B, com inpaint conservador e texto mais compacto.",
-    quality: "alta",
+    quality: "ultra",
     settings: {
       ocr_sensitivity: "normal",
       ocr_cleanup: "strong",
@@ -57,7 +57,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     id: "manhua_color",
     name: "Manhua colorido",
     description: "Para obras coloridas com termos de cultivo, nomes e faccoes recorrentes.",
-    quality: "alta",
+    quality: "ultra",
     settings: {
       ocr_sensitivity: "high",
       ocr_cleanup: "normal",
@@ -73,7 +73,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     id: "small_balloons",
     name: "Baloes pequenos",
     description: "Reduz tamanho de fonte, aumenta rigor de QA e evita texto apertado.",
-    quality: "alta",
+    quality: "ultra",
     settings: {
       ocr_sensitivity: "high",
       ocr_cleanup: "strong",
@@ -89,7 +89,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     id: "scanlation_clean",
     name: "Scanlation clean",
     description: "Foco em limpeza visual, revisao estrita e export com menos tolerancia a falhas.",
-    quality: "alta",
+    quality: "ultra",
     settings: {
       ocr_sensitivity: "normal",
       ocr_cleanup: "strong",
