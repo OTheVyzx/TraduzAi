@@ -120,10 +120,23 @@ def _detach_work_dir_log_handler() -> None:
 
 
 def _select_local_venv_python(current_executable: str, script_root: Path) -> Path | None:
-    candidates = [
-        script_root / "venv" / "Scripts" / "python.exe",
-        script_root / "venv" / "bin" / "python3",
-    ]
+    override_python = os.environ.get("TRADUZAI_PYTHON") or os.environ.get("TRADUZAI_PIPELINE_PYTHON")
+    candidates: list[Path] = [Path(override_python)] if override_python else []
+    candidates.extend(
+        [
+            script_root / "venv" / "Scripts" / "python.exe",
+            script_root / "venv" / "bin" / "python3",
+        ]
+    )
+    for base in list(script_root.parents[:3]):
+        candidates.extend(
+            [
+                base / "pipeline" / "venv" / "Scripts" / "python.exe",
+                base / ".venv" / "Scripts" / "python.exe",
+                base / "pipeline" / "venv" / "bin" / "python3",
+                base / ".venv" / "bin" / "python3",
+            ]
+        )
     current_path = Path(current_executable)
 
     try:

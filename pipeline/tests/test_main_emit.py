@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import unittest
 import tempfile
@@ -200,10 +201,28 @@ class MainEmitTests(unittest.TestCase):
             venv_python.parent.mkdir(parents=True)
             venv_python.write_text("", encoding="utf-8")
 
-            selected = main._select_local_venv_python(
-                current_executable=str(script_root / "global-python.exe"),
-                script_root=script_root,
-            )
+            with patch.dict(os.environ, {"TRADUZAI_PYTHON": "", "TRADUZAI_PIPELINE_PYTHON": ""}, clear=False):
+                selected = main._select_local_venv_python(
+                    current_executable=str(script_root / "global-python.exe"),
+                    script_root=script_root,
+                )
+
+        self.assertEqual(selected, venv_python.resolve())
+
+    def test_select_local_venv_python_finds_parent_repo_venv_for_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "TraduzAI"
+            script_root = repo_root / ".worktrees" / "branch" / "pipeline"
+            venv_python = repo_root / "pipeline" / "venv" / "Scripts" / "python.exe"
+            script_root.mkdir(parents=True)
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("", encoding="utf-8")
+
+            with patch.dict(os.environ, {"TRADUZAI_PYTHON": "", "TRADUZAI_PIPELINE_PYTHON": ""}, clear=False):
+                selected = main._select_local_venv_python(
+                    current_executable=str(script_root / "global-python.exe"),
+                    script_root=script_root,
+                )
 
         self.assertEqual(selected, venv_python.resolve())
 
@@ -214,10 +233,11 @@ class MainEmitTests(unittest.TestCase):
             venv_python.parent.mkdir(parents=True)
             venv_python.write_text("", encoding="utf-8")
 
-            selected = main._select_local_venv_python(
-                current_executable=str(venv_python),
-                script_root=script_root,
-            )
+            with patch.dict(os.environ, {"TRADUZAI_PYTHON": "", "TRADUZAI_PIPELINE_PYTHON": ""}, clear=False):
+                selected = main._select_local_venv_python(
+                    current_executable=str(venv_python),
+                    script_root=script_root,
+                )
 
         self.assertIsNone(selected)
 

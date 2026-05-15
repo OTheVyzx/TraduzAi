@@ -369,16 +369,24 @@ class OCREngine:
         try:
             import sys
             if sys.version_info >= (3, 12) and self.device.type != "cuda":
-                raise ImportError("PaddleOCR incompatível com Python 3.12 via CPU (C++ Segfault). Forçando EasyOCR.")
+                raise ImportError("PaddleOCR incompativel com Python 3.12 via CPU (C++ segfault).")
             from paddleocr import PaddleOCR
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
                 libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
         except Exception as exc:
-            logger.warning("PaddleOCR nÃ£o carregou (%s); usando EasyOCR como fallback", exc)
-            self.model_name = "easyocr"
-            self._load_easyocr()
-            return
+            if _env_bool("TRADUZAI_OCR_ALLOW_EASYOCR_FALLBACK", False):
+                logger.warning(
+                    "PaddleOCR nao carregou (%s); usando EasyOCR como fallback por TRADUZAI_OCR_ALLOW_EASYOCR_FALLBACK=1",
+                    exc,
+                )
+                self.model_name = "easyocr"
+                self._load_easyocr()
+                return
+            raise RuntimeError(
+                "PaddleOCR nao carregou e o fallback automatico para EasyOCR esta desativado. "
+                "Ajuste a venv do pipeline ou defina TRADUZAI_OCR_ALLOW_EASYOCR_FALLBACK=1 para permitir EasyOCR."
+            ) from exc
         
         mapped_lang = normalize_paddleocr_language(self.lang)
         

@@ -281,18 +281,45 @@ class VisionStackOCRTests(unittest.TestCase):
         self.assertEqual(records[0]["text"], "HELLO")
         self.assertEqual(records[0]["source_bbox"], [10, 10, 70, 34])
 
-    def test_load_paddle_ocr_falls_back_to_easyocr_when_paddle_is_unavailable(self):
+    def test_load_paddle_ocr_raises_when_paddle_is_unavailable_by_default(self):
         engine = OCREngine.__new__(OCREngine)
         engine.model_name = "paddleocr"
         engine.lang = "en"
-        engine.device = type("Device", (), {"type": "cpu"})()
+        engine.device = type("Device", (), {"type": "cuda"})()
         engine.half = False
         engine.batch_size = 8
         engine._model = None
         engine._processor = None
         original_import = builtins.__import__
 
-        with patch("vision_stack.ocr.OCREngine._load_easyocr") as load_easyocr, patch(
+        with patch.dict(os.environ, {"TRADUZAI_OCR_ALLOW_EASYOCR_FALLBACK": "0"}, clear=False), patch(
+            "vision_stack.ocr.OCREngine._load_easyocr"
+        ) as load_easyocr, patch(
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError(name))
+            if name == "paddleocr"
+            else original_import(name, *args, **kwargs),
+        ):
+            with self.assertRaises(RuntimeError):
+                OCREngine._load_paddle_ocr(engine)
+
+        self.assertEqual(engine.model_name, "paddleocr")
+        load_easyocr.assert_not_called()
+
+    def test_load_paddle_ocr_can_fall_back_to_easyocr_when_enabled(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine.model_name = "paddleocr"
+        engine.lang = "en"
+        engine.device = type("Device", (), {"type": "cuda"})()
+        engine.half = False
+        engine.batch_size = 8
+        engine._model = None
+        engine._processor = None
+        original_import = builtins.__import__
+
+        with patch.dict(os.environ, {"TRADUZAI_OCR_ALLOW_EASYOCR_FALLBACK": "1"}, clear=False), patch(
+            "vision_stack.ocr.OCREngine._load_easyocr"
+        ) as load_easyocr, patch(
             "builtins.__import__",
             side_effect=lambda name, *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError(name))
             if name == "paddleocr"

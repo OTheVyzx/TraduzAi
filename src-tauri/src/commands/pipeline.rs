@@ -349,23 +349,7 @@ pub(crate) fn get_sidecar_info(app: &AppHandle) -> Result<SidecarInfo, String> {
             .unwrap_or_else(|| std::env::current_dir().unwrap());
 
         let script = root.join("pipeline/main.py");
-        #[cfg(windows)]
-        let venv_python = root.join("pipeline/venv/Scripts/python.exe");
-        #[cfg(not(windows))]
-        let venv_python = root.join("pipeline/venv/bin/python3");
-
-        let program = if venv_python.exists() {
-            venv_python.to_string_lossy().to_string()
-        } else {
-            #[cfg(windows)]
-            {
-                "python".to_string()
-            }
-            #[cfg(not(windows))]
-            {
-                "python3".to_string()
-            }
-        };
+        let program = resolve_dev_python_program(&root);
 
         return Ok(SidecarInfo {
             program,
@@ -384,6 +368,47 @@ pub(crate) fn get_sidecar_info(app: &AppHandle) -> Result<SidecarInfo, String> {
         program: sidecar.to_string_lossy().to_string(),
         script: None,
     })
+}
+
+fn dev_python_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for base in root.ancestors().take(4) {
+        #[cfg(windows)]
+        {
+            candidates.push(base.join("pipeline/venv/Scripts/python.exe"));
+            candidates.push(base.join(".venv/Scripts/python.exe"));
+        }
+        #[cfg(not(windows))]
+        {
+            candidates.push(base.join("pipeline/venv/bin/python3"));
+            candidates.push(base.join(".venv/bin/python3"));
+        }
+    }
+    candidates
+}
+
+fn resolve_dev_python_program(root: &Path) -> String {
+    if let Some(override_python) = std::env::var_os("TRADUZAI_PYTHON")
+        .or_else(|| std::env::var_os("TRADUZAI_PIPELINE_PYTHON"))
+    {
+        return PathBuf::from(override_python).to_string_lossy().to_string();
+    }
+
+    if let Some(found) = dev_python_candidates(root)
+        .into_iter()
+        .find(|path| path.exists())
+    {
+        return found.to_string_lossy().to_string();
+    }
+
+    #[cfg(windows)]
+    {
+        "python".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "python3".to_string()
+    }
 }
 
 pub(crate) fn get_vision_worker_path(app: &AppHandle) -> Result<String, String> {
@@ -2759,8 +2784,8 @@ pub struct SystemProfile {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_project_summary_mismatch, render_preview_paths, resolve_project_json_path,
-        sidecar_env_overrides, HardwareFacts,
+        dev_python_candidates, is_project_summary_mismatch, render_preview_paths,
+        resolve_project_json_path, sidecar_env_overrides, HardwareFacts,
     };
 
     #[test]
@@ -2807,6 +2832,35 @@ mod tests {
         assert!(keys.contains(&"PYTHONUTF8"));
         assert!(!keys.contains(&"TRADUZAI_PREFER_LOCAL_TRANSLATION"));
         assert!(!keys.contains(&"MANGATL_PREFER_LOCAL_TRANSLATION"));
+    }
+
+    #[test]
+    fn dev_python_candidates_prefers_current_root_venv_first() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let candidates = dev_python_candidates(root);
+
+        #[cfg(windows)]
+        let expected = root.join("pipeline/venv/Scripts/python.exe");
+        #[cfg(not(windows))]
+        let expected = root.join("pipeline/venv/bin/python3");
+
+        assert_eq!(candidates.first(), Some(&expected));
+    }
+
+    #[test]
+    fn dev_python_candidates_include_parent_repo_venv_for_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("TraduzAI");
+        let worktree_root = repo_root.join(".worktrees/troca-motores-normal-ultra");
+        let candidates = dev_python_candidates(&worktree_root);
+
+        #[cfg(windows)]
+        let expected = repo_root.join("pipeline/venv/Scripts/python.exe");
+        #[cfg(not(windows))]
+        let expected = repo_root.join("pipeline/venv/bin/python3");
+
+        assert!(candidates.contains(&expected));
     }
 
     #[test]
