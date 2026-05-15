@@ -25,12 +25,14 @@ function resolveProjectImagePath(
 function Thumbnail({
   path,
   numero,
+  pageIndex,
   blocks,
   isActive,
   onClick,
 }: {
   path: string;
   numero: number;
+  pageIndex: number;
   blocks: number;
   isActive: boolean;
   onClick: () => void;
@@ -88,6 +90,7 @@ function Thumbnail({
   return (
     <button
       ref={containerRef}
+      data-testid={`editor-page-thumbnail-${pageIndex + 1}`}
       onClick={onClick}
       className={`group relative w-full flex-shrink-0 overflow-hidden rounded-lg text-left transition-all duration-150 ${
         isActive
@@ -149,6 +152,7 @@ export function PageThumbnails() {
               <Thumbnail
                 key={`${page.numero}-${thumbPath}`}
                 numero={page.numero}
+                pageIndex={index}
                 path={thumbPath}
                 blocks={(page.text_layers ?? page.textos).length}
                 isActive={index === currentPageIndex}

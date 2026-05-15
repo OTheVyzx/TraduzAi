@@ -86,6 +86,8 @@ pub struct AppSettings {
     pub idioma_origem: String,
     #[serde(default = "AppSettings::default_target_language")]
     pub idioma_destino: String,
+    #[serde(default)]
+    pub editor_text_presets: Vec<serde_json::Value>,
 }
 
 impl AppSettings {
@@ -113,6 +115,7 @@ impl Default for AppSettings {
             ollama_host: Self::default_host(),
             idioma_origem: Self::default_source_language(),
             idioma_destino: Self::default_target_language(),
+            editor_text_presets: Vec::new(),
         }
     }
 }
@@ -306,6 +309,7 @@ mod tests {
         assert_eq!(settings.ollama_model, "traduzai-translator");
         assert_eq!(settings.idioma_origem, "en");
         assert_eq!(settings.idioma_destino, "pt-BR");
+        assert!(settings.editor_text_presets.is_empty());
     }
 
     #[test]
@@ -324,5 +328,6 @@ mod tests {
         assert_eq!(parsed.ollama_model, "foo");
         assert_eq!(parsed.idioma_origem, "en");
         assert_eq!(parsed.idioma_destino, "es");
+        assert!(parsed.editor_text_presets.is_empty());
     }
 }

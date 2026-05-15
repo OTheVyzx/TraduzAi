@@ -62,6 +62,8 @@ EDITORIAL_CREDIT_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [
         r"^(?:QC|TS|PR|RD|RAW)\s+[A-Z]{2,}$",
+        r"\bT\s*/?\s*L\s*/?\s*N",
+        r"\bTLN\b",
         r"\bORIGINAL\s+GOLD\s+LINE\s+ART\b",
         r"\b(?:SCAN|SCANS|SCANLATOR|SCANLATIONS|TOON|TOONS)\b",
         r"\bROUGH\s*S[TY]UDIO\b",
@@ -90,6 +92,9 @@ EDITORIAL_ROLE_WORDS = {
     "RD",
     "REDRAWER",
     "STAFF",
+    "TL",
+    "TLN",
+    "TRANSLATION",
     "TRANSLATOR",
     "TS",
     "TYPESETTER",
@@ -352,6 +357,16 @@ def _looks_like_credit_name_token(token: str) -> bool:
     return bool(letters) and letters.upper() == letters
 
 
+def _looks_like_credit_name_or_handle_token(token: str) -> bool:
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", token)
+    if len(cleaned) < 2 or not any(char.isalpha() for char in cleaned):
+        return False
+    letters = "".join(char for char in cleaned if char.isalpha())
+    if not letters:
+        return False
+    return letters.upper() == letters or letters[:1].upper() == letters[:1]
+
+
 def _starts_with_editorial_role_credit(text: str, words: list[str]) -> bool:
     role_end = _consume_editorial_role(words, 0)
     if role_end == 0 or role_end >= len(words):
@@ -367,6 +382,29 @@ def _starts_with_editorial_role_credit(text: str, words: list[str]) -> bool:
     return all(_looks_like_credit_name_token(token) for token in raw_tokens[role_end:])
 
 
+def _looks_like_multi_role_credit_line(text: str, words: list[str]) -> bool:
+    if len(words) < 4 or len(words) > 16:
+        return False
+    if any(word in RUN_ON_WORDS for word in words):
+        return False
+    role_indexes = [index for index, word in enumerate(words) if _consume_editorial_role(words, index) > index]
+    if len(role_indexes) < 2:
+        return False
+    role_ratio = len(role_indexes) / float(max(1, len(words)))
+    if role_ratio < 0.25:
+        return False
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9._-]*", text)
+    if len(raw_tokens) != len(words):
+        return False
+    name_like = 0
+    for index, token in enumerate(raw_tokens):
+        if index in role_indexes:
+            continue
+        if _looks_like_credit_name_or_handle_token(token):
+            name_like += 1
+    return name_like >= 2
+
+
 def is_editorial_credit(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -376,7 +414,11 @@ def is_editorial_credit(text: str) -> bool:
     if any(pattern.search(stripped) for pattern in EDITORIAL_CREDIT_PHRASE_PATTERNS):
         return True
     words = _editorial_words(stripped)
-    return _is_editorial_role_sequence(words) or _starts_with_editorial_role_credit(stripped, words)
+    return (
+        _is_editorial_role_sequence(words)
+        or _starts_with_editorial_role_credit(stripped, words)
+        or _looks_like_multi_role_credit_line(stripped, words)
+    )
 
 
 def is_non_english(text: str) -> bool:
@@ -410,6 +452,22 @@ def is_korean_sfx(text: str) -> bool:
         return False
     if "?" in compact and len(core) <= 2:
         return False
+
+    known_short_sfx = {
+        "허여",
+        "허어",
+        "허억",
+        "헉",
+        "흑",
+        "슥",
+        "휙",
+        "탁",
+        "쿵",
+        "쾅",
+        "비틀",
+    }
+    if core in known_short_sfx:
+        return True
 
     # Onomatopeias curtas costumam vir com repeticao forte e/ou pontuacao enfatica.
     repeated_chars = len(set(core)) <= max(1, len(core) // 3)
@@ -805,6 +863,16 @@ def is_cover_title_logo(
     title_case_ratio = sum(1 for word in words if word[:1].isupper()) / float(max(1, len(words)))
     compact_len = len(re.sub(r"\s+", "", stripped))
     word_count = len(words)
+
+    if (
+        not is_white_balloon
+        and 1 <= word_count <= 4
+        and box_h >= int(image_h * 0.20)
+        and width_ratio >= 0.45
+        and area_ratio >= 0.16
+        and confidence <= 0.90
+    ):
+        return True
 
     if is_white_balloon:
         return (

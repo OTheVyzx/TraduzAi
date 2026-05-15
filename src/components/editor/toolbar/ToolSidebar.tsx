@@ -36,7 +36,7 @@ const TOOLS: {
   { key: "block", label: "T", icon: PenTool, hotkey: "T", title: "Novo bloco de texto (T)" },
   { key: "brush", label: "B", icon: Brush, hotkey: "B", title: "Brush (B)" },
   { key: "repairBrush", label: "R", icon: RotateCcw, hotkey: "R", title: "Pincel de recuperação (R)" },
-  { key: "reinpaintBrush", label: "I", icon: Sparkles, hotkey: "I", title: "Pincel de reinpaint (I)" },
+  { key: "reinpaintBrush", label: "I", icon: Sparkles, hotkey: "I", title: "Pincel corretor: corrigir área pintada (I)" },
   { key: "eraser", label: "E", icon: Eraser, hotkey: "E", title: "Borracha (E)" },
   { key: "mask", label: "L", icon: Scissors, hotkey: "L", title: "Máscara Lasso (L)" },
 ];
@@ -75,18 +75,6 @@ export function ToolSidebar() {
         );
       })}
 
-      {/* Separador */}
-      <div className="my-1 h-px w-6 bg-border" />
-
-      {/* Dica rápida de zoom */}
-      <div
-        className="flex flex-col items-center gap-0.5 text-[8px] text-text-muted/40 leading-none select-none"
-        title="+/- para zoom · 0 para fit"
-      >
-        <span>+</span>
-        <span className="text-[10px]">◎</span>
-        <span>−</span>
-      </div>
     </div>
   );
 }

@@ -10,13 +10,45 @@ interface BitmapStrokePreviewConfig {
   brushSize: number;
   color: string;
   opacity: number;
+  hardness?: number;
   erase: boolean;
+  clipPolygon?: [number, number][];
 }
 
 export interface BitmapStrokePreviewResult {
   layerKey: BitmapPreviewLayerKey;
   beforeDataUrl: string;
   afterDataUrl: string;
+}
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(1, Math.max(0, value));
+}
+
+export function strokePassesForHardness({
+  brushSize,
+  opacity,
+  hardness = 1,
+}: {
+  brushSize: number;
+  opacity: number;
+  hardness?: number;
+}) {
+  const width = Math.max(1, Math.round(brushSize));
+  const alpha = clamp01(opacity);
+  const hard = clamp01(hardness);
+  if (hard >= 0.95 || width <= 2) return [{ width, alpha }];
+
+  const softness = 1 - hard;
+  const outerWidth = Math.max(width + 1, Math.round(width * (1 + softness * 0.9)));
+  const middleWidth = Math.max(width + 1, Math.round(width * (1 + softness * 0.45)));
+
+  return [
+    { width: outerWidth, alpha: Math.round(alpha * softness * 0.18 * 1000) / 1000 },
+    { width: middleWidth, alpha: Math.round(alpha * softness * 0.32 * 1000) / 1000 },
+    { width, alpha },
+  ].filter((pass) => pass.alpha > 0.005);
 }
 
 function drawStrokePath(ctx: CanvasRenderingContext2D, stroke: [number, number][], brushSize: number) {
@@ -35,6 +67,30 @@ function drawStrokePath(ctx: CanvasRenderingContext2D, stroke: [number, number][
   ctx.stroke();
 }
 
+function drawStrokePasses(
+  ctx: CanvasRenderingContext2D,
+  stroke: [number, number][],
+  brushSize: number,
+  opacity: number,
+  hardness?: number,
+) {
+  for (const pass of strokePassesForHardness({ brushSize, opacity, hardness })) {
+    ctx.globalAlpha = pass.alpha;
+    drawStrokePath(ctx, stroke, pass.width);
+  }
+}
+
+function clipToPolygon(ctx: CanvasRenderingContext2D, polygon?: [number, number][]) {
+  if (!polygon || polygon.length < 3) return;
+  ctx.beginPath();
+  ctx.moveTo(polygon[0][0], polygon[0][1]);
+  for (const [x, y] of polygon.slice(1)) {
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.clip();
+}
+
 function canvasWithBase(width: number, height: number, image?: HTMLImageElement | null) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -49,36 +105,34 @@ function canvasWithBase(width: number, height: number, image?: HTMLImageElement 
 
 export function createBitmapStrokePreview(config: BitmapStrokePreviewConfig): BitmapStrokePreviewResult | null {
   const { layerKey, width, height, stroke, brushSize, erase } = config;
+  const originalImage = config.originalImage ?? null;
   const base = canvasWithBase(width, height, config.baseImage);
   if (!base) return null;
   const { canvas, ctx } = base;
   const beforeDataUrl = canvas.toDataURL("image/png");
 
+  ctx.save();
+  clipToPolygon(ctx, config.clipPolygon);
   if (layerKey === "inpaint") {
-    if (!config.originalImage) return null;
-    ctx.save();
-    drawStrokePath(ctx, stroke, brushSize);
+    if (!originalImage) {
+      ctx.restore();
+      return null;
+    }
+    drawStrokePasses(ctx, stroke, brushSize, 1, config.hardness);
     ctx.globalCompositeOperation = "source-in";
-    ctx.drawImage(config.originalImage, 0, 0, width, height);
-    ctx.restore();
+    ctx.drawImage(originalImage, 0, 0, width, height);
   } else if (erase) {
-    ctx.save();
     ctx.globalCompositeOperation = "destination-out";
     ctx.strokeStyle = "rgba(0,0,0,1)";
-    drawStrokePath(ctx, stroke, brushSize);
-    ctx.restore();
+    drawStrokePasses(ctx, stroke, brushSize, 1, config.hardness);
   } else if (layerKey === "mask") {
-    ctx.save();
     ctx.strokeStyle = "#ffffff";
-    drawStrokePath(ctx, stroke, brushSize);
-    ctx.restore();
+    drawStrokePasses(ctx, stroke, brushSize, 1, config.hardness);
   } else {
-    ctx.save();
-    ctx.globalAlpha = Math.max(0, Math.min(1, config.opacity));
     ctx.strokeStyle = config.color || "#000000";
-    drawStrokePath(ctx, stroke, brushSize);
-    ctx.restore();
+    drawStrokePasses(ctx, stroke, brushSize, config.opacity, config.hardness);
   }
+  ctx.restore();
 
   return {
     layerKey,
@@ -95,26 +149,22 @@ export function createBitmapStrokePreviewOnCanvas(
   if (!ctx) return null;
   const beforeDataUrl = canvas.toDataURL("image/png");
 
+  ctx.save();
+  clipToPolygon(ctx, config.clipPolygon);
   if (config.erase) {
-    ctx.save();
     ctx.globalCompositeOperation = "destination-out";
     ctx.strokeStyle = "rgba(0,0,0,1)";
-    drawStrokePath(ctx, config.stroke, config.brushSize);
-    ctx.restore();
+    drawStrokePasses(ctx, config.stroke, config.brushSize, 1, config.hardness);
   } else if (config.layerKey === "mask") {
-    ctx.save();
     ctx.globalCompositeOperation = "source-over";
     ctx.strokeStyle = "#ffffff";
-    drawStrokePath(ctx, config.stroke, config.brushSize);
-    ctx.restore();
+    drawStrokePasses(ctx, config.stroke, config.brushSize, 1, config.hardness);
   } else {
-    ctx.save();
     ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = Math.max(0, Math.min(1, config.opacity));
     ctx.strokeStyle = config.color || "#000000";
-    drawStrokePath(ctx, config.stroke, config.brushSize);
-    ctx.restore();
+    drawStrokePasses(ctx, config.stroke, config.brushSize, config.opacity, config.hardness);
   }
+  ctx.restore();
 
   return {
     layerKey: config.layerKey,

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { PageData, TextEntry, TextLayerStyle } from "../appStore";
 import { useAppStore } from "../appStore";
 import { useEditorStore } from "../editorStore";
+import { BUILTIN_TEXT_STYLE_PRESETS } from "../../editorTextStylePresets";
 
 function makeLayer(overrides: Partial<TextEntry> = {}): TextEntry {
   const estilo: TextLayerStyle = {
@@ -272,6 +273,61 @@ describe("editorStore history working state", () => {
       bbox: [10, 20, 140, 160],
       estilo: expect.objectContaining({ rotacao: 15 }),
     });
+  });
+
+  it("applies a text style preset through the undoable style history", () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+    const preset = BUILTIN_TEXT_STYLE_PRESETS.find((item) => item.id === "bang_comic");
+    expect(preset).toBeTruthy();
+
+    useEditorStore.getState().updatePendingEstilo("layer-a", preset!.stylePatch);
+
+    expect(useEditorStore.getState().pendingEdits["layer-a"]).toEqual({
+      style_origin: "editor",
+      estilo: expect.objectContaining({
+        fonte: "KOMIKAX_.ttf",
+        cor: "#ffe900",
+        cor_gradiente: ["#fff247", "#ff7a00"],
+        contorno_px: 4,
+        sombra: true,
+      }),
+    });
+    expect(useEditorStore.getState().historyByPageKey[pageKey].commands).toEqual([
+      expect.objectContaining({
+        type: "edit-estilo",
+        layerId: "layer-a",
+        touchedKeys: expect.arrayContaining(["fonte", "cor", "cor_gradiente", "contorno_px", "sombra"]),
+      }),
+    ]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().pendingEdits).toEqual({});
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().pendingEdits["layer-a"].estilo).toMatchObject({
+      fonte: "KOMIKAX_.ttf",
+      cor: "#ffe900",
+    });
+  });
+
+  it("clears preset gradient when the user switches back to a solid text color", () => {
+    const preset = BUILTIN_TEXT_STYLE_PRESETS.find((item) => item.id === "bang_comic");
+    expect(preset).toBeTruthy();
+
+    useEditorStore.getState().updatePendingEstilo("layer-a", preset!.stylePatch);
+    expect(useEditorStore.getState().pendingEdits["layer-a"].estilo).toMatchObject({
+      cor: "#ffe900",
+      cor_gradiente: ["#fff247", "#ff7a00"],
+    });
+
+    useEditorStore.getState().updatePendingEstilo("layer-a", {
+      cor: "#ff0000",
+      cor_gradiente: [],
+    });
+
+    expect(useEditorStore.getState().pendingEdits["layer-a"].estilo).toMatchObject({
+      cor: "#ff0000",
+    });
+    expect(useEditorStore.getState().pendingEdits["layer-a"].estilo?.cor_gradiente).toBeUndefined();
   });
 
   it("uses history-backed working state for public create, delete and visibility actions", async () => {

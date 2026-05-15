@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hydratePageData } from "../tauri";
+import { hydratePageData, hydrateProjectJson } from "../tauri";
 
 describe("hydratePageData text style", () => {
   it("normalizes legacy default style to black text without effects", () => {
@@ -106,5 +106,39 @@ describe("hydratePageData text style", () => {
       italico: true,
     });
     expect(page.text_layers[0].style_origin).toBe("editor");
+  });
+});
+
+describe("hydrateProjectJson", () => {
+  it("usa a pasta do project.json quando source/output vierem vazios", () => {
+    const project = hydrateProjectJson(
+      {
+        obra: "",
+        capitulo: 1,
+        source_path: "",
+        output_path: "",
+        _work_dir: "N:/TraduzAI/TraduzAi/data/works/abc",
+        paginas: [
+          {
+            numero: 1,
+            arquivo_original: "originals/001.jpg",
+            arquivo_traduzido: "translated/001.jpg",
+            text_layers: [],
+            textos: [],
+          },
+        ],
+      },
+      "N:/TraduzAI/TraduzAi/data/works/abc/project.json",
+    );
+
+    expect(project.source_path).toBe("N:/TraduzAI/TraduzAi/data/works/abc");
+    expect(project.output_path).toBe("N:/TraduzAI/TraduzAi/data/works/abc");
+    expect(project._work_dir).toBe("N:/TraduzAI/TraduzAi/data/works/abc");
+    expect(project.paginas?.[0]?.arquivo_traduzido).toBe(
+      "N:/TraduzAI/TraduzAi/data/works/abc/translated/001.jpg",
+    );
+    expect(project.paginas?.[0]?.image_layers?.base?.path).toBe(
+      "N:/TraduzAI/TraduzAi/data/works/abc/originals/001.jpg",
+    );
   });
 });

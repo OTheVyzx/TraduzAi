@@ -21,6 +21,13 @@ export interface PageActionResult {
   message?: string;
 }
 
+export interface RegionalInpaintResult {
+  page_index: number;
+  inpaint_path: string;
+  before_inpaint_path?: string | null;
+  bbox: [number, number, number, number];
+}
+
 export interface EditorBackendApi {
   saveProjectJson(config: { project_path: string; project_json: unknown }): Promise<void>;
   loadEditorPage(config: { project_path: string; page_index: number }): Promise<EditorPagePayload>;
@@ -59,6 +66,18 @@ export interface EditorBackendApi {
     layer_key: string;
     op: "replace" | "add" | "subtract";
   }): Promise<string>;
+  writeHealingMask(config: {
+    project_path: string;
+    page_index: number;
+    png_data: string;
+    bbox?: [number, number, number, number];
+  }): Promise<string>;
+  healInpaintRegion(config: {
+    project_path: string;
+    page_index: number;
+    bbox: [number, number, number, number];
+    mask_path: string;
+  }): Promise<RegionalInpaintResult>;
   renderPreviewPage(args: {
     project_path: string;
     page_index: number;
@@ -76,7 +95,12 @@ export interface EditorBackendApi {
   detectPage(args: { project_path: string; page_index: number }): Promise<string>;
   ocrPage(args: { project_path: string; page_index: number }): Promise<string>;
   translatePage(args: { project_path: string; page_index: number }): Promise<string>;
-  reinpaintPage(args: { project_path: string; page_index: number }): Promise<string>;
+  reinpaintPage(args: {
+    project_path: string;
+    page_index: number;
+    bbox?: [number, number, number, number];
+    mask_path?: string | null;
+  }): Promise<string>;
   processBlock(config: {
     project_path: string;
     page_index: number;
@@ -99,6 +123,7 @@ export interface BitmapRegionConfig {
   hardness?: number;
   png_data?: string;
   dirty_bbox?: [number, number, number, number];
+  clip_mask_png?: string;
 }
 
 let configuredBackend: EditorBackendApi | null = null;

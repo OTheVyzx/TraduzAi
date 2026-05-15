@@ -145,8 +145,23 @@ pub fn load_or_create_profile(
             .map_err(|e| format!("Falha ao ler contexto da obra '{}': {e}", path.display()))?;
         let mut profile: WorkContextProfile = serde_json::from_str(&raw)
             .map_err(|e| format!("Contexto da obra invalido '{}': {e}", path.display()))?;
+        let mut updated = false;
+        if profile.context_quality != "reviewed" {
+            updated |= fill_text_if_empty(&mut profile.synopsis, fallback.synopsis);
+            updated |= merge_vec_missing(&mut profile.genre, fallback.genre);
+            updated |= merge_vec_missing(&mut profile.characters, fallback.characters);
+            updated |= merge_vec_missing(&mut profile.factions, fallback.factions);
+            updated |= merge_vec_missing(&mut profile.terms, fallback.terms);
+        }
         if profile.context_quality.trim().is_empty() {
             profile.context_quality = quality_for_profile(&profile);
+            updated = true;
+        } else if updated {
+            profile.context_quality = quality_for_profile(&profile);
+        }
+        if updated {
+            profile.last_updated = current_utc_timestamp();
+            persist_profile(works_root, &profile)?;
         }
         return Ok(profile);
     }
@@ -154,6 +169,29 @@ pub fn load_or_create_profile(
     fallback.last_updated = current_utc_timestamp();
     persist_profile(works_root, &fallback)?;
     Ok(fallback)
+}
+
+fn fill_text_if_empty(current: &mut String, fallback: String) -> bool {
+    if current.trim().is_empty() && !fallback.trim().is_empty() {
+        *current = fallback;
+        true
+    } else {
+        false
+    }
+}
+
+fn merge_vec_missing<T>(current: &mut Vec<T>, fallback: Vec<T>) -> bool
+where
+    T: PartialEq,
+{
+    let mut updated = false;
+    for item in fallback {
+        if !current.contains(&item) {
+            current.push(item);
+            updated = true;
+        }
+    }
+    updated
 }
 
 pub fn persist_profile(works_root: &Path, profile: &WorkContextProfile) -> Result<(), String> {
@@ -245,6 +283,45 @@ mod tests {
 
         assert_eq!(loaded.context_quality, "reviewed");
         assert_eq!(loaded.synopsis, "A hunter story");
+    }
+
+    #[test]
+    fn merges_missing_existing_work_context_from_fallback() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let existing = new_profile(
+            "Grand Finale",
+            "en",
+            "pt-BR",
+            "Existing synopsis",
+            vec![],
+            vec!["Ingris".into()],
+            vec![],
+            vec![],
+        );
+        persist_profile(tmp.path(), &existing).expect("persist");
+
+        let fallback = new_profile(
+            "Grand Finale",
+            "en",
+            "pt-BR",
+            "Fresh synopsis",
+            vec!["Adventure".into(), "Sci-Fi".into()],
+            vec!["Heezy".into(), "Ingris".into()],
+            vec![],
+            vec![],
+        );
+        let loaded = load_or_create_profile(tmp.path(), fallback).expect("load");
+
+        assert_eq!(loaded.synopsis, "Existing synopsis");
+        assert_eq!(loaded.genre, vec!["Adventure", "Sci-Fi"]);
+        assert_eq!(
+            loaded.characters,
+            vec![
+                serde_json::Value::String("Ingris".to_string()),
+                serde_json::Value::String("Heezy".to_string())
+            ]
+        );
+        assert_eq!(loaded.context_quality, "partial");
     }
 
     #[test]

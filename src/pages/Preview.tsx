@@ -24,9 +24,9 @@ import {
   ShieldPlus,
 } from "lucide-react";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { loadImageSource } from "../lib/imageSource";
+import { loadImageSource, preloadImageSource, type LoadedImageSource } from "../lib/imageSource";
 import { getPageKey } from "../lib/editorHistory";
-import { useAppStore } from "../lib/stores/appStore";
+import { useAppStore, type PageData, type Project } from "../lib/stores/appStore";
 import {
   buildQaReviewSummary,
   collectIgnoredQaActions,
@@ -35,7 +35,7 @@ import {
   qaIssueGroup,
   type QaIssue,
 } from "../lib/qaPanel";
-import { useEditorStore } from "../lib/stores/editorStore";
+import { useEditorStore, type RenderPreviewCacheByPageKey } from "../lib/stores/editorStore";
 import {
   exportPagePsd,
   exportProject,
@@ -72,6 +72,130 @@ type PreviewReaderImage = {
   status: "loading" | "ready" | "error";
 };
 
+function readerPageLoadOrder<T>(pages: T[], currentPage: number) {
+  return pages
+    .map((readerPage, pageIndex) => [pageIndex, readerPage] as const)
+    .sort(([leftIndex], [rightIndex]) => {
+      const leftDistance = Math.abs(leftIndex - currentPage);
+      const rightDistance = Math.abs(rightIndex - currentPage);
+      return leftDistance - rightDistance || leftIndex - rightIndex;
+    });
+}
+
+function getPreviewReaderImageCandidates({
+  page,
+  pageIndex,
+  project,
+  projectImageBasePath,
+  renderPreviewCacheByPageKey,
+  showOriginal,
+}: {
+  page: PageData;
+  pageIndex: number;
+  project: Project;
+  projectImageBasePath: string | null;
+  renderPreviewCacheByPageKey: RenderPreviewCacheByPageKey;
+  showOriginal: boolean;
+}) {
+  const readerPageKey = getPageKey(project, pageIndex);
+  const readerPreviewState = renderPreviewCacheByPageKey[readerPageKey];
+  const readerFaithfulPreviewPath =
+    !showOriginal && readerPreviewState?.status === "fresh" ? readerPreviewState.previewPath : null;
+  return getPreviewImageCandidates(
+    page,
+    showOriginal,
+    projectImageBasePath,
+    readerFaithfulPreviewPath,
+  );
+}
+
+async function loadPreviewReaderImage({
+  page,
+  pageIndex,
+  project,
+  projectImageBasePath,
+  renderPreviewCacheByPageKey,
+  showOriginal,
+  useKonvaPreviewRenderer,
+}: {
+  page: PageData;
+  pageIndex: number;
+  project: Project;
+  projectImageBasePath: string | null;
+  renderPreviewCacheByPageKey: RenderPreviewCacheByPageKey;
+  showOriginal: boolean;
+  useKonvaPreviewRenderer: boolean;
+}): Promise<LoadedImageSource> {
+  if (useKonvaPreviewRenderer) {
+    try {
+      const src = await renderPageWithKonvaToDataUrl({ page, projectImageBasePath });
+      await waitForImageLoad(src);
+      return { src };
+    } catch {
+      // O render fiel pode falhar em paginas muito altas ou em assets locais;
+      // nesses casos o preview precisa cair para o JPG final ja gerado.
+    }
+  }
+
+  const candidatePaths = getPreviewReaderImageCandidates({
+    page,
+    pageIndex,
+    project,
+    projectImageBasePath,
+    renderPreviewCacheByPageKey,
+    showOriginal,
+  });
+
+  let lastError: unknown = null;
+  for (const candidatePath of candidatePaths) {
+    let loaded: LoadedImageSource | null = null;
+    try {
+      loaded = await loadImageSource(candidatePath, "image/jpeg");
+      await waitForImageLoad(loaded.src);
+      return loaded;
+    } catch (error) {
+      lastError = error;
+      loaded?.revoke?.();
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("imagem indisponivel");
+}
+
+async function preloadPreviewReaderImage({
+  page,
+  pageIndex,
+  project,
+  projectImageBasePath,
+  renderPreviewCacheByPageKey,
+  showOriginal,
+}: {
+  page: PageData;
+  pageIndex: number;
+  project: Project;
+  projectImageBasePath: string | null;
+  renderPreviewCacheByPageKey: RenderPreviewCacheByPageKey;
+  showOriginal: boolean;
+}) {
+  const candidatePaths = getPreviewReaderImageCandidates({
+    page,
+    pageIndex,
+    project,
+    projectImageBasePath,
+    renderPreviewCacheByPageKey,
+    showOriginal,
+  });
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      await preloadImageSource(candidatePath, "image/jpeg");
+      return;
+    } catch {
+      // Tenta o proximo candidato; o fluxo normal ainda faz fallback ao exibir.
+    }
+  }
+}
+
 export function Preview() {
   const navigate = useNavigate();
   const { project, updateProject, batchCompletion } = useAppStore();
@@ -101,6 +225,7 @@ export function Preview() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const prevImageRevokeRef = useRef<(() => void) | null>(null);
   const readerRevokesRef = useRef<(() => void)[]>([]);
+  const readerPriorityLoadsRef = useRef<Set<number>>(new Set());
   const readerPageRefs = useRef<Array<HTMLDivElement | null>>([]);
   const scrollToPageRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
@@ -130,6 +255,33 @@ export function Preview() {
   const qaReviewSummary = buildQaReviewSummary(project);
   const activeIgnoreIssue = qaIssues.find((issue) => issue.id === ignoreIssueId) ?? null;
   const qaGroups = Object.entries(qaReviewSummary.groups);
+
+  const preloadPreviewPage = (pageIndex: number) => {
+    if (!project || pageIndex < 0 || pageIndex >= project.paginas.length) return;
+    const targetPage = project.paginas[pageIndex];
+    void preloadPreviewReaderImage({
+      page: targetPage,
+      pageIndex,
+      project,
+      projectImageBasePath,
+      renderPreviewCacheByPageKey,
+      showOriginal,
+    }).catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!project?.paginas.length) return;
+    const indexes = [
+      currentPage,
+      currentPage - 2,
+      currentPage - 1,
+      currentPage + 1,
+      currentPage + 2,
+    ];
+    for (const index of indexes) {
+      preloadPreviewPage(index);
+    }
+  }, [currentPage, project, project?.paginas, projectImageBasePath, renderPreviewCacheByPageKey, showOriginal]);
 
   useEffect(() => {
     if (!project || !page || showOriginal || !pageKey || useKonvaPreviewRenderer) return;
@@ -234,43 +386,18 @@ export function Preview() {
     );
 
     const loadReaderImages = async () => {
-      for (const [pageIndex, readerPage] of project.paginas.entries()) {
-        const readerPageKey = getPageKey(project, pageIndex);
-        const readerPreviewState = renderPreviewCacheByPageKey[readerPageKey];
-        const readerFaithfulPreviewPath =
-          !showOriginal && readerPreviewState?.status === "fresh" ? readerPreviewState.previewPath : null;
-        const candidatePaths = getPreviewImageCandidates(
-          readerPage,
-          showOriginal,
-          projectImageBasePath,
-          readerFaithfulPreviewPath,
-        );
+      for (const [pageIndex, readerPage] of readerPageLoadOrder(project.paginas, currentPage)) {
         let loaded: Awaited<ReturnType<typeof loadImageSource>> | null = null;
         try {
-          if (useKonvaPreviewRenderer) {
-            try {
-              const konvaSrc = await renderPageWithKonvaToDataUrl({ page: readerPage, projectImageBasePath });
-              if (cancelled) return;
-              setReaderImages((current) =>
-                current.map((item) =>
-                  item.pageIndex === pageIndex ? { ...item, src: konvaSrc, status: "ready" } : item,
-                ),
-              );
-              continue;
-            } catch {
-              if (cancelled) return;
-            }
-          }
-          for (const candidatePath of candidatePaths) {
-            try {
-              loaded = await loadImageSource(candidatePath, "image/jpeg");
-              await waitForImageLoad(loaded.src);
-              break;
-            } catch {
-              loaded?.revoke?.();
-              loaded = null;
-            }
-          }
+          loaded = await loadPreviewReaderImage({
+            page: readerPage,
+            pageIndex,
+            project,
+            projectImageBasePath,
+            renderPreviewCacheByPageKey,
+            showOriginal,
+            useKonvaPreviewRenderer,
+          });
 
           if (cancelled) {
             loaded?.revoke?.();
@@ -305,10 +432,74 @@ export function Preview() {
 
     return () => {
       cancelled = true;
+      readerPriorityLoadsRef.current.clear();
       readerRevokesRef.current.forEach((revoke) => revoke());
       readerRevokesRef.current = [];
     };
   }, [project, project?.paginas, projectImageBasePath, renderPreviewCacheByPageKey, scrollAxis, showOriginal, useKonvaPreviewRenderer]);
+
+  useEffect(() => {
+    if (scrollAxis !== "vertical" || !project?.paginas.length) return;
+    const readerPage = project.paginas[currentPage];
+    const readerItem = readerImages.find((item) => item.pageIndex === currentPage);
+    if (!readerPage || !readerItem || readerItem.status !== "loading" || readerPriorityLoadsRef.current.has(currentPage)) {
+      return;
+    }
+
+    let cancelled = false;
+    readerPriorityLoadsRef.current.add(currentPage);
+
+    const loadCurrentReaderImage = async () => {
+      let loaded: LoadedImageSource | null = null;
+      try {
+        loaded = await loadPreviewReaderImage({
+          page: readerPage,
+          pageIndex: currentPage,
+          project,
+          projectImageBasePath,
+          renderPreviewCacheByPageKey,
+          showOriginal,
+          useKonvaPreviewRenderer,
+        });
+        if (cancelled) {
+          loaded.revoke?.();
+          return;
+        }
+        if (loaded.revoke) readerRevokesRef.current.push(loaded.revoke);
+        setReaderImages((current) =>
+          current.map((item) =>
+            item.pageIndex === currentPage ? { ...item, src: loaded?.src ?? item.src, status: "ready" } : item,
+          ),
+        );
+      } catch {
+        loaded?.revoke?.();
+        if (!cancelled) {
+          setReaderImages((current) =>
+            current.map((item) => (item.pageIndex === currentPage ? { ...item, status: "error" } : item)),
+          );
+        }
+      } finally {
+        readerPriorityLoadsRef.current.delete(currentPage);
+      }
+    };
+
+    void loadCurrentReaderImage();
+
+    return () => {
+      cancelled = true;
+      readerPriorityLoadsRef.current.delete(currentPage);
+    };
+  }, [
+    currentPage,
+    project,
+    project?.paginas,
+    projectImageBasePath,
+    readerImages,
+    renderPreviewCacheByPageKey,
+    scrollAxis,
+    showOriginal,
+    useKonvaPreviewRenderer,
+  ]);
 
   useEffect(() => {
     if (
@@ -458,6 +649,7 @@ export function Preview() {
 
   function goToPreviewPage(index: number) {
     const nextPage = Math.max(0, Math.min(totalPages - 1, index));
+    preloadPreviewPage(nextPage);
     scrollToPageRef.current = scrollAxis === "vertical";
     setCurrentPage(nextPage);
   }
@@ -701,7 +893,7 @@ export function Preview() {
   const previewTransform =
     scrollAxis === "vertical" ? "translate(0px, 0px)" : `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`;
   const readerImageWidth = `${Math.round(zoom * 10000) / 100}%`;
-  const hasPreviewImage = scrollAxis === "vertical" ? readerImages.some((item) => item.src) : Boolean(page && imageSrc);
+  const hasPreviewImage = scrollAxis === "vertical" ? readerImages.length > 0 : Boolean(page && imageSrc);
   const hasBatchReturn = Boolean(batchCompletion);
 
   return (
@@ -866,16 +1058,16 @@ export function Preview() {
                 }}
               >
                 {scrollAxis === "vertical" ? (
-                  readerImages.some((item) => item.src) ? (
-                    readerImages.map((item) =>
-                      item.src ? (
-                        <div
-                          key={item.pageIndex}
-                          ref={(node) => {
-                            readerPageRefs.current[item.pageIndex] = node;
-                          }}
-                          className="m-0 flex w-full min-w-0 justify-center p-0 leading-none"
-                        >
+                  readerImages.length > 0 ? (
+                    readerImages.map((item) => (
+                      <div
+                        key={item.pageIndex}
+                        ref={(node) => {
+                          readerPageRefs.current[item.pageIndex] = node;
+                        }}
+                        className="m-0 flex w-full min-w-0 justify-center p-0 leading-none"
+                      >
+                        {item.src ? (
                           <img
                             src={item.src}
                             alt={`Pagina ${item.pageNumber}`}
@@ -883,9 +1075,16 @@ export function Preview() {
                             className="block h-auto max-w-none select-none"
                             style={{ width: readerImageWidth }}
                           />
-                        </div>
-                      ) : null,
-                    )
+                        ) : (
+                          <div
+                            className="flex h-64 items-center justify-center text-sm text-text-secondary"
+                            style={{ width: readerImageWidth }}
+                          >
+                            {item.status === "error" ? "Imagem indisponivel" : "Carregando imagem..."}
+                          </div>
+                        )}
+                      </div>
+                    ))
                   ) : page ? (
                     <p className="px-6 py-8 text-sm text-text-secondary">Carregando imagens...</p>
                   ) : (
@@ -1202,6 +1401,8 @@ export function Preview() {
       <div className="flex items-center justify-center gap-4 border-t border-border bg-bg-secondary px-6 py-3">
         <button
           onClick={() => goToPreviewPage(currentPage - 1)}
+          onFocus={() => preloadPreviewPage(currentPage - 1)}
+          onMouseEnter={() => preloadPreviewPage(currentPage - 1)}
           disabled={currentPage === 0}
           title="Pagina anterior"
           className="rounded-lg bg-bg-tertiary p-2 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
@@ -1215,6 +1416,8 @@ export function Preview() {
 
         <button
           onClick={() => goToPreviewPage(currentPage + 1)}
+          onFocus={() => preloadPreviewPage(currentPage + 1)}
+          onMouseEnter={() => preloadPreviewPage(currentPage + 1)}
           disabled={currentPage >= totalPages - 1}
           title="Proxima pagina"
           className="rounded-lg bg-bg-tertiary p-2 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"

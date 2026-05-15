@@ -59,6 +59,240 @@ def _fake_process_band_factory(records: list, ocr_extras: dict | None = None):
 
 
 class RunChapterSmokeTests(unittest.TestCase):
+    def test_page_cleanup_limit_mask_follows_text_geometry(self):
+        from strip.run import _build_page_cleanup_limit_mask
+
+        image = np.full((120, 180, 3), 255, dtype=np.uint8)
+        text = {
+            "bbox": [50, 40, 110, 64],
+            "text_pixel_bbox": [56, 44, 104, 60],
+            "line_polygons": [[[56, 44], [104, 44], [104, 60], [56, 60]]],
+            "balloon_bbox": [20, 20, 150, 92],
+            "balloon_type": "white",
+        }
+
+        mask = _build_page_cleanup_limit_mask(image, [text])
+
+        self.assertIsNotNone(mask)
+        self.assertGreater(int(mask[50, 80]), 0)
+        self.assertEqual(int(mask[88, 80]), 0)
+
+    def test_page_final_cleanup_skips_textured_translucent_balloons(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((120, 180, 3), 220, dtype=np.uint8)
+        clean = original.copy()
+        rendered = original.copy()
+        texts = [
+            {
+                "bbox": [40, 40, 140, 70],
+                "text_pixel_bbox": [40, 40, 140, 70],
+                "translated": "TEXTO",
+                "original": "TEXT",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            }
+        ]
+        typesetter = MagicMock()
+
+        with patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            side_effect=AssertionError("textured balloon should not run white cleanup"),
+        ):
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertFalse(did_fix)
+        self.assertIs(fixed_clean, clean)
+        self.assertIs(fixed_rendered, rendered)
+        typesetter.render_band_image.assert_not_called()
+
+    def test_page_final_near_text_cleanup_is_disabled_by_default(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        clean = original.copy()
+        rendered = original.copy()
+        texts = [
+            {
+                "bbox": [40, 40, 140, 70],
+                "text_pixel_bbox": [44, 44, 136, 66],
+                "translated": "TEXTO",
+                "original": "TEXT",
+                "balloon_type": "white",
+            }
+        ]
+        fixed = clean.copy()
+        fixed[52, 80] = [244, 244, 244]
+        rerendered = rendered.copy()
+        typesetter = MagicMock()
+        typesetter.render_band_image.return_value = rerendered
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "0",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "0",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ) as cleanup:
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertFalse(did_fix)
+        self.assertIs(fixed_clean, clean)
+        self.assertIs(fixed_rendered, rendered)
+        cleanup.assert_not_called()
+        typesetter.render_band_image.assert_not_called()
+
+    def test_page_final_near_text_cleanup_can_be_enabled(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        clean = original.copy()
+        rendered = original.copy()
+        texts = [
+            {
+                "bbox": [40, 40, 140, 70],
+                "text_pixel_bbox": [44, 44, 136, 66],
+                "translated": "TEXTO",
+                "original": "TEXT",
+                "balloon_type": "white",
+            }
+        ]
+        fixed = clean.copy()
+        fixed[52, 80] = [244, 244, 244]
+        rerendered = rendered.copy()
+        typesetter = MagicMock()
+        typesetter.render_band_image.return_value = rerendered
+
+        with patch.dict("os.environ", {"TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1"}, clear=True), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ):
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertTrue(did_fix)
+        self.assertIs(fixed_clean, fixed)
+        self.assertIs(fixed_rendered, rerendered)
+        typesetter.render_band_image.assert_called_once()
+
+    def test_inpaint_block_from_vision_block_preserves_text_geometry_without_connected_metadata(self):
+        from strip.run import _inpaint_block_from_vision_block
+
+        block = _inpaint_block_from_vision_block(
+            {
+                "bbox": [10, 20, 90, 70],
+                "confidence": 0.91,
+                "text_pixel_bbox": [18, 26, 82, 62],
+                "line_polygons": [[[18, 26], [82, 26], [82, 62], [18, 62]]],
+                "balloon_type": "white",
+                "connected_lobe_bboxes": [[0, 0, 50, 70]],
+                "balloon_subregions": [[0, 0, 50, 70]],
+            }
+        )
+
+        self.assertEqual(block["bbox"], [10, 20, 90, 70])
+        self.assertEqual(block["text_pixel_bbox"], [18, 26, 82, 62])
+        self.assertEqual(block["line_polygons"][0][2], [82, 62])
+        self.assertEqual(block["balloon_type"], "white")
+        self.assertNotIn("connected_lobe_bboxes", block)
+        self.assertNotIn("balloon_subregions", block)
+
+    def test_finalize_output_page_ocr_metadata_runs_same_cleanup_after_band_assignment(self):
+        from strip.run import _finalize_output_page_ocr_metadata
+        from strip.types import OutputPage
+
+        texts = [
+            {
+                "text": "PLEASE, FOR THE CHILD'S",
+                "translated": "POR FAVOR, PELO BEM",
+                "bbox": [498, 1655, 656, 1707],
+                "source_bbox": [25, 1436, 667, 1708],
+                "text_pixel_bbox": [498, 1655, 656, 1707],
+                "line_polygons": [
+                    [[498, 1652], [658, 1654], [658, 1678], [498, 1676]],
+                    [[507, 1686], [648, 1686], [648, 1707], [507, 1707]],
+                ],
+                "confidence": 0.93,
+                "tipo": "fala",
+                "balloon_type": "textured",
+            },
+            {
+                "text": "SAKE.",
+                "translated": "DA CRIANCA.",
+                "bbox": [546, 1720, 612, 1740],
+                "source_bbox": [497, 1648, 660, 1741],
+                "text_pixel_bbox": [546, 1720, 612, 1740],
+                "line_polygons": [[[543, 1718], [615, 1718], [615, 1743], [543, 1743]]],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+            {
+                "text": "THE SA",
+                "translated": "O SA",
+                "bbox": [320, 1699, 562, 1949],
+                "source_bbox": [320, 1699, 562, 1949],
+                "text_pixel_bbox": [320, 1699, 562, 1949],
+                "line_polygons": [],
+                "confidence": 0.80,
+                "tipo": "fala",
+                "balloon_type": "textured",
+            },
+        ]
+        page = OutputPage(
+            y_top=0,
+            y_bottom=2400,
+            image=np.full((2400, 760, 3), 255, dtype=np.uint8),
+            ocr_result={
+                "_vision_blocks": [
+                    {
+                        "bbox": text["source_bbox"],
+                        "text_pixel_bbox": text["text_pixel_bbox"],
+                        "line_polygons": text["line_polygons"],
+                        "confidence": text["confidence"],
+                        "balloon_type": text["balloon_type"],
+                    }
+                    for text in texts
+                ]
+            },
+            text_layers={"texts": texts},
+        )
+
+        changed = _finalize_output_page_ocr_metadata(page, page_number=1)
+
+        self.assertTrue(changed)
+        self.assertEqual([text["text"] for text in page.text_layers["texts"]], ["PLEASE, FOR THE CHILD'S SAKE."])
+        self.assertEqual(page.text_layers["texts"][0]["translated"], "POR FAVOR, PELO BEM DA CRIANCA.")
+        self.assertEqual(len(page.ocr_result["_vision_blocks"]), 1)
+
     def test_strip_inpainter_prewarm_is_enabled_by_default(self):
         from strip.run import _strip_inpainter_prewarm_enabled
 
@@ -100,7 +334,14 @@ class RunChapterSmokeTests(unittest.TestCase):
                     "ocr_source": "vision-koharu-paddle-ocr-vl-1.5",
                 }
             ],
-            "_vision_blocks": [{"bbox": [8, 20, 60, 50], "confidence": 0.9}],
+            "_vision_blocks": [
+                {
+                    "bbox": [8, 20, 60, 50],
+                    "text_pixel_bbox": [14, 27, 50, 43],
+                    "line_polygons": [[[12, 25], [52, 25], [52, 45], [12, 45]]],
+                    "confidence": 0.9,
+                }
+            ],
             "_vision_backend": "koharu-http",
         }
 
@@ -118,6 +359,8 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(text["balloon_bbox"], [18, 5, 70, 35])
         self.assertEqual(text["line_polygons"][0][0], [22, 10])
         self.assertEqual(page["_vision_blocks"][0]["bbox"], [18, 5, 70, 35])
+        self.assertEqual(page["_vision_blocks"][0]["text_pixel_bbox"], [24, 12, 60, 28])
+        self.assertEqual(page["_vision_blocks"][0]["line_polygons"][0][0], [22, 10])
         self.assertTrue(page["_ocr_stats"]["koharu_cjk_precompute"])
 
     def test_koharu_precompute_batches_roi_jobs_and_filters_non_translatable_text(self):
@@ -196,6 +439,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                 "TRADUZAI_KOHARU_CJK_STRIP_ROI": "1",
                 "TRADUZAI_KOHARU_CJK_SELECTIVE": "1",
                 "TRADUZAI_KOHARU_CJK_EMPTY_ROI_FILTER": "0",
+                "TRADUZAI_KOHARU_CJK_PAGE_FALLBACK": "0",
             },
             clear=False,
         ):
@@ -306,6 +550,31 @@ class RunChapterSmokeTests(unittest.TestCase):
                 idioma_origem="ko",
             )
         )
+        self.assertTrue(
+            _koharu_cjk_text_is_translatable(
+                {
+                    "text": "\ud558\ud558\ud558",
+                    "tipo": "sfx",
+                    "balloon_type": "white",
+                    "block_profile": "white_balloon",
+                    "background_rgb": [255, 255, 255],
+                    "confidence": 0.486,
+                },
+                idioma_origem="ko",
+            )
+        )
+        self.assertFalse(
+            _koharu_cjk_text_is_translatable(
+                {
+                    "text": "\ud558\ud558\ud558",
+                    "tipo": "sfx",
+                    "balloon_type": "textured",
+                    "background_rgb": [255, 255, 255],
+                    "confidence": 0.486,
+                },
+                idioma_origem="ko",
+            )
+        )
         self.assertFalse(
             _koharu_cjk_text_is_translatable(
                 {
@@ -328,6 +597,178 @@ class RunChapterSmokeTests(unittest.TestCase):
                 idioma_origem="ko",
             )
         )
+
+    def test_koharu_roi_page_fallback_recovers_text_filtered_from_roi(self):
+        from strip.run import _build_precomputed_koharu_cjk_pages
+        from strip.types import BBox, Balloon, Band, VerticalStrip
+
+        strip = VerticalStrip(
+            image=np.full((220, 160, 3), 255, dtype=np.uint8),
+            width=160,
+            height=220,
+            source_page_breaks=[0, 220],
+            page_x_offsets=[0],
+        )
+        band = Band(
+            y_top=20,
+            y_bottom=180,
+            balloons=[Balloon(BBox(20, 25, 140, 150), 0.91)],
+            strip_slice=np.full((160, 160, 3), 255, dtype=np.uint8),
+        )
+        runtime = MagicMock()
+
+        def fake_batch(jobs, **_kwargs):
+            if jobs[0]["mode"] == "roi":
+                return [
+                    {
+                        "texts": [
+                            {
+                                "text": "\ube44\ud2c0",
+                                "bbox": [45, 80, 85, 110],
+                                "text_pixel_bbox": [45, 80, 85, 110],
+                                "confidence": 0.95,
+                                "tipo": "sfx",
+                                "balloon_type": "textured",
+                            }
+                        ],
+                        "_vision_blocks": [{"bbox": [45, 80, 85, 110], "confidence": 0.95}],
+                        "_vision_backend": "koharu-http",
+                    }
+                ]
+            self.assertEqual(jobs[0]["mode"], "page_fallback")
+            return [
+                {
+                    "texts": [
+                        {
+                            "text": "\uc820\uc7a5!",
+                            "bbox": [42, 92, 92, 122],
+                            "text_pixel_bbox": [42, 92, 92, 122],
+                            "confidence": 0.72,
+                            "tipo": "fala",
+                            "balloon_type": "white",
+                            "block_profile": "white_balloon",
+                        }
+                    ],
+                    "_vision_blocks": [{"bbox": [42, 92, 92, 122], "confidence": 0.72}],
+                    "_vision_backend": "koharu-http",
+                }
+            ]
+
+        runtime.run_koharu_cjk_pages.side_effect = fake_batch
+        telemetry = {}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "strip.run._koharu_cjk_strip_precompute_enabled",
+            return_value=True,
+        ), patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_KOHARU_CJK_STRIP_ROI": "1",
+                "TRADUZAI_KOHARU_CJK_SELECTIVE": "1",
+                "TRADUZAI_KOHARU_CJK_EMPTY_ROI_FILTER": "0",
+                "TRADUZAI_KOHARU_CJK_PAGE_FALLBACK": "1",
+            },
+            clear=False,
+        ):
+            mapped = _build_precomputed_koharu_cjk_pages(
+                strip,
+                [band],
+                runtime,
+                [Path(tmp) / "001.jpg"],
+                models_dir="N:/TraduzAI/models",
+                idioma_origem="ko",
+                telemetry=telemetry,
+            )
+
+        self.assertEqual(runtime.run_koharu_cjk_pages.call_count, 2)
+        self.assertEqual(mapped[0]["texts"][0]["text"], "\uc820\uc7a5!")
+        self.assertEqual(telemetry["page_fallback_candidate_count"], 1)
+        self.assertEqual(telemetry["page_fallback_text_count"], 1)
+
+    def test_koharu_roi_page_fallback_prioritizes_large_textlike_empty_balloon(self):
+        from strip.run import _build_precomputed_koharu_cjk_pages
+        from strip.types import BBox, Balloon, Band, VerticalStrip
+
+        strip = VerticalStrip(
+            image=np.full((440, 200, 3), 255, dtype=np.uint8),
+            width=200,
+            height=440,
+            source_page_breaks=[0, 220, 440],
+            page_x_offsets=[0, 0],
+        )
+        small_band = Band(
+            y_top=20,
+            y_bottom=180,
+            balloons=[Balloon(BBox(20, 40, 70, 80), 0.91)],
+            strip_slice=np.full((160, 200, 3), 255, dtype=np.uint8),
+        )
+        large_band = Band(
+            y_top=240,
+            y_bottom=400,
+            balloons=[Balloon(BBox(10, 250, 190, 370), 0.91)],
+            strip_slice=np.full((160, 200, 3), 255, dtype=np.uint8),
+        )
+        runtime = MagicMock()
+
+        def fake_batch(jobs, **_kwargs):
+            if jobs[0]["mode"] == "roi":
+                return [
+                    {"texts": [], "_vision_blocks": [], "_vision_backend": "koharu-http"}
+                    for _job in jobs
+                ]
+            self.assertEqual([job["page_number"] for job in jobs], [2])
+            return [
+                {
+                    "texts": [
+                        {
+                            "text": "\uadf8\uac74...!!",
+                            "bbox": [35, 40, 145, 82],
+                            "text_pixel_bbox": [35, 40, 145, 82],
+                            "confidence": 0.72,
+                            "tipo": "fala",
+                            "balloon_type": "white",
+                            "block_profile": "white_balloon",
+                        }
+                    ],
+                    "_vision_blocks": [{"bbox": [35, 40, 145, 82], "confidence": 0.72}],
+                    "_vision_backend": "koharu-http",
+                }
+            ]
+
+        runtime.run_koharu_cjk_pages.side_effect = fake_batch
+        telemetry = {}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "strip.run._koharu_cjk_strip_precompute_enabled",
+            return_value=True,
+        ), patch(
+            "strip.run._koharu_roi_has_textlike_content",
+            return_value=(True, "test"),
+        ), patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_KOHARU_CJK_STRIP_ROI": "1",
+                "TRADUZAI_KOHARU_CJK_SELECTIVE": "1",
+                "TRADUZAI_KOHARU_CJK_EMPTY_ROI_FILTER": "1",
+                "TRADUZAI_KOHARU_CJK_PAGE_FALLBACK": "1",
+                "TRADUZAI_KOHARU_CJK_PAGE_FALLBACK_MAX": "1",
+            },
+            clear=False,
+        ):
+            mapped = _build_precomputed_koharu_cjk_pages(
+                strip,
+                [small_band, large_band],
+                runtime,
+                [Path(tmp) / "001.jpg", Path(tmp) / "002.jpg"],
+                models_dir="N:/TraduzAI/models",
+                idioma_origem="ko",
+                telemetry=telemetry,
+            )
+
+        self.assertEqual(runtime.run_koharu_cjk_pages.call_count, 2)
+        self.assertEqual(mapped[1]["texts"][0]["text"], "\uadf8\uac74...!!")
+        self.assertEqual(telemetry["page_fallback_job_count"], 1)
+        self.assertEqual(telemetry["page_fallback_text_count"], 1)
 
     def test_koharu_precompute_skips_short_non_hangul_noise_for_korean_source(self):
         from strip.run import _koharu_cjk_text_is_translatable
@@ -474,6 +915,40 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(summary["ocr_macro_ocr_empty_record_count"], 1)
         self.assertTrue(summary["entries"][0]["ocr_precomputed_page"])
 
+    def test_inpaint_stage_preserves_band_and_source_page_metadata_for_debug(self):
+        from strip.process_bands import _run_inpaint_stage
+        from strip.types import Band
+
+        captured = {}
+
+        class CapturingInpainter:
+            def inpaint_band_image(self, band_rgb, ocr_page):
+                captured.update(ocr_page)
+                return band_rgb.copy()
+
+        band = Band(
+            y_top=120,
+            y_bottom=220,
+            strip_slice=np.full((100, 160, 3), 255, dtype=np.uint8),
+        )
+        translated_page = {
+            "numero": 99,
+            "texts": [{"text": "HELLO", "bbox": [20, 30, 70, 55]}],
+            "_vision_blocks": [{"bbox": [20, 30, 70, 55]}],
+        }
+
+        _run_inpaint_stage(
+            band,
+            inpainter=CapturingInpainter(),
+            translated_page=translated_page,
+            band_index=7,
+            source_page_number=3,
+        )
+
+        self.assertEqual(captured["_band_index"], 7)
+        self.assertEqual(captured["_source_page_number"], 3)
+        self.assertEqual(captured["_band_y_top"], 120)
+
     def test_run_chapter_produces_target_count_pages(self):
         from strip.run import run_chapter
 
@@ -556,6 +1031,7 @@ class RunChapterSmokeTests(unittest.TestCase):
             tmp_path = Path(tmp)
             files = _write_pages(tmp_path, 2)
             output = tmp_path / "out"
+            chapter_telemetry = {}
 
             def fake_process_band(band, **_kw):
                 idx = len(getattr(fake_process_band, "seen", []))
@@ -599,6 +1075,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                     translator=MagicMock(),
                     inpainter=MagicMock(),
                     typesetter=MagicMock(),
+                    chapter_telemetry=chapter_telemetry,
                 )
 
             summary = output_pages[0].page_profile.get("strip_perf_summary")
@@ -627,6 +1104,10 @@ class RunChapterSmokeTests(unittest.TestCase):
             self.assertEqual(summary["top_inpaint_bands"][0]["band_index"], 0)
             self.assertEqual(summary["top_typeset_bands"][0]["durations_sec"]["typeset"], 0.4)
             self.assertIn("top_bands", summary)
+            self.assertIn("chapter_stage_durations_sec", summary)
+            self.assertIn("strip_build", summary["chapter_stage_durations_sec"])
+            self.assertIn("strip_process_bands_total", summary["chapter_stage_durations_sec"])
+            self.assertGreater(chapter_telemetry["wall_total_sec"], 0)
             self.assertEqual(output_pages[0].ocr_result["page_profile"], output_pages[0].page_profile)
 
     def test_run_chapter_attaches_macro_ocr_shadow_when_enabled(self):

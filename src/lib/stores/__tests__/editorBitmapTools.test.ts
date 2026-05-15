@@ -3,11 +3,54 @@ import type { PageData, Project, TextEntry, TextLayerStyle } from "../appStore";
 import { useAppStore } from "../appStore";
 import { useEditorStore } from "../editorStore";
 
-const { updateBrushRegion, updateMaskRegion, updateRecoveryRegion, updateReinpaintRegion } = vi.hoisted(() => ({
+const {
+  updateBrushRegion,
+  updateMaskRegion,
+  updateRecoveryRegion,
+  updateReinpaintRegion,
+  healInpaintRegion,
+  patchEditorTextLayer,
+  runPageActionWithOptionalMask,
+  loadEditorPage,
+} = vi.hoisted(() => ({
   updateBrushRegion: vi.fn(async () => "images/brush.png"),
   updateMaskRegion: vi.fn(async () => "images/mask.png"),
   updateRecoveryRegion: vi.fn(async () => "images/inpaint.png"),
   updateReinpaintRegion: vi.fn(async () => "images/reinpaint.png"),
+  healInpaintRegion: vi.fn(async () => ({
+    page_index: 0,
+    inpaint_path: "images/001.png",
+    before_inpaint_path: "editor_cache/healing_inpaint/page-0001/before.png",
+    bbox: [10, 10, 40, 40] as [number, number, number, number],
+  })),
+  patchEditorTextLayer: vi.fn(async () => ({})),
+  runPageActionWithOptionalMask: vi.fn(async () => ({
+    action: "ocr",
+    mode: "regional",
+    bbox: [12, 14, 50, 40],
+    changed_assets: ["project_json", "rendered"],
+    changed_layers: [],
+    message: "ok",
+  })),
+  loadEditorPage: vi.fn(async () => ({
+    page_index: 0,
+    total_pages: 1,
+    page: {
+      numero: 1,
+      arquivo_original: "originals/001.png",
+      arquivo_traduzido: "translated/001.png",
+      image_layers: {
+        base: { key: "base", path: "originals/001.png", visible: true, locked: true },
+        inpaint: { key: "inpaint", path: "images/001.png", visible: true, locked: false },
+        brush: { key: "brush", path: "images/brush.png", visible: true, locked: false },
+        mask: { key: "mask", path: "images/mask.png", visible: true, locked: false },
+        recovery: { key: "recovery", path: null, visible: false, locked: false },
+      },
+      inpaint_blocks: [],
+      text_layers: [],
+      textos: [],
+    },
+  })),
 }));
 
 vi.mock("../../editorBackend", () => ({
@@ -16,6 +59,10 @@ vi.mock("../../editorBackend", () => ({
     updateMaskRegion,
     updateRecoveryRegion,
     updateReinpaintRegion,
+    healInpaintRegion,
+    patchEditorTextLayer,
+    runPageActionWithOptionalMask,
+    loadEditorPage,
   })),
 }));
 
@@ -135,6 +182,27 @@ beforeEach(() => {
 });
 
 describe("editor bitmap tools", () => {
+  it("keeps patch-only saved text visible after pending edits are cleared", async () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+
+    useEditorStore.getState().setWorkingTraduzido(pageKey, "text-a", "Texto novo");
+    expect(useEditorStore.getState().pendingEdits["text-a"]?.traduzido).toBe("Texto novo");
+
+    await useEditorStore.getState().commitEditsPatchOnly();
+
+    expect(patchEditorTextLayer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_path: "D:/tmp/project.json",
+        page_index: 0,
+        layer_id: "text-a",
+        patch: expect.objectContaining({ translated: "Texto novo" }),
+      }),
+    );
+    expect(useEditorStore.getState().pendingEdits).toEqual({});
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Texto novo");
+    expect(useAppStore.getState().project?.paginas[0].text_layers[0].traduzido).toBe("Texto novo");
+  });
+
   it("updates internal bitmap assets without exposing bitmap selection", async () => {
     useEditorStore.setState({ toolMode: "repairBrush" });
     await applyStroke();
@@ -213,9 +281,12 @@ describe("editor bitmap tools", () => {
       color: "#ff0000",
       opacity: 0.5,
       hardness: 1,
+      clipMaskPng: "data:image/png;base64,clip",
     });
 
-    expect(updateRecoveryRegion).toHaveBeenCalledTimes(1);
+    expect(updateRecoveryRegion).toHaveBeenCalledWith(
+      expect.objectContaining({ clip_mask_png: "data:image/png;base64,clip" }),
+    );
     expect(updateBrushRegion).not.toHaveBeenCalled();
     expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe("images/inpaint.png");
   });
@@ -253,6 +324,56 @@ describe("editor bitmap tools", () => {
     );
     expect(updateRecoveryRegion).not.toHaveBeenCalled();
     expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe("images/reinpaint.png");
+  });
+
+  it("runs lasso page actions with the selected region bbox", async () => {
+    useEditorStore.setState({
+      activeLassoSelection: {
+        pageKey: useEditorStore.getState().currentPageKey(),
+        pageIndex: 0,
+        points: [
+          [12, 14],
+          [62, 14],
+          [62, 54],
+          [12, 54],
+        ],
+        bbox: [12, 14, 50, 40],
+        width: 100,
+        height: 100,
+      },
+    });
+
+    await useEditorStore.getState().runMaskedActionFromLasso("ocr");
+
+    expect(runPageActionWithOptionalMask).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      action: "ocr",
+      bbox: [12, 14, 50, 40],
+    });
+    expect(useEditorStore.getState().activeLassoSelection).toBeNull();
+  });
+
+  it("applies healing brush result with undoable inpaint paths", async () => {
+    await useEditorStore.getState().healPaintedRegion({
+      bbox: [10, 10, 40, 40],
+      maskPath: "editor_cache/healing_masks/page-0001/mask.png",
+    });
+
+    expect(healInpaintRegion).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      bbox: [10, 10, 40, 40],
+      mask_path: "editor_cache/healing_masks/page-0001/mask.png",
+    });
+    expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe(
+      "images/001.png",
+    );
+    expect(useEditorStore.getState().getRenderPreviewState(useEditorStore.getState().currentPageKey()).status).toBe("stale");
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe(
+      "editor_cache/healing_inpaint/page-0001/before.png",
+    );
   });
 
   it("does not let stale bitmap persistence overwrite a newer optimistic layer", async () => {

@@ -204,7 +204,7 @@ function Login() {
   const navigate = useNavigate();
   const query = useQueryClient();
   const [searchParams] = useSearchParams();
-  const [email, setEmail] = useState("admin@local");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const googleError = searchParams.get("error");
@@ -250,8 +250,7 @@ function Login() {
           </div>
         </label>
         <div className="auth-meta-row">
-          <span className="auth-helper">Acesso do beta interno</span>
-          <span className="auth-helper">Use sua conta para continuar</span>
+          <span className="auth-helper">Esqueceu sua senha? Entre em contato.</span>
         </div>
         {googleError && <p className="error">Não foi possível entrar com Google. Tente novamente.</p>}
         {mutation.error && <p className="error">{mutation.error.message}</p>}
@@ -414,27 +413,30 @@ function Landing() {
           <a href="#fluxo">Fluxo</a>
           <a href="#recursos">Recursos</a>
           <a href="#resultado">Demonstração</a>
+          <a href="#faq">FAQ</a>
           <a href="#plano">Planos</a>
         </div>
         <div className="landing-nav-actions">
           <Link className="landing-nav-action" to="/login">Entrar</Link>
-          <Link className="landing-nav-action landing-nav-action-primary" to="/login">Começar</Link>
+          <Link className="landing-nav-action landing-nav-action-primary" to="/signup">Criar conta</Link>
         </div>
       </nav>
 
       <section className="landing-hero">
         <div className="landing-hero-copy">
           <div className="hero-kicker hero-reveal reveal-delay-1">
-            <span><Sparkles size={12} /> WEB LOCAL</span>
-            <small>beta interno</small>
+            <span>100% local · suas páginas não saem do PC</span>
           </div>
-          <h1 className="hero-reveal reveal-delay-2">Uma Scan Inteira em um clique.</h1>
+          <h1 className="hero-reveal reveal-delay-2">Traduza um capítulo inteiro de mangá em minutos.</h1>
           <p className="hero-reveal reveal-delay-3">
-            A forma mais fácil e rápida de traduzir
+            OCR, tradução com contexto da obra, inpaint de balões e typesetting — automático. Você só revisa.
           </p>
-          <div className="landing-actions hero-reveal reveal-delay-4">
-            <Link className="landing-cta primary" to="/login">Começar agora</Link>
-            <a className="landing-cta secondary" href="#resultado">Ver demonstração</a>
+          <div className="hero-actions-group hero-reveal reveal-delay-4">
+            <p className="hero-free-badge">40 páginas grátis para começar</p>
+            <div className="landing-actions">
+              <Link className="landing-cta primary" to="/signup">Criar conta grátis</Link>
+              <a className="landing-cta secondary" href="#resultado">Ver demonstração</a>
+            </div>
           </div>
           <div className="hero-flow-preview hero-reveal reveal-delay-5" aria-label="Prévia visual do fluxo TraduzAI">
             <div className="flow-panel">
@@ -499,31 +501,32 @@ function Landing() {
         <div className="landing-section-head">
           <p className="eyebrow">Antes e depois</p>
           <h2>Veja o resultado.</h2>
-          <p>Compare a página original com a versão traduzida e limpa.</p>
+          <p>Página original em inglês → capítulo traduzido, limpo e pronto para distribuição.</p>
         </div>
-        <div className="comparison-strip" data-reveal>
-          <article className="comparison-card">
-            <div className="comparison-page before-page">
-              <span className="speech-bubble">I need to go now!</span>
-              <span className="scan-mark" />
-              <span className="panel-line panel-line-a" />
-              <span className="panel-line panel-line-b" />
-            </div>
-            <span>Antes</span>
-            <strong>Página original</strong>
-            <small>Texto detectado, arte preservada e pronta para processamento.</small>
-          </article>
-          <article className="comparison-card">
-            <div className="comparison-page after-page">
-              <span className="speech-bubble">Preciso ir agora!</span>
-              <span className="clean-mark" />
-              <span className="panel-line panel-line-a" />
-              <span className="panel-line panel-line-b" />
-            </div>
-            <span>Depois</span>
-            <strong>Capítulo traduzido</strong>
-            <small>Texto em português, limpeza aplicada e revisão visual disponível.</small>
-          </article>
+        <img
+          className="ba-real-image"
+          src="/assets/before-after-demo.png"
+          alt="Comparação antes e depois: página original em inglês e versão traduzida para português pelo TraduzAI"
+          loading="lazy"
+        />
+      </section>
+
+      <section className="landing-section" data-reveal>
+        <div className="landing-section-head">
+          <p className="eyebrow">Editor completo</p>
+          <h2>Revise cada detalhe antes de exportar.</h2>
+          <p>Glossário inteligente, QA automático e editor visual com camadas — tudo em um fluxo integrado.</p>
+        </div>
+        <div className="screenshot-showcase">
+          <img
+            src="/assets/editor-view.png"
+            alt="Editor visual do TraduzAI com camadas, propriedades de texto e preview da página"
+            loading="lazy"
+          />
+          <div className="screenshot-side">
+            <img src="/assets/glossary-panel.png" alt="Painel de glossário inteligente com termos revisados e candidatos" loading="lazy" />
+            <img src="/assets/qa-report.png" alt="Relatório de QA com flags de inglês restante e alertas de revisão" loading="lazy" />
+          </div>
         </div>
       </section>
 
@@ -531,21 +534,92 @@ function Landing() {
         <div className="landing-section-head">
           <p className="eyebrow">Para quem é</p>
           <h2>Feito para tradução visual.</h2>
-          <p>Para tradutores, editores, criadores e equipes que trabalham com mangás, manhwas, webtoons e obras visuais autorizadas.</p>
+          <p>Para tradutores, editores e equipes que trabalham com mangás, manhwas, webtoons e obras visuais autorizadas.</p>
+        </div>
+        <div className="audience-grid">
+          <article className="audience-card" data-reveal>
+            <Languages size={22} />
+            <h3>Tradutores</h3>
+            <p>Automatize OCR e tradução e foque na revisão criativa. Glossário e memória garantem consistência entre capítulos.</p>
+          </article>
+          <article className="audience-card" data-reveal>
+            <BookOpen size={22} />
+            <h3>Equipes de scan</h3>
+            <p>Fluxo integrado do upload ao CBZ: contexto da obra, inpaint, typesetting e pacote de revisão em um projeto editável.</p>
+          </article>
+          <article className="audience-card" data-reveal>
+            <Star size={22} />
+            <h3>Criadores independentes</h3>
+            <p>Lance seus quadrinhos em português sem precisar de equipe grande. Do upload ao capítulo pronto em minutos.</p>
+          </article>
         </div>
       </section>
 
-      <section id="plano" className="landing-section plan-band" data-reveal>
-        <div>
-          <p className="eyebrow">Comece agora</p>
-          <h2>Acelere sua tradução visual.</h2>
-          <p>Menos trabalho repetitivo. Mais controle no resultado final.</p>
+      <section id="faq" className="landing-section" data-reveal>
+        <div className="landing-section-head">
+          <p className="eyebrow">Dúvidas frequentes</p>
+          <h2>Perguntas e respostas.</h2>
         </div>
-        <div className="plan-meter">
-          <strong>1040</strong>
-          <span>páginas disponíveis</span>
-          <small>40 grátis + 1000 créditos</small>
-          <Link className="landing-cta primary plan-cta" to="/login">Testar TraduzAI</Link>
+        <div className="faq-list">
+          <div className="faq-item">
+            <strong>O TraduzAI fornece mangás?</strong>
+            <p>Não. O app edita arquivos do próprio usuário e não hospeda nem distribui obras.</p>
+          </div>
+          <div className="faq-item">
+            <strong>Minhas páginas são enviadas para a internet?</strong>
+            <p>Não. As imagens ficam no seu computador. A internet é usada apenas para busca de contexto textual e tradução quando o usuário ativa esses recursos.</p>
+          </div>
+          <div className="faq-item">
+            <strong>Posso revisar antes de exportar?</strong>
+            <p>Sim. O fluxo inclui glossário, memória de obra, editor visual, QA automático e múltiplos modos de exportação.</p>
+          </div>
+          <div className="faq-item">
+            <strong>Funciona em qual sistema operacional?</strong>
+            <p>Windows 10 e 11 são suportados nesta versão. macOS e Linux estão no roadmap.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="plano" className="landing-section" data-reveal>
+        <div className="landing-section-head">
+          <p className="eyebrow">Planos</p>
+          <h2>Comece grátis.</h2>
+          <p>40 páginas gratuitas para testar. Sem cartão de crédito.</p>
+        </div>
+        <div className="pricing-grid">
+          <article className="pricing-card">
+            <p className="pricing-card-name">Free</p>
+            <p className="pricing-card-price">Grátis</p>
+            <ul className="pricing-card-items">
+              <li>40 páginas para testar</li>
+              <li>Modo automático e manual</li>
+              <li>Export básico (CBZ/ZIP)</li>
+              <li>Processamento local</li>
+            </ul>
+            <Link className="landing-cta primary pricing-card-cta" to="/signup">Criar conta grátis</Link>
+          </article>
+          <article className="pricing-card featured">
+            <p className="pricing-card-name">Pro</p>
+            <p className="pricing-card-price">Em desenvolvimento</p>
+            <ul className="pricing-card-items">
+              <li>Tradução com API própria</li>
+              <li>Contexto online de obras</li>
+              <li>QA completo</li>
+              <li>Glossário e memória</li>
+              <li>Export avançado</li>
+            </ul>
+          </article>
+          <article className="pricing-card">
+            <p className="pricing-card-name">Studio</p>
+            <p className="pricing-card-price">Futuro</p>
+            <ul className="pricing-card-items">
+              <li>Tradução em lote</li>
+              <li>Presets de projeto</li>
+              <li>Relatórios de produção</li>
+              <li>Pacotes de revisão</li>
+              <li>Recursos avançados de equipe</li>
+            </ul>
+          </article>
         </div>
       </section>
 
@@ -555,10 +629,14 @@ function Landing() {
         <div>
           <a href="#recursos">Recursos</a>
           <a href="#resultado">Demonstração</a>
+          <a href="#faq">FAQ</a>
           <a href="#plano">Planos</a>
           <a href="mailto:contato@traduzai.app">Contato</a>
           <Link to="/legal">Termos</Link>
         </div>
+        <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
+          © {new Date().getFullYear()} TraduzAI
+        </small>
       </footer>
     </main>
   );

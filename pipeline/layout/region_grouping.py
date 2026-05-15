@@ -87,7 +87,7 @@ def group_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for member in group:
             ordered[member]["group_id"] = group_id
             ordered[member]["grouping_status"] = status
-            ordered[member]["layout_group_size"] = len(group)
+            ordered[member]["layout_group_size"] = 1
     return ordered
 
 

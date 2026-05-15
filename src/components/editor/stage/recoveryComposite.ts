@@ -79,11 +79,39 @@ function drawRecoveryStrokeMask(
   ctx.stroke();
 }
 
+function drawPolygonMask(
+  ctx: CanvasRenderingContext2D,
+  polygon?: [number, number][],
+) {
+  if (!polygon || polygon.length < 3) return false;
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.moveTo(polygon[0][0], polygon[0][1]);
+  for (const [x, y] of polygon.slice(1)) {
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  return true;
+}
+
+function clipMaskToPolygon(
+  ctx: CanvasRenderingContext2D,
+  polygon?: [number, number][],
+) {
+  if (!polygon || polygon.length < 3) return;
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-in";
+  drawPolygonMask(ctx, polygon);
+  ctx.restore();
+}
+
 export function applyRecoveryStrokeToCanvas(
   canvas: HTMLCanvasElement,
   original: HTMLImageElement,
   stroke: [number, number][],
   brushSize: number,
+  clipPolygon?: [number, number][],
 ): string | null {
   const width = canvas.width;
   const height = canvas.height;
@@ -99,6 +127,7 @@ export function applyRecoveryStrokeToCanvas(
   const maskCtx = maskCanvas.getContext("2d");
   if (!maskCtx) return null;
   drawRecoveryStrokeMask(maskCtx, stroke, brushSize);
+  clipMaskToPolygon(maskCtx, clipPolygon);
 
   const patchCanvas = document.createElement("canvas");
   patchCanvas.width = width;
@@ -118,6 +147,7 @@ export function createRecoveryStrokePreviewPatch(
   stroke: [number, number][],
   brushSize: number,
   dirtyBbox: [number, number, number, number],
+  clipPolygon?: [number, number][],
 ): Promise<RecoveryStrokePreviewPatch | null> {
   const [x1, y1, x2, y2] = dirtyBbox;
   const width = Math.max(1, x2 - x1);
@@ -145,6 +175,10 @@ export function createRecoveryStrokePreviewPatch(
     maskCtx,
     stroke.map(([x, y]) => [x - x1, y - y1] as [number, number]),
     brushSize,
+  );
+  clipMaskToPolygon(
+    maskCtx,
+    clipPolygon?.map(([x, y]) => [x - x1, y - y1] as [number, number]),
   );
 
   ctx.globalCompositeOperation = "destination-in";

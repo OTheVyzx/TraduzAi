@@ -13,6 +13,7 @@ import type {
 } from "./stores/appStore";
 import type { InternetContextCandidate, InternetContextSourceResult } from "./internetContext";
 import { canonicalizeTextStyle } from "./editorTextStylePolicy";
+import type { EditorTextStylePreset } from "./editorTextStylePresets";
 
 export function isE2E() {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
@@ -27,6 +28,9 @@ export interface ProjectJson {
   capitulo?: number;
   idioma_origem?: string;
   idioma_destino?: string;
+  source_path?: string;
+  output_path?: string;
+  _work_dir?: string;
   contexto?: Partial<ProjectContext>;
   work_context?: Partial<WorkContextSummary>;
   preset?: unknown;
@@ -138,6 +142,10 @@ function projectBaseDir(baseDir: string) {
   return baseDir.replace(/\\/g, "/").replace(/\/project\.json$/i, "");
 }
 
+function nonEmptyProjectPath(path?: string | null) {
+  return typeof path === "string" && path.trim() ? path.trim().replace(/\\/g, "/") : null;
+}
+
 function joinProjectPath(baseDir: string, maybeRelative?: string | null) {
   if (!maybeRelative) return null;
   if (isAbsolutePath(maybeRelative)) return maybeRelative.replace(/\\/g, "/");
@@ -241,9 +249,20 @@ export function hydratePageData(page: Partial<PageData>, baseDir: string): PageD
 }
 
 export function hydrateProjectJson(raw: ProjectJson, projectDir: string): ProjectJson {
+  const baseDir = projectBaseDir(
+    nonEmptyProjectPath(projectDir) ??
+      nonEmptyProjectPath(raw._work_dir) ??
+      nonEmptyProjectPath(raw.output_path) ??
+      nonEmptyProjectPath(raw.source_path) ??
+      "",
+  );
+
   return {
     ...raw,
-    paginas: (raw.paginas ?? []).map((page) => hydratePageData(page, projectDir)),
+    source_path: nonEmptyProjectPath(raw.source_path) ?? baseDir,
+    output_path: nonEmptyProjectPath(raw.output_path) ?? baseDir,
+    _work_dir: nonEmptyProjectPath(raw._work_dir) ?? baseDir,
+    paginas: (raw.paginas ?? []).map((page) => hydratePageData(page, baseDir)),
   };
 }
 
@@ -251,6 +270,8 @@ export interface WorkSearchCandidate {
   id: string;
   title: string;
   synopsis: string;
+  genres?: string[];
+  characters?: string[];
   source: "anilist" | "myanimelist" | "mangaupdates" | "kitsu" | "shikimori" | "bangumi" | "wikipedia" | "wikidata" | "fandom" | "webnovel";
   source_url: string;
   cover_url?: string;
@@ -678,6 +699,7 @@ export async function updateMaskRegion(config: {
   erase?: boolean;
   strokes: [number, number][][];
   dirty_bbox?: [number, number, number, number];
+  clip_mask_png?: string;
 }): Promise<string> {
   if (isE2E()) return tauriMock.updateMaskRegion();
   return invoke("update_mask_region", { config });
@@ -696,6 +718,7 @@ export async function updateBrushRegion(config: {
   opacity?: number;
   hardness?: number;
   dirty_bbox?: [number, number, number, number];
+  clip_mask_png?: string;
 }): Promise<string> {
   if (isE2E()) return tauriMock.updateBrushRegion();
   return invoke("update_brush_region", { config });
@@ -715,6 +738,7 @@ export async function updateRecoveryRegion(config: {
   hardness?: number;
   png_data?: string;
   dirty_bbox?: [number, number, number, number];
+  clip_mask_png?: string;
 }): Promise<string> {
   if (isE2E()) return tauriMock.updateRecoveryRegion();
   return invoke("update_recovery_region", { config });
@@ -734,6 +758,7 @@ export async function updateReinpaintRegion(config: {
   hardness?: number;
   png_data?: string;
   dirty_bbox?: [number, number, number, number];
+  clip_mask_png?: string;
 }): Promise<string> {
   if (isE2E()) return tauriMock.updateReinpaintRegion();
   return invoke("update_reinpaint_region", { config });
@@ -748,6 +773,33 @@ export async function writeMaskFromPng(config: {
 }): Promise<string> {
   if (isE2E()) return "";
   return invoke("write_mask_from_png", { config });
+}
+
+export type RegionalInpaintResult = {
+  page_index: number;
+  inpaint_path: string;
+  before_inpaint_path?: string | null;
+  bbox: [number, number, number, number];
+};
+
+export async function writeHealingMask(config: {
+  project_path: string;
+  page_index: number;
+  png_data: string;
+  bbox?: [number, number, number, number];
+}): Promise<string> {
+  if (isE2E()) return tauriMock.writeHealingMask(config);
+  return invoke("write_healing_mask", { config });
+}
+
+export async function healInpaintRegion(config: {
+  project_path: string;
+  page_index: number;
+  bbox: [number, number, number, number];
+  mask_path: string;
+}): Promise<RegionalInpaintResult> {
+  if (isE2E()) return tauriMock.healInpaintRegion(config);
+  return invoke("heal_inpaint_region", { config });
 }
 
 // Context lookup
@@ -961,7 +1013,12 @@ export async function translatePage(args: { project_path: string; page_index: nu
   return await invoke("translate_page", buildPlainPageCommandArgs(args));
 }
 
-export async function reinpaintPage(args: { project_path: string; page_index: number }): Promise<string> {
+export async function reinpaintPage(args: {
+  project_path: string;
+  page_index: number;
+  bbox?: [number, number, number, number];
+  mask_path?: string | null;
+}): Promise<string> {
   return invoke("reinpaint_page", { config: args });
 }
 
@@ -1295,6 +1352,7 @@ export interface AppSettings {
   ollama_host?: string;
   idioma_origem: string;
   idioma_destino: string;
+  editor_text_presets?: EditorTextStylePreset[];
 }
 
 export interface SupportedLanguage {
@@ -1314,6 +1372,7 @@ export async function loadSettings(): Promise<AppSettings> {
       ollama_host: "http://localhost:11434",
       idioma_origem: "en",
       idioma_destino: "pt-BR",
+      editor_text_presets: [],
     };
   }
   return invoke("load_settings");
@@ -1349,5 +1408,18 @@ export async function runPageActionWithOptionalMask(config: {
   bbox?: [number, number, number, number] | null;
   mask_path?: string | null;
 }): Promise<PageActionResult> {
-  return invoke("run_page_action_with_optional_mask", { config });
+  if (isE2E()) return tauriMock.runPageActionWithOptionalMask(config);
+  try {
+    return await invoke("run_page_action_with_optional_mask", { config });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes("run_page_action_with_optional_mask") ||
+      message.includes("unknown command") ||
+      message.includes("not found")
+    ) {
+      return invoke("run_paint_optional_mask", { config });
+    }
+    throw error;
+  }
 }

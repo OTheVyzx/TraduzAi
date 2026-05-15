@@ -103,6 +103,9 @@ SOURCE_OCR_REPAIRS: list[tuple[str, str, int]] = [
 TRANSLATION_REVIEW_REPAIRS: list[tuple[str, str, int]] = [
     (r"VocÄ™|Vocę|VocÃª", "Você", re.IGNORECASE),
     (r"atravÃ©s|atraves", "através", re.IGNORECASE),
+    (r"\b(?:ranqueador|rankeador)\b", "Ranker", re.IGNORECASE),
+    (r"\bsele[cç][aã]o\s+da\s+sele[cç][aã]o\b", "seletiva nacional", re.IGNORECASE),
+    (r"\bsele[cç][aã]o\s+da\s+equipe\s+nacional\b", "seletiva nacional", re.IGNORECASE),
 ]
 
 # Palavras inglesas curtas em CAPS que NÃO devem ser tratadas como nomes próprios.
@@ -124,6 +127,7 @@ _COMMON_EN_CAPS_WORDS = frozenset({
     "ATTACK", "DEFEND", "RETREAT", "CHARGE", "FIRE", "WATER", "EARTH", "AIR",
     "LIGHT", "DARK", "LIFE", "DEATH", "LOVE", "HATE", "WAR", "PEACE",
     "ENEMY", "FRIEND", "HELP", "SAVE", "KILL", "DIE", "LIVE",
+    "KILLING", "SOMEHOW",
     "MAGIC", "SPELL", "POWER", "FORCE", "WILL", "MIND", "SOUL", "HEART",
     "MERCY", "JUSTICE", "HONOR", "GLORY", "SHAME", "PRIDE",
     "DAY", "PEOPLE", "MOST",
@@ -297,22 +301,7 @@ def _repair_translated_proper_name(
     translated_text: str,
     tipo: str = "fala",
 ) -> tuple[str, list[dict]]:
-    if tipo == "sfx":
-        return translated_text, []
-    canonical = _source_multiword_caps_name(source_text)
-    if not canonical:
-        return translated_text, []
-    if _normalize_entity_key(translated_text) == _normalize_entity_key(canonical):
-        return translated_text, []
-    fixed = canonical.upper() if translated_text.strip().isupper() else canonical
-    return fixed, [
-        {
-            "phase": "target",
-            "kind": "proper_name",
-            "from": translated_text,
-            "to": fixed,
-        }
-    ]
+    return translated_text, []
 
 
 def normalize_google_language_code(language_code: str) -> str:
@@ -598,6 +587,9 @@ def _postprocess(
     result = result.replace("\u2026", "...")
     for pattern, replacement, flags in ADAPTATIONS:
         result = re.sub(pattern, replacement, result, flags=flags)
+    if lang == "ko" and "생문" in source_text and re.search(r"\btexto\s+original\b", result, re.IGNORECASE):
+        result = re.sub(r"\b(?:o|um)?\s*texto\s+original\b", "a porta da vida", result, flags=re.IGNORECASE)
+
     result = re.sub(r"\s+([!?.,;:])", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result).strip()
 
@@ -1295,6 +1287,10 @@ def _lookup_special_literal_translation(text: str, tipo: str) -> str | None:
     phrase_key = re.sub(r"[\W_]+", "", stripped.lower())
     phrase_literal_map = {
         "anoisano": "Um n\u00e3o \u00e9 um n\u00e3o",
+        "mom": "M\u00e3e",
+        "what": "O qu\u00ea",
+        "why": "Por qu\u00ea",
+        "shehidthismuch": "Ela escondeu tudo isso",
     }
     if phrase_key in phrase_literal_map:
         punct_match = re.search(r"([!?.,]+)$", stripped)
@@ -1314,6 +1310,143 @@ def _lookup_special_literal_translation(text: str, tipo: str) -> str | None:
     if normalized == "none":
         punct = punct or "."
     return f"{prefix}{literal_map[normalized]}{suffix_quote}{punct}"
+
+
+def _translation_bbox(value) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _translation_context_bbox(text: dict) -> list[int] | None:
+    return (
+        _translation_bbox(text.get("balloon_bbox"))
+        or _translation_bbox(text.get("source_bbox"))
+        or _translation_bbox(text.get("bbox"))
+        or _translation_bbox(text.get("text_pixel_bbox"))
+    )
+
+
+def _translation_bbox_iou(a: list[int] | None, b: list[int] | None) -> float:
+    if not a or not b:
+        return 0.0
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area_a = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    return inter / float(max(1, area_a + area_b - inter))
+
+
+def _same_translation_context(prev_text: dict, next_text: dict) -> bool:
+    prev_bbox = _translation_context_bbox(prev_text)
+    next_bbox = _translation_context_bbox(next_text)
+    if not prev_bbox or not next_bbox:
+        return False
+    if _translation_bbox_iou(prev_bbox, next_bbox) >= 0.20:
+        return True
+    px1, py1, px2, py2 = prev_bbox
+    nx1, ny1, nx2, ny2 = next_bbox
+    horizontal_overlap = min(px2, nx2) - max(px1, nx1)
+    vertical_gap = max(0, max(ny1 - py2, py1 - ny2))
+    min_width = max(1, min(px2 - px1, nx2 - nx1))
+    return horizontal_overlap >= int(min_width * 0.35) and vertical_gap <= 38
+
+
+def _normalize_context_source(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip())
+
+
+def _looks_like_split_sake_phrase(parts: list[str]) -> bool:
+    joined = _normalize_context_source(" ".join(parts)).lower()
+    if re.search(r"\bfor\s+(?:the\s+)?[a-z][a-z' -]{1,40}'s\s+sake\b", joined):
+        return True
+    return any(
+        re.search(r"\bfor\b.*'s\s*$", _normalize_context_source(left).lower())
+        and re.match(r"^sake\b", _normalize_context_source(right).lower())
+        for left, right in zip(parts, parts[1:])
+    )
+
+
+def _join_context_source(parts: list[str]) -> str:
+    joined = _normalize_context_source(" ".join(part for part in parts if str(part or "").strip()))
+    return joined
+
+
+def _build_translation_context_groups(texts: list[dict], source_parts: list[str]) -> list[list[int]]:
+    groups: list[list[int]] = []
+    index = 0
+    while index < len(texts) - 1:
+        current = [index]
+        cursor = index + 1
+        while cursor < len(texts) and len(current) < 4:
+            prev = texts[current[-1]]
+            nxt = texts[cursor]
+            if prev.get("skip_processing") or nxt.get("skip_processing"):
+                break
+            if str(prev.get("tipo", "fala")) not in {"fala", "pensamento", "narracao"}:
+                break
+            if str(nxt.get("tipo", "fala")) not in {"fala", "pensamento", "narracao"}:
+                break
+            candidate = current + [cursor]
+            candidate_sources = [source_parts[i] for i in candidate]
+            if not _same_translation_context(prev, nxt):
+                break
+            if _looks_like_split_sake_phrase(candidate_sources):
+                current = candidate
+                cursor += 1
+                break
+            break
+        if len(current) > 1:
+            groups.append(current)
+            index = current[-1] + 1
+        else:
+            index += 1
+    return groups
+
+
+def _split_by_source_lengths(translated: str, source_parts: list[str]) -> list[str]:
+    words = _normalize_context_source(translated).split()
+    if len(source_parts) <= 1 or not words:
+        return [translated]
+    weights = [max(1, len(re.sub(r"\s+", "", part))) for part in source_parts]
+    total = max(1, sum(weights))
+    result: list[str] = []
+    cursor = 0
+    for part_index, weight in enumerate(weights):
+        if part_index == len(weights) - 1:
+            chunk = words[cursor:]
+        else:
+            remaining_parts = len(weights) - part_index - 1
+            take = max(1, round(len(words) * (weight / total)))
+            take = min(take, max(1, len(words) - cursor - remaining_parts))
+            chunk = words[cursor: cursor + take]
+            cursor += take
+        result.append(" ".join(chunk).strip())
+    return result
+
+
+def _split_contextual_translation(translated: str, source_parts: list[str]) -> list[str]:
+    cleaned = _normalize_context_source(translated)
+    if len(source_parts) == 2 and _looks_like_split_sake_phrase(source_parts):
+        match = re.match(r"(?is)^(.+?\bpelo\s+bem)\s+((?:d[aeo]|de)\s+.+)$", cleaned)
+        if match:
+            first, second = match.groups()
+            return [first.strip(), second.strip()]
+    split = _split_by_source_lengths(cleaned, source_parts)
+    if len(split) == len(source_parts):
+        return split
+    return [cleaned, *[""] * (len(source_parts) - 1)]
 
 
 def _build_text_payload(texts: list[dict], index: int, history_tail: list[dict]) -> dict:
@@ -1849,14 +1982,57 @@ def _translate_google_single_page(
             pending_indices.append(index)
             pending_texts.append(prepared)
 
-    if pending_texts:
+    handled_context_indices: set[int] = set()
+    context_groups = _build_translation_context_groups(texts, repaired_sources)
+    context_requests: list[tuple[list[int], list[str], str]] = []
+    pending_set = set(pending_indices)
+    for group in context_groups:
+        if len(group) < 2 or any(index not in pending_set for index in group):
+            continue
+        source_parts = [repaired_sources[index] or raw_texts[index] for index in group]
+        if not _looks_like_split_sake_phrase(source_parts):
+            continue
+        group_id = f"tc_{page_idx + 1:03}_{group[0] + 1:03}"
+        context_source = _join_context_source([preprocessed[index] for index in group])
+        if not context_source:
+            continue
+        for offset, index in enumerate(group):
+            texts[index]["translation_context_group_id"] = group_id
+            texts[index]["translation_context_index"] = offset + 1
+            texts[index]["translation_context_size"] = len(group)
+            texts[index]["translation_context_source"] = _join_context_source(source_parts)
+        context_requests.append((group, source_parts, context_source))
+        handled_context_indices.update(group)
+
+    if context_requests:
         try:
-            pending_translations = _google.translate_batch(pending_texts)
+            context_translations = _google.translate_batch([request[2] for request in context_requests])
+        except Exception as exc:
+            logger.warning(f"Batch contextual falhou na pagina {page_idx + 1}: {exc}")
+            context_translations = [request[2] for request in context_requests]
+        for (group, source_parts, _context_source), translated_group in zip(context_requests, context_translations):
+            split_parts = _split_contextual_translation(translated_group, source_parts)
+            if len(split_parts) != len(group):
+                split_parts = _split_by_source_lengths(translated_group, source_parts)
+            for index, translated_part in zip(group, split_parts):
+                translations[index] = translated_part
+
+    remaining_pending = [
+        (index, text)
+        for index, text in zip(pending_indices, pending_texts)
+        if index not in handled_context_indices
+    ]
+
+    if remaining_pending:
+        remaining_indices = [index for index, _text in remaining_pending]
+        remaining_texts = [text for _index, text in remaining_pending]
+        try:
+            pending_translations = _google.translate_batch(remaining_texts)
         except Exception as exc:
             logger.warning(f"Batch falhou na pagina {page_idx + 1}: {exc}")
-            pending_translations = pending_texts
+            pending_translations = remaining_texts
 
-        for index, translated in zip(pending_indices, pending_translations):
+        for index, translated in zip(remaining_indices, pending_translations):
             translations[index] = translated
 
     page_texts = []

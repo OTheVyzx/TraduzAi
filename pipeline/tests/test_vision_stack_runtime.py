@@ -19,6 +19,7 @@ from vision_stack.runtime import (
     _apply_textured_balloon_band_artifact_cleanup,
     _apply_textured_balloon_seam_cleanup,
     _apply_geometry_white_balloon_cleanup,
+    _apply_glyph_residual_cleanup_for_texts,
     _apply_white_balloon_artifact_cleanup,
     _apply_white_balloon_line_artifact_cleanup,
     _apply_white_balloon_micro_artifact_cleanup,
@@ -43,9 +44,12 @@ from vision_stack.runtime import (
     _integrate_recovery_page,
     _is_white_balloon_region,
     _looks_like_cover_editorial_band,
+    _drop_contained_duplicate_ocr_texts,
+    _finalize_page_ocr_texts,
     _should_use_base_white_balloon_font,
     _merge_text_fragments,
     _merge_nearby_bboxes,
+    _merge_ocr_clusters,
     _enlarge_koharu_window,
     _profile_to_ocr_model,
     _quick_text_presence_check,
@@ -57,6 +61,8 @@ from vision_stack.runtime import (
     _run_masked_inpaint_passes,
     _scan_orphan_white_balloon_blocks,
     _should_merge_ocr_cluster,
+    _text_background_looks_translucent_or_textured,
+    _text_is_white_cleanup_safe,
     _try_koharu_balloon_fill,
     build_page_result,
     run_inpaint_pages,
@@ -68,6 +74,191 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_glyph_cleanup_removes_residual_text_without_box_fill(self):
+        original = np.full((120, 220, 3), 255, dtype=np.uint8)
+        cv2.putText(
+            original,
+            "CANCER",
+            (48, 66),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (18, 18, 18),
+            2,
+            cv2.LINE_AA,
+        )
+        cleaned = original.copy()
+        text = {
+            "bbox": [42, 42, 164, 76],
+            "text_pixel_bbox": [42, 42, 164, 76],
+            "line_polygons": [[[42, 42], [164, 42], [164, 76], [42, 76]]],
+            "source_bbox": [18, 24, 198, 96],
+            "balloon_bbox": [42, 42, 164, 76],
+            "balloon_type": "textured",
+        }
+
+        result = _apply_glyph_residual_cleanup_for_texts(original, cleaned, [text])
+
+        before_dark = int(np.count_nonzero(cv2.cvtColor(cleaned[42:76, 42:164], cv2.COLOR_RGB2GRAY) < 180))
+        after_dark = int(np.count_nonzero(cv2.cvtColor(result[42:76, 42:164], cv2.COLOR_RGB2GRAY) < 180))
+        self.assertGreater(before_dark, 40)
+        self.assertEqual(after_dark, 0)
+        self.assertGreater(int(result[28, 22, 0]), 240)
+
+    def test_textured_cleanup_requires_line_geometry(self):
+        image = np.full((120, 220, 3), 255, dtype=np.uint8)
+        image[48:88, 74:146] = 20
+        text = {
+            "bbox": [70, 44, 150, 92],
+            "text_pixel_bbox": [70, 44, 150, 92],
+            "balloon_type": "textured",
+        }
+
+        self.assertFalse(_text_is_white_cleanup_safe(image, text))
+
+    def test_geometry_white_cleanup_preserves_outline_outside_text_geometry(self):
+        image = np.full((180, 260, 3), 255, dtype=np.uint8)
+        image[76:90, 112:148] = 20
+        cv2.line(image, (58, 138), (144, 138), (8, 8, 8), 2)
+        text = {
+            "bbox": [108, 72, 152, 94],
+            "text_pixel_bbox": [108, 72, 152, 94],
+            "line_polygons": [[[108, 72], [152, 72], [152, 94], [108, 94]]],
+            "balloon_bbox": [34, 34, 226, 154],
+            "balloon_type": "white",
+            "block_profile": "white_balloon",
+        }
+
+        result = _apply_geometry_white_balloon_cleanup(image, image.copy(), [text])
+
+        self.assertLess(int(result[138, 80, 0]), 80)
+
+    def test_post_cleanup_removes_small_text_edge_specks_without_erasing_outline(self):
+        original = np.full((140, 220, 3), 255, dtype=np.uint8)
+        cleaned = original.copy()
+        original[58:72, 88:132] = 20
+        cv2.line(original, (48, 32), (172, 32), (8, 8, 8), 2)
+        cleaned[76:79, 82:85] = 18
+        cleaned[81, 92] = 12
+        cv2.line(cleaned, (54, 112), (166, 112), (8, 8, 8), 2)
+        text = {
+            "bbox": [84, 54, 136, 76],
+            "text_pixel_bbox": [84, 54, 136, 76],
+            "line_polygons": [[[84, 54], [136, 54], [136, 76], [84, 76]]],
+            "balloon_bbox": [34, 26, 186, 122],
+            "balloon_type": "white",
+            "block_profile": "white_balloon",
+        }
+        limit_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        limit_mask[46:88, 76:144] = 255
+
+        result, stats = _apply_post_inpaint_cleanup_timed(original, cleaned, [text], limit_mask=limit_mask)
+
+        self.assertGreater(stats["_t_cleanup_near_text_residual_ms"], 0.0)
+        self.assertGreater(int(result[77, 83, 0]), 230)
+        self.assertGreater(int(result[81, 92, 0]), 230)
+        self.assertLess(int(result[32, 90, 0]), 80)
+        self.assertLess(int(result[112, 90, 0]), 80)
+
+    def test_vision_mask_keeps_near_text_residual_but_protects_distant_outline(self):
+        image = np.full((120, 180, 3), 255, dtype=np.uint8)
+        image[50:70, 70:110] = 15
+        image[47:50, 111:114] = 15
+        cv2.ellipse(image, (92, 43), (42, 14), 0, 190, 350, (8, 8, 8), 2)
+        cv2.line(image, (40, 94), (142, 94), (8, 8, 8), 2)
+        block = {
+            "bbox": [68, 48, 112, 72],
+            "text_pixel_bbox": [70, 50, 110, 70],
+            "line_polygons": [[[70, 50], [110, 50], [110, 70], [70, 70]]],
+            "balloon_type": "white",
+        }
+
+        mask = vision_blocks_to_mask(image.shape, [block], image_rgb=image, expand_mask=True)
+
+        self.assertGreater(int(mask[48, 112]), 0)
+        self.assertEqual(int(mask[28, 92]), 0)
+        self.assertEqual(int(mask[94, 82]), 0)
+
+    def test_serialized_vision_block_keeps_text_geometry_without_connected_fields(self):
+        from vision_stack.runtime import _apply_text_geometry_to_serialized_block
+
+        block = _apply_text_geometry_to_serialized_block(
+            {
+                "bbox": [0, 0, 300, 180],
+                "confidence": 0.9,
+                "connected_lobe_bboxes": [[0, 0, 150, 180], [150, 0, 300, 180]],
+            },
+            {
+                "text": "HELLO",
+                "bbox": [20, 30, 220, 110],
+                "source_bbox": [20, 30, 220, 110],
+                "text_pixel_bbox": [60, 50, 160, 88],
+                "line_polygons": [[[60, 50], [160, 50], [160, 88], [60, 88]]],
+                "balloon_subregions": [[0, 0, 150, 180], [150, 0, 300, 180]],
+                "connected_lobe_bboxes": [[0, 0, 150, 180], [150, 0, 300, 180]],
+                "connected_lobe_polygons": [],
+                "tipo": "fala",
+            },
+        )
+
+        self.assertEqual(block["bbox"], [0, 0, 300, 180])
+        self.assertEqual(block["source_bbox"], [0, 0, 300, 180])
+        self.assertEqual(block["text_pixel_bbox"], [60, 50, 160, 88])
+        self.assertEqual(block["text_pixel_bbox"], [60, 50, 160, 88])
+        self.assertEqual(block["line_polygons"], [[[60, 50], [160, 50], [160, 88], [60, 88]]])
+        self.assertNotIn("balloon_subregions", block)
+        self.assertNotIn("connected_lobe_bboxes", block)
+        self.assertNotIn("connected_lobe_polygons", block)
+
+    def test_strip_inpaint_debug_writes_masks_and_overlay(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((80, 120, 3), 245, dtype=np.uint8)
+        image[30:42, 45:75] = 10
+        ocr_page = {
+            "_band_index": 7,
+            "_source_page_number": 3,
+            "texts": [
+                {
+                    "text": "YES",
+                    "translated": "SIM",
+                    "bbox": [45, 30, 75, 42],
+                    "text_pixel_bbox": [45, 30, 75, 42],
+                    "tipo": "fala",
+                    "confidence": 0.95,
+                    "balloon_type": "white",
+                }
+            ],
+            "_vision_blocks": [{"bbox": [45, 30, 75, 42], "mask": None, "confidence": 0.95}],
+        }
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, batch_size=4, debug=None, force_no_tiling=False):
+                result = image_np.copy()
+                result[mask > 0] = 245
+                return result
+
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_INPAINT_DEBUG_DIR": tmp,
+                "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "0",
+            },
+        ), patch("vision_stack.runtime._get_inpainter", return_value=FakeInpainter()):
+            inpaint_band_image(image, ocr_page)
+            debug_dir = Path(tmp) / "page_003_band_007"
+            raw_mask_path = debug_dir / "01_inpaint_mask_raw.png"
+
+            self.assertTrue(raw_mask_path.exists())
+            self.assertTrue((debug_dir / "02_inpaint_mask_expanded.png").exists())
+            self.assertTrue((debug_dir / "03_inpaint_mask_overlay.jpg").exists())
+            metadata = json.loads((debug_dir / "metadata.json").read_text(encoding="utf-8"))
+            raw_mask = np.array(Image.open(raw_mask_path).convert("L"))
+
+        self.assertGreater(int(np.count_nonzero(raw_mask)), 0)
+        self.assertEqual(metadata["remaining_inpaint_blocks"], 1)
+        self.assertEqual(metadata["text_count"], 1)
+
     @staticmethod
     def _fixture_image_path(name: str) -> Path:
         root = Path(__file__).resolve().parents[2]
@@ -118,6 +309,39 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertLessEqual(y1, 128)
         self.assertGreaterEqual(y2, 145)
         self.assertEqual(orphan.detector, "white_balloon_orphan_scan")
+
+    def test_orphan_white_balloon_scan_adds_light_translucent_small_bubble_without_existing_blocks(self):
+        image = np.zeros((220, 260, 3), dtype=np.uint8)
+        cv2.ellipse(image, (130, 90), (54, 34), 0, 0, 360, (232, 232, 232), -1)
+        cv2.ellipse(image, (130, 90), (54, 34), 0, 0, 360, (0, 0, 0), 2)
+        cv2.putText(image, "MOM...", (100, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1, cv2.LINE_AA)
+
+        blocks = _scan_orphan_white_balloon_blocks(image, [])
+
+        self.assertGreaterEqual(len(blocks), 1)
+        orphan = blocks[0]
+        x1, y1, x2, y2 = [int(v) for v in orphan.xyxy]
+        self.assertLessEqual(x1, 105)
+        self.assertGreaterEqual(x2, 145)
+        self.assertLessEqual(y1, 86)
+        self.assertGreaterEqual(y2, 102)
+        self.assertEqual(orphan.detector, "white_balloon_orphan_scan")
+
+    def test_orphan_white_balloon_scan_adds_uncovered_line_when_white_regions_are_connected(self):
+        image = np.full((240, 360, 3), 255, dtype=np.uint8)
+        cv2.putText(image, "WHAT?", (70, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(image, "SHE HID THIS MUCH.", (126, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 2, cv2.LINE_AA)
+        existing = [SimpleNamespace(xyxy=(66, 58, 154, 86), confidence=0.9)]
+
+        blocks = _scan_orphan_white_balloon_blocks(image, existing)
+
+        added = [block for block in blocks if getattr(block, "detector", "") == "white_text_line_orphan_scan"]
+        self.assertTrue(added)
+        x1, y1, x2, y2 = [int(v) for v in added[0].xyxy]
+        self.assertLessEqual(x1, 132)
+        self.assertGreaterEqual(x2, 300)
+        self.assertLessEqual(y1, 150)
+        self.assertGreaterEqual(y2, 165)
 
     def test_get_inpainter_is_thread_safe_during_prewarm(self):
         import vision_stack.runtime as runtime
@@ -243,6 +467,154 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(stats["cleanup_reason"], "micro_only")
         self.assertTrue(stats["cleanup_skipped_seam"])
         self.assertTrue(stats["cleanup_skipped_white_line"])
+
+    def test_post_inpaint_cleanup_filters_textured_art_out_of_white_cleanup(self):
+        image = np.full((90, 130, 3), [238, 246, 249], dtype=np.uint8)
+        image[:, 55:59] = [160, 188, 202]
+        cleaned = image.copy()
+        texts = [
+            {
+                "text": "HELLO",
+                "bbox": [10, 12, 38, 32],
+                "text_pixel_bbox": [10, 12, 38, 32],
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+            {
+                "text": "SFX",
+                "bbox": [50, 8, 68, 78],
+                "text_pixel_bbox": [50, 8, 68, 78],
+                "balloon_type": "textured",
+                "block_profile": "sfx",
+                "background_type": "textured_background",
+                "background_rgb": [238, 246, 249],
+            },
+        ]
+        seen = {}
+
+        def capture(name):
+            def fake_cleanup(original, current, cleanup_texts):
+                seen[name] = [text.get("text") for text in cleanup_texts]
+                return current
+
+            return fake_cleanup
+
+        with patch("vision_stack.runtime._apply_textured_balloon_seam_cleanup", side_effect=capture("seam")), patch(
+            "vision_stack.runtime._apply_textured_balloon_band_artifact_cleanup",
+            side_effect=capture("band"),
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_line_artifact_cleanup",
+            side_effect=capture("white_line"),
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_text_box_cleanup",
+            side_effect=capture("white_box"),
+        ), patch(
+            "vision_stack.runtime._apply_geometry_white_balloon_cleanup",
+            side_effect=capture("geometry_white"),
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_micro_artifact_cleanup",
+            side_effect=capture("micro"),
+        ):
+            result, stats = _apply_post_inpaint_cleanup_timed(image, cleaned, texts, selective=False)
+
+        self.assertEqual(seen["white_line"], ["HELLO"])
+        self.assertNotIn("white_box", seen)
+        self.assertEqual(seen["geometry_white"], ["HELLO"])
+        self.assertEqual(seen["micro"], ["HELLO"])
+        self.assertEqual(seen["seam"], ["HELLO", "SFX"])
+        self.assertEqual(seen["band"], ["HELLO", "SFX"])
+        self.assertEqual(stats["cleanup_reason"], "mixed")
+        self.assertTrue(stats["cleanup_skipped_white_box"])
+        self.assertTrue(np.array_equal(result, cleaned))
+
+    def test_white_cleanup_accepts_text_anchor_inside_white_balloon_even_when_detector_bbox_is_textured(self):
+        image = np.full((140, 220, 3), [90, 110, 130], dtype=np.uint8)
+        cv2.ellipse(image, (150, 70), (54, 34), 0, 0, 360, (252, 252, 252), -1)
+        image[60:74, 118:184] = 18
+        text = {
+            "text": "THE CHILD'S",
+            "bbox": [20, 12, 204, 112],
+            "text_pixel_bbox": [116, 58, 186, 76],
+            "line_polygons": [[[116, 58], [186, 58], [186, 76], [116, 76]]],
+            "balloon_type": "textured",
+            "block_profile": "standard",
+            "skip_processing": False,
+        }
+
+        self.assertTrue(_text_is_white_cleanup_safe(image, text))
+
+    def test_geometry_white_cleanup_removes_residual_for_textured_detector_inside_white_balloon(self):
+        original = np.full((140, 220, 3), [90, 110, 130], dtype=np.uint8)
+        cv2.ellipse(original, (150, 70), (54, 34), 0, 0, 360, (252, 252, 252), -1)
+        cv2.ellipse(original, (150, 70), (54, 34), 0, 0, 360, (20, 20, 20), 2)
+        original[60:74, 118:184] = 18
+        cleaned = original.copy()
+        cleaned[60:74, 118:184] = 32
+        text = {
+            "text": "THE CHILD'S",
+            "bbox": [20, 12, 204, 112],
+            "text_pixel_bbox": [116, 58, 186, 76],
+            "line_polygons": [[[116, 58], [186, 58], [186, 76], [116, 76]]],
+            "balloon_type": "textured",
+            "block_profile": "standard",
+            "skip_processing": False,
+        }
+
+        result = _apply_geometry_white_balloon_cleanup(original, cleaned, [text])
+
+        self.assertGreaterEqual(int(np.percentile(result[61:73, 122:180, 0], 10)), 225)
+        self.assertLessEqual(int(result[36, 150, 0]), 30)
+
+    def test_post_inpaint_cleanup_clamps_white_cleanup_to_limit_mask(self):
+        image = np.full((80, 120, 3), 230, dtype=np.uint8)
+        cleaned = image.copy()
+        limit_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        limit_mask[10:25, 20:45] = 255
+        text = {
+            "text": "HELLO",
+            "bbox": [20, 10, 45, 25],
+            "text_pixel_bbox": [20, 10, 45, 25],
+            "balloon_type": "white",
+            "block_profile": "white_balloon",
+        }
+
+        def fake_white_cleanup(original, current, cleanup_texts):
+            result = current.copy()
+            result[15, 30] = [255, 255, 255]
+            result[55, 95] = [255, 255, 255]
+            return result
+
+        with patch(
+            "vision_stack.runtime._apply_textured_balloon_seam_cleanup",
+            side_effect=lambda _original, current, _texts: current,
+        ), patch(
+            "vision_stack.runtime._apply_textured_balloon_band_artifact_cleanup",
+            side_effect=lambda _original, current, _texts: current,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_line_artifact_cleanup",
+            side_effect=fake_white_cleanup,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_text_box_cleanup",
+            side_effect=lambda _original, current, _texts: current,
+        ), patch(
+            "vision_stack.runtime._apply_geometry_white_balloon_cleanup",
+            side_effect=lambda _original, current, _texts: current,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_micro_artifact_cleanup",
+            side_effect=lambda _original, current, _texts: current,
+        ):
+            result, stats = _apply_post_inpaint_cleanup_timed(
+                image,
+                cleaned,
+                [text],
+                selective=False,
+                limit_mask=limit_mask,
+            )
+
+        self.assertEqual(result[15, 30].tolist(), [255, 255, 255])
+        self.assertEqual(result[55, 95].tolist(), cleaned[55, 95].tolist())
+        self.assertEqual(stats["cleanup_limit_mask_pixels"], int(np.count_nonzero(limit_mask)))
+        self.assertEqual(stats["cleanup_changed_outside_limit_mask"], 1)
 
     def test_run_masked_inpaint_passes_reports_roi_metrics(self):
         class FakeInpainter:
@@ -478,6 +850,59 @@ class VisionStackRuntimeTests(unittest.TestCase):
             "WHAT'S WITH THAT ARROGANT TONE? ARE YOU ACCUSING ME OF BETRAYING OUR MASTER AND DESTROYING OUR LINEAGE?",
         )
 
+    def test_build_page_result_keeps_white_orphan_line_on_opening_strip_band(self):
+        image = np.full((300, 800, 3), 255, dtype=np.uint8)
+        cv2.putText(image, "SHE HID THIS MUCH.", (436, 142), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+        block = SimpleNamespace(
+            xyxy=(436, 112, 713, 142),
+            mask=None,
+            confidence=0.61,
+            detector="white_text_line_orphan_scan",
+        )
+
+        page = build_page_result(
+            image_path="band_003.jpg",
+            image_rgb=image,
+            blocks=[block],
+            texts=["SHE HID THISMUCH"],
+        )
+
+        self.assertEqual(len(page["texts"]), 1)
+        self.assertEqual(page["texts"][0]["text"], "SHE HID THISMUCH")
+
+    def test_drop_contained_duplicate_ocr_texts_keeps_tight_block(self):
+        page_texts = [
+            {
+                "text": "DON'T HIT SFX: KICK My MOM!",
+                "bbox": [80, 60, 300, 160],
+                "text_pixel_bbox": [80, 60, 300, 160],
+            },
+            {
+                "text": "DON'T HIT My MOM!",
+                "bbox": [122, 84, 244, 126],
+                "text_pixel_bbox": [122, 84, 244, 126],
+            },
+        ]
+        vision_blocks = [{"bbox": text["bbox"]} for text in page_texts]
+
+        kept_texts, kept_blocks = _drop_contained_duplicate_ocr_texts(page_texts, vision_blocks, page_number=2)
+
+        self.assertEqual([item["text"] for item in kept_texts], ["DON'T HIT My MOM!"])
+        self.assertEqual(kept_blocks, [{"bbox": [122, 84, 244, 126]}])
+
+    def test_drop_contained_duplicate_ocr_texts_removes_near_identical_overlap(self):
+        page_texts = [
+            {"text": "PLEASE!", "bbox": [473, 2764, 644, 2797], "text_pixel_bbox": [473, 2764, 644, 2797], "confidence": 0.82},
+            {"text": "PLEASE!", "bbox": [473, 2765, 641, 2796], "text_pixel_bbox": [473, 2765, 641, 2796], "confidence": 0.81},
+        ]
+        vision_blocks = [{"bbox": text["bbox"]} for text in page_texts]
+
+        kept_texts, kept_blocks = _drop_contained_duplicate_ocr_texts(page_texts, vision_blocks, page_number=1)
+
+        self.assertEqual(len(kept_texts), 1)
+        self.assertEqual(kept_texts[0]["bbox"], [473, 2764, 644, 2797])
+        self.assertEqual(kept_blocks, [{"bbox": [473, 2764, 644, 2797]}])
+
     def test_looks_like_cover_editorial_band_detects_cover_credit_layout(self):
         image = np.full((401, 1200, 3), 230, dtype=np.uint8)
         cv2.rectangle(image, (500, 92), (775, 104), (255, 255, 255), -1)
@@ -552,6 +977,358 @@ class VisionStackRuntimeTests(unittest.TestCase):
         should_merge = _should_merge_ocr_cluster(texts, [118, 0, 598, 210])
 
         self.assertTrue(should_merge)
+
+    def test_merge_ocr_clusters_merges_mixed_same_balloon_tail_line(self):
+        texts = [
+            {
+                "text": "PLEASE, FOR THE CHILD'S",
+                "bbox": [498, 5655, 656, 5707],
+                "source_bbox": [25, 5436, 667, 5708],
+                "text_pixel_bbox": [498, 5655, 656, 5707],
+                "line_polygons": [
+                    [[499, 5655], [655, 5655], [655, 5681], [499, 5681]],
+                    [[506, 5684], [647, 5684], [647, 5707], [506, 5707]],
+                ],
+                "confidence": 0.93,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+            {
+                "text": "SAKE.",
+                "bbox": [546, 5720, 612, 5740],
+                "source_bbox": [497, 5648, 660, 5741],
+                "text_pixel_bbox": [546, 5720, 612, 5740],
+                "line_polygons": [[[546, 5720], [612, 5720], [612, 5740], [546, 5740]]],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+        ]
+        blocks = [
+            {"bbox": text["source_bbox"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        merged_texts, merged_blocks = _merge_ocr_clusters(texts, blocks, (6200, 760, 3), page_number=1)
+
+        self.assertEqual(len(merged_texts), 1)
+        self.assertEqual(merged_texts[0]["text"], "PLEASE, FOR THE CHILD'S SAKE.")
+        self.assertEqual(merged_texts[0]["bbox"], [498, 5655, 656, 5740])
+        self.assertEqual(merged_texts[0]["text_pixel_bbox"], [498, 5655, 656, 5740])
+        self.assertEqual(merged_texts[0]["source_bbox"], [25, 5436, 667, 5741])
+        self.assertEqual(merged_texts[0]["balloon_type"], "white")
+        self.assertEqual(merged_texts[0]["block_profile"], "white_balloon")
+        self.assertEqual(len(merged_texts[0]["line_polygons"]), 3)
+        self.assertEqual(len(merged_blocks), 1)
+
+    def test_finalize_page_ocr_texts_drops_short_art_noise_before_tail_merge(self):
+        texts = [
+            {
+                "text": "PLEASE, FOR THE CHILD'S",
+                "translated": "POR FAVOR, PELO BEM",
+                "bbox": [498, 5655, 656, 5707],
+                "source_bbox": [25, 5436, 667, 5708],
+                "text_pixel_bbox": [498, 5655, 656, 5707],
+                "line_polygons": [
+                    [[498, 5652], [658, 5654], [658, 5678], [498, 5676]],
+                    [[507, 5686], [648, 5686], [648, 5707], [507, 5707]],
+                ],
+                "confidence": 0.93,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+            {
+                "text": "SAKE.",
+                "translated": "DA CRIANCA.",
+                "bbox": [546, 5720, 612, 5740],
+                "source_bbox": [497, 5648, 660, 5741],
+                "text_pixel_bbox": [546, 5720, 612, 5740],
+                "line_polygons": [[[543, 5718], [615, 5718], [615, 5743], [543, 5743]]],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+            {
+                "text": "THE SA",
+                "translated": "O SA",
+                "bbox": [320, 5699, 562, 5949],
+                "source_bbox": [320, 5699, 562, 5949],
+                "text_pixel_bbox": [320, 5699, 562, 5949],
+                "line_polygons": [],
+                "confidence": 0.80,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+        ]
+        blocks = [
+            {"bbox": text["source_bbox"], "text_pixel_bbox": text["text_pixel_bbox"], "line_polygons": text["line_polygons"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        final_texts, final_blocks = _finalize_page_ocr_texts(texts, blocks, (6200, 760, 3), page_number=1)
+
+        self.assertEqual([text["text"] for text in final_texts], ["PLEASE, FOR THE CHILD'S SAKE."])
+        self.assertEqual(final_texts[0]["translated"], "POR FAVOR, PELO BEM DA CRIANCA.")
+        self.assertEqual(final_texts[0]["balloon_type"], "white")
+        self.assertEqual(final_texts[0]["text_pixel_bbox"], [498, 5655, 656, 5740])
+        self.assertEqual(len(final_blocks), 1)
+
+    def test_finalize_page_ocr_texts_drops_partial_duplicate_without_line_polygons(self):
+        texts = [
+            {
+                "text": "AISH! WHY DOYOUKEEP MAKINGUS THE BAD GUYS.",
+                "translated": "AISH! POR QUE VOCE CONTINUA NOS TRANSFORMANDO EM BANDIDOS?",
+                "bbox": [132, 7619, 322, 7737],
+                "source_bbox": [130, 7615, 328, 7739],
+                "text_pixel_bbox": [132, 7619, 322, 7737],
+                "line_polygons": [
+                    [[165, 7619], [291, 7619], [291, 7639], [165, 7639]],
+                    [[146, 7651], [309, 7651], [309, 7672], [146, 7672]],
+                    [[132, 7685], [324, 7685], [324, 7704], [132, 7704]],
+                    [[163, 7715], [289, 7715], [289, 7739], [163, 7739]],
+                ],
+                "confidence": 0.93,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+            {
+                "text": "AISH! WHY DO YOU KEEP",
+                "translated": "AISH! POR QUE VOCE CONTINUA",
+                "bbox": [146, 7619, 309, 7672],
+                "source_bbox": [142, 7616, 313, 7674],
+                "text_pixel_bbox": [146, 7619, 309, 7672],
+                "line_polygons": [],
+                "confidence": 0.80,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+        ]
+        blocks = [
+            {"bbox": text["source_bbox"], "text_pixel_bbox": text["text_pixel_bbox"], "line_polygons": text["line_polygons"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        final_texts, final_blocks = _finalize_page_ocr_texts(texts, blocks, (8200, 760, 3), page_number=1)
+
+        self.assertEqual(len(final_texts), 1)
+        self.assertEqual(final_texts[0]["text"], "AISH! WHY DOYOUKEEP MAKINGUS THE BAD GUYS.")
+        self.assertEqual(final_texts[0]["translated"], "AISH! POR QUE VOCE CONTINUA NOS TRANSFORMANDO EM BANDIDOS?")
+        self.assertEqual(final_blocks[0]["bbox"], [130, 7615, 328, 7739])
+
+    def test_finalize_page_ocr_texts_uses_preserved_bbox_when_balloon_bbox_was_sanitized(self):
+        texts = [
+            {
+                "text": "AFTER ALL, IT'S CANCER, WHY BOTHER USING A PRIVATE LOAN FOR A PATIENT? YOUR LIFE IS SO",
+                "translated": "AFINAL, E CANCER, POR QUE SE PREOCUPAR EM USAR UM EMPRESTIMO PRIVADO PARA UM PACIENTE? SUA VIDA E TAO",
+                "bbox": [8, 12873, 749, 13652],
+                "balloon_bbox": [303, 13497, 691, 13630],
+                "text_pixel_bbox": [303, 13497, 691, 13630],
+                "line_polygons": [
+                    [[304, 13497], [690, 13497], [690, 13528], [304, 13528]],
+                    [[314, 13531], [681, 13531], [681, 13562], [314, 13562]],
+                    [[330, 13566], [665, 13566], [665, 13596], [330, 13596]],
+                    [[359, 13600], [636, 13600], [636, 13630], [359, 13630]],
+                ],
+                "confidence": 0.91,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+            {
+                "text": "FRUSTRATING TOO",
+                "translated": "FRUSTRANTE TAMBEM",
+                "bbox": [296, 13496, 693, 13672],
+                "balloon_bbox": [365, 13644, 627, 13667],
+                "text_pixel_bbox": [365, 13644, 627, 13667],
+                "line_polygons": [[[365, 13644], [627, 13644], [627, 13667], [365, 13667]]],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+        ]
+        blocks = [
+            {"bbox": text["bbox"], "text_pixel_bbox": text["text_pixel_bbox"], "line_polygons": text["line_polygons"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        final_texts, _final_blocks = _finalize_page_ocr_texts(texts, blocks, (14000, 760, 3), page_number=1)
+
+        self.assertEqual(len(final_texts), 1)
+        self.assertTrue(final_texts[0]["text"].endswith("YOUR LIFE IS SO FRUSTRATING TOO"))
+        self.assertTrue(final_texts[0]["translated"].endswith("FRUSTRANTE TAMBEM"))
+
+    def test_finalize_page_ocr_texts_merges_valid_pair_inside_larger_mask_region(self):
+        texts = [
+            {
+                "text": "AISH IT'S NOT LIKE WE'RE FOOLS",
+                "translated": "AISH, NAO SOMOS TOLOS",
+                "bbox": [88, 22, 394, 158],
+                "text_pixel_bbox": [88, 22, 394, 158],
+                "line_polygons": [],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+            {
+                "text": "AFTER ALL, IT'S CANCER, WHY BOTHER USING A PRIVATE LOAN FOR A PATIENT? YOUR LIFE IS SO",
+                "translated": "AFINAL, E CANCER, POR QUE SE PREOCUPAR EM USAR UM EMPRESTIMO PRIVADO PARA UM PACIENTE? SUA VIDA E TAO",
+                "bbox": [8, 49, 749, 828],
+                "balloon_bbox": [303, 673, 691, 806],
+                "text_pixel_bbox": [303, 673, 691, 806],
+                "line_polygons": [
+                    [[304, 673], [690, 673], [690, 704], [304, 704]],
+                    [[314, 707], [681, 707], [681, 738], [314, 738]],
+                    [[330, 742], [665, 742], [665, 772], [330, 772]],
+                    [[359, 776], [636, 776], [636, 806], [359, 806]],
+                ],
+                "confidence": 0.56,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+            {
+                "text": "FRUSTRATING TOO",
+                "translated": "FRUSTRANTE TAMBEM",
+                "bbox": [296, 672, 693, 848],
+                "balloon_bbox": [365, 820, 627, 843],
+                "text_pixel_bbox": [365, 820, 627, 843],
+                "line_polygons": [[[365, 820], [627, 820], [627, 843], [365, 843]]],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+        ]
+        blocks = [
+            {"bbox": text["bbox"], "text_pixel_bbox": text["text_pixel_bbox"], "line_polygons": text["line_polygons"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        final_texts, _final_blocks = _finalize_page_ocr_texts(texts, blocks, (900, 800, 3), page_number=1)
+
+        self.assertEqual(len(final_texts), 2)
+        self.assertEqual(final_texts[0]["text"], "AISH IT'S NOT LIKE WE'RE FOOLS")
+        self.assertTrue(final_texts[1]["text"].endswith("YOUR LIFE IS SO FRUSTRATING TOO"))
+        self.assertTrue(final_texts[1]["translated"].endswith("FRUSTRANTE TAMBEM"))
+
+    def test_finalize_page_ocr_texts_drops_cover_title_overlay_without_dropping_speech(self):
+        texts = [
+            {
+                "text": "The God ofdeath Shadow Erian Shadow NTEEM",
+                "translated": "O deus da morte sombra erian shadow NTEEM",
+                "bbox": [116, 667, 541, 1030],
+                "text_pixel_bbox": [132, 674, 534, 972],
+                "line_polygons": [[[132, 674], [534, 674], [534, 972], [132, 972]]],
+                "confidence": 0.77,
+                "tipo": "narracao",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+                "page_profile": "cover_opening",
+            },
+            {
+                "text": "I'M SORRY... MOM IS VERY SORRY.",
+                "translated": "SINTO MUITO... MAMAE SENTE MUITO.",
+                "bbox": [217, 64, 406, 170],
+                "text_pixel_bbox": [218, 70, 401, 166],
+                "line_polygons": [[[218, 70], [401, 70], [401, 166], [218, 166]]],
+                "confidence": 0.67,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+                "page_profile": "cover_opening",
+            },
+        ]
+        blocks = [
+            {"bbox": text["bbox"], "text_pixel_bbox": text["text_pixel_bbox"], "line_polygons": text["line_polygons"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        final_texts, _final_blocks = _finalize_page_ocr_texts(texts, blocks, (1400, 760, 3), page_number=1)
+
+        self.assertEqual([text["text"] for text in final_texts], ["I'M SORRY... MOM IS VERY SORRY."])
+
+    def test_merge_ocr_clusters_merges_mixed_same_balloon_short_bottom_line(self):
+        texts = [
+            {
+                "text": "AFTER ALL, IT'S CANCER, WHY BOTHER USING A PRIVATE LOAN FOR A PATIENT? YOUR LIFE IS SO",
+                "bbox": [303, 13497, 691, 13630],
+                "source_bbox": [8, 12873, 749, 13652],
+                "text_pixel_bbox": [303, 13497, 691, 13630],
+                "line_polygons": [
+                    [[304, 13497], [690, 13497], [690, 13528], [304, 13528]],
+                    [[314, 13531], [681, 13531], [681, 13562], [314, 13562]],
+                    [[330, 13566], [665, 13566], [665, 13596], [330, 13596]],
+                    [[359, 13600], [636, 13600], [636, 13630], [359, 13630]],
+                ],
+                "confidence": 0.91,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+            {
+                "text": "FRUSTRATING TOO",
+                "bbox": [365, 13644, 627, 13667],
+                "source_bbox": [296, 13496, 693, 13672],
+                "text_pixel_bbox": [365, 13644, 627, 13667],
+                "line_polygons": [[[365, 13644], [627, 13644], [627, 13667], [365, 13667]]],
+                "confidence": 0.94,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+        ]
+        blocks = [
+            {"bbox": text["source_bbox"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        merged_texts, _merged_blocks = _merge_ocr_clusters(texts, blocks, (14000, 760, 3), page_number=1)
+
+        self.assertEqual(len(merged_texts), 1)
+        self.assertTrue(merged_texts[0]["text"].endswith("YOUR LIFE IS SO FRUSTRATING TOO"))
+        self.assertEqual(merged_texts[0]["bbox"], [303, 13497, 691, 13667])
+        self.assertEqual(merged_texts[0]["source_bbox"], [8, 12873, 749, 13672])
+        self.assertEqual(merged_texts[0]["balloon_type"], "white")
+
+    def test_merge_ocr_clusters_keeps_mixed_diagonal_balloons_separate(self):
+        texts = [
+            {
+                "text": "FIRST BALLOON",
+                "bbox": [100, 100, 260, 160],
+                "source_bbox": [80, 80, 280, 180],
+                "confidence": 0.92,
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "block_profile": "standard",
+            },
+            {
+                "text": "SECOND BALLOON",
+                "bbox": [300, 170, 460, 230],
+                "source_bbox": [282, 150, 482, 250],
+                "confidence": 0.93,
+                "tipo": "fala",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            },
+        ]
+        blocks = [
+            {"bbox": text["source_bbox"], "confidence": text["confidence"], "balloon_type": text["balloon_type"]}
+            for text in texts
+        ]
+
+        merged_texts, merged_blocks = _merge_ocr_clusters(texts, blocks, (400, 620, 3), page_number=1)
+
+        self.assertEqual([text["text"] for text in merged_texts], ["FIRST BALLOON", "SECOND BALLOON"])
+        self.assertEqual(len(merged_blocks), 2)
 
     def test_build_page_result_marks_balloon_type_for_white_and_textured_regions(self):
         blocks = [
@@ -1126,7 +1903,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertEqual(page["texts"], [])
 
-    def test_build_page_result_keeps_textured_font_when_font_detection_is_enabled(self):
+    def test_build_page_result_keeps_canonical_font_when_font_detection_is_enabled(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
             mask=None,
@@ -1145,8 +1922,8 @@ class VisionStackRuntimeTests(unittest.TestCase):
             )
 
         get_font_detector.assert_not_called()
-        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "Newrotic.ttf")
-        self.assertEqual(page["texts"][0]["estilo"].get("cor"), "#FFFFFF")
+        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "ComicNeue-Bold.ttf")
+        self.assertEqual(page["texts"][0]["estilo"].get("cor"), "#000000")
 
     def test_build_koharu_worker_page_result_passes_rich_text_blocks_to_builder(self):
         worker_payload = {
@@ -1206,7 +1983,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "ComicNeue-Bold.ttf")
         self.assertTrue(page["texts"][0]["estilo"].get("force_upper"))
 
-    def test_build_page_result_textured_balloon_uses_fixed_font_without_detector(self):
+    def test_build_page_result_textured_balloon_uses_canonical_font_without_detector(self):
         block = SimpleNamespace(
             xyxy=(20, 16, 84, 40),
             mask=None,
@@ -1218,14 +1995,14 @@ class VisionStackRuntimeTests(unittest.TestCase):
         ) as get_font_detector:
             page = build_page_result(
                 image_path="page.jpg",
-                image_rgb=np.full((80, 120, 3), 200, dtype=np.uint8),
+                image_rgb=np.full((80, 120, 3), 30, dtype=np.uint8),
                 blocks=[block],
                 texts=["HELLO"],
                 enable_font_detection=True,
             )
 
         get_font_detector.assert_not_called()
-        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "Newrotic.ttf")
+        self.assertEqual(page["texts"][0]["estilo"].get("fonte"), "ComicNeue-Bold.ttf")
         self.assertEqual(page["texts"][0]["estilo"].get("cor"), "#FFFFFF")
 
     def test_vision_blocks_to_mask_prefers_precise_mask_and_falls_back_to_bbox(self):
@@ -1282,6 +2059,46 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(int(mask[45, 35]), 0)
         self.assertLess(int(np.count_nonzero(mask)), 22000)
 
+    def test_vision_blocks_to_mask_uses_text_pixel_bbox_without_overbroad_refined_fallback(self):
+        image = np.full((120, 180, 3), 245, dtype=np.uint8)
+        block = {
+            "bbox": [64, 42, 116, 62],
+            "text_pixel_bbox": [64, 42, 116, 62],
+            "balloon_bbox": [28, 16, 150, 92],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "mask": None,
+        }
+
+        with patch(
+            "vision_stack.runtime._build_refined_bbox_mask",
+            side_effect=AssertionError("text geometry should prevent broad balloon refinement"),
+        ):
+            mask = vision_blocks_to_mask(image.shape, [block], image_rgb=image, expand_mask=False)
+
+        self.assertGreater(int(mask[50, 80]), 0)
+        self.assertEqual(int(mask[20, 36]), 0)
+        self.assertEqual(int(mask[88, 144]), 0)
+        self.assertLess(int(np.count_nonzero(mask)), 3000)
+
+    def test_vision_blocks_to_mask_protects_balloon_outline_near_text_geometry(self):
+        image = np.full((80, 140, 3), 250, dtype=np.uint8)
+        image[34:36, 18:122] = 8
+        block = {
+            "bbox": [42, 18, 98, 29],
+            "text_pixel_bbox": [42, 18, 98, 29],
+            "line_polygons": [[[42, 18], [98, 18], [98, 29], [42, 29]]],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "mask": None,
+        }
+
+        mask = vision_blocks_to_mask(image.shape, [block], image_rgb=image, expand_mask=True)
+
+        self.assertGreater(int(mask[23, 70]), 0)
+        self.assertEqual(int(mask[34, 70]), 0)
+        self.assertEqual(int(mask[35, 70]), 0)
+
     def test_build_refined_bbox_mask_expands_light_text_on_dark_background_beyond_seed(self):
         image = np.full((180, 260, 3), 18, dtype=np.uint8)
         cv2.rectangle(image, (40, 40), (220, 140), (20, 20, 20), -1)
@@ -1322,16 +2139,18 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertEqual(list(extract_fill_mask.call_args.args[1]), [28, 20, 132, 92])
 
-    def test_vision_blocks_to_mask_falls_back_to_full_bbox_without_image(self):
+    def test_vision_blocks_to_mask_falls_back_to_octagon_bbox_without_image(self):
         blocks = [
             {"bbox": [30, 20, 110, 50], "mask": None},
         ]
 
-        mask = vision_blocks_to_mask((90, 140, 3), blocks, image_rgb=None)
+        mask = vision_blocks_to_mask((90, 140, 3), blocks, image_rgb=None, expand_mask=False)
 
         self.assertGreater(int(mask[30, 60]), 0)
         self.assertGreater(int(mask[24, 34]), 0)
         self.assertGreater(int(mask[46, 106]), 0)
+        self.assertEqual(int(mask[20, 30]), 0)
+        self.assertEqual(int(mask[49, 109]), 0)
 
     def test_vision_blocks_to_mask_white_balloon_falls_back_when_exact_boxes_are_too_sparse(self):
         image = np.full((120, 160, 3), 245, dtype=np.uint8)
@@ -1594,7 +2413,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         get_ocr.assert_called_once()
         self.assertEqual(result["texts"], [])
 
-    def test_run_ocr_stage_disables_crop_fallback_by_default_for_strip(self):
+    def test_run_ocr_stage_enables_small_crop_fallback_by_default_for_strip(self):
         image = np.full((520, 800, 3), 248, dtype=np.uint8)
         page_dict = {
             "numero": 1,
@@ -1619,7 +2438,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
                 result = run_ocr_stage(image, page_dict)
 
         self.assertEqual(result["texts"], [])
-        self.assertEqual(seen_kwargs["crop_fallback_max"], 0)
+        self.assertEqual(seen_kwargs["crop_fallback_max"], 3)
 
     def test_run_ocr_stage_allows_strip_crop_fallback_override(self):
         image = np.full((520, 800, 3), 248, dtype=np.uint8)
@@ -2558,7 +3377,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         )
         self.assertLessEqual(int(result[112, 38, 0]), 25)
 
-    def test_geometry_white_cleanup_accepts_bright_textured_misclassification(self):
+    def test_geometry_white_cleanup_rejects_bright_textured_misclassification(self):
         original = np.full((180, 220, 3), 255, dtype=np.uint8)
         cv2.rectangle(original, (40, 28), (180, 132), (255, 255, 255), -1)
         cv2.rectangle(original, (40, 28), (180, 132), (12, 12, 12), 2)
@@ -2577,12 +3396,28 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         result = _apply_geometry_white_balloon_cleanup(original, cleaned, [text])
 
-        self.assertGreaterEqual(int(result[74, 115, 0]), 245)
-        self.assertLess(
+        self.assertTrue(np.array_equal(result, cleaned))
+        self.assertEqual(
             int(np.count_nonzero(result[68:80, 90:140, 0] < 80)),
             int(np.count_nonzero(cleaned[68:80, 90:140, 0] < 80)),
         )
         self.assertLessEqual(int(result[28, 100, 0]), 25)
+
+    def test_translucent_white_balloon_is_not_white_cleanup_safe(self):
+        image = np.full((150, 220, 3), 244, dtype=np.uint8)
+        for x in range(40, 180):
+            image[36:118, x, :] = 232 + ((x - 40) % 24)
+        image[70:86, 82:138] = 18
+        text = {
+            "bbox": [76, 66, 144, 92],
+            "text_pixel_bbox": [82, 70, 138, 86],
+            "balloon_bbox": [40, 36, 180, 118],
+            "balloon_type": "white",
+            "skip_processing": False,
+        }
+
+        self.assertTrue(_text_background_looks_translucent_or_textured(image, text))
+        self.assertFalse(_text_is_white_cleanup_safe(image, text))
 
     def test_apply_white_balloon_text_box_cleanup_clips_box_to_balloon_interior(self):
         original = np.full((220, 220, 3), 250, dtype=np.uint8)
@@ -3307,8 +4142,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
             result = np.array(Image.open(outputs[0]).convert("RGB"))
 
-        self.assertGreater(int(result[0, 0, 0]), 105)
-        self.assertLess(int(result[0, 0, 0]), 145)
+        self.assertGreaterEqual(int(result[0, 0, 0]), 245)
 
     def test_apply_inpainting_round_applies_white_balloon_cleanup_stack_after_lama(self):
         image = np.full((120, 160, 3), 230, dtype=np.uint8)
@@ -3379,7 +4213,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         ):
             result = _apply_inpainting_round(image, ocr_data, inpainter=object())
 
-        self.assertEqual(calls, ["lama", "line_cleanup", "text_box_cleanup", "micro_cleanup"])
+        self.assertEqual(calls, ["lama", "line_cleanup", "micro_cleanup"])
         self.assertEqual(int(result[55, 80, 0]), 248)
 
     def test_run_inpaint_pages_skips_page_without_detected_blocks(self):

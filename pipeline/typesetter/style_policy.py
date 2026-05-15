@@ -25,16 +25,18 @@ def relative_luminance(rgb: tuple[int, int, int]) -> float:
 
 def auto_text_color_for_background(background_rgb: tuple[int, int, int]) -> str:
     # Conservative for manga/manhwa: if contrast is ambiguous, use black.
-    return "#000000" if relative_luminance(background_rgb) >= 0.42 else "#FFFFFF"
+    return "#000000" if relative_luminance(background_rgb) >= 0.25 else "#FFFFFF"
 
 
 def normalize_auto_typesetting_style(
     style: dict | None,
     background_rgb: tuple[int, int, int],
+    *,
+    force_black_text: bool = False,
 ) -> dict:
     normalized = dict(style or {})
     normalized["fonte"] = CANONICAL_AUTO_FONT
-    normalized["cor"] = auto_text_color_for_background(background_rgb)
+    normalized["cor"] = "#000000" if force_black_text else auto_text_color_for_background(background_rgb)
     normalized["cor_gradiente"] = []
     normalized["contorno"] = ""
     normalized["contorno_px"] = 0

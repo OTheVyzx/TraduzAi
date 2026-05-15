@@ -13,6 +13,7 @@ import {
   styleValueEquals,
   undo as undoHistory,
   updateHistoryBaseFingerprint,
+  bitmapCache,
   type Bbox,
   type EditorCommand,
   type HistoryStack,
@@ -44,6 +45,8 @@ export type BitmapLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" 
 export type MutableBitmapLayerKey = Exclude<BitmapLayerKey, "base">;
 const EDITOR_MIN_ZOOM = 0.2;
 const EDITOR_MAX_ZOOM = 10;
+let healingBrushQueue: Promise<void> = Promise.resolve();
+let healingBrushPending = 0;
 
 function getTauriEditorApi() {
   return getEditorBackend();
@@ -424,6 +427,8 @@ interface EditorState {
   historyByPageKey: Record<string, HistoryStack>;
   isRetypesetting: boolean;
   isReinpainting: boolean;
+  isHealingBrushApplying: boolean;
+  healingBrushError: string | null;
   isLoadingPage: boolean;
   lastRetypesetTime: number;
   brushSize: number;
@@ -596,7 +601,13 @@ interface EditorState {
     hardness?: number;
     optimisticPath?: string;
     pngData?: string;
+    clipMaskPng?: string;
     dirty_bbox?: [number, number, number, number];
+  }) => Promise<void>;
+  healPaintedRegion: (payload: {
+    bbox: Bbox;
+    maskPath?: string;
+    maskPngData?: string;
   }) => Promise<void>;
   retypesetCurrentPage: () => Promise<void>;
   reinpaintCurrentPage: () => Promise<void>;
@@ -632,6 +643,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   historyByPageKey: {},
   isRetypesetting: false,
   isReinpainting: false,
+  isHealingBrushApplying: false,
+  healingBrushError: null,
   isLoadingPage: false,
   lastRetypesetTime: 0,
   brushSize: 18,
@@ -727,6 +740,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await saveProjectJson({ project_path: path, project_json: nextProject });
       useAppStore.getState().updateProject({ paginas });
       set((state) => ({
+        currentPage: state.currentPageIndex === currentPageIndex ? materializedPage : state.currentPage,
         pendingEdits: pruneSavedPendingEdits(state.pendingEdits, pendingSnapshot),
         pendingStructuralEdits: structuralEditsEqual(state.pendingStructuralEdits, structuralSnapshot)
           ? emptyStructuralEdits()
@@ -760,7 +774,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
     }
 
+    const materializedPage = materializeWorkingPage(currentPage, pendingSnapshot, structuralSnapshot);
+    syncCurrentPageIntoProject(materializedPage, currentPageIndex);
     set((state) => ({
+      currentPage: state.currentPageIndex === currentPageIndex ? materializedPage : state.currentPage,
       pendingEdits: pruneSavedPendingEdits(state.pendingEdits, pendingSnapshot),
       pendingStructuralEdits: structuralEditsEqual(state.pendingStructuralEdits, structuralSnapshot)
         ? emptyStructuralEdits()
@@ -891,9 +908,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setCurrentPage: async (index) => {
     // Auto-save desligado — usuário é responsável por salvar antes de trocar.
     // Se houver pendingEdits, o indicador "Não salvo" alerta o usuário.
+    const optimisticPage = useAppStore.getState().project?.paginas[index] ?? null;
     set({
       currentPageIndex: index,
-      currentPage: null,
+      currentPage: optimisticPage,
       pendingEdits: {},
       pendingStructuralEdits: emptyStructuralEdits(),
       selectedLayerId: null,
@@ -2070,6 +2088,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     hardness: requestedHardness,
     optimisticPath,
     pngData,
+    clipMaskPng,
     dirty_bbox,
   }) => {
     const path = projectPath();
@@ -2140,6 +2159,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       opacity: requestedOpacity ?? get().brushOpacity,
       hardness: requestedHardness ?? get().brushHardness,
       png_data: pngData ?? optimisticPath,
+      clip_mask_png: clipMaskPng,
       dirty_bbox: dirty_bbox ?? strokeDirtyBBox(strokes, brushSize, width, height),
     });
 
@@ -2188,6 +2208,99 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     // Cache-bust da camada editada (runtime-only, não persiste no project.json)
     get().bumpBitmapLayerVersion(visibleLayerKey as MutableBitmapLayerKey);
     get().markRenderPreviewStale(get().currentPageKey());
+  },
+
+  healPaintedRegion: async ({ bbox, maskPath, maskPngData }) => {
+    const path = projectPath();
+    const page = get().currentPage;
+    if (!path || !page || (!maskPath && !maskPngData)) return;
+    const pageIndex = get().currentPageIndex;
+    const pageKey = get().currentPageKey();
+    const previousPath = page.image_layers?.inpaint?.path ?? null;
+
+    healingBrushPending += 1;
+    set({ isHealingBrushApplying: true, healingBrushError: null });
+
+    const run = async () => {
+      await get().commitEdits();
+      const api = await getTauriEditorApi();
+      const resolvedMaskPath =
+        maskPath && maskPath.trim()
+          ? maskPath
+          : await api.writeHealingMask({
+              project_path: path,
+              page_index: pageIndex,
+              png_data: maskPngData!,
+              bbox,
+            });
+      const result = await api.healInpaintRegion({
+        project_path: path,
+        page_index: pageIndex,
+        bbox,
+        mask_path: resolvedMaskPath,
+      });
+
+      if (get().currentPageIndex !== pageIndex || get().currentPageKey() !== pageKey) {
+        return;
+      }
+
+      const livePage = get().currentPage;
+      if (!livePage) return;
+      const beforePath = result.before_inpaint_path ?? previousPath ?? "";
+      const afterPath = result.inpaint_path;
+      const commandId = `bitmap-${crypto.randomUUID()}`;
+      bitmapCache.set(commandId, {
+        pageKey,
+        commandId,
+        before: new TextEncoder().encode(beforePath),
+        after: new TextEncoder().encode(afterPath),
+        byteLength: beforePath.length + afterPath.length,
+      });
+
+      const updatedPage: PageData = {
+        ...livePage,
+        image_layers: {
+          ...livePage.image_layers,
+          inpaint: {
+            ...(livePage.image_layers?.inpaint ?? {}),
+            key: "inpaint",
+            path: afterPath,
+            visible: true,
+            locked: livePage.image_layers?.inpaint?.locked ?? false,
+          },
+        },
+      };
+      syncCurrentPageIntoProject(updatedPage, pageIndex);
+      set({
+        currentPage: updatedPage,
+        viewMode: "inpainted",
+        lastRetypesetTime: Date.now(),
+      });
+      get().recordEditorCommand({
+        commandId,
+        pageKey,
+        createdAt: Date.now(),
+        type: "bitmap-stroke",
+        layerKey: "inpaint",
+        bbox,
+      });
+      get().bumpBitmapLayerVersion("inpaint");
+      get().markRenderPreviewStale(pageKey);
+    };
+
+    const job = healingBrushQueue.catch(() => undefined).then(run);
+    healingBrushQueue = job;
+    try {
+      await job;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ healingBrushError: message, pageActionError: { action: "inpaint", message } });
+    } finally {
+      healingBrushPending = Math.max(0, healingBrushPending - 1);
+      if (healingBrushPending === 0) {
+        set({ isHealingBrushApplying: false });
+      }
+    }
   },
 
   retypesetCurrentPage: async () => {
@@ -2361,6 +2474,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       historyByPageKey: {},
       isRetypesetting: false,
       isReinpainting: false,
+      isHealingBrushApplying: false,
+      healingBrushError: null,
       isLoadingPage: false,
       lastRetypesetTime: 0,
       brushSize: 18,

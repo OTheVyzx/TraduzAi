@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEditorStore } from "../../../lib/stores/editorStore";
 import { BUNDLE_FONTS } from "../../../lib/fonts";
+import { TextStylePresetPopover } from "./TextStylePresetPopover";
 
 // Lista canônica de fontes disponíveis extraída do BUNDLE_FONTS.
 // O `value` é o nome do arquivo (ex: "CCDaveGibbonsLower W00 Regular.ttf")
@@ -142,6 +143,10 @@ function colorInputValue(value: unknown, fallback: string) {
   return /^#[0-9a-fA-F]{6}$/.test(color) ? color : fallback;
 }
 
+function defaultGradientEnd(startColor: string) {
+  return startColor.toLowerCase() === "#ffffff" ? "#000000" : "#ffffff";
+}
+
 export function TypesettingBar() {
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   const currentPage = useEditorStore((s) => s.currentPage);
@@ -157,6 +162,10 @@ export function TypesettingBar() {
   const fonte = estilo.fonte ?? "ComicNeue-Bold.ttf";
   const tamanho = estilo.tamanho ?? 28;
   const cor = colorInputValue(estilo.cor, "#000000");
+  const gradientColors = Array.isArray(estilo.cor_gradiente) ? estilo.cor_gradiente : [];
+  const gradientActive = gradientColors.length >= 2;
+  const gradientStart = colorInputValue(gradientColors[0], cor);
+  const gradientEnd = colorInputValue(gradientColors[1], defaultGradientEnd(gradientStart));
   const alinhamento = estilo.alinhamento ?? "center";
   const bold = estilo.bold ?? true;
   const italico = estilo.italico ?? false;
@@ -177,6 +186,7 @@ export function TypesettingBar() {
       <select
         value={fonte}
         title="Fonte"
+        data-testid="text-font-select"
         onChange={(e) => updateEstilo(selectedLayerId, { fonte: e.target.value })}
         className="h-7 rounded-md border border-border bg-bg-tertiary/60 px-2 text-[11px] text-text-primary focus:border-brand/40 focus:outline-none max-w-[160px]"
       >
@@ -186,6 +196,11 @@ export function TypesettingBar() {
           </option>
         ))}
       </select>
+
+      <TextStylePresetPopover
+        currentStyle={estilo}
+        onApply={(stylePatch) => updateEstilo(selectedLayerId, stylePatch)}
+      />
 
       <div className="h-4 w-px bg-border mx-0.5 shrink-0" />
 
@@ -262,7 +277,7 @@ export function TypesettingBar() {
           type="color"
           value={cor}
           title="Cor do texto"
-          onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value })}
+          onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value, cor_gradiente: [] })}
           className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
         />
         <div
@@ -271,6 +286,74 @@ export function TypesettingBar() {
           title={`Cor: ${cor}`}
         />
       </div>
+
+      {/* Gradiente */}
+      <EffectPopover label="Gradiente" active={gradientActive}>
+        <div
+          data-testid="text-gradient-preview"
+          data-gradient-active={String(gradientActive)}
+          className="h-8 rounded-md border border-border"
+          style={{ background: `linear-gradient(180deg, ${gradientStart}, ${gradientEnd})` }}
+          title="Preview do gradiente"
+        />
+        <div className="grid grid-cols-2 gap-1.5">
+          <div>
+            <PopoverLabel>Cor inicial</PopoverLabel>
+            <input
+              data-testid="text-gradient-start"
+              type="color"
+              value={gradientStart}
+              title="Cor inicial do gradiente"
+              onChange={(e) =>
+                updateEstilo(selectedLayerId, {
+                  cor: e.target.value,
+                  cor_gradiente: [e.target.value, gradientEnd],
+                })
+              }
+              className="w-full h-7 rounded border border-border cursor-pointer bg-transparent"
+            />
+          </div>
+          <div>
+            <PopoverLabel>Cor final</PopoverLabel>
+            <input
+              data-testid="text-gradient-end"
+              type="color"
+              value={gradientEnd}
+              title="Cor final do gradiente"
+              onChange={(e) =>
+                updateEstilo(selectedLayerId, {
+                  cor: gradientStart,
+                  cor_gradiente: [gradientStart, e.target.value],
+                })
+              }
+              className="w-full h-7 rounded border border-border cursor-pointer bg-transparent"
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            data-testid="text-gradient-enable"
+            onClick={() =>
+              updateEstilo(selectedLayerId, {
+                cor: gradientStart,
+                cor_gradiente: [gradientStart, gradientEnd],
+              })
+            }
+            className="flex-1 rounded-md bg-brand px-2 py-1 text-[10px] font-semibold text-white"
+          >
+            Aplicar
+          </button>
+          <button
+            type="button"
+            data-testid="text-gradient-clear"
+            onClick={() => updateEstilo(selectedLayerId, { cor: gradientStart, cor_gradiente: [] })}
+            className="rounded-md border border-border px-2 py-1 text-[10px] font-semibold text-text-muted hover:text-text-primary"
+          >
+            Solido
+          </button>
+        </div>
+      </EffectPopover>
 
       <div className="h-4 w-px bg-border mx-0.5 shrink-0" />
 

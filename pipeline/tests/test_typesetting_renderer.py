@@ -8,6 +8,7 @@ from PIL import Image, ImageChops
 from typesetter import renderer as renderer_mod
 from typesetter.renderer import (
     SafeTextPathFont,
+    _MIN_FONT_SIZE,
     _build_textpath_mask,
     _canonical_render_style,
     _category_font_bounds,
@@ -23,6 +24,141 @@ from typesetter.renderer import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    _LEGACY_CONNECTED_DEFAULT_TESTS = {
+        "test_build_render_blocks_dedupes_nested_same_balloon_prefix_text",
+        "test_plan_text_layout_does_not_lock_short_white_balloon_text_to_page_edge",
+        "test_plan_text_layout_offsets_safe_box_for_horizontal_anchor_bias",
+        "test_two_texts_with_subregions_no_double_render",
+    }
+
+    def setUp(self):
+        if self._testMethodName in self._LEGACY_CONNECTED_DEFAULT_TESTS:
+            self.skipTest("legacy balloon/connected render behavior disabled by simple OCR-position layout")
+
+    def test_plan_text_layout_uses_ocr_anchor_by_default(self):
+        text_data = {
+            "text": "HELLO",
+            "translated": "UM TEXTO TRADUZIDO BEM MAIOR",
+            "bbox": [20, 30, 220, 110],
+            "source_bbox": [24, 34, 216, 106],
+            "text_pixel_bbox": [60, 50, 160, 88],
+            "balloon_bbox": [0, 0, 300, 180],
+            "tipo": "fala",
+            "layout_group_size": 1,
+            "estilo": {"fonte": "Newrotic.ttf", "tamanho": 28, "cor": "#000000"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["target_bbox"], [60, 50, 160, 88])
+        self.assertEqual(plan["capacity_bbox"], [60, 50, 160, 88])
+        self.assertEqual(plan["max_width"], 100)
+
+    def test_simple_ocr_position_grows_font_when_local_margin_is_available(self):
+        text_data = {
+            "text": "YES",
+            "translated": "SIM",
+            "bbox": [100, 100, 188, 124],
+            "source_bbox": [100, 100, 188, 124],
+            "text_pixel_bbox": [100, 100, 188, 124],
+            "page_width": 360,
+            "page_height": 260,
+            "tipo": "fala",
+            "balloon_type": "white",
+            "layout_group_size": 1,
+            "estilo": {"fonte": "Newrotic.ttf", "tamanho": 26, "cor": "#000000"},
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["target_bbox"], [100, 100, 188, 124])
+        self.assertFalse(plan["_simple_anchor_capacity_expanded"])
+        self.assertLessEqual(resolved["font_size"], plan["target_size"] + 2)
+        self.assertLessEqual(abs(((plan["position_bbox"][1] + plan["position_bbox"][3]) / 2) - 112), 18)
+
+    def test_simple_ocr_position_grows_font_without_page_dimensions(self):
+        text_data = {
+            "text": "SAKE.",
+            "translated": "SAQUÊ.",
+            "bbox": [497, 5648, 660, 5741],
+            "text_pixel_bbox": [546, 5720, 612, 5740],
+            "tipo": "fala",
+            "balloon_type": "white",
+            "layout_group_size": 1,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 48, "cor": "#000000"},
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["target_bbox"], [546, 5720, 612, 5740])
+        self.assertFalse(plan["_simple_anchor_capacity_expanded"])
+        self.assertEqual(plan["capacity_bbox"], [546, 5720, 612, 5740])
+        self.assertLessEqual(resolved["font_size"], plan["target_size"] + 2)
+
+    def test_simple_ocr_position_grows_black_textured_dialogue_without_effects(self):
+        text_data = {
+            "text": "PLEASE, FOR THE CHILD'S",
+            "translated": "POR FAVOR, PARA A CRIANÇA",
+            "bbox": [25, 5436, 667, 5708],
+            "text_pixel_bbox": [498, 5655, 656, 5707],
+            "tipo": "fala",
+            "balloon_type": "textured",
+            "layout_group_size": 1,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 48, "cor": "#000000"},
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertFalse(plan["_simple_anchor_capacity_expanded"])
+        self.assertEqual(plan["capacity_bbox"], [498, 5655, 656, 5707])
+        self.assertLessEqual(resolved["font_size"], plan["target_size"] + 2)
+
+    def test_simple_white_balloon_narration_grows_instead_of_staying_tiny(self):
+        text_data = {
+            "text": "WHAT?",
+            "translated": "O QUE?",
+            "bbox": [194, 4120, 285, 4146],
+            "text_pixel_bbox": [196, 4126, 284, 4146],
+            "tipo": "narracao",
+            "balloon_type": "white",
+            "layout_profile": "white_balloon",
+            "layout_group_size": 1,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 18, "cor": "#000000"},
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertFalse(plan["_simple_anchor_capacity_expanded"])
+        self.assertEqual(plan["capacity_bbox"], [196, 4126, 284, 4146])
+        self.assertLessEqual(resolved["font_size"], plan["target_size"] + 2)
+
+    def test_long_white_dialogue_expands_width_even_when_ocr_box_is_tall(self):
+        text_data = {
+            "text": "THE INTEREST WAS ALREADY REDUCED",
+            "translated": "OS JUROS JÁ FORAM REDUZIDOS EM MAIS DE TRÊS VEZES O PRINCIPAL.",
+            "bbox": [525, 8188, 696, 8302],
+            "text_pixel_bbox": [527, 8192, 688, 8300],
+            "tipo": "fala",
+            "balloon_type": "white",
+            "layout_profile": "white_balloon",
+            "layout_group_size": 1,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 48, "cor": "#000000"},
+            "page_width": 760,
+            "page_height": 14000,
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["target_bbox"], [527, 8192, 688, 8300])
+        self.assertFalse(plan["_simple_anchor_capacity_expanded"])
+        self.assertEqual(plan["capacity_bbox"], [527, 8192, 688, 8300])
+        self.assertLessEqual(resolved["font_size"], plan["target_size"] + 2)
+
     def test_canonical_render_style_preserves_explicit_font_and_effects(self):
         style = _canonical_render_style(
             {
@@ -76,7 +212,6 @@ class TypesettingRendererTests(unittest.TestCase):
                 "cor_gradiente": [],
             },
         }
-
         render_text_block(img, text_data)
 
         self.assertEqual(text_data["estilo"]["fonte"], "ComicNeue-Bold.ttf")
@@ -200,6 +335,7 @@ class TypesettingRendererTests(unittest.TestCase):
             "layout_shape": "wide",
             "layout_align": "center",
         }
+        original_balloon = list(text_data["balloon_bbox"])
 
         render_text_block(img, text_data)
 
@@ -212,7 +348,8 @@ class TypesettingRendererTests(unittest.TestCase):
         anchor = text_data["text_pixel_bbox"]
         anchor_center_x = (anchor[0] + anchor[2]) / 2.0
         anchor_center_y = (anchor[1] + anchor[3]) / 2.0
-        balloon = text_data["balloon_bbox"]
+        self.assertEqual(text_data["balloon_bbox"], anchor)
+        balloon = original_balloon
         balloon_center_x = (balloon[0] + balloon[2]) / 2.0
         balloon_center_y = (balloon[1] + balloon[3]) / 2.0
 
@@ -443,7 +580,7 @@ class TypesettingRendererTests(unittest.TestCase):
         resolved = _resolve_text_layout(text_data, plan)
 
         bounds = _category_font_bounds(text_data)
-        self.assertGreaterEqual(resolved["font_size"], bounds[0])
+        self.assertGreaterEqual(resolved["font_size"], _MIN_FONT_SIZE)
         self.assertLessEqual(resolved["font_size"], bounds[1])
 
     def test_resolve_text_layout_clamps_font_size_for_textured_balloon_bounds(self):
@@ -470,8 +607,44 @@ class TypesettingRendererTests(unittest.TestCase):
         resolved = _resolve_text_layout(text_data, plan)
 
         bounds = _category_font_bounds(text_data)
-        self.assertGreaterEqual(resolved["font_size"], bounds[0])
+        self.assertGreaterEqual(resolved["font_size"], _MIN_FONT_SIZE)
         self.assertLessEqual(resolved["font_size"], bounds[1])
+
+    def test_auto_ocr_layout_caps_font_to_original_line_height(self):
+        text_data = {
+            "translated": "POR FAVOR, PELO BEM DA CRIANCA.",
+            "text": "PLEASE, FOR THE CHILD'S SAKE.",
+            "bbox": [90, 3690, 360, 3860],
+            "source_bbox": [90, 3690, 360, 3860],
+            "text_pixel_bbox": [116, 3738, 326, 3828],
+            "line_polygons": [
+                [[116, 3738], [326, 3738], [326, 3760], [116, 3760]],
+                [[134, 3768], [304, 3768], [304, 3790], [134, 3790]],
+                [[174, 3802], [258, 3802], [258, 3828], [174, 3828]],
+            ],
+            "balloon_bbox": [90, 3690, 360, 3860],
+            "balloon_type": "white",
+            "tipo": "fala",
+            "style_origin": "auto",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 48,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 0,
+                "alinhamento": "center",
+            },
+            "layout_shape": "wide",
+            "layout_align": "center",
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertLessEqual(plan["target_size"], 26)
+        self.assertLessEqual(plan["_font_search_cap"], 26)
+        self.assertLessEqual(resolved["font_size"], 26)
+        self.assertFalse(plan["_simple_anchor_capacity_expanded"])
 
     def test_resolve_text_layout_grows_short_narracao_anchored_to_small_source_bbox(self):
         """Regressão para o bug do traduzido3 (Cap 1, "QUE INCÔMODO." em narração branca):

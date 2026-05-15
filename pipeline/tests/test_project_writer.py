@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from main import _save_project_json
 from project_writer import validate_project_consistency, write_project_json_atomic
 
 
@@ -62,3 +63,36 @@ def test_log_summary_mismatch_fails():
 
     with pytest.raises(ValueError, match="log.summary"):
         validate_project_consistency(project)
+
+
+def test_editor_save_refreshes_stale_log_summary(tmp_path):
+    path = tmp_path / "project.json"
+    project = {
+        "paginas": [
+            {
+                "text_layers": [
+                    {
+                        "id": "layer-a",
+                        "traduzido": "Ola",
+                        "translated": "Ola",
+                        "qa_flags": [],
+                    }
+                ]
+            }
+        ],
+        "estatisticas": {"total_paginas": 1},
+        "log": {
+            "summary": {
+                "actual_pages": 1,
+                "processed_pages": 1,
+                "translated_regions": 0,
+                "qa_flags": 0,
+                "critical_flags": 0,
+            }
+        },
+    }
+
+    _save_project_json(path, project)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["log"]["summary"]["translated_regions"] == 1

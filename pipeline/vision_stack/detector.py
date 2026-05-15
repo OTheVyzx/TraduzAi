@@ -32,6 +32,8 @@ MODEL_URLS = {
     "comic-text-detector-cuda": "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/comictextdetector.pt.onnx",
 }
 
+MIN_VALID_MODEL_BYTES = 1024
+
 def _default_models_dir() -> Path:
     env_dir = (os.getenv("TRADUZAI_MODELS_DIR") or os.getenv("MANGATL_MODELS_DIR") or "").strip()
     if env_dir:
@@ -47,6 +49,20 @@ def _default_models_dir() -> Path:
 MODELS_DIR = _default_models_dir()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PK_CTD_DIR = PROJECT_ROOT / "pk" / "huggingface" / "mayocream" / "comic-text-detector"
+
+
+def _is_valid_model_file(path: Path) -> bool:
+    try:
+        return path.exists() and path.is_file() and path.stat().st_size >= MIN_VALID_MODEL_BYTES
+    except OSError:
+        return False
+
+
+def _bundled_model_candidates(model_name: str) -> list[Path]:
+    return [
+        PROJECT_ROOT / "pipeline" / "models" / f"{model_name}.pt",
+        Path(__file__).resolve().parents[1] / "models" / f"{model_name}.pt",
+    ]
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -195,8 +211,19 @@ class TextDetector:
 
     def _get_model_path(self, model_name: str) -> Path:
         path = MODELS_DIR / f"{model_name}.pt"
-        if not path.exists():
-            self._download_model(model_name, path)
+        if _is_valid_model_file(path):
+            return path
+        if path.exists():
+            logger.warning("Modelo %s invalido ou vazio em %s; tentando fallback local", model_name, path)
+
+        for fallback in _bundled_model_candidates(model_name):
+            if fallback == path:
+                continue
+            if _is_valid_model_file(fallback):
+                logger.info("Usando fallback local para %s: %s", model_name, fallback)
+                return fallback
+
+        self._download_model(model_name, path)
         return path
 
     def _download_model(self, model_name: str, dest: Path):

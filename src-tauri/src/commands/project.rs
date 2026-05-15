@@ -194,6 +194,15 @@ fn validate_archive(path: &PathBuf) -> Result<ValidationResult, String> {
         }
     }
 
+    if has_project_json {
+        return Ok(ValidationResult {
+            valid: false,
+            pages: 0,
+            has_project_json,
+            error: Some(traduzai_project_source_error("arquivo")),
+        });
+    }
+
     if page_count == 0 {
         return Ok(ValidationResult {
             valid: false,
@@ -216,6 +225,15 @@ fn validate_directory(path: &PathBuf) -> Result<ValidationResult, String> {
     let mut page_count = 0;
     let has_project_json = path.join("project.json").exists();
 
+    if has_project_json {
+        return Ok(ValidationResult {
+            valid: false,
+            pages: 0,
+            has_project_json,
+            error: Some(traduzai_project_source_error("pasta")),
+        });
+    }
+
     for entry in walkdir::WalkDir::new(path).max_depth(3) {
         if let Ok(entry) = entry {
             if entry.file_type().is_file() {
@@ -237,6 +255,16 @@ fn validate_directory(path: &PathBuf) -> Result<ValidationResult, String> {
             None
         },
     })
+}
+
+fn traduzai_project_source_error(kind: &str) -> String {
+    if kind == "arquivo" {
+        "Este arquivo ja e um projeto/exportacao do TraduzAi. Extraia o ZIP e use Abrir projeto para continuar, nao Nova traducao."
+            .to_string()
+    } else {
+        "Esta pasta ja e um projeto/exportacao do TraduzAi. Use Abrir projeto para continuar, nao Nova traducao."
+            .to_string()
+    }
 }
 
 #[tauri::command]
@@ -312,6 +340,8 @@ pub struct BitmapLayerUpdateConfig {
     pub hardness: Option<f32>,
     #[serde(default)]
     pub dirty_bbox: Option<[u32; 4]>,
+    #[serde(default)]
+    pub clip_mask_png: Option<String>,
 }
 
 #[tauri::command]
@@ -614,6 +644,29 @@ fn paint_stroke_rgba(
     }
 }
 
+fn apply_rgba_stroke_mask(
+    bitmap: &mut RgbaImage,
+    stroke_mask: &GrayImage,
+    color: [u8; 3],
+    alpha: u8,
+    erase: bool,
+) {
+    let width = bitmap.width().min(stroke_mask.width());
+    let height = bitmap.height().min(stroke_mask.height());
+    for y in 0..height {
+        for x in 0..width {
+            if stroke_mask.get_pixel(x, y)[0] == 0 {
+                continue;
+            }
+            if erase {
+                bitmap.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            } else {
+                bitmap.put_pixel(x, y, image::Rgba([color[0], color[1], color[2], alpha]));
+            }
+        }
+    }
+}
+
 fn save_rgba_bitmap_layer(path: &Path, bitmap: &RgbaImage) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -656,13 +709,17 @@ fn update_brush_rgba_layer(config: BitmapLayerUpdateConfig) -> Result<String, St
             config.height,
             config.clear,
         )?;
-        let radius = (config.brush_size.max(1) as i32 / 2).max(1);
         let color = parse_hex_rgb(config.color.as_deref());
         let alpha = ((config.opacity.unwrap_or(1.0).clamp(0.0, 1.0)) * 255.0).round() as u8;
         let _hardness = config.hardness.unwrap_or(1.0).clamp(0.0, 1.0);
-        for stroke in &config.strokes {
-            paint_stroke_rgba(&mut bitmap, stroke, radius, color, alpha, config.erase);
-        }
+        let stroke_mask = build_clipped_stroke_mask(
+            config.width,
+            config.height,
+            config.brush_size,
+            &config.strokes,
+            config.clip_mask_png.as_deref(),
+        )?;
+        apply_rgba_stroke_mask(&mut bitmap, &stroke_mask, color, alpha, config.erase);
         save_rgba_bitmap_layer(&absolute_layer_path, &bitmap)?;
         project_schema::set_layer_visibility(
             project,
@@ -698,11 +755,15 @@ fn update_bitmap_layer(config: BitmapLayerUpdateConfig, layer_key: &str) -> Resu
             config.clear,
         )?;
 
-        let radius = (config.brush_size.max(1) as i32 / 2).max(1);
         let value = if config.erase { 0 } else { 255 };
-        for stroke in &config.strokes {
-            paint_stroke(&mut bitmap, stroke, radius, value);
-        }
+        let stroke_mask = build_clipped_stroke_mask(
+            config.width,
+            config.height,
+            config.brush_size,
+            &config.strokes,
+            config.clip_mask_png.as_deref(),
+        )?;
+        apply_gray_stroke_mask(&mut bitmap, &stroke_mask, value);
 
         save_bitmap_layer(&absolute_layer_path, &bitmap)?;
         project_schema::set_layer_visibility(
@@ -902,6 +963,61 @@ fn build_stroke_mask(
         paint_stroke(&mut mask, stroke, radius, 255);
     }
     mask
+}
+
+fn decode_clip_mask_png(data: &str, width: u32, height: u32) -> Result<GrayImage, String> {
+    let bytes = decode_png_data_url(data)?;
+    let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+        .map_err(|e| format!("Mascara de recorte invalida: {e}"))?
+        .to_luma8();
+    if decoded.width() == width && decoded.height() == height {
+        return Ok(decoded);
+    }
+    Ok(image::imageops::resize(
+        &decoded,
+        width,
+        height,
+        FilterType::Nearest,
+    ))
+}
+
+fn apply_clip_mask(stroke_mask: &mut GrayImage, clip_mask: &GrayImage) {
+    let width = stroke_mask.width().min(clip_mask.width());
+    let height = stroke_mask.height().min(clip_mask.height());
+    for y in 0..height {
+        for x in 0..width {
+            if clip_mask.get_pixel(x, y)[0] == 0 {
+                stroke_mask.put_pixel(x, y, Luma([0]));
+            }
+        }
+    }
+}
+
+fn build_clipped_stroke_mask(
+    width: u32,
+    height: u32,
+    brush_size: u32,
+    strokes: &[Vec<[i32; 2]>],
+    clip_mask_png: Option<&str>,
+) -> Result<GrayImage, String> {
+    let mut stroke_mask = build_stroke_mask(width, height, brush_size, strokes);
+    if let Some(raw_clip) = clip_mask_png.filter(|value| !value.trim().is_empty()) {
+        let clip_mask = decode_clip_mask_png(raw_clip, width, height)?;
+        apply_clip_mask(&mut stroke_mask, &clip_mask);
+    }
+    Ok(stroke_mask)
+}
+
+fn apply_gray_stroke_mask(bitmap: &mut GrayImage, stroke_mask: &GrayImage, value: u8) {
+    let width = bitmap.width().min(stroke_mask.width());
+    let height = bitmap.height().min(stroke_mask.height());
+    for y in 0..height {
+        for x in 0..width {
+            if stroke_mask.get_pixel(x, y)[0] > 0 {
+                bitmap.put_pixel(x, y, Luma([value]));
+            }
+        }
+    }
 }
 
 fn apply_history_brush_to_inpaint(
@@ -1139,19 +1255,24 @@ pub async fn update_recovery_region(config: BitmapLayerUpdateConfig) -> Result<S
                 config.height,
                 config.clear,
             )?;
-            let radius = (config.brush_size.max(1) as i32 / 2).max(1);
-            for stroke in &config.strokes {
-                paint_stroke(&mut bitmap, stroke, radius, 0);
-            }
-            save_bitmap_layer(&absolute_layer_path, &bitmap)?;
-            absolute_layer_path
-        } else {
-            let stroke_mask = build_stroke_mask(
+            let stroke_mask = build_clipped_stroke_mask(
                 config.width,
                 config.height,
                 config.brush_size,
                 &config.strokes,
-            );
+                config.clip_mask_png.as_deref(),
+            )?;
+            apply_gray_stroke_mask(&mut bitmap, &stroke_mask, 0);
+            save_bitmap_layer(&absolute_layer_path, &bitmap)?;
+            absolute_layer_path
+        } else {
+            let stroke_mask = build_clipped_stroke_mask(
+                config.width,
+                config.height,
+                config.brush_size,
+                &config.strokes,
+                config.clip_mask_png.as_deref(),
+            )?;
             apply_history_brush_to_inpaint(
                 project,
                 config.page_index,
@@ -1185,12 +1306,13 @@ pub async fn update_reinpaint_region(config: BitmapLayerUpdateConfig) -> Result<
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let stroke_mask = build_stroke_mask(
+        let stroke_mask = build_clipped_stroke_mask(
             config.width,
             config.height,
             config.brush_size,
             &config.strokes,
-        );
+            config.clip_mask_png.as_deref(),
+        )?;
         let updated_path = apply_cached_inpaint_brush_to_inpaint(
             project,
             config.page_index,
@@ -1222,6 +1344,380 @@ pub struct WriteMaskFromPngConfig {
 
 /// Escreve uma imagem PNG (passada como base64) diretamente na camada mask/brush da página.
 /// Usado pelo lasso tool (Fase 8) para polygon fill.
+#[derive(Debug, Deserialize)]
+pub struct WriteHealingMaskConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub png_data: String,
+    #[serde(default)]
+    pub bbox: Option<[u32; 4]>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HealInpaintRegionConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub bbox: [i64; 4],
+    pub mask_path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegionalInpaintResult {
+    pub page_index: usize,
+    pub inpaint_path: String,
+    pub before_inpaint_path: Option<String>,
+    pub bbox: [u32; 4],
+}
+
+const MAX_HEALING_MASK_BYTES: usize = 32 * 1024 * 1024;
+
+fn healing_mask_root(project_dir: &Path) -> PathBuf {
+    project_dir.join("editor_cache").join("healing_masks")
+}
+
+fn healing_inpaint_root(project_dir: &Path) -> PathBuf {
+    project_dir.join("editor_cache").join("healing_inpaint")
+}
+
+fn project_relative_string(project_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(project_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn decode_png_data_url(data: &str) -> Result<Vec<u8>, String> {
+    let b64 = data
+        .trim_start_matches("data:image/png;base64,")
+        .trim_start_matches("data:image/webp;base64,");
+    let bytes = BASE64
+        .decode(b64)
+        .map_err(|e| format!("Base64 invalido: {e}"))?;
+    if bytes.len() > MAX_HEALING_MASK_BYTES {
+        return Err("Mascara do pincel corretor muito grande".to_string());
+    }
+    Ok(bytes)
+}
+
+fn validate_bbox_against_dimensions(
+    bbox: [i64; 4],
+    width: u32,
+    height: u32,
+) -> Result<[u32; 4], String> {
+    if bbox[0] < 0 || bbox[1] < 0 || bbox[2] < 0 || bbox[3] < 0 {
+        return Err("BBox do pincel corretor fora dos limites da pagina".to_string());
+    }
+    let bbox = [
+        bbox[0] as u32,
+        bbox[1] as u32,
+        bbox[2] as u32,
+        bbox[3] as u32,
+    ];
+    if bbox[0] >= bbox[2] || bbox[1] >= bbox[3] {
+        return Err("BBox do pincel corretor invalida".to_string());
+    }
+    if bbox[2] > width || bbox[3] > height {
+        return Err("BBox do pincel corretor excede a pagina".to_string());
+    }
+    Ok(bbox)
+}
+
+fn resolve_healing_mask_path(project_dir: &Path, mask_path: &str) -> Result<PathBuf, String> {
+    let raw = Path::new(mask_path);
+    let path = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        project_dir.join(raw)
+    };
+    let canonical_root = healing_mask_root(project_dir)
+        .canonicalize()
+        .map_err(|e| format!("Cache de mascaras do pincel corretor invalido: {e}"))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("Mascara do pincel corretor nao encontrada: {e}"))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("Mascara do pincel corretor fora do projeto".to_string());
+    }
+    Ok(canonical_path)
+}
+
+fn copy_inpaint_snapshot(source: &Path, version_dir: &Path) -> Result<PathBuf, String> {
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.trim().is_empty())
+        .unwrap_or("png");
+    let destination = version_dir.join(format!("{}-before.{extension}", uuid::Uuid::new_v4()));
+    std::fs::copy(source, &destination)
+        .map_err(|e| format!("Erro ao copiar snapshot anterior do inpaint: {e}"))?;
+    Ok(destination)
+}
+
+fn path_is_inside(root: &Path, path: &Path) -> bool {
+    let root = root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    let path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn stable_healing_inpaint_path(
+    project_dir: &Path,
+    page: &Value,
+    page_index: usize,
+    output_path: &Path,
+) -> PathBuf {
+    let page_number = page
+        .get("numero")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or((page_index + 1) as u64);
+    let stem = page_image_layer_path(page, "base")
+        .or_else(|| {
+            page.get("arquivo_original")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|path| {
+            Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .filter(|stem| !stem.trim().is_empty())
+        .unwrap_or_else(|| format!("{page_number:03}"));
+    let extension = output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.trim().is_empty())
+        .unwrap_or("png");
+    project_dir
+        .join("images")
+        .join(format!("{stem}.{extension}"))
+}
+
+fn normalize_healing_visible_output(
+    project_dir: &Path,
+    page: &Value,
+    page_index: usize,
+    output_path: &Path,
+) -> Result<PathBuf, String> {
+    if !path_is_inside(&healing_inpaint_root(project_dir), output_path) {
+        return Ok(output_path.to_path_buf());
+    }
+
+    let stable_path = stable_healing_inpaint_path(project_dir, page, page_index, output_path);
+    if stable_path == output_path {
+        return Ok(stable_path);
+    }
+    let image = load_rgba_image(output_path, "resultado do pincel corretor")?;
+    save_rgba_image_preserving_format(&stable_path, &image)?;
+    Ok(stable_path)
+}
+
+fn validate_healing_mask_bbox(
+    bbox: [i64; 4],
+    mask_width: u32,
+    mask_height: u32,
+) -> Result<[u32; 4], String> {
+    let bbox =
+        validate_bbox_against_dimensions(bbox, bbox[2].max(0) as u32, bbox[3].max(0) as u32)?;
+    let bbox_width = bbox[2].saturating_sub(bbox[0]);
+    let bbox_height = bbox[3].saturating_sub(bbox[1]);
+    if mask_width == bbox_width && mask_height == bbox_height {
+        return Ok(bbox);
+    }
+    if bbox[2] > mask_width || bbox[3] > mask_height {
+        return Err("BBox do pincel corretor excede a mascara".to_string());
+    }
+    Ok(bbox)
+}
+
+#[tauri::command]
+pub async fn write_healing_mask(config: WriteHealingMaskConfig) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    let project_file = resolve_project_file(&config.project_path);
+    let project = project_schema::load_project_value(&project_file)?;
+    let pages = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Projeto sem paginas validas".to_string())?;
+    if config.page_index >= pages.len() {
+        return Err("Pagina do pincel corretor invalida".to_string());
+    }
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Caminho do projeto invalido".to_string())?;
+    let png_bytes = decode_png_data_url(&config.png_data)?;
+    let decoded = image::load_from_memory_with_format(&png_bytes, ImageFormat::Png)
+        .map_err(|e| format!("Mascara PNG invalida: {e}"))?
+        .to_luma8();
+    if decoded.width() == 0 || decoded.height() == 0 {
+        return Err("Mascara do pincel corretor vazia".to_string());
+    }
+    if let Some(bbox) = config.bbox {
+        validate_healing_mask_bbox(
+            [
+                i64::from(bbox[0]),
+                i64::from(bbox[1]),
+                i64::from(bbox[2]),
+                i64::from(bbox[3]),
+            ],
+            decoded.width(),
+            decoded.height(),
+        )?;
+    }
+
+    let page_dir =
+        healing_mask_root(&project_dir).join(format!("page-{:04}", config.page_index + 1));
+    std::fs::create_dir_all(&page_dir)
+        .map_err(|e| format!("Erro ao criar cache do pincel corretor: {e}"))?;
+    let mask_path = page_dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+    let mut temp_path = mask_path.clone();
+    temp_path.set_extension("tmp.png");
+    decoded
+        .save_with_format(&temp_path, ImageFormat::Png)
+        .map_err(|e| format!("Erro ao salvar mascara temporaria: {e}"))?;
+    if mask_path.exists() {
+        std::fs::remove_file(&mask_path)
+            .map_err(|e| format!("Erro ao substituir mascara temporaria: {e}"))?;
+    }
+    std::fs::rename(&temp_path, &mask_path)
+        .map_err(|e| format!("Erro ao finalizar mascara temporaria: {e}"))?;
+    eprintln!(
+        "[EditorAction] timing healing mask page={} elapsed={:.3}s bbox={:?} mask={}x{}",
+        config.page_index,
+        started.elapsed().as_secs_f64(),
+        config.bbox,
+        decoded.width(),
+        decoded.height()
+    );
+    Ok(mask_path.to_string_lossy().replace('\\', "/"))
+}
+
+#[tauri::command]
+pub async fn heal_inpaint_region(
+    app: tauri::AppHandle,
+    config: HealInpaintRegionConfig,
+) -> Result<RegionalInpaintResult, String> {
+    use crate::commands::pipeline::{reinpaint_page_with_region, PageRegionConfig};
+
+    let command_started = std::time::Instant::now();
+    let project_file = resolve_project_file(&config.project_path);
+    let project = project_schema::load_project_value(&project_file)?;
+    let pages = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Projeto sem paginas validas".to_string())?;
+    if config.page_index >= pages.len() {
+        return Err("Pagina do pincel corretor invalida".to_string());
+    }
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Caminho do projeto invalido".to_string())?;
+    let current_inpaint_path = pages
+        .get(config.page_index)
+        .and_then(|page| page_image_layer_path(page, "inpaint"))
+        .map(|rel| resolve_project_relative_path(&project_dir, &rel));
+    let mask_path = resolve_healing_mask_path(&project_dir, &config.mask_path)?;
+    if !mask_has_nonzero_pixels(&mask_path)? {
+        return Err("Mascara do pincel corretor sem pixels ativos".to_string());
+    }
+    let mask = image::open(&mask_path)
+        .map_err(|e| format!("Mascara do pincel corretor invalida: {e}"))?
+        .to_luma8();
+    let bbox = validate_healing_mask_bbox(config.bbox, mask.width(), mask.height())?;
+
+    let version_dir =
+        healing_inpaint_root(&project_dir).join(format!("page-{:04}", config.page_index + 1));
+    std::fs::create_dir_all(&version_dir)
+        .map_err(|e| format!("Erro ao criar cache de inpaint do pincel corretor: {e}"))?;
+    let before_snapshot_started = std::time::Instant::now();
+    let before_inpaint_path =
+        if let Some(path) = current_inpaint_path.as_ref().filter(|path| path.exists()) {
+            Some(copy_inpaint_snapshot(path, &version_dir)?)
+        } else {
+            None
+        };
+    let before_snapshot_seconds = before_snapshot_started.elapsed().as_secs_f64();
+
+    let worker_started = std::time::Instant::now();
+    let output = reinpaint_page_with_region(
+        app,
+        config.project_path.clone(),
+        config.page_index as u32,
+        Some(PageRegionConfig {
+            bbox: Some(bbox),
+            mask_path: Some(mask_path.to_string_lossy().to_string()),
+        }),
+    )
+    .await?;
+    let worker_seconds = worker_started.elapsed().as_secs_f64();
+    let output_path = if output.trim().is_empty() {
+        current_inpaint_path
+            .clone()
+            .ok_or_else(|| "Inpaint regional nao retornou imagem".to_string())?
+    } else {
+        resolve_project_relative_path(&project_dir, &output)
+    };
+    if !output_path.exists() {
+        return Err("Inpaint regional nao gerou imagem valida".to_string());
+    }
+    let visible_output_path = normalize_healing_visible_output(
+        &project_dir,
+        &pages[config.page_index],
+        config.page_index,
+        &output_path,
+    )?;
+    let visible_rel = project_relative_string(&project_dir, &visible_output_path);
+    project_schema::edit_project_value(&project_file, |project| {
+        let page = project
+            .get_mut("paginas")
+            .and_then(Value::as_array_mut)
+            .and_then(|pages| pages.get_mut(config.page_index))
+            .ok_or_else(|| "Pagina do pincel corretor invalida".to_string())?;
+        let layers = page
+            .get_mut("image_layers")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "image_layers invalido".to_string())?;
+        let entry = layers
+            .entry("inpaint".to_string())
+            .or_insert_with(|| json!({}));
+        let entry_obj = entry
+            .as_object_mut()
+            .ok_or_else(|| "image_layers.inpaint invalido".to_string())?;
+        entry_obj.insert("key".to_string(), json!("inpaint"));
+        entry_obj.insert("path".to_string(), json!(visible_rel));
+        entry_obj.insert("visible".to_string(), json!(true));
+        entry_obj
+            .entry("locked".to_string())
+            .or_insert(json!(false));
+        Ok(())
+    })?;
+    eprintln!(
+        "[EditorAction] timing healing command page={} total={:.3}s before_snapshot={:.3}s worker={:.3}s finalize={:.3}s out={}",
+        config.page_index,
+        command_started.elapsed().as_secs_f64(),
+        before_snapshot_seconds,
+        worker_seconds,
+        command_started.elapsed().as_secs_f64() - before_snapshot_seconds - worker_seconds,
+        visible_output_path.display()
+    );
+    Ok(RegionalInpaintResult {
+        page_index: config.page_index,
+        inpaint_path: visible_output_path.to_string_lossy().replace('\\', "/"),
+        before_inpaint_path: before_inpaint_path
+            .map(|path| path.to_string_lossy().replace('\\', "/")),
+        bbox,
+    })
+}
+
 #[tauri::command]
 pub async fn write_mask_from_png(config: WriteMaskFromPngConfig) -> Result<String, String> {
     let project_file = resolve_project_file(&config.project_path);
@@ -1732,7 +2228,9 @@ fn export_flag_label(flag: &str) -> &'static str {
 
 fn export_flag_severity(flag: &str) -> &'static str {
     match flag {
-        "critical_error" | "visual_text_leak" | "page_not_processed" | "untranslated_english" => "critical",
+        "critical_error" | "visual_text_leak" | "page_not_processed" | "untranslated_english" => {
+            "critical"
+        }
         "glossary_violation"
         | "forbidden_term"
         | "missing_protected_term"
@@ -2036,10 +2534,7 @@ fn collect_export_issues(project: &Value) -> Vec<Value> {
                     flags.push(inferred.to_string());
                 }
             }
-            for flag in flags
-                .iter()
-                .map(String::as_str)
-            {
+            for flag in flags.iter().map(String::as_str) {
                 if ignored_export_flag(layer, flag) {
                     continue;
                 }
@@ -2589,6 +3084,14 @@ pub async fn run_page_action_with_optional_mask(
     })
 }
 
+#[tauri::command]
+pub async fn run_paint_optional_mask(
+    app: tauri::AppHandle,
+    config: PageActionConfig,
+) -> Result<PageActionResult, String> {
+    run_page_action_with_optional_mask(app, config).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2614,6 +3117,21 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    fn write_zip_entries(path: &PathBuf, entries: &[(&str, &[u8])]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            zip_writer.start_file(*name, options).unwrap();
+            zip_writer.write_all(data).unwrap();
+        }
+        zip_writer.finish().unwrap();
+    }
+
     fn zip_entries(zip_path: &PathBuf) -> Vec<String> {
         let file = std::fs::File::open(zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -2625,6 +3143,50 @@ mod tests {
         }
 
         names
+    }
+
+    #[test]
+    fn validate_directory_rejects_exported_traduzai_project_as_source() {
+        let root = unique_temp_dir();
+        let project_dir = root.join("project");
+        write_file(&project_dir.join("project.json"), br#"{"obra":"Teste"}"#);
+        write_file(&project_dir.join("originals").join("001.jpg"), b"original");
+        write_file(
+            &project_dir.join("translated").join("001.jpg"),
+            b"translated",
+        );
+
+        let result = validate_directory(&project_dir).unwrap();
+
+        assert!(!result.valid);
+        assert_eq!(result.pages, 0);
+        assert!(result.has_project_json);
+        assert!(result.error.unwrap().contains("Abrir projeto"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn validate_archive_rejects_exported_traduzai_project_as_source() {
+        let root = unique_temp_dir();
+        let archive_path = root.join("traduzido.zip");
+        write_zip_entries(
+            &archive_path,
+            &[
+                ("project.json", br#"{"obra":"Teste"}"#),
+                ("originals/001.jpg", b"original"),
+                ("translated/001.jpg", b"translated"),
+            ],
+        );
+
+        let result = validate_archive(&archive_path).unwrap();
+
+        assert!(!result.valid);
+        assert_eq!(result.pages, 0);
+        assert!(result.has_project_json);
+        assert!(result.error.unwrap().contains("Abrir projeto"));
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn zip_entry_string(zip_path: &PathBuf, name: &str) -> String {
@@ -2779,7 +3341,9 @@ mod tests {
 
         let issues = collect_export_issues(&project);
 
-        assert!(!issues.iter().any(|issue| issue["type"] == "entity_mistranslated"));
+        assert!(!issues
+            .iter()
+            .any(|issue| issue["type"] == "entity_mistranslated"));
     }
 
     #[tokio::test]
@@ -3086,7 +3650,8 @@ mod tests {
         });
         let mut recovery_mask = ImageBuffer::from_pixel(4, 4, Luma([0]));
         recovery_mask.put_pixel(1, 1, Luma([255]));
-        apply_history_brush_to_inpaint(&mut project, 0, &root, &recovery_mask, Some([1, 1, 2, 2])).unwrap();
+        apply_history_brush_to_inpaint(&mut project, 0, &root, &recovery_mask, Some([1, 1, 2, 2]))
+            .unwrap();
 
         let after_recovery = ImageReader::open(&inpaint_path)
             .unwrap()
@@ -3094,7 +3659,11 @@ mod tests {
             .unwrap()
             .to_rgba8();
         assert_eq!(after_recovery.get_pixel(1, 1), base.get_pixel(1, 1));
-        assert!(root.join("layers").join("inpaint-cache").join("001.png").exists());
+        assert!(root
+            .join("layers")
+            .join("inpaint-cache")
+            .join("001.png")
+            .exists());
 
         let mut reinpaint_mask = ImageBuffer::from_pixel(4, 4, Luma([0]));
         reinpaint_mask.put_pixel(1, 1, Luma([255]));
@@ -3138,6 +3707,28 @@ mod tests {
         assert_eq!(decoded.get_pixel(2, 2), &image::Rgba([255, 0, 0, 255]));
         assert_eq!(decoded.get_pixel(5, 5), &image::Rgba([0, 0, 255, 255]));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn clip_mask_limits_bitmap_stroke_mask_to_selected_area() {
+        let mut clip = ImageBuffer::from_pixel(8, 8, Luma([0]));
+        for y in 0..4 {
+            for x in 0..4 {
+                clip.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageLuma8(clip)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        let clip_mask_png = format!("data:image/png;base64,{}", BASE64.encode(png.into_inner()));
+
+        let mask =
+            build_clipped_stroke_mask(8, 8, 2, &[vec![[1, 1], [7, 7]]], Some(&clip_mask_png))
+                .unwrap();
+
+        assert!(mask.get_pixel(1, 1)[0] > 0);
+        assert_eq!(mask.get_pixel(6, 6)[0], 0);
     }
 
     #[test]

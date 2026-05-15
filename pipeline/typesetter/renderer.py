@@ -31,6 +31,11 @@ from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
 
+try:
+    from layout.simple_text_geometry import resolve_text_anchor_bbox, sanitize_simple_text_geometry
+except ImportError:
+    from ..layout.simple_text_geometry import resolve_text_anchor_bbox, sanitize_simple_text_geometry
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +111,13 @@ def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> Non
         return
     image_rgb = np.array(img.convert("RGB"))
     background_rgb = sample_text_background_rgb(image_rgb, _auto_style_sample_bbox(text_data))
-    text_data["estilo"] = normalize_auto_typesetting_style(text_data.get("estilo", {}), background_rgb)
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    force_black_text = str(text_data.get("balloon_type") or "").strip().lower() == "white" or profile == "white_balloon"
+    text_data["estilo"] = normalize_auto_typesetting_style(
+        text_data.get("estilo", {}),
+        background_rgb,
+        force_black_text=force_black_text,
+    )
     text_data["style"] = text_data["estilo"]
 
 SAFE_PATH_FORCE_KEYWORDS = (
@@ -1920,8 +1931,182 @@ def _infer_connected_fragment_groups(group: list[dict], balloon_bbox: list[int])
     return best_payload[1], best_payload[2], best_payload[3]
 
 
+def _bbox_from_polygons(polygons: list) -> list[int] | None:
+    points: list[tuple[float, float]] = []
+    for polygon in polygons:
+        if not isinstance(polygon, (list, tuple)):
+            continue
+        if polygon and all(isinstance(v, (int, float)) for v in polygon):
+            coords = list(polygon)
+            if len(coords) % 2 != 0:
+                continue
+            iterator = zip(coords[0::2], coords[1::2])
+        else:
+            iterator = (
+                point
+                for point in polygon
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            )
+        for point in iterator:
+            try:
+                px, py = float(point[0]), float(point[1])
+            except Exception:
+                continue
+            points.append((px, py))
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return [
+        int(math.floor(min(xs))),
+        int(math.floor(min(ys))),
+        int(math.ceil(max(xs))),
+        int(math.ceil(max(ys))),
+    ]
+
+
+def _line_polygon_bbox(polygon) -> list[int] | None:
+    bbox = _bbox_from_polygons([polygon])
+    return _layout_bbox(bbox) if bbox else None
+
+
+def _split_line_polygons_by_large_gap(line_polygons: list) -> list[list[list]] | None:
+    line_entries: list[tuple[list[int], list]] = []
+    for polygon in line_polygons or []:
+        bbox = _line_polygon_bbox(polygon)
+        if bbox is not None:
+            line_entries.append((bbox, polygon))
+    if len(line_entries) < 2:
+        return None
+
+    line_entries.sort(key=lambda item: (item[0][1], item[0][0]))
+    heights = [max(1, bbox[3] - bbox[1]) for bbox, _polygon in line_entries]
+    median_height = sorted(heights)[len(heights) // 2]
+    gaps = [
+        (
+            max(0, line_entries[index + 1][0][1] - line_entries[index][0][3]),
+            index,
+        )
+        for index in range(len(line_entries) - 1)
+    ]
+    if not gaps:
+        return None
+    largest_gap, split_index = max(gaps, key=lambda item: item[0])
+    all_bbox = _bbox_from_polygons([entry[1] for entry in line_entries])
+    if all_bbox is None:
+        return None
+    total_height = max(1, all_bbox[3] - all_bbox[1])
+    threshold = max(42, int(median_height * 2.4), int(total_height * 0.18))
+    if largest_gap < threshold:
+        return None
+
+    first = [entry[1] for entry in line_entries[: split_index + 1]]
+    second = [entry[1] for entry in line_entries[split_index + 1 :]]
+    if not first or not second:
+        return None
+    return [first, second]
+
+
+def _split_single_ocr_visual_lobes(text: dict) -> list[dict] | None:
+    if not isinstance(text, dict) or text.get("skip_processing"):
+        return None
+    tipo = str(text.get("tipo", "fala") or "fala").strip().lower()
+    if tipo not in {"fala", "pensamento"}:
+        return None
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    if not translated:
+        return None
+    groups = _split_line_polygons_by_large_gap(text.get("line_polygons") or [])
+    if not groups or len(groups) != 2:
+        return None
+
+    group_bboxes = [_bbox_from_polygons(group) for group in groups]
+    group_bboxes = [_layout_bbox(bbox) for bbox in group_bboxes if bbox is not None]
+    if len(group_bboxes) != 2:
+        return None
+    if any((bbox[2] - bbox[0]) < 24 or (bbox[3] - bbox[1]) < 10 for bbox in group_bboxes):
+        return None
+
+    areas = [max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) for bbox in group_bboxes]
+    total_area = max(1, sum(areas))
+    chunks = _split_text_for_connected_balloons(translated, 2, [area / float(total_area) for area in areas])
+    if len(chunks) != 2 or not all(chunk.strip() for chunk in chunks):
+        return None
+
+    children: list[dict] = []
+    for index, (chunk, bbox, polygons) in enumerate(zip(chunks, group_bboxes, groups)):
+        child = dict(text)
+        child["translated"] = chunk.strip()
+        child["traduzido"] = chunk.strip()
+        child["bbox"] = list(bbox)
+        child["source_bbox"] = list(bbox)
+        child["text_pixel_bbox"] = list(bbox)
+        child["layout_bbox"] = list(bbox)
+        child["balloon_bbox"] = list(bbox)
+        child["line_polygons"] = [polygon for polygon in polygons]
+        child["_visual_lobe_split_parent_bbox"] = list(resolve_text_anchor_bbox(text) or text.get("bbox") or [])
+        child["_visual_lobe_split_index"] = index
+        child["_visual_lobe_split_count"] = 2
+        children.append(sanitize_simple_text_geometry(child))
+    return children
+
+
+def _should_skip_noisy_overlapping_ocr_fragment(text: dict, texts: list[dict]) -> bool:
+    if not isinstance(text, dict) or text.get("skip_processing"):
+        return False
+    if text.get("line_polygons"):
+        return False
+    balloon_type = str(text.get("balloon_type") or "").strip().lower()
+    layout_profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    if balloon_type not in {"textured", "colored", "dark"} and layout_profile not in {
+        "textured",
+        "textured_background",
+        "colored_balloon",
+        "dark_background",
+        "gradient_background",
+    }:
+        return False
+    bbox = _layout_bbox(text.get("text_pixel_bbox") or text.get("bbox"))
+    if bbox is None:
+        return False
+    text_key = re.sub(r"\s+", "", str(text.get("translated") or text.get("text") or text.get("original") or ""))
+    if len(text_key) > 24:
+        return False
+    own_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+    for other in texts:
+        if other is text or not isinstance(other, dict) or other.get("skip_processing"):
+            continue
+        other_bbox = _layout_bbox(other.get("text_pixel_bbox") or other.get("bbox"))
+        if other_bbox is None:
+            continue
+        if not other.get("line_polygons") and len(str(other.get("text") or other.get("original") or "")) <= len(
+            str(text.get("text") or text.get("original") or "")
+        ):
+            continue
+        ix1 = max(bbox[0], other_bbox[0])
+        iy1 = max(bbox[1], other_bbox[1])
+        ix2 = min(bbox[2], other_bbox[2])
+        iy2 = min(bbox[3], other_bbox[3])
+        overlap = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        if overlap / float(own_area) >= 0.25:
+            return True
+    return False
+
+
 def build_render_blocks(texts: list[dict]) -> list[dict]:
-    texts = [text for text in texts if not text.get("skip_processing")]
+    blocks = []
+    for text in texts:
+        if text.get("skip_processing"):
+            continue
+        if _should_skip_noisy_overlapping_ocr_fragment(text, texts):
+            continue
+        split_blocks = _split_single_ocr_visual_lobes(text)
+        if split_blocks:
+            blocks.extend(split_blocks)
+            continue
+        blocks.append(sanitize_simple_text_geometry(text))
+    return blocks
+
     prepared_texts: list[dict] = []
     shared_balloon_groups: dict[tuple[int, int, int, int], list[dict]] = {}
     for text in texts:
@@ -2291,6 +2476,85 @@ def _layout_bbox(value) -> list[int] | None:
     return [x1, y1, x2, y2]
 
 
+def _median_int(values: list[int]) -> int | None:
+    cleaned = sorted(int(v) for v in values if int(v) > 0)
+    if not cleaned:
+        return None
+    mid = len(cleaned) // 2
+    if len(cleaned) % 2:
+        return cleaned[mid]
+    return int(round((cleaned[mid - 1] + cleaned[mid]) / 2.0))
+
+
+def _polygon_height(poly) -> int | None:
+    if not isinstance(poly, (list, tuple)) or len(poly) < 2:
+        return None
+    ys: list[int] = []
+    for point in poly:
+        if isinstance(point, (list, tuple)) and len(point) >= 2:
+            try:
+                ys.append(int(round(float(point[1]))))
+            except Exception:
+                continue
+    if not ys:
+        return None
+    height = max(ys) - min(ys)
+    return height if height > 0 else None
+
+
+def _estimate_source_line_count(text: str, bbox_height: int, bbox_width: int) -> int:
+    explicit_lines = [part for part in re.split(r"\n+", str(text or "")) if part.strip()]
+    if len(explicit_lines) > 1:
+        return len(explicit_lines)
+    compact_len = len(re.sub(r"\s+", "", str(text or "")))
+    if compact_len >= 36 and bbox_height >= 72:
+        return 4
+    if compact_len >= 20 and bbox_height >= 54:
+        return 3
+    if compact_len >= 12 and bbox_height >= 38 and bbox_width <= bbox_height * 4:
+        return 2
+    return 1
+
+
+def _estimate_original_font_size_px(text_data: dict) -> int | None:
+    explicit = text_data.get("detected_font_size_px") or text_data.get("font_size_px")
+    try:
+        explicit_size = int(round(float(explicit)))
+    except Exception:
+        explicit_size = 0
+    if explicit_size > 0:
+        return max(_MIN_FONT_SIZE, min(96, explicit_size))
+
+    polygon_heights = [
+        height
+        for height in (_polygon_height(poly) for poly in (text_data.get("line_polygons") or []))
+        if height is not None
+    ]
+    median_height = _median_int(polygon_heights)
+    if median_height is not None:
+        return max(_MIN_FONT_SIZE, min(96, int(round(median_height * 1.05))))
+
+    text_bbox = _layout_bbox(text_data.get("text_pixel_bbox"))
+    if text_bbox:
+        x1, y1, x2, y2 = text_bbox
+        bbox_h = max(1, y2 - y1)
+        bbox_w = max(1, x2 - x1)
+        source = str(text_data.get("text") or text_data.get("original") or "")
+        line_count = max(1, _estimate_source_line_count(source, bbox_h, bbox_w))
+        return max(_MIN_FONT_SIZE, min(96, int(round((bbox_h / float(line_count)) * 0.95))))
+
+    return None
+
+
+def _should_follow_original_ocr_size(text_data: dict) -> bool:
+    if text_data.get("_is_lobe_subregion"):
+        return False
+    if not (text_data.get("line_polygons") or text_data.get("text_pixel_bbox") or text_data.get("detected_font_size_px")):
+        return False
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    return style_origin in {"", "auto", "legacy_auto", "ocr"}
+
+
 def _bbox_intersection(a: list[int], b: list[int]) -> list[int] | None:
     x1 = max(int(a[0]), int(b[0]))
     y1 = max(int(a[1]), int(b[1]))
@@ -2485,8 +2749,73 @@ def _center_span_within_bounds(center: float, span: int, lower: int, upper: int)
     return int(left), int(right)
 
 
+def _resolve_simple_anchor_capacity_bbox(
+    text_data: dict,
+    anchor_bbox: list[int],
+    target_size: int,
+) -> list[int] | None:
+    """Grow OCR-position capacity only when larger type still fits nearby."""
+    if text_data.get("_is_lobe_subregion"):
+        return None
+    tipo = str(text_data.get("tipo", "fala") or "fala").strip().lower()
+    balloon_type = str(text_data.get("balloon_type", "") or "").strip().lower()
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if tipo not in {"fala", "pensamento"} and not (
+        tipo == "narracao" and (balloon_type == "white" or profile == "white_balloon")
+    ):
+        return None
+    style = _canonical_render_style(text_data.get("estilo", {}))
+    if balloon_type == "textured" and (
+        str(style.get("cor", "") or "").strip().upper() not in {"#000000", "#111111", "BLACK"}
+        or bool(style.get("glow"))
+        or int(style.get("contorno_px", 0) or 0) > 0
+    ):
+        return None
+
+    x1, y1, x2, y2 = [int(v) for v in anchor_bbox]
+    anchor_w = max(1, x2 - x1)
+    anchor_h = max(1, y2 - y1)
+    target_size = max(8, int(target_size or 0))
+
+    page_profile = text_data.get("page_profile") if isinstance(text_data.get("page_profile"), dict) else {}
+    has_page_bounds = bool(page_profile.get("width") or page_profile.get("height") or text_data.get("page_width") or text_data.get("page_height"))
+    if not has_page_bounds and target_size < 36:
+        return None
+
+    text_len = len(re.sub(r"\s+", "", str(text_data.get("translated", "") or text_data.get("text", "") or "")))
+    if anchor_h >= int(target_size * 1.45) and (text_len <= 18 or anchor_w >= int(target_size * 7.5)):
+        return None
+    estimated_lines = 1 if text_len <= 12 else 2 if text_len <= 30 else 3
+    desired_h = max(anchor_h, int(round(target_size * (1.45 + (estimated_lines - 1) * 1.05))))
+    desired_w = max(
+        anchor_w,
+        int(round(target_size * max(4.4, min(10.0, text_len * 0.72 + 2.4)))),
+    )
+
+    max_extra_x = max(12, int(round(anchor_w * 0.45)), target_size)
+    max_extra_y = max(10, int(round(anchor_h * 0.70)), int(round(target_size * 0.85)))
+    desired_w = min(desired_w, anchor_w + (max_extra_x * 2))
+    desired_h = min(desired_h, anchor_h + (max_extra_y * 2))
+    if desired_w <= anchor_w and desired_h <= anchor_h:
+        return None
+
+    page_width, page_height = _page_dimensions_for_layout(text_data, anchor_bbox)
+    center_x = (x1 + x2) / 2.0
+    center_y = (y1 + y2) / 2.0
+    ex1, ex2 = _center_span_within_bounds(center_x, desired_w, 0, page_width)
+    ey1, ey2 = _center_span_within_bounds(center_y, desired_h, 0, page_height)
+    expanded = [ex1, ey1, ex2, ey2]
+    return None if expanded == anchor_bbox else expanded
+
+
 def plan_text_layout(text_data: dict) -> dict:
-    target_bbox = text_data.get("balloon_bbox") or text_data.get("bbox") or [0, 0, 0, 0]
+    target_bbox = (
+        resolve_text_anchor_bbox(text_data)
+        or text_data.get("layout_bbox")
+        or text_data.get("balloon_bbox")
+        or text_data.get("bbox")
+        or [0, 0, 0, 0]
+    )
     target_bbox = _layout_bbox(target_bbox) or [0, 0, 0, 0]
     layout_safe_area = _resolve_balloon_safe_area(text_data, target_bbox)
     layout_safe_bbox = layout_safe_area.get("safe_bbox") if layout_safe_area else None
@@ -2612,9 +2941,51 @@ def plan_text_layout(text_data: dict) -> dict:
         corpus_textual=corpus_textual,
     )
 
-    target_size = max(10, int(estilo.get("tamanho", 24)) + target_size_delta)
+    style_target_size = max(10, int(estilo.get("tamanho", 24)) + target_size_delta)
+    original_font_size = _estimate_original_font_size_px(text_data)
+    follow_original_ocr_size = _should_follow_original_ocr_size(text_data) and original_font_size is not None
+    target_size = (
+        max(_MIN_FONT_SIZE, int(original_font_size or style_target_size) + target_size_delta)
+        if follow_original_ocr_size
+        else style_target_size
+    )
     explicit_outline = bool(estilo.get("contorno")) or int(estilo.get("contorno_px", 0) or 0) > 0
     outline_px = max(int(estilo.get("contorno_px", 0)), outline_boost) if explicit_outline else 0
+
+    simple_anchor_capacity_expanded = False
+    simple_anchor_font_cap = 0
+    simple_anchor_capacity_enabled = str(os.getenv("TRADUZAI_ENABLE_SIMPLE_ANCHOR_CAPACITY", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    auto_ocr_font_cap = max(_MIN_FONT_SIZE, int(target_size)) if follow_original_ocr_size else 0
+    font_search_floor = _MIN_FONT_SIZE if follow_original_ocr_size else 0
+    if (
+        simple_anchor_capacity_enabled
+        and anchor_bbox
+        and anchor_capacity_locked
+        and not text_data.get("_is_lobe_subregion")
+    ):
+        translated_len = len(re.sub(r"\s+", "", str(text_data.get("translated", "") or text_data.get("text", "") or "")))
+        capacity_target_size = target_size
+        if (
+            tipo in {"fala", "pensamento", "narracao"}
+            and (balloon_type == "white" or layout_profile == "white_balloon")
+            and translated_len <= 28
+            and target_size < 24
+        ):
+            capacity_target_size = max(capacity_target_size, 36)
+        expanded_capacity = _resolve_simple_anchor_capacity_bbox(text_data, anchor_bbox, capacity_target_size)
+        if expanded_capacity:
+            target_size = max(target_size, capacity_target_size)
+            capacity_bbox = expanded_capacity
+            cx1, cy1, cx2, cy2 = [int(v) for v in capacity_bbox]
+            capacity_width = max(1, cx2 - cx1)
+            capacity_height = max(1, cy2 - cy1)
+            simple_anchor_capacity_expanded = True
+            simple_anchor_font_cap = min(target_size, 32) if target_size >= 32 else target_size
 
     connected_orientation = str(text_data.get("connected_balloon_orientation", "") or "")
     raw_slot_index = text_data.get("_connected_slot_index", -1)
@@ -2673,6 +3044,7 @@ def plan_text_layout(text_data: dict) -> dict:
     return {
         "target_bbox": target_bbox,
         "position_bbox": position_bbox,
+        "capacity_bbox": capacity_bbox,
         "layout_safe_bbox": layout_safe_bbox,
         "layout_safe_reason": layout_safe_area.get("reason") if layout_safe_area else "",
         "safe_text_box": safe_text_box,
@@ -2702,6 +3074,10 @@ def plan_text_layout(text_data: dict) -> dict:
         "vertical_bias_px": vertical_bias_px,
         "horizontal_bias_px": horizontal_bias_px,
         "_anchor_capacity_locked": anchor_capacity_locked,
+        "_simple_anchor_capacity_expanded": simple_anchor_capacity_expanded,
+        "_font_search_cap": simple_anchor_font_cap or auto_ocr_font_cap,
+        "_font_search_floor": font_search_floor,
+        "_follow_original_ocr_size": follow_original_ocr_size,
     }
 
 
@@ -3077,7 +3453,8 @@ def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
     The old logic treated target_size as a hard cap, which is the main reason
     small OCR-estimated sizes stayed tiny even inside large clean balloons.
     """
-    x1, y1, x2, y2 = plan["target_bbox"]
+    search_bbox = plan.get("capacity_bbox") if plan.get("_simple_anchor_capacity_expanded") else plan["target_bbox"]
+    x1, y1, x2, y2 = [int(v) for v in search_bbox]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
     seed = int(plan.get("target_size", 16) or 16)
@@ -3101,9 +3478,13 @@ def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
 
     explicit_cap = int(plan.get("_font_search_cap", 0) or 0)
     hi = max(seed + 4, seed + growth)
+    if plan.get("_simple_anchor_capacity_expanded"):
+        hi = min(hi, seed)
     if explicit_cap > 0:
         hi = min(hi, explicit_cap)
-    hi = min(hi, max(12, int(box_height * 0.56)))
+    if not plan.get("_simple_anchor_capacity_expanded"):
+        height_ratio_cap = 0.98 if explicit_cap > 0 else 0.56
+        hi = min(hi, max(12, int(box_height * height_ratio_cap)))
     hi = min(hi, max(12, max_height))
     hi = min(hi, 96)
     return max(8, hi)
@@ -3112,23 +3493,29 @@ def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
 def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     text = text_data.get("translated", "")
     x1, y1, x2, y2 = plan["target_bbox"]
-    px1, py1, px2, py2 = [int(v) for v in plan.get("position_bbox", plan["target_bbox"])]
+    effective_position_bbox = plan.get("capacity_bbox") if plan.get("_simple_anchor_capacity_expanded") else plan.get("position_bbox", plan["target_bbox"])
+    px1, py1, px2, py2 = [int(v) for v in effective_position_bbox]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
     position_width = max(1, px2 - px1)
     position_height = max(1, py2 - py1)
+    score_width = position_width if plan.get("_simple_anchor_capacity_expanded") else box_width
+    score_height = position_height if plan.get("_simple_anchor_capacity_expanded") else box_height
 
     category_min, category_max = _category_font_bounds(text_data)
+    height_limit = position_height if plan.get("_simple_anchor_capacity_expanded") else box_height
     font_size = min(
         _compute_font_search_upper_bound(plan, text),
-        max(_MIN_FONT_SIZE, box_height - 4),
+        max(_MIN_FONT_SIZE, height_limit - 4),
         category_max,
         96,
     )
     best_candidate = None
 
     # Binary search: achar o maior tamanho que cabe
-    lo, hi = category_min, font_size
+    floor_bound = int(plan.get("_font_search_floor", category_min) or category_min)
+    lo = max(_MIN_FONT_SIZE, min(floor_bound, font_size))
+    hi = max(lo, font_size)
     best_fit = lo
     while lo <= hi:
         mid = (lo + hi) // 2
@@ -3139,7 +3526,6 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             hi = mid - 1
 
     # Refinar: testar best_fit e vizinhos (±2, ±1, melhor) para scoring
-    floor_bound = int(plan.get("_font_search_floor", category_min) or category_min)
     candidate_sizes = sorted(
         {
             size
@@ -3233,15 +3619,19 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         }
         candidate["width_ratio"] = candidate["block_width"] / float(max(1, box_width))
         candidate["height_ratio"] = candidate["block_height"] / float(max(1, box_height))
-        candidate["score"] = _score_layout_candidate(
-            block_width=candidate["block_width"],
-            block_height=candidate["block_height"],
-            box_width=box_width,
-            box_height=box_height,
-            font_size=attempt_size,
-            layout_shape=plan.get("layout_shape", "square"),
-            balloon_geo=plan.get("balloon_geo", "ellipse"),
-        )
+        if plan.get("_follow_original_ocr_size"):
+            preferred_size = int(plan.get("target_size", attempt_size) or attempt_size)
+            candidate["score"] = -(abs(preferred_size - attempt_size) * 100.0) + (attempt_size * 0.01)
+        else:
+            candidate["score"] = _score_layout_candidate(
+                block_width=candidate["block_width"],
+                block_height=candidate["block_height"],
+                box_width=score_width,
+                box_height=score_height,
+                font_size=attempt_size,
+                layout_shape=plan.get("layout_shape", "square"),
+                balloon_geo=plan.get("balloon_geo", "ellipse"),
+            )
         if best_candidate is None or candidate["score"] > best_candidate["score"]:
             best_candidate = candidate
 
@@ -3251,7 +3641,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     # Fallback honra o resultado do binary-search (best_fit) em vez de cair
     # para category_min — se o binary-search achou que size 36 cabe (com +4 px
     # de tolerância) é melhor renderizar em 36 do que voltar para 14.
-    fallback_size = max(8, best_fit, category_min)
+    fallback_size = max(_MIN_FONT_SIZE, best_fit, min(category_min, font_size))
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
@@ -3907,7 +4297,8 @@ def _render_single_text_block(
 
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     layer.paste(crop_rgba, crop_box[:2], crop_alpha)
-    x1, y1, x2, y2 = plan["target_bbox"]
+    search_bbox = plan.get("position_bbox") if plan.get("_simple_anchor_capacity_expanded") else plan["target_bbox"]
+    x1, y1, x2, y2 = [int(v) for v in search_bbox]
     center = ((float(x1) + float(x2)) / 2.0, (float(y1) + float(y2)) / 2.0)
     resampling = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
     rotated_layer = layer.rotate(-rotation_deg, resample=resampling, center=center, expand=False)
@@ -4228,6 +4619,7 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None)
     if not text:
         return
     text = _normalize_render_text(text)
+    text_data.update(sanitize_simple_text_geometry(text_data))
 
     subregions = [
         [int(v) for v in bbox]

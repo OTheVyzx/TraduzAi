@@ -5,6 +5,7 @@ and outputs JSON progress messages to stdout for the Tauri sidecar to consume.
 """
 
 import os
+import copy
 import json
 import math
 import re
@@ -25,10 +26,45 @@ if str(pipeline_root) not in sys.path:
 
 from utils.decision_log import configure_decision_trace, finalize_decision_trace
 from typesetter.style_policy import normalize_auto_typesetting_style
+from layout.simple_text_geometry import resolve_text_anchor_bbox, sanitize_simple_text_geometry
 
 _EMIT_STDOUT_FAILED = False
 _PIPELINE_FILE_HANDLER: logging.Handler | None = None
 logger = logging.getLogger(__name__)
+
+
+class _PipelineTiming:
+    def __init__(self) -> None:
+        self._started = time.perf_counter()
+        self._durations: dict[str, float] = {}
+        self._events: list[dict] = []
+
+    @contextlib.contextmanager
+    def measure(self, stage: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.add(stage, time.perf_counter() - started)
+
+    def add(self, stage: str, seconds: float) -> None:
+        self._durations[stage] = self._durations.get(stage, 0.0) + float(seconds)
+        self._events.append({"stage": stage, "seconds": round(float(seconds), 4)})
+
+    def snapshot(self, *, total_seconds: float | None = None, extra: dict | None = None) -> dict:
+        total = float(total_seconds) if total_seconds is not None else time.perf_counter() - self._started
+        durations = {stage: round(seconds, 4) for stage, seconds in sorted(self._durations.items())}
+        instrumented = round(sum(durations.values()), 4)
+        payload = {
+            "total_sec": round(total, 4),
+            "instrumented_sec": instrumented,
+            "unattributed_sec": round(max(0.0, total - instrumented), 4),
+            "durations_sec": durations,
+            "events": list(self._events),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
 
 
 class _AutoClosingFileHandler(logging.Handler):
@@ -471,7 +507,7 @@ def main():
     if sys.argv[1] == "--serve-fast-page":
         from fast_page_server import serve_stdio
 
-        serve_stdio(pipeline_runner=_run_pipeline)
+        serve_stdio(pipeline_runner=_run_pipeline, reinpaint_runner=_run_reinpaint)
         return
 
     if sys.argv[1] == "--warmup-visual":
@@ -665,13 +701,20 @@ def _run_pipeline(config_path: str):
     from translator.translate import translate_pages
     from typesetter.renderer import run_typesetting
 
-    config = _load_json_file(config_path)
-    runtime_profile_decision = _apply_runtime_profile_config(config)
+    pipeline_timing = _PipelineTiming()
+    start_time = time.time()
+    with pipeline_timing.measure("load_config"):
+        config = _load_json_file(config_path)
+    with pipeline_timing.measure("apply_runtime_profile"):
+        runtime_profile_decision = _apply_runtime_profile_config(config)
 
     wait_if_paused(config)
     work_dir = Path(config["work_dir"])
     models_dir = Path(config["models_dir"])
     _attach_work_dir_log_handler(work_dir)
+    if config.get("debug"):
+        os.environ.setdefault("STRIP_DEBUG", "1")
+        os.environ["TRADUZAI_INPAINT_DEBUG_DIR"] = str(work_dir / "debug_inpaint")
     configure_decision_trace(
         work_dir,
         {
@@ -696,42 +739,47 @@ def _run_pipeline(config_path: str):
     originals_dir.mkdir(parents=True, exist_ok=True)
     translated_dir.mkdir(parents=True, exist_ok=True)
 
-    corpus_bundle = load_corpus_bundle(
-        config.get("obra", ""),
-        models_root=models_dir / "corpus",
-        fallback_root=Path(__file__).resolve().parent / "models" / "corpus",
-    )
-    corpus_expected_terms = extract_expected_terms(corpus_bundle)
+    with pipeline_timing.measure("load_corpus"):
+        corpus_bundle = load_corpus_bundle(
+            config.get("obra", ""),
+            models_root=models_dir / "corpus",
+            fallback_root=Path(__file__).resolve().parent / "models" / "corpus",
+        )
+        corpus_expected_terms = extract_expected_terms(corpus_bundle)
 
     emit_progress("extract", 0, 0, message="Extraindo arquivos...")
     try:
-        image_files, tmp_dir = extract(source_path, work_dir)
+        with pipeline_timing.measure("extract_source"):
+            image_files, tmp_dir = extract(source_path, work_dir)
     except Exception as e:
         emit("error", message=str(e))
         sys.exit(1)
 
-    for img_path in image_files:
-        shutil.copy2(img_path, originals_dir / img_path.name)
+    with pipeline_timing.measure("copy_original_inputs"):
+        for img_path in image_files:
+            shutil.copy2(img_path, originals_dir / img_path.name)
 
     total_pages = len(image_files)
     mode = config.get("mode", "auto")
     ocr_results = []
     page_text_layers = []
-    context = merge_corpus_into_context(config.get("contexto", {}), corpus_bundle)
-    start_time = time.time()
+    with pipeline_timing.measure("merge_corpus_context"):
+        context = merge_corpus_into_context(config.get("contexto", {}), corpus_bundle)
+    strip_chapter_telemetry = None
 
     if mode == "manual":
         emit_progress("extract", 100, 95, message="Modo Manual: Preparando projeto...")
-        for img_path in image_files:
-            # Em modo manual, o 'clean' (images) e o final (translated) sao apenas copias
-            shutil.copy2(originals_dir / img_path.name, images_dir / img_path.name)
-            shutil.copy2(originals_dir / img_path.name, translated_dir / img_path.name)
-            
-            # Garantir diretorios de camadas para o editor nao reclamar
-            (work_dir / "layers" / "mask").mkdir(parents=True, exist_ok=True)
-            (work_dir / "layers" / "brush").mkdir(parents=True, exist_ok=True)
-            (work_dir / "layers" / "text-preview").mkdir(parents=True, exist_ok=True)
-            
+        with pipeline_timing.measure("manual_prepare_project"):
+            for img_path in image_files:
+                # Em modo manual, o 'clean' (images) e o final (translated) sao apenas copias
+                shutil.copy2(originals_dir / img_path.name, images_dir / img_path.name)
+                shutil.copy2(originals_dir / img_path.name, translated_dir / img_path.name)
+
+                # Garantir diretorios de camadas para o editor nao reclamar
+                (work_dir / "layers" / "mask").mkdir(parents=True, exist_ok=True)
+                (work_dir / "layers" / "brush").mkdir(parents=True, exist_ok=True)
+                (work_dir / "layers" / "text-preview").mkdir(parents=True, exist_ok=True)
+
         inpainted_paths = [str(images_dir / f.name) for f in image_files]
         # Prepare empty lists for project building
         for _ in range(total_pages):
@@ -752,25 +800,27 @@ def _run_pipeline(config_path: str):
         # Start AniList context fetch in parallel
         _context_future = None
         if not context.get("sinopse") and config.get("obra"):
-            from concurrent.futures import ThreadPoolExecutor as _CtxTPE
-            _ctx_pool = _CtxTPE(max_workers=1)
-            _context_future = _ctx_pool.submit(
-                fetch_context,
-                config["obra"],
-                work_dir / "context_cache",
-                config.get("glossario", {}),
-                config.get("context_sources") or [],
-            )
+            with pipeline_timing.measure("context_fetch_submit"):
+                from concurrent.futures import ThreadPoolExecutor as _CtxTPE
+                _ctx_pool = _CtxTPE(max_workers=1)
+                _context_future = _ctx_pool.submit(
+                    fetch_context,
+                    config["obra"],
+                    work_dir / "context_cache",
+                    config.get("glossario", {}),
+                    config.get("context_sources") or [],
+                )
 
         # Warmup models
         emit_progress("ocr", 0, 9, total=total_pages, message="Carregando modelos...")
         if runtime_profile_decision.visual_stack_warmup:
-            _warmup_visual_stack(
-                str(models_dir),
-                "max",
-                run_sample=False,
-                lang=config.get("idioma_origem", "en"),
-            )
+            with pipeline_timing.measure("visual_stack_warmup"):
+                _warmup_visual_stack(
+                    str(models_dir),
+                    "max",
+                    run_sample=False,
+                    lang=config.get("idioma_origem", "en"),
+                )
         else:
             logger.info(
                 "Warmup visual opcional desativado pelo perfil runtime=%s",
@@ -779,11 +829,12 @@ def _run_pipeline(config_path: str):
 
         # Resolve AniList context
         if _context_future:
-            try:
-                context = merge_context(context, _context_future.result(timeout=10))
-            except Exception:
-                pass
-            _ctx_pool.shutdown(wait=False)
+            with pipeline_timing.measure("context_fetch_wait_merge"):
+                try:
+                    context = merge_context(context, _context_future.result(timeout=10))
+                except Exception:
+                    pass
+                _ctx_pool.shutdown(wait=False)
 
         # Bridges
         connected_reasoner_config = _build_connected_reasoner_config(config)
@@ -857,26 +908,37 @@ def _run_pipeline(config_path: str):
                 # Chamado internamente por process_band (OCR da banda)
                 pass 
 
-        output_pages = run_chapter(
-            image_files=image_files,
-            output_dir=translated_dir,
-            detector=StripDetector(),
-            runtime=StripRuntime(),
-            translator=translator_mod,
-            inpainter=SimpleNamespace(inpaint_band_image=inpaint_band_image),
-            typesetter=typesetter_mod,
-            target_count=_resolve_strip_target_pages(config, total_pages),
-            progress_callback=progress_cb,
-            context=context,
-            glossario=config.get("glossario", {}),
-            idioma_origem=config.get("idioma_origem", "en"),
-            idioma_destino=config.get("idioma_destino", "pt-BR"),
-            obra=config.get("obra", ""),
-            connected_reasoner_config=connected_reasoner_config,
-            models_dir=str(models_dir),
-            ollama_host=config.get("ollama_host", "http://localhost:11434"),
-            ollama_model=config.get("ollama_model", "traduzai-translator"),
-            translation_context=config.get("translation_context") or None,
+        strip_chapter_telemetry: dict = {}
+        with pipeline_timing.measure("strip_run_chapter"):
+            output_pages = run_chapter(
+                image_files=image_files,
+                output_dir=translated_dir,
+                detector=StripDetector(),
+                runtime=StripRuntime(),
+                translator=translator_mod,
+                inpainter=SimpleNamespace(inpaint_band_image=inpaint_band_image),
+                typesetter=typesetter_mod,
+                target_count=_resolve_strip_target_pages(config, total_pages),
+                progress_callback=progress_cb,
+                context=context,
+                glossario=config.get("glossario", {}),
+                idioma_origem=config.get("idioma_origem", "en"),
+                idioma_destino=config.get("idioma_destino", "pt-BR"),
+                obra=config.get("obra", ""),
+                connected_reasoner_config=connected_reasoner_config,
+                models_dir=str(models_dir),
+                ollama_host=config.get("ollama_host", "http://localhost:11434"),
+                ollama_model=config.get("ollama_model", "traduzai-translator"),
+                translation_context=config.get("translation_context") or None,
+                chapter_telemetry=strip_chapter_telemetry,
+            )
+        strip_chapter_telemetry["internal_unattributed_sec"] = round(
+            max(
+                0.0,
+                float(strip_chapter_telemetry.get("wall_total_sec", 0.0) or 0.0)
+                - sum(float(v) for v in (strip_chapter_telemetry.get("durations_sec") or {}).values()),
+            ),
+            4,
         )
 
 
@@ -888,76 +950,84 @@ def _run_pipeline(config_path: str):
         total_pages = len(output_pages)
 
         # Copia imagens processadas para images/ para que o editor as veja como base de inpaint
-        for p in output_pages:
-            inpaint_target = images_dir / p.path.name
-            if getattr(p, "inpainted_image", None) is not None:
-                cv2.imwrite(str(inpaint_target), p.inpainted_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            else:
-                shutil.copy2(p.path, inpaint_target)
+        with pipeline_timing.measure("sync_inpaint_images"):
+            for p in output_pages:
+                inpaint_target = images_dir / p.path.name
+                if getattr(p, "inpainted_image", None) is not None:
+                    cv2.imwrite(str(inpaint_target), p.inpainted_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                else:
+                    shutil.copy2(p.path, inpaint_target)
 
         # Substituir originals/ pelos nomes reassemblados esperados pelo editor.
         # O overwrite direto evita falhar em ACLs/locks temporarios de arquivos ja
         # extraidos, e a limpeza residual fica como best-effort.
-        expected_original_names = {p.path.name for p in output_pages}
-        for p in output_pages:
-            original_target = originals_dir / p.path.name
-            if getattr(p, "original_image", None) is not None:
-                cv2.imwrite(str(original_target), p.original_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            else:
-                shutil.copy2(p.path, original_target)
-        for stale in originals_dir.glob("*"):
-            if not stale.is_file() or stale.name in expected_original_names:
-                continue
-            try:
-                stale.unlink()
-            except PermissionError:
-                logger.warning("Nao foi possivel remover original temporario residual: %s", stale)
+        with pipeline_timing.measure("sync_original_images"):
+            expected_original_names = {p.path.name for p in output_pages}
+            for p in output_pages:
+                original_target = originals_dir / p.path.name
+                if getattr(p, "original_image", None) is not None:
+                    cv2.imwrite(str(original_target), p.original_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                else:
+                    shutil.copy2(p.path, original_target)
+            for stale in originals_dir.glob("*"):
+                if not stale.is_file() or stale.name in expected_original_names:
+                    continue
+                try:
+                    stale.unlink()
+                except PermissionError:
+                    logger.warning("Nao foi possivel remover original temporario residual: %s", stale)
 
         # Garantir diretorios de camadas + PNGs transparentes 1x1 para mask/brush
         # (UI Tauri reclama de 404 quando layers/mask/NNN.png nao existe).
-        layers_root = work_dir / "layers"
-        (layers_root / "mask").mkdir(parents=True, exist_ok=True)
-        (layers_root / "brush").mkdir(parents=True, exist_ok=True)
-        (layers_root / "recovery").mkdir(parents=True, exist_ok=True)
-        (layers_root / "text-preview").mkdir(parents=True, exist_ok=True)
-        try:
-            from PIL import Image as _PILImage
-            _empty_png = _PILImage.new("RGBA", (1, 1), (0, 0, 0, 0))
-            for i in range(1, len(output_pages) + 1):
-                mask_path = layers_root / "mask" / f"{i:03}.png"
-                brush_path = layers_root / "brush" / f"{i:03}.png"
-                recovery_path = layers_root / "recovery" / f"{i:03}.png"
-                if not mask_path.exists():
-                    _empty_png.save(mask_path)
-                if not brush_path.exists():
-                    _empty_png.save(brush_path)
-                if not recovery_path.exists():
-                    _empty_png.save(recovery_path)
-        except Exception:
-            pass
+        with pipeline_timing.measure("ensure_layer_placeholders"):
+            layers_root = work_dir / "layers"
+            (layers_root / "mask").mkdir(parents=True, exist_ok=True)
+            (layers_root / "brush").mkdir(parents=True, exist_ok=True)
+            (layers_root / "recovery").mkdir(parents=True, exist_ok=True)
+            (layers_root / "text-preview").mkdir(parents=True, exist_ok=True)
+            try:
+                from PIL import Image as _PILImage
+                _empty_png = _PILImage.new("RGBA", (1, 1), (0, 0, 0, 0))
+                for i in range(1, len(output_pages) + 1):
+                    mask_path = layers_root / "mask" / f"{i:03}.png"
+                    brush_path = layers_root / "brush" / f"{i:03}.png"
+                    recovery_path = layers_root / "recovery" / f"{i:03}.png"
+                    if not mask_path.exists():
+                        _empty_png.save(mask_path)
+                    if not brush_path.exists():
+                        _empty_png.save(brush_path)
+                    if not recovery_path.exists():
+                        _empty_png.save(recovery_path)
+            except Exception:
+                pass
 
 
 
 
     # Wrap up
     emit_progress("typeset", 100, 98, message="Finalizando projeto...")
-    project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
+    with pipeline_timing.measure("build_project_json"):
+        project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
     try:
         from runtime_profiles import build_chapter_route_shadow
 
-        project_data["chapter_route_decision"] = build_chapter_route_shadow(ocr_results)
+        with pipeline_timing.measure("chapter_route_shadow"):
+            project_data["chapter_route_decision"] = build_chapter_route_shadow(ocr_results)
     except Exception as exc:
         logger.warning("Falha ao montar chapter_route_decision: %s", exc)
-    glossary_used_report = build_glossary_used_report(config, context, page_text_layers)
-    project_data["glossary_shadow"] = glossary_used_report["summary"]
-    (work_dir / "glossary_used.json").write_text(
-        json.dumps(glossary_used_report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with pipeline_timing.measure("build_glossary_report"):
+        glossary_used_report = build_glossary_used_report(config, context, page_text_layers)
+        project_data["glossary_shadow"] = glossary_used_report["summary"]
+    with pipeline_timing.measure("write_glossary_report"):
+        (work_dir / "glossary_used.json").write_text(
+            json.dumps(glossary_used_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     from structured_logger import StructuredLogger, build_log_summary
-    structured_logger = StructuredLogger(config.get("logs_dir") or (work_dir / "logs"), config.get("job_id", "run"))
-    log_summary = build_log_summary(project_data)
-    structured_logger.log(stage="summary", event="run_summary", payload=log_summary)
+    with pipeline_timing.measure("structured_log_summary"):
+        structured_logger = StructuredLogger(config.get("logs_dir") or (work_dir / "logs"), config.get("job_id", "run"))
+        log_summary = build_log_summary(project_data)
+        structured_logger.log(stage="summary", event="run_summary", payload=log_summary)
     project_data["log"] = {
         "structured_log_path": str(structured_logger.path),
         "summary": log_summary,
@@ -965,23 +1035,53 @@ def _run_pipeline(config_path: str):
     try:
         from qa.export_gate import evaluate_export_gate
 
-        export_gate = evaluate_export_gate(
-            project_data,
-            override=bool(config.get("allow_p0_export_override")),
-        )
-        project_data["qa"]["export_gate"] = export_gate
-        project_data["needs_review"] = export_gate["status"] == "BLOCK"
+        with pipeline_timing.measure("evaluate_export_gate"):
+            export_gate = evaluate_export_gate(
+                project_data,
+                override=bool(config.get("allow_p0_export_override")),
+            )
+            project_data["qa"]["export_gate"] = export_gate
+            project_data["needs_review"] = export_gate["status"] == "BLOCK"
     except Exception as exc:
         logger.warning("Falha ao avaliar export gate: %s", exc)
-    _save_project_json(work_dir / "project.json", project_data)
-    finalize_decision_trace(
-        {
-            "total_paginas": total_pages,
-            "total_textos": project_data.get("estatisticas", {}).get("total_textos", 0),
-        }
+    project_data["performance"] = pipeline_timing.snapshot(
+        total_seconds=time.time() - start_time,
+        extra={
+            "schema_version": 1,
+            "mode": mode,
+            "sidecar_path": "performance_timing.json",
+            "strip": strip_chapter_telemetry or {},
+        },
     )
-    
-    cleanup(tmp_dir)
+    with pipeline_timing.measure("save_project_json"):
+        _save_project_json(work_dir / "project.json", project_data)
+    with pipeline_timing.measure("finalize_decision_trace"):
+        finalize_decision_trace(
+            {
+                "total_paginas": total_pages,
+                "total_textos": project_data.get("estatisticas", {}).get("total_textos", 0),
+            }
+        )
+
+    with pipeline_timing.measure("cleanup_temp"):
+        cleanup(tmp_dir)
+    final_performance = pipeline_timing.snapshot(
+        total_seconds=time.time() - start_time,
+        extra={
+            "schema_version": 1,
+            "mode": mode,
+            "sidecar_path": "performance_timing.json",
+            "strip": strip_chapter_telemetry or {},
+        },
+    )
+    try:
+        (work_dir / "performance_timing.json").write_text(
+            json.dumps(final_performance, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        project_data["performance"] = final_performance
+    except Exception as exc:
+        logger.warning("Falha ao escrever performance_timing.json: %s", exc)
     emit_progress("typeset", 100, 100, message="Concluido!")
     emit("complete", output_path=str(work_dir))
 
@@ -1133,6 +1233,46 @@ def _region_bbox(region: dict | None) -> list[int] | None:
     if not isinstance(region, dict):
         return None
     return _optional_bbox4(region.get("bbox"))
+
+
+def _external_mask_vision_block(region: dict | None) -> dict | None:
+    bbox = _region_bbox(region)
+    if bbox is None or not isinstance(region, dict):
+        return None
+    mask_path = region.get("mask_path")
+    if not mask_path:
+        return None
+    path = Path(str(mask_path))
+    if not path.exists():
+        return None
+    try:
+        from PIL import Image
+        import numpy as np
+
+        bbox_x1, bbox_y1, bbox_x2, bbox_y2 = [int(v) for v in bbox]
+        with Image.open(path) as img:
+            mask = np.array(img.convert("L"), dtype=np.uint8)
+        height, width = mask.shape[:2]
+        bbox_width = max(0, bbox_x2 - bbox_x1)
+        bbox_height = max(0, bbox_y2 - bbox_y1)
+        if width == bbox_width and height == bbox_height:
+            if int(np.count_nonzero(mask)) <= 0:
+                return None
+            return {"bbox": [bbox_x1, bbox_y1, bbox_x2, bbox_y2], "confidence": 1.0, "mask": mask}
+
+        x1, y1, x2, y2 = bbox_x1, bbox_y1, bbox_x2, bbox_y2
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        local_mask = mask[y1:y2, x1:x2]
+        if int(np.count_nonzero(local_mask)) <= 0:
+            return None
+        return {"bbox": [x1, y1, x2, y2], "confidence": 1.0, "mask": local_mask}
+    except Exception:
+        return None
 
 
 def _bbox_in_region(bbox, region: dict | None) -> bool:
@@ -1410,23 +1550,34 @@ def build_text_layer(
     ocr_text = normalize_ocr_record(ocr_text)
     layer_id = ocr_text.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
     source_bbox = _bbox4(ocr_text.get("source_bbox"), ocr_text.get("bbox"))
-    layout_bbox = _bbox4(
-        ocr_text.get("layout_bbox"),
-        ocr_text.get("balloon_bbox") or source_bbox,
-    )
     text_pixel_bbox = _bbox4(
         _normalize_relative_y_bbox(ocr_text.get("text_pixel_bbox"), source_bbox),
         source_bbox,
     )
+    layout_bbox = resolve_text_anchor_bbox(
+        {
+            "text_pixel_bbox": text_pixel_bbox,
+            "source_bbox": source_bbox,
+            "bbox": ocr_text.get("bbox"),
+        }
+    ) or _bbox4(
+        ocr_text.get("layout_bbox"),
+        ocr_text.get("balloon_bbox") or source_bbox,
+    )
+    force_black_text = (
+        str(ocr_text.get("balloon_type") or "").strip().lower() == "white"
+        or str(ocr_text.get("layout_profile") or ocr_text.get("block_profile") or "").strip().lower() == "white_balloon"
+    )
     style = normalize_auto_typesetting_style(
         _merge_style(ocr_text.get("estilo")),
         _coerce_background_rgb(ocr_text.get("background_rgb")),
+        force_black_text=force_black_text,
     )
-    balloon_subregions = _normalize_relative_y_bbox_list(ocr_text.get("balloon_subregions"), layout_bbox)
-    connected_lobe_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_lobe_bboxes"), layout_bbox)
-    connected_text_groups = _normalize_relative_y_bbox_list(ocr_text.get("connected_text_groups"), layout_bbox)
-    connected_position_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_position_bboxes"), layout_bbox)
-    connected_focus_bboxes = _normalize_relative_y_bbox_list(ocr_text.get("connected_focus_bboxes"), layout_bbox)
+    balloon_subregions = []
+    connected_lobe_bboxes = []
+    connected_text_groups = []
+    connected_position_bboxes = []
+    connected_focus_bboxes = []
     line_polygons = _normalize_relative_y_polygons(ocr_text.get("line_polygons"), source_bbox)
 
     return {
@@ -1468,27 +1619,27 @@ def build_text_layer(
         "inpaint_strategy": ocr_text.get("inpaint_strategy"),
         "balloon_bbox": layout_bbox,
         "balloon_subregions": balloon_subregions,
-        "layout_group_size": int(ocr_text.get("layout_group_size", 1) or 1),
-        "connected_children": ocr_text.get("connected_children"),
+        "layout_group_size": 1,
+        "connected_children": None,
         "connected_text_groups": connected_text_groups,
         "connected_lobe_bboxes": connected_lobe_bboxes,
         "connected_position_bboxes": connected_position_bboxes,
         "connected_focus_bboxes": connected_focus_bboxes,
-        "connected_balloon_orientation": ocr_text.get("connected_balloon_orientation"),
-        "connected_detection_confidence": float(ocr_text.get("connected_detection_confidence", 0.0) or 0.0),
-        "connected_group_confidence": float(ocr_text.get("connected_group_confidence", 0.0) or 0.0),
-        "connected_position_confidence": float(ocr_text.get("connected_position_confidence", 0.0) or 0.0),
-        "subregion_confidence": float(ocr_text.get("subregion_confidence", 0.0) or 0.0),
-        "connected_position_reasoner": ocr_text.get("connected_position_reasoner"),
-        "connected_reasoner_model": ocr_text.get("connected_reasoner_model"),
-        "connected_reasoner_notes": ocr_text.get("connected_reasoner_notes"),
-        "_connected_slot_index": ocr_text.get("_connected_slot_index"),
-        "_connected_slot_count": ocr_text.get("_connected_slot_count"),
-        "_connected_vertical_bias_ratio": ocr_text.get("_connected_vertical_bias_ratio"),
-        "_is_lobe_subregion": bool(ocr_text.get("_is_lobe_subregion", False)),
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0.0,
+        "connected_group_confidence": 0.0,
+        "connected_position_confidence": 0.0,
+        "subregion_confidence": 0.0,
+        "connected_position_reasoner": "",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "_connected_slot_index": None,
+        "_connected_slot_count": None,
+        "_connected_vertical_bias_ratio": None,
+        "_is_lobe_subregion": False,
         "page_profile": ocr_text.get("page_profile"),
         "block_profile": ocr_text.get("block_profile"),
-        "layout_profile": ocr_text.get("layout_profile") or ocr_text.get("block_profile"),
+        "layout_profile": ocr_text.get("block_profile") if ocr_text.get("layout_profile") == "connected_balloon" else (ocr_text.get("layout_profile") or ocr_text.get("block_profile")),
         "entity_flags": list(ocr_text.get("entity_flags") or []),
         "entity_repairs": list(ocr_text.get("entity_repairs") or []),
         "glossary_hits": list(ocr_text.get("glossary_hits") or []),
@@ -1500,20 +1651,20 @@ def build_text_layer(
 
 def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_index: int) -> dict:
     source_bbox = _bbox4(raw_layer.get("source_bbox"), raw_layer.get("bbox"))
-    layout_bbox = _bbox4(raw_layer.get("layout_bbox"), raw_layer.get("balloon_bbox") or source_bbox)
     text_pixel_bbox = _bbox4(
         _normalize_relative_y_bbox(raw_layer.get("text_pixel_bbox"), source_bbox),
         source_bbox,
     )
+    layout_bbox = _bbox4(raw_layer.get("layout_bbox"), text_pixel_bbox or source_bbox)
     style = _merge_style(raw_layer.get("style") or raw_layer.get("estilo"))
     layer_id = raw_layer.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
     translated = raw_layer.get("translated", raw_layer.get("traduzido", ""))
     original = raw_layer.get("original", raw_layer.get("text", ""))
-    balloon_subregions = _normalize_relative_y_bbox_list(raw_layer.get("balloon_subregions"), layout_bbox)
-    connected_lobe_bboxes = _normalize_relative_y_bbox_list(raw_layer.get("connected_lobe_bboxes"), layout_bbox)
-    connected_text_groups = _normalize_relative_y_bbox_list(raw_layer.get("connected_text_groups"), layout_bbox)
-    connected_position_bboxes = _normalize_relative_y_bbox_list(raw_layer.get("connected_position_bboxes"), layout_bbox)
-    connected_focus_bboxes = _normalize_relative_y_bbox_list(raw_layer.get("connected_focus_bboxes"), layout_bbox)
+    balloon_subregions = []
+    connected_lobe_bboxes = []
+    connected_text_groups = []
+    connected_position_bboxes = []
+    connected_focus_bboxes = []
     line_polygons = _normalize_relative_y_polygons(raw_layer.get("line_polygons"), source_bbox)
 
     return {
@@ -1552,27 +1703,27 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
         "inpaint_strategy": raw_layer.get("inpaint_strategy"),
         "balloon_bbox": _bbox4(raw_layer.get("balloon_bbox"), layout_bbox),
         "balloon_subregions": balloon_subregions,
-        "layout_group_size": int(raw_layer.get("layout_group_size", 1) or 1),
-        "connected_children": raw_layer.get("connected_children"),
+        "layout_group_size": 1,
+        "connected_children": None,
         "connected_text_groups": connected_text_groups,
         "connected_lobe_bboxes": connected_lobe_bboxes,
         "connected_position_bboxes": connected_position_bboxes,
         "connected_focus_bboxes": connected_focus_bboxes,
-        "connected_balloon_orientation": raw_layer.get("connected_balloon_orientation"),
-        "connected_detection_confidence": float(raw_layer.get("connected_detection_confidence", 0.0) or 0.0),
-        "connected_group_confidence": float(raw_layer.get("connected_group_confidence", 0.0) or 0.0),
-        "connected_position_confidence": float(raw_layer.get("connected_position_confidence", 0.0) or 0.0),
-        "subregion_confidence": float(raw_layer.get("subregion_confidence", 0.0) or 0.0),
-        "connected_position_reasoner": raw_layer.get("connected_position_reasoner"),
-        "connected_reasoner_model": raw_layer.get("connected_reasoner_model"),
-        "connected_reasoner_notes": raw_layer.get("connected_reasoner_notes"),
-        "_connected_slot_index": raw_layer.get("_connected_slot_index"),
-        "_connected_slot_count": raw_layer.get("_connected_slot_count"),
-        "_connected_vertical_bias_ratio": raw_layer.get("_connected_vertical_bias_ratio"),
-        "_is_lobe_subregion": bool(raw_layer.get("_is_lobe_subregion", False)),
+        "connected_balloon_orientation": "",
+        "connected_detection_confidence": 0.0,
+        "connected_group_confidence": 0.0,
+        "connected_position_confidence": 0.0,
+        "subregion_confidence": 0.0,
+        "connected_position_reasoner": "",
+        "connected_reasoner_model": "",
+        "connected_reasoner_notes": "",
+        "_connected_slot_index": None,
+        "_connected_slot_count": None,
+        "_connected_vertical_bias_ratio": None,
+        "_is_lobe_subregion": False,
         "page_profile": raw_layer.get("page_profile"),
         "block_profile": raw_layer.get("block_profile"),
-        "layout_profile": raw_layer.get("layout_profile") or raw_layer.get("block_profile"),
+        "layout_profile": raw_layer.get("block_profile") if raw_layer.get("layout_profile") == "connected_balloon" else (raw_layer.get("layout_profile") or raw_layer.get("block_profile")),
         "entity_flags": list(raw_layer.get("entity_flags") or []),
         "entity_repairs": list(raw_layer.get("entity_repairs") or []),
         "glossary_hits": list(raw_layer.get("glossary_hits") or []),
@@ -1604,7 +1755,8 @@ def _sync_page_legacy_aliases(page: dict) -> None:
     page["arquivo_original"] = ((image_layers.get("base") or {}).get("path")) or page.get("arquivo_original")
     page["arquivo_traduzido"] = ((image_layers.get("rendered") or {}).get("path")) or page.get("arquivo_traduzido")
 
-    text_layers = page.get("text_layers") or []
+    text_layers = [sanitize_simple_text_geometry(layer) for layer in (page.get("text_layers") or []) if isinstance(layer, dict)]
+    page["text_layers"] = text_layers
     page["textos"] = [
         {
             "id": layer.get("id"),
@@ -1637,19 +1789,73 @@ def _sync_page_legacy_aliases(page: dict) -> None:
             "balloon_bbox": _bbox4(layer.get("balloon_bbox"), layer.get("layout_bbox") or layer.get("bbox")),
             "balloon_type": layer.get("balloon_type"),
             "layout_profile": layer.get("layout_profile") or layer.get("block_profile"),
-            "layout_group_size": int(layer.get("layout_group_size", 1) or 1),
+            "layout_group_size": 1,
             "skip_processing": bool(layer.get("skip_processing", False)),
             "skip_reason": layer.get("skip_reason"),
             "smart_skip_decision": layer.get("smart_skip_decision"),
-            "balloon_subregions": _bbox4_list(layer.get("balloon_subregions")),
+            "balloon_subregions": [],
+            "connected_lobe_bboxes": [],
+            "connected_text_groups": [],
+            "connected_position_bboxes": [],
+            "connected_focus_bboxes": [],
+            "connected_balloon_orientation": "",
+            "connected_detection_confidence": 0.0,
+            "connected_group_confidence": 0.0,
+            "connected_position_confidence": 0.0,
+            "subregion_confidence": 0.0,
         }
         for layer in text_layers
         if isinstance(layer, dict)
     ]
 
 
+def _project_inpaint_block_from_vision_block(block: dict) -> dict | None:
+    if not isinstance(block, dict):
+        return None
+    bbox = block.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        bbox = [int(round(float(v))) for v in bbox]
+    except Exception:
+        return None
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+
+    out = {"bbox": bbox, "confidence": block.get("confidence", 0.0)}
+    if block.get("source_bbox") in (None, [], ""):
+        out["source_bbox"] = list(bbox)
+    for key in (
+        "line_polygons",
+        "text_pixel_bbox",
+        "source_bbox",
+        "balloon_bbox",
+        "balloon_type",
+        "block_profile",
+        "background_type",
+        "tipo",
+        "font_size_px",
+        "font_size",
+    ):
+        value = block.get(key)
+        if value is not None and value != [] and value != "":
+            out[key] = copy.deepcopy(value)
+    if "text_pixel_bbox" not in out:
+        out["text_pixel_bbox"] = list(bbox)
+    return out
+
+
 def _save_project_json(project_json_path: Path, project: dict) -> None:
     from project_writer import write_project_json_atomic
+
+    log = project.get("log")
+    if isinstance(log, dict) and isinstance(log.get("summary"), dict):
+        try:
+            from structured_logger import build_log_summary
+
+            log["summary"] = build_log_summary(project)
+        except Exception as exc:
+            logger.warning("Falha ao atualizar log.summary antes de salvar project.json: %s", exc)
 
     write_project_json_atomic(project_json_path, project)
 
@@ -1747,21 +1953,48 @@ def _merge_regional_inpaint_output(
         target_path = base_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
         base_source = target_path if target_path.exists() else fallback_path
-        with Image.open(base_source).convert("RGB") as base_img:
-            with Image.open(generated_path).convert("RGB") as generated_img:
-                if generated_img.size != base_img.size:
-                    generated_img = generated_img.resize(base_img.size, Image.Resampling.LANCZOS)
-                x1, y1, x2, y2 = bbox
-                x1 = max(0, min(base_img.width, x1))
-                y1 = max(0, min(base_img.height, y1))
-                x2 = max(0, min(base_img.width, x2))
-                y2 = max(0, min(base_img.height, y2))
-                if x2 <= x1 or y2 <= y1:
-                    return
-                base_img.paste(generated_img.crop((x1, y1, x2, y2)), (x1, y1))
-                base_img.save(target_path)
+        with Image.open(base_source) as base_src:
+            base_img = base_src.convert("RGB")
+        with Image.open(generated_path) as generated_src:
+            generated_img = generated_src.convert("RGB")
+        if generated_img.size != base_img.size:
+            generated_img = generated_img.resize(base_img.size, Image.Resampling.LANCZOS)
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, min(base_img.width, x1))
+        y1 = max(0, min(base_img.height, y1))
+        x2 = max(0, min(base_img.width, x2))
+        y2 = max(0, min(base_img.height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return
+        base_img.paste(generated_img.crop((x1, y1, x2, y2)), (x1, y1))
+        base_img.save(target_path)
     except Exception as exc:
         logger.warning("Falha ao mesclar inpaint regional: %s", exc)
+
+
+def _finalize_reinpaint_output_path(
+    *,
+    outputs: list,
+    is_regional: bool,
+    base_path: Path,
+    fallback_path: Path,
+    bbox: list[int] | None,
+    default_path: Path,
+) -> Path:
+    if not outputs:
+        return default_path
+
+    generated_path = Path(outputs[0])
+    if is_regional:
+        _merge_regional_inpaint_output(
+            generated_path=generated_path,
+            base_path=base_path,
+            fallback_path=fallback_path,
+            bbox=bbox,
+        )
+        return base_path
+
+    return generated_path
 
 
 def _visible_render_texts(texts: list[dict]) -> list[dict]:
@@ -1784,6 +2017,13 @@ def _texts_requiring_final_cleanup(texts: list[dict]) -> list[dict]:
     return [text for text in _visible_render_texts(texts) if _text_requires_final_cleanup(text)]
 
 
+def _final_render_text_box_cleanup_enabled() -> bool:
+    raw = os.getenv("TRADUZAI_ENABLE_FINAL_RENDER_TEXT_BOX_CLEANUP")
+    if raw is None or not raw.strip():
+        return False
+    return bool(raw and raw.strip().lower() in {"1", "true", "yes", "on"})
+
+
 def _prepare_inpaint_base_for_render(
     *,
     original_path: Path,
@@ -1792,6 +2032,9 @@ def _prepare_inpaint_base_for_render(
     temp_output_path: Path | None = None,
     update_inpaint: bool = False,
 ) -> Path:
+    if not _final_render_text_box_cleanup_enabled():
+        return inpainted_path
+
     cleanup_texts = _texts_requiring_final_cleanup(texts)
     if not cleanup_texts or not original_path.exists() or not inpainted_path.exists():
         return inpainted_path
@@ -1966,6 +2209,7 @@ def _run_retypeset(project_json_path: Path, page_idx: int):
 
 
 def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None = None):
+    started = time.perf_counter()
     with open(project_json_path, "r", encoding="utf-8") as f:
         project = json.load(f)
 
@@ -1982,10 +2226,9 @@ def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None =
     inpaint_rel = _resolve_image_layer_path(page, "inpaint", f"images/{Path(original_rel).name}")
     img_name = Path(original_rel).name
     original_path = work_dir / original_rel
+    inpaint_path = work_dir / inpaint_rel
     if not original_path.exists():
         original_path = work_dir / "originals" / img_name
-    output_dir = (work_dir / inpaint_rel).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     if not original_path.exists():
         candidate = Path(original_rel)
@@ -1999,6 +2242,19 @@ def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None =
     page_texts = _page_text_layers_for_renderer(page, page_idx)
     is_regional = _region_bbox(region) is not None
     regional_texts = [layer for layer in page_texts if _layer_in_region(layer, region)] if is_regional else page_texts
+    source_path = inpaint_path if is_regional and inpaint_path.exists() else original_path
+    models_dir = Path(
+        os.getenv("TRADUZAI_MODELS_DIR")
+        or project.get("_models_dir")
+        or project.get("models_dir")
+        or "D:/traduzai_data/models"
+    )
+    output_dir = (
+        work_dir / "editor_cache" / "reinpaint_regions" / f"page-{page_number:04d}"
+        if is_regional
+        else inpaint_path.parent
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     inpaint_blocks = page.get("inpaint_blocks") or [
         {
@@ -2007,12 +2263,16 @@ def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None =
         }
         for t in page_texts
     ]
+    external_mask_block = None
     if is_regional:
         inpaint_blocks = [
             block
             for block in inpaint_blocks
             if isinstance(block, dict) and _block_in_region(block, region)
         ]
+        external_mask_block = _external_mask_vision_block(region)
+        if external_mask_block is not None:
+            inpaint_blocks = [external_mask_block]
         if not inpaint_blocks:
             inpaint_blocks = [
                 {
@@ -2025,25 +2285,32 @@ def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None =
     try:
         from inpainter.lama import run_inpainting
         ocr_data = {
-            "image": str(original_path),
+            "image": str(source_path),
             "width": 0,
             "height": 0,
             "texts": regional_texts,
             "_vision_blocks": inpaint_blocks,
         }
+        if external_mask_block is not None:
+            ocr_data["_skip_internal_post_cleanup"] = True
+        inpaint_started = time.perf_counter()
         outputs = run_inpainting(
-            image_files=[original_path],
+            image_files=[source_path],
             ocr_results=[ocr_data],
             output_dir=str(output_dir),
-            models_dir=str(Path("D:/traduzai_data/models")),
+            models_dir=str(models_dir),
         )
-        if is_regional and outputs:
-            _merge_regional_inpaint_output(
-                generated_path=Path(outputs[0]),
-                base_path=work_dir / inpaint_rel,
-                fallback_path=original_path,
-                bbox=_region_bbox(region),
-            )
+        inpaint_seconds = time.perf_counter() - inpaint_started
+        finalize_started = time.perf_counter()
+        completed_output_path = _finalize_reinpaint_output_path(
+            outputs=outputs,
+            is_regional=is_regional,
+            base_path=inpaint_path,
+            fallback_path=original_path,
+            bbox=_region_bbox(region),
+            default_path=output_dir / source_path.name,
+        )
+        finalize_seconds = time.perf_counter() - finalize_started
         _ensure_image_layer(page, "base", original_rel, visible=True, locked=True)
         _ensure_image_layer(page, "mask", _resolve_image_layer_path(page, "mask", f"layers/mask/{page_number:03}.png"), visible=False, locked=False)
         _ensure_image_layer(page, "inpaint", inpaint_rel, visible=False, locked=True)
@@ -2054,7 +2321,24 @@ def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None =
         _sync_page_legacy_aliases(page)
         project["versao"] = "2.0"
         _save_project_json(project_json_path, project)
-        emit("complete", output_path=str(outputs[0]) if outputs else str(output_dir / img_name))
+        elapsed_seconds = time.perf_counter() - started
+        stats = ocr_data.get("_inpaint_round_stats") if isinstance(ocr_data, dict) else None
+        logger.info(
+            "Editor reinpaint page=%s elapsed=%.3fs inpaint=%.3fs finalize=%.3fs stats=%s",
+            page_idx,
+            elapsed_seconds,
+            inpaint_seconds,
+            finalize_seconds,
+            stats or {},
+        )
+        emit(
+            "complete",
+            output_path=str(completed_output_path),
+            elapsed_seconds=round(elapsed_seconds, 3),
+            inpaint_seconds=round(inpaint_seconds, 3),
+            finalize_seconds=round(finalize_seconds, 3),
+            inpaint_stats=stats or {},
+        )
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -2195,6 +2479,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
     for i, (img, ocr, text_page) in enumerate(zip(image_files, ocr_results, page_text_layers)):
         text_layers = text_page.get("texts", [])
         text_layers = group_regions(text_layers)
+        text_layers = [sanitize_simple_text_geometry(layer) for layer in text_layers]
         qa_regions.extend(text_layers)
         page = {
             "numero": i + 1,
@@ -2237,11 +2522,10 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
                 },
             },
             "inpaint_blocks": [
-                {
-                    "bbox": block.get("bbox", [0, 0, 0, 0]),
-                    "confidence": block.get("confidence", 0.0),
-                }
+                project_block
                 for block in ocr.get("_vision_blocks", [])
+                for project_block in [_project_inpaint_block_from_vision_block(block)]
+                if project_block is not None
             ],
             "page_profile": ocr.get("page_profile"),
             "page_quality": ocr.get("page_quality"),

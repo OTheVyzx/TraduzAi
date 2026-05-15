@@ -55,6 +55,26 @@ class MainEmitTests(unittest.TestCase):
         self.assertIn("--translate-page", output)
         self.assertIn("--input", output)
 
+    def test_prepare_inpaint_base_final_text_box_cleanup_is_disabled_by_default(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(main._final_render_text_box_cleanup_enabled())
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = main._prepare_inpaint_base_for_render(
+                original_path=Path("missing-original.jpg"),
+                inpainted_path=Path("missing-inpaint.jpg"),
+                texts=[
+                    {
+                        "original": "WHAT",
+                        "translated": "O QUE",
+                        "bbox": [10, 10, 40, 20],
+                        "balloon_type": "white",
+                    }
+                ],
+            )
+
+        self.assertEqual(result, Path("missing-inpaint.jpg"))
+
     def test_runner_cli_parser_accepts_mock_debug_flags(self) -> None:
         parsed = main._parse_runner_cli_args(
             [
@@ -389,16 +409,34 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(layer["original"], "HELLO")
             self.assertEqual(layer["translated"], "")
             self.assertEqual(layer["source_bbox"], [10, 20, 110, 120])
-            self.assertEqual(layer["balloon_bbox"], [8, 18, 118, 130])
+            self.assertEqual(layer["balloon_bbox"], [12, 24, 106, 116])
             self.assertEqual(layer["text_pixel_bbox"], [12, 24, 106, 116])
-            self.assertEqual(layer["layout_group_size"], 2)
-            self.assertEqual(layer["layout_profile"], "connected_balloon")
-            self.assertEqual(saved["paginas"][0]["textos"][0]["layout_group_size"], 2)
-            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_bbox"], [8, 18, 118, 130])
+            self.assertEqual(layer["layout_group_size"], 1)
+            self.assertNotEqual(layer["layout_profile"], "connected_balloon")
+            self.assertEqual(layer["balloon_subregions"], [])
+            self.assertEqual(saved["paginas"][0]["textos"][0]["layout_group_size"], 1)
+            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_bbox"], [12, 24, 106, 116])
             self.assertEqual(saved["paginas"][0]["textos"][0]["text_pixel_bbox"], [12, 24, 106, 116])
+            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_subregions"], [])
             self.assertEqual(saved["paginas"][0]["textos"][0]["ocr_source"], "vision-paddleocr")
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["bbox"], [10, 20, 110, 120])
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["confidence"], 0.88)
+
+    def test_project_inpaint_block_preserves_raw_bbox_with_text_anchor_metadata(self) -> None:
+        block = main._project_inpaint_block_from_vision_block(
+            {
+                "bbox": [8, 12873, 749, 13652],
+                "confidence": 0.91,
+                "text_pixel_bbox": [303, 13497, 691, 13630],
+                "line_polygons": [[[303, 13497], [691, 13497], [691, 13630], [303, 13630]]],
+                "balloon_type": "textured",
+            }
+        )
+
+        self.assertIsNotNone(block)
+        self.assertEqual(block["bbox"], [8, 12873, 749, 13652])
+        self.assertEqual(block["source_bbox"], [8, 12873, 749, 13652])
+        self.assertEqual(block["text_pixel_bbox"], [303, 13497, 691, 13630])
 
     def test_sync_page_legacy_aliases_preserves_rich_text_metadata(self) -> None:
         page = {
@@ -676,7 +714,7 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(layer["bbox"], [110, 220, 310, 430])
             self.assertEqual(layer["ocr_confidence"], 0.95)
 
-    def test_build_text_layer_preserves_connected_balloon_metadata_for_renderer(self) -> None:
+    def test_build_text_layer_strips_connected_balloon_metadata_by_default(self) -> None:
         ocr_text = {
             "id": "tl_001_003",
             "text": "IT MAY BE NOTHING MORE THAN A HALF-FINISHED CULTIVATION METHOD...",
@@ -720,12 +758,14 @@ class MainEmitTests(unittest.TestCase):
 
         blocks = build_render_blocks([layer])
 
-        self.assertEqual(layer.get("connected_position_bboxes"), ocr_text["connected_position_bboxes"])
-        self.assertEqual(layer.get("connected_text_groups"), ocr_text["connected_text_groups"])
-        self.assertEqual(layer.get("connected_detection_confidence"), 1.0)
+        self.assertEqual(layer.get("connected_position_bboxes"), [])
+        self.assertEqual(layer.get("connected_text_groups"), [])
+        self.assertEqual(layer.get("connected_detection_confidence"), 0.0)
+        self.assertEqual(layer.get("layout_group_size"), 1)
+        self.assertEqual(layer.get("balloon_subregions"), [])
         self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0].get("balloon_subregions"), ocr_text["balloon_subregions"])
-        self.assertEqual(blocks[0].get("connected_position_bboxes"), ocr_text["connected_position_bboxes"])
+        self.assertEqual(blocks[0].get("balloon_subregions"), [])
+        self.assertEqual(blocks[0].get("connected_position_bboxes"), [])
 
     def test_build_text_layer_sanitizes_auto_style_before_project_json(self) -> None:
         layer = main.build_text_layer(
@@ -760,6 +800,27 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
         self.assertFalse(layer["estilo"]["glow"])
         self.assertFalse(layer["estilo"]["sombra"])
+
+    def test_build_text_layer_forces_black_text_for_white_balloon(self) -> None:
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "id": "tl_001_001",
+                "text": "RIGHT?",
+                "bbox": [10, 20, 140, 70],
+                "tipo": "fala",
+                "confidence": 0.92,
+                "background_rgb": [155, 155, 155],
+                "balloon_type": "white",
+                "estilo": {"cor": "#FFFFFF"},
+            },
+            translated="CERTO?",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertEqual(layer["estilo"]["cor"], "#000000")
 
     def test_build_text_layer_preserves_entity_metadata_for_project_json(self) -> None:
         layer = main.build_text_layer(

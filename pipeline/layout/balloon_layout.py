@@ -33,10 +33,14 @@ except ImportError:
     from ..translator.translate import OLLAMA_HOST, _check_ollama, _pick_ollama_model  # type: ignore
 
 try:
+    from layout.simple_text_geometry import sanitize_simple_text_geometry  # type: ignore
+except ImportError:
+    from .simple_text_geometry import sanitize_simple_text_geometry  # type: ignore
+
+try:
     from utils.decision_log import infer_page_number, record_decision
 except ImportError:
     from ..utils.decision_log import infer_page_number, record_decision
-
 
 def _resolve_page_number(page_result: dict) -> int | None:
     raw = page_result.get("numero")
@@ -238,6 +242,35 @@ def enrich_page_layout(page_result: dict) -> dict:
     height = int(page_result.get("height", 0) or 0)
     if not texts or width <= 0 or height <= 0:
         return page_result
+    page_number = _resolve_page_number(page_result)
+    enriched_texts = []
+    for index, text in enumerate(texts, start=1):
+        layer_ref = str(text.get("id") or f"ocr_{index:03d}")
+        updated = sanitize_simple_text_geometry(text)
+        anchor_bbox = updated.get("layout_bbox") or updated.get("balloon_bbox") or text.get("bbox", [0, 0, 0, 0])
+        updated["layout_shape"] = classify_layout_shape(anchor_bbox, updated.get("tipo", "fala"), None)
+        updated["layout_align"] = classify_layout_align(updated.get("tipo", "fala"), updated["layout_shape"])
+        record_decision(
+            stage="layout",
+            action="assign_text_anchor_bbox",
+            reason="simple_ocr_position",
+            page=page_number,
+            layer=layer_ref,
+            text=updated.get("text", ""),
+            bbox=anchor_bbox,
+            details={
+                "source_bbox": updated.get("source_bbox") or updated.get("bbox") or [],
+                "ocr_text_bbox": updated.get("ocr_text_bbox") or [],
+                "layout_shape": updated.get("layout_shape"),
+                "layout_profile": updated.get("layout_profile"),
+            },
+        )
+        enriched_texts.append(updated)
+
+    updated_page = dict(page_result)
+    updated_page["texts"] = enriched_texts
+    updated_page.pop("_cached_image_bgr", None)
+    return updated_page
 
     regions = build_mask_regions(texts=texts, image_shape=(height, width, 3))
     page_image = _load_page_image(page_result)

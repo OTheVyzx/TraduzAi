@@ -4,6 +4,7 @@ from ocr.postprocess import (
     classify_text_type,
     fix_ocr_errors,
     has_run_on_tokens,
+    is_cover_title_logo,
     is_editorial_credit,
     is_ghost_ocr_noise,
     is_hallucination,
@@ -33,6 +34,25 @@ class OcrPostprocessTests(unittest.TestCase):
         self.assertTrue(is_editorial_credit("STAFF EDITOR"))
         self.assertTrue(is_editorial_credit("RAW PROVIDER"))
 
+    def test_editorial_credit_detects_scan_team_role_line_and_tl_note(self):
+        self.assertTrue(is_editorial_credit("TL Kiki Pr Mars Shadow CI Ts Erian Qc Shadow Rp Shadow"))
+        self.assertTrue(is_editorial_credit("TL/N: AISH IS A FORM OF IRRITATED EXPRESSION IN KOREA."))
+        self.assertTrue(is_editorial_credit("TL/NAISHISAFORMOF IRRITATED OR ANNOYED EXPRESSION IN KOREA."))
+        self.assertFalse(is_editorial_credit("PLEASE, FOR THE CHILD'S SAKE."))
+
+    def test_cover_title_logo_catches_large_misread_opening_logo(self):
+        self.assertTrue(
+            is_cover_title_logo(
+                "SIE ooi",
+                [53, 1226, 800, 2283],
+                0.74,
+                (2400, 800, 3),
+                "fala",
+                False,
+                page_profile="cover_opening",
+            )
+        )
+
     def test_korean_dialogue_is_not_forced_to_sfx(self):
         self.assertFalse(is_korean_sfx("도저히 생문을 찾을 수가 없다"))
         self.assertFalse(is_korean_sfx("진법은 이 갈사량의 짓이 분명합니다"))
@@ -42,6 +62,10 @@ class OcrPostprocessTests(unittest.TestCase):
         self.assertTrue(is_korean_sfx("크아아악!!"))
         self.assertTrue(is_korean_sfx("하하하"))
         self.assertTrue(is_korean_sfx("즈으으"))
+
+    def test_known_short_korean_sfx_stays_sfx(self):
+        self.assertTrue(is_korean_sfx("\uD5C8\uC5EC"))
+        self.assertTrue(is_korean_sfx("\uBE44\uD2C0"))
 
     def test_korean_dialogue_question_is_not_sfx(self):
         self.assertFalse(is_korean_sfx("뭐?!"))

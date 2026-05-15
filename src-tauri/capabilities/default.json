@@ -19,7 +19,8 @@
         { "path": "$DOWNLOAD/**" },
         { "path": "$PICTURE/**" },
         { "path": "$TEMP/**" },
-        { "path": "D:/**" }
+        { "path": "D:/**" },
+        { "path": "N:/**" }
       ]
     }
   ]
