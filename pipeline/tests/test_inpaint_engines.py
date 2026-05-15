@@ -2,6 +2,7 @@ import numpy as np
 
 from inpainter.engines.base import pixel_lock_composite
 from inpainter.engines.composite import CompositeBandInpaintEngine
+from inpainter.engines.lama_onnx import LamaOnnxInpaintEngine
 from inpainter.engines.opencv_fallback import OpenCVFallbackInpaintEngine
 from vision_stack.runtime import vision_blocks_to_mask
 
@@ -27,6 +28,29 @@ def test_opencv_fallback_inpaint_keeps_pixels_outside_mask():
     result = OpenCVFallbackInpaintEngine().inpaint(image, mask, quality="normal")
 
     assert result.shape == image.shape
+    assert np.array_equal(result[mask == 0], image[mask == 0])
+
+
+def test_lama_onnx_engine_detects_existing_local_model(tmp_path):
+    model_path = tmp_path / "lama-manga-dynamic.onnx"
+    model_path.write_bytes(b"model")
+
+    engine = LamaOnnxInpaintEngine(models_dir=tmp_path)
+
+    assert engine._model_path() == model_path
+
+
+def test_lama_onnx_engine_falls_back_for_tiny_roi(tmp_path):
+    (tmp_path / "lama-manga-dynamic.onnx").write_bytes(b"model")
+    image = np.full((24, 24, 3), 180, dtype=np.uint8)
+    mask = np.zeros((24, 24), dtype=np.uint8)
+    mask[8:16, 8:16] = 255
+    engine = LamaOnnxInpaintEngine(models_dir=tmp_path)
+
+    result = engine.inpaint(image, mask, quality="normal")
+
+    assert result.shape == image.shape
+    assert engine.last_fallback_reason == "roi_too_small"
     assert np.array_equal(result[mask == 0], image[mask == 0])
 
 

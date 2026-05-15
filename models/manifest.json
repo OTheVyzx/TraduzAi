@@ -1,6 +1,7 @@
 {
   "detection.comic_layout_rtdetr": {
-    "path": "detection/comic_layout_rtdetr/model.onnx",
+    "path": "huggingface/models--ogkalu--comic-text-and-bubble-detector/snapshots/<revision>/model.safetensors",
+    "onnx_path": "detection/comic_layout_rtdetr/model.onnx",
     "labels_path": "detection/comic_layout_rtdetr/labels.json",
     "license": "apache-2.0",
     "source": "huggingface:ogkalu/comic-text-and-bubble-detector",
@@ -22,7 +23,8 @@
     "optional": true
   },
   "inpaint.lama_onnx": {
-    "path": "inpaint/lama_onnx/model.onnx",
+    "path": "lama-manga-dynamic.onnx",
+    "fallback_path": "lama_manga_onnx/lama-manga.onnx",
     "license": "apache-2.0",
     "source": "LaMa ONNX",
     "enabled": false,

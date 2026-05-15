@@ -39,20 +39,31 @@ class ComicLayoutRTDetrDetector:
         self.labels_path = self.model_path.with_name("labels.json")
         self.labels = self._load_labels()
         self._session = None
+        self._hf_model = None
+        self._hf_processor = None
+        self._hf_model_dir: Path | None = None
         self._load_error: str | None = None
 
     def detect(self, image_rgb: np.ndarray, conf_threshold: float | None = None) -> list[Any]:
         threshold = float(conf_threshold if conf_threshold is not None else (0.42 if self.quality == "ultra" else 0.5))
         try:
             session = self._get_session()
-            if session is None:
-                return self._fallback_detect(image_rgb, threshold)
-            blocks = self._detect_with_session(session, image_rgb, threshold)
-            if blocks:
-                return blocks
-            logger.info("comic_layout_rtdetr retornou 0 blocos; usando fallback legado")
+            if session is not None:
+                blocks = self._detect_with_session(session, image_rgb, threshold)
+                if blocks:
+                    return blocks
+                logger.info("comic_layout_rtdetr retornou 0 blocos; tentando HF/fallback")
         except Exception as exc:
-            logger.warning("comic_layout_rtdetr falhou; usando fallback legado: %s", exc)
+            logger.warning("comic_layout_rtdetr ONNX falhou; tentando HF/fallback: %s", exc)
+        try:
+            hf_model = self._get_hf_model()
+            if hf_model is not None:
+                blocks = self._detect_with_hf(hf_model, image_rgb, threshold)
+                if blocks:
+                    return blocks
+                logger.info("comic_layout_rtdetr HF retornou 0 blocos; usando fallback legado")
+        except Exception as exc:
+            logger.warning("comic_layout_rtdetr HF falhou; usando fallback legado: %s", exc)
         return self._fallback_detect(image_rgb, threshold)
 
     def crop(self, image_rgb: np.ndarray, block: Any, padding: int = 4) -> np.ndarray:
@@ -89,6 +100,86 @@ class ComicLayoutRTDetrDetector:
             self._load_error = str(exc)
             logger.warning("Nao foi possivel carregar comic_layout_rtdetr: %s", exc)
             return None
+
+    def _find_hf_model_dir(self) -> Path | None:
+        direct = self.models_dir / "detection" / "comic_layout_rtdetr"
+        if (direct / "model.safetensors").exists() and (direct / "config.json").exists():
+            return direct
+
+        cache_root = self.models_dir / "huggingface" / "models--ogkalu--comic-text-and-bubble-detector"
+        ref_path = cache_root / "refs" / "main"
+        snapshots = cache_root / "snapshots"
+        if ref_path.exists():
+            try:
+                revision = ref_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                revision = ""
+            candidate = snapshots / revision
+            if (candidate / "model.safetensors").exists() and (candidate / "config.json").exists():
+                return candidate
+        if snapshots.exists():
+            candidates = [
+                path
+                for path in snapshots.iterdir()
+                if path.is_dir() and (path / "model.safetensors").exists() and (path / "config.json").exists()
+            ]
+            if candidates:
+                return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+        return None
+
+    def _get_hf_model(self):
+        if self._hf_model is not None:
+            return self._hf_model
+        if self._hf_model_dir is None:
+            self._hf_model_dir = self._find_hf_model_dir()
+        if self._hf_model_dir is None:
+            return None
+        from transformers import AutoImageProcessor, AutoModelForObjectDetection
+        import torch
+
+        self._hf_processor = AutoImageProcessor.from_pretrained(str(self._hf_model_dir), local_files_only=True)
+        model = AutoModelForObjectDetection.from_pretrained(str(self._hf_model_dir), local_files_only=True)
+        device = "cuda" if torch.cuda.is_available() and self.quality == "ultra" else "cpu"
+        self._hf_model = model.to(device).eval()
+        self.labels = self._labels_from_hf_config(getattr(self._hf_model, "config", None))
+        logger.info("comic_layout_rtdetr HF carregado: %s", self._hf_model_dir)
+        return self._hf_model
+
+    def _detect_with_hf(self, model: Any, image_rgb: np.ndarray, threshold: float) -> list[Any]:
+        if self._hf_processor is None:
+            return []
+        import torch
+
+        inputs = self._hf_processor(images=image_rgb, return_tensors="pt")
+        device = next(model.parameters()).device
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        with torch.no_grad():
+            outputs = model(**inputs)
+        target_sizes = torch.tensor([image_rgb.shape[:2]], device=device)
+        results = self._hf_processor.post_process_object_detection(
+            outputs,
+            threshold=threshold,
+            target_sizes=target_sizes,
+        )[0]
+
+        from vision_stack.detector import TextBlock
+
+        blocks = []
+        boxes = results.get("boxes", [])
+        scores = results.get("scores", [])
+        labels = results.get("labels", [])
+        for box, score, label in zip(boxes, scores, labels):
+            box_values = [float(value) for value in box.detach().cpu().tolist()]
+            x1, y1, x2, y2 = self._scale_box(box_values, (1.0, 1.0), image_rgb.shape)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            class_id = int(label.detach().cpu().item() if hasattr(label, "detach") else label)
+            block = TextBlock((x1, y1, x2, y2), confidence=float(score.detach().cpu().item()))
+            block.detector = self.name
+            block.region_type = self.labels.get(class_id, str(class_id))
+            block.class_id = class_id
+            blocks.append(block)
+        return blocks
 
     def _detect_with_session(self, session: Any, image_rgb: np.ndarray, threshold: float) -> list[Any]:
         input_name = session.get_inputs()[0].name
@@ -173,3 +264,15 @@ class ComicLayoutRTDetrDetector:
             labels = {int(key): str(value) for key, value in data.items()}
             return labels or DEFAULT_LABELS.copy()
         return DEFAULT_LABELS.copy()
+
+    def _labels_from_hf_config(self, config: Any) -> dict[int, str]:
+        raw = getattr(config, "id2label", None)
+        if not isinstance(raw, dict):
+            return self.labels or DEFAULT_LABELS.copy()
+        labels = {}
+        for key, value in raw.items():
+            try:
+                labels[int(key)] = str(value)
+            except Exception:
+                continue
+        return labels or self.labels or DEFAULT_LABELS.copy()
