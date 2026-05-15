@@ -25,6 +25,13 @@ export function EditorBitmapOverlay({ image, width, height, color, opacity = 0.6
       return;
     }
 
+    const isPlaceholder =
+      image.naturalWidth <= 1 && image.naturalHeight <= 1 && (width > 1 || height > 1);
+    if (isPlaceholder) {
+      setColoredImage(null);
+      return;
+    }
+
     if (image.naturalWidth !== width || image.naturalHeight !== height) {
       console.warn(
         `[EditorBitmapOverlay] Mismatch dimensões: ${image.naturalWidth}x${image.naturalHeight} vs ${width}x${height}`,

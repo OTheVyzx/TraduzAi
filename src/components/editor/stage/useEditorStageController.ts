@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import { bitmapCache } from "../../../lib/editorHistory";
 import { loadImageSource } from "../../../lib/imageSource";
+import { createLassoSelection, rasterizeLassoToPng } from "../../../lib/lassoSelection";
 import {
   getRenderPreviewStateForPage,
   useEditorStore,
@@ -10,19 +11,29 @@ import {
 import { useAppStore, type PageData, type TextEntry } from "../../../lib/stores/appStore";
 import { createBitmapStrokePreviewOnCanvas, encodeDataUrl } from "./bitmapStrokePreview";
 import {
-  applyInpaintCacheStrokeToCanvas,
-  createInpaintCacheStrokePreviewPatch,
-  type InpaintCacheStrokePreviewPatch,
-} from "./inpaintCacheComposite";
-import {
   applyRecoveryStrokeToCanvas,
   createRecoveryStrokePreviewPatch,
   type RecoveryStrokePreviewPatch,
 } from "./recoveryComposite";
+import { createHealingBrushMaskPngDataUrl, paddedStrokeBBox } from "./healingBrushMask";
 import { displayImagePathForMode, isFaithfulPreviewMode, originalImagePath } from "./renderModeUtils";
 import { mergePendingTextEntry } from "./textLayerStyleUtils";
 
 const EMPTY_PAGES: PageData[] = [];
+
+function intersectBbox(
+  a: [number, number, number, number],
+  b: [number, number, number, number],
+  width: number,
+  height: number,
+): [number, number, number, number] | null {
+  const x1 = Math.max(0, Math.floor(Math.max(a[0], b[0])));
+  const y1 = Math.max(0, Math.floor(Math.max(a[1], b[1])));
+  const x2 = Math.min(width, Math.ceil(Math.min(a[2], b[2])));
+  const y2 = Math.min(height, Math.ceil(Math.min(a[3], b[3])));
+  if (x2 <= x1 || y2 <= y1) return null;
+  return [x1, y1, x2, y2];
+}
 
 function useObjectUrl(path: string | null | undefined, type = "image/png", version = 0) {
   const [src, setSrc] = useState<string | null>(null);
@@ -121,11 +132,14 @@ export function useEditorStageController() {
   const executeEditorCommand = useEditorStore((state) => state.executeEditorCommand);
   const createTextLayer = useEditorStore((state) => state.createTextLayer);
   const applyBitmapStroke = useEditorStore((state) => state.applyBitmapStroke);
+  const healPaintedRegion = useEditorStore((state) => state.healPaintedRegion);
   // Fase 8 — Lasso
   const maskShape = useEditorStore((state) => state.maskShape);
   const maskOp = useEditorStore((state) => state.maskOp);
   const maskInProgress = useEditorStore((state) => state.maskInProgress);
+  const activeLassoSelection = useEditorStore((state) => state.activeLassoSelection);
   const setMaskInProgress = useEditorStore((state) => state.setMaskInProgress);
+  const setActiveLassoSelection = useEditorStore((state) => state.setActiveLassoSelection);
   const bumpBitmapLayerVersion = useEditorStore((state) => state.bumpBitmapLayerVersion);
 
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
@@ -135,7 +149,7 @@ export function useEditorStageController() {
   } | null>(null);
   const [paintStroke, setPaintStroke] = useState<[number, number][]>([]);
   const [recoveryPreviewPatches, setRecoveryPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
-  const [reinpaintPreviewPatches, setReinpaintPreviewPatches] = useState<InpaintCacheStrokePreviewPatch[]>([]);
+  const [reinpaintPreviewPatches, setReinpaintPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
   const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null);
   const [cursorViewportPoint, setCursorViewportPoint] = useState<{ x: number; y: number } | null>(null);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -144,10 +158,8 @@ export function useEditorStageController() {
   const recoveryPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const bitmapPersistQueueRef = useRef<Partial<Record<"brush" | "mask", Promise<void>>>>({});
   const activeRecoveryPreviewIdsRef = useRef<Set<string>>(new Set());
-  const activeReinpaintPreviewIdsRef = useRef<Set<string>>(new Set());
   const bitmapWorkingCanvasRef = useRef<Partial<Record<"brush" | "mask", HTMLCanvasElement>>>({});
   const recoveryWorkingCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const reinpaintWorkingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sessionInpaintCacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [panSession, setPanSession] = useState<{
     startX: number;
@@ -179,13 +191,11 @@ export function useEditorStageController() {
     bitmapWorkingCanvasRef.current = {};
     bitmapPersistQueueRef.current = {};
     recoveryWorkingCanvasRef.current = null;
-    reinpaintWorkingCanvasRef.current = null;
     sessionInpaintCacheCanvasRef.current = null;
   }, [currentPageKey]);
 
   useEffect(() => {
     recoveryWorkingCanvasRef.current = null;
-    reinpaintWorkingCanvasRef.current = null;
   }, [bitmapLayerVersions.inpaint, currentPage?.image_layers?.inpaint?.path]);
 
   useEffect(() => {
@@ -205,6 +215,7 @@ export function useEditorStageController() {
         if (event.key === "Escape") {
           event.preventDefault();
           s.setMaskInProgress(null);
+          s.setActiveLassoSelection(null);
           return;
         }
         // Enter fecha o polígono (equivalente a clicar no primeiro ponto)
@@ -314,11 +325,6 @@ export function useEditorStageController() {
 
   const originalImageSrc = useObjectUrl(originalImagePath(currentPage), "image/png", 0);
   const baseImageSrc = useObjectUrl(displayImagePath, "image/png", lastRetypesetTime);
-  const inpaintCacheSrc = useObjectUrl(
-    currentPage?.editor_cache?.inpaint ?? null,
-    "image/png",
-    bitmapLayerVersions.inpaint ?? 0,
-  );
   // Usar versão dedicada por camada para garantir re-load imediato após stroke
   const maskOverlaySrc = useObjectUrl(
     currentPage?.image_layers?.mask?.visible ? currentPage.image_layers.mask.path : null,
@@ -332,7 +338,6 @@ export function useEditorStageController() {
   );
   const baseImage = useImageElement(baseImageSrc);
   const originalImage = useImageElement(originalImageSrc);
-  const inpaintCacheImage = useImageElement(inpaintCacheSrc);
   const maskImage = useImageElement(maskOverlaySrc);
   const brushImage = useImageElement(brushOverlaySrc);
 
@@ -396,30 +401,6 @@ export function useEditorStageController() {
     if (!ctx) return null;
     ctx.drawImage(baseImage.image, 0, 0, canvas.width, canvas.height);
     sessionInpaintCacheCanvasRef.current = canvas;
-    return canvas;
-  };
-
-  const getInpaintCacheSource = () => {
-    if (inpaintCacheImage.image?.naturalWidth && inpaintCacheImage.image.naturalHeight) {
-      return inpaintCacheImage.image;
-    }
-    return sessionInpaintCacheCanvasRef.current;
-  };
-
-  const getReinpaintWorkingCanvas = () => {
-    const existing = reinpaintWorkingCanvasRef.current;
-    if (existing?.width === baseImage.size.width && existing.height === baseImage.size.height) {
-      return existing;
-    }
-
-    const canvas = document.createElement("canvas");
-    canvas.width = baseImage.size.width;
-    canvas.height = baseImage.size.height;
-    const ctx = canvas.getContext("2d");
-    if (ctx && baseImage.image?.naturalWidth && baseImage.image?.naturalHeight) {
-      ctx.drawImage(baseImage.image, 0, 0, canvas.width, canvas.height);
-    }
-    reinpaintWorkingCanvasRef.current = canvas;
     return canvas;
   };
 
@@ -540,6 +521,7 @@ export function useEditorStageController() {
       if (!point) return;
       event.cancelBubble = true;
       selectLayer(null);
+      if (activeLassoSelection?.pageKey === currentPageKey) return;
 
       if (maskShape === "freehand") {
         // Inicia traço freehand
@@ -583,7 +565,7 @@ export function useEditorStageController() {
     }
 
     // Freehand lasso — decimação mínima de 2px para evitar pontos redundantes
-    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress !== null) {
+    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress !== null && (event.evt.buttons & 1) === 1) {
       const last = maskInProgress.points[maskInProgress.points.length - 1];
       if (!last || Math.hypot(point.x - last[0], point.y - last[1]) >= 2) {
         setMaskInProgress({ points: [...maskInProgress.points, [point.x, point.y]] });
@@ -639,17 +621,37 @@ export function useEditorStageController() {
     const pad = Math.max(1, Math.ceil(strokeBrushSize / 2) + 2);
     const xs = stroke.map(([x]) => x);
     const ys = stroke.map(([, y]) => y);
-    const dirty_bbox: [number, number, number, number] = [
+    const basicDirtyBBox: [number, number, number, number] = [
       Math.max(0, Math.floor(Math.min(...xs) - pad)),
       Math.max(0, Math.floor(Math.min(...ys) - pad)),
       Math.min(baseImage.size.width, Math.ceil(Math.max(...xs) + pad)),
       Math.min(baseImage.size.height, Math.ceil(Math.max(...ys) + pad)),
     ];
+    const strokeDirtyBBox =
+      strokeToolMode === "reinpaintBrush"
+        ? (paddedStrokeBBox({
+            stroke,
+            brushSize: strokeBrushSize,
+            width: baseImage.size.width,
+            height: baseImage.size.height,
+          }) ?? basicDirtyBBox)
+        : basicDirtyBBox;
+    const strokeSelection = activeLassoSelection?.pageKey === currentPageKey ? activeLassoSelection : null;
+    const dirty_bbox = strokeSelection
+      ? intersectBbox(strokeDirtyBBox, strokeSelection.bbox, baseImage.size.width, baseImage.size.height)
+      : strokeDirtyBBox;
+    if (!dirty_bbox) return;
+    const clipPolygon = strokeSelection?.points;
+    const clipMaskPng = strokeSelection
+      ? rasterizeLassoToPng(strokeSelection.points, strokeSelection.width, strokeSelection.height)
+      : undefined;
+    if (strokeSelection && !clipMaskPng) return;
     const payload = {
       width: baseImage.size.width,
       height: baseImage.size.height,
       strokes: [stroke],
       dirty_bbox,
+      clipMaskPng,
     };
 
     if (strokeToolMode === "repairBrush") {
@@ -666,6 +668,7 @@ export function useEditorStageController() {
           originalImage.image,
           stroke,
           strokeBrushSize,
+          clipPolygon,
         ) ?? undefined;
       }
 
@@ -687,7 +690,7 @@ export function useEditorStageController() {
           bbox: dirty_bbox,
         });
       } else if (originalImage.image) {
-        void createRecoveryStrokePreviewPatch(originalImage.image, stroke, strokeBrushSize, dirty_bbox)
+        void createRecoveryStrokePreviewPatch(originalImage.image, stroke, strokeBrushSize, dirty_bbox, clipPolygon)
           .then((patch) => {
             if (patch && activeRecoveryPreviewIdsRef.current.has(previewId)) {
               setRecoveryPreviewPatches((patches) => [...patches, { ...patch, id: previewId }]);
@@ -729,78 +732,29 @@ export function useEditorStageController() {
     }
 
     if (strokeToolMode === "reinpaintBrush") {
-      const previewId = crypto.randomUUID();
-      activeReinpaintPreviewIdsRef.current.add(previewId);
-      const inpaintCacheSource = getInpaintCacheSource();
-      let reinpaintPngData: string | undefined;
-      let reinpaintBeforeDataUrl: string | undefined;
+      const maskPngData = createHealingBrushMaskPngDataUrl({
+        width: baseImage.size.width,
+        height: baseImage.size.height,
+        stroke,
+        brushSize: strokeBrushSize,
+        dirtyBBox: dirty_bbox,
+        clipPolygon,
+      });
+      if (!maskPngData) return;
 
-      if (baseImage.image && inpaintCacheSource) {
-        const reinpaintCanvas = getReinpaintWorkingCanvas();
-        reinpaintBeforeDataUrl = reinpaintCanvas.toDataURL("image/png");
-        reinpaintPngData = applyInpaintCacheStrokeToCanvas(
-          reinpaintCanvas,
-          inpaintCacheSource,
-          stroke,
-          strokeBrushSize,
-        ) ?? undefined;
-      }
-
-      if (reinpaintBeforeDataUrl && reinpaintPngData) {
-        const commandId = `bitmap-${crypto.randomUUID()}`;
-        bitmapCache.set(commandId, {
-          pageKey: currentPageKey,
-          commandId,
-          before: encodeDataUrl(reinpaintBeforeDataUrl),
-          after: encodeDataUrl(reinpaintPngData),
-          byteLength: reinpaintBeforeDataUrl.length + reinpaintPngData.length,
-        });
-        executeEditorCommand({
-          commandId,
-          pageKey: currentPageKey,
-          createdAt: Date.now(),
-          type: "bitmap-stroke",
-          layerKey: "inpaint",
-          bbox: dirty_bbox,
-        });
-      } else if (inpaintCacheSource) {
-        void createInpaintCacheStrokePreviewPatch(inpaintCacheSource, stroke, strokeBrushSize, dirty_bbox)
-          .then((patch) => {
-            if (patch && activeReinpaintPreviewIdsRef.current.has(previewId)) {
-              setReinpaintPreviewPatches((patches) => [...patches, { ...patch, id: previewId }]);
-            }
-          })
-          .catch((error) => console.error("Erro ao criar preview local do reinpaint:", error));
-      }
-
-      const persistReinpaintStroke = async () => {
+      const persistHealingStroke = async () => {
         try {
-          await applyBitmapStroke({
-            ...payload,
-            layerKey: "reinpaint",
-            erase: false,
-            brushSize: strokeBrushSize,
-            color: strokeBrushColor,
-            opacity: strokeBrushOpacity,
-            hardness: strokeBrushHardness,
-            pngData: reinpaintPngData,
-            optimisticPath: reinpaintPngData,
-          });
-          activeReinpaintPreviewIdsRef.current.delete(previewId);
-          window.setTimeout(() => {
-            setReinpaintPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
-          }, 500);
-          bumpBitmapLayerVersion("inpaint");
+          await healPaintedRegion({ bbox: dirty_bbox, maskPngData });
+          setReinpaintPreviewPatches([]);
         } catch (error) {
-          activeReinpaintPreviewIdsRef.current.delete(previewId);
-          setReinpaintPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
-          console.error("Erro ao persistir pincel de reinpaint:", error);
+          setReinpaintPreviewPatches([]);
+          console.error("Erro ao aplicar pincel corretor:", error);
         }
       };
 
       recoveryPersistQueueRef.current = recoveryPersistQueueRef.current
         .catch(() => undefined)
-        .then(persistReinpaintStroke);
+        .then(persistHealingStroke);
       void recoveryPersistQueueRef.current;
       return;
     }
@@ -815,7 +769,9 @@ export function useEditorStageController() {
       brushSize: strokeBrushSize,
       color: strokeBrushColor,
       opacity: strokeBrushOpacity,
+      hardness: strokeBrushHardness,
       erase,
+      clipPolygon,
     });
 
     if (preview) {
@@ -860,53 +816,31 @@ export function useEditorStageController() {
 
   // ── Fase 8: Lasso commit ─────────────────────────────────────────────────
   const commitLasso = async (points: Array<[number, number]>) => {
-    const { project } = (await import("../../../lib/stores/appStore")).useAppStore.getState();
-    const path = project ? (project.output_path ?? project.source_path) : null;
-    if (points.length < 3 || !baseImage.size.width || !baseImage.size.height || !path) {
+    if (points.length < 3 || !baseImage.size.width || !baseImage.size.height) {
       setMaskInProgress(null);
       return;
     }
     const w = baseImage.size.width;
     const h = baseImage.size.height;
-    const currentPageIndex = useEditorStore.getState().currentPageIndex;
-
-    // Rasterizar polígono em offscreen canvas (espaço da imagem)
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) { setMaskInProgress(null); return; }
-
-    // Se "subtract", apagar (preto no canal alpha); caso contrário, preencher (branco)
-    const isSub = maskOp === "subtract";
-    if (isSub) {
-      ctx.globalCompositeOperation = "source-over";
-    }
-    ctx.fillStyle = isSub ? "#000000" : "#ffffff";
-    ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    for (let i = 1; i < points.length; i++) {
-      ctx.lineTo(points[i][0], points[i][1]);
-    }
-    ctx.closePath();
-    ctx.fill();
-
-    const pngData = canvas.toDataURL("image/png");
+    const state = useEditorStore.getState();
+    const selection = createLassoSelection({
+      pageKey: state.currentPageKey(),
+      pageIndex: state.currentPageIndex,
+      points,
+      width: w,
+      height: h,
+    });
     setMaskInProgress(null);
+    setActiveLassoSelection(selection);
 
-    try {
-      const { writeMaskFromPng } = await import("../../../lib/tauri");
-      await writeMaskFromPng({
-        project_path: path,
-        page_index: currentPageIndex,
-        png_data: pngData,
-        layer_key: "mask",
-        op: maskOp,
-      });
-      bumpBitmapLayerVersion("mask");
-    } catch (e) {
-      console.error("[Lasso] Falha ao escrever máscara:", e);
+  };
+
+  const finishFreehandLasso = (points: Array<[number, number]>) => {
+    if (points.length >= 3) {
+      void commitLasso(points);
+      return;
     }
+    setMaskInProgress(null);
   };
 
   // Sincronizar ref para evitar stale closure no global mouseup handler
@@ -928,6 +862,19 @@ export function useEditorStageController() {
     return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
   }, [paintStroke.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (toolMode !== "mask" || maskShape !== "freehand" || maskInProgress === null) return;
+
+    const handleGlobalMouseUp = (event: MouseEvent) => {
+      if (containerRef.current?.contains(event.target as Node)) return;
+      const points = useEditorStore.getState().maskInProgress?.points ?? [];
+      finishFreehandLasso(points);
+    };
+
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+    return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
+  }, [maskInProgress, maskShape, toolMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleStageMouseUp = () => {
     if (blockDraft) {
       void finishBlockDraft();
@@ -937,8 +884,8 @@ export function useEditorStageController() {
       void finishPaintStroke();
     }
     // Freehand lasso commit ao soltar o mouse
-    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress && maskInProgress.points.length >= 3) {
-      void commitLasso(maskInProgress.points);
+    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress) {
+      finishFreehandLasso(maskInProgress.points);
     }
   };
 
@@ -1027,6 +974,7 @@ export function useEditorStageController() {
     cursorViewportPoint,
     // Fase 8 — Lasso
     maskInProgress,
+    activeLassoSelection,
     maskShape,
     maskOp,
   };

@@ -54,6 +54,7 @@ function buildTwoPageEditorReaderProject() {
     )}`;
   const pageOneImage = makeImage("P1", "#f7f7fb");
   const pageTwoImage = makeImage("P2", "#eef8ff");
+  const pageThreeImage = makeImage("P3", "#fff8ed");
   const style = {
     fonte: "ComicNeue-Bold.ttf",
     tamanho: 28,
@@ -136,11 +137,22 @@ function buildTwoPageEditorReaderProject() {
         },
         text_layers: [makeLayer("reader-page-2", "PAGINA DOIS")],
       },
+      {
+        numero: 3,
+        arquivo_original: pageThreeImage,
+        arquivo_traduzido: pageThreeImage,
+        image_layers: {
+          base: { key: "base", path: pageThreeImage, visible: true, locked: true },
+          inpaint: { key: "inpaint", path: pageThreeImage, visible: true, locked: true },
+          rendered: { key: "rendered", path: pageThreeImage, visible: true, locked: true },
+        },
+        text_layers: [makeLayer("reader-page-3", "PAGINA TRES")],
+      },
     ],
     status: "done",
     source_path: "e2e/project-reader-scroll.json",
     output_path: "e2e/project-reader-scroll.json",
-    totalPages: 2,
+    totalPages: 3,
     mode: "manual",
   };
 }
@@ -274,9 +286,59 @@ test("editor Konva usa fundo limpo e layers editaveis @smoke", async ({ page }) 
   await page.mouse.move(box.x + box.width * 0.52, box.y + box.height * 0.28, { steps: 5 });
   await page.mouse.up();
   await expect(stage).toHaveAttribute("data-text-editing", "true");
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-selection", /"points"/);
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-selection", /"bbox"/);
+  await expect(page.getByTestId("lasso-context-menu")).toBeVisible();
+  await expect(page.getByTitle("OCR area")).toBeVisible();
+  const lassoSelection = await page.getByTestId("editor-stage-state").getAttribute("data-lasso-selection");
+  expect(lassoSelection).toBeTruthy();
+  await page.mouse.click(box.x + box.width * 0.48, box.y + box.height * 0.25);
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-selection", lassoSelection ?? "");
+  await page.getByTitle("Cancelar seleção").click();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-selection", "");
+  await page.mouse.move(box.x + box.width * 0.24, box.y + box.height * 0.36);
+  await page.mouse.down();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-progress-points", "1");
+  await page.mouse.up();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-progress-points", "0");
+  await page.mouse.move(box.x + box.width * 0.56, box.y + box.height * 0.44, { steps: 5 });
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-lasso-progress-points", "0");
 
   const criticalErrors = errors.filter((message) => criticalPatterns.some((pattern) => pattern.test(message)));
   expect(criticalErrors).toEqual([]);
+});
+
+test("editor aplica preset visual ao texto selecionado @text-presets", async ({ page }) => {
+  await page.goto("/editor");
+
+  await expect(page.getByTestId("editor-stage")).toBeVisible({ timeout: 15000 });
+  await page.getByText("TEXTO LIMPO").click();
+
+  const layerState = async () => {
+    const raw = await page.getByTestId("editor-stage-state").getAttribute("data-layers");
+    const layers = JSON.parse(raw ?? "[]") as Array<{ color: string; gradient: string[]; rotation: number }>;
+    return layers[0];
+  };
+
+  await page.getByTestId("text-style-preset-button").click();
+  await expect(page.getByTestId("text-style-preset-popover")).toBeVisible();
+  await page.getByTestId("text-style-preset-option-bang_comic").click();
+
+  await expect(page.getByTestId("text-font-select")).toHaveValue("KOMIKAX_.ttf");
+  await expect.poll(async () => (await layerState()).color).toBe("#ffe900");
+  await expect.poll(async () => (await layerState()).gradient).toEqual(["#fff247", "#ff7a00"]);
+  await expect.poll(async () => (await layerState()).rotation).toBe(0);
+
+  await page.getByTitle("Cor do texto").fill("#ff0000");
+  await expect.poll(async () => (await layerState()).color).toBe("#ff0000");
+  await expect.poll(async () => (await layerState()).gradient).toEqual([]);
+
+  await page.getByTitle("Gradiente").click();
+  await expect(page.getByTestId("text-gradient-preview")).toBeVisible();
+  await page.getByTestId("text-gradient-end").fill("#00ffff");
+  await expect.poll(async () => (await layerState()).gradient).toEqual(["#ff0000", "#00ffff"]);
+  await page.getByTestId("text-gradient-clear").click();
+  await expect.poll(async () => (await layerState()).gradient).toEqual([]);
 });
 
 test("editor abre project.json gerado real @real-project", async ({ page }) => {
@@ -329,7 +391,7 @@ test("editor mantem imagem editavel visivel depois de salvar @smoke", async ({ p
   await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /TEXTO LIMPO/);
 });
 
-test("editor usa leitor vertical continuo e sincroniza faixa de edicao pelo scroll @editor", async ({ page }) => {
+test("editor usa leitor vertical com barreira e sincroniza textos por scroll e miniatura @editor", async ({ page }) => {
   await page.addInitScript((injectedProject) => {
     (window as unknown as { __TRADUZAI_E2E_PROJECT__?: unknown }).__TRADUZAI_E2E_PROJECT__ = injectedProject;
   }, buildTwoPageEditorReaderProject());
@@ -338,15 +400,17 @@ test("editor usa leitor vertical continuo e sincroniza faixa de edicao pelo scro
 
   const stage = page.getByTestId("editor-stage");
   await expect(stage).toBeVisible({ timeout: 15000 });
-  await expect(page.getByText("1/2")).toBeVisible();
+  await expect(page.getByText("1/3")).toBeVisible();
   await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA UM/);
 
   const viewport = page.getByTestId("editor-reader-viewport");
   const firstPage = page.getByTestId("editor-reader-page-1");
   const secondPage = page.getByTestId("editor-reader-page-2");
+  const barrier = page.getByTestId("editor-reader-barrier-1-2");
   await expect(viewport).toBeVisible();
   await expect(firstPage).toBeVisible();
   await expect(secondPage).toBeVisible();
+  await expect(barrier).toBeVisible();
   await expect(page.getByTestId("editor-page-turn-preview")).toHaveCount(0);
 
   const firstBox = await firstPage.boundingBox();
@@ -354,7 +418,7 @@ test("editor usa leitor vertical continuo e sincroniza faixa de edicao pelo scro
   expect(firstBox).not.toBeNull();
   expect(secondBox).not.toBeNull();
   if (!firstBox || !secondBox) throw new Error("Paginas do leitor sem bounding box");
-  expect(Math.abs(secondBox.y - (firstBox.y + firstBox.height))).toBeLessThan(1.5);
+  expect(secondBox.y - (firstBox.y + firstBox.height)).toBeGreaterThan(56);
 
   await viewport.evaluate((node) => {
     const target = node.querySelector('[data-testid="editor-reader-page-2"]') as HTMLElement | null;
@@ -363,7 +427,54 @@ test("editor usa leitor vertical continuo e sincroniza faixa de edicao pelo scro
     node.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
 
-  await expect(page.getByText("2/2")).toBeVisible();
+  await expect(page.getByText("2/3")).toBeVisible();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "1");
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA DOIS/);
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "1");
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA DOIS/);
+
+  await page.getByTestId("editor-page-thumbnail-1").click();
+  await expect(page.getByText("1/3")).toBeVisible();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "0");
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA UM/);
+  await expect
+    .poll(async () =>
+      viewport.evaluate((node) => {
+        const target = node.querySelector('[data-testid="editor-reader-page-1"]') as HTMLElement | null;
+        if (!target) return false;
+        const viewportRect = node.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        return targetRect.bottom > viewportRect.top && targetRect.top < viewportRect.bottom;
+      }),
+    )
+    .toBe(true);
+
+  await page.getByTitle("Diminuir zoom (-)").click();
+  await expect(page.getByText("85%")).toBeVisible();
+  await page.getByTestId("editor-reader-go-down-2").click();
+  await expect(page.getByText("2/3")).toBeVisible();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "1");
+  await expect(page.getByText("PAGINA DOIS")).toBeVisible();
+  await expect(page.getByText("85%")).toBeVisible();
+
+  await page.getByTestId("editor-page-thumbnail-3").click();
+  await expect(page.getByText("3/3")).toBeVisible();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "2");
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA TRES/);
+  await page.waitForTimeout(300);
+
+  await viewport.evaluate((node) => {
+    const target = node.querySelector('[data-testid="editor-reader-page-2"]') as HTMLElement | null;
+    if (!target) throw new Error("Pagina 2 nao encontrada");
+    node.scrollTop = target.offsetTop + target.offsetHeight / 3;
+    node.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  await expect(page.getByText("2/3")).toBeVisible();
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "1");
+  await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA DOIS/);
+  await page.waitForTimeout(500);
   await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-page-index", "1");
   await expect(page.getByTestId("editor-stage-state")).toHaveAttribute("data-layers", /PAGINA DOIS/);
 });

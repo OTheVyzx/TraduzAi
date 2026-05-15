@@ -78,6 +78,10 @@ import {
   pagesPerMinute,
   PERCEIVED_PROCESSING_STEPS,
 } from "../lib/processingMetrics";
+import {
+  isTraduzAiProjectSourceError,
+  shouldLeaveProcessingForCompletedProject,
+} from "../lib/projectSourceGuards";
 
 interface CompletionData {
   obra: string;
@@ -126,6 +130,47 @@ function buildLogFileName(obra?: string | null, capitulo?: number | null): strin
 function fileNameFromPath(path?: string | null): string {
   if (!path) return "project.json";
   return path.split(/[/\\]/).filter(Boolean).pop() ?? path;
+}
+
+function normalizeProjectDir(path?: string | null): string {
+  const normalized = (path ?? "").replace(/\\/g, "/").trim();
+  return normalized.toLocaleLowerCase("pt-BR").endsWith("/project.json")
+    ? normalized.slice(0, -"/project.json".length)
+    : normalized;
+}
+
+function isAbsoluteOrDirectImagePath(path: string) {
+  return (
+    /^[A-Za-z]:\//.test(path) ||
+    path.startsWith("/") ||
+    /^(data|blob|asset|file):/i.test(path) ||
+    /^https?:\/\//i.test(path)
+  );
+}
+
+function resolveCompletionImagePath(path: string | null | undefined, projectDir: string) {
+  const normalized = path?.replace(/\\/g, "/").trim();
+  if (!normalized) return null;
+  if (isAbsoluteOrDirectImagePath(normalized)) return normalized;
+  return `${normalizeProjectDir(projectDir)}/${normalized}`.replace(/\\/g, "/");
+}
+
+function firstTranslatedPagePath(page: PageData | null | undefined, projectDir: string) {
+  if (!page) return null;
+  return resolveCompletionImagePath(
+    page.image_layers?.rendered?.path ??
+      page.arquivo_traduzido ??
+      page.image_layers?.inpaint?.path ??
+      page.image_layers?.base?.path ??
+      page.arquivo_original ??
+      null,
+    projectDir,
+  );
+}
+
+function shouldSearchCover(obra: string) {
+  const normalized = obra.trim().toLocaleLowerCase("pt-BR");
+  return Boolean(normalized && normalized !== "projeto");
 }
 
 function pad2(value: number): string {
@@ -250,6 +295,10 @@ export function Processing() {
   useEffect(() => {
     if (!project || !requestKey) return;
     if (batchCompletion) return;
+    if (shouldLeaveProcessingForCompletedProject(project)) {
+      navigate(project.mode === "manual" ? "/editor" : "/preview");
+      return;
+    }
     if (startRequestKeyRef.current === requestKey) return;
 
     let disposed = false;
@@ -352,9 +401,10 @@ export function Processing() {
           setPipeline(null);
           try {
             const raw = await loadProjectJson(result.output_path);
-            const outputDir = result.output_path.replace(/\\/g, "/");
+            const outputDir = normalizeProjectDir(result.output_path);
             const qaSummary = await loadProcessingQaSummary(outputDir);
             const paginas: PageData[] = raw.paginas ?? [];
+            const firstPagePath = firstTranslatedPagePath(paginas[0], outputDir);
 
             const chapterNum = raw.capitulo || project?.capitulo || 1;
             const obra = raw.obra || project?.obra || "Projeto";
@@ -366,7 +416,7 @@ export function Processing() {
               pages: paginas.length,
               project_path: outputDir,
               output_path: outputDir,
-              first_page_path: paginas[0]?.arquivo_traduzido ?? null,
+              first_page_path: firstPagePath,
               cover_url: coverUrl,
               paginas,
             };
@@ -454,7 +504,7 @@ export function Processing() {
                 pages: paginas.length,
                 elapsedSeconds: elapsed,
                 coverUrl,
-                firstPagePath: paginas[0]?.arquivo_traduzido ?? null,
+                firstPagePath,
                 paginas,
                 qaSummary,
               });
@@ -466,6 +516,35 @@ export function Processing() {
           }
         } else {
           setPipeline(null);
+          if (isTraduzAiProjectSourceError(result.error)) {
+            appendPipelineLog({
+              level: "info",
+              message: "Entrada ja era um projeto TraduzAi; abrindo projeto existente.",
+            });
+            try {
+              const projectPath = project?.source_path ?? "";
+              const raw = await loadProjectJson(projectPath);
+              const outputDir = normalizeProjectDir(
+                raw.output_path || raw._work_dir || projectPath,
+              );
+              const paginas: PageData[] = raw.paginas ?? [];
+              updateProject({
+                status: "done",
+                paginas,
+                source_path: outputDir,
+                output_path: outputDir,
+                obra: raw.obra || project?.obra || "Projeto",
+                capitulo: raw.capitulo || project?.capitulo || 1,
+                totalPages: paginas.length,
+              });
+              navigate(project?.mode === "manual" ? "/editor" : "/preview");
+            } catch (e) {
+              console.warn("Nao foi possivel abrir o projeto existente apos bloqueio:", e);
+              updateProject({ status: "idle" });
+              navigate("/");
+            }
+            return;
+          }
           alert(`Erro no processamento: ${result.error}`);
           updateProject({ status: "error" });
           navigate("/");
@@ -761,41 +840,45 @@ export function Processing() {
         </div>
       )}
 
-      <div data-testid="processing-performance-panel" className="mb-8 rounded-xl border border-border bg-bg-secondary p-4">
-        <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
-          <div>
-            <p className="text-text-muted">Pagina atual</p>
-            <p className="mt-1 text-sm font-medium text-text-primary">{pipeline?.current_page ?? 0}</p>
-          </div>
-          <div>
-            <p className="text-text-muted">Total de paginas</p>
-            <p className="mt-1 text-sm font-medium text-text-primary">{pipeline?.total_pages ?? project?.totalPages ?? 0}</p>
-          </div>
-          <div>
-            <p className="text-text-muted">Paginas/minuto</p>
-            <p data-testid="processing-pages-per-minute" className="mt-1 text-sm font-medium text-text-primary">{ppm.toFixed(1)}</p>
-          </div>
-          <div>
-            <p className="text-text-muted">Flags encontradas</p>
-            <p className="mt-1 text-sm font-medium text-text-primary">{flagLogCount}</p>
-          </div>
-          <div className="sm:col-span-2">
-            <p className="text-text-muted">Uso CPU/GPU</p>
-            <p className="mt-1 truncate text-sm font-medium text-text-primary">{hardwareUsage}</p>
-          </div>
-        </div>
-      </div>
-
-      <div data-testid="processing-perceived-steps" className="mb-8 rounded-xl border border-border bg-bg-secondary p-4">
-        <p className="mb-3 text-sm font-medium text-text-primary">Etapas detalhadas</p>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {PERCEIVED_PROCESSING_STEPS.map((step) => (
-            <div key={step} className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2 text-xs text-text-secondary">
-              {step}
+      {project?.mode !== "manual" && (
+        <div data-testid="processing-performance-panel" className="mb-8 rounded-xl border border-border bg-bg-secondary p-4">
+          <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
+            <div>
+              <p className="text-text-muted">Pagina atual</p>
+              <p className="mt-1 text-sm font-medium text-text-primary">{pipeline?.current_page ?? 0}</p>
             </div>
-          ))}
+            <div>
+              <p className="text-text-muted">Total de paginas</p>
+              <p className="mt-1 text-sm font-medium text-text-primary">{pipeline?.total_pages ?? project?.totalPages ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-text-muted">Paginas/minuto</p>
+              <p data-testid="processing-pages-per-minute" className="mt-1 text-sm font-medium text-text-primary">{ppm.toFixed(1)}</p>
+            </div>
+            <div>
+              <p className="text-text-muted">Flags encontradas</p>
+              <p className="mt-1 text-sm font-medium text-text-primary">{flagLogCount}</p>
+            </div>
+            <div className="sm:col-span-2">
+              <p className="text-text-muted">Uso CPU/GPU</p>
+              <p className="mt-1 truncate text-sm font-medium text-text-primary">{hardwareUsage}</p>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
+
+      {project?.mode !== "manual" && (
+        <div data-testid="processing-perceived-steps" className="mb-8 rounded-xl border border-border bg-bg-secondary p-4">
+          <p className="mb-3 text-sm font-medium text-text-primary">Etapas detalhadas</p>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {PERCEIVED_PROCESSING_STEPS.map((step) => (
+              <div key={step} className="rounded-lg border border-border bg-bg-tertiary/70 px-3 py-2 text-xs text-text-secondary">
+                {step}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Steps */}
       <div className="space-y-1 mb-8">
@@ -1100,6 +1183,7 @@ function ChapterCompletionScreen({
         return;
       }
       await loadFallbackPage();
+      if (!shouldSearchCover(data.obra)) return;
       try {
         const { searchWork } = await getTauriProcessingApi();
         const result = await searchWork(data.obra);

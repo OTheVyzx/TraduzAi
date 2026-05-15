@@ -139,6 +139,82 @@ export const tauriMock = {
     return getE2EFixtureProject().paginas[0].image_layers?.inpaint?.path ?? "/e2e-reinpaint.png";
   },
 
+  async writeHealingMask(config?: { page_index?: number }): Promise<string> {
+    const page = Number(config?.page_index ?? 0) + 1;
+    return `/e2e/editor_cache/healing_masks/page-${String(page).padStart(4, "0")}/mask.png`;
+  },
+
+  async healInpaintRegion(config: {
+    page_index: number;
+    bbox: [number, number, number, number];
+  }): Promise<{
+    page_index: number;
+    inpaint_path: string;
+    before_inpaint_path: string | null;
+    bbox: [number, number, number, number];
+  }> {
+    const before = getE2EFixtureProject().paginas[config.page_index].image_layers?.inpaint?.path ?? null;
+    const path = `/e2e-healed-page-${config.page_index + 1}.png`;
+    updatePage(config.page_index, (page) => ({
+      ...page,
+      image_layers: {
+        ...page.image_layers,
+        inpaint: {
+          key: "inpaint",
+          path,
+          visible: true,
+          locked: page.image_layers?.inpaint?.locked ?? false,
+        },
+      },
+    }));
+    return {
+      page_index: config.page_index,
+      inpaint_path: path,
+      before_inpaint_path: before,
+      bbox: config.bbox,
+    };
+  },
+
+  async runPageActionWithOptionalMask(config: {
+    page_index: number;
+    action: "detect" | "ocr" | "translate" | "inpaint";
+    bbox?: [number, number, number, number] | null;
+    mask_path?: string | null;
+  }): Promise<{
+    action: "detect" | "ocr" | "translate" | "inpaint";
+    mode: "global" | "regional";
+    bbox?: [number, number, number, number] | null;
+    changed_assets: Array<"brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json">;
+    changed_layers: string[];
+    message: string;
+  }> {
+    if (config.action === "inpaint") {
+      updatePage(config.page_index, (page) => ({
+        ...page,
+        image_layers: {
+          ...page.image_layers,
+          inpaint: {
+            key: "inpaint",
+            path: `/e2e-inpaint-page-${config.page_index + 1}.png`,
+            visible: true,
+            locked: page.image_layers?.inpaint?.locked ?? false,
+          },
+        },
+      }));
+    }
+    return {
+      action: config.action,
+      mode: config.bbox ? "regional" : "global",
+      bbox: config.bbox ?? null,
+      changed_assets:
+        config.action === "inpaint"
+          ? ["project_json", "inpaint", "rendered"]
+          : ["project_json", "rendered"],
+      changed_layers: [],
+      message: "ok",
+    };
+  },
+
   async startPipeline(config?: { source_path?: string; obra?: string; capitulo?: number }): Promise<{ job_id: string }> {
     const capitulo = Number(config?.capitulo ?? getE2EFixtureProject().capitulo);
     const outputPath = `e2e/project-cap-${capitulo}.json`;

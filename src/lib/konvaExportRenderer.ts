@@ -1,6 +1,7 @@
 import Konva from "konva";
 import type { PageData, TextEntry } from "./stores/appStore";
 import { loadImageSource } from "./imageSource";
+import { ensureEditorFontLoaded } from "./fonts";
 import { EDITOR_TEXT_LINE_HEIGHT, fitEditorTextFontSize } from "../components/editor/stage/textFit";
 import {
   fontFamilyFromStyle,
@@ -8,6 +9,7 @@ import {
   styleForLayer,
   textForLayer,
 } from "../components/editor/stage/textLayerStyleUtils";
+import { addStyledKonvaTextNodes } from "../components/editor/stage/konvaTextStyleRenderer";
 
 type RenderPageOptions = {
   page: PageData;
@@ -73,13 +75,8 @@ function loadHtmlImage(src: string) {
   });
 }
 
-async function waitForFont(fontFamily: string, fontSize: number) {
-  if (typeof document === "undefined" || !document.fonts) return;
-  try {
-    await document.fonts.load(`${Math.max(8, fontSize)}px "${fontFamily}"`);
-  } catch {
-    // Se o carregamento da fonte falhar, o Konva ainda renderiza com fallback.
-  }
+async function waitForStyledFont(fontFamily: string, fontSize: number, fontStyle: string) {
+  await ensureEditorFontLoaded(fontFamily, fontSize, fontStyle);
 }
 
 function addTextLayer(layer: Konva.Layer, entry: TextEntry) {
@@ -110,32 +107,20 @@ function addTextLayer(layer: Konva.Layer, entry: TextEntry) {
     rotation: normalizeRotationDegrees(style.rotacao),
     listening: false,
   });
-  group.add(
-    new Konva.Text({
-      x: 8,
-      y: 6,
-      width: textBoxWidth,
-      height: textBoxHeight,
-      text,
-      align: style.alinhamento,
-      verticalAlign: "middle",
-      wrap: "word",
-      ellipsis: false,
-      fontSize,
-      fontFamily,
-      fontStyle,
-      lineHeight: EDITOR_TEXT_LINE_HEIGHT,
-      fill: style.cor || "#000000",
-      stroke: style.contorno || "#000000",
-      strokeWidth: Math.max(0, style.contorno_px || 0),
-      shadowEnabled: !!style.sombra,
-      shadowColor: style.sombra_cor || "#000000",
-      shadowOffsetX: style.sombra_offset?.[0] ?? 0,
-      shadowOffsetY: style.sombra_offset?.[1] ?? 0,
-      shadowBlur: style.sombra ? 2 : 0,
-      listening: false,
-    }),
-  );
+  addStyledKonvaTextNodes(group, {
+    x: 8,
+    y: 6,
+    width: textBoxWidth,
+    height: textBoxHeight,
+    text,
+    align: style.alinhamento,
+    fontSize,
+    fontFamily,
+    fontStyle,
+    lineHeight: EDITOR_TEXT_LINE_HEIGHT,
+    style,
+    listening: false,
+  });
   layer.add(group);
 }
 
@@ -178,7 +163,7 @@ export async function renderPageWithKonvaToDataUrl({
     await Promise.all(
       textEntries.map((entry) => {
         const style = styleForLayer(entry);
-        return waitForFont(fontFamilyFromStyle(style), style.tamanho);
+        return waitForStyledFont(fontFamilyFromStyle(style), style.tamanho, fontStyleFromStyle(style));
       }),
     );
     textEntries.forEach((entry) => addTextLayer(textLayer, entry));

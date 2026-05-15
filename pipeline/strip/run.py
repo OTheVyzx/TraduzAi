@@ -17,6 +17,7 @@ import threading
 import time
 
 import cv2
+import numpy as np
 
 from strip._diagnostics import dump_strip_debug, is_debug_enabled
 from strip.bands import attach_band_slices, group_balloons_into_bands
@@ -25,6 +26,32 @@ from strip.detect_balloons import detect_strip_balloons
 from strip.process_bands import process_band
 from strip.reassemble import assemble_output_pages
 from strip.types import Band, OutputPage, VerticalStrip
+
+
+def _add_timing(telemetry: dict | None, stage: str, seconds: float) -> None:
+    if telemetry is None:
+        return
+    durations = telemetry.setdefault("durations_sec", {})
+    durations[stage] = round(float(durations.get(stage, 0.0) or 0.0) + float(seconds), 4)
+
+
+class _TimingScope:
+    def __init__(self, telemetry: dict | None, stage: str):
+        self._telemetry = telemetry
+        self._stage = stage
+        self._start = 0.0
+
+    def __enter__(self):
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _add_timing(self._telemetry, self._stage, time.perf_counter() - self._start)
+        return False
+
+
+def _timed(telemetry: dict | None, stage: str) -> _TimingScope:
+    return _TimingScope(telemetry, stage)
 
 
 @dataclass(frozen=True)
@@ -151,6 +178,95 @@ def _shift_text_geometry_y(text: dict, delta_y: int) -> dict:
     return shifted
 
 
+def _inpaint_block_from_vision_block(block: dict) -> dict | None:
+    if not isinstance(block, dict):
+        return None
+    bbox = _shift_bbox_y(block.get("bbox"), 0)
+    if bbox is None:
+        return None
+    out: dict = {"bbox": bbox}
+    for key in (
+        "confidence",
+        "line_polygons",
+        "text_pixel_bbox",
+        "source_bbox",
+        "balloon_bbox",
+        "balloon_type",
+        "block_profile",
+        "background_type",
+        "tipo",
+        "font_size_px",
+        "font_size",
+    ):
+        value = block.get(key)
+        if value is not None and value != [] and value != "":
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _ocr_metadata_signature(texts: list[dict], blocks: list[dict]) -> tuple:
+    def _bbox(value) -> tuple[int, int, int, int] | tuple:
+        if not isinstance(value, (list, tuple)) or len(value) < 4:
+            return tuple()
+        return tuple(int(v) for v in value[:4])
+
+    return tuple(
+        (
+            str(text.get("text") or ""),
+            str(text.get("translated") or text.get("traduzido") or ""),
+            _bbox(text.get("bbox")),
+            _bbox(text.get("text_pixel_bbox")),
+            _bbox(text.get("source_bbox")),
+            _bbox(block.get("bbox")) if isinstance(block, dict) else tuple(),
+        )
+        for text, block in zip(texts, blocks)
+        if isinstance(text, dict)
+    )
+
+
+def _finalize_output_page_ocr_metadata(page: OutputPage, page_number: int) -> bool:
+    if not isinstance(getattr(page, "text_layers", None), dict):
+        return False
+    if not isinstance(getattr(page, "ocr_result", None), dict):
+        page.ocr_result = {"_vision_blocks": []}
+
+    texts = [text for text in list(page.text_layers.get("texts") or []) if isinstance(text, dict)]
+    blocks = [block for block in list(page.ocr_result.get("_vision_blocks") or []) if isinstance(block, dict)]
+    if not texts:
+        page.ocr_result["texts"] = []
+        page.ocr_result["_vision_blocks"] = []
+        return bool(blocks)
+
+    image = getattr(page, "image", None)
+    if isinstance(image, np.ndarray) and image.ndim >= 2:
+        image_shape = image.shape if image.ndim == 3 else (image.shape[0], image.shape[1], 3)
+    else:
+        page_height = max(1, int(getattr(page, "y_bottom", 0) or 0) - int(getattr(page, "y_top", 0) or 0))
+        page_width = max(1, int(max((text.get("bbox", [0, 0, 1, 1])[2] for text in texts), default=1)))
+        image_shape = (page_height, page_width, 3)
+
+    before = _ocr_metadata_signature(texts, blocks)
+    try:
+        from vision_stack.runtime import _finalize_page_ocr_texts
+
+        final_texts, final_blocks = _finalize_page_ocr_texts(
+            texts,
+            blocks,
+            image_shape,
+            page_number=page_number,
+        )
+    except Exception:
+        return False
+
+    after = _ocr_metadata_signature(final_texts, final_blocks)
+    changed = before != after or len(final_texts) != len(texts) or len(final_blocks) != len(blocks)
+    page.text_layers["texts"] = final_texts
+    page.ocr_result["texts"] = final_texts
+    page.ocr_result["_vision_blocks"] = final_blocks
+    return changed
+
+
+
 def _source_page_number_for_band(strip: VerticalStrip, band: Band) -> int:
     breaks = list(strip.source_page_breaks or [])
     if len(breaks) < 2:
@@ -241,6 +357,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None or not str(raw).strip():
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _page_final_near_text_cleanup_enabled() -> bool:
+    return _env_bool("TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP", True)
 
 
 def _rate(count: int, total: int) -> float:
@@ -625,20 +745,7 @@ def _bbox_overlaps_band(global_bbox: list[int] | None, band: Band) -> bool:
 
 
 def _shift_block_geometry_xy(block: dict, dx: int, dy: int) -> dict:
-    shifted = dict(block)
-    bbox = _shift_bbox_xy(shifted.get("bbox"), dx, dy)
-    if bbox is not None:
-        shifted["bbox"] = bbox
-    bbox = _shift_bbox_xy(shifted.get("balloon_bbox"), dx, dy)
-    if bbox is not None:
-        shifted["balloon_bbox"] = bbox
-    for key in ("balloon_subregions", "connected_lobe_bboxes"):
-        if key in shifted:
-            shifted[key] = _shift_bbox_list_xy(shifted.get(key), dx, dy)
-    for key in ("line_polygons", "connected_lobe_polygons", "balloon_polygon"):
-        if key in shifted:
-            shifted[key] = _shift_polygons_xy(shifted.get(key), dx, dy)
-    return shifted
+    return _shift_text_geometry_xy(block, dx, dy)
 
 
 def _split_koharu_page_result_into_bands(
@@ -731,6 +838,14 @@ def _koharu_cjk_roi_padding_px() -> int:
 
 def _koharu_cjk_empty_roi_filter_enabled() -> bool:
     return _env_bool("TRADUZAI_KOHARU_CJK_EMPTY_ROI_FILTER", True)
+
+
+def _koharu_cjk_page_fallback_enabled() -> bool:
+    return _env_bool("TRADUZAI_KOHARU_CJK_PAGE_FALLBACK", True)
+
+
+def _koharu_cjk_page_fallback_max() -> int:
+    return max(0, _env_int("TRADUZAI_KOHARU_CJK_PAGE_FALLBACK_MAX", 12))
 
 
 def _koharu_cjk_ocr_only_enabled() -> bool:
@@ -833,24 +948,95 @@ def _cleanup_page_inpaint_and_rerender(
     rendered_image,
     typesetter,
 ) -> tuple[object, object, bool]:
-    cleanup_texts = [text for text in page_texts if _text_requires_final_cleanup(text)]
-    if not cleanup_texts:
+    cleanup_candidates = [text for text in page_texts if _text_requires_final_cleanup(text)]
+    if not cleanup_candidates:
         return clean_image, rendered_image, False
     try:
         from vision_stack.runtime import (
-            _apply_geometry_white_balloon_cleanup,
-            _apply_white_balloon_text_box_cleanup,
+            _apply_white_balloon_near_text_residual_cleanup,
+            _apply_post_inpaint_cleanup_timed,
             _has_white_balloon_text_residual,
+            _white_cleanup_texts,
         )
 
-        if not _has_white_balloon_text_residual(original_image, clean_image, cleanup_texts):
+        cleanup_texts = _white_cleanup_texts(original_image, cleanup_candidates)
+        if not cleanup_texts:
             return clean_image, rendered_image, False
-        fixed_clean = _apply_white_balloon_text_box_cleanup(original_image, clean_image, cleanup_texts)
-        fixed_clean = _apply_geometry_white_balloon_cleanup(original_image, fixed_clean, cleanup_texts)
+
+        near_text_cleanup_enabled = _page_final_near_text_cleanup_enabled()
+        full_cleanup_enabled = _env_bool("TRADUZAI_PAGE_FINAL_FULL_CLEANUP", True)
+        if not near_text_cleanup_enabled and not full_cleanup_enabled:
+            return clean_image, rendered_image, False
+
+        fixed_clean = clean_image
+        if near_text_cleanup_enabled:
+            fixed_clean = _apply_white_balloon_near_text_residual_cleanup(original_image, fixed_clean, cleanup_texts)
+        if full_cleanup_enabled and _has_white_balloon_text_residual(
+            original_image,
+            fixed_clean,
+            cleanup_texts,
+        ):
+            limit_mask = _build_page_cleanup_limit_mask(original_image, cleanup_texts)
+            fixed_clean, _stats = _apply_post_inpaint_cleanup_timed(
+                original_image,
+                fixed_clean,
+                cleanup_texts,
+                limit_mask=limit_mask,
+            )
+        if not np.any(cv2.absdiff(clean_image, fixed_clean)):
+            return clean_image, rendered_image, False
         fixed_rendered = typesetter.render_band_image(fixed_clean, {"texts": page_texts})
         return fixed_clean, fixed_rendered, True
     except Exception:
         return clean_image, rendered_image, False
+
+
+def _build_page_cleanup_limit_mask(image_rgb, texts: list[dict]) -> np.ndarray | None:
+    if image_rgb is None or not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0:
+        return None
+    shape = image_rgb.shape[:2]
+    limit = np.zeros(shape, dtype=np.uint8)
+    try:
+        from inpainter.mask_builder import build_inpaint_mask, mask_from_text_geometry
+    except Exception:
+        build_inpaint_mask = None
+        mask_from_text_geometry = None
+
+    for text in texts:
+        if not isinstance(text, dict) or text.get("skip_processing"):
+            continue
+        mask = None
+        if build_inpaint_mask is not None:
+            try:
+                mask = build_inpaint_mask(text, image_rgb.shape, image_rgb=image_rgb)
+            except Exception:
+                mask = None
+        if (mask is None or not np.any(mask)) and mask_from_text_geometry is not None:
+            try:
+                mask = mask_from_text_geometry(text, image_rgb.shape)
+            except Exception:
+                mask = None
+        if isinstance(mask, np.ndarray) and mask.shape[:2] == shape and np.any(mask):
+            limit = np.maximum(limit, (mask > 0).astype(np.uint8) * 255)
+            continue
+
+        bbox = _shift_bbox_y(text.get("text_pixel_bbox") or text.get("bbox"), 0)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        pad = max(8, int(round(max(x2 - x1, y2 - y1) * 0.12)))
+        x1 -= pad
+        x2 += pad
+        y1 -= pad
+        y2 += pad
+        x1 = max(0, min(shape[1], x1))
+        x2 = max(0, min(shape[1], x2))
+        y1 = max(0, min(shape[0], y1))
+        y2 = max(0, min(shape[0], y2))
+        if x2 > x1 and y2 > y1:
+            limit[y1:y2, x1:x2] = 255
+
+    return limit if np.any(limit) else None
 
 
 def _is_korean_source_language(idioma_origem: str = "") -> bool:
@@ -914,6 +1100,23 @@ def _korean_sfx_should_be_translated(raw: str, confidence: float) -> bool:
     return hangul_count >= 3 and bool(re.search(r"(?<!\.)\.$|。$", text))
 
 
+def _koharu_text_bright_balloon_context(text: dict) -> tuple[bool, bool]:
+    profiles = {
+        str(text.get("balloon_type") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("layout_profile") or "").strip().lower(),
+    }
+    structural = bool(profiles & {"white", "white_balloon", "connected_balloon", "top_narration"})
+    bright = structural
+    background_rgb = text.get("background_rgb")
+    if not bright and isinstance(background_rgb, (list, tuple)) and len(background_rgb) >= 3:
+        try:
+            bright = sum(float(v) for v in background_rgb[:3]) / 3.0 >= 235.0
+        except Exception:
+            bright = False
+    return bright, structural
+
+
 def _koharu_cjk_text_is_translatable(text: dict, *, idioma_origem: str = "") -> bool:
     raw = str(text.get("text") or text.get("original") or "").strip()
     if not raw:
@@ -922,25 +1125,21 @@ def _koharu_cjk_text_is_translatable(text: dict, *, idioma_origem: str = "") -> 
         return False
     tipo = str(text.get("tipo") or "").strip().lower()
     confidence = float(text.get("confidence", text.get("ocr_confidence", 0.0)) or 0.0)
+    bright_balloon_context, structural_balloon_context = _koharu_text_bright_balloon_context(text)
     keep_korean_sfx_dialogue = (
         tipo == "sfx"
         and _is_korean_source_language(idioma_origem)
         and _korean_sfx_should_be_translated(raw, confidence)
     )
+    keep_structural_korean_sfx_dialogue = (
+        tipo == "sfx"
+        and _is_korean_source_language(idioma_origem)
+        and _has_hangul_text(raw)
+        and structural_balloon_context
+    )
     if tipo == "sfx" and not keep_korean_sfx_dialogue:
-        return False
-    profiles = {
-        str(text.get("balloon_type") or "").strip().lower(),
-        str(text.get("block_profile") or "").strip().lower(),
-        str(text.get("layout_profile") or "").strip().lower(),
-    }
-    background_rgb = text.get("background_rgb")
-    bright_balloon_context = bool(profiles & {"white", "white_balloon", "connected_balloon", "top_narration"})
-    if not bright_balloon_context and isinstance(background_rgb, (list, tuple)) and len(background_rgb) >= 3:
-        try:
-            bright_balloon_context = sum(float(v) for v in background_rgb[:3]) / 3.0 >= 235.0
-        except Exception:
-            bright_balloon_context = False
+        if not keep_structural_korean_sfx_dialogue:
+            return False
     if _is_korean_source_language(idioma_origem) and _looks_like_korean_source_sfx_noise(
         raw,
         bright_balloon_context=bright_balloon_context,
@@ -954,6 +1153,42 @@ def _koharu_cjk_text_is_translatable(text: dict, *, idioma_origem: str = "") -> 
     except Exception:
         pass
     return True
+
+
+def _koharu_cjk_should_page_fallback(
+    *,
+    text_count: int,
+    filtered_count: int,
+    empty_count: int,
+    job_count: int,
+) -> bool:
+    if not _koharu_cjk_page_fallback_enabled() or job_count <= 0:
+        return False
+    if text_count <= 0:
+        return True
+    if filtered_count > 0:
+        return True
+    if empty_count >= job_count and job_count > 0:
+        return True
+    return False
+
+
+def _koharu_cjk_page_fallback_priority(page_number: int, page_stat: dict) -> tuple[int, int, int, int]:
+    filtered_count = int(page_stat.get("filtered_count", 0) or 0)
+    text_count = int(page_stat.get("text_count", 0) or 0)
+    empty_count = int(page_stat.get("empty_count", 0) or 0)
+    job_count = int(page_stat.get("job_count", 0) or 0)
+    textlike_count = int(page_stat.get("textlike_count", 0) or 0)
+    balloon_area = int(page_stat.get("balloon_area", 0) or 0)
+    if filtered_count > 0:
+        class_rank = 4
+    elif text_count <= 0 and textlike_count > 0:
+        class_rank = 3
+    elif empty_count >= job_count and job_count > 0:
+        class_rank = 2
+    else:
+        class_rank = 1
+    return (class_rank, filtered_count + textlike_count, balloon_area, -int(page_number))
 
 
 def _bbox_intersects(a: list[int] | None, b: list[int] | None) -> bool:
@@ -1224,6 +1459,7 @@ def _build_precomputed_koharu_cjk_pages(
         with tempfile.TemporaryDirectory(prefix="traduzai_koharu_cjk_roi_") as tmpdir:
             tmp_path = Path(tmpdir)
             jobs: list[dict] = []
+            page_roi_stats: dict[int, dict[str, int]] = {}
             for page_number, page_bands in bands_by_page.items():
                 page_index = page_number - 1
                 if page_index < 0 or page_index >= len(page_paths):
@@ -1242,6 +1478,7 @@ def _build_precomputed_koharu_cjk_pages(
                         if _koharu_cjk_ocr_only_enabled()
                         else []
                     )
+                    has_textlike = True
                     if _koharu_cjk_empty_roi_filter_enabled():
                         has_textlike, quick_reason = _koharu_roi_has_textlike_content(crop_image)
                         if not has_textlike:
@@ -1258,6 +1495,23 @@ def _build_precomputed_koharu_cjk_pages(
                                 mode="roi_quick_skip",
                             )
                             continue
+                    page_stat = page_roi_stats.setdefault(
+                        int(page_number),
+                        {
+                            "job_count": 0,
+                            "text_count": 0,
+                            "filtered_count": 0,
+                            "empty_count": 0,
+                            "textlike_count": 0,
+                            "balloon_area": 0,
+                        },
+                    )
+                    if has_textlike:
+                        page_stat["textlike_count"] += 1
+                    page_stat["balloon_area"] += sum(
+                        max(0, int(balloon.strip_bbox.width)) * max(0, int(balloon.strip_bbox.height))
+                        for balloon in band.balloons
+                    )
                     crop_path = tmp_path / f"p{page_number:04d}_b{band_index:04d}.jpg"
                     cv2.imwrite(str(crop_path), crop_image)
                     job = {
@@ -1272,6 +1526,7 @@ def _build_precomputed_koharu_cjk_pages(
                     if known_text_bboxes:
                         job["known_text_bboxes"] = known_text_bboxes
                     jobs.append(job)
+                    page_stat["job_count"] += 1
 
             stats["roi_job_count"] = len(jobs)
             try:
@@ -1296,6 +1551,17 @@ def _build_precomputed_koharu_cjk_pages(
                 band_index = int(job["band_index"])
                 band = job["band"]
                 page_number = int(job["page_number"])
+                page_stat = page_roi_stats.setdefault(
+                    page_number,
+                    {
+                        "job_count": 0,
+                        "text_count": 0,
+                        "filtered_count": 0,
+                        "empty_count": 0,
+                        "textlike_count": 0,
+                        "balloon_area": 0,
+                    },
+                )
                 filtered_result, filtered_count = _filter_koharu_cjk_page_result(
                     page_result,
                     selective=selective,
@@ -1304,6 +1570,8 @@ def _build_precomputed_koharu_cjk_pages(
                 stats["filtered_text_count"] = int(stats.get("filtered_text_count", 0) or 0) + filtered_count
                 stats["page_count"] = int(stats.get("page_count", 0) or 0) + 1
                 stats["text_count"] = int(stats.get("text_count", 0) or 0) + len(filtered_result.get("texts") or [])
+                page_stat["filtered_count"] += int(filtered_count)
+                page_stat["text_count"] += len(filtered_result.get("texts") or [])
                 mapped_page = _map_koharu_roi_result_to_band(
                     band=band,
                     page_number=page_number,
@@ -1315,7 +1583,81 @@ def _build_precomputed_koharu_cjk_pages(
                     stats["empty_precomputed_band_count"] = int(
                         stats.get("empty_precomputed_band_count", 0) or 0
                     ) + 1
+                    page_stat["empty_count"] += 1
                 precomputed[band_index] = mapped_page
+
+            fallback_candidates = [
+                (page_number, page_stat)
+                for page_number, page_stat in page_roi_stats.items()
+                if _koharu_cjk_should_page_fallback(
+                    text_count=int(page_stat.get("text_count", 0) or 0),
+                    filtered_count=int(page_stat.get("filtered_count", 0) or 0),
+                    empty_count=int(page_stat.get("empty_count", 0) or 0),
+                    job_count=int(page_stat.get("job_count", 0) or 0),
+                )
+            ]
+            fallback_page_numbers = [
+                page_number
+                for page_number, _page_stat in sorted(
+                    fallback_candidates,
+                    key=lambda item: _koharu_cjk_page_fallback_priority(item[0], item[1]),
+                    reverse=True,
+                )
+            ][:_koharu_cjk_page_fallback_max()]
+            stats["page_fallback_candidate_count"] = len(fallback_page_numbers)
+            stats["page_fallback_text_count"] = 0
+            if fallback_page_numbers:
+                page_jobs: list[dict] = []
+                for page_number in fallback_page_numbers:
+                    page_index = page_number - 1
+                    if page_index < 0 or page_index >= len(page_paths):
+                        continue
+                    page_y0, page_y1 = _source_page_bounds(strip, page_number)
+                    page_x_offsets = list(strip.page_x_offsets or [])
+                    page_x0 = int(page_x_offsets[page_index]) if page_index < len(page_x_offsets) else 0
+                    page_image = strip.image[page_y0:page_y1, page_x0:strip.width, :]
+                    if page_image.size == 0:
+                        continue
+                    page_jobs.append(
+                        {
+                            "image_path": str(page_paths[page_index]),
+                            "image_rgb": page_image,
+                            "mode": "page_fallback",
+                            "page_number": int(page_number),
+                            "page_bands": list(bands_by_page.get(page_number) or []),
+                        }
+                    )
+                stats["page_fallback_job_count"] = len(page_jobs)
+                try:
+                    fallback_results = _run_koharu_cjk_pages_ocr(
+                        runtime,
+                        page_jobs,
+                        models_dir=models_dir,
+                        idioma_origem=idioma_origem,
+                    )
+                except Exception as exc:
+                    failures = list(stats.get("failures") or [])
+                    failures.append({"page": "page_fallback_batch", "error": str(exc)[:240]})
+                    stats["failures"] = failures[-10:]
+                    fallback_results = []
+                for job, page_result in zip(page_jobs, fallback_results):
+                    filtered_result, filtered_count = _filter_koharu_cjk_page_result(
+                        page_result,
+                        selective=selective,
+                        idioma_origem=idioma_origem,
+                    )
+                    stats["filtered_text_count"] = int(stats.get("filtered_text_count", 0) or 0) + filtered_count
+                    stats["page_fallback_text_count"] = int(stats.get("page_fallback_text_count", 0) or 0) + len(
+                        filtered_result.get("texts") or []
+                    )
+                    precomputed.update(
+                        _split_koharu_page_result_into_bands(
+                            strip,
+                            page_number=int(job["page_number"]),
+                            page_result=filtered_result,
+                            page_bands=list(job["page_bands"]),
+                        )
+                    )
 
         stats["precomputed_band_count"] = len(precomputed)
         stats["seconds"] = round(time.perf_counter() - started_at, 4)
@@ -1358,6 +1700,12 @@ def _build_precomputed_koharu_cjk_pages(
         for job, page_result in zip(page_jobs, page_results):
             page_number = int(job["page_number"])
             page_bands = list(job["page_bands"])
+            page_result, filtered_count = _filter_koharu_cjk_page_result(
+                page_result,
+                selective=_koharu_cjk_selective_enabled(),
+                idioma_origem=idioma_origem,
+            )
+            stats["filtered_text_count"] = int(stats.get("filtered_text_count", 0) or 0) + filtered_count
             stats["page_count"] = int(stats.get("page_count", 0) or 0) + 1
             stats["text_count"] = int(stats.get("text_count", 0) or 0) + len(page_result.get("texts") or [])
             precomputed.update(
@@ -1390,6 +1738,12 @@ def _build_precomputed_koharu_cjk_pages(
                 continue
 
             stats["page_count"] = int(stats.get("page_count", 0) or 0) + 1
+            page_result, filtered_count = _filter_koharu_cjk_page_result(
+                page_result,
+                selective=_koharu_cjk_selective_enabled(),
+                idioma_origem=idioma_origem,
+            )
+            stats["filtered_text_count"] = int(stats.get("filtered_text_count", 0) or 0) + filtered_count
             stats["text_count"] = int(stats.get("text_count", 0) or 0) + len(page_result.get("texts") or [])
             precomputed.update(
                 _split_koharu_page_result_into_bands(
@@ -1950,6 +2304,7 @@ def run_chapter(
     ollama_host: str = "http://localhost:11434",
     ollama_model: str = "traduzai-translator",
     translation_context: dict | None = None,
+    chapter_telemetry: dict | None = None,
 
     progress_callback=None,
 ) -> list[OutputPage]:
@@ -1958,43 +2313,64 @@ def run_chapter(
         return []
 
     page_paths = image_files
-    strip = build_strip(page_paths, progress_callback=progress_callback)
-    original_strip_image = strip.image.copy()
+    run_started = time.perf_counter()
+    if chapter_telemetry is not None:
+        chapter_telemetry.setdefault("durations_sec", {})
+        chapter_telemetry["input_page_count"] = len(page_paths)
+    with _timed(chapter_telemetry, "strip_build"):
+        strip = build_strip(page_paths, progress_callback=progress_callback)
+    if chapter_telemetry is not None:
+        chapter_telemetry["strip_width"] = int(strip.width)
+        chapter_telemetry["strip_height"] = int(strip.height)
+    with _timed(chapter_telemetry, "strip_copy_original"):
+        original_strip_image = strip.image.copy()
 
-    prewarm_handle = _start_inpainter_prewarm(inpainter, page_paths)
+    with _timed(chapter_telemetry, "inpainter_prewarm_start"):
+        prewarm_handle = _start_inpainter_prewarm(inpainter, page_paths)
 
     try:
         if progress_callback: progress_callback("detect", 0, 1)
-        balloons = detect_strip_balloons(strip, detector=detector)
+        with _timed(chapter_telemetry, "strip_detect_balloons"):
+            balloons = detect_strip_balloons(strip, detector=detector)
+        if chapter_telemetry is not None:
+            chapter_telemetry["balloon_count"] = len(balloons)
 
-        bands = group_balloons_into_bands(balloons)
-        attach_band_slices(strip, bands)
+        with _timed(chapter_telemetry, "strip_group_bands"):
+            bands = group_balloons_into_bands(balloons)
+        if chapter_telemetry is not None:
+            chapter_telemetry["band_count"] = len(bands)
+        with _timed(chapter_telemetry, "strip_attach_band_slices"):
+            attach_band_slices(strip, bands)
 
         if is_debug_enabled():
-            dump_strip_debug(strip, bands, output_dir.parent / "_strip_debug")
+            with _timed(chapter_telemetry, "strip_debug_dump"):
+                dump_strip_debug(strip, bands, output_dir.parent / "_strip_debug")
 
-        scheduler_executor_report = _build_scheduler_executor_report(
-            band_count=len(bands),
-            page_count=len(page_paths),
-        )
+        with _timed(chapter_telemetry, "scheduler_plan"):
+            scheduler_executor_report = _build_scheduler_executor_report(
+                band_count=len(bands),
+                page_count=len(page_paths),
+            )
         macro_ocr_precompute_stats: dict = {}
-        precomputed_macro_ocr_pages = _build_precomputed_macro_ocr_pages(
-            strip,
-            bands,
-            runtime,
-            idioma_origem=idioma_origem,
-            telemetry=macro_ocr_precompute_stats,
-        )
+        with _timed(chapter_telemetry, "macro_ocr_precompute_wall"):
+            precomputed_macro_ocr_pages = _build_precomputed_macro_ocr_pages(
+                strip,
+                bands,
+                runtime,
+                idioma_origem=idioma_origem,
+                telemetry=macro_ocr_precompute_stats,
+            )
         koharu_cjk_precompute_stats: dict = {}
-        precomputed_koharu_cjk_pages = _build_precomputed_koharu_cjk_pages(
-            strip,
-            bands,
-            runtime,
-            page_paths,
-            models_dir=models_dir,
-            idioma_origem=idioma_origem,
-            telemetry=koharu_cjk_precompute_stats,
-        )
+        with _timed(chapter_telemetry, "koharu_cjk_precompute_wall"):
+            precomputed_koharu_cjk_pages = _build_precomputed_koharu_cjk_pages(
+                strip,
+                bands,
+                runtime,
+                page_paths,
+                models_dir=models_dir,
+                idioma_origem=idioma_origem,
+                telemetry=koharu_cjk_precompute_stats,
+            )
         precomputed_ocr_pages = {
             **precomputed_macro_ocr_pages,
             **precomputed_koharu_cjk_pages,
@@ -2067,6 +2443,7 @@ def run_chapter(
             if event is not None:
                 event.set()
 
+        process_bands_started = time.perf_counter()
         if overlap_executor:
             futures = []
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="traduzai-strip-overlap") as executor:
@@ -2147,38 +2524,47 @@ def run_chapter(
                     running_glossary,
                     band.ocr_result,
                 )
+        _add_timing(chapter_telemetry, "strip_process_bands_total", time.perf_counter() - process_bands_started)
     finally:
-        _close_inpainter_prewarm(prewarm_handle)
+        with _timed(chapter_telemetry, "inpainter_prewarm_close"):
+            _close_inpainter_prewarm(prewarm_handle)
 
-    clean_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
-    rendered_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
-    strip.image[:, :, :] = rendered_strip_image
+    with _timed(chapter_telemetry, "strip_paste_cleaned"):
+        clean_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
+    with _timed(chapter_telemetry, "strip_paste_rendered"):
+        rendered_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
+    with _timed(chapter_telemetry, "strip_assign_rendered"):
+        strip.image[:, :, :] = rendered_strip_image
 
-    output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
-    original_pages = assemble_output_pages(
-        VerticalStrip(
-            image=original_strip_image,
-            width=strip.width,
-            height=strip.height,
-            source_page_breaks=list(strip.source_page_breaks),
-            page_x_offsets=list(strip.page_x_offsets),
-        ),
-        balloons,
-        target_count=target_count,
-    )
-    clean_pages = assemble_output_pages(
-        VerticalStrip(
-            image=clean_strip_image,
-            width=strip.width,
-            height=strip.height,
-            source_page_breaks=list(strip.source_page_breaks),
-            page_x_offsets=list(strip.page_x_offsets),
-        ),
-        balloons,
-        target_count=target_count,
-    )
+    with _timed(chapter_telemetry, "assemble_rendered_pages"):
+        output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
+    with _timed(chapter_telemetry, "assemble_original_pages"):
+        original_pages = assemble_output_pages(
+            VerticalStrip(
+                image=original_strip_image,
+                width=strip.width,
+                height=strip.height,
+                source_page_breaks=list(strip.source_page_breaks),
+                page_x_offsets=list(strip.page_x_offsets),
+            ),
+            balloons,
+            target_count=target_count,
+        )
+    with _timed(chapter_telemetry, "assemble_clean_pages"):
+        clean_pages = assemble_output_pages(
+            VerticalStrip(
+                image=clean_strip_image,
+                width=strip.width,
+                height=strip.height,
+                source_page_breaks=list(strip.source_page_breaks),
+                page_x_offsets=list(strip.page_x_offsets),
+            ),
+            balloons,
+            target_count=target_count,
+        )
 
     # Remapeamento de metadados para project.json
+    remap_started = time.perf_counter()
     all_texts: list[dict] = []
     all_vision_blocks: list[dict] = []
     for band in bands:
@@ -2198,9 +2584,9 @@ def run_chapter(
             new_vb = dict(vb)
             if not new_vb.get("bbox"):
                 continue
-            x1, y1, x2, y2 = new_vb["bbox"]
-            new_vb["bbox"] = [x1, y1 + b_y, x2, y2 + b_y]
+            new_vb = _shift_text_geometry_y(new_vb, b_y)
             all_vision_blocks.append(new_vb)
+    _add_timing(chapter_telemetry, "remap_band_metadata", time.perf_counter() - remap_started)
 
     def _assign_text_to_page(txt_y1: int, txt_y2: int, pages: list) -> int | None:
         """Retorna índice da página com maior intersecção em y (sem duplicar)."""
@@ -2214,6 +2600,7 @@ def run_chapter(
         return best_idx
 
     # Inicializar listas em cada página
+    assign_started = time.perf_counter()
     for page in output_pages:
         page.ocr_result = {"_vision_blocks": []}
         page.text_layers = {"texts": []}
@@ -2237,18 +2624,37 @@ def run_chapter(
             continue
         page = output_pages[pidx]
         p_y0 = page.y_top
-        local_vb = dict(vb)
+        local_vb = _shift_text_geometry_y(vb, -p_y0)
         local_vb["bbox"] = [vx1, vy1 - p_y0, vx2, vy2 - p_y0]
         page.ocr_result["_vision_blocks"].append(local_vb)
+    _add_timing(chapter_telemetry, "assign_metadata_to_pages", time.perf_counter() - assign_started)
 
-    strip_perf_summary = _summarize_band_perf(
-        bands,
-        macro_ocr_precompute=macro_ocr_precompute_stats,
-        koharu_cjk_precompute=koharu_cjk_precompute_stats,
-        scheduler_executor=scheduler_executor_report,
+    finalize_page_metadata_started = time.perf_counter()
+    page_metadata_changed = [False for _ in output_pages]
+    for page_index, page in enumerate(output_pages):
+        page_metadata_changed[page_index] = _finalize_output_page_ocr_metadata(page, page_index + 1)
+    _add_timing(
+        chapter_telemetry,
+        "finalize_page_ocr_metadata",
+        time.perf_counter() - finalize_page_metadata_started,
     )
 
+    with _timed(chapter_telemetry, "summarize_band_perf"):
+        strip_perf_summary = _summarize_band_perf(
+            bands,
+            macro_ocr_precompute=macro_ocr_precompute_stats,
+            koharu_cjk_precompute=koharu_cjk_precompute_stats,
+            scheduler_executor=scheduler_executor_report,
+        )
+    if chapter_telemetry is not None:
+        strip_perf_summary["chapter_stage_durations_sec"] = dict(chapter_telemetry.get("durations_sec", {}))
+        strip_perf_summary["chapter_stage_total_sec"] = round(
+            sum(float(v) for v in chapter_telemetry.get("durations_sec", {}).values()),
+            4,
+        )
+
     # Preencher page_profile e inpaint_blocks em cada página
+    attach_profile_started = time.perf_counter()
     for page_index, page in enumerate(output_pages):
         page.page_profile = {
             "width": strip.width,
@@ -2260,11 +2666,15 @@ def run_chapter(
             page.page_profile["strip_perf_summary"] = strip_perf_summary
         page.ocr_result["page_profile"] = page.page_profile
         page.inpaint_blocks = [
-            {"bbox": vb["bbox"]}
+            block
             for vb in page.ocr_result.get("_vision_blocks", [])
+            for block in [_inpaint_block_from_vision_block(vb)]
+            if block is not None
         ]
+    _add_timing(chapter_telemetry, "attach_page_profiles", time.perf_counter() - attach_profile_started)
 
-    for page, original_page, clean_page in zip(output_pages, original_pages, clean_pages):
+    cleanup_started = time.perf_counter()
+    for page_index, (page, original_page, clean_page) in enumerate(zip(output_pages, original_pages, clean_pages)):
         page_texts = []
         if isinstance(page.text_layers, dict):
             page_texts = [text for text in list(page.text_layers.get("texts") or []) if isinstance(text, dict)]
@@ -2279,19 +2689,36 @@ def run_chapter(
         page.inpainted_image = fixed_clean
         if did_fix:
             page.image = fixed_rendered
+        elif page_index < len(page_metadata_changed) and page_metadata_changed[page_index]:
+            try:
+                page.image = typesetter.render_band_image(fixed_clean, {"texts": page_texts})
+            except Exception:
+                page.image = fixed_rendered
+    _add_timing(chapter_telemetry, "page_cleanup_rerender", time.perf_counter() - cleanup_started)
 
     if _macro_ocr_shadow_enabled() and output_pages:
-        macro_shadow = _run_macro_ocr_shadow(
-            output_pages,
-            runtime,
-            idioma_origem=idioma_origem,
-        )
+        with _timed(chapter_telemetry, "macro_ocr_shadow"):
+            macro_shadow = _run_macro_ocr_shadow(
+                output_pages,
+                runtime,
+                idioma_origem=idioma_origem,
+            )
         output_pages[0].page_profile["macro_ocr_shadow"] = macro_shadow
         output_pages[0].ocr_result["page_profile"] = output_pages[0].page_profile
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for i, page in enumerate(output_pages):
-        page.path = output_dir / f"{i + 1:03d}.jpg"
-        cv2.imwrite(str(page.path), page.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    with _timed(chapter_telemetry, "write_translated_pages"):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for i, page in enumerate(output_pages):
+            page.path = output_dir / f"{i + 1:03d}.jpg"
+            cv2.imwrite(str(page.path), page.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+    if chapter_telemetry is not None:
+        chapter_telemetry["wall_total_sec"] = round(time.perf_counter() - run_started, 4)
+        chapter_telemetry["output_page_count"] = len(output_pages)
+        chapter_telemetry["text_count"] = sum(
+            len((page.text_layers or {}).get("texts") or [])
+            for page in output_pages
+            if isinstance(page.text_layers, dict)
+        )
 
     return output_pages

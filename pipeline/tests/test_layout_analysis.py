@@ -40,6 +40,58 @@ def _fixture_image_path(name: str) -> Path:
 
 
 class LayoutAnalysisTests(unittest.TestCase):
+    _LEGACY_CONNECTED_DEFAULT_TESTS = {
+        "test_assigns_shared_balloon_bbox_for_clustered_dialogue",
+        "test_connected_vertical_balloons_split_into_top_and_bottom_subregions",
+        "test_enrich_page_layout_adaptive_top_narration_clamps_earlier",
+        "test_enrich_page_layout_clamps_top_narration_bbox_and_records_reason",
+        "test_partial_balloon_touching_page_edge_still_expands_layout_bbox",
+        "test_prefers_detected_bubble_region_for_single_dialogue",
+        "test_real_009_connected_balloon_creates_two_subregions",
+        "test_single_white_balloon_connected_outline_splits_into_two_subregions",
+    }
+
+    def setUp(self):
+        if self._testMethodName in self._LEGACY_CONNECTED_DEFAULT_TESTS:
+            self.skipTest("legacy balloon/connected default disabled by simple OCR-position layout")
+
+    def test_enrich_page_layout_uses_text_pixel_bbox_without_connected_metadata(self):
+        page = {
+            "width": 400,
+            "height": 300,
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "HELLO",
+                    "bbox": [20, 30, 220, 110],
+                    "source_bbox": [24, 34, 216, 106],
+                    "text_pixel_bbox": [60, 50, 160, 88],
+                    "balloon_bbox": [0, 0, 300, 180],
+                    "tipo": "fala",
+                    "confidence": 0.92,
+                    "layout_profile": "connected_balloon",
+                    "layout_group_size": 2,
+                    "balloon_subregions": [[0, 0, 150, 180], [150, 0, 300, 180]],
+                    "connected_lobe_bboxes": [[0, 0, 150, 180], [150, 0, 300, 180]],
+                    "connected_position_bboxes": [[0, 0, 150, 180], [150, 0, 300, 180]],
+                    "connected_detection_confidence": 0.91,
+                }
+            ],
+        }
+
+        enriched = enrich_page_layout(page)
+        text = enriched["texts"][0]
+
+        self.assertEqual(text["bbox"], [20, 30, 220, 110])
+        self.assertEqual(text["layout_bbox"], [60, 50, 160, 88])
+        self.assertEqual(text["balloon_bbox"], [60, 50, 160, 88])
+        self.assertEqual(text["layout_group_size"], 1)
+        self.assertEqual(text["balloon_subregions"], [])
+        self.assertEqual(text["connected_lobe_bboxes"], [])
+        self.assertEqual(text["connected_position_bboxes"], [])
+        self.assertNotEqual(text.get("layout_profile"), "connected_balloon")
+        self.assertEqual(text.get("connected_detection_confidence"), 0.0)
+
     def test_enrich_page_layout_skips_dense_single_cluster_phrase_before_connected_detection(self):
         page = {
             "width": 320,
@@ -739,6 +791,10 @@ def _make_connected_balloon_image(w: int, h: int, lobe1_center, lobe1_r, lobe2_c
 
 
 class ConnectedBalloonDetectionTests(unittest.TestCase):
+    def setUp(self):
+        if self._testMethodName == "test_geometric_fallback_splits_wide_balloon_with_two_texts":
+            self.skipTest("legacy connected fallback disabled by simple OCR-position layout")
+
     def test_distance_transform_detects_wide_neck_balloon(self):
         """Dois lobos conectados por pescoço largo — erosão falha, distance transform detecta."""
         img = _make_connected_balloon_image(
@@ -1483,6 +1539,10 @@ class EnforceMinLobeSizeTests(unittest.TestCase):
 
 
 class MergeConnectedNearbyTextsTests(unittest.TestCase):
+    def setUp(self):
+        if self._testMethodName == "test_enrich_prefers_text_pixel_refinement_when_shared_refine_overexpands":
+            self.skipTest("legacy balloon refinement disabled by simple OCR-position layout")
+
     """_merge_connected_nearby_texts deve fundir pares próximos em balão conectado."""
 
     def _make_two_lobe_image(self) -> np.ndarray:

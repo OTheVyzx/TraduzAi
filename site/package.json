@@ -23,5 +23,8 @@
     "typescript": "^5.8.3",
     "vite": "^6.4.1",
     "zustand": "^5.0.13"
+  },
+  "devDependencies": {
+    "vite-plugin-prerender": "^1.0.8"
   }
 }

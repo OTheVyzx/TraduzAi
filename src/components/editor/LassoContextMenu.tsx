@@ -4,19 +4,21 @@ import { useEditorStore } from "../../lib/stores/editorStore";
 type PageAction = "detect" | "ocr" | "translate" | "inpaint";
 
 const ACTIONS: { action: PageAction; label: string; icon: typeof Search }[] = [
-  { action: "detect", label: "Detectar", icon: Search },
-  { action: "ocr", label: "Ler texto", icon: ScanText },
-  { action: "translate", label: "Traduzir", icon: Languages },
-  { action: "inpaint", label: "Limpar fundo", icon: Sparkles },
+  { action: "detect", label: "Detectar area", icon: Search },
+  { action: "ocr", label: "OCR area", icon: ScanText },
+  { action: "translate", label: "Traduzir area", icon: Languages },
+  { action: "inpaint", label: "Inpaint area", icon: Sparkles },
 ];
 
 export function LassoContextMenu({
   x,
   y,
+  position = "fixed",
   onClose,
 }: {
   x: number;
   y: number;
+  position?: "fixed" | "absolute";
   onClose: () => void;
 }) {
   const activePageAction = useEditorStore((s) => s.activePageAction);
@@ -27,8 +29,10 @@ export function LassoContextMenu({
 
   return (
     <div
-      className="fixed z-[60] min-w-[180px] rounded-lg border border-border bg-bg-secondary p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.45)]"
+      data-testid="lasso-context-menu"
+      className={`${position} z-[60] min-w-[180px] rounded-lg border border-border bg-bg-secondary p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.45)]`}
       style={{ left: x, top: y }}
+      onMouseDownCapture={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
@@ -40,6 +44,7 @@ export function LassoContextMenu({
             onClose();
             void runMaskedActionFromLasso(action);
           }}
+          title={label}
           className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] text-text-primary hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Icon size={13} />

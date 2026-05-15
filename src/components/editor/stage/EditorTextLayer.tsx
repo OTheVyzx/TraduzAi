@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Konva from "konva";
-import { Group, Rect, Text } from "react-konva";
+import { Group, Rect } from "react-konva";
 import type { TextEntry } from "../../../lib/stores/appStore";
 import type { TextTransformSnapshot } from "../../../lib/stores/editorStore";
 import { bboxToRect, rectToBbox, sameBbox } from "./coordinateUtils";
+import { snapRectToGuides, type SnapGuide } from "./snapGuides";
 import { EDITOR_TEXT_LINE_HEIGHT, fitEditorTextFontSize } from "./textFit";
+import { KonvaStyledText } from "./konvaTextStyleRenderer";
+import type { PageSize } from "./transformConstraints";
 import {
   fontFamilyFromStyle,
   fontStyleFromStyle,
   styleForLayer,
   textForLayer,
 } from "./textLayerStyleUtils";
+import { ensureEditorFontLoaded } from "../../../lib/fonts";
 
 export function EditorTextLayer({
   entry,
@@ -19,9 +23,12 @@ export function EditorTextLayer({
   showGuides,
   interactive,
   draftRotation,
+  pageSize,
+  snapLayers = [],
   onSelect,
   onHover,
   onCommitTransform,
+  onSnapGuidesChange,
 }: {
   entry: TextEntry;
   selected: boolean;
@@ -29,9 +36,12 @@ export function EditorTextLayer({
   showGuides: boolean;
   interactive: boolean;
   draftRotation?: number | null;
+  pageSize?: PageSize | null;
+  snapLayers?: TextEntry[];
   onSelect: () => void;
   onHover: (hovered: boolean) => void;
   onCommitTransform: (before: TextTransformSnapshot, after: TextTransformSnapshot) => void;
+  onSnapGuidesChange?: (guides: SnapGuide[]) => void;
 }) {
   // IMPORTANTE: nenhum return condicional entre hooks — todos os hooks antes
   // do early-return de visibility, senão React quebra com "Rendered fewer
@@ -64,10 +74,8 @@ export function EditorTextLayer({
     [fontFamily, fontStyle, fontVersion, style.tamanho, text, textBoxHeight, textBoxWidth],
   );
   useEffect(() => {
-    const fonts = document.fonts;
-    if (!fonts) return;
     let cancelled = false;
-    void fonts.load(`${Math.max(8, style.tamanho)}px "${fontFamily}"`).then(() => {
+    void ensureEditorFontLoaded(fontFamily, style.tamanho, fontStyle).then(() => {
       if (cancelled) return;
       bumpFontVersion((version) => version + 1);
       textRef.current?.getLayer()?.batchDraw();
@@ -75,7 +83,7 @@ export function EditorTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [fontFamily, style.tamanho]);
+  }, [fontFamily, fontStyle, style.tamanho]);
 
   // Early-return só DEPOIS de todos os hooks
   if (entry.visible === false) return null;
@@ -99,6 +107,28 @@ export function EditorTextLayer({
     }
   };
 
+  const snapDragPosition = (position: { x: number; y: number }) => {
+    if (!pageSize || entry.locked) return position;
+    const candidate = {
+      x: position.x - rect.width / 2,
+      y: position.y - rect.height / 2,
+      width: rect.width,
+      height: rect.height,
+    };
+    const snapped = snapRectToGuides(candidate, {
+      pageSize,
+      layers: snapLayers,
+      excludeLayerId: entry.id,
+    });
+    onSnapGuidesChange?.(snapped.guides);
+    return {
+      x: snapped.rect.x + rect.width / 2,
+      y: snapped.rect.y + rect.height / 2,
+    };
+  };
+
+  const clearSnapGuides = () => onSnapGuidesChange?.([]);
+
   return (
     <Group
       name={nodeName}
@@ -111,6 +141,7 @@ export function EditorTextLayer({
       rotation={displayedRotation}
       listening={interactive}
       draggable={interactive && !entry.locked}
+      dragBoundFunc={interactive && !entry.locked ? snapDragPosition : undefined}
       onClick={(event) => {
         if (!interactive) return;
         event.cancelBubble = true;
@@ -130,17 +161,20 @@ export function EditorTextLayer({
       onDragStart={(event) => {
         if (!interactive) return;
         event.cancelBubble = true;
+        clearSnapGuides();
         onSelect();
       }}
       onDragEnd={(event) => {
         if (!interactive) return;
         event.cancelBubble = true;
         commitGroupTransform(event.target as Konva.Group);
+        clearSnapGuides();
       }}
       onTransformEnd={(event) => {
         if (!interactive) return;
         event.cancelBubble = true;
         commitGroupTransform(event.target as Konva.Group);
+        clearSnapGuides();
       }}
     >
       <Rect
@@ -160,29 +194,19 @@ export function EditorTextLayer({
         dash={selected || hovered ? undefined : [6, 5]}
         strokeWidth={selected ? 2 : 1}
       />
-      <Text
-        ref={textRef}
+      <KonvaStyledText
+        textRef={textRef}
         x={8}
         y={6}
         width={textBoxWidth}
         height={textBoxHeight}
         text={text}
         align={style.alinhamento}
-        verticalAlign="middle"
-        wrap="word"
-        ellipsis={false}
         fontSize={fontSize}
         fontFamily={fontFamily}
         fontStyle={fontStyle}
         lineHeight={EDITOR_TEXT_LINE_HEIGHT}
-        fill={style.cor || "#000000"}
-        stroke={style.contorno || "#000000"}
-        strokeWidth={Math.max(0, style.contorno_px || 0)}
-        shadowEnabled={!!style.sombra}
-        shadowColor={style.sombra_cor || "#000000"}
-        shadowOffsetX={style.sombra_offset?.[0] ?? 0}
-        shadowOffsetY={style.sombra_offset?.[1] ?? 0}
-        shadowBlur={style.sombra ? 2 : 0}
+        style={style}
         listening={false}
       />
     </Group>

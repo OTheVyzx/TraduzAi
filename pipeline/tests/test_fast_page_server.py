@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from io import StringIO
 from pathlib import Path
@@ -57,6 +58,111 @@ def test_fast_page_session_warms_once_and_reports_page_artifact(tmp_path: Path) 
     assert page_events[1]["page_count"] == 1
     assert runner_calls[0]["mode"] == "manual"
     assert runner_calls[0]["source_path"] == str(tmp_path / "001.png")
+
+
+def test_fast_page_session_warms_inpaint_once(tmp_path: Path) -> None:
+    warmup_calls: list[dict] = []
+    session = FastPageSession(
+        pipeline_runner=lambda _config_path: None,
+        inpaint_warmup_runner=lambda **kwargs: warmup_calls.append(kwargs),
+        session_id="fixed-session",
+    )
+
+    first = session.handle({"type": "warmup_inpaint", "models_dir": str(tmp_path / "models"), "profile": "quality"})
+    second = session.handle({"type": "warmup_inpaint", "models_dir": str(tmp_path / "models"), "profile": "quality"})
+
+    assert warmup_calls == [{"models_dir": str(tmp_path / "models"), "profile": "quality"}]
+    assert first == [{"type": "ready", "session_id": "fixed-session", "warm": True, "target": "inpaint"}]
+    assert second == [
+        {"type": "ready", "session_id": "fixed-session", "warm": True, "target": "inpaint", "reused": True}
+    ]
+
+
+def test_fast_page_session_routes_editor_reinpaint_and_captures_stdout(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.delenv("TRADUZAI_INPAINT_ROI_TIGHTEN", raising=False)
+    calls: list[tuple[Path, int, dict | None]] = []
+    roi_flags: list[str | None] = []
+
+    def reinpaint_runner(project_path: Path, page_index: int, region: dict | None) -> None:
+        calls.append((project_path, page_index, region))
+        roi_flags.append(os.environ.get("TRADUZAI_INPAINT_ROI_TIGHTEN"))
+        print(json.dumps({"type": "progress", "step": "inpaint", "message": "regional"}))
+        print(json.dumps({"type": "complete", "output_path": str(tmp_path / "images" / "001.png")}))
+
+    session = FastPageSession(
+        pipeline_runner=lambda _config_path: None,
+        reinpaint_runner=reinpaint_runner,
+        session_id="fixed-session",
+    )
+
+    events = session.handle(
+        {
+            "type": "editor_reinpaint",
+            "project_path": str(tmp_path / "project.json"),
+            "page_index": 2,
+            "region": {"bbox": [1, 2, 30, 40], "mask_path": str(tmp_path / "mask.png")},
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert calls == [
+        (tmp_path / "project.json", 2, {"bbox": [1, 2, 30, 40], "mask_path": str(tmp_path / "mask.png")})
+    ]
+    assert roi_flags == ["1"]
+    assert os.environ.get("TRADUZAI_INPAINT_ROI_TIGHTEN") is None
+    assert [event["type"] for event in events] == ["progress", "complete"]
+    assert events[0]["message"] == "regional"
+
+
+def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, capsys) -> None:
+    calls: list[tuple[str, Path, int, dict | None]] = []
+
+    def detect_runner(project_path: Path, page_index: int, region: dict | None) -> None:
+        calls.append(("detect", project_path, page_index, region))
+        print(json.dumps({"type": "progress", "step": "ocr", "message": "detectando"}))
+        print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "001.png")}))
+
+    def ocr_runner(project_path: Path, page_index: int, region: dict | None) -> None:
+        calls.append(("ocr", project_path, page_index, region))
+        print(json.dumps({"type": "progress", "step": "ocr", "message": "lendo"}))
+        print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "002.png")}))
+
+    session = FastPageSession(
+        pipeline_runner=lambda _config_path: None,
+        detect_runner=detect_runner,
+        ocr_runner=ocr_runner,
+        session_id="fixed-session",
+    )
+
+    detect_events = session.handle(
+        {
+            "type": "editor_detect_page",
+            "project_path": str(tmp_path / "project.json"),
+            "page_index": 1,
+        }
+    )
+    ocr_events = session.handle(
+        {
+            "type": "editor_ocr_page",
+            "project_path": str(tmp_path / "project.json"),
+            "page_index": 2,
+            "region": {"bbox": [10, 20, 30, 40]},
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert calls == [
+        ("detect", tmp_path / "project.json", 1, None),
+        ("ocr", tmp_path / "project.json", 2, {"bbox": [10, 20, 30, 40]}),
+    ]
+    assert [event["type"] for event in detect_events] == ["progress", "complete"]
+    assert detect_events[0]["message"] == "detectando"
+    assert detect_events[1]["output_path"].endswith("001.png")
+    assert [event["type"] for event in ocr_events] == ["progress", "complete"]
+    assert ocr_events[0]["message"] == "lendo"
+    assert ocr_events[1]["output_path"].endswith("002.png")
 
 
 def test_serve_jsonl_keeps_one_session_for_multiple_page_requests(tmp_path: Path) -> None:

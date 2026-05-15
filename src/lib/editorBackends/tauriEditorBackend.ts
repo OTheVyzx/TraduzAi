@@ -16,6 +16,8 @@ import {
   updateMaskRegion,
   updateReinpaintRegion,
   updateRecoveryRegion,
+  healInpaintRegion,
+  writeHealingMask,
   writeMaskFromPng,
 } from "../tauri";
 
@@ -29,6 +31,8 @@ export const tauriEditorBackend: EditorBackendApi = {
   updateRecoveryRegion,
   updateReinpaintRegion,
   writeMaskFromPng,
+  writeHealingMask,
+  healInpaintRegion,
   renderPreviewPage,
   runPageActionWithOptionalMask,
   retypesetPage,

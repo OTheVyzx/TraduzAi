@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, Plus, X, Rocket, ArrowLeft, BookOpen, Sparkles, Globe, Gauge, Cpu, Star } from "lucide-react";
+import { Check, Pencil, Search, Plus, X, Rocket, ArrowLeft, BookOpen, Sparkles, Globe, Gauge, Cpu, Star } from "lucide-react";
 import { LanguageSelectField } from "../components/ui";
 import { useAppStore } from "../lib/stores/appStore";
 import { getFavoriteWorkSuggestions } from "../lib/favoriteWorks";
@@ -29,6 +29,7 @@ import {
   candidateToGlossaryEntry,
   filterRejectedCandidates,
   glossaryConflicts,
+  glossaryEntryId,
   manualTermToGlossaryEntry,
   type GlossaryTab,
 } from "../lib/glossaryCenter";
@@ -81,6 +82,7 @@ export function Setup() {
   const [obraSearch, setObraSearch] = useState(project?.obra || "");
   const [searching, setSearching] = useState(false);
   const [newTerm, setNewTerm] = useState({ key: "", value: "" });
+  const [editingTerm, setEditingTerm] = useState<{ originalKey: string; key: string; value: string } | null>(null);
   const [candidates, setCandidates] = useState<WorkSearchCandidate[]>([]);
   const [searchError, setSearchError] = useState("");
   const [loadingCandidateId, setLoadingCandidateId] = useState<string | null>(null);
@@ -248,31 +250,8 @@ export function Setup() {
       setInternetContextResult(filteredInternetResult);
       setInternetContextAppliedCount(null);
       setGlossaryTab("online");
-      const glossaryCount = glossaryEntriesCount(project?.contexto ?? {
-        sinopse: "",
-        genero: [],
-        personagens: [],
-        glossario: {},
-        aliases: [],
-        termos: [],
-        relacoes: [],
-        faccoes: [],
-        resumo_por_arco: [],
-        memoria_lexical: {},
-        fontes_usadas: [],
-      });
-      const workSummary = summarizeWorkContext(
-        {
-          work_id: result.work_id,
-          title: result.title,
-          context_quality: result.context_quality,
-          internet_context_loaded: filteredInternetResult.internet_context_loaded,
-          cover_url: selectedCoverUrl,
-        },
-        glossaryCount,
-      );
       const savedGlossary = await loadGlossary(result.work_id);
-      const savedGlossaryCount = savedGlossary.entries.length || workSummary.glossary_entries_count;
+      const savedGlossaryCount = savedGlossary.entries.length;
       const summaryWithGlossary = summarizeWorkContext(
         {
           work_id: result.work_id,
@@ -292,7 +271,7 @@ export function Setup() {
         obra: result.title,
         work_context: {
           ...summaryWithGlossary,
-          glossary_loaded: savedGlossary.entries.length > 0 || workSummary.glossary_loaded,
+          glossary_loaded: savedGlossary.entries.length > 0,
           glossary_entries_count: savedGlossaryCount,
           internet_context_loaded: internetResult.internet_context_loaded,
         },
@@ -300,7 +279,7 @@ export function Setup() {
           sinopse: result.synopsis,
           genero: result.genres,
           personagens: result.characters,
-          glossario: { ...(project?.contexto.glossario || {}), ...glossaryFromFile },
+          glossario: glossaryFromFile,
           aliases: result.aliases,
           termos: result.terms,
           relacoes: result.relationships,
@@ -349,22 +328,7 @@ export function Setup() {
     }
     updateProject({
       contexto: { ...project.contexto, glossario: updated },
-      work_context: project.work_context
-        ? {
-            ...project.work_context,
-            glossary_loaded: count > 0,
-            glossary_entries_count: count,
-            risk_level: summarizeWorkContext(
-              {
-                work_id: project.work_context.work_id,
-                title: project.work_context.title,
-                context_quality: project.work_context.context_loaded ? "partial" : "empty",
-              },
-              count,
-              project.work_context.user_ignored_warning,
-            ).risk_level,
-          }
-        : project.work_context,
+      work_context: glossarySummaryForCount(count),
     });
     setNewTerm({ key: "", value: "" });
   }
@@ -401,6 +365,65 @@ export function Setup() {
       glossary_entries_count: glossaryCount,
       risk_level: glossaryCount > 0 ? "medium" as const : project.work_context.risk_level,
     };
+  }
+
+  function glossaryEntryIdsForSource(source: string) {
+    return ["term", "character", "alias", "faction", "place", "generic_term"].map((prefix) =>
+      glossaryEntryId(prefix, source),
+    );
+  }
+
+  function removePersistedGlossarySource(workId: string, source: string) {
+    for (const entryId of glossaryEntryIdsForSource(source)) {
+      void removeGlossaryEntry(workId, entryId).catch((err) => {
+        console.error("Erro ao remover termo do glossario:", err);
+      });
+    }
+  }
+
+  function glossarySummaryForCount(glossaryCount: number) {
+    if (!project?.work_context) return project?.work_context;
+    return {
+      ...project.work_context,
+      glossary_loaded: glossaryCount > 0,
+      glossary_entries_count: glossaryCount,
+      risk_level: summarizeWorkContext(
+        {
+          work_id: project.work_context.work_id,
+          title: project.work_context.title,
+          context_quality: project.work_context.context_loaded ? "partial" : "empty",
+        },
+        glossaryCount,
+        project.work_context.user_ignored_warning,
+      ).risk_level,
+    };
+  }
+
+  function saveEditedGlossaryTerm() {
+    if (!project || !editingTerm) return;
+    const key = editingTerm.key.trim();
+    const value = editingTerm.value.trim();
+    if (!key || !value) return;
+    const { [editingTerm.originalKey]: _, ...withoutOriginal } = project.contexto.glossario;
+    const nextGlossary = {
+      ...withoutOriginal,
+      [key]: value,
+    };
+    const count = Object.keys(nextGlossary).length;
+    const activeWorkId = project.work_context?.work_id;
+    if (activeWorkId) {
+      if (editingTerm.originalKey !== key) {
+        removePersistedGlossarySource(activeWorkId, editingTerm.originalKey);
+      }
+      void upsertGlossaryEntry(activeWorkId, manualTermToGlossaryEntry(key, value)).catch((err) => {
+        console.error("Erro ao salvar edicao do glossario:", err);
+      });
+    }
+    updateProject({
+      contexto: { ...project.contexto, glossario: nextGlossary },
+      work_context: glossarySummaryForCount(count),
+    });
+    setEditingTerm(null);
   }
 
   function markInternetCandidate(source: string, status: InternetContextCandidate["status"]) {
@@ -492,30 +515,15 @@ export function Setup() {
     const { [key]: _, ...rest } = project.contexto.glossario;
     const count = Object.keys(rest).length;
     if (project.work_context?.work_id) {
-      const entryId = `term_${key.trim().toLocaleLowerCase("pt-BR").replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}`;
-      void removeGlossaryEntry(project.work_context.work_id, entryId).catch((err) => {
-        console.error("Erro ao remover termo do glossario:", err);
-      });
+      removePersistedGlossarySource(project.work_context.work_id, key);
     }
     updateProject({
       contexto: { ...project.contexto, glossario: rest },
-      work_context: project.work_context
-        ? {
-            ...project.work_context,
-            glossary_loaded: count > 0,
-            glossary_entries_count: count,
-            risk_level: summarizeWorkContext(
-              {
-                work_id: project.work_context.work_id,
-                title: project.work_context.title,
-                context_quality: project.work_context.context_loaded ? "partial" : "empty",
-              },
-              count,
-              project.work_context.user_ignored_warning,
-            ).risk_level,
-          }
-        : project.work_context,
+      work_context: glossarySummaryForCount(count),
     });
+    if (editingTerm?.originalKey === key) {
+      setEditingTerm(null);
+    }
   }
 
   async function ensureWorkContext(userIgnoredWarning = false) {
@@ -1233,27 +1241,80 @@ export function Setup() {
 
           {(!SHOW_CONTEXT_ASSISTANT_UI || glossaryTab === "reviewed") && (
             <div data-testid="glossary-reviewed-list">
-              {Object.entries(project.contexto.glossario).map(([key, value]) => (
-                <div data-testid="glossary-reviewed-row" key={key} className="flex items-center gap-2 py-1.5 border-b border-border last:border-0">
-                  <span className="text-sm text-text-primary flex-1">{key}</span>
-                  <span className="text-xs text-text-muted">=</span>
-                  <span className="text-sm text-brand-300 flex-1">{value}</span>
-                  <button
-                    type="button"
-                    onClick={() => addForbiddenToGlossaryTerm(key, value)}
-                    className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:border-status-warning/40 hover:text-status-warning"
-                  >
-                    Adicionar forbidden
-                  </button>
-                  <button
-                    onClick={() => removeGlossaryTerm(key)}
-                    title="Remover termo"
-                    className="p-1 text-text-muted hover:text-status-error transition-smooth"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              ))}
+              {Object.entries(project.contexto.glossario).map(([key, value]) => {
+                const rowEdit = editingTerm?.originalKey === key ? editingTerm : null;
+                return (
+                  <div data-testid="glossary-reviewed-row" key={key} className="flex items-center gap-2 py-1.5 border-b border-border last:border-0">
+                    {rowEdit ? (
+                      <>
+                        <input
+                          data-testid="glossary-edit-source"
+                          type="text"
+                          value={rowEdit.key}
+                          onChange={(e) => setEditingTerm({ ...rowEdit, key: e.target.value })}
+                          onKeyDown={(e) => e.key === "Enter" && saveEditedGlossaryTerm()}
+                          className="min-w-0 flex-1 rounded-lg border border-brand/25 bg-bg-tertiary px-2 py-1 text-sm text-text-primary focus:outline-none focus:border-brand/50"
+                        />
+                        <span className="text-xs text-text-muted">=</span>
+                        <input
+                          data-testid="glossary-edit-target"
+                          type="text"
+                          value={rowEdit.value}
+                          onChange={(e) => setEditingTerm({ ...rowEdit, value: e.target.value })}
+                          onKeyDown={(e) => e.key === "Enter" && saveEditedGlossaryTerm()}
+                          className="min-w-0 flex-1 rounded-lg border border-brand/25 bg-bg-tertiary px-2 py-1 text-sm text-brand-300 focus:outline-none focus:border-brand/50"
+                        />
+                        <button
+                          data-testid="glossary-edit-save"
+                          type="button"
+                          onClick={saveEditedGlossaryTerm}
+                          title="Salvar edicao"
+                          className="p-1 text-status-success hover:bg-status-success/10 rounded-lg transition-smooth"
+                        >
+                          <Check size={14} />
+                        </button>
+                        <button
+                          data-testid="glossary-edit-cancel"
+                          type="button"
+                          onClick={() => setEditingTerm(null)}
+                          title="Cancelar edicao"
+                          className="p-1 text-text-muted hover:text-text-primary transition-smooth"
+                        >
+                          <X size={14} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="min-w-0 flex-1 truncate text-sm text-text-primary">{key}</span>
+                        <span className="text-xs text-text-muted">=</span>
+                        <span className="min-w-0 flex-1 truncate text-sm text-brand-300">{value}</span>
+                        <button
+                          type="button"
+                          onClick={() => setEditingTerm({ originalKey: key, key, value })}
+                          title="Editar termo"
+                          className="p-1 text-text-muted hover:text-brand-300 transition-smooth"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addForbiddenToGlossaryTerm(key, value)}
+                          className="rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:border-status-warning/40 hover:text-status-warning"
+                        >
+                          Adicionar forbidden
+                        </button>
+                        <button
+                          onClick={() => removeGlossaryTerm(key)}
+                          title="Remover termo"
+                          className="p-1 text-text-muted hover:text-status-error transition-smooth"
+                        >
+                          <X size={14} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
               {Object.keys(project.contexto.glossario).length === 0 && (
                 <p className="py-2 text-xs text-text-muted">Nenhum termo revisado ainda.</p>
               )}

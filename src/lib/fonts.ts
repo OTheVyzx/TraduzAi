@@ -65,6 +65,7 @@ export const BUNDLE_FONTS: Record<string, FontEntry> = {
  * Evita re-registrar a mesma family em chamadas repetidas.
  */
 const registeredFamilies = new Set<string>(Object.values(BUNDLE_FONTS).map((f) => f.cssFamily));
+let bundleFontsPreloadPromise: Promise<void> | null = null;
 
 /**
  * Carrega todas as bundle fonts via FontFace API e aguarda `document.fonts.ready`.
@@ -75,57 +76,79 @@ const registeredFamilies = new Set<string>(Object.values(BUNDLE_FONTS).map((f) =
  */
 export async function preloadEditorFonts(): Promise<void> {
   if (typeof document === "undefined" || !("fonts" in document)) return;
+  if (bundleFontsPreloadPromise) return bundleFontsPreloadPromise;
 
-  const loaders: Promise<FontFace>[] = [];
-  for (const entry of Object.values(BUNDLE_FONTS)) {
-    if (entry.files.regular) {
-      const ff = new FontFace(entry.cssFamily, `url(${entry.files.regular})`, {
-        weight: "400",
-        style: "normal",
-        display: "block",
-      });
-      loaders.push(ff.load().then((loaded) => {
-        document.fonts.add(loaded);
-        return loaded;
-      }));
+  bundleFontsPreloadPromise = (async () => {
+    const loaders: Promise<FontFace>[] = [];
+    for (const entry of Object.values(BUNDLE_FONTS)) {
+      if (entry.files.regular) {
+        const ff = new FontFace(entry.cssFamily, `url(${entry.files.regular})`, {
+          weight: "400",
+          style: "normal",
+          display: "block",
+        });
+        loaders.push(ff.load().then((loaded) => {
+          document.fonts.add(loaded);
+          return loaded;
+        }));
+      }
+      if (entry.files.bold) {
+        const ff = new FontFace(entry.cssFamily, `url(${entry.files.bold})`, {
+          weight: "700",
+          style: "normal",
+          display: "block",
+        });
+        loaders.push(ff.load().then((loaded) => {
+          document.fonts.add(loaded);
+          return loaded;
+        }));
+      }
+      if (entry.files.italic) {
+        const ff = new FontFace(entry.cssFamily, `url(${entry.files.italic})`, {
+          weight: "400",
+          style: "italic",
+          display: "block",
+        });
+        loaders.push(ff.load().then((loaded) => {
+          document.fonts.add(loaded);
+          return loaded;
+        }));
+      }
+      if (entry.files.boldItalic) {
+        const ff = new FontFace(entry.cssFamily, `url(${entry.files.boldItalic})`, {
+          weight: "700",
+          style: "italic",
+          display: "block",
+        });
+        loaders.push(ff.load().then((loaded) => {
+          document.fonts.add(loaded);
+          return loaded;
+        }));
+      }
     }
-    if (entry.files.bold) {
-      const ff = new FontFace(entry.cssFamily, `url(${entry.files.bold})`, {
-        weight: "700",
-        style: "normal",
-        display: "block",
-      });
-      loaders.push(ff.load().then((loaded) => {
-        document.fonts.add(loaded);
-        return loaded;
-      }));
-    }
-    if (entry.files.italic) {
-      const ff = new FontFace(entry.cssFamily, `url(${entry.files.italic})`, {
-        weight: "400",
-        style: "italic",
-        display: "block",
-      });
-      loaders.push(ff.load().then((loaded) => {
-        document.fonts.add(loaded);
-        return loaded;
-      }));
-    }
-    if (entry.files.boldItalic) {
-      const ff = new FontFace(entry.cssFamily, `url(${entry.files.boldItalic})`, {
-        weight: "700",
-        style: "italic",
-        display: "block",
-      });
-      loaders.push(ff.load().then((loaded) => {
-        document.fonts.add(loaded);
-        return loaded;
-      }));
-    }
+
+    await Promise.allSettled(loaders);
+    await document.fonts.ready;
+  })();
+
+  return bundleFontsPreloadPromise;
+}
+
+export async function ensureEditorFontLoaded(
+  fontFamily: string,
+  fontSize: number,
+  fontStyle = "normal",
+): Promise<void> {
+  if (typeof document === "undefined" || !("fonts" in document)) return;
+  await preloadEditorFonts();
+  const cssStyle = /\bitalic\b/i.test(fontStyle) ? "italic" : "normal";
+  const cssWeight = /\bbold\b/i.test(fontStyle) ? "700" : "400";
+  try {
+    await document.fonts.load(`${cssStyle} ${cssWeight} ${Math.max(8, fontSize)}px "${fontFamily}"`);
+    await document.fonts.ready;
+  } catch (err) {
+    console.warn("[fonts] falha ao carregar fonte do editor:", fontFamily, fontStyle, err);
   }
-
-  await Promise.allSettled(loaders);
-  await document.fonts.ready;
 }
 
 /**

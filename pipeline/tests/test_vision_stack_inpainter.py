@@ -85,7 +85,8 @@ class VisionStackInpainterTests(unittest.TestCase):
             "text_pixel_bbox": [390, 3074, 789, 3175],
         }
 
-        self.assertEqual(_fast_white_rejection_reason(text), "")
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_WHITE_NARRATION": "1"}, clear=True):
+            self.assertEqual(_fast_white_rejection_reason(text), "")
 
     def test_fallback_blocks_preserve_text_geometry_for_mask_refinement(self):
         from inpainter import _build_fallback_vision_blocks
@@ -123,6 +124,25 @@ class VisionStackInpainterTests(unittest.TestCase):
         image[154:166, 44:205, :] = 238
 
         result = _try_solid_background_text_fill(image, [35, 55, 230, 205], [30, 50, 235, 210])
+
+        self.assertIsNone(result)
+
+    def test_metadata_background_fill_skips_translucent_white_balloon(self):
+        from inpainter import _try_metadata_background_text_fill
+
+        image = np.full((120, 180, 3), 244, dtype=np.uint8)
+        for x in range(image.shape[1]):
+            image[:, x, :] = 232 + (x % 22)
+        image[48:60, 62:118] = 18
+        text = {
+            "bbox": [58, 44, 122, 64],
+            "text_pixel_bbox": [62, 48, 118, 60],
+            "balloon_bbox": [24, 22, 154, 92],
+            "balloon_type": "white",
+            "background_rgb": [244, 244, 244],
+        }
+
+        result = _try_metadata_background_text_fill(image, text)
 
         self.assertIsNone(result)
 

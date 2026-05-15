@@ -358,8 +358,19 @@ def _run_inpaint_stage(
     *,
     inpainter,
     translated_page: dict,
+    band_index: int | None = None,
+    source_page_number: int | None = None,
 ) -> BandImageStageOutput:
     page_for_inpaint = copy.deepcopy(translated_page)
+    if band_index is not None:
+        page_for_inpaint["_band_index"] = int(band_index)
+    elif "_band_index" not in page_for_inpaint:
+        page_for_inpaint["_band_index"] = 0
+    if source_page_number is not None:
+        page_for_inpaint["_source_page_number"] = int(source_page_number)
+    elif "_source_page_number" not in page_for_inpaint:
+        page_for_inpaint["_source_page_number"] = int(page_for_inpaint.get("numero") or 0)
+    page_for_inpaint["_band_y_top"] = int(band.y_top)
     cleaned = inpainter.inpaint_band_image(band.strip_slice, page_for_inpaint)
     translated_page.update(
         {
@@ -721,6 +732,8 @@ def process_band(
             band,
             inpainter=inpainter,
             translated_page=translated_page,
+            band_index=page_idx + 1,
+            source_page_number=source_page_number,
         )
     _mark("inpaint", stage_start)
     cleaned = inpaint_stage.to_image()

@@ -34,10 +34,15 @@ def extract(source_path: str | Path, work_dir: str | Path) -> tuple[list[Path], 
     source_path = Path(source_path)
     work_dir = Path(work_dir)
 
+    suffix = source_path.suffix.lower()
+
+    if suffix in (".cbz", ".zip"):
+        _raise_if_traduzai_project_archive(source_path)
+    elif source_path.is_dir():
+        _raise_if_traduzai_project_directory(source_path)
+
     tmp_dir = work_dir / "_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    suffix = source_path.suffix.lower()
 
     if suffix in IMAGE_EXTS:
         _copy_single_image(source_path, tmp_dir)
@@ -80,6 +85,8 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> None:
     if not archive_path.exists():
         raise FileNotFoundError(f"Arquivo não encontrado: {archive_path}")
 
+    _raise_if_traduzai_project_archive(archive_path)
+
     with zipfile.ZipFile(archive_path, "r") as zf:
         for info in zf.infolist():
             if info.is_dir():
@@ -93,9 +100,31 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> None:
 
 
 def _copy_directory(source_dir: Path, dest_dir: Path) -> None:
+    _raise_if_traduzai_project_directory(source_dir)
+
     for f in sorted(source_dir.rglob("*")):
         if f.suffix.lower() in IMAGE_EXTS:
             shutil.copy2(f, dest_dir / f.name)
+
+
+def _raise_if_traduzai_project_directory(source_dir: Path) -> None:
+    if (source_dir / "project.json").exists():
+        raise ValueError(
+            "Esta pasta ja e um projeto TraduzAi. Use Abrir projeto para continuar, "
+            "nao Nova traducao."
+        )
+
+
+def _raise_if_traduzai_project_archive(archive_path: Path) -> None:
+    if not archive_path.exists():
+        return
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        for info in zf.infolist():
+            if not info.is_dir() and Path(info.filename).name.lower() == "project.json":
+                raise ValueError(
+                    "Este arquivo ja e um projeto/exportacao do TraduzAi. Extraia o ZIP e use "
+                    "Abrir projeto para continuar, nao Nova traducao."
+                )
 
 
 def _sorted_images(directory: Path) -> list[Path]:

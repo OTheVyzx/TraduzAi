@@ -12,6 +12,7 @@ Regra central: nunca borre antes de copiar o fundo.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Callable
@@ -21,6 +22,15 @@ import numpy as np
 from PIL import Image
 
 from .mask_builder import build_mask_regions, build_region_pixel_mask
+
+
+def _white_balloon_overlay_enabled() -> bool:
+    return os.getenv("TRADUZAI_ENABLE_WHITE_BALLOON_RECT_OVERLAY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 # ── Ponto de entrada ──────────────────────────────────────────────────────
@@ -246,6 +256,9 @@ def detect_white_balloon_overlay(
     img_array: np.ndarray,
     region: dict,
 ) -> dict | None:
+    if not _white_balloon_overlay_enabled():
+        return None
+
     if region.get("tipo") not in {"fala", "narracao"}:
         return None
 

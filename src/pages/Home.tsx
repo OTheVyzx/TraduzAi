@@ -47,6 +47,7 @@ import {
   openProjectDialog,
   validateImport,
 } from "../lib/tauri";
+import { shouldOpenExistingProjectFromImport } from "../lib/projectSourceGuards";
 import { Card, Badge } from "../components/ui";
 import { ONBOARDING_FLOW } from "../lib/onboarding";
 
@@ -81,6 +82,11 @@ export function Home() {
     const outputDir = normalizedPath.toLocaleLowerCase("pt-BR").endsWith("/project.json")
       ? normalizedPath.slice(0, -"/project.json".length)
       : normalizedPath;
+    const rawWorkDir = (raw as typeof raw & { _work_dir?: string | null })._work_dir;
+    const projectDir =
+      (typeof raw.output_path === "string" && raw.output_path.trim()) ||
+      (typeof rawWorkDir === "string" && rawWorkDir.trim()) ||
+      outputDir;
     return {
       id: crypto.randomUUID(),
       obra: raw.obra || "",
@@ -118,8 +124,9 @@ export function Home() {
       preset: raw.preset ?? null,
       paginas: raw.paginas ?? [],
       status: "done" as const,
-      source_path: outputDir,
-      output_path: outputDir,
+      source_path: projectDir,
+      output_path: projectDir,
+      _work_dir: projectDir,
       totalPages: raw.paginas?.length ?? 0,
       mode: "auto" as const,
     };
@@ -140,6 +147,10 @@ export function Home() {
       if (!path) return;
       setBatchSources([]);
       const validation = await validateImport(path);
+      if (shouldOpenExistingProjectFromImport(path, validation)) {
+        await openProjectFromPath(path);
+        return;
+      }
       if (!validation.valid) {
         alert(`Arquivo inválido: ${validation.error}`);
         return;
@@ -188,6 +199,10 @@ export function Home() {
       if (paths.length === 1) {
         setBatchSources([]);
         const validation = await validateImport(paths[0]);
+        if (shouldOpenExistingProjectFromImport(paths[0], validation)) {
+          await openProjectFromPath(paths[0]);
+          return;
+        }
         if (!validation.valid) {
           alert(`Arquivo inválido: ${validation.error}`);
           return;

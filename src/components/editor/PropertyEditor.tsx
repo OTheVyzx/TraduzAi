@@ -252,12 +252,12 @@ export function PropertyEditor() {
                 type="color"
                 value={estilo.cor}
                 title="Cor do texto"
-                onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value })}
+                onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value, cor_gradiente: [] })}
                 className="w-6 h-6 rounded border border-border cursor-pointer bg-transparent"
               />
               <InputField
                 value={estilo.cor}
-                onChange={(v) => updateEstilo(selectedLayerId, { cor: v })}
+                onChange={(v) => updateEstilo(selectedLayerId, { cor: v, cor_gradiente: [] })}
               />
             </div>
           </div>

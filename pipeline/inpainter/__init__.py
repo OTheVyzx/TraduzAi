@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import cv2
+from PIL import Image
+
+try:
+    from .mask_builder import bbox_to_octagon_mask
+except ImportError:  # pragma: no cover - supports direct pipeline path imports
+    from inpainter.mask_builder import bbox_to_octagon_mask
 
 
 def _normalize_bbox(raw_bbox, width: int, height: int) -> list[int] | None:
@@ -55,7 +63,7 @@ def _build_fallback_vision_blocks(ocr_page: dict, width: int, height: int) -> li
 
 
 def _fast_white_balloon_fill_enabled() -> bool:
-    flag = os.getenv("TRADUZAI_STRIP_FAST_WHITE_INPAINT", "1").strip().lower()
+    flag = os.getenv("TRADUZAI_STRIP_FAST_WHITE_INPAINT", "0").strip().lower()
     return flag not in {"0", "false", "no", "off"}
 
 
@@ -65,7 +73,7 @@ def _fast_white_post_cleanup_enabled() -> bool:
 
 
 def _fast_white_narration_enabled() -> bool:
-    flag = os.getenv("TRADUZAI_STRIP_FAST_WHITE_NARRATION", "1").strip().lower()
+    flag = os.getenv("TRADUZAI_STRIP_FAST_WHITE_NARRATION", "0").strip().lower()
     return flag not in {"0", "false", "no", "off"}
 
 
@@ -278,6 +286,10 @@ def _apply_fast_white_balloon_fill(
         if resolved is None:
             _reject("no_white_fill_mask")
             continue
+        text_mask = _mask_from_bbox(width, height, text_bbox)
+        if _looks_translucent_or_textured_background(band_rgb, balloon_bbox, text_mask):
+            _reject("translucent_background")
+            continue
         filled_from_original = _apply_white_balloon_fill(band_rgb, resolved)
         changed_mask = np.any(filled_from_original != band_rgb, axis=2)
         result[changed_mask] = filled_from_original[changed_mask]
@@ -312,20 +324,52 @@ def _fast_local_rejection_reason(text: dict) -> str:
 
 
 def _mask_from_bbox(width: int, height: int, bbox: list[int], padding: int = 2) -> np.ndarray:
-    x1, y1, x2, y2 = bbox
-    x1 = max(0, x1 - padding)
-    y1 = max(0, y1 - padding)
-    x2 = min(width, x2 + padding)
-    y2 = min(height, y2 + padding)
-    mask = np.zeros((height, width), dtype=np.uint8)
-    if x2 > x1 and y2 > y1:
-        mask[y1:y2, x1:x2] = 255
-    return mask
+    return bbox_to_octagon_mask(width, height, bbox, padding=padding)
 
 
 def _expanded_bbox(width: int, height: int, bbox: list[int], padding: int) -> list[int] | None:
     x1, y1, x2, y2 = bbox
     return _normalize_bbox([x1 - padding, y1 - padding, x2 + padding, y2 + padding], width, height)
+
+
+def _looks_translucent_or_textured_background(
+    image_rgb: np.ndarray,
+    sample_bbox: list[int],
+    text_mask: np.ndarray | None = None,
+) -> bool:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0:
+        return False
+    height, width = image_rgb.shape[:2]
+    bbox = _normalize_bbox(sample_bbox, width, height)
+    if bbox is None:
+        return False
+    x1, y1, x2, y2 = bbox
+    sample_mask = np.zeros((height, width), dtype=np.uint8)
+    sample_mask[y1:y2, x1:x2] = 255
+    if isinstance(text_mask, np.ndarray) and text_mask.shape[:2] == sample_mask.shape:
+        exclusion = cv2.dilate(
+            (text_mask > 0).astype(np.uint8) * 255,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            iterations=1,
+        )
+        sample_mask = cv2.bitwise_and(sample_mask, cv2.bitwise_not(exclusion))
+    if int(np.count_nonzero(sample_mask)) < 64:
+        return False
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY) if image_rgb.ndim == 3 else image_rgb.astype(np.uint8)
+    bright_sample = (sample_mask > 0) & (gray >= 205)
+    pixels = gray[bright_sample].astype(np.float32)
+    if pixels.size < 64:
+        return False
+    mean_luma = float(np.mean(pixels))
+    if mean_luma < 205.0:
+        return False
+    spread = float(np.percentile(pixels, 95) - np.percentile(pixels, 5))
+    std = float(np.std(pixels))
+    gx = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+    grad = cv2.magnitude(gx, gy)[bright_sample]
+    grad_p90 = float(np.percentile(grad, 90)) if grad.size else 0.0
+    return spread >= 14.0 or std >= 5.5 or grad_p90 >= 18.0
 
 
 def _try_solid_background_text_fill(
@@ -337,6 +381,9 @@ def _try_solid_background_text_fill(
     text_bbox = _normalize_bbox(text_bbox, width, height)
     fill_bbox = _normalize_bbox(fill_bbox, width, height)
     if text_bbox is None or fill_bbox is None:
+        return None
+    text_mask = _mask_from_bbox(width, height, text_bbox, padding=8)
+    if _looks_translucent_or_textured_background(image_rgb, fill_bbox, text_mask):
         return None
 
     context_bbox = [
@@ -356,8 +403,8 @@ def _try_solid_background_text_fill(
 
     tx1, ty1, tx2, ty2 = text_bbox
     local_text_bbox = [tx1 - cx1, ty1 - cy1, tx2 - cx1, ty2 - cy1]
-    text_mask = _mask_from_bbox(local.shape[1], local.shape[0], local_text_bbox, padding=8)
-    sample = local[text_mask == 0]
+    local_text_mask = _mask_from_bbox(local.shape[1], local.shape[0], local_text_bbox, padding=8)
+    sample = local[local_text_mask == 0]
     if sample.size == 0 or len(sample) < 64:
         return None
 
@@ -401,7 +448,11 @@ def _try_solid_background_text_fill(
     fx1, fy1, fx2, fy2 = fill_bbox
     result = image_rgb.copy()
     fill = np.asarray([int(round(float(v))) for v in median], dtype=np.uint8)
-    result[fy1:fy2, fx1:fx2] = fill
+    fill_mask = _mask_from_bbox(width, height, text_bbox, padding=fill_padding)
+    if not np.any(fill_mask):
+        result[fy1:fy2, fx1:fx2] = fill
+    else:
+        result[fill_mask > 0] = fill
     return result
 
 
@@ -461,6 +512,132 @@ def _text_geometry_mask(width: int, height: int, text: dict) -> np.ndarray | Non
     return mask
 
 
+def _strip_inpaint_debug_dir(ocr_page: dict) -> Path | None:
+    root = str(os.getenv("TRADUZAI_INPAINT_DEBUG_DIR", "") or "").strip()
+    if not root:
+        return None
+    try:
+        page_number = int(ocr_page.get("_source_page_number") or ocr_page.get("numero") or 0)
+    except Exception:
+        page_number = 0
+    try:
+        band_index = int(ocr_page.get("_band_index") or 0)
+    except Exception:
+        band_index = 0
+    debug_dir = Path(root) / f"page_{page_number:03d}_band_{band_index:03d}"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    return debug_dir
+
+
+def _save_rgb(path: Path, image_rgb: np.ndarray) -> None:
+    Image.fromarray(image_rgb.astype(np.uint8)).save(path, quality=92)
+
+
+def _save_mask(path: Path, mask: np.ndarray) -> None:
+    cv2.imwrite(str(path), mask.astype(np.uint8))
+
+
+def _mask_overlay(image_rgb: np.ndarray, mask: np.ndarray, blocks: list[dict]) -> np.ndarray:
+    overlay = image_rgb.copy()
+    red = np.zeros_like(overlay)
+    red[:, :, 0] = 255
+    active = mask > 0
+    overlay[active] = (overlay[active].astype(np.float32) * 0.45 + red[active].astype(np.float32) * 0.55).astype(np.uint8)
+    for index, block in enumerate(blocks, start=1):
+        bbox = _normalize_bbox(block.get("bbox"), image_rgb.shape[1], image_rgb.shape[0])
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (40, 220, 255), 1)
+        cv2.putText(overlay, str(index), (x1, max(12, y1 - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (40, 220, 255), 1, cv2.LINE_AA)
+    return overlay
+
+
+def _write_strip_inpaint_debug(
+    ocr_page: dict,
+    *,
+    original_rgb: np.ndarray,
+    working_rgb: np.ndarray,
+    cleaned_rgb: np.ndarray | None,
+    vision_blocks: list[dict],
+    used_real_inpaint: bool,
+    fast_fill_mask: np.ndarray | None = None,
+    raw_mask: np.ndarray | None = None,
+    expanded_mask: np.ndarray | None = None,
+) -> None:
+    debug_dir = _strip_inpaint_debug_dir(ocr_page)
+    if debug_dir is None:
+        return
+    from vision_stack.runtime import _build_post_cleanup_limit_mask, vision_blocks_to_mask
+
+    if raw_mask is None:
+        raw_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=False)
+    if expanded_mask is None:
+        expanded_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=True)
+    if fast_fill_mask is None:
+        fast_fill_mask = np.zeros(raw_mask.shape, dtype=np.uint8)
+    effective_limit_mask = _build_post_cleanup_limit_mask(
+        expanded_mask,
+        list(ocr_page.get("texts", [])),
+        expanded_mask.shape[:2],
+    )
+    if effective_limit_mask is None:
+        effective_limit_mask = expanded_mask
+    _save_rgb(debug_dir / "00_band_original.jpg", original_rgb)
+    _save_rgb(debug_dir / "00_band_before_inpaint.jpg", working_rgb)
+    _save_mask(debug_dir / "01_fast_fill_changed_mask.png", fast_fill_mask)
+    _save_mask(debug_dir / "02_inpaint_mask_raw.png", raw_mask)
+    _save_mask(debug_dir / "03_inpaint_mask_expanded.png", expanded_mask)
+    _save_mask(debug_dir / "04_real_inpaint_mask_used.png", expanded_mask if used_real_inpaint else np.zeros(raw_mask.shape, dtype=np.uint8))
+    _save_rgb(debug_dir / "05_inpaint_mask_overlay.jpg", _mask_overlay(working_rgb, expanded_mask, vision_blocks))
+    _save_mask(debug_dir / "07_effective_inpaint_limit_mask.png", effective_limit_mask)
+    if cleaned_rgb is not None:
+        _save_rgb(debug_dir / "06_band_after_inpaint.jpg", cleaned_rgb)
+        _save_rgb(debug_dir / "04_band_after_inpaint.jpg", cleaned_rgb)
+        changed = np.any(cleaned_rgb != working_rgb, axis=2)
+        changed_outside = changed & (expanded_mask == 0)
+        changed_outside_effective = changed & (effective_limit_mask == 0)
+        _save_mask(debug_dir / "08_changed_outside_expanded_mask.png", changed_outside.astype(np.uint8) * 255)
+        _save_mask(debug_dir / "09_changed_outside_effective_limit_mask.png", changed_outside_effective.astype(np.uint8) * 255)
+        if np.any(changed_outside):
+            _save_rgb(debug_dir / "10_changed_outside_expanded_overlay.jpg", _mask_overlay(working_rgb, changed_outside.astype(np.uint8) * 255, []))
+        if np.any(changed_outside_effective):
+            _save_rgb(
+                debug_dir / "11_changed_outside_effective_limit_overlay.jpg",
+                _mask_overlay(working_rgb, changed_outside_effective.astype(np.uint8) * 255, []),
+            )
+    _save_mask(debug_dir / "01_inpaint_mask_raw.png", raw_mask)
+    _save_mask(debug_dir / "02_inpaint_mask_expanded.png", expanded_mask)
+    _save_rgb(debug_dir / "03_inpaint_mask_overlay.jpg", _mask_overlay(working_rgb, expanded_mask, vision_blocks))
+    metadata = {
+        "page_number": int(ocr_page.get("_source_page_number") or ocr_page.get("numero") or 0),
+        "band_index": int(ocr_page.get("_band_index") or 0),
+        "text_count": len([t for t in ocr_page.get("texts", []) if isinstance(t, dict)]),
+        "remaining_inpaint_blocks": len(vision_blocks),
+        "fast_fill_mask_pixels": int(np.count_nonzero(fast_fill_mask)),
+        "raw_mask_pixels": int(np.count_nonzero(raw_mask)),
+        "expanded_mask_pixels": int(np.count_nonzero(expanded_mask)),
+        "used_real_inpaint": bool(used_real_inpaint),
+        "used_fast_white_fill": bool(ocr_page.get("_strip_used_fast_white_fill")),
+        "used_fast_local_fill": bool(ocr_page.get("_strip_used_fast_local_fill")),
+        "changed_pixels_after_inpaint": int(np.count_nonzero(np.any(cleaned_rgb != working_rgb, axis=2))) if cleaned_rgb is not None else 0,
+        "changed_pixels_outside_expanded_mask": int(
+            np.count_nonzero(np.any(cleaned_rgb != working_rgb, axis=2) & (expanded_mask == 0))
+        )
+        if cleaned_rgb is not None
+        else 0,
+        "changed_pixels_outside_effective_limit_mask": int(
+            np.count_nonzero(np.any(cleaned_rgb != working_rgb, axis=2) & (effective_limit_mask == 0))
+        )
+        if cleaned_rgb is not None
+        else 0,
+        "raw_changed_outside_limit_mask": int(ocr_page.get("_strip_raw_changed_outside_limit_mask") or 0),
+        "cleanup_changed_outside_limit_mask": int(ocr_page.get("cleanup_changed_outside_limit_mask") or 0),
+    }
+    (debug_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    ocr_page["_strip_inpaint_debug_dir"] = str(debug_dir)
+
+
 def _try_metadata_background_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray | None:
     if not _fast_metadata_background_fill_enabled():
         return None
@@ -472,6 +649,13 @@ def _try_metadata_background_text_fill(image_rgb: np.ndarray, text: dict) -> np.
         return None
     mask = _text_geometry_mask(width, height, text)
     if mask is None:
+        return None
+    sample_bbox = (
+        _normalize_bbox(text.get("balloon_bbox"), width, height)
+        or _normalize_bbox(text.get("layout_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+    )
+    if sample_bbox is not None and _looks_translucent_or_textured_background(image_rgb, sample_bbox, mask):
         return None
     mask_area = int(np.count_nonzero(mask))
     if mask_area > int(width * height * 0.35):
@@ -552,6 +736,9 @@ def _apply_fast_local_balloon_fill(
             continue
 
         mask = _mask_from_bbox(width, height, text_bbox)
+        if _looks_translucent_or_textured_background(result, fill_bbox, mask):
+            _reject("translucent_background")
+            continue
         filled = _try_koharu_balloon_fill(result, mask)
         if filled is None:
             filled = _try_solid_background_text_fill(result, text_bbox, fill_bbox)
@@ -589,7 +776,12 @@ def prewarm_band_inpainter(profile: str = "quality"):
 
 def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     """Aplica o mesmo round de inpaint do runtime principal na banda do strip."""
-    from vision_stack.runtime import _apply_inpainting_round, _apply_post_inpaint_cleanup_timed, _get_inpainter
+    from vision_stack.runtime import (
+        _apply_inpainting_round,
+        _apply_post_inpaint_cleanup_timed,
+        _clamp_image_to_limit_mask,
+        _get_inpainter,
+    )
 
     if band_rgb.size == 0 or not ocr_page.get("texts"):
         return band_rgb.copy()
@@ -624,24 +816,55 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     if len(vision_blocks) != before_local:
         ocr_page["_strip_used_fast_local_fill"] = True
 
+    fast_fill_mask = (np.any(working_rgb != band_rgb, axis=2).astype(np.uint8) * 255)
     if not vision_blocks:
         if not _fast_white_post_cleanup_enabled():
+            _write_strip_inpaint_debug(
+                ocr_page,
+                original_rgb=band_rgb,
+                working_rgb=working_rgb,
+                cleaned_rgb=working_rgb,
+                vision_blocks=[],
+                used_real_inpaint=False,
+                fast_fill_mask=fast_fill_mask,
+            )
             return working_rgb.copy()
         cleaned, cleanup_stats = _apply_post_inpaint_cleanup_timed(
             band_rgb,
             working_rgb,
             list(ocr_page.get("texts", [])),
+            limit_mask=fast_fill_mask if np.any(fast_fill_mask) else None,
         )
         ocr_page.update(cleanup_stats)
         ocr_page["_strip_used_post_cleanup"] = True
+        _write_strip_inpaint_debug(
+            ocr_page,
+            original_rgb=band_rgb,
+            working_rgb=working_rgb,
+            cleaned_rgb=cleaned,
+            vision_blocks=[],
+            used_real_inpaint=False,
+            fast_fill_mask=fast_fill_mask,
+        )
         return cleaned
 
     inpaint_payload = dict(ocr_page)
     inpaint_payload["_vision_blocks"] = vision_blocks
     inpaint_payload["_skip_internal_post_cleanup"] = True
+    from vision_stack.runtime import vision_blocks_to_mask
+    raw_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=False)
+    expanded_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=True)
     inpainter = _get_inpainter("quality")
     started = time.perf_counter()
     cleaned = _apply_inpainting_round(working_rgb, inpaint_payload, inpainter)
+    cleaned, raw_limit_pixels, raw_changed_outside = _clamp_image_to_limit_mask(
+        working_rgb,
+        cleaned,
+        expanded_mask,
+        list(ocr_page.get("texts", [])),
+    )
+    ocr_page["_strip_raw_limit_mask_pixels"] = int(raw_limit_pixels)
+    ocr_page["_strip_raw_changed_outside_limit_mask"] = int(raw_changed_outside)
     ocr_page["_t_lama_total_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
     round_stats = inpaint_payload.get("_inpaint_round_stats")
     if isinstance(round_stats, dict):
@@ -651,7 +874,19 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         band_rgb,
         cleaned,
         list(ocr_page.get("texts", [])),
+        limit_mask=expanded_mask,
     )
     ocr_page.update(cleanup_stats)
     ocr_page["_strip_used_post_cleanup"] = True
+    _write_strip_inpaint_debug(
+        ocr_page,
+        original_rgb=band_rgb,
+        working_rgb=working_rgb,
+        cleaned_rgb=cleaned,
+        vision_blocks=vision_blocks,
+        used_real_inpaint=True,
+        fast_fill_mask=fast_fill_mask,
+        raw_mask=raw_mask,
+        expanded_mask=expanded_mask,
+    )
     return cleaned.copy() if cleaned is working_rgb else cleaned

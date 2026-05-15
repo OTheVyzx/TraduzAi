@@ -2,9 +2,12 @@
 
 import os
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
+from PIL import Image
 
 
 _FAST_WHITE_ENV = {
@@ -17,6 +20,12 @@ _FAST_ALL_ENV = {**_FAST_WHITE_ENV, **_FAST_LOCAL_ENV}
 
 
 class StripInpaintAdapterTests(unittest.TestCase):
+    def test_fast_white_balloon_fill_is_opt_in_by_default(self):
+        from inpainter import _fast_white_balloon_fill_enabled
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_fast_white_balloon_fill_enabled())
+
     def test_prewarm_band_inpainter_delegates_to_runtime_cache(self):
         import inpainter
 
@@ -41,11 +50,12 @@ class StripInpaintAdapterTests(unittest.TestCase):
             return_value=expected,
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
-        self.assertTrue(np.array_equal(cleaned, expected))
+        self.assertEqual(cleaned[30, 80].tolist(), [127, 127, 127])
+        self.assertEqual(cleaned[0, 0].tolist(), band[0, 0].tolist())
         get_inpainter.assert_called_once_with("quality")
         apply_round.assert_called_once()
         args = apply_round.call_args[0]
@@ -82,7 +92,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             return_value=filled,
         ) as apply_fill, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ) as post_cleanup, patch(
             "vision_stack.runtime._get_inpainter",
         ) as get_inpainter, patch(
@@ -243,7 +253,53 @@ class StripInpaintAdapterTests(unittest.TestCase):
         self.assertEqual(int(cleaned[70, 240, 0]), 255)
         self.assertEqual(page["_strip_fast_white_balloon_count"], 1)
 
-    def test_fast_white_narration_is_enabled_by_default_for_speed_profile(self):
+    def test_fast_white_debug_records_actual_fast_fill_changed_mask(self):
+        from inpainter import inpaint_band_image
+
+        band = np.full((80, 160, 3), 245, dtype=np.uint8)
+        page = {
+            "_band_index": 5,
+            "_source_page_number": 2,
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [56, 28, 100, 48],
+                    "text_pixel_bbox": [56, 28, 100, 48],
+                    "balloon_bbox": [40, 16, 120, 64],
+                    "tipo": "fala",
+                    "text": "HELLO",
+                    "balloon_type": "white",
+                }
+            ],
+            "_vision_blocks": [{"bbox": [56, 28, 100, 48], "confidence": 0.92}],
+        }
+        filled = band.copy()
+        filled[20:60, 44:116] = 255
+
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                **_FAST_WHITE_ENV,
+                "TRADUZAI_INPAINT_DEBUG_DIR": tmp,
+            },
+        ), patch(
+            "vision_stack.runtime._resolve_white_balloon_bbox",
+            return_value=[40, 16, 120, 64],
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_fill",
+            return_value=filled,
+        ), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            side_effect=AssertionError("fast fill should consume covered block"),
+        ):
+            inpaint_band_image(band, page)
+            debug_dir = Path(tmp) / "page_002_band_005"
+            fast_mask = np.array(Image.open(debug_dir / "01_fast_fill_changed_mask.png").convert("L"))
+
+        self.assertGreater(int(np.count_nonzero(fast_mask)), 0)
+        self.assertEqual(page["_strip_fast_white_balloon_count"], 1)
+
+    def test_fast_white_narration_is_enabled_only_when_flag_is_on_for_speed_profile(self):
         from inpainter import _fast_white_rejection_reason
 
         text = {
@@ -254,6 +310,8 @@ class StripInpaintAdapterTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_fast_white_rejection_reason(text), "narration_disabled")
+        with patch.dict(os.environ, {"TRADUZAI_STRIP_FAST_WHITE_NARRATION": "1"}, clear=True):
             self.assertEqual(_fast_white_rejection_reason(text), "")
 
     def test_fast_white_balloon_fill_accepts_edge_clipped_strip_balloon(self):
@@ -297,7 +355,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=lambda image_np, payload, inp: image_np.copy(),
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -338,7 +396,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=lambda image_np, payload, inp: image_np.copy(),
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -436,7 +494,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
         self.assertEqual(page["_strip_fast_local_balloon_count"], 1)
         self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
 
-    def test_fast_local_solid_background_skips_lama_for_large_uniform_dark_caption(self):
+    def test_fast_local_solid_background_leaves_large_uniform_dark_caption_for_lama(self):
         from inpainter import inpaint_band_image
 
         band = np.full((308, 720, 3), 0, dtype=np.uint8)
@@ -469,16 +527,16 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=lambda image_np, payload, inp: image_np.copy(),
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
-        get_inpainter.assert_not_called()
-        apply_round.assert_not_called()
-        self.assertLess(int(cleaned[120, 300, 0]), 32)
+        get_inpainter.assert_called_once_with("quality")
+        apply_round.assert_called_once()
+        self.assertEqual(int(cleaned[120, 300, 0]), 245)
         self.assertEqual(int(cleaned[10, 10, 0]), 0)
-        self.assertEqual(page["_strip_fast_local_balloon_count"], 1)
-        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
+        self.assertEqual(page["_strip_fast_local_balloon_count"], 0)
+        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 1)
 
     def test_fast_local_solid_background_leaves_large_noisy_dark_caption_for_lama(self):
         from inpainter import inpaint_band_image
@@ -518,7 +576,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=lambda image_np, payload, inp: image_np.copy(),
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -570,7 +628,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=lambda image_np, payload, inp: image_np.copy(),
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -626,7 +684,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=_capture_round,
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -663,7 +721,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=_capture_payload,
         ) as apply_round, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -691,7 +749,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             side_effect=_capture_payload,
         ), patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts: (cleaned, {}),
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
             cleaned = inpaint_band_image(band, page)
 
@@ -727,7 +785,7 @@ class InpaintPassthroughTests(unittest.TestCase):
                 side_effect=lambda image_np, payload, inp: image_np.copy(),
             ), patch(
                 "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-                side_effect=lambda original, cleaned, texts: (cleaned, {}),
+                side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
             ):
                 result = inpaint_band_image(band, page)
             self.assertEqual(result.shape, shape, f"Shape {shape} foi alterado")

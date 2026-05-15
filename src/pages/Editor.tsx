@@ -16,6 +16,7 @@ import {
   ScanText,
   Languages,
   Loader2,
+  X,
 } from "lucide-react";
 import { useAppStore } from "../lib/stores/appStore";
 import { EditorStage } from "../components/editor/stage/EditorStage";
@@ -44,6 +45,9 @@ function MaskLassoControls() {
   const setMaskShape = useEditorStore((s) => s.setMaskShape);
   const setMaskOp = useEditorStore((s) => s.setMaskOp);
   const clearMask = useEditorStore((s) => s.clearMask);
+  const activeLassoSelection = useEditorStore((s) => s.activeLassoSelection);
+  const applyLassoSelectionToMask = useEditorStore((s) => s.applyLassoSelectionToMask);
+  const setActiveLassoSelection = useEditorStore((s) => s.setActiveLassoSelection);
 
   return (
     <div className="flex items-center gap-2">
@@ -86,6 +90,28 @@ function MaskLassoControls() {
       >
         Limpar
       </button>
+
+      {activeLassoSelection && (
+        <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+          <button
+            type="button"
+            onClick={() => void applyLassoSelectionToMask()}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-accent-cyan transition-smooth hover:bg-accent-cyan/10"
+            title="Aplicar seleção à máscara"
+          >
+            <Check size={11} />
+            Aplicar
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveLassoSelection(null)}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-smooth hover:bg-white/[0.06] hover:text-text-primary"
+            title="Cancelar seleção"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -123,6 +149,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     renderPreviewCacheByPageKey,
     isRetypesetting,
     isReinpainting,
+    isHealingBrushApplying,
     loadCurrentPage,
     setCurrentPage,
     setToolMode,
@@ -141,6 +168,8 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     setBrushSize,
     activePageAction,
     runMaskedAction,
+    runMaskedActionFromLasso,
+    activeLassoSelection,
     pageActionError,
     clearPageActionError,
     forceFidelityRender,
@@ -156,7 +185,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     pendingStructuralEdits.created.length +
     Object.keys(pendingStructuralEdits.deleted).length +
     (pendingStructuralEdits.order ? 1 : 0);
-  const pagePipelineBusy = isRetypesetting || isReinpainting;
+  const pagePipelineBusy = isRetypesetting || isReinpainting || isHealingBrushApplying;
   const pageKey = currentPageKey();
   const renderPreviewState = useMemo(
     () => getRenderPreviewStateForPage(pageKey, currentPage, renderPreviewCacheByPageKey),
@@ -166,6 +195,8 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     !currentPage ||
     pagePipelineBusy ||
     (pendingCount === 0 && renderPreviewState.status === "fresh");
+  const runSelectionAwareAction = (action: Parameters<typeof runMaskedAction>[0]) =>
+    activeLassoSelection ? runMaskedActionFromLasso(action) : runMaskedAction(action);
 
   const saveAndRenderCurrentPage = async () => {
     const targetPageKey = currentPageKey();
@@ -496,7 +527,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
             )}
             <button
               disabled={pagePipelineBusy || activePageAction !== null}
-              onClick={() => void runMaskedAction("detect")}
+              onClick={() => void runSelectionAwareAction("detect")}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
               title="Detectar balões"
             >
@@ -505,7 +536,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
             </button>
             <button
               disabled={pagePipelineBusy || activePageAction !== null}
-              onClick={() => void runMaskedAction("ocr")}
+              onClick={() => void runSelectionAwareAction("ocr")}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
               title="Executar OCR"
             >
@@ -514,7 +545,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
             </button>
             <button
               disabled={pagePipelineBusy || activePageAction !== null}
-              onClick={() => void runMaskedAction("translate")}
+              onClick={() => void runSelectionAwareAction("translate")}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
               title="Traduzir textos"
             >
@@ -523,7 +554,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
             </button>
             <button
               disabled={pagePipelineBusy || activePageAction !== null}
-              onClick={() => void runMaskedAction("inpaint")}
+              onClick={() => void runSelectionAwareAction("inpaint")}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
               title="Limpar imagem (Inpaint)"
             >
@@ -533,14 +564,14 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
           </div>
 
           {/* Pipeline progress indicator */}
-          {(isRetypesetting || isReinpainting) && !!pipeline && (
+          {(isRetypesetting || isReinpainting || isHealingBrushApplying) && (
             <div className="flex items-center gap-1.5 rounded-lg bg-brand/8 px-2.5 py-1 border border-brand/15">
               <Loader2 size={11} className="text-brand animate-spin" />
               <span className="text-[10px] text-brand font-medium truncate max-w-[100px]">
-                {pipeline.message || "Processando"}
+                {isHealingBrushApplying ? "Corrigindo" : pipeline?.message || "Processando"}
               </span>
               <span className="text-[10px] text-brand/60 font-mono">
-                {Math.round(pipeline.step_progress)}%
+                {isHealingBrushApplying ? "" : `${Math.round(pipeline?.step_progress ?? 0)}%`}
               </span>
             </div>
           )}
@@ -567,7 +598,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
               </p>
             </div>
             <button
-              onClick={() => void runMaskedAction(pageActionError.action)}
+              onClick={() => void runSelectionAwareAction(pageActionError.action)}
               disabled={activePageAction !== null}
               className="rounded-md border border-border bg-bg-secondary px-2 py-0.5 text-[10px] text-text-primary hover:bg-bg-tertiary disabled:opacity-40"
               title="Tentar novamente"

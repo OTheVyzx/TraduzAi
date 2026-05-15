@@ -273,4 +273,51 @@ describe("editor render preview cache", () => {
       }),
     );
   });
+
+  it("includes gradient/effect preset style changes in the faithful preview payload and fingerprint", async () => {
+    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/001-preview.png");
+    const pageKey = useEditorStore.getState().currentPageKey();
+    const before = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
+
+    useEditorStore.getState().setWorkingEstiloPatch(pageKey, "layer-a", {
+      cor: "#ffe900",
+      cor_gradiente: ["#fff247", "#ff7a00"],
+      contorno: "#000000",
+      contorno_px: 4,
+      glow: true,
+      glow_cor: "#ffffff",
+      glow_px: 2,
+      sombra: true,
+      sombra_cor: "#050505",
+      sombra_offset: [5, 6],
+    }, ["cor", "cor_gradiente", "contorno", "contorno_px", "glow", "glow_cor", "glow_px", "sombra", "sombra_cor", "sombra_offset"]);
+    const after = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
+    await useEditorStore.getState().renderPreviewPage(pageKey);
+
+    expect(after).not.toBe(before);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "render_preview_page",
+      expect.objectContaining({
+        config: expect.objectContaining({
+          page: expect.objectContaining({
+            text_layers: [
+              expect.objectContaining({
+                id: "layer-a",
+                estilo: expect.objectContaining({
+                  cor_gradiente: ["#fff247", "#ff7a00"],
+                  glow: true,
+                  sombra_offset: [5, 6],
+                }),
+                style: expect.objectContaining({
+                  cor_gradiente: ["#fff247", "#ff7a00"],
+                  glow: true,
+                  sombra_offset: [5, 6],
+                }),
+              }),
+            ],
+          }),
+        }),
+      }),
+    );
+  });
 });

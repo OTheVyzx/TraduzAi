@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /projects
+Disallow: /settings
+Disallow: /admin
+Disallow: /job/
+Disallow: /resultados/
+Disallow: /novo
+
+Sitemap: https://traduzai.app/sitemap.xml

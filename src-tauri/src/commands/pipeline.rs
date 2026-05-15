@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -25,6 +26,12 @@ static VISUAL_WARMUP_STATE: once_cell::sync::Lazy<Mutex<VisualWarmupState>> =
     once_cell::sync::Lazy::new(|| Mutex::new(VisualWarmupState::Idle));
 #[allow(dead_code)]
 static VISION_WORKER_WARMUP_STATE: once_cell::sync::Lazy<Mutex<VisualWarmupState>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(VisualWarmupState::Idle));
+#[allow(dead_code)]
+static FAST_PAGE_WORKER: once_cell::sync::Lazy<Mutex<Option<FastPageWorker>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+#[allow(dead_code)]
+static FAST_PAGE_INPAINT_WARMUP_STATE: once_cell::sync::Lazy<Mutex<VisualWarmupState>> =
     once_cell::sync::Lazy::new(|| Mutex::new(VisualWarmupState::Idle));
 
 #[allow(dead_code)]
@@ -135,6 +142,10 @@ pub struct WorkSearchCandidate {
     pub title: String,
     #[serde(default)]
     pub synopsis: String,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub characters: Vec<String>,
     pub source: String,
     #[serde(default)]
     pub source_url: String,
@@ -157,6 +168,34 @@ pub struct ContextSourceRef {
     pub title: String,
     pub url: String,
     pub snippet: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalContextCandidate {
+    kind: String,
+    source: String,
+    target: String,
+    confidence: f64,
+    sources: Vec<String>,
+    status: String,
+    protect: bool,
+    aliases: Vec<String>,
+    forbidden: Vec<String>,
+    notes: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalContextData {
+    source: String,
+    status: String,
+    confidence: f64,
+    title: String,
+    synopsis: String,
+    genres: Vec<String>,
+    candidates: Vec<ExternalContextCandidate>,
+    url: String,
+    error: String,
+    cover_url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -192,11 +231,100 @@ pub struct EnrichedWorkContext {
     pub risk_level: String,
     #[serde(default)]
     pub glossary_entries_count: u32,
+    #[serde(default)]
+    pub internet_context_loaded: bool,
+    #[serde(default)]
+    pub source_results: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub glossary_candidates: Vec<serde_json::Value>,
 }
 
 pub(crate) struct SidecarInfo {
     pub(crate) program: String,
     pub(crate) script: Option<String>,
+}
+
+struct FastPageWorker {
+    signature: String,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+#[derive(Debug)]
+enum FastPageRunError {
+    Worker(String),
+    Action(String),
+}
+
+fn is_project_summary_mismatch(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("log.summary") && lowered.contains("project.json")
+}
+
+async fn stop_fast_page_worker(reason: &str) {
+    let mut guard = FAST_PAGE_WORKER.lock().await;
+    if let Some(mut worker) = guard.take() {
+        eprintln!("[FastPageWorker] reiniciando worker: {reason}");
+        let _ = worker.child.kill().await;
+    }
+    drop(guard);
+    *VISUAL_WARMUP_STATE.lock().await = VisualWarmupState::Idle;
+    *FAST_PAGE_INPAINT_WARMUP_STATE.lock().await = VisualWarmupState::Idle;
+}
+
+impl FastPageWorker {
+    async fn request(
+        &mut self,
+        request: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let raw = serde_json::to_string(request)
+            .map_err(|e| format!("falha ao serializar request do fast worker: {e}"))?;
+        self.stdin
+            .write_all(raw.as_bytes())
+            .await
+            .map_err(|e| format!("falha ao escrever no fast worker: {e}"))?;
+        self.stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("falha ao finalizar request do fast worker: {e}"))?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| format!("falha ao flush do fast worker: {e}"))?;
+
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            let read = self
+                .stdout
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("falha ao ler resposta do fast worker: {e}"))?;
+            if read == 0 {
+                return Err("fast worker encerrou sem resposta".into());
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let event: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(event) => event,
+                Err(error) => {
+                    eprintln!("[FastPageWorker] ignorando stdout nao JSON: {error} | {trimmed}");
+                    continue;
+                }
+            };
+            let is_terminal = matches!(
+                event.get("type").and_then(|value| value.as_str()),
+                Some("complete" | "error" | "ready" | "bye")
+            );
+            events.push(event);
+            if is_terminal {
+                return Ok(events);
+            }
+        }
+    }
 }
 
 fn normalize_text(input: &str) -> String {
@@ -557,6 +685,16 @@ fn append_page_region_args(cmd: &mut Command, region: Option<&PageRegionConfig>)
     }
 }
 
+fn page_region_to_json(region: Option<&PageRegionConfig>) -> serde_json::Value {
+    match region {
+        Some(region) => serde_json::json!({
+            "bbox": region.bbox,
+            "mask_path": region.mask_path,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
 fn safe_render_preview_key(raw: &str) -> String {
     let mut key = raw
         .chars()
@@ -677,6 +815,339 @@ fn format_pipeline_error(action: &str, base: &str, stderr: &str) -> String {
         };
         format!("[EditorAction] {action} falhou: {base}\n--- stderr Python ---\n{truncated}")
     }
+}
+
+fn fast_page_worker_signature(sidecar: &SidecarInfo) -> String {
+    format!(
+        "{}|{}",
+        sidecar.program,
+        sidecar.script.as_deref().unwrap_or("")
+    )
+}
+
+async fn spawn_fast_page_worker(
+    sidecar: &SidecarInfo,
+    signature: String,
+    models_dir: &Path,
+) -> Result<FastPageWorker, String> {
+    let mut cmd = Command::new(&sidecar.program);
+    if let Some(script) = &sidecar.script {
+        cmd.arg(script);
+    }
+    cmd.arg("--serve-fast-page")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TRADUZAI_MODELS_DIR", models_dir);
+    apply_sidecar_env(&mut cmd, &sidecar.program)?;
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("erro ao iniciar fast page worker: {e}"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "fast page worker iniciou sem stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "fast page worker iniciou sem stdout".to_string())?;
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[FastPageWorker] {line}");
+            }
+        });
+    }
+
+    Ok(FastPageWorker {
+        signature,
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+    })
+}
+
+async fn run_fast_page_worker_request(
+    app: &AppHandle,
+    request: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    let sidecar = get_sidecar_info(app)?;
+    let storage = crate::storage::service_for_app(app)?;
+    let models_dir = storage.ensure_base_dirs()?.models;
+    let signature = format!(
+        "{}|models={}",
+        fast_page_worker_signature(&sidecar),
+        models_dir.to_string_lossy()
+    );
+    let mut guard = FAST_PAGE_WORKER.lock().await;
+    let should_restart = match guard.as_mut() {
+        Some(worker) if worker.signature == signature => match worker.child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!("[FastPageWorker] worker finalizado antes do request: {status}");
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                eprintln!("[FastPageWorker] falha ao consultar worker: {error}");
+                true
+            }
+        },
+        Some(_) => true,
+        None => true,
+    };
+
+    if should_restart {
+        if let Some(mut worker) = guard.take() {
+            let _ = worker.child.kill().await;
+        }
+        *guard = Some(spawn_fast_page_worker(&sidecar, signature, &models_dir).await?);
+    }
+
+    let worker = guard
+        .as_mut()
+        .ok_or_else(|| "fast page worker indisponivel".to_string())?;
+    match worker.request(&request).await {
+        Ok(events) => Ok(events),
+        Err(error) => {
+            if let Some(mut worker) = guard.take() {
+                let _ = worker.child.kill().await;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn emit_progress_from_fast_worker_event(
+    app: &AppHandle,
+    event: &serde_json::Value,
+    default_step: &str,
+) {
+    let prog = PipelineProgress {
+        step: event["step"].as_str().unwrap_or(default_step).to_string(),
+        step_progress: event["step_progress"].as_f64().unwrap_or(0.0),
+        overall_progress: event["overall_progress"].as_f64().unwrap_or(0.0),
+        current_page: event["current_page"].as_u64().unwrap_or(0) as u32,
+        total_pages: event["total_pages"].as_u64().unwrap_or(0) as u32,
+        message: event["message"].as_str().unwrap_or("").to_string(),
+        eta_seconds: event["eta_seconds"].as_f64().unwrap_or(0.0),
+    };
+    app.emit("pipeline-progress", prog).ok();
+}
+
+async fn run_editor_page_action_with_fast_worker(
+    app: &AppHandle,
+    request_type: &str,
+    action: &str,
+    default_step: &str,
+    project_file: &Path,
+    page_index: u32,
+    region: Option<&PageRegionConfig>,
+) -> Result<String, FastPageRunError> {
+    let request = serde_json::json!({
+        "type": request_type,
+        "project_path": project_file.to_string_lossy().to_string(),
+        "page_index": page_index,
+        "region": page_region_to_json(region),
+    });
+    let events = run_fast_page_worker_request(app, request)
+        .await
+        .map_err(FastPageRunError::Worker)?;
+
+    let mut output_path = String::new();
+    for event in events {
+        match event.get("type").and_then(|value| value.as_str()) {
+            Some("progress") => emit_progress_from_fast_worker_event(app, &event, default_step),
+            Some("complete") => {
+                output_path = event["output_path"].as_str().unwrap_or("").to_string();
+            }
+            Some("error") => {
+                let message = event["message"].as_str().unwrap_or("Erro Python");
+                if is_project_summary_mismatch(message) {
+                    stop_fast_page_worker("project summary stale no editor action").await;
+                    return Err(FastPageRunError::Worker(format_pipeline_error(
+                        action, message, "",
+                    )));
+                }
+                if message.contains(request_type) || message.contains("fast-page") {
+                    return Err(FastPageRunError::Worker(message.to_string()));
+                }
+                return Err(FastPageRunError::Action(format_pipeline_error(
+                    action, message, "",
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    if output_path.is_empty() {
+        Err(FastPageRunError::Worker(format!(
+            "fast worker nao retornou output_path para {action}"
+        )))
+    } else {
+        Ok(output_path)
+    }
+}
+
+async fn run_reinpaint_page_with_fast_worker(
+    app: &AppHandle,
+    project_file: &Path,
+    page_index: u32,
+    region: Option<&PageRegionConfig>,
+) -> Result<String, FastPageRunError> {
+    let started = Instant::now();
+    let request = serde_json::json!({
+        "type": "editor_reinpaint",
+        "project_path": project_file.to_string_lossy().to_string(),
+        "page_index": page_index,
+        "region": page_region_to_json(region),
+    });
+    let events = run_fast_page_worker_request(app, request)
+        .await
+        .map_err(FastPageRunError::Worker)?;
+
+    let mut output_path = String::new();
+    for event in events {
+        match event.get("type").and_then(|value| value.as_str()) {
+            Some("progress") => emit_progress_from_fast_worker_event(app, &event, "inpaint"),
+            Some("complete") => {
+                output_path = event["output_path"].as_str().unwrap_or("").to_string();
+                let elapsed_seconds = event["elapsed_seconds"].as_f64().unwrap_or(0.0);
+                let inpaint_seconds = event["inpaint_seconds"].as_f64().unwrap_or(0.0);
+                let finalize_seconds = event["finalize_seconds"].as_f64().unwrap_or(0.0);
+                let lama_ms = event["inpaint_stats"]["_t_lama_ms"].as_f64().unwrap_or(0.0);
+                let roi_ratio = event["inpaint_stats"]["roi_area_ratio"]
+                    .as_f64()
+                    .unwrap_or(0.0);
+                eprintln!(
+                    "[EditorAction] timing inpaint worker page={} rust={:.3}s py={:.3}s inpaint={:.3}s finalize={:.3}s lama={:.0}ms roi_ratio={:.4}",
+                    page_index,
+                    started.elapsed().as_secs_f64(),
+                    elapsed_seconds,
+                    inpaint_seconds,
+                    finalize_seconds,
+                    lama_ms,
+                    roi_ratio,
+                );
+            }
+            Some("error") => {
+                let message = event["message"].as_str().unwrap_or("Erro Python");
+                if is_project_summary_mismatch(message) {
+                    stop_fast_page_worker("project summary stale no inpaint worker").await;
+                    return Err(FastPageRunError::Worker(format_pipeline_error(
+                        "inpaint", message, "",
+                    )));
+                }
+                if message.contains("editor_reinpaint") || message.contains("fast-page") {
+                    return Err(FastPageRunError::Worker(message.to_string()));
+                }
+                return Err(FastPageRunError::Action(format_pipeline_error(
+                    "inpaint", message, "",
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    if output_path.is_empty() {
+        Err(FastPageRunError::Worker(
+            "fast worker nao retornou output_path".into(),
+        ))
+    } else {
+        Ok(output_path)
+    }
+}
+
+async fn warmup_editor_visual_worker(app: AppHandle) -> Result<String, String> {
+    {
+        let mut state = VISUAL_WARMUP_STATE.lock().await;
+        match *state {
+            VisualWarmupState::Ready => return Ok("ready".into()),
+            VisualWarmupState::Running => return Ok("warming".into()),
+            VisualWarmupState::Idle => {
+                *state = VisualWarmupState::Running;
+            }
+        }
+    }
+
+    let result = async {
+        let storage = crate::storage::service_for_app(&app)?;
+        let models_dir = storage.ensure_base_dirs()?.models;
+        let events = run_fast_page_worker_request(
+            &app,
+            serde_json::json!({
+                "type": "warmup",
+                "models_dir": models_dir.to_string_lossy().to_string(),
+                "profile": "max",
+                "idioma_origem": "en",
+            }),
+        )
+        .await?;
+
+        if events
+            .iter()
+            .any(|event| event.get("type").and_then(|value| value.as_str()) == Some("ready"))
+        {
+            Ok("ready".to_string())
+        } else {
+            Err("fast worker nao confirmou warmup visual".to_string())
+        }
+    }
+    .await;
+
+    let mut state = VISUAL_WARMUP_STATE.lock().await;
+    *state = if result.is_ok() {
+        VisualWarmupState::Ready
+    } else {
+        VisualWarmupState::Idle
+    };
+    result
+}
+
+async fn warmup_editor_inpaint_worker(app: AppHandle) -> Result<String, String> {
+    {
+        let mut state = FAST_PAGE_INPAINT_WARMUP_STATE.lock().await;
+        match *state {
+            VisualWarmupState::Ready => return Ok("ready".into()),
+            VisualWarmupState::Running => return Ok("warming".into()),
+            VisualWarmupState::Idle => {
+                *state = VisualWarmupState::Running;
+            }
+        }
+    }
+
+    let result = async {
+        let storage = crate::storage::service_for_app(&app)?;
+        let models_dir = storage.ensure_base_dirs()?.models;
+        let events = run_fast_page_worker_request(
+            &app,
+            serde_json::json!({
+                "type": "warmup_inpaint",
+                "models_dir": models_dir.to_string_lossy().to_string(),
+                "profile": "quality",
+            }),
+        )
+        .await?;
+
+        if events
+            .iter()
+            .any(|event| event.get("type").and_then(|value| value.as_str()) == Some("ready"))
+        {
+            Ok("ready".to_string())
+        } else {
+            Err("fast worker nao confirmou warmup do inpaint".to_string())
+        }
+    }
+    .await;
+
+    let mut state = FAST_PAGE_INPAINT_WARMUP_STATE.lock().await;
+    *state = if result.is_ok() {
+        VisualWarmupState::Ready
+    } else {
+        VisualWarmupState::Idle
+    };
+    result
 }
 
 #[tauri::command]
@@ -910,6 +1381,27 @@ pub async fn reinpaint_page_with_region(
     region: Option<PageRegionConfig>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
+    match run_reinpaint_page_with_fast_worker(&app, &pf, page_index, region.as_ref()).await {
+        Ok(out) => {
+            eprintln!(
+                "[EditorAction] success inpaint page={} out={} worker=fast",
+                page_index, out
+            );
+            if let Err(error) =
+                crate::commands::project::clear_inpaint_cache_for_page(&pf, page_index as usize)
+            {
+                eprintln!("[EditorAction] warn   inpaint cache cleanup failed: {error}");
+            }
+            return Ok(out);
+        }
+        Err(FastPageRunError::Action(error)) => return Err(error),
+        Err(FastPageRunError::Worker(error)) => {
+            eprintln!(
+                "[EditorAction] warn   fast inpaint worker indisponivel; usando sidecar unico: {error}"
+            );
+        }
+    }
+
     let sidecar = get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
     if let Some(s) = &sidecar.script {
@@ -919,6 +1411,11 @@ pub async fn reinpaint_page_with_region(
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
     append_page_region_args(&mut cmd, region.as_ref());
+    if let Ok(storage) = crate::storage::service_for_app(&app) {
+        if let Ok(paths) = storage.ensure_base_dirs() {
+            cmd.env("TRADUZAI_MODELS_DIR", paths.models);
+        }
+    }
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  inpaint page={}", page_index);
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "inpaint")?;
@@ -979,6 +1476,32 @@ pub async fn detect_page_with_region(
     region: Option<PageRegionConfig>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
+    match run_editor_page_action_with_fast_worker(
+        &app,
+        "editor_detect_page",
+        "detect",
+        "ocr",
+        &pf,
+        page_index,
+        region.as_ref(),
+    )
+    .await
+    {
+        Ok(out) => {
+            eprintln!(
+                "[EditorAction] success detect page={} out={} worker=fast",
+                page_index, out
+            );
+            return Ok(out);
+        }
+        Err(FastPageRunError::Action(error)) => return Err(error),
+        Err(FastPageRunError::Worker(error)) => {
+            eprintln!(
+                "[EditorAction] warn   fast detect worker indisponivel; usando sidecar unico: {error}"
+            );
+        }
+    }
+
     let sidecar = get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
     if let Some(s) = &sidecar.script {
@@ -1056,6 +1579,32 @@ pub async fn ocr_page_with_region(
     region: Option<PageRegionConfig>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
+    match run_editor_page_action_with_fast_worker(
+        &app,
+        "editor_ocr_page",
+        "ocr",
+        "ocr",
+        &pf,
+        page_index,
+        region.as_ref(),
+    )
+    .await
+    {
+        Ok(out) => {
+            eprintln!(
+                "[EditorAction] success ocr page={} out={} worker=fast",
+                page_index, out
+            );
+            return Ok(out);
+        }
+        Err(FastPageRunError::Action(error)) => return Err(error),
+        Err(FastPageRunError::Worker(error)) => {
+            eprintln!(
+                "[EditorAction] warn   fast ocr worker indisponivel; usando sidecar unico: {error}"
+            );
+        }
+    }
+
     let sidecar = get_sidecar_info(&app)?;
     let mut cmd = Command::new(&sidecar.program);
     if let Some(s) = &sidecar.script {
@@ -1286,7 +1835,7 @@ pub async fn download_models(app: AppHandle) -> Result<(), String> {
 }
 
 async fn search_anilist_internal(query: &str) -> Result<serde_json::Value, String> {
-    let gq = r#"query ($search: String) { Media(search: $search, type: MANGA) { title { english romaji } description(asHtml: false) genres characters(sort: ROLE, perPage: 10) { nodes { name { full } } } coverImage { large } } }"#;
+    let gq = r#"query ($search: String) { Media(search: $search, type: MANGA) { id siteUrl title { english romaji native } synonyms description(asHtml: false) genres characters(sort: ROLE, perPage: 20) { nodes { name { full native alternative } } } coverImage { large } } }"#;
     let client = reqwest::Client::new();
     let resp = client
         .post("https://graphql.anilist.co")
@@ -1299,11 +1848,675 @@ async fn search_anilist_internal(query: &str) -> Result<serde_json::Value, Strin
     let title = media["title"]["english"]
         .as_str()
         .or(media["title"]["romaji"].as_str())
+        .or(media["title"]["native"].as_str())
         .unwrap_or(query)
         .to_string();
-    Ok(
-        serde_json::json!({ "title": title, "synopsis": media["description"].as_str().unwrap_or(""), "genres": media["genres"].as_array().unwrap_or(&vec![]), "characters": media["characters"]["nodes"].as_array().unwrap_or(&vec![]).iter().filter_map(|c| c["name"]["full"].as_str().map(|s| s.to_string())).collect::<Vec<_>>(), "cover_url": media["coverImage"]["large"].as_str().unwrap_or("") }),
+    let characters = media["characters"]["nodes"]
+        .as_array()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|c| c["name"]["full"].as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "title": title,
+        "synopsis": media["description"].as_str().unwrap_or(""),
+        "genres": media["genres"].as_array().cloned().unwrap_or_default(),
+        "characters": characters,
+        "aliases": media["synonyms"].as_array().cloned().unwrap_or_default(),
+        "cover_url": media["coverImage"]["large"].as_str().unwrap_or(""),
+        "url": media["siteUrl"].as_str().unwrap_or(""),
+    }))
+}
+
+fn external_error(source: &str, error: impl ToString) -> ExternalContextData {
+    ExternalContextData {
+        source: source.to_string(),
+        status: "error".to_string(),
+        confidence: 0.0,
+        title: String::new(),
+        synopsis: String::new(),
+        genres: vec![],
+        candidates: vec![],
+        url: String::new(),
+        error: error.to_string(),
+        cover_url: String::new(),
+    }
+}
+
+fn external_not_found(source: &str) -> ExternalContextData {
+    ExternalContextData {
+        source: source.to_string(),
+        status: "not_found".to_string(),
+        confidence: 0.0,
+        title: String::new(),
+        synopsis: String::new(),
+        genres: vec![],
+        candidates: vec![],
+        url: String::new(),
+        error: String::new(),
+        cover_url: String::new(),
+    }
+}
+
+fn anilist_context_from_value(value: &serde_json::Value) -> ExternalContextData {
+    let mut candidates = Vec::new();
+    for name in json_string_vec(&value["characters"]) {
+        if let Some(candidate) = context_candidate("character", &name, 0.95, "anilist", vec![]) {
+            candidates.push(candidate);
+        }
+    }
+    for alias in json_string_vec(&value["aliases"]) {
+        if let Some(candidate) = context_candidate("alias", &alias, 0.75, "anilist", vec![]) {
+            candidates.push(candidate);
+        }
+    }
+    ExternalContextData {
+        source: "anilist".to_string(),
+        status: "found".to_string(),
+        confidence: 0.92,
+        title: value["title"].as_str().unwrap_or_default().to_string(),
+        synopsis: value["synopsis"].as_str().unwrap_or_default().to_string(),
+        genres: json_string_vec(&value["genres"]),
+        candidates,
+        url: value["url"].as_str().unwrap_or_default().to_string(),
+        error: String::new(),
+        cover_url: value["cover_url"].as_str().unwrap_or_default().to_string(),
+    }
+}
+
+async fn search_anilist_context(client: &reqwest::Client, query: &str) -> ExternalContextData {
+    let gq = r#"query ($search: String) { Media(search: $search, type: MANGA) { id siteUrl title { english romaji native } synonyms description(asHtml: false) genres characters(sort: ROLE, perPage: 20) { nodes { name { full native alternative } } } coverImage { large } } }"#;
+    let data = match client
+        .post("https://graphql.anilist.co")
+        .json(&serde_json::json!({"query": gq, "variables": {"search": query}}))
+        .send()
+        .await
+        .and_then(|resp| resp.error_for_status())
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => value,
+            Err(error) => return external_error("anilist", error),
+        },
+        Err(error) => return external_error("anilist", error),
+    };
+    let media = &data["data"]["Media"];
+    if media.is_null() {
+        return external_not_found("anilist");
+    }
+    let title = media["title"]["english"]
+        .as_str()
+        .or(media["title"]["romaji"].as_str())
+        .or(media["title"]["native"].as_str())
+        .unwrap_or(query)
+        .to_string();
+    let mut candidates = Vec::new();
+    for node in media["characters"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let names = &node["name"];
+        let primary = names["full"]
+            .as_str()
+            .or(names["native"].as_str())
+            .unwrap_or_default();
+        let aliases = names["alternative"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(candidate) = context_candidate("character", primary, 0.95, "anilist", aliases) {
+            candidates.push(candidate);
+        }
+    }
+    for alias in media["synonyms"].as_array().into_iter().flatten() {
+        if let Some(alias) = alias.as_str() {
+            if let Some(candidate) = context_candidate("alias", alias, 0.75, "anilist", vec![]) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    ExternalContextData {
+        source: "anilist".to_string(),
+        status: "found".to_string(),
+        confidence: 0.92,
+        title,
+        synopsis: media["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        genres: json_string_vec(&media["genres"]),
+        candidates,
+        url: media["siteUrl"].as_str().unwrap_or_default().to_string(),
+        error: String::new(),
+        cover_url: media["coverImage"]["large"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+async fn search_jikan_context(client: &reqwest::Client, query: &str) -> ExternalContextData {
+    let search = match client
+        .get("https://api.jikan.moe/v4/manga")
+        .query(&[("q", query), ("limit", "1")])
+        .send()
+        .await
+        .and_then(|resp| resp.error_for_status())
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => value,
+            Err(error) => return external_error("myanimelist", error),
+        },
+        Err(error) => return external_error("myanimelist", error),
+    };
+    let Some(manga) = search["data"].as_array().and_then(|items| items.first()) else {
+        return external_not_found("myanimelist");
+    };
+    let title = manga["title_english"]
+        .as_str()
+        .or(manga["title"].as_str())
+        .unwrap_or(query)
+        .to_string();
+    let title_synonyms = manga["title_synonyms"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !context_title_matches(query, &title, &title_synonyms) {
+        return external_not_found("myanimelist");
+    }
+    let mal_id = manga["mal_id"].as_i64().unwrap_or_default();
+    let mut candidates = Vec::new();
+    if mal_id > 0 {
+        let url = format!("https://api.jikan.moe/v4/manga/{mal_id}/characters");
+        if let Ok(resp) = client
+            .get(url)
+            .send()
+            .await
+            .and_then(|resp| resp.error_for_status())
+        {
+            if let Ok(chars) = resp.json::<serde_json::Value>().await {
+                for item in chars["data"].as_array().into_iter().flatten() {
+                    let character = &item["character"];
+                    let name = character["name"].as_str().unwrap_or_default();
+                    if let Some(candidate) =
+                        context_candidate("character", name, 0.9, "myanimelist", vec![])
+                    {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+    }
+    let genres = manga["genres"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["name"].as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    ExternalContextData {
+        source: "myanimelist".to_string(),
+        status: "found".to_string(),
+        confidence: 0.86,
+        title,
+        synopsis: manga["synopsis"].as_str().unwrap_or_default().to_string(),
+        genres,
+        candidates,
+        url: manga["url"].as_str().unwrap_or_default().to_string(),
+        error: String::new(),
+        cover_url: manga["images"]["jpg"]["large_image_url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+async fn search_mangadex_context(client: &reqwest::Client, query: &str) -> ExternalContextData {
+    let data = match client
+        .get("https://api.mangadex.org/manga")
+        .query(&[("title", query), ("limit", "1")])
+        .send()
+        .await
+        .and_then(|resp| resp.error_for_status())
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => value,
+            Err(error) => return external_error("mangadex", error),
+        },
+        Err(error) => return external_error("mangadex", error),
+    };
+    let Some(manga) = data["data"].as_array().and_then(|items| items.first()) else {
+        return external_not_found("mangadex");
+    };
+    let attrs = &manga["attributes"];
+    let title = attrs["title"]["en"]
+        .as_str()
+        .or_else(|| {
+            attrs["title"]
+                .as_object()
+                .and_then(|titles| titles.values().find_map(|value| value.as_str()))
+        })
+        .unwrap_or(query)
+        .to_string();
+    let mut candidates = Vec::new();
+    for alt in attrs["altTitles"].as_array().into_iter().flatten() {
+        if let Some(map) = alt.as_object() {
+            for value in map.values().filter_map(|value| value.as_str()) {
+                if let Some(candidate) = context_candidate("alias", value, 0.72, "mangadex", vec![])
+                {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    let genres = attrs["tags"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item["attributes"]["name"]["en"]
+                        .as_str()
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let id = manga["id"].as_str().unwrap_or_default();
+    ExternalContextData {
+        source: "mangadex".to_string(),
+        status: "found".to_string(),
+        confidence: 0.78,
+        title,
+        synopsis: attrs["description"]["en"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        genres,
+        candidates,
+        url: if id.is_empty() {
+            String::new()
+        } else {
+            format!("https://mangadex.org/title/{id}")
+        },
+        error: String::new(),
+        cover_url: String::new(),
+    }
+}
+
+async fn search_kitsu_context(client: &reqwest::Client, query: &str) -> ExternalContextData {
+    let data = match client
+        .get("https://kitsu.io/api/edge/manga")
+        .header("Accept", "application/vnd.api+json")
+        .query(&[("filter[text]", query), ("page[limit]", "1")])
+        .send()
+        .await
+        .and_then(|resp| resp.error_for_status())
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => value,
+            Err(error) => return external_error("kitsu", error),
+        },
+        Err(error) => return external_error("kitsu", error),
+    };
+    let Some(manga) = data["data"].as_array().and_then(|items| items.first()) else {
+        return external_not_found("kitsu");
+    };
+    let attrs = &manga["attributes"];
+    let title = attrs["titles"]["en"]
+        .as_str()
+        .or(attrs["titles"]["en_jp"].as_str())
+        .or(attrs["canonicalTitle"].as_str())
+        .unwrap_or(query)
+        .to_string();
+    let mut candidates = Vec::new();
+    if let Some(titles) = attrs["titles"].as_object() {
+        for value in titles.values().filter_map(|value| value.as_str()) {
+            if value != title {
+                if let Some(candidate) = context_candidate("alias", value, 0.7, "kitsu", vec![]) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    let slug = attrs["slug"]
+        .as_str()
+        .or(manga["id"].as_str())
+        .unwrap_or_default();
+    ExternalContextData {
+        source: "kitsu".to_string(),
+        status: "found".to_string(),
+        confidence: 0.74,
+        title,
+        synopsis: attrs["synopsis"].as_str().unwrap_or_default().to_string(),
+        genres: vec![],
+        candidates,
+        url: if slug.is_empty() {
+            String::new()
+        } else {
+            format!("https://kitsu.io/manga/{slug}")
+        },
+        error: String::new(),
+        cover_url: attrs["posterImage"]["large"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+async fn search_external_context_sources(query: &str) -> Vec<ExternalContextData> {
+    let client = reqwest::Client::builder()
+        .user_agent("TraduzAi/1.0")
+        .timeout(Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let anilist = search_anilist_context(&client, query);
+    let myanimelist = search_jikan_context(&client, query);
+    let mangadex = search_mangadex_context(&client, query);
+    let kitsu = search_kitsu_context(&client, query);
+    let (anilist, myanimelist, mangadex, kitsu) =
+        tokio::join!(anilist, myanimelist, mangadex, kitsu);
+    vec![anilist, myanimelist, mangadex, kitsu]
+}
+
+fn json_string_vec(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn value_strings(values: &[serde_json::Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| value.as_str().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn unique_strings(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let key = normalize_text(&clean);
+        if !key.is_empty() && seen.insert(key) {
+            out.push(clean);
+        }
+    }
+    out
+}
+
+fn context_title_matches(query: &str, title: &str, aliases: &[String]) -> bool {
+    let query_key = normalize_text(query);
+    if query_key.is_empty() {
+        return false;
+    }
+    let mut candidates = vec![title.to_string()];
+    candidates.extend(aliases.iter().cloned());
+    let query_tokens = query_key.split_whitespace().collect::<Vec<_>>();
+    for candidate in candidates {
+        let candidate_key = normalize_text(&candidate);
+        if candidate_key == query_key
+            || candidate_key.contains(&query_key)
+            || query_key.contains(&candidate_key)
+        {
+            return true;
+        }
+        let candidate_tokens = candidate_key
+            .split_whitespace()
+            .collect::<std::collections::BTreeSet<_>>();
+        let overlap = query_tokens
+            .iter()
+            .filter(|token| candidate_tokens.contains(**token))
+            .count();
+        if overlap >= 2 && overlap * 2 >= query_tokens.len() {
+            return true;
+        }
+    }
+    false
+}
+
+fn context_candidate(
+    kind: &str,
+    source: &str,
+    confidence: f64,
+    source_name: &str,
+    aliases: Vec<String>,
+) -> Option<ExternalContextCandidate> {
+    let clean = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() {
+        return None;
+    }
+    Some(ExternalContextCandidate {
+        kind: kind.to_string(),
+        source: clean.clone(),
+        target: clean,
+        confidence,
+        sources: vec![source_name.to_string()],
+        status: "candidate".to_string(),
+        protect: true,
+        aliases: unique_strings(aliases),
+        forbidden: vec![],
+        notes: String::new(),
+    })
+}
+
+fn source_result_value(result: &ExternalContextData) -> serde_json::Value {
+    serde_json::json!({
+        "source": result.source,
+        "status": result.status,
+        "confidence": result.confidence,
+        "title": result.title,
+        "synopsis": result.synopsis,
+        "genres": result.genres,
+        "url": result.url,
+        "error": result.error,
+    })
+}
+
+fn candidate_value(candidate: &ExternalContextCandidate) -> serde_json::Value {
+    serde_json::json!({
+        "kind": candidate.kind,
+        "source": candidate.source,
+        "target": candidate.target,
+        "confidence": candidate.confidence,
+        "sources": candidate.sources,
+        "status": candidate.status,
+        "protect": candidate.protect,
+        "aliases": candidate.aliases,
+        "forbidden": candidate.forbidden,
+        "notes": candidate.notes,
+    })
+}
+
+fn merge_external_candidates(results: &[ExternalContextData]) -> Vec<ExternalContextCandidate> {
+    let mut merged: HashMap<String, ExternalContextCandidate> = HashMap::new();
+    for result in results.iter().filter(|item| item.status == "found") {
+        for candidate in &result.candidates {
+            let key = normalize_text(&candidate.source);
+            if key.is_empty() {
+                continue;
+            }
+            let entry = merged.entry(key).or_insert_with(|| candidate.clone());
+            entry.sources = unique_strings(
+                entry
+                    .sources
+                    .iter()
+                    .cloned()
+                    .chain(candidate.sources.iter().cloned())
+                    .chain(std::iter::once(result.source.clone())),
+            );
+            entry.aliases = unique_strings(
+                entry
+                    .aliases
+                    .iter()
+                    .cloned()
+                    .chain(candidate.aliases.iter().cloned()),
+            );
+            if candidate.confidence > entry.confidence {
+                entry.confidence = candidate.confidence;
+                entry.target = candidate.target.clone();
+            }
+        }
+    }
+    let mut values: Vec<_> = merged.into_values().collect();
+    values.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.source.to_lowercase().cmp(&b.source.to_lowercase()))
+    });
+    values
+}
+
+fn best_context_title(results: &[ExternalContextData], fallback: &str) -> String {
+    results
+        .iter()
+        .filter(|item| item.status == "found" && !item.title.trim().is_empty())
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|item| item.title.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn best_context_synopsis(results: &[ExternalContextData], fallback: &str) -> String {
+    results
+        .iter()
+        .filter(|item| item.status == "found" && !item.synopsis.trim().is_empty())
+        .max_by(|a, b| {
+            (a.confidence, a.synopsis.len())
+                .partial_cmp(&(b.confidence, b.synopsis.len()))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|item| item.synopsis.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn merged_context_genres(results: &[ExternalContextData], fallback: &[String]) -> Vec<String> {
+    unique_strings(
+        fallback
+            .iter()
+            .cloned()
+            .chain(results.iter().flat_map(|item| item.genres.iter().cloned())),
     )
+}
+
+fn best_cover_url(results: &[ExternalContextData], fallback: &str) -> String {
+    results
+        .iter()
+        .filter(|item| item.status == "found" && !item.cover_url.trim().is_empty())
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|item| item.cover_url.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn glossary_entry_id(prefix: &str, source: &str) -> String {
+    let slug = normalize_text(source).replace(' ', "_");
+    format!("{prefix}_{}", if slug.is_empty() { "termo" } else { &slug })
+}
+
+fn auto_save_character_glossary(
+    works_root: &Path,
+    work_id: &str,
+    candidates: &[ExternalContextCandidate],
+) -> Result<u32, String> {
+    let mut glossary = crate::glossary::load(works_root, work_id)?;
+    let current_character_keys = candidates
+        .iter()
+        .filter(|item| item.kind == "character" && !item.source.trim().is_empty())
+        .map(|item| crate::glossary::normalize_lookup(&item.source, false))
+        .collect::<std::collections::BTreeSet<_>>();
+    glossary.entries.retain(|entry| {
+        let is_auto_character = entry.entry_type == "character"
+            && entry
+                .notes
+                .contains("importado automaticamente do contexto online");
+        if !is_auto_character {
+            return true;
+        }
+        current_character_keys.contains(&crate::glossary::normalize_lookup(&entry.source, false))
+    });
+    for candidate in candidates
+        .iter()
+        .filter(|item| item.kind == "character" && !item.source.trim().is_empty())
+    {
+        let normalized = crate::glossary::normalize_lookup(&candidate.source, false);
+        if let Some(existing) = glossary
+            .entries
+            .iter_mut()
+            .find(|entry| crate::glossary::normalize_lookup(&entry.source, false) == normalized)
+        {
+            existing.protect = true;
+            existing.sources = unique_strings(
+                existing
+                    .sources
+                    .iter()
+                    .cloned()
+                    .chain(candidate.sources.iter().cloned()),
+            );
+            existing.aliases = unique_strings(
+                existing
+                    .aliases
+                    .iter()
+                    .cloned()
+                    .chain(candidate.aliases.iter().cloned()),
+            );
+            existing.confidence = existing.confidence.max(candidate.confidence);
+            if existing.status.trim().is_empty() || existing.status == "candidate" {
+                existing.status = "reviewed".to_string();
+            }
+            continue;
+        }
+        glossary.entries.push(crate::glossary::GlossaryEntry {
+            id: glossary_entry_id("character", &candidate.source),
+            source: candidate.source.clone(),
+            target: candidate.target.clone(),
+            entry_type: "character".to_string(),
+            case_sensitive: false,
+            protect: true,
+            aliases: candidate.aliases.clone(),
+            forbidden: vec![],
+            confidence: candidate.confidence,
+            status: "reviewed".to_string(),
+            notes: "Nome de personagem importado automaticamente do contexto online da obra."
+                .to_string(),
+            context_rule: String::new(),
+            sources: candidate.sources.clone(),
+        });
+    }
+    crate::glossary::save(works_root, &glossary)?;
+    Ok(glossary.entries.len() as u32)
 }
 
 #[tauri::command]
@@ -1320,6 +2533,8 @@ pub async fn search_work(query: String) -> Result<serde_json::Value, String> {
             id: format!("anilist:{}", normalize_text(&t)),
             title: t,
             synopsis: a["synopsis"].as_str().unwrap_or_default().into(),
+            genres: json_string_vec(&a["genres"]),
+            characters: json_string_vec(&a["characters"]),
             source: "anilist".into(),
             source_url: "".into(),
             cover_url: a["cover_url"].as_str().unwrap_or_default().into(),
@@ -1339,28 +2554,91 @@ pub async fn enrich_work_context(
     storage.check_writable()?;
     crate::storage::set_configured_paths(storage_paths.clone());
 
+    let source_results = search_external_context_sources(&selection.title).await;
+    let merged_candidates = merge_external_candidates(&source_results);
+    let characters = unique_strings(
+        selection.characters.iter().cloned().chain(
+            merged_candidates
+                .iter()
+                .filter(|candidate| candidate.kind == "character")
+                .map(|candidate| candidate.source.clone()),
+        ),
+    );
+    let aliases = unique_strings(
+        merged_candidates
+            .iter()
+            .filter(|candidate| candidate.kind == "alias")
+            .map(|candidate| candidate.source.clone()),
+    );
+    let terms = unique_strings(
+        merged_candidates
+            .iter()
+            .filter(|candidate| candidate.kind == "term")
+            .map(|candidate| candidate.source.clone()),
+    );
+    let synopsis = best_context_synopsis(&source_results, &selection.synopsis);
+    let genres = merged_context_genres(&source_results, &selection.genres);
+    let cover_url = best_cover_url(&source_results, &selection.cover_url);
+
     let profile = crate::work_context::new_profile(
         &selection.title,
         "en",
         "pt-BR",
-        &selection.synopsis,
-        vec![],
-        vec![],
-        vec![],
+        &synopsis,
+        genres,
+        characters.clone(),
+        terms,
         vec![],
     );
     let profile = crate::work_context::load_or_create_profile(&storage_paths.works, profile)?;
     let risk_level = crate::work_context::risk_level(&profile.context_quality, 0);
+    let profile_terms = value_strings(&profile.terms);
+    let profile_genres = profile.genre.clone();
+    let glossary_entries_count =
+        auto_save_character_glossary(&storage_paths.works, &profile.work_id, &merged_candidates)?;
+    let source_refs = source_results
+        .iter()
+        .filter(|result| result.status == "found")
+        .map(|result| ContextSourceRef {
+            source: result.source.clone(),
+            title: if result.title.trim().is_empty() {
+                profile.title.clone()
+            } else {
+                result.title.clone()
+            },
+            url: result.url.clone(),
+            snippet: result.synopsis.clone(),
+        })
+        .collect::<Vec<_>>();
+    let source_result_values = source_results
+        .iter()
+        .map(source_result_value)
+        .collect::<Vec<_>>();
+    let glossary_candidate_values = merged_candidates
+        .iter()
+        .map(candidate_value)
+        .collect::<Vec<_>>();
 
     let context = EnrichedWorkContext {
         work_id: profile.work_id,
-        title: profile.title,
+        title: best_context_title(&source_results, &profile.title),
         synopsis: profile.synopsis,
-        cover_url: selection.cover_url,
-        genres: profile.genre,
+        cover_url,
+        genres: profile_genres,
+        characters: characters.clone(),
+        aliases,
+        terms: profile_terms.clone(),
         context_quality: profile.context_quality,
         risk_level,
-        ..Default::default()
+        sources_used: source_refs,
+        source_results: source_result_values,
+        glossary_candidates: glossary_candidate_values,
+        internet_context_loaded: source_results.iter().any(|result| result.status == "found"),
+        glossary_entries_count,
+        relationships: vec![],
+        factions: vec![],
+        arc_summaries: vec![],
+        lexical_memory: HashMap::new(),
     };
     serde_json::to_value(context).map_err(|e| e.to_string())
 }
@@ -1406,6 +2684,15 @@ pub async fn warmup_visual_stack(app: AppHandle) -> Result<String, String> {
         }
     }
     .await;
+
+    if result.is_ok() {
+        if let Err(error) = warmup_editor_visual_worker(app.clone()).await {
+            eprintln!("[TraduzAi] Warmup visual do editor falhou: {error}");
+        }
+        if let Err(error) = warmup_editor_inpaint_worker(app.clone()).await {
+            eprintln!("[TraduzAi] Warmup do inpaint do editor falhou: {error}");
+        }
+    }
 
     let mut state = VISION_WORKER_WARMUP_STATE.lock().await;
     *state = if result.is_ok() {
@@ -1455,7 +2742,8 @@ pub struct SystemProfile {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_preview_paths, resolve_project_json_path, sidecar_env_overrides, HardwareFacts,
+        is_project_summary_mismatch, render_preview_paths, resolve_project_json_path,
+        sidecar_env_overrides, HardwareFacts,
     };
 
     #[test]
@@ -1505,6 +2793,16 @@ mod tests {
     }
 
     #[test]
+    fn project_summary_mismatch_is_fast_worker_retryable() {
+        assert!(is_project_summary_mismatch(
+            "Falha no reinpaint: log.summary nao bate com project.json: translated_regions"
+        ));
+        assert!(!is_project_summary_mismatch(
+            "Falha no reinpaint: modelo indisponivel"
+        ));
+    }
+
+    #[test]
     fn hardware_facts_accepts_decimal_ram_gb() {
         let facts: HardwareFacts = serde_json::from_str(
             r#"{
@@ -1520,5 +2818,112 @@ mod tests {
         .expect("parse hardware facts");
 
         assert!((facts.ram_gb - 31.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn merges_same_character_across_context_sources() {
+        let anilist = super::ExternalContextData {
+            source: "anilist".into(),
+            status: "found".into(),
+            confidence: 0.92,
+            title: "The Regressed Mercenary Has a Plan".into(),
+            synopsis: String::new(),
+            genres: vec![],
+            candidates: vec![super::ExternalContextCandidate {
+                kind: "character".into(),
+                source: "Giselle Perdium".into(),
+                target: "Giselle Perdium".into(),
+                confidence: 0.95,
+                sources: vec!["anilist".into()],
+                status: "candidate".into(),
+                protect: true,
+                aliases: vec![],
+                forbidden: vec![],
+                notes: String::new(),
+            }],
+            url: String::new(),
+            error: String::new(),
+            cover_url: String::new(),
+        };
+        let mal = super::ExternalContextData {
+            source: "myanimelist".into(),
+            status: "found".into(),
+            confidence: 0.86,
+            title: "The Regressed Mercenary Has a Plan".into(),
+            synopsis: String::new(),
+            genres: vec![],
+            candidates: vec![super::ExternalContextCandidate {
+                kind: "character".into(),
+                source: "Giselle Perdium".into(),
+                target: "Giselle Perdium".into(),
+                confidence: 0.90,
+                sources: vec!["myanimelist".into()],
+                status: "candidate".into(),
+                protect: true,
+                aliases: vec!["Giselle".into()],
+                forbidden: vec![],
+                notes: String::new(),
+            }],
+            url: String::new(),
+            error: String::new(),
+            cover_url: String::new(),
+        };
+
+        let merged = super::merge_external_candidates(&[anilist, mal]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, "Giselle Perdium");
+        assert_eq!(merged[0].sources, vec!["anilist", "myanimelist"]);
+        assert_eq!(merged[0].aliases, vec!["Giselle"]);
+    }
+
+    #[test]
+    fn auto_saves_character_candidates_to_glossary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_id = "the-regressed-mercenary-has-a-plan";
+        let mut stale = crate::glossary::empty_glossary(work_id);
+        stale.entries.push(crate::glossary::GlossaryEntry {
+            id: "character_wrong".into(),
+            source: "Wrong Character".into(),
+            target: "Wrong Character".into(),
+            entry_type: "character".into(),
+            case_sensitive: false,
+            protect: true,
+            aliases: vec![],
+            forbidden: vec![],
+            confidence: 0.9,
+            status: "reviewed".into(),
+            notes: "Nome de personagem importado automaticamente do contexto online da obra."
+                .into(),
+            context_rule: String::new(),
+            sources: vec!["myanimelist".into()],
+        });
+        crate::glossary::save(temp.path(), &stale).expect("save stale glossary");
+        let candidates = vec![super::ExternalContextCandidate {
+            kind: "character".into(),
+            source: "Giselle Perdium".into(),
+            target: "Giselle Perdium".into(),
+            confidence: 0.95,
+            sources: vec!["anilist".into(), "myanimelist".into()],
+            status: "candidate".into(),
+            protect: true,
+            aliases: vec!["Giselle".into()],
+            forbidden: vec![],
+            notes: String::new(),
+        }];
+
+        let count = super::auto_save_character_glossary(temp.path(), work_id, &candidates)
+            .expect("save glossary");
+        let glossary = crate::glossary::load(temp.path(), work_id).expect("load glossary");
+
+        assert_eq!(count, 1);
+        assert!(!glossary
+            .entries
+            .iter()
+            .any(|entry| entry.source == "Wrong Character"));
+        assert_eq!(glossary.entries[0].source, "Giselle Perdium");
+        assert_eq!(glossary.entries[0].entry_type, "character");
+        assert!(glossary.entries[0].protect);
+        assert_eq!(glossary.entries[0].status, "reviewed");
     }
 }
