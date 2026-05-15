@@ -14,6 +14,13 @@ from worker.config import WorkerSettings
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
+def normalize_pipeline_quality(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"ultra", "alta", "max", "maximum"}:
+        return "ultra"
+    return "normal"
+
+
 @dataclass(frozen=True)
 class OutputArtifact:
     kind: str
@@ -126,6 +133,12 @@ def run_fast_page_job(
 
 def build_pipeline_request(settings: WorkerSettings, job: dict, work_dir: Path, job_dir: Path) -> dict:
     project_config = project_config_for_job(job)
+    pipeline_quality = normalize_pipeline_quality(
+        job.get("pipeline_quality")
+        or job.get("qualidade")
+        or project_config.get("pipeline_quality")
+        or project_config.get("qualidade")
+    )
     models_dir = (
         job.get("models_dir")
         or project_config.get("models_dir")
@@ -142,6 +155,8 @@ def build_pipeline_request(settings: WorkerSettings, job: dict, work_dir: Path, 
         "capitulo": job.get("capitulo") or project_config.get("capitulo") or 1,
         "idioma_origem": job.get("src_lang") or project_config.get("idioma_origem") or "en",
         "idioma_destino": job.get("dst_lang") or project_config.get("idioma_destino") or "pt-BR",
+        "qualidade": pipeline_quality,
+        "pipeline_quality": pipeline_quality,
         "mode": pipeline_mode_for_job(job),
     }
     optional_pairs = {

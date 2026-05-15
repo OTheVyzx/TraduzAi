@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { sanitizeFavoriteWorks, upsertFavoriteWork } from "../favoriteWorks";
+import type { PipelineQuality } from "../pipelineQuality";
 import type { WorkContext } from "../workContext";
 
 export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" | "rendered";
@@ -157,7 +158,7 @@ export interface Project {
   preset?: unknown;
 }
 
-export type ProjectQuality = "rapida" | "normal" | "alta";
+export type ProjectQuality = PipelineQuality;
 
 export type PipelineStep =
   | "extract"
@@ -180,9 +181,10 @@ export interface PipelineProgress {
 export type PerformanceTier = "cpu_only" | "balanced" | "fast" | "workstation";
 
 export interface QualityEstimateTable {
-  rapida: number;
   normal: number;
-  alta: number;
+  ultra: number;
+  rapida?: number;
+  alta?: number;
 }
 
 export interface SystemProfile {

@@ -82,6 +82,8 @@ pub struct PipelineConfig {
     pub idioma_origem: String,
     pub idioma_destino: String,
     pub qualidade: String,
+    #[serde(default)]
+    pub pipeline_quality: Option<String>,
     pub glossario: HashMap<String, String>,
     pub contexto: PipelineContext,
     pub mode: String,
@@ -456,6 +458,13 @@ fn resolve_project_json_path(raw_path: &str) -> Result<std::path::PathBuf, Strin
     Ok(project_file)
 }
 
+fn normalize_pipeline_quality(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ultra" | "alta" | "max" | "maximum" => "ultra".to_string(),
+        _ => "normal".to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn start_pipeline(
     app: AppHandle,
@@ -481,11 +490,14 @@ pub async fn start_pipeline(
     }
 
     let worker_path = get_vision_worker_path(&app).unwrap_or_default();
+    let pipeline_quality =
+        normalize_pipeline_quality(config.pipeline_quality.as_deref().unwrap_or(&config.qualidade));
 
     let config_json = serde_json::to_string(&serde_json::json!({
         "job_id": job_id, "source_path": config.source_path, "work_dir": work_dir.to_string_lossy(),
         "obra": config.obra, "capitulo": config.capitulo, "idioma_origem": config.idioma_origem,
-        "idioma_destino": config.idioma_destino, "qualidade": config.qualidade, "glossario": config.glossario,
+        "idioma_destino": config.idioma_destino, "qualidade": pipeline_quality.clone(), "pipeline_quality": pipeline_quality,
+        "glossario": config.glossario,
         "mode": config.mode,
         "contexto": {
             "sinopse": config.contexto.sinopse, "genero": config.contexto.genero, "personagens": config.contexto.personagens,
@@ -1801,6 +1813,9 @@ pub async fn get_system_profile(app: AppHandle) -> Result<SystemProfile, String>
         "cpu_only"
     };
 
+    let normal_seconds = if facts.gpu_available { 4.8 } else { 28.0 };
+    let ultra_seconds = if facts.gpu_available { 8.5 } else { 42.0 };
+
     Ok(SystemProfile {
         cpu_name: facts.cpu_name,
         cpu_cores: facts.cpu_cores,
@@ -1812,9 +1827,10 @@ pub async fn get_system_profile(app: AppHandle) -> Result<SystemProfile, String>
         performance_tier: tier.into(),
         startup_seconds: 18.0,
         seconds_per_page: QualityEstimateTable {
-            rapida: if facts.gpu_available { 2.2 } else { 14.5 },
-            normal: if facts.gpu_available { 4.8 } else { 28.0 },
-            alta: if facts.gpu_available { 8.5 } else { 42.0 },
+            normal: normal_seconds,
+            ultra: ultra_seconds,
+            rapida: normal_seconds,
+            alta: ultra_seconds,
         },
     })
 }
@@ -2721,8 +2737,9 @@ struct HardwareFacts {
 }
 #[derive(Debug, Serialize, Clone)]
 pub struct QualityEstimateTable {
-    pub rapida: f64,
     pub normal: f64,
+    pub ultra: f64,
+    pub rapida: f64,
     pub alta: f64,
 }
 #[derive(Debug, Serialize, Clone)]

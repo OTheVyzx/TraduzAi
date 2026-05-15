@@ -43,7 +43,7 @@ import {
   UploadCloud,
   XCircle,
 } from "lucide-react";
-import { emptyProjectConfig, type GlossaryCandidate, type WebProjectConfig, type WebProjectMode } from "./projectConfig";
+import { emptyProjectConfig, normalizeWebProjectQuality, type GlossaryCandidate, type WebProjectConfig, type WebProjectMode } from "./projectConfig";
 import { setupApi, type WorkSearchResult } from "./projectSetupApi";
 import { assetUrl, projectApi, type ProjectLayerMap } from "./projectApi";
 import { editorApi } from "./editor/editorApi";
@@ -1099,6 +1099,7 @@ function ProjectSetup() {
         throw new Error("Contexto da obra não revisado");
       }
       const preset = (presets.data?.presets ?? []).find((item) => item.id === presetId);
+      const pipelineQuality = normalizeWebProjectQuality(quality);
       const config: WebProjectConfig = {
         ...emptyProjectConfig(mode),
         mode,
@@ -1108,7 +1109,8 @@ function ProjectSetup() {
         idioma_destino: dstLang,
         preset_id: presetId,
         preset,
-        qualidade: quality,
+        qualidade: pipelineQuality,
+        pipeline_quality: pipelineQuality,
         export_mode: exportMode,
         contexto: {
           ...context,
@@ -1374,7 +1376,7 @@ function ProjectSetup() {
         <details className="setup-panel" data-testid="setup-advanced-panel" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
           <summary>Avançado</summary>
           <div className="setup-two">
-            <label>Qualidade<select value={quality} onChange={(event) => setQuality(event.target.value as WebProjectConfig["qualidade"])}><option value="rapida">Rápida</option><option value="normal">Normal</option><option value="alta">Alta</option></select></label>
+            <label>Qualidade<select value={quality} onChange={(event) => setQuality(event.target.value as WebProjectConfig["qualidade"])}><option value="normal">Normal</option><option value="ultra">Ultra</option></select></label>
             <label>Export padrão<select value={exportMode} onChange={(event) => setExportMode(event.target.value as WebProjectConfig["export_mode"])}><option value="clean">Seguro</option><option value="with_warnings">Com avisos</option><option value="debug">Debug</option></select></label>
           </div>
         </details>

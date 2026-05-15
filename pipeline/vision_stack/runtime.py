@@ -8461,6 +8461,17 @@ def vision_blocks_to_mask(
             if local_mask.shape == (height, width):
                 mask = np.maximum(mask, local_mask.astype(np.uint8))
             else:
+                mask_bbox = _coerce_bbox(block.get("mask_bbox"))
+                if mask_bbox is not None:
+                    mx1, my1, mx2, my2 = mask_bbox
+                    target_h = my2 - my1
+                    target_w = mx2 - mx1
+                    patch = local_mask
+                    if target_h > 0 and target_w > 0:
+                        if patch.shape != (target_h, target_w):
+                            patch = cv2.resize(patch, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+                        mask[my1:my2, mx1:mx2] = np.maximum(mask[my1:my2, mx1:mx2], patch.astype(np.uint8))
+                        continue
                 target_h = y2 - y1
                 target_w = x2 - x1
                 patch = local_mask

@@ -12,8 +12,11 @@ import type {
   SystemProfile,
 } from "./stores/appStore";
 import type { InternetContextCandidate, InternetContextSourceResult } from "./internetContext";
+import type { PipelineQualityInput } from "./pipelineQuality";
 import { canonicalizeTextStyle } from "./editorTextStylePolicy";
 import type { EditorTextStylePreset } from "./editorTextStylePresets";
+
+export type { PipelineQuality, PipelineQualityInput } from "./pipelineQuality";
 
 export function isE2E() {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
@@ -966,7 +969,8 @@ export async function startPipeline(config: {
   capitulo: number;
   idioma_origem: string;
   idioma_destino: string;
-  qualidade: "rapida" | "normal" | "alta";
+  qualidade: PipelineQualityInput;
+  pipeline_quality?: PipelineQualityInput;
   glossario: Record<string, string>;
   work_context?: WorkContextSummary | null;
   preset?: unknown;

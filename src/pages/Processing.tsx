@@ -82,6 +82,7 @@ import {
   isTraduzAiProjectSourceError,
   shouldLeaveProcessingForCompletedProject,
 } from "../lib/projectSourceGuards";
+import { normalizePipelineQuality } from "../lib/pipelineQuality";
 
 interface CompletionData {
   obra: string;
@@ -311,6 +312,7 @@ export function Processing() {
       const isBatch = batchSources.length > 0;
       const currentPath = isBatch ? batchSources[index] : project.source_path;
       const currentChapter = project.capitulo + (isBatch ? index : 0);
+      const pipelineQuality = normalizePipelineQuality(project.qualidade);
 
       try {
         setPipeline(null);
@@ -325,7 +327,8 @@ export function Processing() {
           capitulo: currentChapter,
           idioma_origem: project.idioma_origem,
           idioma_destino: project.idioma_destino,
-          qualidade: project.qualidade,
+          qualidade: pipelineQuality,
+          pipeline_quality: pipelineQuality,
           glossario: project.contexto.glossario,
           work_context: project.work_context ?? null,
           preset: project.preset ?? null,

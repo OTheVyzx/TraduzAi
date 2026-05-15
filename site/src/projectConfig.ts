@@ -1,5 +1,12 @@
 export type WebProjectMode = "auto" | "manual" | "batch";
-export type WebProjectQuality = "rapida" | "normal" | "alta";
+export type WebProjectQuality = "normal" | "ultra";
+export type LegacyWebProjectQuality = "rapida" | "alta" | "max" | "maximum";
+
+export function normalizeWebProjectQuality(value: unknown): WebProjectQuality {
+  const raw = typeof value === "string" ? value.trim().toLocaleLowerCase("pt-BR") : "";
+  if (raw === "ultra" || raw === "alta" || raw === "max" || raw === "maximum") return "ultra";
+  return "normal";
+}
 
 export type GlossaryCandidate = {
   kind: string;
@@ -18,6 +25,7 @@ export interface WebProjectConfig {
   preset_id: string;
   preset?: unknown;
   qualidade: WebProjectQuality;
+  pipeline_quality?: WebProjectQuality;
   export_mode: "clean" | "with_warnings" | "debug";
   contexto: {
     sinopse: string;
@@ -55,6 +63,7 @@ export const emptyProjectConfig = (mode: WebProjectMode): WebProjectConfig => ({
   idioma_destino: "pt-BR",
   preset_id: "scan-clean",
   qualidade: "normal",
+  pipeline_quality: "normal",
   export_mode: "clean",
   contexto: {
     sinopse: "",
