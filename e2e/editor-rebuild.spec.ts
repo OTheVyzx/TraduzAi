@@ -176,10 +176,18 @@ test("editor Konva usa fundo limpo e layers editaveis @smoke", async ({ page }) 
   await expect(page.getByTitle("Brush (B)")).toBeVisible();
   await expect(page.getByTitle("Borracha (E)")).toBeVisible();
   await expect(page.getByTitle(/Lasso/)).toBeVisible();
+  await expect(page.getByTestId("editor-source-language-select")).toBeVisible();
+  await expect(page.getByTestId("editor-source-language-select")).toHaveValue("en");
+  await page.getByTestId("editor-source-language-select").selectOption("ko");
+  await expect(page.getByTestId("editor-source-language-select")).toHaveValue("ko");
 
   await expect(page.getByText("Fixture E2E")).toBeVisible();
   await expect(page.getByText("TEXTO LIMPO")).toBeVisible();
   await expect(page.getByText("BURNED")).toHaveCount(0);
+  const renderedLayerRow = page.locator("[title='Camada rendered']");
+  await expect(renderedLayerRow).toContainText("visivel");
+  await renderedLayerRow.getByTitle("visivel").click();
+  await expect(renderedLayerRow).toContainText("oculta");
 
   async function layerState() {
     const raw = await page.getByTestId("editor-stage-state").getAttribute("data-layers");

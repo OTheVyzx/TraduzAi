@@ -25,6 +25,7 @@ from vision_stack.runtime import (
     _apply_white_balloon_micro_artifact_cleanup,
     _apply_white_balloon_text_box_cleanup,
     _apply_bright_zone_line_cleanup,
+    _apply_cjk_mask_residual_cleanup,
     _apply_mask_boundary_seam_cleanup,
     _apply_post_inpaint_cleanup_timed,
     _apply_white_balloon_fill,
@@ -63,6 +64,7 @@ from vision_stack.runtime import (
     _should_merge_ocr_cluster,
     _text_background_looks_translucent_or_textured,
     _text_is_white_cleanup_safe,
+    _strict_cjk_aot_crop_windows,
     _try_koharu_balloon_fill,
     build_page_result,
     run_inpaint_pages,
@@ -377,7 +379,9 @@ class VisionStackRuntimeTests(unittest.TestCase):
         import vision_stack.runtime as runtime
 
         previous = runtime._detector
+        previous_model = runtime._detector_model
         runtime._detector = None
+        runtime._detector_model = ""
         constructor_calls = []
         gate = threading.Barrier(2)
 
@@ -399,9 +403,23 @@ class VisionStackRuntimeTests(unittest.TestCase):
                     results = list(pool.map(lambda _idx: call_get(), range(2)))
         finally:
             runtime._detector = previous
+            runtime._detector_model = previous_model
 
         self.assertEqual(len(constructor_calls), 1)
         self.assertIs(results[0], results[1])
+
+    def test_detector_model_for_manga_preset_uses_anime_text_yolo(self):
+        from vision_stack.engine_presets import resolve_engine_preset
+        from vision_stack.runtime import _detector_model_for_preset
+
+        self.assertEqual(
+            _detector_model_for_preset(resolve_engine_preset({"engine_preset_id": "manga"})),
+            "anime-text-yolo-n",
+        )
+        self.assertEqual(
+            _detector_model_for_preset(resolve_engine_preset({"engine_preset_id": "manhwa_manhua"})),
+            "comic-text-detector",
+        )
 
     def test_get_ocr_engine_is_thread_safe_during_prewarm(self):
         import vision_stack.runtime as runtime
@@ -633,6 +651,92 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertIn("roi_area_ratio", result)
         self.assertIsInstance(result["used_roi_crop"], bool)
 
+    def test_run_masked_inpaint_passes_can_skip_internal_mask_expansion(self):
+        calls = []
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, **kwargs):
+                del kwargs
+                calls.append(mask.copy())
+                return image_np.copy()
+
+        image = np.full((40, 40, 3), 127, dtype=np.uint8)
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        mask[20, 20] = 255
+
+        result = _run_masked_inpaint_passes(
+            FakeInpainter(),
+            image,
+            mask,
+            expand_mask=False,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(int(np.count_nonzero(calls[0])), 1)
+        self.assertEqual(int(np.count_nonzero(result["expanded_mask"])), 1)
+
+    def test_run_masked_inpaint_passes_with_crop_windows_pastes_mask_only(self):
+        calls = []
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, **kwargs):
+                del kwargs
+                calls.append((image_np.shape, int(np.count_nonzero(mask))))
+                return np.full_like(image_np, 9)
+
+        image = np.full((120, 160, 3), 127, dtype=np.uint8)
+        mask = np.zeros((120, 160), dtype=np.uint8)
+        mask[50:56, 70:78] = 255
+
+        result = _run_masked_inpaint_passes(
+            FakeInpainter(),
+            image,
+            mask,
+            expand_mask=False,
+            crop_windows=[[40, 40, 100, 80]],
+        )
+
+        self.assertEqual(calls, [((40, 60, 3), 48)])
+        self.assertEqual(int(result["final_output"][52, 72, 0]), 9)
+        self.assertEqual(int(result["final_output"][42, 42, 0]), 127)
+        self.assertEqual(int(result["final_output"][10, 10, 0]), 127)
+        self.assertEqual(result["crop_windows_used"], 1)
+
+    def test_cjk_mask_residual_cleanup_removes_unchanged_text_inside_mask_only(self):
+        original = np.zeros((80, 140, 3), dtype=np.uint8)
+        cleaned = original.copy()
+        cv2.putText(original, "...", (42, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (245, 245, 245), 2, cv2.LINE_AA)
+        cleaned[:] = original
+        mask = np.zeros((80, 140), dtype=np.uint8)
+        mask[20:56, 35:104] = 255
+        mask[20:56, 108:130] = 0
+        untouched = cleaned.copy()
+
+        result = _apply_cjk_mask_residual_cleanup(original, cleaned, mask)
+
+        self.assertLess(int(np.mean(result[30:50, 42:96])), int(np.mean(untouched[30:50, 42:96])))
+        self.assertTrue(np.array_equal(result[:, 110:130], untouched[:, 110:130]))
+
+    def test_strict_cjk_aot_crop_windows_follow_mask_inside_blocks(self):
+        mask = np.zeros((160, 220), dtype=np.uint8)
+        mask[70:76, 100:112] = 255
+        blocks = [{"bbox": [20, 30, 180, 130]}]
+
+        windows = _strict_cjk_aot_crop_windows(mask, blocks, (160, 220, 3), margin=12)
+
+        self.assertEqual(windows, [[88, 58, 124, 88]])
+
+    def test_strict_cjk_aot_crop_windows_include_orphan_mask_outside_blocks(self):
+        mask = np.zeros((160, 220), dtype=np.uint8)
+        mask[70:76, 100:112] = 255
+        mask[18:25, 30:44] = 255
+        blocks = [{"bbox": [20, 30, 180, 130]}]
+
+        windows = _strict_cjk_aot_crop_windows(mask, blocks, (160, 220, 3), margin=12)
+
+        self.assertIn([88, 58, 124, 88], windows)
+        self.assertIn([18, 6, 56, 37], windows)
+
     def test_build_page_result_keeps_vision_blocks_for_later_inpainting(self):
         mask = np.zeros((80, 120), dtype=np.uint8)
         mask[18:42, 30:78] = 255
@@ -654,6 +758,61 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(len(page["_vision_blocks"]), 1)
         self.assertEqual(page["_vision_blocks"][0]["bbox"], [30, 18, 78, 42])
         self.assertEqual(int(np.count_nonzero(page["_vision_blocks"][0]["mask"])), int(np.count_nonzero(mask)))
+
+    def test_build_page_result_can_disable_cjk_sfx_preservation_for_ocr_guided_cleanup(self):
+        block = SimpleNamespace(
+            xyxy=(30, 18, 98, 54),
+            mask=None,
+            confidence=0.91,
+        )
+        image = np.full((90, 130, 3), 42, dtype=np.uint8)
+
+        with patch("vision_stack.runtime._is_white_balloon_context_for_text", return_value=False):
+            preserved = build_page_result(
+                image_path="page.jpg",
+                image_rgb=image,
+                blocks=[block],
+                texts=["반짝"],
+                idioma_origem="ko",
+            )
+            cleaned = build_page_result(
+                image_path="page.jpg",
+                image_rgb=image,
+                blocks=[block],
+                texts=["반짝"],
+                idioma_origem="ko",
+                preserve_cjk_sfx=False,
+            )
+
+        self.assertTrue(preserved["texts"][0]["skip_processing"])
+        self.assertEqual(preserved["texts"][0]["ignored_reason"], "cjk_sfx_preserved")
+        self.assertFalse(cleaned["texts"][0]["skip_processing"])
+        self.assertEqual(cleaned["texts"][0]["text"], "반짝")
+
+    def test_ocr_guided_mask_absorbs_dark_outline_around_light_cjk_text(self):
+        image = np.full((100, 150, 3), [58, 82, 150], dtype=np.uint8)
+        image[28:62, 34:96] = [8, 8, 12]
+        image[34:56, 42:88] = [245, 245, 245]
+        block = {"bbox": [28, 22, 104, 70], "confidence": 0.91}
+        text = {"bbox": [28, 22, 104, 70], "text": "CJK"}
+
+        def segmenter(crop):
+            gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+            return (gray > 220).astype(np.uint8) * 255
+
+        mask = vision_blocks_to_mask(
+            image.shape,
+            [block],
+            image_rgb=image,
+            expand_mask=True,
+            mask_strategy="ocr_guided_roi_segmentation",
+            ocr_texts=[text],
+            text_segmenter=segmenter,
+        )
+
+        self.assertEqual(mask[36, 44], 255)
+        self.assertEqual(mask[30, 36], 255)
+        self.assertEqual(mask[80, 120], 0)
 
     def test_remap_orientation_recovery_page_restores_texts_blocks_and_masks(self):
         rotated_mask = np.zeros((100, 200), dtype=np.uint8)
@@ -2708,6 +2867,18 @@ class VisionStackRuntimeTests(unittest.TestCase):
                 self.assertEqual(payload["requests"][0]["mode"], "ocrOnly")
                 self.assertEqual(payload["requests"][0]["knownTextBBoxes"], [[8, 9, 54, 40]])
                 self.assertLessEqual(payload["requests"][0]["maxNewTokens"], 96)
+                self.assertEqual(payload["requests"][0]["enginePresetId"], "manhwa_manhua")
+                self.assertEqual(
+                    payload["requests"][0]["engineSteps"],
+                    [
+                        "comic-text-bubble-detector",
+                        "comic-text-detector-seg",
+                        "speech-bubble-segmentation",
+                        "paddle-ocr-vl-1.5",
+                        "aot-inpainting",
+                    ],
+                )
+                self.assertEqual(payload["requests"][0]["maskStrategy"], "roi_segmentation_assisted")
                 self.assertEqual(payload["requests"][1]["imagePath"], str(page_b))
                 self.assertEqual(payload["requests"][1]["mode"], "page")
                 self.assertTrue(kwargs.get("capture_output"))
@@ -2822,6 +2993,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
             result = run_detect_ocr("page.jpg", profile="quality", idioma_origem="ko")
 
         run_koharu.assert_called_once()
+        self.assertEqual(run_koharu.call_args.kwargs["engine_preset_id"], "manhwa_manhua")
         self.assertEqual(result["texts"][0]["text"], "\ud658\uc0dd\ucc9c\ub9c8")
 
     def test_koharu_http_client_runs_batch_import_and_pipeline_once(self):
@@ -2875,6 +3047,63 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(requests[0][2]["replace"], True)
         self.assertEqual(requests[1][1], "/pipelines")
         self.assertEqual(requests[1][2]["pages"], ["page-a", "page-b"])
+        self.assertEqual(
+            requests[1][2]["steps"],
+            [
+                "comic-text-bubble-detector",
+                "comic-text-detector-seg",
+                "speech-bubble-segmentation",
+                "paddle-ocr-vl-1.5",
+                "aot-inpainting",
+            ],
+        )
+        self.assertEqual(pages[0]["_engine_preset"]["engine_preset_id"], "manhwa_manhua")
+        self.assertEqual(pages[0]["_engine_preset"]["mask_strategy"], "roi_segmentation_assisted")
+
+    def test_koharu_http_client_uses_manga_engine_steps_when_requested(self):
+        from pathlib import Path
+
+        from vision_stack.runtime import _KoharuHttpOcrClient
+
+        client = _KoharuHttpOcrClient(Path("N:/TraduzAI/koharu/koharu.exe"))
+        client.start = MagicMock()
+        client._ensure_project = MagicMock()
+        client._wait_operation = MagicMock(return_value={"status": "completed"})
+        requests = []
+
+        def fake_request(method, path, payload=None, timeout=120):
+            requests.append((method, path, payload))
+            if path == "/pages/from-paths":
+                return {"pages": ["page-a"]}
+            if path == "/pipelines":
+                return {"operationId": "op-1"}
+            if path == "/scene.json":
+                return {"scene": {"pages": {"page-a": {"nodes": {}}}}}
+            raise AssertionError(f"unexpected request {method} {path}")
+
+        client.request_json = MagicMock(side_effect=fake_request)
+
+        page = client.run_ocr(
+            "a.jpg",
+            np.full((80, 120, 3), 255, dtype=np.uint8),
+            profile="max",
+            idioma_origem="ja",
+            engine_preset_id="manga",
+        )
+
+        self.assertEqual(
+            requests[1][2]["steps"],
+            [
+                "anime-text-yolo-n",
+                "yuzumarker-font-detection",
+                "comic-text-detector-seg",
+                "speech-bubble-segmentation",
+                "paddle-ocr-vl-1.5",
+                "aot-inpainting",
+            ],
+        )
+        self.assertEqual(page["_engine_preset"]["engine_preset_id"], "manga")
+        self.assertEqual(page["_engine_preset"]["mask_strategy"], "segmentation_assisted")
 
     def test_run_detect_ocr_cjk_koharu_failure_falls_back_to_quick_skip(self):
         image = np.full((100, 100, 3), 255, dtype=np.uint8)
@@ -2942,6 +3171,118 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(result["texts"][0]["text"], "SO THIS IS HOW IT ENDS")
         get_ocr.return_value.recognize_full_page_lines.assert_called_once()
         self.assertEqual(build_page_result.call_count, 2)
+
+    def test_vision_blocks_to_mask_uses_roi_strategy_without_full_bbox_fill(self):
+        image = np.full((120, 160, 3), 248, dtype=np.uint8)
+        block = {
+            "bbox": [20, 20, 130, 90],
+            "text_pixel_bbox": [55, 42, 95, 62],
+        }
+
+        mask = vision_blocks_to_mask(
+            image.shape,
+            [block],
+            image_rgb=image,
+            expand_mask=False,
+            mask_strategy="roi_segmentation_assisted",
+            ocr_texts=[block],
+        )
+
+        self.assertEqual(mask[52, 72], 255)
+        self.assertEqual(mask[25, 25], 0)
+
+    def test_vision_blocks_to_mask_uses_text_segmenter_for_manga_strategy(self):
+        image = np.full((120, 160, 3), 248, dtype=np.uint8)
+        block = {
+            "bbox": [20, 20, 130, 90],
+            "text_pixel_bbox": [55, 42, 95, 62],
+        }
+        seen_shapes = []
+
+        def segmenter(crop):
+            seen_shapes.append(crop.shape[:2])
+            local = np.zeros(crop.shape[:2], dtype=np.uint8)
+            local[24:30, 42:46] = 255
+            local[24:30, 64:68] = 255
+            return local
+
+        mask = vision_blocks_to_mask(
+            image.shape,
+            [block],
+            image_rgb=image,
+            expand_mask=False,
+            mask_strategy="segmentation_assisted",
+            ocr_texts=[block],
+            text_segmenter=segmenter,
+        )
+
+        self.assertEqual(seen_shapes, [(70, 110), (120, 160)])
+        self.assertEqual(mask[46, 64], 255)
+        self.assertEqual(mask[46, 86], 255)
+        self.assertEqual(mask[25, 25], 0)
+
+    def test_vision_blocks_to_mask_keeps_cjk_orphan_sfx_after_expansion(self):
+        image = np.full((120, 160, 3), 248, dtype=np.uint8)
+        image[78:84, 88:94] = 20
+        block = {
+            "bbox": [20, 20, 60, 50],
+            "text_pixel_bbox": [30, 30, 45, 42],
+        }
+
+        def segmenter(crop):
+            local = np.zeros(crop.shape[:2], dtype=np.uint8)
+            if crop.shape[:2] == image.shape[:2]:
+                local[78:84, 88:94] = 255
+            else:
+                local[10:16, 12:18] = 255
+            return local
+
+        mask = vision_blocks_to_mask(
+            image.shape,
+            [block],
+            image_rgb=image,
+            expand_mask=True,
+            mask_strategy="segmentation_assisted",
+            ocr_texts=[block],
+            text_segmenter=segmenter,
+        )
+
+        self.assertEqual(mask[81, 91], 255)
+        self.assertEqual(mask[110, 145], 0)
+
+    def test_apply_inpainting_round_uses_page_text_segmenter_for_cjk_preset(self):
+        image = np.full((120, 160, 3), 248, dtype=np.uint8)
+        block = {
+            "bbox": [20, 20, 130, 90],
+            "text_pixel_bbox": [55, 42, 95, 62],
+        }
+        ocr_data = {
+            "_vision_blocks": [block],
+            "texts": [block],
+            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "_engine_preset": {"mask_strategy": "segmentation_assisted"},
+        }
+        captured = {}
+
+        def segmenter(crop):
+            local = np.zeros(crop.shape[:2], dtype=np.uint8)
+            local[24:30, 42:46] = 255
+            local[24:30, 64:68] = 255
+            return local
+
+        def fake_inpaint(_inpainter, image_arg, mask_arg, **_kwargs):
+            captured["mask"] = mask_arg.copy()
+            return image_arg.copy()
+
+        with patch("vision_stack.runtime._get_text_segmenter_for_page", return_value=segmenter), patch(
+            "vision_stack.runtime._run_masked_inpaint_passes",
+            side_effect=fake_inpaint,
+        ):
+            result = _apply_inpainting_round(image, ocr_data, object())
+
+        self.assertEqual(result.shape, image.shape)
+        self.assertEqual(captured["mask"][46, 64], 255)
+        self.assertEqual(captured["mask"][25, 25], 0)
 
     def test_build_koharu_worker_page_result_accepts_camel_case_payload(self):
         image = np.full((120, 160, 3), 255, dtype=np.uint8)
@@ -4216,6 +4557,70 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(calls, ["lama", "line_cleanup", "micro_cleanup"])
         self.assertEqual(int(result[55, 80, 0]), 248)
 
+    def test_apply_inpainting_round_skips_cjk_aot_force_fill_after_masked_crop(self):
+        image = np.full((120, 160, 3), 210, dtype=np.uint8)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[52:62, 72:84] = 255
+        ocr_data = {
+            "texts": [
+                {
+                    "bbox": [30, 30, 130, 90],
+                    "text_pixel_bbox": [30, 30, 130, 90],
+                    "balloon_bbox": [24, 24, 136, 96],
+                    "balloon_type": "white",
+                    "block_profile": "white_balloon",
+                    "skip_processing": False,
+                    "text": "SFX",
+                }
+            ],
+            "_vision_blocks": [{"bbox": [30, 30, 130, 90], "mask": None, "confidence": 0.9}],
+            "engine_preset": {"inpainter": "aot-inpainting"},
+            "_engine_preset": {"mask_strategy": "segmentation_assisted"},
+        }
+        pass_kwargs = {}
+
+        def fake_run_masked_inpaint_passes(inpainter, image_np, mask_arg, **kwargs):
+            del inpainter
+            pass_kwargs.update(kwargs)
+            result = image_np.copy()
+            result[mask_arg > 0] = [77, 77, 77]
+            return {
+                "expanded_mask": mask_arg.copy(),
+                "raw_output": result.copy(),
+                "after_roi_paste": result.copy(),
+                "after_seam_cleanup": result.copy(),
+                "final_output": result.copy(),
+                "cleanup_base_mask": mask_arg.copy(),
+                "fallback_to_legacy": False,
+                "fallback_error": "",
+            }
+
+        def fake_cleanup(original_rgb, cleaned_rgb, texts, **kwargs):
+            del original_rgb, texts, kwargs
+            return cleaned_rgb.copy(), {"cleanup_changed_outside_limit_mask": 0, "cleanup_limit_mask_pixels": 0}
+
+        with patch("vision_stack.runtime.vision_blocks_to_mask", return_value=mask), patch(
+            "vision_stack.runtime._run_masked_inpaint_passes",
+            side_effect=fake_run_masked_inpaint_passes,
+        ), patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=fake_cleanup,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=True,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_residual_force_fill",
+            side_effect=AssertionError("force-fill nao deve rodar no modo CJK+AOT estrito"),
+        ):
+            result = _apply_inpainting_round(image, ocr_data, inpainter=object())
+
+        self.assertIs(pass_kwargs.get("expand_mask"), False)
+        self.assertEqual(pass_kwargs.get("crop_windows"), [[0, 0, 160, 120]])
+        self.assertEqual(int(result[55, 75, 0]), 77)
+        self.assertEqual(int(result[35, 35, 0]), 210)
+        self.assertEqual(ocr_data.get("_inpaint_white_residual_force_fill"), False)
+        self.assertEqual(ocr_data.get("_inpaint_white_residual_force_fill_skipped"), "strict_cjk_aot")
+
     def test_run_inpaint_pages_skips_page_without_detected_blocks(self):
         image = np.full((120, 160, 3), 210, dtype=np.uint8)
         ocr_data = {
@@ -4308,6 +4713,45 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertEqual(full_page_round.call_count, 1)
         self.assertEqual(int(result[45, 70, 0]), 123)
+
+    def test_run_inpaint_pages_selects_aot_from_engine_preset(self):
+        image = np.full((120, 160, 3), 200, dtype=np.uint8)
+        cleaned = image.copy()
+        cleaned[42:54, 60:96] = 123
+        ocr_data = {
+            "engine_preset": {
+                "id": "manhwa_manhua",
+                "inpainter": "aot-inpainting",
+            },
+            "texts": [
+                {"bbox": [58, 40, 98, 56], "text": "HELLO", "skip_processing": False},
+            ],
+            "_vision_blocks": [
+                {"bbox": [58, 40, 98, 56], "mask": None, "confidence": 0.9},
+            ],
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "page.jpg"
+            output_dir = Path(tmpdir) / "out"
+            Image.fromarray(image).save(image_path)
+
+            with patch("vision_stack.runtime._get_inpainter", return_value=object()) as get_inpainter, patch(
+                "vision_stack.runtime._apply_inpainting_round",
+                return_value=cleaned,
+            ):
+                outputs = run_inpaint_pages([image_path], [ocr_data], str(output_dir))
+
+            result = np.array(Image.open(outputs[0]).convert("RGB"))
+
+        get_inpainter.assert_called_once_with("quality", model="aot-inpainting")
+        self.assertEqual(ocr_data["_inpaint_engine"], "aot-inpainting")
+        self.assertEqual(int(result[45, 70, 0]), 123)
+
+    def test_inpainter_model_for_page_uses_default_for_non_cjk_preset(self):
+        from vision_stack.runtime import _inpainter_model_for_page
+
+        self.assertEqual(_inpainter_model_for_page({"engine_preset": {"inpainter": "default"}}), "lama-manga")
 
     def test_run_inpaint_pages_can_use_koharu_blockwise_path_by_flag(self):
         image = np.full((120, 160, 3), 200, dtype=np.uint8)

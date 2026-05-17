@@ -77,6 +77,26 @@ class Inpainter:
 
     def _load_model(self, model_name: str, model_path: Optional[str] = None):
         """Carrega LaMA com checkpoint pré-treinado."""
+        if model_name == "aot-inpainting":
+            try:
+                from .aot_inpainter import AotInpainter
+            except ImportError:
+                from vision_stack.aot_inpainter import AotInpainter
+
+            aot_config_path = None
+            if model_path:
+                aot_config_path = os.getenv("TRADUZAI_AOT_CONFIG", "").strip() or str(Path(model_path).with_name("config.json"))
+            self._model = AotInpainter(
+                models_dir=MODELS_DIR,
+                device=self.device,
+                half=self.half,
+                weights_path=model_path,
+                config_path=aot_config_path,
+            )
+            self._backend = "aot_inpainting"
+            logger.info("AOT inpainting carregado de %s", self._model.paths.weights)
+            return
+
         onnx_backend = self._try_load_onnx_backend(model_name, model_path)
         if onnx_backend is not None:
             self._model = onnx_backend
@@ -318,6 +338,9 @@ class Inpainter:
         if self._backend == "opencv":
             return self._opencv_inpaint(img_np, mask)
 
+        if self._backend == "aot_inpainting":
+            return self._run_inpaint(img_np, mask, debug=debug)
+
         h, w = img_np.shape[:2]
 
         # Imagens grandes: processa por tiles sobrepostos
@@ -332,6 +355,9 @@ class Inpainter:
         assert mask.shape[:2] == img_np.shape[:2], (
             f"mask/image mismatch before run: mask={mask.shape[:2]} image={img_np.shape[:2]}"
         )
+        if self._backend == "aot_inpainting":
+            return self._model.inpaint(img_np, mask, debug=debug)
+
         if self._backend in {"lama_onnx_cuda", "lama_onnx_tensorrt"}:
             if not TYPE_CHECKING:
                 try:

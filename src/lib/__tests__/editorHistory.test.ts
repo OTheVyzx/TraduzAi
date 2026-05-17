@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TextEntry, TextLayerStyle } from "../stores/appStore";
+import type { PageData, TextEntry, TextLayerStyle } from "../stores/appStore";
 import {
   bitmapCache,
   commandMatchesWorkingState,
@@ -62,9 +62,19 @@ function makeLayer(id: string, overrides: Partial<TextEntry> = {}): TextEntry {
 class Draft implements WorkingStateDraft {
   layers = new Map<string, TextEntry>();
   bitmapPaths = new Map<string, string>();
+  pageSnapshot: PageData;
 
   constructor(layers: TextEntry[] = [makeLayer("a")]) {
     for (const layer of layers) this.layers.set(layer.id, layer);
+    this.pageSnapshot = {
+      numero: 1,
+      arquivo_original: "page.png",
+      arquivo_traduzido: "translated.png",
+      image_layers: {},
+      inpaint_blocks: [],
+      text_layers: [...this.layers.values()],
+      textos: [...this.layers.values()],
+    };
   }
 
   setWorkingTraduzido(_pageKey: string, layerId: string, value: string): void {
@@ -134,12 +144,21 @@ class Draft implements WorkingStateDraft {
     this.layers.set(layerId, { ...layer, locked });
   }
 
+  setWorkingPageSnapshot(_pageKey: string, page: PageData): void {
+    this.pageSnapshot = structuredClone(page);
+    this.layers = new Map(page.text_layers.map((layer) => [layer.id, layer]));
+  }
+
   hasLayer(_pageKey: string, layerId: string): boolean {
     return this.layers.has(layerId);
   }
 
   getLayer(_pageKey: string, layerId: string): TextEntry | null {
     return this.layers.get(layerId) ?? null;
+  }
+
+  getWorkingPageSnapshot(): PageData | null {
+    return structuredClone(this.pageSnapshot);
   }
 
   getOrderedLayerIds(): string[] {

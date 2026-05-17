@@ -1,6 +1,9 @@
 import type { ProjectQuality } from "./stores/appStore";
 
+export type EnginePresetId = "manga" | "manhwa_manhua" | "default";
+
 export interface ProjectPresetSettings {
+  engine_preset_id: EnginePresetId;
   ocr_sensitivity: "low" | "normal" | "high";
   ocr_cleanup: "light" | "normal" | "strong";
   translation_style: "natural_br" | "literal";
@@ -27,6 +30,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Ideal para capitulos coloridos verticais. Traducao natural, fonte maior, revisao de SFX manual.",
     quality: "alta",
     settings: {
+      engine_preset_id: "manhwa_manhua",
       ocr_sensitivity: "high",
       ocr_cleanup: "normal",
       translation_style: "natural_br",
@@ -43,6 +47,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Melhor para paginas P&B, com inpaint conservador e texto mais compacto.",
     quality: "alta",
     settings: {
+      engine_preset_id: "manga",
       ocr_sensitivity: "normal",
       ocr_cleanup: "strong",
       translation_style: "natural_br",
@@ -59,6 +64,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Para obras coloridas com termos de cultivo, nomes e faccoes recorrentes.",
     quality: "alta",
     settings: {
+      engine_preset_id: "manhwa_manhua",
       ocr_sensitivity: "high",
       ocr_cleanup: "normal",
       translation_style: "literal",
@@ -75,6 +81,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Reduz tamanho de fonte, aumenta rigor de QA e evita texto apertado.",
     quality: "alta",
     settings: {
+      engine_preset_id: "default",
       ocr_sensitivity: "high",
       ocr_cleanup: "strong",
       translation_style: "natural_br",
@@ -91,6 +98,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Foco em limpeza visual, revisao estrita e export com menos tolerancia a falhas.",
     quality: "alta",
     settings: {
+      engine_preset_id: "default",
       ocr_sensitivity: "normal",
       ocr_cleanup: "strong",
       translation_style: "natural_br",
@@ -107,6 +115,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Prioriza fluidez em portugues brasileiro sem perder nomes protegidos.",
     quality: "normal",
     settings: {
+      engine_preset_id: "default",
       ocr_sensitivity: "normal",
       ocr_cleanup: "normal",
       translation_style: "natural_br",
@@ -123,6 +132,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Mantem estrutura mais fiel ao original e aumenta peso do glossario.",
     quality: "normal",
     settings: {
+      engine_preset_id: "default",
       ocr_sensitivity: "normal",
       ocr_cleanup: "normal",
       translation_style: "literal",
@@ -139,6 +149,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Mantem efeitos sonoros no original e sinaliza revisao manual quando necessario.",
     quality: "normal",
     settings: {
+      engine_preset_id: "default",
       ocr_sensitivity: "normal",
       ocr_cleanup: "light",
       translation_style: "natural_br",
@@ -155,6 +166,7 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
     description: "Traduz SFX simples e preserva efeitos complexos para revisao.",
     quality: "normal",
     settings: {
+      engine_preset_id: "default",
       ocr_sensitivity: "normal",
       ocr_cleanup: "normal",
       translation_style: "natural_br",
@@ -169,6 +181,45 @@ export const PROJECT_PRESETS: ProjectPreset[] = [
 
 export function getProjectPreset(id?: string | null) {
   return PROJECT_PRESETS.find((preset) => preset.id === id) ?? PROJECT_PRESETS[0];
+}
+
+export function getEnginePresetLabel(id: EnginePresetId) {
+  if (id === "manga") return "Manga";
+  if (id === "manhwa_manhua") return "Manhwa/Manhua";
+  return "Padrao";
+}
+
+export function resolveEnginePresetId(preset?: unknown, sourceLanguage?: string | null): EnginePresetId {
+  if (preset && typeof preset === "object") {
+    const raw = preset as {
+      id?: unknown;
+      settings?: { engine_preset_id?: unknown };
+    };
+    const settingsValue = raw.settings?.engine_preset_id;
+    if (settingsValue === "manga" || settingsValue === "manhwa_manhua" || settingsValue === "default") {
+      return settingsValue;
+    }
+    if (raw.id === "manga_bw") return "manga";
+    if (raw.id === "manhwa_webtoon_color" || raw.id === "manhua_color") return "manhwa_manhua";
+  }
+
+  const normalizedLanguage = String(sourceLanguage || "").trim().toLowerCase();
+  if (normalizedLanguage === "ja" || normalizedLanguage === "jp" || normalizedLanguage === "jpn") {
+    return "manga";
+  }
+  if (
+    normalizedLanguage === "ko" ||
+    normalizedLanguage === "kr" ||
+    normalizedLanguage === "kor" ||
+    normalizedLanguage === "zh" ||
+    normalizedLanguage === "zh-cn" ||
+    normalizedLanguage === "zh-tw" ||
+    normalizedLanguage === "cn" ||
+    normalizedLanguage === "tw"
+  ) {
+    return "manhwa_manhua";
+  }
+  return "default";
 }
 
 export function createCustomPreset(base: ProjectPreset, name: string): ProjectPreset {

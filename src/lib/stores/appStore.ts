@@ -86,6 +86,17 @@ export interface InpaintBlock {
   confidence?: number;
 }
 
+export interface ProcessRegionOverlay {
+  id: string;
+  page_index: number;
+  bbox: [number, number, number, number];
+  crop_path: string;
+  text_layer_ids: string[];
+  visible: boolean;
+  locked: boolean;
+  order: number;
+}
+
 export interface EditorPageCache {
   inpaint?: string | null;
 }
@@ -97,6 +108,7 @@ export interface PageData {
   image_layers?: Partial<Record<ImageLayerKey, ImageLayer>>;
   editor_cache?: EditorPageCache;
   inpaint_blocks?: InpaintBlock[];
+  process_overlays?: ProcessRegionOverlay[];
   text_layers: TextEntry[];
   textos: TextEntry[];
 }
@@ -142,6 +154,7 @@ export interface Project {
   capitulo: number;
   idioma_origem: string;
   idioma_destino: string;
+  engine_preset_id?: "manga" | "manhwa_manhua" | "default" | string;
   qualidade: ProjectQuality;
   contexto: ProjectContext;
   work_context?: WorkContextSummary | null;

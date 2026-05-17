@@ -55,6 +55,7 @@ pub fn run() {
             commands::project::export_page_psd,
             commands::project::run_page_action_with_optional_mask,
             commands::project::run_paint_optional_mask,
+            commands::project::run_process_region,
             commands::glossary::load_glossary,
             commands::glossary::save_glossary,
             commands::glossary::upsert_glossary_entry,

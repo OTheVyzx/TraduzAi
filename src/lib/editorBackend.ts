@@ -1,4 +1,4 @@
-import type { PageData, TextEntry } from "./stores/appStore";
+import type { PageData, ProcessRegionOverlay, TextEntry } from "./stores/appStore";
 
 export type PageActionName = "detect" | "ocr" | "translate" | "inpaint";
 export type PageActionChangedAsset = "brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json";
@@ -26,6 +26,14 @@ export interface RegionalInpaintResult {
   inpaint_path: string;
   before_inpaint_path?: string | null;
   bbox: [number, number, number, number];
+}
+
+export interface ProcessRegionResult {
+  page_index: number;
+  overlay: ProcessRegionOverlay;
+  changed_assets: PageActionChangedAsset[];
+  changed_layers: string[];
+  message: string;
 }
 
 export interface EditorBackendApi {
@@ -90,11 +98,28 @@ export interface EditorBackendApi {
     action: PageActionName;
     bbox?: [number, number, number, number] | null;
     mask_path?: string | null;
+    engine_preset_id?: "manga" | "manhwa_manhua" | "default" | string;
+    idioma_origem?: string;
+    idioma_destino?: string;
   }): Promise<PageActionResult>;
+  runProcessRegion(config: {
+    project_path: string;
+    page_index: number;
+    bbox: [number, number, number, number];
+    mask_path?: string | null;
+    engine_preset_id?: "manga" | "manhwa_manhua" | "default" | string;
+    idioma_origem?: string;
+    idioma_destino?: string;
+  }): Promise<ProcessRegionResult>;
   retypesetPage(args: { project_path: string; page_index: number }): Promise<string>;
-  detectPage(args: { project_path: string; page_index: number }): Promise<string>;
-  ocrPage(args: { project_path: string; page_index: number }): Promise<string>;
-  translatePage(args: { project_path: string; page_index: number }): Promise<string>;
+  detectPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string>;
+  ocrPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string>;
+  translatePage(args: {
+    project_path: string;
+    page_index: number;
+    idioma_origem?: string;
+    idioma_destino?: string;
+  }): Promise<string>;
   reinpaintPage(args: {
     project_path: string;
     page_index: number;
@@ -106,6 +131,8 @@ export interface EditorBackendApi {
     page_index: number;
     block_id: string;
     mode: "ocr" | "translate" | "inpaint";
+    idioma_origem?: string;
+    idioma_destino?: string;
   }): Promise<string>;
 }
 

@@ -9,6 +9,7 @@ from inpainter.mask_builder import (
     mask_from_text_geometry,
     polygon_to_mask,
 )
+from vision_stack.cjk_segmentation_mask import build_manhwa_manhua_roi_segmentation_mask
 
 
 def test_polygon_to_mask_fills_polygon_in_page_space():
@@ -229,3 +230,23 @@ def test_raw_text_mask_searches_just_outside_italic_ocr_polygon():
 
     assert mask is not None
     assert mask[42, 96] == 255
+
+
+def test_cjk_roi_segmentation_mask_remaps_crop_pixels_to_page_space():
+    image = np.full((240, 180, 3), 248, dtype=np.uint8)
+    block = {"bbox": [40, 80, 100, 130], "text_pixel_bbox": [55, 95, 84, 112]}
+
+    def segmenter(crop):
+        local = np.zeros(crop.shape[:2], dtype=np.uint8)
+        local[50:62, 48:60] = 255
+        return local
+
+    mask = build_manhwa_manhua_roi_segmentation_mask(
+        image,
+        [block],
+        [block],
+        segmenter=segmenter,
+    )
+
+    assert int(np.count_nonzero(mask)) > 0
+    assert mask[90, 40] == 0

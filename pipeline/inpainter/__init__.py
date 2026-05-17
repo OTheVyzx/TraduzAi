@@ -62,6 +62,24 @@ def _build_fallback_vision_blocks(ocr_page: dict, width: int, height: int) -> li
     return blocks
 
 
+def _cjk_mask_kwargs_for_strip_page(ocr_page: dict) -> dict:
+    engine_meta = ocr_page.get("_engine_preset")
+    mask_strategy = ""
+    if isinstance(engine_meta, dict):
+        mask_strategy = str(engine_meta.get("mask_strategy") or "").strip().lower()
+    try:
+        from vision_stack.runtime import _get_text_segmenter_for_page
+
+        text_segmenter = _get_text_segmenter_for_page(ocr_page)
+    except Exception:
+        text_segmenter = None
+    return {
+        "mask_strategy": mask_strategy,
+        "ocr_texts": list(ocr_page.get("texts", [])) + list(ocr_page.get("_oar_ocr_regions", [])),
+        "text_segmenter": text_segmenter,
+    }
+
+
 def _fast_white_balloon_fill_enabled() -> bool:
     flag = os.getenv("TRADUZAI_STRIP_FAST_WHITE_INPAINT", "0").strip().lower()
     return flag not in {"0", "false", "no", "off"}
@@ -570,10 +588,23 @@ def _write_strip_inpaint_debug(
         return
     from vision_stack.runtime import _build_post_cleanup_limit_mask, vision_blocks_to_mask
 
+    mask_kwargs = _cjk_mask_kwargs_for_strip_page(ocr_page)
     if raw_mask is None:
-        raw_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=False)
+        raw_mask = vision_blocks_to_mask(
+            working_rgb.shape,
+            vision_blocks,
+            image_rgb=working_rgb,
+            expand_mask=False,
+            **mask_kwargs,
+        )
     if expanded_mask is None:
-        expanded_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=True)
+        expanded_mask = vision_blocks_to_mask(
+            working_rgb.shape,
+            vision_blocks,
+            image_rgb=working_rgb,
+            expand_mask=True,
+            **mask_kwargs,
+        )
     if fast_fill_mask is None:
         fast_fill_mask = np.zeros(raw_mask.shape, dtype=np.uint8)
     effective_limit_mask = _build_post_cleanup_limit_mask(
@@ -736,9 +767,6 @@ def _apply_fast_local_balloon_fill(
             continue
 
         mask = _mask_from_bbox(width, height, text_bbox)
-        if _looks_translucent_or_textured_background(result, fill_bbox, mask):
-            _reject("translucent_background")
-            continue
         filled = _try_koharu_balloon_fill(result, mask)
         if filled is None:
             filled = _try_solid_background_text_fill(result, text_bbox, fill_bbox)
@@ -852,8 +880,21 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     inpaint_payload["_vision_blocks"] = vision_blocks
     inpaint_payload["_skip_internal_post_cleanup"] = True
     from vision_stack.runtime import vision_blocks_to_mask
-    raw_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=False)
-    expanded_mask = vision_blocks_to_mask(working_rgb.shape, vision_blocks, image_rgb=working_rgb, expand_mask=True)
+    mask_kwargs = _cjk_mask_kwargs_for_strip_page(ocr_page)
+    raw_mask = vision_blocks_to_mask(
+        working_rgb.shape,
+        vision_blocks,
+        image_rgb=working_rgb,
+        expand_mask=False,
+        **mask_kwargs,
+    )
+    expanded_mask = vision_blocks_to_mask(
+        working_rgb.shape,
+        vision_blocks,
+        image_rgb=working_rgb,
+        expand_mask=True,
+        **mask_kwargs,
+    )
     inpainter = _get_inpainter("quality")
     started = time.perf_counter()
     cleaned = _apply_inpainting_round(working_rgb, inpaint_payload, inpainter)

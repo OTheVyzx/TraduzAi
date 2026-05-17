@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
 
+import cv2
 import numpy as np
 
 from strip.types import Band
@@ -77,6 +78,7 @@ def _apply_copy_back_outside_balloons(
     balloon_margin: int = 8,
     ocr_page: dict | None = None,
     rendered_slice: np.ndarray | None = None,
+    cleaned_slice: np.ndarray | None = None,
 ) -> np.ndarray:
     """Copy-back defensivo: preserva pixels fora dos balões da banda.
 
@@ -125,6 +127,18 @@ def _apply_copy_back_outside_balloons(
                 bx2 + balloon_margin,
                 by2 + balloon_margin,
             )
+        inpaint_mask = _copy_back_inpaint_mask(band.original_slice, ocr_page)
+        if inpaint_mask is not None and inpaint_mask.shape[:2] == mask_inside.shape:
+            mask_inside |= inpaint_mask > 0
+    if cleaned_slice is not None and cleaned_slice.shape == band.original_slice.shape:
+        changed_by_inpaint = np.any(cleaned_slice != band.original_slice, axis=2).astype(np.uint8) * 255
+        if np.any(changed_by_inpaint):
+            changed_by_inpaint = cv2.dilate(
+                changed_by_inpaint,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                iterations=1,
+            )
+            mask_inside |= changed_by_inpaint > 0
 
     result = np.where(
         mask_inside[:, :, None],
@@ -132,6 +146,38 @@ def _apply_copy_back_outside_balloons(
         band.original_slice,
     )
     return result.astype(np.uint8)
+
+
+def _copy_back_inpaint_mask(original_slice: np.ndarray, ocr_page: dict) -> np.ndarray | None:
+    if original_slice is None or not isinstance(ocr_page, dict):
+        return None
+    engine_meta = ocr_page.get("_engine_preset") if isinstance(ocr_page.get("_engine_preset"), dict) else {}
+    strategy = str((engine_meta or {}).get("mask_strategy") or "").strip().lower()
+    if strategy not in {
+        "segmentation_assisted",
+        "roi_segmentation_assisted",
+        "ocr_guided_segmentation",
+        "ocr_guided_roi_segmentation",
+    }:
+        return None
+    vision_blocks = [block for block in list(ocr_page.get("_vision_blocks") or []) if isinstance(block, dict)]
+    if not vision_blocks:
+        return None
+    try:
+        from inpainter import _cjk_mask_kwargs_for_strip_page
+        from vision_stack.runtime import vision_blocks_to_mask
+    except Exception:
+        return None
+    try:
+        return vision_blocks_to_mask(
+            original_slice.shape,
+            vision_blocks,
+            image_rgb=original_slice,
+            expand_mask=True,
+            **_cjk_mask_kwargs_for_strip_page(ocr_page),
+        )
+    except Exception:
+        return None
 
 
 def _merge_translated_page_metadata(ocr_page: dict, translated_page: dict) -> dict:
@@ -165,7 +211,15 @@ def _merge_translated_page_metadata(ocr_page: dict, translated_page: dict) -> di
     if not merged_page.get("_vision_blocks"):
         merged_page["_vision_blocks"] = list((ocr_page or {}).get("_vision_blocks") or [])
 
-    for key in ("numero", "width", "height", "page_profile"):
+    for key in (
+        "numero",
+        "width",
+        "height",
+        "page_profile",
+        "engine_preset_id",
+        "engine_preset",
+        "_engine_preset",
+    ):
         if key not in merged_page and key in ocr_page:
             merged_page[key] = ocr_page[key]
 
@@ -411,6 +465,7 @@ def _run_typeset_stage(
 def _run_copy_back_stage(
     band: Band,
     *,
+    cleaned_slice: np.ndarray | None = None,
     rendered_slice: np.ndarray,
     translated_page: dict,
 ) -> BandImageStageOutput:
@@ -420,6 +475,7 @@ def _run_copy_back_stage(
             band,
             ocr_page=translated_page,
             rendered_slice=rendered_slice,
+            cleaned_slice=cleaned_slice,
         ),
     )
 
@@ -749,6 +805,7 @@ def process_band(
     stage_start = time.perf_counter()
     copy_back_stage = _run_copy_back_stage(
         band,
+        cleaned_slice=cleaned,
         rendered_slice=typeset_stage.to_image(),
         translated_page=translated_page,
     )

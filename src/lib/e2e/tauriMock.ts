@@ -1,5 +1,12 @@
 import type { EditorPagePayload, ProjectJson } from "../tauri";
-import { useAppStore, type ImageLayerKey, type PageData, type Project, type TextEntry } from "../stores/appStore";
+import {
+  useAppStore,
+  type ImageLayerKey,
+  type PageData,
+  type ProcessRegionOverlay,
+  type Project,
+  type TextEntry,
+} from "../stores/appStore";
 import { getE2EFixtureProject, setE2EFixtureProject } from "./fixtureProject";
 
 function clone<T>(value: T): T {
@@ -144,6 +151,11 @@ export const tauriMock = {
     return `/e2e/editor_cache/healing_masks/page-${String(page).padStart(4, "0")}/mask.png`;
   },
 
+  async writeMaskFromPng(config?: { page_index?: number }): Promise<string> {
+    const page = Number(config?.page_index ?? 0) + 1;
+    return `/e2e/editor_cache/masks/page-${String(page).padStart(4, "0")}/lasso.png`;
+  },
+
   async healInpaintRegion(config: {
     page_index: number;
     bbox: [number, number, number, number];
@@ -180,6 +192,7 @@ export const tauriMock = {
     action: "detect" | "ocr" | "translate" | "inpaint";
     bbox?: [number, number, number, number] | null;
     mask_path?: string | null;
+    engine_preset_id?: string;
   }): Promise<{
     action: "detect" | "ocr" | "translate" | "inpaint";
     mode: "global" | "regional";
@@ -215,6 +228,47 @@ export const tauriMock = {
     };
   },
 
+  async runProcessRegion(config: {
+    page_index: number;
+    bbox: [number, number, number, number];
+    mask_path?: string | null;
+  }): Promise<{
+    page_index: number;
+    overlay: ProcessRegionOverlay;
+    changed_assets: Array<"brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json">;
+    changed_layers: string[];
+    message: string;
+  }> {
+    const page = getE2EFixtureProject().paginas[config.page_index];
+    const overlay: ProcessRegionOverlay = {
+      id: `e2e-process-${Date.now()}`,
+      page_index: config.page_index,
+      bbox: config.bbox,
+      crop_path: `/e2e-process-page-${config.page_index + 1}.png`,
+      text_layer_ids: page.text_layers.map((layer) => layer.id).slice(0, 1),
+      visible: true,
+      locked: false,
+      order: page.process_overlays?.length ?? 0,
+    };
+    updatePage(config.page_index, (current) => ({
+      ...current,
+      process_overlays: [...(current.process_overlays ?? []), overlay],
+      image_layers: {
+        ...current.image_layers,
+        mask: current.image_layers?.mask
+          ? { ...current.image_layers.mask, path: config.mask_path ?? current.image_layers.mask.path }
+          : { key: "mask", path: config.mask_path ?? null, visible: true, locked: false },
+      },
+    }));
+    return {
+      page_index: config.page_index,
+      overlay,
+      changed_assets: ["project_json", "inpaint", "rendered"],
+      changed_layers: overlay.text_layer_ids,
+      message: "ok",
+    };
+  },
+
   async startPipeline(config?: { source_path?: string; obra?: string; capitulo?: number }): Promise<{ job_id: string }> {
     const capitulo = Number(config?.capitulo ?? getE2EFixtureProject().capitulo);
     const outputPath = `e2e/project-cap-${capitulo}.json`;
@@ -222,7 +276,7 @@ export const tauriMock = {
     const outputProject: Project = {
       ...project,
       id: `${project.id}-cap-${capitulo}`,
-      obra: config?.obra ?? project.obra,
+      obra: config?.obra?.trim() || project.obra,
       capitulo,
       source_path: config?.source_path ?? project.source_path,
       output_path: outputPath,

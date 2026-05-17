@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { Check, Search, Trash2, Wand2 } from "lucide-react";
+import { Check, Image as ImageIcon, Lock, LockOpen, Search, Trash2, Wand2 } from "lucide-react";
 import { useEditorStore } from "../../lib/stores/editorStore";
+import { buildEditorScene, searchTextLayers } from "../../lib/editorScene";
 import { LayerItem } from "./LayerItem";
 
 export function LayersPanel() {
@@ -9,20 +10,20 @@ export function LayersPanel() {
   const pendingEdits = useEditorStore((s) => s.pendingEdits);
   const deleteSelectedLayer = useEditorStore((s) => s.deleteSelectedLayer);
   const commitEdits = useEditorStore((s) => s.commitEdits);
+  const toggleImageLayerVisibility = useEditorStore((s) => s.toggleImageLayerVisibility);
+  const setImageLayerLocked = useEditorStore((s) => s.setImageLayerLocked);
 
   const [query, setQuery] = useState("");
 
-  const textLayers = currentPage?.text_layers ?? [];
+  const scene = useMemo(
+    () => buildEditorScene({ page: currentPage, pendingEdits, selectedLayerId }),
+    [currentPage, pendingEdits, selectedLayerId],
+  );
   const hasPendingEdits = Object.keys(pendingEdits).length > 0;
 
   const filteredTextLayers = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return textLayers;
-    return textLayers.filter((entry) => {
-      const haystack = `${entry.traduzido ?? entry.translated ?? ""} ${entry.original} ${entry.tipo}`.toLowerCase();
-      return haystack.includes(normalized);
-    });
-  }, [query, textLayers]);
+    return searchTextLayers(scene.textLayers, query);
+  }, [query, scene.textLayers]);
 
   return (
     <div className="flex h-full w-[340px] flex-col border-l border-border bg-bg-primary">
@@ -32,7 +33,7 @@ export function LayersPanel() {
             <Wand2 size={13} className="text-brand" />
             <span className="text-[13px] font-semibold tracking-tight">Textos</span>
             <span className="rounded-full bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-mono text-text-muted">
-              {filteredTextLayers.length}/{textLayers.length}
+              {filteredTextLayers.length}/{scene.textLayers.length}
             </span>
           </div>
           <div className="flex items-center gap-0.5">
@@ -66,14 +67,69 @@ export function LayersPanel() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
+        <div className="mb-3 rounded-lg border border-border bg-bg-secondary/40 p-2.5">
+          <div className="mb-2 flex items-center gap-2">
+            <ImageIcon size={12} className="text-text-muted" />
+            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+              Camadas da pagina
+            </span>
+          </div>
+          <div className="space-y-1">
+            {scene.imageLayers.map((layer) => {
+              const status = layer.visible ? "visivel" : "oculta";
+              return (
+                <div
+                  key={layer.key}
+                  className="flex items-center justify-between rounded-md border border-border/70 bg-bg-tertiary/35 px-2 py-1.5"
+                  title={layer.hasContent ? `Camada ${layer.key}` : `Camada ${layer.key} sem conteudo`}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-[11px] font-medium text-text-secondary">
+                      Camada {layer.key}
+                    </p>
+                    <p className="text-[10px] text-text-muted">{layer.hasContent ? status : "sem conteudo"}</p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      disabled={!layer.hasContent}
+                      onClick={() => {
+                        void toggleImageLayerVisibility(layer.key).catch((error) => {
+                          console.error("Erro ao alternar visibilidade da camada:", error);
+                        });
+                      }}
+                      className="rounded p-1 text-text-muted transition-smooth hover:bg-white/[0.06] hover:text-text-primary disabled:opacity-25"
+                      title={status}
+                    >
+                      <span className="sr-only">{status}</span>
+                      <span className={`block h-1.5 w-1.5 rounded-full ${layer.visible ? "bg-status-success" : "bg-text-muted"}`} />
+                    </button>
+                    <button
+                      disabled={!layer.hasContent}
+                      onClick={() => {
+                        void setImageLayerLocked(layer.key, !layer.locked).catch((error) => {
+                          console.error("Erro ao alternar bloqueio da camada:", error);
+                        });
+                      }}
+                      className="rounded p-1 text-text-muted transition-smooth hover:bg-white/[0.06] hover:text-text-primary disabled:opacity-25"
+                      title={layer.locked ? "bloqueada" : "desbloqueada"}
+                    >
+                      {layer.locked ? <Lock size={12} /> : <LockOpen size={12} />}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         {filteredTextLayers.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border bg-bg-tertiary/30 px-4 py-5 text-center text-[11px] text-text-muted">
-            {textLayers.length === 0 ? "Nenhum texto" : "Sem resultados"}
+            {scene.textLayers.length === 0 ? "Nenhum texto" : "Sem resultados"}
           </div>
         ) : (
           <div className="space-y-0.5">
             {filteredTextLayers.map((entry, index) => (
-              <LayerItem key={entry.id} entry={entry} index={index + 1} />
+              <LayerItem key={entry.id} entry={entry} index={index + 1} hasEdits={entry.id in pendingEdits} />
             ))}
           </div>
         )}

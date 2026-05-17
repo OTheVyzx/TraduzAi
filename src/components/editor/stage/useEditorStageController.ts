@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import { bitmapCache } from "../../../lib/editorHistory";
+import {
+  bitmapTargetForEditorTool,
+  pointFromStageClientRect,
+  shouldAppendStrokePoint,
+  strokeDirtyBbox,
+} from "../../../lib/editorStroke";
 import { loadImageSource } from "../../../lib/imageSource";
 import { createLassoSelection, rasterizeLassoToPng } from "../../../lib/lassoSelection";
 import {
@@ -18,6 +24,7 @@ import {
 import { createHealingBrushMaskPngDataUrl, paddedStrokeBBox } from "./healingBrushMask";
 import { displayImagePathForMode, isFaithfulPreviewMode, originalImagePath } from "./renderModeUtils";
 import { mergePendingTextEntry } from "./textLayerStyleUtils";
+import { useEditorBitmapDrawing } from "./useEditorBitmapDrawing";
 
 const EMPTY_PAGES: PageData[] = [];
 
@@ -140,6 +147,7 @@ export function useEditorStageController() {
   const activeLassoSelection = useEditorStore((state) => state.activeLassoSelection);
   const setMaskInProgress = useEditorStore((state) => state.setMaskInProgress);
   const setActiveLassoSelection = useEditorStore((state) => state.setActiveLassoSelection);
+  const runProcessRegionFromSelection = useEditorStore((state) => state.runProcessRegionFromSelection);
   const bumpBitmapLayerVersion = useEditorStore((state) => state.bumpBitmapLayerVersion);
 
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
@@ -155,8 +163,6 @@ export function useEditorStageController() {
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   // Ref para garantir acesso ao finishPaintStroke mais recente sem criar stale closure
   const finishPaintStrokeRef = useRef<(() => Promise<void>) | null>(null);
-  const recoveryPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const bitmapPersistQueueRef = useRef<Partial<Record<"brush" | "mask", Promise<void>>>>({});
   const activeRecoveryPreviewIdsRef = useRef<Set<string>>(new Set());
   const bitmapWorkingCanvasRef = useRef<Partial<Record<"brush" | "mask", HTMLCanvasElement>>>({});
   const recoveryWorkingCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -189,7 +195,6 @@ export function useEditorStageController() {
     setRecoveryPreviewPatches([]);
     setReinpaintPreviewPatches([]);
     bitmapWorkingCanvasRef.current = {};
-    bitmapPersistQueueRef.current = {};
     recoveryWorkingCanvasRef.current = null;
     sessionInpaintCacheCanvasRef.current = null;
   }, [currentPageKey]);
@@ -211,7 +216,7 @@ export function useEditorStageController() {
 
       // Lasso keyboard shortcuts — lê estado fresco via getState para evitar stale closure
       const s = useEditorStore.getState();
-      if (s.toolMode === "mask") {
+      if (s.toolMode === "mask" || s.toolMode === "process") {
         if (event.key === "Escape") {
           event.preventDefault();
           s.setMaskInProgress(null);
@@ -340,19 +345,23 @@ export function useEditorStageController() {
   const originalImage = useImageElement(originalImageSrc);
   const maskImage = useImageElement(maskOverlaySrc);
   const brushImage = useImageElement(brushOverlaySrc);
+  const {
+    enqueueBitmapPersist,
+    enqueueRecoveryPersist,
+    applyBitmapStroke: applyBitmapStrokePersist,
+    healPaintedRegion: healPaintedRegionPersist,
+  } = useEditorBitmapDrawing({
+    pageKey: currentPageKey,
+    pageIndex: currentPageIndex,
+    width: baseImage.size.width,
+    height: baseImage.size.height,
+    applyBitmapStroke,
+    healPaintedRegion,
+  });
 
   const bitmapTargetForTool = (mode: typeof toolMode) => {
     const state = useEditorStore.getState();
-    if (mode === "repairBrush") return "recovery" as const;
-    if (mode === "reinpaintBrush") return "reinpaint" as const;
-    if (mode === "brush") return "brush" as const;
-    if (mode === "mask") return "mask" as const;
-    if (mode === "eraser") {
-      const target = state.eraserTarget ?? state.lastPaintedLayer;
-      if (target === "mask") return "mask" as const;
-      return "brush" as const;
-    }
-    return "brush" as const;
+    return bitmapTargetForEditorTool(mode, state.eraserTarget, state.lastPaintedLayer);
   };
 
   const getBitmapWorkingCanvas = (layerKey: "brush" | "mask") => {
@@ -437,14 +446,23 @@ export function useEditorStageController() {
       const stageCanvas = node.querySelector("canvas");
       if (!stageCanvas || !baseImage.size.width || !baseImage.size.height) return;
       const rect = stageCanvas.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return;
-      const x = ((event.clientX - rect.left) / rect.width) * baseImage.size.width;
-      const y = ((event.clientY - rect.top) / rect.height) * baseImage.size.height;
-      if (x < 0 || y < 0 || x > baseImage.size.width || y > baseImage.size.height) {
+      if (
+        event.clientX < rect.left ||
+        event.clientX > rect.left + rect.width ||
+        event.clientY < rect.top ||
+        event.clientY > rect.top + rect.height
+      ) {
         if (paintStroke.length === 0) setCursorPoint(null);
         return;
       }
-      setCursorPoint({ x: Math.round(x), y: Math.round(y) });
+      const point = pointFromStageClientRect({
+        clientX: event.clientX,
+        clientY: event.clientY,
+        rect,
+        imageWidth: baseImage.size.width,
+        imageHeight: baseImage.size.height,
+      });
+      if (point) setCursorPoint(point);
     };
 
     window.addEventListener("mousemove", onMove);
@@ -464,6 +482,7 @@ export function useEditorStageController() {
 
   const faithfulPreview = isFaithfulPreviewMode(viewMode, renderPreviewState);
   const translatedEditing = viewMode === "translated" && !faithfulPreview;
+  const isLassoTool = toolMode === "mask" || toolMode === "process";
   const selectedNodeName = selectedLayerId
     ? `text-layer-${selectedLayerId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
     : null;
@@ -488,13 +507,14 @@ export function useEditorStageController() {
   const pointFromStageEvent = (event: Konva.KonvaEventObject<MouseEvent>) => {
     const stage = event.target.getStage();
     const rect = stage?.container().getBoundingClientRect();
-    if (!rect || !baseImage.size.width || !baseImage.size.height) return null;
-    const x = ((event.evt.clientX - rect.left) / rect.width) * baseImage.size.width;
-    const y = ((event.evt.clientY - rect.top) / rect.height) * baseImage.size.height;
-    return {
-      x: Math.max(0, Math.min(baseImage.size.width, Math.round(x))),
-      y: Math.max(0, Math.min(baseImage.size.height, Math.round(y))),
-    };
+    if (!rect) return null;
+    return pointFromStageClientRect({
+      clientX: event.evt.clientX,
+      clientY: event.evt.clientY,
+      rect,
+      imageWidth: baseImage.size.width,
+      imageHeight: baseImage.size.height,
+    });
   };
 
   const handleStageMouseDown = (event: Konva.KonvaEventObject<MouseEvent>) => {
@@ -516,7 +536,7 @@ export function useEditorStageController() {
       setPaintStroke([[point.x, point.y]]);
     }
 
-    if (toolMode === "mask") {
+    if (isLassoTool) {
       const point = pointFromStageEvent(event);
       if (!point) return;
       event.cancelBubble = true;
@@ -559,13 +579,13 @@ export function useEditorStageController() {
     if (paintStroke.length > 0) {
       setPaintStroke((points) => {
         const last = points[points.length - 1];
-        if (last && last[0] === point.x && last[1] === point.y) return points;
+        if (!shouldAppendStrokePoint(last, point)) return points;
         return [...points, [point.x, point.y]];
       });
     }
 
     // Freehand lasso — decimação mínima de 2px para evitar pontos redundantes
-    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress !== null && (event.evt.buttons & 1) === 1) {
+    if (isLassoTool && maskShape === "freehand" && maskInProgress !== null && (event.evt.buttons & 1) === 1) {
       const last = maskInProgress.points[maskInProgress.points.length - 1];
       if (!last || Math.hypot(point.x - last[0], point.y - last[1]) >= 2) {
         setMaskInProgress({ points: [...maskInProgress.points, [point.x, point.y]] });
@@ -618,15 +638,13 @@ export function useEditorStageController() {
     const strokeBrushHardness = brushHardness;
     setPaintStroke([]);
     if (!baseImage.size.width || !baseImage.size.height || stroke.length === 0) return;
-    const pad = Math.max(1, Math.ceil(strokeBrushSize / 2) + 2);
-    const xs = stroke.map(([x]) => x);
-    const ys = stroke.map(([, y]) => y);
-    const basicDirtyBBox: [number, number, number, number] = [
-      Math.max(0, Math.floor(Math.min(...xs) - pad)),
-      Math.max(0, Math.floor(Math.min(...ys) - pad)),
-      Math.min(baseImage.size.width, Math.ceil(Math.max(...xs) + pad)),
-      Math.min(baseImage.size.height, Math.ceil(Math.max(...ys) + pad)),
-    ];
+    const basicDirtyBBox = strokeDirtyBbox({
+      stroke,
+      brushSize: strokeBrushSize,
+      width: baseImage.size.width,
+      height: baseImage.size.height,
+    });
+    if (!basicDirtyBBox) return;
     const strokeDirtyBBox =
       strokeToolMode === "reinpaintBrush"
         ? (paddedStrokeBBox({
@@ -699,9 +717,11 @@ export function useEditorStageController() {
           .catch((error) => console.error("Erro ao criar preview local da recuperação:", error));
       }
 
-      const persistRecoveryStroke = async () => {
+      const persistRecoveryStroke = async (context: { pageKey: string; pageIndex: number }) => {
         try {
-          await applyBitmapStroke({
+          await applyBitmapStrokePersist({
+            pageKey: context.pageKey,
+            pageIndex: context.pageIndex,
             ...payload,
             layerKey: "recovery",
             erase: false,
@@ -716,7 +736,10 @@ export function useEditorStageController() {
           window.setTimeout(() => {
             setRecoveryPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
           }, 500);
-          bumpBitmapLayerVersion("inpaint");
+          const state = useEditorStore.getState();
+          if (state.currentPageIndex === context.pageIndex && state.currentPageKey() === context.pageKey) {
+            bumpBitmapLayerVersion("inpaint");
+          }
         } catch (error) {
           activeRecoveryPreviewIdsRef.current.delete(previewId);
           setRecoveryPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
@@ -724,10 +747,7 @@ export function useEditorStageController() {
         }
       };
 
-      recoveryPersistQueueRef.current = recoveryPersistQueueRef.current
-        .catch(() => undefined)
-        .then(persistRecoveryStroke);
-      void recoveryPersistQueueRef.current;
+      void enqueueRecoveryPersist(persistRecoveryStroke);
       return;
     }
 
@@ -742,9 +762,9 @@ export function useEditorStageController() {
       });
       if (!maskPngData) return;
 
-      const persistHealingStroke = async () => {
+      const persistHealingStroke = async (context: { pageKey: string; pageIndex: number }) => {
         try {
-          await healPaintedRegion({ bbox: dirty_bbox, maskPngData });
+          await healPaintedRegionPersist({ pageKey: context.pageKey, pageIndex: context.pageIndex, bbox: dirty_bbox, maskPngData });
           setReinpaintPreviewPatches([]);
         } catch (error) {
           setReinpaintPreviewPatches([]);
@@ -752,14 +772,12 @@ export function useEditorStageController() {
         }
       };
 
-      recoveryPersistQueueRef.current = recoveryPersistQueueRef.current
-        .catch(() => undefined)
-        .then(persistHealingStroke);
-      void recoveryPersistQueueRef.current;
+      void enqueueRecoveryPersist(persistHealingStroke);
       return;
     }
 
     const layerKey = bitmapTargetForTool(strokeToolMode);
+    if (!layerKey) return;
     if (layerKey === "recovery" || layerKey === "reinpaint") return;
     const erase = strokeToolMode === "eraser";
     const workingCanvas = getBitmapWorkingCanvas(layerKey);
@@ -793,8 +811,10 @@ export function useEditorStageController() {
       });
     }
 
-    const persistBitmapStroke = async () => {
-      await applyBitmapStroke({
+    const persistBitmapStroke = async (context: { pageKey: string; pageIndex: number }) => {
+      await applyBitmapStrokePersist({
+        pageKey: context.pageKey,
+        pageIndex: context.pageIndex,
         ...payload,
         layerKey,
         erase,
@@ -806,10 +826,7 @@ export function useEditorStageController() {
       });
     };
 
-    bitmapPersistQueueRef.current[layerKey] = (bitmapPersistQueueRef.current[layerKey] ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(persistBitmapStroke);
-    void bitmapPersistQueueRef.current[layerKey]?.catch((error) => {
+    void enqueueBitmapPersist(layerKey, persistBitmapStroke).catch((error) => {
       console.error("Erro ao persistir pincel:", error);
     });
   };
@@ -832,7 +849,9 @@ export function useEditorStageController() {
     });
     setMaskInProgress(null);
     setActiveLassoSelection(selection);
-
+    if (state.toolMode === "process") {
+      void runProcessRegionFromSelection(selection);
+    }
   };
 
   const finishFreehandLasso = (points: Array<[number, number]>) => {
@@ -863,7 +882,7 @@ export function useEditorStageController() {
   }, [paintStroke.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (toolMode !== "mask" || maskShape !== "freehand" || maskInProgress === null) return;
+    if (!isLassoTool || maskShape !== "freehand" || maskInProgress === null) return;
 
     const handleGlobalMouseUp = (event: MouseEvent) => {
       if (containerRef.current?.contains(event.target as Node)) return;
@@ -873,7 +892,7 @@ export function useEditorStageController() {
 
     window.addEventListener("mouseup", handleGlobalMouseUp);
     return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
-  }, [maskInProgress, maskShape, toolMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isLassoTool, maskInProgress, maskShape]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleStageMouseUp = () => {
     if (blockDraft) {
@@ -884,7 +903,7 @@ export function useEditorStageController() {
       void finishPaintStroke();
     }
     // Freehand lasso commit ao soltar o mouse
-    if (toolMode === "mask" && maskShape === "freehand" && maskInProgress) {
+    if (isLassoTool && maskShape === "freehand" && maskInProgress) {
       finishFreehandLasso(maskInProgress.points);
     }
   };
@@ -925,7 +944,7 @@ export function useEditorStageController() {
       ? "ew-resize"
     : isSpacePressed
       ? "grab"
-      : toolMode === "block" || toolMode === "mask"
+      : toolMode === "block" || isLassoTool
         ? "crosshair"
         : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser"
           ? "none"

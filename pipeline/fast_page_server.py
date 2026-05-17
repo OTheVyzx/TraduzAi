@@ -15,7 +15,9 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PipelineRunner = Callable[[str], None]
 WarmupRunner = Callable[..., None]
 InpaintWarmupRunner = Callable[..., None]
-PageActionRunner = Callable[[Path, int, dict | None], None]
+PageActionOptions = dict[str, str | None]
+PageActionRunner = Callable[[Path, int, dict | None, PageActionOptions | None], None]
+RegionalPageActionRunner = Callable[[Path, int, dict | None], None]
 
 
 class FastPageSession:
@@ -26,7 +28,7 @@ class FastPageSession:
         inpaint_warmup_runner: InpaintWarmupRunner | None = None,
         detect_runner: PageActionRunner | None = None,
         ocr_runner: PageActionRunner | None = None,
-        reinpaint_runner: PageActionRunner | None = None,
+        reinpaint_runner: RegionalPageActionRunner | None = None,
         session_id: str | None = None,
     ) -> None:
         self._pipeline_runner = pipeline_runner
@@ -155,11 +157,12 @@ class FastPageSession:
         region = request.get("region")
         if region is not None and not isinstance(region, dict):
             raise ValueError("campo region deve ser objeto quando informado")
+        options = _page_action_options_from_request(request)
 
         captured_stdout = io.StringIO()
         try:
             with contextlib.redirect_stdout(captured_stdout):
-                runner(project_path, page_index, region)
+                runner(project_path, page_index, region, options)
         except SystemExit as exc:
             raise RuntimeError(f"pipeline saiu durante {action_name}: {exc}") from exc
 
@@ -229,7 +232,7 @@ def serve_jsonl(
     inpaint_warmup_runner: InpaintWarmupRunner | None = None,
     detect_runner: PageActionRunner | None = None,
     ocr_runner: PageActionRunner | None = None,
-    reinpaint_runner: PageActionRunner | None = None,
+    reinpaint_runner: RegionalPageActionRunner | None = None,
 ) -> None:
     active_session = session or FastPageSession(
         pipeline_runner=pipeline_runner or _load_default_pipeline_runner(),
@@ -266,7 +269,7 @@ def serve_stdio(
     inpaint_warmup_runner: InpaintWarmupRunner | None = None,
     detect_runner: PageActionRunner | None = None,
     ocr_runner: PageActionRunner | None = None,
-    reinpaint_runner: PageActionRunner | None = None,
+    reinpaint_runner: RegionalPageActionRunner | None = None,
 ) -> int:
     serve_jsonl(
         sys.stdin,
@@ -368,6 +371,22 @@ def _require_text(request: dict, key: str) -> str:
     return str(value)
 
 
+def _optional_text(request: dict, key: str) -> str | None:
+    value = request.get(key)
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _page_action_options_from_request(request: dict) -> PageActionOptions:
+    return {
+        "idioma_origem": _optional_text(request, "idioma_origem") or _optional_text(request, "source_lang"),
+        "idioma_destino": _optional_text(request, "idioma_destino") or _optional_text(request, "target_lang"),
+        "engine_preset_id": _optional_text(request, "engine_preset_id") or _optional_text(request, "enginePresetId"),
+    }
+
+
 def _require_int(request: dict, key: str) -> int:
     value = request.get(key)
     if value is None:
@@ -409,7 +428,7 @@ def _load_default_ocr_runner() -> PageActionRunner:
     return _run_ocr_page
 
 
-def _load_default_reinpaint_runner() -> PageActionRunner:
+def _load_default_reinpaint_runner() -> RegionalPageActionRunner:
     from main import _run_reinpaint
 
     return _run_reinpaint

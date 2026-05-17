@@ -11,6 +11,7 @@ import contextlib
 import importlib
 import importlib.util
 import io
+import json
 import logging
 import os
 import sys
@@ -30,7 +31,23 @@ logger = logging.getLogger(__name__)
 MODEL_URLS = {
     "comic-text-detector": "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/comictextdetector.pt",
     "comic-text-detector-cuda": "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/comictextdetector.pt.onnx",
+    "anime-text-yolo-n": "https://huggingface.co/mayocream/anime-text-yolo/resolve/main/yolo12n_animetext.safetensors",
+    "anime-text-yolo-s": "https://huggingface.co/mayocream/anime-text-yolo/resolve/main/yolo12s_animetext.safetensors",
+    "anime-text-yolo-m": "https://huggingface.co/mayocream/anime-text-yolo/resolve/main/yolo12m_animetext.safetensors",
+    "anime-text-yolo-l": "https://huggingface.co/mayocream/anime-text-yolo/resolve/main/yolo12l_animetext.safetensors",
+    "anime-text-yolo-x": "https://huggingface.co/mayocream/anime-text-yolo/resolve/main/yolo12x_animetext.safetensors",
 }
+
+ANIME_TEXT_YOLO_FILES = {
+    "anime-text-yolo": "yolo12n_animetext.safetensors",
+    "anime-text-yolo-n": "yolo12n_animetext.safetensors",
+    "anime-text-yolo-s": "yolo12s_animetext.safetensors",
+    "anime-text-yolo-m": "yolo12m_animetext.safetensors",
+    "anime-text-yolo-l": "yolo12l_animetext.safetensors",
+    "anime-text-yolo-x": "yolo12x_animetext.safetensors",
+}
+ANIME_TEXT_YOLO_HF_REPO = "mayocream/anime-text-yolo"
+ANIME_TEXT_YOLO_HF_DIR = "models--mayocream--anime-text-yolo"
 
 MIN_VALID_MODEL_BYTES = 1024
 
@@ -201,7 +218,7 @@ class TextDetector:
         self.half = half and self.device.type == "cuda"
         self._model = None
         self._model_type = model
-        self._model_path = model_path or self._get_model_path(model)
+        self._model_path = Path(model_path) if model_path else self._get_model_path(model)
         self._load_model()
 
     def _resolve_device(self, device: str) -> torch.device:
@@ -210,6 +227,9 @@ class TextDetector:
         return torch.device("cpu")
 
     def _get_model_path(self, model_name: str) -> Path:
+        if model_name in ANIME_TEXT_YOLO_FILES:
+            return self._get_anime_text_yolo_path(model_name)
+
         path = MODELS_DIR / f"{model_name}.pt"
         if _is_valid_model_file(path):
             return path
@@ -225,6 +245,34 @@ class TextDetector:
 
         self._download_model(model_name, path)
         return path
+
+    def _get_anime_text_yolo_path(self, model_name: str) -> Path:
+        filename = ANIME_TEXT_YOLO_FILES[model_name]
+        candidates = [
+            MODELS_DIR / "huggingface" / ANIME_TEXT_YOLO_HF_DIR / filename,
+            MODELS_DIR / ANIME_TEXT_YOLO_HF_DIR / filename,
+            MODELS_DIR / "anime-text-yolo" / filename,
+            PROJECT_ROOT / "models" / "huggingface" / ANIME_TEXT_YOLO_HF_DIR / filename,
+            PROJECT_ROOT / "pk" / "huggingface" / "mayocream" / "anime-text-yolo" / filename,
+        ]
+        for candidate in candidates:
+            if _is_valid_model_file(candidate):
+                return candidate
+
+        dest = candidates[0]
+        try:
+            from huggingface_hub import hf_hub_download
+
+            downloaded = hf_hub_download(
+                repo_id=ANIME_TEXT_YOLO_HF_REPO,
+                filename=filename,
+                local_dir=str(dest.parent),
+            )
+            return Path(downloaded)
+        except Exception as exc:
+            logger.warning("hf_hub_download falhou para %s; tentando URL direta: %s", model_name, exc)
+            self._download_model(model_name, dest)
+            return dest
 
     def _download_model(self, model_name: str, dest: Path):
         import urllib.request
@@ -245,6 +293,9 @@ class TextDetector:
         logger.info("Modelo salvo em %s", dest)
 
     def _load_model(self):
+        if self._load_anime_text_yolo():
+            return
+
         if self._load_comic_text_detector_native():
             return
 
@@ -259,7 +310,7 @@ class TextDetector:
             logger.info("Detector carregado via ultralytics (%s)", self.device)
             return
         except Exception as exc:
-            logger.warning("comic-text-detector nao carregou via ultralytics: %s", exc)
+            logger.warning("Detector nao carregou via ultralytics: %s", exc)
 
         if self._load_paddle_detection_backend():
             return
@@ -289,6 +340,56 @@ class TextDetector:
         self._backend = "paddle-det"
         logger.info("Detector carregado via paddle-det (gpu=%s)", use_gpu)
         return True
+
+    def _load_anime_text_yolo(self) -> bool:
+        if self._model_type not in ANIME_TEXT_YOLO_FILES:
+            return False
+        if self._model_path.suffix.lower() != ".safetensors" or not self._model_path.exists():
+            return False
+
+        try:
+            from safetensors.torch import load_file, safe_open
+            from ultralytics import YOLO
+            from ultralytics.nn.tasks import DetectionModel
+
+            with safe_open(str(self._model_path), framework="pt", device="cpu") as handle:
+                metadata = handle.metadata() or {}
+
+            yaml_payload = metadata.get("yaml")
+            if not yaml_payload:
+                raise RuntimeError("anime-text-yolo safetensors sem metadata yaml")
+            yaml_dict = json.loads(yaml_payload)
+            names_payload = metadata.get("names") or '{"0": "text_block"}'
+            names = {int(key): str(value) for key, value in json.loads(names_payload).items()}
+
+            model = DetectionModel(
+                yaml_dict,
+                ch=int(yaml_dict.get("ch", 3)),
+                nc=int(yaml_dict.get("nc", len(names) or 1)),
+                verbose=False,
+            )
+            incompat = model.load_state_dict(load_file(str(self._model_path), device="cpu"), strict=False)
+            if incompat.missing_keys or incompat.unexpected_keys:
+                logger.warning(
+                    "anime-text-yolo carregado com incompatibilidades: missing=%s unexpected=%s",
+                    len(incompat.missing_keys),
+                    len(incompat.unexpected_keys),
+                )
+
+            model.names = names
+            model.to(self.device)
+            model.eval()
+
+            yolo = YOLO("yolo12n.yaml")
+            yolo.model = model
+            self._model = yolo
+            self._backend = "anime-text-yolo"
+            self._anime_text_yolo_file = self._model_path
+            logger.info("Detector carregado via anime-text-yolo (%s): %s", self.device, self._model_path)
+            return True
+        except Exception as exc:
+            logger.warning("anime-text-yolo nao carregou: %s", exc)
+            return False
 
     def _load_comic_text_detector_native(self) -> bool:
         if self._model_type != "comic-text-detector":
@@ -458,9 +559,10 @@ class TextDetector:
             target_size = self._get_inference_size(orig_h, orig_w)
             img_resized = cv2.resize(img_rgb, (target_size[1], target_size[0]))
 
-            if self._backend == "ultralytics":
+            if self._backend in {"ultralytics", "anime-text-yolo"}:
                 with torch.inference_mode():
-                    results = self._model(img_resized, conf=0.45, verbose=False)
+                    conf = min(float(conf_threshold), 0.30) if self._backend == "anime-text-yolo" else 0.45
+                    results = self._model(img_resized, conf=conf, verbose=False)
                 blocks = self._parse_ultralytics(results, orig_h, orig_w, target_size)
             else:
                 results = self._model.ocr(img_resized, det=True, rec=False, cls=False)
@@ -656,7 +758,14 @@ class TextDetector:
 
     def _get_inference_size(self, h: int, w: int) -> tuple[int, int]:
         # Para strips verticais, aumentamos o limite para manter detalhes dos balões
-        max_size = 1024
+        if getattr(self, "_backend", "") == "anime-text-yolo":
+            try:
+                max_size = int(os.getenv("TRADUZAI_ANIME_TEXT_YOLO_MAX_SIZE", "1280"))
+            except Exception:
+                max_size = 1280
+            max_size = max(640, min(max_size, 2048))
+        else:
+            max_size = 1024
         if h > w * 2: # Strip vertical
             max_size = 2048 if h < 4000 else 3072
         

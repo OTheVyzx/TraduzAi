@@ -1,4 +1,5 @@
 import { useEditorStore } from "../../lib/stores/editorStore";
+import { buildEditorScene } from "../../lib/editorScene";
 import {
   AlignLeft,
   AlignCenter,
@@ -11,7 +12,7 @@ import {
   RefreshCw,
   Link2Off,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 const AVAILABLE_FONTS = [
   "ComicNeue-Bold.ttf",
@@ -86,7 +87,10 @@ export function PropertyEditor() {
   const updateEdit = useEditorStore((s) => s.updatePendingEdit);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
 
-  const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
+  const selectedLayer = useMemo(
+    () => buildEditorScene({ page: currentPage, pendingEdits, selectedLayerId }).selectedTextLayer,
+    [currentPage, pendingEdits, selectedLayerId],
+  );
   const entry = selectedLayer;
 
   if (!entry || !selectedLayerId) {
@@ -99,11 +103,10 @@ export function PropertyEditor() {
     );
   }
 
-  const edit = pendingEdits[selectedLayerId];
-  const traduzido = edit?.traduzido ?? edit?.translated ?? entry.traduzido ?? entry.translated ?? "";
-  const original = entry.original;
-  const estilo = edit?.estilo ? { ...entry.estilo, ...edit.estilo } : entry.estilo;
-  const [x1, y1, x2, y2] = edit?.bbox ?? entry.layout_bbox ?? entry.bbox;
+  const traduzido = entry.displayText;
+  const original = entry.displayOriginal;
+  const estilo = entry.estilo;
+  const [x1, y1, x2, y2] = entry.effectiveBbox;
 
   const confidencePercent = Math.round(((entry.confianca_ocr ?? entry.ocr_confidence ?? 0) || 0) * 100);
   const confidenceColor =

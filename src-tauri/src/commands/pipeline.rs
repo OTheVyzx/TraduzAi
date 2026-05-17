@@ -82,6 +82,8 @@ pub struct PipelineConfig {
     pub idioma_origem: String,
     pub idioma_destino: String,
     pub qualidade: String,
+    #[serde(default)]
+    pub engine_preset_id: Option<String>,
     pub glossario: HashMap<String, String>,
     pub contexto: PipelineContext,
     pub mode: String,
@@ -259,7 +261,8 @@ enum FastPageRunError {
 
 fn is_project_summary_mismatch(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
-    lowered.contains("log.summary") && lowered.contains("project.json")
+    (lowered.contains("log.summary") && lowered.contains("project.json"))
+        || (lowered.contains("qa.summary") && lowered.contains("qa.flags"))
 }
 
 async fn stop_fast_page_worker(reason: &str) {
@@ -486,6 +489,7 @@ pub async fn start_pipeline(
         "job_id": job_id, "source_path": config.source_path, "work_dir": work_dir.to_string_lossy(),
         "obra": config.obra, "capitulo": config.capitulo, "idioma_origem": config.idioma_origem,
         "idioma_destino": config.idioma_destino, "qualidade": config.qualidade, "glossario": config.glossario,
+        "engine_preset_id": config.engine_preset_id,
         "mode": config.mode,
         "contexto": {
             "sinopse": config.contexto.sinopse, "genero": config.contexto.genero, "personagens": config.contexto.personagens,
@@ -660,6 +664,10 @@ pub struct ProcessBlockConfig {
     pub page_index: u32,
     pub block_id: String,
     pub mode: String,
+    #[serde(default)]
+    pub idioma_origem: Option<String>,
+    #[serde(default)]
+    pub idioma_destino: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -682,6 +690,32 @@ fn append_page_region_args(cmd: &mut Command, region: Option<&PageRegionConfig>)
         .filter(|value| !value.is_empty())
     {
         cmd.arg("--external-mask").arg(mask_path);
+    }
+}
+
+fn clean_language(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn append_page_language_args(
+    cmd: &mut Command,
+    idioma_origem: Option<&str>,
+    idioma_destino: Option<&str>,
+) {
+    if let Some(lang) = clean_language(idioma_origem) {
+        cmd.arg("--source-lang").arg(lang);
+    }
+    if let Some(lang) = clean_language(idioma_destino) {
+        cmd.arg("--target-lang").arg(lang);
+    }
+}
+
+fn append_page_engine_args(cmd: &mut Command, engine_preset_id: Option<&str>) {
+    if let Some(engine_preset) = clean_language(engine_preset_id) {
+        cmd.arg("--engine-preset").arg(engine_preset);
     }
 }
 
@@ -944,12 +978,30 @@ async fn run_editor_page_action_with_fast_worker(
     project_file: &Path,
     page_index: u32,
     region: Option<&PageRegionConfig>,
+    engine_preset_id: Option<&str>,
+    idioma_origem: Option<&str>,
 ) -> Result<String, FastPageRunError> {
+    let engine_preset = clean_language(engine_preset_id);
+    let source_language = clean_language(idioma_origem)
+        .or_else(|| {
+            crate::commands::project_schema::load_project_value(project_file)
+                .ok()
+                .and_then(|project| {
+                    project["idioma_origem"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                })
+        })
+        .unwrap_or_else(|| "en".to_string());
     let request = serde_json::json!({
         "type": request_type,
         "project_path": project_file.to_string_lossy().to_string(),
         "page_index": page_index,
         "region": page_region_to_json(region),
+        "engine_preset_id": engine_preset,
+        "idioma_origem": source_language,
     });
     let events = run_fast_page_worker_request(app, request)
         .await
@@ -1316,6 +1368,11 @@ pub async fn process_block(app: AppHandle, config: ProcessBlockConfig) -> Result
         .arg(pf.to_string_lossy().to_string())
         .arg(config.page_index.to_string())
         .arg(&config.block_id);
+    append_page_language_args(
+        &mut cmd,
+        config.idioma_origem.as_deref(),
+        config.idioma_destino.as_deref(),
+    );
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!(
         "[EditorAction] start  process_block page={} block={}",
@@ -1465,8 +1522,9 @@ pub async fn detect_page(
     app: AppHandle,
     project_path: String,
     page_index: u32,
+    #[allow(non_snake_case)] idioma_origem: Option<String>,
 ) -> Result<String, String> {
-    detect_page_with_region(app, project_path, page_index, None).await
+    detect_page_with_region(app, project_path, page_index, None, None, idioma_origem).await
 }
 
 pub async fn detect_page_with_region(
@@ -1474,6 +1532,8 @@ pub async fn detect_page_with_region(
     project_path: String,
     page_index: u32,
     region: Option<PageRegionConfig>,
+    engine_preset_id: Option<String>,
+    idioma_origem: Option<String>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
     match run_editor_page_action_with_fast_worker(
@@ -1484,6 +1544,8 @@ pub async fn detect_page_with_region(
         &pf,
         page_index,
         region.as_ref(),
+        engine_preset_id.as_deref(),
+        idioma_origem.as_deref(),
     )
     .await
     {
@@ -1511,6 +1573,8 @@ pub async fn detect_page_with_region(
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
     append_page_region_args(&mut cmd, region.as_ref());
+    append_page_engine_args(&mut cmd, engine_preset_id.as_deref());
+    append_page_language_args(&mut cmd, idioma_origem.as_deref(), None);
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  detect page={page_index}");
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "detect")?;
@@ -1568,8 +1632,9 @@ pub async fn ocr_page(
     app: AppHandle,
     project_path: String,
     page_index: u32,
+    #[allow(non_snake_case)] idioma_origem: Option<String>,
 ) -> Result<String, String> {
-    ocr_page_with_region(app, project_path, page_index, None).await
+    ocr_page_with_region(app, project_path, page_index, None, None, idioma_origem).await
 }
 
 pub async fn ocr_page_with_region(
@@ -1577,6 +1642,8 @@ pub async fn ocr_page_with_region(
     project_path: String,
     page_index: u32,
     region: Option<PageRegionConfig>,
+    engine_preset_id: Option<String>,
+    idioma_origem: Option<String>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
     match run_editor_page_action_with_fast_worker(
@@ -1587,6 +1654,8 @@ pub async fn ocr_page_with_region(
         &pf,
         page_index,
         region.as_ref(),
+        engine_preset_id.as_deref(),
+        idioma_origem.as_deref(),
     )
     .await
     {
@@ -1614,6 +1683,8 @@ pub async fn ocr_page_with_region(
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
     append_page_region_args(&mut cmd, region.as_ref());
+    append_page_engine_args(&mut cmd, engine_preset_id.as_deref());
+    append_page_language_args(&mut cmd, idioma_origem.as_deref(), None);
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  ocr page={page_index}");
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "ocr")?;
@@ -1671,8 +1742,18 @@ pub async fn translate_page(
     app: AppHandle,
     project_path: String,
     page_index: u32,
+    #[allow(non_snake_case)] idioma_origem: Option<String>,
+    #[allow(non_snake_case)] idioma_destino: Option<String>,
 ) -> Result<String, String> {
-    translate_page_with_region(app, project_path, page_index, None).await
+    translate_page_with_region(
+        app,
+        project_path,
+        page_index,
+        None,
+        idioma_origem,
+        idioma_destino,
+    )
+    .await
 }
 
 pub async fn translate_page_with_region(
@@ -1680,6 +1761,8 @@ pub async fn translate_page_with_region(
     project_path: String,
     page_index: u32,
     region: Option<PageRegionConfig>,
+    idioma_origem: Option<String>,
+    idioma_destino: Option<String>,
 ) -> Result<String, String> {
     let pf = resolve_project_json_path(&project_path)?;
     let sidecar = get_sidecar_info(&app)?;
@@ -1691,6 +1774,11 @@ pub async fn translate_page_with_region(
         .arg(pf.to_string_lossy().to_string())
         .arg(page_index.to_string());
     append_page_region_args(&mut cmd, region.as_ref());
+    append_page_language_args(
+        &mut cmd,
+        idioma_origem.as_deref(),
+        idioma_destino.as_deref(),
+    );
     apply_sidecar_env(&mut cmd, &sidecar.program)?;
     eprintln!("[EditorAction] start  translate page={page_index}");
     let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "translate")?;
@@ -2796,6 +2884,9 @@ mod tests {
     fn project_summary_mismatch_is_fast_worker_retryable() {
         assert!(is_project_summary_mismatch(
             "Falha no reinpaint: log.summary nao bate com project.json: translated_regions"
+        ));
+        assert!(is_project_summary_mismatch(
+            "[EditorAction] detect falhou: qa.summary nao bate com qa.flags"
         ));
         assert!(!is_project_summary_mismatch(
             "Falha no reinpaint: modelo indisponivel"

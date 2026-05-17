@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -9,6 +9,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  Globe2,
   GripHorizontal,
   Image,
   Layers,
@@ -30,6 +31,8 @@ import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
 import { BrushOptionsInline } from "../components/editor/toolbar/BrushOptionsPopover";
 import { UndoRedoControls } from "../components/editor/toolbar/UndoRedoControls";
 import { preloadEditorFonts } from "../lib/fonts";
+import { loadSupportedLanguages } from "../lib/tauri";
+import { getLanguageOptions, normalizeLanguageCodeForSelection } from "../lib/languages";
 
 const VIEW_MODES = [
   { key: "original" as const, label: "Original", icon: Image, hotkey: "1" },
@@ -136,6 +139,8 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
   const navigate = useNavigate();
   const project = useAppStore((s) => s.project);
   const pipeline = useAppStore((s) => s.pipeline);
+  const updateProject = useAppStore((s) => s.updateProject);
+  const [supportedLanguages, setSupportedLanguages] = useState(getLanguageOptions(null));
   const {
     currentPageIndex,
     currentPage,
@@ -180,6 +185,13 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
 
   const totalPages = project?.paginas.length ?? 0;
   const projectId = project?.id ?? null;
+  const sourceLanguageValue = normalizeLanguageCodeForSelection(
+    project?.idioma_origem,
+    supportedLanguages,
+    "en",
+  );
+  const selectedSourceLanguage =
+    supportedLanguages.find((language) => language.code === sourceLanguageValue) ?? supportedLanguages[0] ?? null;
   const pendingCount =
     Object.keys(pendingEdits).length +
     pendingStructuralEdits.created.length +
@@ -197,6 +209,21 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     (pendingCount === 0 && renderPreviewState.status === "fresh");
   const runSelectionAwareAction = (action: Parameters<typeof runMaskedAction>[0]) =>
     activeLassoSelection ? runMaskedActionFromLasso(action) : runMaskedAction(action);
+
+  useEffect(() => {
+    let disposed = false;
+    loadSupportedLanguages()
+      .then((languages) => {
+        if (!disposed) setSupportedLanguages(getLanguageOptions(languages));
+      })
+      .catch((error) => {
+        console.warn("Nao foi possivel carregar idiomas no editor:", error);
+        if (!disposed) setSupportedLanguages(getLanguageOptions(null));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   const saveAndRenderCurrentPage = async () => {
     const targetPageKey = currentPageKey();
@@ -256,6 +283,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
         if (event.key.toLowerCase() === "i") setToolMode("reinpaintBrush");
         if (event.key.toLowerCase() === "e") setToolMode("eraser");
         if (event.key.toLowerCase() === "l") setToolMode("mask");
+        if (event.key.toLowerCase() === "p") setToolMode("process");
         // Tab: cicla alvo da borracha quando eraser ativo
         if (event.key === "Tab" && toolMode === "eraser") {
           event.preventDefault();
@@ -518,6 +546,33 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
 
           <div className="flex-1" />
 
+          <div
+            className="hidden items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/30 px-2 py-1 md:flex"
+            title="Idioma de origem usado por Detectar e OCR"
+          >
+            <Globe2 size={12} className="text-accent-cyan" />
+            <span className="text-[10px] font-medium text-text-muted">Origem</span>
+            <select
+              data-testid="editor-source-language-select"
+              aria-label="Idioma de origem do OCR"
+              value={sourceLanguageValue}
+              disabled={!project}
+              onChange={(event) => updateProject({ idioma_origem: event.target.value })}
+              className="max-w-[150px] rounded-md border border-transparent bg-transparent py-0.5 pl-1 pr-5 text-[11px] font-medium text-text-primary outline-none transition-smooth hover:border-white/10 focus:border-brand/40"
+            >
+              {supportedLanguages.map((language) => (
+                <option key={language.code} value={language.code} className="bg-bg-primary text-text-primary">
+                  {language.label} ({language.code})
+                </option>
+              ))}
+            </select>
+            {selectedSourceLanguage?.ocr_strategy === "best_effort" && (
+              <span className="hidden rounded-md bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning xl:inline">
+                OCR exp.
+              </span>
+            )}
+          </div>
+
           {/* Pipeline actions */}
           <div className="flex items-center gap-0.5 rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
             {activePageAction !== null && (
@@ -597,14 +652,18 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
                 {pageActionError.message}
               </p>
             </div>
-            <button
-              onClick={() => void runSelectionAwareAction(pageActionError.action)}
-              disabled={activePageAction !== null}
-              className="rounded-md border border-border bg-bg-secondary px-2 py-0.5 text-[10px] text-text-primary hover:bg-bg-tertiary disabled:opacity-40"
-              title="Tentar novamente"
-            >
-              Retry
-            </button>
+            {pageActionError.action !== "process" && (
+              <button
+                onClick={() => {
+                  if (pageActionError.action !== "process") void runSelectionAwareAction(pageActionError.action);
+                }}
+                disabled={activePageAction !== null}
+                className="rounded-md border border-border bg-bg-secondary px-2 py-0.5 text-[10px] text-text-primary hover:bg-bg-tertiary disabled:opacity-40"
+                title="Tentar novamente"
+              >
+                Retry
+              </button>
+            )}
             <button
               onClick={clearPageActionError}
               className="rounded-md px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-white/[0.04]"

@@ -38,6 +38,70 @@ function readerImagePathForPage(page: PageData, viewMode: EditorViewMode) {
   return editingBaseImagePath(page);
 }
 
+function ProcessRegionOverlayNode({
+  cropPath,
+  bbox,
+  version,
+}: {
+  cropPath: string;
+  bbox: [number, number, number, number];
+  version: number;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let revokeSource: (() => void) | null = null;
+    setSrc(null);
+    setImage(null);
+    loadImageSource(cropPath, "image/png", version)
+      .then((loaded) => {
+        if (cancelled) {
+          loaded.revoke?.();
+          return;
+        }
+        revokeSource = loaded.revoke ?? null;
+        setSrc(loaded.src);
+      })
+      .catch((error) => {
+        console.error("Falha ao carregar crop do processo:", error);
+        if (!cancelled) setSrc(null);
+      });
+
+    return () => {
+      cancelled = true;
+      if (revokeSource) window.setTimeout(revokeSource, 100);
+    };
+  }, [cropPath, version]);
+
+  useEffect(() => {
+    if (!src) {
+      setImage(null);
+      return;
+    }
+    const nextImage = new Image();
+    nextImage.onload = () => setImage(nextImage);
+    nextImage.onerror = () => setImage(null);
+    nextImage.src = src;
+  }, [src]);
+
+  const [x1, y1, x2, y2] = bbox;
+  const overlayWidth = Math.max(1, x2 - x1);
+  const overlayHeight = Math.max(1, y2 - y1);
+  if (!image) return null;
+  return (
+    <KonvaImage
+      image={image}
+      x={x1}
+      y={y1}
+      width={overlayWidth}
+      height={overlayHeight}
+      listening={false}
+    />
+  );
+}
+
 function EditorReaderStaticPage({
   page,
   pageIndex,
@@ -215,6 +279,9 @@ export function EditorStage() {
   // Selectors estáveis (escalares) para evitar loop por nova referência {} a cada render
   const maskLayerOpacity = useEditorStore((s) => s.currentPage?.image_layers?.mask?.opacity ?? 1);
   const brushLayerOpacity = useEditorStore((s) => s.currentPage?.image_layers?.brush?.opacity ?? 1);
+  const processOverlayVersion = useEditorStore((s) =>
+    Math.max(s.bitmapLayerVersions.inpaint ?? 0, s.bitmapLayerVersions.rendered ?? 0),
+  );
   const setCurrentPage = useEditorStore((s) => s.setCurrentPage);
   const {
     containerRef,
@@ -274,24 +341,25 @@ export function EditorStage() {
     Math.round(width > 0 ? width * stageScale : Math.max(1, containerSize.width - 48) * zoom),
   );
   const lassoMenuPosition = useMemo(() => {
+    if (toolMode !== "mask") return null;
     if (!activeLassoSelection || activeLassoSelection.pageIndex !== currentPageIndex) return null;
-    const [x, y, boxWidth, boxHeight] = activeLassoSelection.bbox;
+    const [x1, y1, x2, y2] = activeLassoSelection.bbox;
     const pageWidth = Math.max(1, Math.round(width * stageScale));
     const pageHeight = Math.max(1, Math.round(height * stageScale));
-    const centerX = panOffset.x + (x + boxWidth / 2) * stageScale;
+    const centerX = panOffset.x + ((x1 + x2) / 2) * stageScale;
     const left = Math.max(
       8,
       Math.min(pageWidth - LASSO_CONTEXT_MENU_SIZE.width - 8, centerX - LASSO_CONTEXT_MENU_SIZE.width / 2),
     );
-    const below = panOffset.y + (y + boxHeight) * stageScale + 10;
-    const above = panOffset.y + y * stageScale - LASSO_CONTEXT_MENU_SIZE.height - 10;
+    const below = panOffset.y + y2 * stageScale + 10;
+    const above = panOffset.y + y1 * stageScale - LASSO_CONTEXT_MENU_SIZE.height - 10;
     const top =
       below + LASSO_CONTEXT_MENU_SIZE.height <= pageHeight - 8
         ? below
         : Math.max(8, Math.min(pageHeight - LASSO_CONTEXT_MENU_SIZE.height - 8, above));
 
     return { x: Math.round(left), y: Math.round(top) };
-  }, [activeLassoSelection, currentPageIndex, height, panOffset.x, panOffset.y, stageScale, width]);
+  }, [activeLassoSelection, currentPageIndex, height, panOffset.x, panOffset.y, stageScale, toolMode, width]);
 
   useEffect(() => {
     setSnapGuides([]);
@@ -684,6 +752,16 @@ export function EditorStage() {
                     listening={false}
                   />
                 )}
+                {(currentPage.process_overlays ?? [])
+                  .filter((overlay) => overlay.visible !== false)
+                  .map((overlay) => (
+                    <ProcessRegionOverlayNode
+                      key={overlay.id}
+                      cropPath={overlay.crop_path}
+                      bbox={overlay.bbox}
+                      version={processOverlayVersion}
+                    />
+                  ))}
                 <Rect width={width} height={height} fill="rgba(0,0,0,0)" />
               </Layer>
 

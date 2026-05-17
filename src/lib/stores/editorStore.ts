@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import { useAppStore, type ImageLayerKey, type PageData, type Project, type TextEntry } from "./appStore";
+import {
+  useAppStore,
+  type ImageLayerKey,
+  type PageData,
+  type ProcessRegionOverlay,
+  type Project,
+  type TextEntry,
+} from "./appStore";
 import type { TextLayerStyle } from "./appStore";
 import {
   createHistoryStack,
@@ -23,6 +30,7 @@ import {
 } from "../editorHistory";
 import { getEditorBackend } from "../editorBackend";
 import { loadImageSource } from "../imageSource";
+import { buildToggleLockCommand, buildToggleVisibilityCommand } from "../editorOps";
 import {
   defaultWorkContext,
   type WorkCharacter,
@@ -32,13 +40,24 @@ import { DEFAULT_TEXT_STYLE, canonicalizeTextStyle } from "../editorTextStylePol
 import type { LassoSelection } from "../lassoSelection";
 import { rasterizeLassoToPng } from "../lassoSelection";
 
-export type EditorToolMode = "select" | "block" | "brush" | "repairBrush" | "reinpaintBrush" | "eraser" | "mask";
+export type EditorToolMode =
+  | "select"
+  | "block"
+  | "brush"
+  | "repairBrush"
+  | "reinpaintBrush"
+  | "eraser"
+  | "mask"
+  | "process";
+export type EditorPageActionName = "detect" | "ocr" | "translate" | "inpaint";
+export type EditorBusyActionName = EditorPageActionName | "process";
 export type EditorViewMode = "translated" | "inpainted" | "original";
 export type RenderPreviewStatus = "fresh" | "stale" | "rendering" | "error";
 export type TextTransformSnapshot = {
   bbox: Bbox;
   rotacao: number;
 };
+const LASSO_ENGINE_PRESET_ID = "manga" as const;
 
 // Chaves de camadas bitmap — "base" é imutável (nunca reescrita pelo brush/inpaint)
 export type BitmapLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" | "rendered" | "preview";
@@ -70,6 +89,43 @@ function projectPath() {
   return project ? project.output_path || project.source_path || project._work_dir || null : null;
 }
 
+function projectLanguages() {
+  const project = useAppStore.getState().project;
+  return {
+    idioma_origem: project?.idioma_origem?.trim() || "en",
+    idioma_destino: project?.idioma_destino?.trim() || "pt-BR",
+  };
+}
+
+function updateMaskLayerForSelection(page: PageData, maskPath: string): PageData {
+  return {
+    ...page,
+    image_layers: {
+      ...page.image_layers,
+      mask: {
+        key: "mask",
+        path: maskPath,
+        visible: true,
+        locked: false,
+      },
+    },
+  };
+}
+
+function upsertProcessOverlay(page: PageData, overlay: ProcessRegionOverlay): PageData {
+  const overlays = [...(page.process_overlays ?? [])];
+  const existingIndex = overlays.findIndex((item) => item.id === overlay.id);
+  if (existingIndex >= 0) {
+    return page;
+  }
+  overlays.push(overlay);
+  overlays.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return {
+    ...page,
+    process_overlays: overlays,
+  };
+}
+
 function sortTextLayers(layers: TextEntry[]) {
   return [...layers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 }
@@ -85,6 +141,11 @@ function syncCurrentPageIntoProject(page: PageData, pageIndex: number) {
   const paginas = [...project.paginas];
   paginas[pageIndex] = page;
   appStore.updateProject({ paginas });
+}
+
+function projectPageKey(project: Project | null, pageIndex: number) {
+  if (!project || pageIndex < 0 || pageIndex >= project.paginas.length) return null;
+  return getPageKey(project, pageIndex);
 }
 
 function pageFingerprint(page: PageData | null) {
@@ -259,6 +320,10 @@ function clonePendingEdits(edits: Record<string, Partial<TextEntry>>) {
 
 function cloneStructuralEdits(edits: PendingStructuralEdits) {
   return structuredClone(edits) as PendingStructuralEdits;
+}
+
+function clonePageSnapshot(page: PageData): PageData {
+  return structuredClone(page) as PageData;
 }
 
 function pendingValueEquals(a: unknown, b: unknown): boolean {
@@ -505,11 +570,12 @@ interface EditorState {
   pendingStructuralEdits: PendingStructuralEdits;
   setWorkingTraduzido: (pageKey: string, layerId: string, value: string) => void;
   setWorkingOriginal: (pageKey: string, layerId: string, value: string) => void;
-  activePageAction: null | "detect" | "ocr" | "translate" | "inpaint";
-  pageActionError: { action: "detect" | "ocr" | "translate" | "inpaint"; message: string } | null;
+  activePageAction: null | EditorBusyActionName;
+  pageActionError: { action: EditorBusyActionName; message: string } | null;
   clearPageActionError: () => void;
-  runMaskedAction: (action: "detect" | "ocr" | "translate" | "inpaint") => Promise<void>;
-  runMaskedActionFromLasso: (action: "detect" | "ocr" | "translate" | "inpaint") => Promise<void>;
+  runMaskedAction: (action: EditorPageActionName) => Promise<void>;
+  runMaskedActionFromLasso: (action: EditorPageActionName) => Promise<void>;
+  runProcessRegionFromSelection: (selection: LassoSelection) => Promise<void>;
 
   // ── Auto-save (Fase 3) ───────────────────────────────────────────────
   /** True quando há edição não persistida (incrementa em todo mutador). */
@@ -572,8 +638,10 @@ interface EditorState {
   ) => void;
   setWorkingVisibility: (pageKey: string, layerId: string, visible: boolean) => void;
   setWorkingLocked: (pageKey: string, layerId: string, locked: boolean) => void;
+  setWorkingPageSnapshot: (pageKey: string, page: PageData) => void;
   hasLayer: (pageKey: string, layerId: string) => boolean;
   getLayer: (pageKey: string, layerId: string) => TextEntry | null;
+  getWorkingPageSnapshot: (pageKey: string) => PageData | null;
   getOrderedLayerIds: (pageKey: string) => string[];
   sanitizeSelection: () => void;
   recordEditorCommand: (cmd: EditorCommand) => ValidationResult;
@@ -589,6 +657,8 @@ interface EditorState {
   createTextLayer: (bbox: [number, number, number, number]) => Promise<void>;
   deleteSelectedLayer: () => Promise<void>;
   applyBitmapStroke: (payload: {
+    pageKey?: string;
+    pageIndex?: number;
     width: number;
     height: number;
     strokes: [number, number][][];
@@ -605,6 +675,8 @@ interface EditorState {
     dirty_bbox?: [number, number, number, number];
   }) => Promise<void>;
   healPaintedRegion: (payload: {
+    pageKey?: string;
+    pageIndex?: number;
     bbox: Bbox;
     maskPath?: string;
     maskPngData?: string;
@@ -977,20 +1049,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     const page = get().currentPage;
     if (page && get().currentPageIndex === selection.pageIndex) {
-      const updatedPage: PageData = {
-        ...page,
-        image_layers: {
-          ...page.image_layers,
-          mask: {
-            key: "mask",
-            path: absolutePath,
-            visible: true,
-            locked: false,
-          },
-        },
-      };
+      const updatedPage = updateMaskLayerForSelection(page, absolutePath);
       syncCurrentPageIntoProject(updatedPage, selection.pageIndex);
-      set({ currentPage: updatedPage, activeLassoSelection: null });
+      set({ currentPage: updatedPage });
       get().bumpBitmapLayerVersion("mask");
       get().markRenderPreviewStale(get().currentPageKey());
     } else {
@@ -1492,6 +1553,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         project_path: path,
         page_index: pageIndex,
         action,
+        ...projectLanguages(),
       });
       await get().loadCurrentPage();
       // Cache-bust para assets que foram modificados
@@ -1536,12 +1598,32 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     set({ activePageAction: action, pageActionError: null });
     try {
-      const { runPageActionWithOptionalMask } = await getTauriEditorApi();
+      const { runPageActionWithOptionalMask, writeMaskFromPng } = await getTauriEditorApi();
+      const pngData = rasterizeLassoToPng(selection.points, selection.width, selection.height);
+      const maskPath = pngData
+        ? await writeMaskFromPng({
+            project_path: path,
+            page_index: selection.pageIndex,
+            png_data: pngData,
+            layer_key: "mask",
+            op: get().maskOp,
+          })
+        : null;
+      const page = get().currentPage;
+      if (maskPath && page && get().currentPageIndex === selection.pageIndex) {
+        const updatedPage = updateMaskLayerForSelection(page, maskPath);
+        syncCurrentPageIntoProject(updatedPage, selection.pageIndex);
+        set({ currentPage: updatedPage });
+        get().bumpBitmapLayerVersion("mask");
+      }
       const result = await runPageActionWithOptionalMask({
         project_path: path,
         page_index: selection.pageIndex,
         action,
         bbox: selection.bbox,
+        mask_path: maskPath,
+        engine_preset_id: LASSO_ENGINE_PRESET_ID,
+        ...projectLanguages(),
       });
       await get().loadCurrentPage();
       for (const asset of result.changed_assets) {
@@ -1554,6 +1636,95 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ pageActionError: { action, message } });
+    } finally {
+      set({ activePageAction: null });
+    }
+  },
+
+  runProcessRegionFromSelection: async (selection) => {
+    if (!selection || selection.pageKey !== get().currentPageKey()) return;
+    if (get().activePageAction) return;
+    const path = projectPath();
+    if (!path) return;
+    const pageKey = get().currentPageKey();
+    const initialPage = get().currentPage;
+    const beforePage = initialPage ? clonePageSnapshot(initialPage) : null;
+
+    if (get().dirty) {
+      try {
+        await get().flushAutoSave();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set({ pageActionError: { action: "process", message } });
+        return;
+      }
+    }
+
+    set({ activePageAction: "process", pageActionError: null });
+    try {
+      const { runProcessRegion, writeMaskFromPng } = await getTauriEditorApi();
+      const pngData = rasterizeLassoToPng(selection.points, selection.width, selection.height);
+      const maskPath = pngData
+        ? await writeMaskFromPng({
+            project_path: path,
+            page_index: selection.pageIndex,
+            png_data: pngData,
+            layer_key: "mask",
+            op: "replace",
+          })
+        : null;
+      const page = get().currentPage;
+      if (maskPath && page && get().currentPageIndex === selection.pageIndex) {
+        const updatedPage = updateMaskLayerForSelection(page, maskPath);
+        syncCurrentPageIntoProject(updatedPage, selection.pageIndex);
+        set({ currentPage: updatedPage });
+        get().bumpBitmapLayerVersion("mask");
+      }
+      const result = await runProcessRegion({
+        project_path: path,
+        page_index: selection.pageIndex,
+        bbox: selection.bbox,
+        mask_path: maskPath,
+        engine_preset_id: LASSO_ENGINE_PRESET_ID,
+        ...projectLanguages(),
+      });
+      await get().loadCurrentPage();
+      if (get().currentPageIndex === result.page_index) {
+        const loadedPage = get().currentPage;
+        if (loadedPage) {
+          const updatedPage = upsertProcessOverlay(loadedPage, result.overlay);
+          if (updatedPage !== loadedPage) {
+            syncCurrentPageIntoProject(updatedPage, result.page_index);
+            set({ currentPage: updatedPage });
+          }
+        }
+      }
+      const currentPageAfterProcess = get().currentPage;
+      const afterPage = currentPageAfterProcess ? clonePageSnapshot(currentPageAfterProcess) : null;
+      if (beforePage && afterPage) {
+        get().recordEditorCommand({
+          commandId: `process-region-${crypto.randomUUID()}`,
+          pageKey,
+          createdAt: Date.now(),
+          type: "page-snapshot",
+          label: "Processo regional",
+          before: beforePage,
+          after: afterPage,
+        });
+      }
+      for (const asset of result.changed_assets) {
+        if (asset === "inpaint") get().bumpBitmapLayerVersion("inpaint");
+        if (asset === "rendered") get().bumpBitmapLayerVersion("rendered");
+        if (asset === "mask") get().bumpBitmapLayerVersion("mask");
+      }
+      get().markRenderPreviewStale(get().currentPageKey());
+      set({
+        activeLassoSelection: null,
+        selectedLayerId: result.changed_layers[0] ?? result.overlay.text_layer_ids[0] ?? get().selectedLayerId,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ pageActionError: { action: "process", message } });
     } finally {
       set({ activePageAction: null });
     }
@@ -1786,6 +1957,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     }),
 
+  setWorkingPageSnapshot: (pageKey, page) => {
+    if (pageKey !== get().currentPageKey()) return;
+    const nextPage = clonePageSnapshot(page);
+    syncCurrentPageIntoProject(nextPage, get().currentPageIndex);
+    set({
+      currentPage: nextPage,
+      pendingEdits: {},
+      pendingStructuralEdits: emptyStructuralEdits(),
+      lastRetypesetTime: Date.now(),
+    });
+    get().markRenderPreviewStale(pageKey);
+    get().bumpBitmapLayerVersion("inpaint");
+    get().bumpBitmapLayerVersion("rendered");
+    get().bumpBitmapLayerVersion("mask");
+  },
+
   hasLayer: (pageKey, layerId) =>
     pageKey === get().currentPageKey() &&
     !!get().currentPage?.text_layers.some((layer) => layer.id === layerId),
@@ -1802,6 +1989,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       estilo: edit.estilo ? { ...layer.estilo, ...edit.estilo } : layer.estilo,
       style: edit.estilo ? { ...layer.estilo, ...edit.estilo } : layer.style,
     };
+  },
+
+  getWorkingPageSnapshot: (pageKey) => {
+    const page = get().currentPage;
+    if (pageKey !== get().currentPageKey() || !page) return null;
+    return clonePageSnapshot(page);
   },
 
   getOrderedLayerIds: (pageKey) => {
@@ -1973,15 +2166,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!page) return;
     const layer = page.text_layers.find((item) => item.id === layerId);
     if (!layer) return;
-    get().executeEditorCommand({
-      commandId: crypto.randomUUID(),
+    get().executeEditorCommand(buildToggleVisibilityCommand({
       pageKey: get().currentPageKey(),
-      createdAt: Date.now(),
-      type: "toggle-visibility",
       layerId,
       before: layer.visible ?? true,
       after: !(layer.visible ?? true),
-    });
+    }));
   },
 
   toggleTextLayerLock: (layerId) => {
@@ -1989,15 +2179,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!page) return;
     const layer = page.text_layers.find((item) => item.id === layerId);
     if (!layer) return;
-    get().executeEditorCommand({
-      commandId: crypto.randomUUID(),
+    get().executeEditorCommand(buildToggleLockCommand({
       pageKey: get().currentPageKey(),
-      createdAt: Date.now(),
-      type: "toggle-lock",
       layerId,
       before: layer.locked ?? false,
       after: !(layer.locked ?? false),
-    });
+    }));
   },
 
   toggleImageLayerVisibility: async (layerKey) => {
@@ -2076,6 +2263,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   applyBitmapStroke: async ({
+    pageKey: requestedPageKey,
+    pageIndex: requestedPageIndex,
     width,
     height,
     strokes,
@@ -2092,7 +2281,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     dirty_bbox,
   }) => {
     const path = projectPath();
-    const page = get().currentPage;
+    const project = useAppStore.getState().project;
+    const targetPageIndex = requestedPageIndex ?? get().currentPageIndex;
+    const expectedPageKey = projectPageKey(project, targetPageIndex);
+    const targetPageKey = requestedPageKey ?? expectedPageKey ?? get().currentPageKey();
+    if (expectedPageKey && expectedPageKey !== targetPageKey) return;
+    const activeMatchesTarget = get().currentPageIndex === targetPageIndex && get().currentPageKey() === targetPageKey;
+    const page = activeMatchesTarget ? get().currentPage : (project?.paginas[targetPageIndex] ?? null);
     if (!path || !page || strokes.length === 0) return;
 
     const mode = get().toolMode;
@@ -2124,7 +2319,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
 
     // Guardar última camada pintada (não apagada)
-    if (!erase && layerKey !== "reinpaint") {
+    if (activeMatchesTarget && !erase && layerKey !== "reinpaint") {
       set({ lastPaintedLayer: layerKey });
     }
 
@@ -2148,7 +2343,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const brushSize = requestedBrushSize ?? get().brushSize;
     const absolutePath = await fn({
       project_path: path,
-      page_index: get().currentPageIndex,
+      page_index: targetPageIndex,
       width,
       height,
       brush_size: brushSize,
@@ -2164,14 +2359,38 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
 
     const visibleLayerKey = layerKey === "recovery" || layerKey === "reinpaint" ? "inpaint" : layerKey;
-    const livePage = get().currentPage;
+    const latestProject = useAppStore.getState().project;
+    if (projectPageKey(latestProject, targetPageIndex) !== targetPageKey) return;
+    const stillActiveTarget = get().currentPageIndex === targetPageIndex && get().currentPageKey() === targetPageKey;
+    const livePage = stillActiveTarget ? get().currentPage : (latestProject?.paginas[targetPageIndex] ?? null);
+    const markTargetRenderPreviewStale = (pageForFingerprint: PageData | null) => {
+      set((state) => {
+        const current = getRenderPreviewStateForPage(
+          targetPageKey,
+          pageForFingerprint,
+          state.renderPreviewCacheByPageKey,
+        );
+        return {
+          renderPreviewCacheByPageKey: {
+            ...state.renderPreviewCacheByPageKey,
+            [targetPageKey]: {
+              ...current,
+              fingerprint: renderPreviewFingerprint(pageForFingerprint),
+              status: "stale",
+              error: null,
+            },
+          },
+        };
+      });
+    };
     if (
+      stillActiveTarget &&
       optimisticPath &&
       livePage?.image_layers?.[visibleLayerKey]?.path &&
       livePage.image_layers[visibleLayerKey]?.path !== optimisticPath
     ) {
       get().bumpBitmapLayerVersion(visibleLayerKey as MutableBitmapLayerKey);
-      get().markRenderPreviewStale(get().currentPageKey());
+      markTargetRenderPreviewStale(livePage);
       return;
     }
     const pageForUpdate = livePage ?? page;
@@ -2199,58 +2418,64 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           : {}),
       },
     };
-    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
-    set({
-      currentPage: updatedPage,
-      selectedLayerId: null,
-      lastRetypesetTime: Date.now(),
-    });
-    // Cache-bust da camada editada (runtime-only, não persiste no project.json)
-    get().bumpBitmapLayerVersion(visibleLayerKey as MutableBitmapLayerKey);
-    get().markRenderPreviewStale(get().currentPageKey());
+    syncCurrentPageIntoProject(updatedPage, targetPageIndex);
+    if (stillActiveTarget) {
+      set({
+        currentPage: updatedPage,
+        selectedLayerId: null,
+        lastRetypesetTime: Date.now(),
+      });
+      get().bumpBitmapLayerVersion(visibleLayerKey as MutableBitmapLayerKey);
+    }
+    markTargetRenderPreviewStale(updatedPage);
   },
 
-  healPaintedRegion: async ({ bbox, maskPath, maskPngData }) => {
+  healPaintedRegion: async ({ pageKey: requestedPageKey, pageIndex: requestedPageIndex, bbox, maskPath, maskPngData }) => {
     const path = projectPath();
-    const page = get().currentPage;
+    const project = useAppStore.getState().project;
+    const targetPageIndex = requestedPageIndex ?? get().currentPageIndex;
+    const expectedPageKey = projectPageKey(project, targetPageIndex);
+    const targetPageKey = requestedPageKey ?? expectedPageKey ?? get().currentPageKey();
+    if (expectedPageKey && expectedPageKey !== targetPageKey) return;
+    const activeMatchesTarget = get().currentPageIndex === targetPageIndex && get().currentPageKey() === targetPageKey;
+    const page = activeMatchesTarget ? get().currentPage : (project?.paginas[targetPageIndex] ?? null);
     if (!path || !page || (!maskPath && !maskPngData)) return;
-    const pageIndex = get().currentPageIndex;
-    const pageKey = get().currentPageKey();
     const previousPath = page.image_layers?.inpaint?.path ?? null;
 
     healingBrushPending += 1;
     set({ isHealingBrushApplying: true, healingBrushError: null });
 
     const run = async () => {
-      await get().commitEdits();
+      if (get().currentPageIndex === targetPageIndex && get().currentPageKey() === targetPageKey) {
+        await get().commitEdits();
+      }
       const api = await getTauriEditorApi();
       const resolvedMaskPath =
         maskPath && maskPath.trim()
           ? maskPath
           : await api.writeHealingMask({
               project_path: path,
-              page_index: pageIndex,
+              page_index: targetPageIndex,
               png_data: maskPngData!,
               bbox,
             });
       const result = await api.healInpaintRegion({
         project_path: path,
-        page_index: pageIndex,
+        page_index: targetPageIndex,
         bbox,
         mask_path: resolvedMaskPath,
       });
 
-      if (get().currentPageIndex !== pageIndex || get().currentPageKey() !== pageKey) {
-        return;
-      }
-
-      const livePage = get().currentPage;
+      const latestProject = useAppStore.getState().project;
+      if (projectPageKey(latestProject, targetPageIndex) !== targetPageKey) return;
+      const stillActiveTarget = get().currentPageIndex === targetPageIndex && get().currentPageKey() === targetPageKey;
+      const livePage = stillActiveTarget ? get().currentPage : (latestProject?.paginas[targetPageIndex] ?? null);
       if (!livePage) return;
       const beforePath = result.before_inpaint_path ?? previousPath ?? "";
       const afterPath = result.inpaint_path;
       const commandId = `bitmap-${crypto.randomUUID()}`;
       bitmapCache.set(commandId, {
-        pageKey,
+        pageKey: targetPageKey,
         commandId,
         before: new TextEncoder().encode(beforePath),
         after: new TextEncoder().encode(afterPath),
@@ -2270,22 +2495,41 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           },
         },
       };
-      syncCurrentPageIntoProject(updatedPage, pageIndex);
-      set({
-        currentPage: updatedPage,
-        viewMode: "inpainted",
-        lastRetypesetTime: Date.now(),
+      syncCurrentPageIntoProject(updatedPage, targetPageIndex);
+      if (stillActiveTarget) {
+        set({
+          currentPage: updatedPage,
+          viewMode: "inpainted",
+          lastRetypesetTime: Date.now(),
+        });
+        get().recordEditorCommand({
+          commandId,
+          pageKey: targetPageKey,
+          createdAt: Date.now(),
+          type: "bitmap-stroke",
+          layerKey: "inpaint",
+          bbox,
+        });
+        get().bumpBitmapLayerVersion("inpaint");
+      }
+      set((state) => {
+        const current = getRenderPreviewStateForPage(
+          targetPageKey,
+          updatedPage,
+          state.renderPreviewCacheByPageKey,
+        );
+        return {
+          renderPreviewCacheByPageKey: {
+            ...state.renderPreviewCacheByPageKey,
+            [targetPageKey]: {
+              ...current,
+              fingerprint: renderPreviewFingerprint(updatedPage),
+              status: "stale",
+              error: null,
+            },
+          },
+        };
       });
-      get().recordEditorCommand({
-        commandId,
-        pageKey,
-        createdAt: Date.now(),
-        type: "bitmap-stroke",
-        layerKey: "inpaint",
-        bbox,
-      });
-      get().bumpBitmapLayerVersion("inpaint");
-      get().markRenderPreviewStale(pageKey);
     };
 
     const job = healingBrushQueue.catch(() => undefined).then(run);
@@ -2338,6 +2582,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         page_index: currentPageIndex,
         block_id: selectedLayerId,
         mode,
+        ...projectLanguages(),
       });
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(get().currentPageKey(), renderedPathForPage(get().currentPage));
@@ -2406,6 +2651,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await detectPage({
         project_path: path,
         page_index: get().currentPageIndex,
+        idioma_origem: projectLanguages().idioma_origem,
       });
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
@@ -2429,6 +2675,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await ocrPage({
         project_path: path,
         page_index: get().currentPageIndex,
+        idioma_origem: projectLanguages().idioma_origem,
       });
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
@@ -2448,6 +2695,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await translatePage({
         project_path: path,
         page_index: get().currentPageIndex,
+        ...projectLanguages(),
       });
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));

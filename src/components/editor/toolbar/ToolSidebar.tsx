@@ -39,6 +39,7 @@ const TOOLS: {
   { key: "reinpaintBrush", label: "I", icon: Sparkles, hotkey: "I", title: "Pincel corretor: corrigir área pintada (I)" },
   { key: "eraser", label: "E", icon: Eraser, hotkey: "E", title: "Borracha (E)" },
   { key: "mask", label: "L", icon: Scissors, hotkey: "L", title: "Máscara Lasso (L)" },
+  { key: "process", label: "P", icon: Sparkles, hotkey: "P", title: "Processo regional automatico (P)" },
 ];
 
 // Ferramenta "Hand/Pan" — mapeada para select até termos o modo pan dedicado (Fase 7)

@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -300,6 +301,61 @@ class VisionStackInpainterTests(unittest.TestCase):
         inpaint_onnx.assert_called_once_with(inpainter._model, image, mask)
         self.assertEqual(result.shape, image.shape)
         self.assertTrue(np.all(result == 210))
+
+    def test_aot_model_path_resolver_finds_huggingface_snapshot(self):
+        from vision_stack.aot_inpainter import find_aot_model_paths
+
+        with TemporaryDirectory() as tmpdir:
+            snapshot = (
+                Path(tmpdir)
+                / "huggingface"
+                / "models--mayocream--aot-inpainting"
+                / "snapshots"
+                / "abc"
+            )
+            snapshot.mkdir(parents=True)
+            (snapshot / "config.json").write_text("{}", encoding="utf-8")
+            (snapshot / "model.safetensors").write_bytes(b"stub")
+
+            paths = find_aot_model_paths(tmpdir)
+
+        self.assertIsNotNone(paths)
+        self.assertEqual(paths.config.name, "config.json")
+        self.assertEqual(paths.weights.name, "model.safetensors")
+
+    def test_load_aot_model_requires_explicit_flag(self):
+        from vision_stack.aot_inpainter import AotInpaintingUnavailable
+
+        inpainter = Inpainter.__new__(Inpainter)
+        inpainter.device = type("FakeDevice", (), {"type": "cpu"})()
+        inpainter.half = False
+        inpainter._model = None
+
+        with patch.dict("os.environ", {"TRADUZAI_AOT_INPAINT": "0"}, clear=False):
+            with self.assertRaisesRegex(AotInpaintingUnavailable, "TRADUZAI_AOT_INPAINT=1"):
+                Inpainter._load_model(inpainter, "aot-inpainting")
+
+    def test_run_inpaint_delegates_to_aot_backend(self):
+        inpainter = Inpainter.__new__(Inpainter)
+        inpainter._backend = "aot_inpainting"
+
+        expected = np.full((32, 32, 3), 77, dtype=np.uint8)
+
+        class FakeAot:
+            def inpaint(self, img_np, mask, debug=None):
+                self.last_debug = debug
+                self.last_shape = img_np.shape
+                return expected
+
+        inpainter._model = FakeAot()
+        image = np.full((32, 32, 3), 127, dtype=np.uint8)
+        mask = np.zeros((32, 32), dtype=np.uint8)
+        mask[8:20, 8:20] = 255
+
+        result = inpainter._run_inpaint(image, mask)
+
+        self.assertIs(result, expected)
+        self.assertEqual(inpainter._model.last_shape, image.shape)
 
 
 if __name__ == "__main__":
