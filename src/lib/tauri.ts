@@ -7,6 +7,7 @@ import type {
   ImageLayerKey,
   PageData,
   PipelineProgress,
+  ProcessRegionOverlay,
   ProjectContext,
   TextEntry,
   SystemProfile,
@@ -152,10 +153,17 @@ function joinProjectPath(baseDir: string, maybeRelative?: string | null) {
   return `${projectBaseDir(baseDir)}/${maybeRelative}`.replace(/\\/g, "/");
 }
 
-export function buildPlainPageCommandArgs(args: { project_path: string; page_index: number }) {
+export function buildPlainPageCommandArgs(args: {
+  project_path: string;
+  page_index: number;
+  idioma_origem?: string;
+  idioma_destino?: string;
+}) {
   return {
     projectPath: args.project_path,
     pageIndex: args.page_index,
+    idiomaOrigem: args.idioma_origem,
+    idiomaDestino: args.idioma_destino,
   };
 }
 
@@ -232,6 +240,10 @@ export function hydratePageData(page: Partial<PageData>, baseDir: string): PageD
         inpaint: joinProjectPath(baseDir, page.editor_cache.inpaint ?? null),
       }
     : undefined;
+  const processOverlays = (page.process_overlays ?? []).map((overlay) => ({
+    ...overlay,
+    crop_path: joinProjectPath(baseDir, overlay.crop_path) ?? overlay.crop_path,
+  }));
 
   return {
     ...page,
@@ -243,6 +255,7 @@ export function hydratePageData(page: Partial<PageData>, baseDir: string): PageD
     image_layers: imageLayers,
     editor_cache: editorCache,
     inpaint_blocks: page.inpaint_blocks ?? [],
+    process_overlays: processOverlays,
     text_layers: [...textLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
     textos: [...textLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
   };
@@ -771,7 +784,7 @@ export async function writeMaskFromPng(config: {
   layer_key: string;
   op: "replace" | "add" | "subtract";
 }): Promise<string> {
-  if (isE2E()) return "";
+  if (isE2E()) return tauriMock.writeMaskFromPng(config);
   return invoke("write_mask_from_png", { config });
 }
 
@@ -967,6 +980,7 @@ export async function startPipeline(config: {
   idioma_origem: string;
   idioma_destino: string;
   qualidade: "rapida" | "normal" | "alta";
+  engine_preset_id?: "manga" | "manhwa_manhua" | "default";
   glossario: Record<string, string>;
   work_context?: WorkContextSummary | null;
   preset?: unknown;
@@ -1001,15 +1015,20 @@ export async function renderPreviewPage(args: {
   return await invoke("render_preview_page", { config: args });
 }
 
-export async function detectPage(args: { project_path: string; page_index: number }): Promise<string> {
+export async function detectPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string> {
   return await invoke("detect_page", buildPlainPageCommandArgs(args));
 }
 
-export async function ocrPage(args: { project_path: string; page_index: number }): Promise<string> {
+export async function ocrPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string> {
   return await invoke("ocr_page", buildPlainPageCommandArgs(args));
 }
 
-export async function translatePage(args: { project_path: string; page_index: number }): Promise<string> {
+export async function translatePage(args: {
+  project_path: string;
+  page_index: number;
+  idioma_origem?: string;
+  idioma_destino?: string;
+}): Promise<string> {
   return await invoke("translate_page", buildPlainPageCommandArgs(args));
 }
 
@@ -1027,6 +1046,8 @@ export async function processBlock(config: {
   page_index: number;
   block_id: string;
   mode: "ocr" | "translate" | "inpaint";
+  idioma_origem?: string;
+  idioma_destino?: string;
 }): Promise<string> {
   return invoke("process_block", { config });
 }
@@ -1401,12 +1422,23 @@ export type PageActionResult = {
   message: string;
 };
 
+export type ProcessRegionResult = {
+  page_index: number;
+  overlay: ProcessRegionOverlay;
+  changed_assets: ChangedAsset[];
+  changed_layers: string[];
+  message: string;
+};
+
 export async function runPageActionWithOptionalMask(config: {
   project_path: string;
   page_index: number;
   action: "detect" | "ocr" | "translate" | "inpaint";
   bbox?: [number, number, number, number] | null;
   mask_path?: string | null;
+  engine_preset_id?: "manga" | "manhwa_manhua" | "default" | string;
+  idioma_origem?: string;
+  idioma_destino?: string;
 }): Promise<PageActionResult> {
   if (isE2E()) return tauriMock.runPageActionWithOptionalMask(config);
   try {
@@ -1422,4 +1454,17 @@ export async function runPageActionWithOptionalMask(config: {
     }
     throw error;
   }
+}
+
+export async function runProcessRegion(config: {
+  project_path: string;
+  page_index: number;
+  bbox: [number, number, number, number];
+  mask_path?: string | null;
+  engine_preset_id?: "manga" | "manhwa_manhua" | "default" | string;
+  idioma_origem?: string;
+  idioma_destino?: string;
+}): Promise<ProcessRegionResult> {
+  if (isE2E()) return tauriMock.runProcessRegion(config);
+  return invoke("run_process_region", { config });
 }

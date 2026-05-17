@@ -54,6 +54,19 @@ def _timed(telemetry: dict | None, stage: str) -> _TimingScope:
     return _TimingScope(telemetry, stage)
 
 
+def _strip_band_margin_px(idioma_origem: str = "") -> int:
+    raw = os.getenv("TRADUZAI_STRIP_BAND_MARGIN_PX", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    lang = str(idioma_origem or "").strip().lower()
+    if lang in {"ja", "jp", "jpn", "ko", "kor", "kr", "zh", "zho", "chi", "cn", "zh-cn", "zh-tw"}:
+        return 96
+    return 16
+
+
 @dataclass(frozen=True)
 class OrderedBandContextSnapshot:
     _band_history: tuple[dict, ...]
@@ -1385,6 +1398,12 @@ def _map_koharu_roi_result_to_band(
             "koharu_cjk_filtered_text_count": int(filtered_text_count),
         },
     }
+    if page_result.get("engine_preset_id"):
+        page["engine_preset_id"] = page_result.get("engine_preset_id")
+    if isinstance(page_result.get("engine_preset"), dict):
+        page["engine_preset"] = dict(page_result.get("engine_preset") or {})
+    if isinstance(page_result.get("_engine_preset"), dict):
+        page["_engine_preset"] = dict(page_result.get("_engine_preset") or {})
     if page_result.get("_koharu_worker_batch"):
         page["_koharu_worker_batch"] = dict(page_result.get("_koharu_worker_batch") or {})
     return page
@@ -2336,9 +2355,11 @@ def run_chapter(
             chapter_telemetry["balloon_count"] = len(balloons)
 
         with _timed(chapter_telemetry, "strip_group_bands"):
-            bands = group_balloons_into_bands(balloons)
+            band_margin = _strip_band_margin_px(idioma_origem)
+            bands = group_balloons_into_bands(balloons, margin=band_margin)
         if chapter_telemetry is not None:
             chapter_telemetry["band_count"] = len(bands)
+            chapter_telemetry["band_margin_px"] = int(band_margin)
         with _timed(chapter_telemetry, "strip_attach_band_slices"):
             attach_band_slices(strip, bands)
 

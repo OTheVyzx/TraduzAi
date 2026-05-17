@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import {
   Eye,
   EyeOff,
@@ -8,9 +8,12 @@ import {
   BookOpen,
   Zap,
   Cloud,
+  ScanText,
+  Languages,
+  Eraser,
 } from "lucide-react";
 import { useEditorStore } from "../../lib/stores/editorStore";
-import type { TextEntry } from "../../lib/stores/appStore";
+import type { NormalizedTextLayer } from "../../lib/editorScene";
 
 const TIPO_ICONS = {
   fala: MessageSquare,
@@ -20,41 +23,65 @@ const TIPO_ICONS = {
 } as const;
 
 interface LayerItemProps {
-  entry: TextEntry;
+  entry: NormalizedTextLayer;
   index: number;
+  hasEdits?: boolean;
 }
 
-export function LayerItem({ entry, index }: LayerItemProps) {
+export function LayerItem({ entry, index, hasEdits = false }: LayerItemProps) {
   const rowRef = useRef<HTMLDivElement>(null);
-  const { selectedLayerId, hoveredLayerId, pendingEdits } = useEditorStore();
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<"ocr" | "translate" | "inpaint" | null>(null);
+  const { selectedLayerId, hoveredLayerId } = useEditorStore();
   const selectLayer = useEditorStore((s) => s.selectLayer);
   const hoverLayer = useEditorStore((s) => s.hoverLayer);
   const toggleVisibility = useEditorStore((s) => s.toggleTextLayerVisibility);
   const toggleLock = useEditorStore((s) => s.toggleTextLayerLock);
+  const reProcessBlock = useEditorStore((s) => s.reProcessBlock);
 
   const isSelected = selectedLayerId === entry.id;
   const isHovered = hoveredLayerId === entry.id;
-  const isHidden = entry.visible === false;
-  const isLocked = entry.locked === true;
+  const isHidden = !entry.visible;
+  const isLocked = entry.locked;
 
   useEffect(() => {
     if (!isSelected || !rowRef.current) return;
     rowRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [isSelected]);
 
-  const edit = pendingEdits[entry.id];
-  const displayText = edit?.traduzido ?? edit?.translated ?? entry.traduzido ?? entry.translated ?? entry.original;
-  const hasEdits = !!edit;
+  useEffect(() => {
+    setActionError(null);
+    setPendingAction(null);
+  }, [entry.id]);
+
+  const displayText = entry.displayText || entry.displayOriginal;
 
   const TipoIcon = TIPO_ICONS[entry.tipo] ?? MessageSquare;
 
-  const confidence = entry.confianca_ocr ?? entry.ocr_confidence ?? 0;
   const confidenceColor =
-    confidence >= 0.8
+    entry.confidencePercent >= 80
       ? "bg-status-success"
-      : confidence >= 0.5
+      : entry.confidencePercent >= 50
         ? "bg-status-warning"
         : "bg-status-error";
+
+  const handleBlockAction = async (
+    event: MouseEvent<HTMLButtonElement>,
+    mode: "ocr" | "translate" | "inpaint",
+  ) => {
+    event.stopPropagation();
+    selectLayer(entry.id);
+    setActionError(null);
+    setPendingAction(mode);
+    try {
+      await reProcessBlock(mode);
+    } catch (error) {
+      console.error("Falha ao reprocessar bloco de texto", error);
+      setActionError("Nao foi possivel executar a acao neste texto.");
+    } finally {
+      setPendingAction(null);
+    }
+  };
 
   return (
     <div
@@ -123,12 +150,44 @@ export function LayerItem({ entry, index }: LayerItemProps) {
               {displayText.trim() || "(vazio)"}
             </p>
             <div className="mt-1.5 flex items-center justify-between text-[10px] text-text-muted">
-              <span className="truncate">{(edit?.bbox ?? entry.bbox).join(", ")}</span>
+              <span className="truncate">{entry.effectiveBbox.join(", ")}</span>
               <span className="flex items-center gap-1">
                 <span className={`h-1.5 w-1.5 rounded-full ${confidenceColor}`} />
-                {Math.round(confidence * 100)}%
+                {entry.confidencePercent}%
               </span>
             </div>
+            <div className="mt-2 flex items-center gap-1">
+              <button
+                disabled={pendingAction !== null}
+                className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={(event) => handleBlockAction(event, "ocr")}
+                title="Refazer OCR deste texto"
+              >
+                <ScanText size={11} />
+                OCR
+              </button>
+              <button
+                disabled={pendingAction !== null}
+                className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={(event) => handleBlockAction(event, "translate")}
+                title="Traduzir este texto"
+              >
+                <Languages size={11} />
+                Traduzir
+              </button>
+              <button
+                disabled={pendingAction !== null}
+                className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={(event) => handleBlockAction(event, "inpaint")}
+                title="Limpar fundo deste texto"
+              >
+                <Eraser size={11} />
+                Limpar
+              </button>
+            </div>
+            {actionError && (
+              <p className="mt-1 text-[10px] leading-tight text-status-error">{actionError}</p>
+            )}
           </div>
         </div>
       </div>

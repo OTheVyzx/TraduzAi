@@ -66,6 +66,154 @@ class StripInpaintAdapterTests(unittest.TestCase):
         self.assertTrue(page["_strip_used_real_inpaint"])
         self.assertTrue(page["_strip_used_post_cleanup"])
 
+    def test_strip_mask_uses_cjk_strategy_for_clamp_and_debug_masks(self):
+        from inpainter import inpaint_band_image
+
+        band = np.full((80, 180, 3), 240, dtype=np.uint8)
+        page = {
+            "texts": [{"id": "t1", "text": "점화", "bbox": [20, 18, 120, 58], "tipo": "sfx"}],
+            "_vision_blocks": [{"bbox": [20, 18, 120, 58], "confidence": 0.92}],
+            "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
+            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+        }
+        expected = np.full_like(band, 180)
+        mask = np.zeros(band.shape[:2], dtype=np.uint8)
+        mask[18:58, 20:120] = 255
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "0",
+            },
+        ), patch("vision_stack.runtime._get_text_segmenter_for_page", return_value="segmenter") as get_segmenter, patch(
+            "vision_stack.runtime.vision_blocks_to_mask",
+            side_effect=lambda *_args, **_kwargs: mask.copy(),
+        ) as mask_builder, patch(
+            "vision_stack.runtime._get_inpainter",
+            return_value="fake-inpainter",
+        ), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=expected,
+        ), patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
+        ):
+            inpaint_band_image(band, page)
+
+        get_segmenter.assert_called()
+        self.assertGreaterEqual(mask_builder.call_count, 2)
+        for call in mask_builder.call_args_list[:2]:
+            self.assertEqual(call.kwargs["mask_strategy"], "ocr_guided_roi_segmentation")
+            self.assertEqual(call.kwargs["ocr_texts"], page["texts"])
+            self.assertEqual(call.kwargs["text_segmenter"], "segmenter")
+
+    def test_koharu_roi_band_mapping_preserves_engine_preset_metadata(self):
+        from strip.run import _map_koharu_roi_result_to_band
+        from strip.types import Band
+
+        band = Band(y_top=200, y_bottom=320, strip_slice=np.zeros((120, 240, 3), dtype=np.uint8))
+        page_result = {
+            "texts": [{"text": "점화", "bbox": [30, 230, 120, 280]}],
+            "_vision_blocks": [{"bbox": [30, 230, 120, 280], "confidence": 0.91}],
+            "engine_preset_id": "manhwa_manhua_ocr_guided",
+            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
+        }
+
+        mapped = _map_koharu_roi_result_to_band(
+            band=band,
+            page_number=1,
+            page_result=page_result,
+            crop_bbox=[0, 200, 240, 320],
+            filtered_text_count=0,
+        )
+
+        self.assertEqual(mapped["engine_preset_id"], "manhwa_manhua_ocr_guided")
+        self.assertEqual(mapped["engine_preset"]["segmenter"], "manga-text-segmentation-2025")
+        self.assertEqual(mapped["_engine_preset"]["mask_strategy"], "ocr_guided_roi_segmentation")
+
+    def test_strip_translation_merge_preserves_engine_preset_metadata(self):
+        from strip.process_bands import _merge_translated_page_metadata
+
+        ocr_page = {
+            "texts": [{"id": "t1", "text": "점화"}],
+            "_vision_blocks": [{"bbox": [20, 18, 120, 58]}],
+            "engine_preset_id": "manhwa_manhua_ocr_guided",
+            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
+        }
+        translated_page = {"texts": [{"id": "t1", "translated": "IGNICAO"}]}
+
+        merged = _merge_translated_page_metadata(ocr_page, translated_page)
+
+        self.assertEqual(merged["engine_preset_id"], "manhwa_manhua_ocr_guided")
+        self.assertEqual(merged["engine_preset"]["segmenter"], "manga-text-segmentation-2025")
+        self.assertEqual(merged["_engine_preset"]["mask_strategy"], "ocr_guided_roi_segmentation")
+
+    def test_copy_back_preserves_cjk_inpaint_mask_outside_balloon_boxes(self):
+        from strip.process_bands import _apply_copy_back_outside_balloons
+        from strip.types import BBox, Balloon, Band
+
+        original = np.full((90, 180, 3), 30, dtype=np.uint8)
+        rendered = original.copy()
+        rendered[22:44, 24:72] = [180, 180, 180]
+        rendered[12:36, 112:156] = [90, 90, 90]
+        band = Band(
+            y_top=0,
+            y_bottom=90,
+            balloons=[Balloon(strip_bbox=BBox(108, 8, 160, 40), confidence=0.9)],
+            original_slice=original,
+            rendered_slice=rendered,
+        )
+        mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        mask[22:44, 24:72] = 255
+        page = {
+            "texts": [],
+            "_vision_blocks": [{"bbox": [24, 22, 72, 44], "confidence": 0.81}],
+            "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
+            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+        }
+
+        with patch("vision_stack.runtime._get_text_segmenter_for_page", return_value="segmenter"), patch(
+            "vision_stack.runtime.vision_blocks_to_mask",
+            return_value=mask,
+        ) as mask_builder:
+            result = _apply_copy_back_outside_balloons(band, ocr_page=page, rendered_slice=rendered)
+
+        mask_builder.assert_called_once()
+        self.assertEqual(result[30, 32].tolist(), [180, 180, 180])
+        self.assertEqual(result[20, 120].tolist(), [90, 90, 90])
+        self.assertEqual(result[70, 20].tolist(), [30, 30, 30])
+
+    def test_copy_back_preserves_pixels_changed_by_inpaint_outside_balloon_boxes(self):
+        from strip.process_bands import _apply_copy_back_outside_balloons
+        from strip.types import BBox, Balloon, Band
+
+        original = np.full((90, 180, 3), 30, dtype=np.uint8)
+        cleaned = original.copy()
+        cleaned[50:70, 24:72] = [160, 160, 160]
+        rendered = cleaned.copy()
+        rendered[12:36, 112:156] = [90, 90, 90]
+        band = Band(
+            y_top=0,
+            y_bottom=90,
+            balloons=[Balloon(strip_bbox=BBox(108, 8, 160, 40), confidence=0.9)],
+            original_slice=original,
+            rendered_slice=rendered,
+        )
+
+        result = _apply_copy_back_outside_balloons(
+            band,
+            ocr_page={},
+            rendered_slice=rendered,
+            cleaned_slice=cleaned,
+        )
+
+        self.assertEqual(result[60, 32].tolist(), [160, 160, 160])
+        self.assertEqual(result[20, 120].tolist(), [90, 90, 90])
+        self.assertEqual(result[80, 20].tolist(), [30, 30, 30])
+
     def test_fast_white_balloon_fill_skips_lama_when_all_blocks_are_covered(self):
         from inpainter import inpaint_band_image
 

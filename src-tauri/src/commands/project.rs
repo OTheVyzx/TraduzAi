@@ -2190,6 +2190,126 @@ fn resolve_text_layer_bbox(layer_val: &Value) -> Option<[i32; 4]> {
         .or_else(|| parse_layer_bbox_array(layer_val.get("balloon_bbox")))
 }
 
+fn bboxes_intersect(a: [u32; 4], b: [i32; 4]) -> bool {
+    let b = [
+        b[0].max(0) as u32,
+        b[1].max(0) as u32,
+        b[2].max(0) as u32,
+        b[3].max(0) as u32,
+    ];
+    a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+}
+
+fn process_text_layer_ids_in_bbox(page: &Value, bbox: [u32; 4]) -> Vec<String> {
+    page.get("text_layers")
+        .and_then(Value::as_array)
+        .or_else(|| page.get("textos").and_then(Value::as_array))
+        .map(|layers| {
+            layers
+                .iter()
+                .filter(|layer| {
+                    resolve_text_layer_bbox(layer)
+                        .map(|layer_bbox| bboxes_intersect(bbox, layer_bbox))
+                        .unwrap_or(false)
+                })
+                .filter_map(|layer| layer.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn append_process_overlay_to_page(
+    page: &mut Value,
+    page_index: usize,
+    bbox: [u32; 4],
+    crop_path: String,
+) -> Result<ProcessRegionOverlay, String> {
+    let text_layer_ids = process_text_layer_ids_in_bbox(page, bbox);
+    let overlays_value = page
+        .as_object_mut()
+        .ok_or_else(|| "Pagina invalida para overlay de processo".to_string())?
+        .entry("process_overlays".to_string())
+        .or_insert_with(|| json!([]));
+    let overlays = overlays_value
+        .as_array_mut()
+        .ok_or_else(|| "process_overlays invalido".to_string())?;
+    let order = overlays.len();
+    let overlay = ProcessRegionOverlay {
+        id: uuid::Uuid::new_v4().to_string(),
+        page_index,
+        bbox,
+        crop_path,
+        text_layer_ids,
+        visible: true,
+        locked: false,
+        order,
+    };
+    overlays.push(
+        serde_json::to_value(&overlay)
+            .map_err(|e| format!("Erro ao serializar overlay de processo: {e}"))?,
+    );
+    Ok(overlay)
+}
+
+fn page_number_for_cache(page: &Value, page_index: usize) -> u64 {
+    page.get("numero")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or((page_index + 1) as u64)
+}
+
+fn crop_process_region_to_cache(
+    project_dir: &Path,
+    page: &Value,
+    page_index: usize,
+    bbox: [u32; 4],
+) -> Result<String, String> {
+    let source_rel = resolve_inpaint_rel(page)
+        .or_else(|| page.get("arquivo_original").and_then(Value::as_str))
+        .ok_or_else(|| "Pagina sem imagem limpa para criar crop de processo".to_string())?;
+    let source_path = resolve_project_relative_path(project_dir, source_rel);
+    let image = image::open(&source_path)
+        .map_err(|e| format!("Falha ao abrir imagem limpa do processo: {e}"))?;
+    let width = image.width();
+    let height = image.height();
+    let x1 = bbox[0].min(width);
+    let y1 = bbox[1].min(height);
+    let x2 = bbox[2].min(width);
+    let y2 = bbox[3].min(height);
+    if x2 <= x1 || y2 <= y1 {
+        return Err("Area do processo fora da pagina".to_string());
+    }
+
+    let page_number = page_number_for_cache(page, page_index);
+    let output_dir = project_dir
+        .join("editor_cache")
+        .join("process_regions")
+        .join(format!("page-{page_number:04}"));
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Erro ao criar cache de processo: {e}"))?;
+    let output_path = output_dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+    let cropped = image.crop_imm(x1, y1, x2 - x1, y2 - y1);
+    cropped
+        .save_with_format(&output_path, ImageFormat::Png)
+        .map_err(|e| format!("Erro ao salvar crop de processo: {e}"))?;
+    Ok(project_relative_string(project_dir, &output_path))
+}
+
+fn process_bbox_from_config(bbox: [i64; 4]) -> Result<[u32; 4], String> {
+    if bbox.iter().any(|value| *value < 0) {
+        return Err("Area do processo nao pode ter coordenadas negativas".to_string());
+    }
+    if bbox[2] <= bbox[0] || bbox[3] <= bbox[1] {
+        return Err("Area do processo invalida".to_string());
+    }
+    Ok([
+        u32::try_from(bbox[0]).map_err(|_| "Area do processo excede u32".to_string())?,
+        u32::try_from(bbox[1]).map_err(|_| "Area do processo excede u32".to_string())?,
+        u32::try_from(bbox[2]).map_err(|_| "Area do processo excede u32".to_string())?,
+        u32::try_from(bbox[3]).map_err(|_| "Area do processo excede u32".to_string())?,
+    ])
+}
+
 fn parse_hex_color(hex: &str) -> [u8; 4] {
     let hex = hex.trim_start_matches('#');
     if hex.len() >= 6 {
@@ -2937,6 +3057,48 @@ pub struct PageActionConfig {
     pub bbox: Option<[i64; 4]>,
     #[serde(default)]
     pub mask_path: Option<String>,
+    #[serde(default)]
+    pub engine_preset_id: Option<String>,
+    #[serde(default)]
+    pub idioma_origem: Option<String>,
+    #[serde(default)]
+    pub idioma_destino: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProcessRegionConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub bbox: [i64; 4],
+    #[serde(default)]
+    pub mask_path: Option<String>,
+    #[serde(default)]
+    pub engine_preset_id: Option<String>,
+    #[serde(default)]
+    pub idioma_origem: Option<String>,
+    #[serde(default)]
+    pub idioma_destino: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessRegionOverlay {
+    pub id: String,
+    pub page_index: usize,
+    pub bbox: [u32; 4],
+    pub crop_path: String,
+    pub text_layer_ids: Vec<String>,
+    pub visible: bool,
+    pub locked: bool,
+    pub order: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProcessRegionResult {
+    pub page_index: usize,
+    pub overlay: ProcessRegionOverlay,
+    pub changed_assets: Vec<ChangedAsset>,
+    pub changed_layers: Vec<String>,
+    pub message: String,
 }
 
 /// Detecta se a página corrente tem uma máscara com pixels ativos e executa a ação
@@ -3021,6 +3183,8 @@ pub async fn run_page_action_with_optional_mask(
                 config.project_path.clone(),
                 page_index_u32,
                 Some(region.clone()),
+                config.engine_preset_id.clone(),
+                config.idioma_origem.clone(),
             )
             .await?;
             // detect re-renderiza a página ao final (render_page_image em main.py)
@@ -3032,6 +3196,8 @@ pub async fn run_page_action_with_optional_mask(
                 config.project_path.clone(),
                 page_index_u32,
                 Some(region.clone()),
+                config.engine_preset_id.clone(),
+                config.idioma_origem.clone(),
             )
             .await?;
             // ocr_page também re-renderiza ao final
@@ -3043,6 +3209,8 @@ pub async fn run_page_action_with_optional_mask(
                 config.project_path.clone(),
                 page_index_u32,
                 Some(region.clone()),
+                config.idioma_origem.clone(),
+                config.idioma_destino.clone(),
             )
             .await?;
             // translate atualiza texto traduzido e re-renderiza
@@ -3090,6 +3258,132 @@ pub async fn run_paint_optional_mask(
     config: PageActionConfig,
 ) -> Result<PageActionResult, String> {
     run_page_action_with_optional_mask(app, config).await
+}
+
+#[tauri::command]
+pub async fn run_process_region(
+    app: tauri::AppHandle,
+    config: ProcessRegionConfig,
+) -> Result<ProcessRegionResult, String> {
+    use crate::commands::pipeline::{
+        detect_page_with_region, ocr_page_with_region, reinpaint_page_with_region,
+        translate_page_with_region, PageRegionConfig,
+    };
+
+    let started = std::time::Instant::now();
+    let project_file = resolve_project_file(&config.project_path);
+    let project = project_schema::load_project_value(&project_file)?;
+    let pages = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Projeto sem paginas validas".to_string())?;
+    if config.page_index >= pages.len() {
+        return Err("Pagina do processo invalida".to_string());
+    }
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Caminho do projeto invalido".to_string())?;
+    let bbox = process_bbox_from_config(config.bbox)?;
+    let mask_path = config
+        .mask_path
+        .as_ref()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|raw| {
+            let path = Path::new(raw);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                project_dir.join(path)
+            }
+        });
+    let region = PageRegionConfig {
+        bbox: Some(bbox),
+        mask_path: mask_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+    };
+    let page_index_u32 = config.page_index as u32;
+    let engine_preset_id = Some(
+        config
+            .engine_preset_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "manga".to_string()),
+    );
+
+    eprintln!(
+        "[EditorAction] start  process_region page={} bbox={:?} mask={:?}",
+        config.page_index, bbox, region.mask_path
+    );
+
+    detect_page_with_region(
+        app.clone(),
+        config.project_path.clone(),
+        page_index_u32,
+        Some(region.clone()),
+        engine_preset_id.clone(),
+        config.idioma_origem.clone(),
+    )
+    .await?;
+    ocr_page_with_region(
+        app.clone(),
+        config.project_path.clone(),
+        page_index_u32,
+        Some(region.clone()),
+        engine_preset_id,
+        config.idioma_origem.clone(),
+    )
+    .await?;
+    translate_page_with_region(
+        app.clone(),
+        config.project_path.clone(),
+        page_index_u32,
+        Some(region.clone()),
+        config.idioma_origem.clone(),
+        config.idioma_destino.clone(),
+    )
+    .await?;
+    reinpaint_page_with_region(
+        app,
+        config.project_path.clone(),
+        page_index_u32,
+        Some(region),
+    )
+    .await?;
+
+    let overlay = project_schema::edit_project_value(&project_file, |project| {
+        let page = project
+            .get_mut("paginas")
+            .and_then(Value::as_array_mut)
+            .and_then(|pages| pages.get_mut(config.page_index))
+            .ok_or_else(|| "Pagina do processo invalida".to_string())?;
+        let crop_path = crop_process_region_to_cache(&project_dir, page, config.page_index, bbox)?;
+        append_process_overlay_to_page(page, config.page_index, bbox, crop_path)
+    })?;
+    let changed_layers = overlay.text_layer_ids.clone();
+
+    eprintln!(
+        "[EditorAction] success process_region page={} elapsed={:.3}s overlay={} layers={:?}",
+        config.page_index,
+        started.elapsed().as_secs_f64(),
+        overlay.id,
+        changed_layers
+    );
+
+    Ok(ProcessRegionResult {
+        page_index: config.page_index,
+        overlay,
+        changed_assets: vec![
+            ChangedAsset::ProjectJson,
+            ChangedAsset::Inpaint,
+            ChangedAsset::Rendered,
+        ],
+        changed_layers,
+        message: "Processo regional concluido".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -3572,6 +3866,50 @@ mod tests {
         });
 
         assert_eq!(resolve_inpaint_rel(&page), Some("images/001.jpg"));
+    }
+
+    #[test]
+    fn append_process_overlay_to_page_preserves_existing_overlays_and_links_text_layers() {
+        let mut page = serde_json::json!({
+            "numero": 1,
+            "process_overlays": [
+                {
+                    "id": "old",
+                    "page_index": 0,
+                    "bbox": [1, 2, 3, 4],
+                    "crop_path": "editor_cache/process_regions/page-0001/old.png",
+                    "text_layer_ids": [],
+                    "visible": true,
+                    "locked": false,
+                    "order": 0
+                }
+            ],
+            "text_layers": [
+                {
+                    "id": "inside",
+                    "layout_bbox": [10, 20, 80, 90]
+                },
+                {
+                    "id": "outside",
+                    "layout_bbox": [200, 200, 300, 300]
+                }
+            ]
+        });
+
+        let overlay = append_process_overlay_to_page(
+            &mut page,
+            0,
+            [10, 20, 80, 90],
+            "editor_cache/process_regions/page-0001/new.png".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(overlay.page_index, 0);
+        assert_eq!(overlay.bbox, [10, 20, 80, 90]);
+        assert_eq!(overlay.text_layer_ids, vec!["inside".to_string()]);
+        assert_eq!(overlay.order, 1);
+        assert_eq!(page["process_overlays"].as_array().unwrap().len(), 2);
+        assert_eq!(page["process_overlays"][1]["crop_path"], overlay.crop_path);
     }
 
     #[test]

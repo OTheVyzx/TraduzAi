@@ -59,6 +59,21 @@ def _fake_process_band_factory(records: list, ocr_extras: dict | None = None):
 
 
 class RunChapterSmokeTests(unittest.TestCase):
+    def test_strip_band_margin_is_larger_for_cjk_sources(self):
+        from strip.run import _strip_band_margin_px
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_strip_band_margin_px("ko"), 96)
+            self.assertEqual(_strip_band_margin_px("ja"), 96)
+            self.assertEqual(_strip_band_margin_px("zh-cn"), 96)
+            self.assertEqual(_strip_band_margin_px("en"), 16)
+
+    def test_strip_band_margin_env_override_wins(self):
+        from strip.run import _strip_band_margin_px
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_BAND_MARGIN_PX": "48"}, clear=False):
+            self.assertEqual(_strip_band_margin_px("ko"), 48)
+
     def test_page_cleanup_limit_mask_follows_text_geometry(self):
         from strip.run import _build_page_cleanup_limit_mask
 

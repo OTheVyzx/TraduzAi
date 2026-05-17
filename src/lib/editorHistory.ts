@@ -1,4 +1,4 @@
-import type { Project, TextEntry, TextLayerStyle } from "./stores/appStore";
+import type { PageData, Project, TextEntry, TextLayerStyle } from "./stores/appStore";
 
 export type Bbox = TextEntry["bbox"];
 
@@ -51,6 +51,7 @@ export type NonBatchCommand = BaseCmdMeta &
     | { type: "toggle-lock"; layerId: string; before: boolean; after: boolean }
     | { type: "reorder-layers"; before: string[]; after: string[] }
     | { type: "bitmap-stroke"; layerKey: "brush" | "mask" | "inpaint"; bbox: Bbox }
+    | { type: "page-snapshot"; label: string; before: PageData; after: PageData }
   );
 
 export type BatchCommand = BaseCmdMeta & {
@@ -91,8 +92,10 @@ export interface WorkingStateDraft {
   ): void;
   setWorkingVisibility(pageKey: string, layerId: string, visible: boolean): void;
   setWorkingLocked(pageKey: string, layerId: string, locked: boolean): void;
+  setWorkingPageSnapshot(pageKey: string, page: PageData): void;
   hasLayer(pageKey: string, layerId: string): boolean;
   getLayer(pageKey: string, layerId: string): TextEntry | null;
+  getWorkingPageSnapshot(pageKey: string): PageData | null;
   getOrderedLayerIds(pageKey: string): string[];
   currentPageKey(): string;
   sanitizeSelection(): void;
@@ -155,6 +158,9 @@ export function estimateCommandBytes(cmd: EditorCommand): number {
   if (cmd.type === "batch") {
     return cmd.commands.reduce((total, child) => total + estimateCommandBytes(child), TRIVIAL_COMMAND_BYTES);
   }
+  if (cmd.type === "page-snapshot") {
+    return JSON.stringify(cmd.before).length + JSON.stringify(cmd.after).length;
+  }
   if (cmd.type !== "bitmap-stroke") return TRIVIAL_COMMAND_BYTES;
   return bitmapCache.get(cmd.commandId)?.byteLength ?? TRIVIAL_COMMAND_BYTES;
 }
@@ -203,6 +209,10 @@ export function validateCommand(
     return bitmapCache.has(cmd.commandId)
       ? { ok: true }
       : { ok: false, reason: "bitmap-stroke sem cache valido" };
+  }
+
+  if (cmd.type === "page-snapshot") {
+    return { ok: true };
   }
 
   if ("layerId" in cmd && !draft.hasLayer(cmd.pageKey, cmd.layerId)) {
@@ -265,6 +275,10 @@ export function commandMatchesWorkingState(cmd: EditorCommand, draft: WorkingSta
         ? { ok: true }
         : { ok: false, reason: "bitmap-stroke sem cache valido" };
     }
+    case "page-snapshot":
+      return pageSnapshotEquals(draft.getWorkingPageSnapshot(cmd.pageKey), cmd.after)
+        ? { ok: true }
+        : { ok: false, reason: "snapshot da pagina diverge do working state" };
   }
 }
 
@@ -304,6 +318,9 @@ export function applyCommand(cmd: EditorCommand, draft: WorkingStateDraft): void
       break;
     case "toggle-lock":
       draft.setWorkingLocked(cmd.pageKey, cmd.layerId, cmd.after);
+      break;
+    case "page-snapshot":
+      draft.setWorkingPageSnapshot(cmd.pageKey, cmd.after);
       break;
   }
   draft.sanitizeSelection();
@@ -345,6 +362,9 @@ export function revertCommand(cmd: EditorCommand, draft: WorkingStateDraft): voi
       break;
     case "toggle-lock":
       draft.setWorkingLocked(cmd.pageKey, cmd.layerId, cmd.before);
+      break;
+    case "page-snapshot":
+      draft.setWorkingPageSnapshot(cmd.pageKey, cmd.before);
       break;
   }
   draft.sanitizeSelection();
@@ -490,6 +510,8 @@ function isNoOpCommand(cmd: EditorCommand): boolean {
     case "delete-layer":
     case "bitmap-stroke":
       return false;
+    case "page-snapshot":
+      return pageSnapshotEquals(cmd.before, cmd.after);
   }
 }
 
@@ -500,4 +522,9 @@ function bboxEquals(a: Bbox | undefined, b: Bbox | undefined) {
 
 function arrayEquals(a: string[], b: string[]) {
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function pageSnapshotEquals(a: PageData | null | undefined, b: PageData | null | undefined) {
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }

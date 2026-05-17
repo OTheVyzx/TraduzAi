@@ -116,15 +116,15 @@ def test_fast_page_session_routes_editor_reinpaint_and_captures_stdout(tmp_path:
 
 
 def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, capsys) -> None:
-    calls: list[tuple[str, Path, int, dict | None]] = []
+    calls: list[tuple[str, Path, int, dict | None, dict | None]] = []
 
-    def detect_runner(project_path: Path, page_index: int, region: dict | None) -> None:
-        calls.append(("detect", project_path, page_index, region))
+    def detect_runner(project_path: Path, page_index: int, region: dict | None, options: dict | None) -> None:
+        calls.append(("detect", project_path, page_index, region, options))
         print(json.dumps({"type": "progress", "step": "ocr", "message": "detectando"}))
         print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "001.png")}))
 
-    def ocr_runner(project_path: Path, page_index: int, region: dict | None) -> None:
-        calls.append(("ocr", project_path, page_index, region))
+    def ocr_runner(project_path: Path, page_index: int, region: dict | None, options: dict | None) -> None:
+        calls.append(("ocr", project_path, page_index, region, options))
         print(json.dumps({"type": "progress", "step": "ocr", "message": "lendo"}))
         print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "002.png")}))
 
@@ -140,6 +140,8 @@ def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, 
             "type": "editor_detect_page",
             "project_path": str(tmp_path / "project.json"),
             "page_index": 1,
+            "idioma_origem": "ja",
+            "engine_preset_id": "manga",
         }
     )
     ocr_events = session.handle(
@@ -148,14 +150,28 @@ def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, 
             "project_path": str(tmp_path / "project.json"),
             "page_index": 2,
             "region": {"bbox": [10, 20, 30, 40]},
+            "idioma_origem": "ja",
+            "engine_preset_id": "manga",
         }
     )
 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert calls == [
-        ("detect", tmp_path / "project.json", 1, None),
-        ("ocr", tmp_path / "project.json", 2, {"bbox": [10, 20, 30, 40]}),
+        (
+            "detect",
+            tmp_path / "project.json",
+            1,
+            None,
+            {"idioma_origem": "ja", "idioma_destino": None, "engine_preset_id": "manga"},
+        ),
+        (
+            "ocr",
+            tmp_path / "project.json",
+            2,
+            {"bbox": [10, 20, 30, 40]},
+            {"idioma_origem": "ja", "idioma_destino": None, "engine_preset_id": "manga"},
+        ),
     ]
     assert [event["type"] for event in detect_events] == ["progress", "complete"]
     assert detect_events[0]["message"] == "detectando"

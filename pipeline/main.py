@@ -232,6 +232,7 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
         "obra": "",
         "idioma_origem": "en",
         "idioma_destino": "pt-BR",
+        "engine_preset_id": "",
         "mode": "real",
         "debug": False,
         "skip_inpaint": False,
@@ -258,6 +259,10 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
             continue
         if arg == "--target" and index + 1 < len(args):
             parsed["idioma_destino"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--engine-preset" and index + 1 < len(args):
+            parsed["engine_preset_id"] = args[index + 1]
             index += 2
             continue
         if arg == "--mode" and index + 1 < len(args):
@@ -474,6 +479,7 @@ def _run_pipeline_runner_cli(config: dict) -> int:
         "capitulo": 1,
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "engine_preset_id": config.get("engine_preset_id", ""),
         "mode": "manual" if config.get("skip_ocr") else "auto",
         "debug": config.get("debug", False),
         "skip_inpaint": config.get("skip_inpaint", False),
@@ -557,7 +563,8 @@ def main():
         project_json_path = Path(sys.argv[3])
         page_idx = int(sys.argv[4])
         block_id = sys.argv[5]
-        _run_process_block(project_json_path, page_idx, block_id, mode)
+        _region, language_options = _page_action_options_from_args(sys.argv[6:])
+        _run_process_block(project_json_path, page_idx, block_id, mode, language_options)
         return
 
     # Despachador unificado dos 4 handlers per-página (Fase 0 — sem falhas silenciosas).
@@ -573,10 +580,10 @@ def main():
         action_name, handler = _ACTION_DISPATCH[sys.argv[1]]
         project_json_path = Path(sys.argv[2])
         page_idx = int(sys.argv[3])
-        region = _page_action_region_from_args(sys.argv[4:])
+        region, language_options = _page_action_options_from_args(sys.argv[4:])
         log_editor_action("start", action_name, page=page_idx)
         try:
-            handler(project_json_path, page_idx, region)
+            handler(project_json_path, page_idx, region, language_options)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -700,11 +707,15 @@ def _run_pipeline(config_path: str):
     from translator.context import fetch_context, merge_context
     from translator.translate import translate_pages
     from typesetter.renderer import run_typesetting
+    from vision_stack.engine_presets import resolve_engine_preset
 
     pipeline_timing = _PipelineTiming()
     start_time = time.time()
     with pipeline_timing.measure("load_config"):
         config = _load_json_file(config_path)
+    engine_preset = resolve_engine_preset(config, idioma_origem=config.get("idioma_origem", ""))
+    config["engine_preset_id"] = engine_preset.id
+    config["engine_preset"] = engine_preset.to_dict()
     with pipeline_timing.measure("apply_runtime_profile"):
         runtime_profile_decision = _apply_runtime_profile_config(config)
 
@@ -847,7 +858,13 @@ def _run_pipeline(config_path: str):
                 
         class StripRuntime:
             def run_ocr_stage(self, img, page_dict):
-                return run_ocr_stage(img, page_dict, profile="max", idioma_origem=config.get("idioma_origem", "en"))
+                return run_ocr_stage(
+                    img,
+                    page_dict,
+                    profile="max",
+                    idioma_origem=config.get("idioma_origem", "en"),
+                    engine_preset_id=config.get("engine_preset_id", ""),
+                )
 
             def run_koharu_cjk_page(self, img, image_path):
                 from vision_stack.runtime import _run_koharu_cjk_http_detect_ocr
@@ -858,6 +875,7 @@ def _run_pipeline(config_path: str):
                     models_dir=str(models_dir),
                     profile="max",
                     idioma_origem=config.get("idioma_origem", "en"),
+                    engine_preset_id=config.get("engine_preset_id", ""),
                 )
 
             def run_koharu_cjk_pages(self, jobs, models_dir="", idioma_origem="en", _models_dir=str(models_dir)):
@@ -881,6 +899,7 @@ def _run_pipeline(config_path: str):
                             models_dir=resolved_models_dir,
                             profile="max",
                             idioma_origem=resolved_idioma,
+                            engine_preset_id=config.get("engine_preset_id", ""),
                         )
                     except Exception as exc:
                         logger.warning("Koharu worker batch falhou; fallback para Koharu HTTP batch: %s", exc)
@@ -892,6 +911,7 @@ def _run_pipeline(config_path: str):
                     models_dir=resolved_models_dir,
                     profile="max",
                     idioma_origem=resolved_idioma,
+                    engine_preset_id=config.get("engine_preset_id", ""),
                 )
         
         def progress_cb(stage, current, total, message=""):
@@ -1211,7 +1231,13 @@ def _mask_bounding_box(mask_path: str | Path | None) -> list[int] | None:
 
 
 def _page_action_region_from_args(args: list[str]) -> dict:
+    region, _language_options = _page_action_options_from_args(args)
+    return region
+
+
+def _page_action_options_from_args(args: list[str]) -> tuple[dict, dict]:
     region: dict = {"bbox": None, "mask_path": None}
+    language_options: dict = {"idioma_origem": None, "idioma_destino": None, "engine_preset_id": None}
     idx = 0
     while idx < len(args):
         arg = args[idx]
@@ -1223,10 +1249,36 @@ def _page_action_region_from_args(args: list[str]) -> dict:
             region["mask_path"] = args[idx + 1]
             idx += 2
             continue
+        if arg in {"--source-lang", "--idioma-origem"} and idx + 1 < len(args):
+            language_options["idioma_origem"] = args[idx + 1]
+            idx += 2
+            continue
+        if arg in {"--target-lang", "--idioma-destino"} and idx + 1 < len(args):
+            language_options["idioma_destino"] = args[idx + 1]
+            idx += 2
+            continue
+        if arg == "--engine-preset" and idx + 1 < len(args):
+            language_options["engine_preset_id"] = args[idx + 1]
+            idx += 2
+            continue
         idx += 1
     if region["bbox"] is None:
         region["bbox"] = _mask_bounding_box(region.get("mask_path"))
-    return region
+    return region, language_options
+
+
+def _apply_page_action_language_options(project: dict, language_options: dict | None) -> None:
+    if not isinstance(language_options, dict):
+        return
+    idioma_origem = str(language_options.get("idioma_origem") or "").strip()
+    idioma_destino = str(language_options.get("idioma_destino") or "").strip()
+    engine_preset_id = str(language_options.get("engine_preset_id") or "").strip()
+    if idioma_origem:
+        project["idioma_origem"] = idioma_origem
+    if idioma_destino:
+        project["idioma_destino"] = idioma_destino
+    if engine_preset_id:
+        project["engine_preset_id"] = engine_preset_id
 
 
 def _region_bbox(region: dict | None) -> list[int] | None:
@@ -1845,8 +1897,31 @@ def _project_inpaint_block_from_vision_block(block: dict) -> dict | None:
     return out
 
 
+def _refresh_project_qa_summary(project: dict) -> None:
+    qa = project.get("qa")
+    pages = project.get("paginas")
+    if not isinstance(qa, dict) or not isinstance(qa.get("summary"), dict) or not isinstance(pages, list):
+        return
+
+    from qa.translation_qa import summarize_flags
+
+    regions: list[dict] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        layers = page.get("text_layers")
+        if isinstance(layers, list):
+            regions.extend(layer for layer in layers if isinstance(layer, dict))
+    qa["summary"] = summarize_flags(regions)
+
+
 def _save_project_json(project_json_path: Path, project: dict) -> None:
     from project_writer import write_project_json_atomic
+
+    try:
+        _refresh_project_qa_summary(project)
+    except Exception as exc:
+        logger.warning("Falha ao atualizar qa.summary antes de salvar project.json: %s", exc)
 
     log = project.get("log")
     if isinstance(log, dict) and isinstance(log.get("summary"), dict):
@@ -2208,7 +2283,7 @@ def _run_retypeset(project_json_path: Path, page_idx: int):
         emit("error", message=f"Falha no retypeset: {e}\n{tb}")
 
 
-def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None = None):
+def _run_reinpaint(project_json_path: Path, page_idx: int, region: dict | None = None, language_options: dict | None = None):
     started = time.perf_counter()
     with open(project_json_path, "r", encoding="utf-8") as f:
         project = json.load(f)
@@ -2481,6 +2556,16 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         text_layers = group_regions(text_layers)
         text_layers = [sanitize_simple_text_geometry(layer) for layer in text_layers]
         qa_regions.extend(text_layers)
+        engine_meta = ocr.get("_engine_preset") if isinstance(ocr.get("_engine_preset"), dict) else {}
+        engine_steps = engine_meta.get("engine_steps")
+        if not isinstance(engine_steps, list):
+            engine_steps = []
+        page_engine = {
+            "engine_preset_id": ocr.get("engine_preset_id") or engine_meta.get("engine_preset_id") or config.get("engine_preset_id") or "",
+            "content_family": engine_meta.get("content_family") or (config.get("engine_preset") or {}).get("content_family") or "",
+            "mask_strategy": engine_meta.get("mask_strategy") or (config.get("engine_preset") or {}).get("mask_strategy") or "",
+            "engine_steps": list(engine_steps),
+        }
         page = {
             "numero": i + 1,
             "image_layers": {
@@ -2530,6 +2615,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
             "page_profile": ocr.get("page_profile"),
             "page_quality": ocr.get("page_quality"),
             "route_history": ocr.get("route_history") or [],
+            "vision_engine": page_engine,
             "text_layers": text_layers,
         }
         _sync_page_legacy_aliases(page)
@@ -2542,6 +2628,8 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "capitulo": config.get("capitulo", 1),
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
+        "engine_preset_id": config.get("engine_preset_id") or "",
+        "engine_preset": config.get("engine_preset") or {},
         "_ollama_host": config.get("ollama_host"),
         "_ollama_model": config.get("ollama_model"),
         "_models_dir": config.get("models_dir"),
@@ -2564,13 +2652,14 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
     }
 
 
-def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: str):
+def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: str, language_options: dict | None = None):
     """Refazer processo para um unico bloco."""
     from ocr.detector import run_ocr_on_block
     from translator.translate import translate_single_block
     
     with open(project_path, "r", encoding="utf-8") as f:
         project = json.load(f)
+    _apply_page_action_language_options(project, language_options)
 
     work_dir = project_path.parent
     _attach_work_dir_log_handler(work_dir)
@@ -2603,7 +2692,12 @@ def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: s
 
     if mode == "ocr":
         emit_progress("ocr", 10, 50, message="Redetectando texto...")
-        text, conf = run_ocr_on_block(str(orig_img), block_bbox)
+        text, conf = run_ocr_on_block(
+            str(orig_img),
+            block_bbox,
+            idioma_origem=project.get("idioma_origem", "en"),
+            engine_preset_id=project.get("engine_preset_id", ""),
+        )
         found_block["original"] = text
         found_block["ocr_confidence"] = conf
         found_block["confianca_ocr"] = conf
@@ -2638,12 +2732,13 @@ def _run_process_block(project_path: Path, page_idx: int, block_id: str, mode: s
 
     emit("complete", output_path=str(out_img))
 
-def _run_detect_page(project_path: Path, page_idx: int, region: dict | None = None):
+def _run_detect_page(project_path: Path, page_idx: int, region: dict | None = None, language_options: dict | None = None):
     from ocr.detector import run_ocr
     from ocr.contextual_reviewer import contextual_review_page
     from layout.balloon_layout import enrich_page_layout
     with open(project_path, "r", encoding="utf-8") as f:
         project = json.load(f)
+    _apply_page_action_language_options(project, language_options)
 
     work_dir = project_path.parent
     _attach_work_dir_log_handler(work_dir)
@@ -2667,7 +2762,8 @@ def _run_detect_page(project_path: Path, page_idx: int, region: dict | None = No
         str(orig_img),
         models_dir=project.get("_models_dir", "models"),
         vision_worker_path=project.get("_vision_worker_path", ""),
-        idioma_origem=project.get("idioma_origem", "en")
+        idioma_origem=project.get("idioma_origem", "en"),
+        engine_preset_id=project.get("engine_preset_id", ""),
     )
     
     reviewed = contextual_review_page(ocr_data, [], [])
@@ -2740,10 +2836,11 @@ def _run_detect_page(project_path: Path, page_idx: int, region: dict | None = No
     emit_progress("render", 100, 100, message="Detecção concluída!")
     emit("complete", output_path=str(out_img))
 
-def _run_ocr_page(project_path: Path, page_idx: int, region: dict | None = None):
+def _run_ocr_page(project_path: Path, page_idx: int, region: dict | None = None, language_options: dict | None = None):
     from ocr.detector import run_ocr_on_block
     with open(project_path, "r", encoding="utf-8") as f:
         project = json.load(f)
+    _apply_page_action_language_options(project, language_options)
 
     work_dir = project_path.parent
     _attach_work_dir_log_handler(work_dir)
@@ -2790,7 +2887,12 @@ def _run_ocr_page(project_path: Path, page_idx: int, region: dict | None = None)
         emit_progress("ocr", progress, 10, message=f"OCR em bloco {i+1}/{total}...")
         block_bbox = _resolved_layer_bbox(layer)
         layer["bbox"] = block_bbox
-        text, conf = run_ocr_on_block(str(orig_img), block_bbox)
+        text, conf = run_ocr_on_block(
+            str(orig_img),
+            block_bbox,
+            idioma_origem=project.get("idioma_origem", "en"),
+            engine_preset_id=project.get("engine_preset_id", ""),
+        )
         layer["original"] = text
         layer["ocr_confidence"] = conf
         layer["confianca_ocr"] = conf
@@ -2806,10 +2908,11 @@ def _run_ocr_page(project_path: Path, page_idx: int, region: dict | None = None)
     emit_progress("render", 100, 100, message="OCR concluído!")
     emit("complete", output_path=str(out_img))
 
-def _run_translate_page(project_path: Path, page_idx: int, region: dict | None = None):
+def _run_translate_page(project_path: Path, page_idx: int, region: dict | None = None, language_options: dict | None = None):
     from translator.translate import translate_pages
     with open(project_path, "r", encoding="utf-8") as f:
         project = json.load(f)
+    _apply_page_action_language_options(project, language_options)
 
     work_dir = project_path.parent
     _attach_work_dir_log_handler(work_dir)

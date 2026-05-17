@@ -55,6 +55,7 @@ import {
 } from "../lib/time-estimates";
 import {
   createCustomPreset,
+  getEnginePresetLabel,
   getProjectPreset,
   PROJECT_PRESETS,
   type ProjectPreset,
@@ -912,7 +913,10 @@ export function Setup() {
         <p data-testid="project-preset-description" className="mt-2 text-xs text-text-secondary">
           {selectedPreset.description}
         </p>
-        <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-text-secondary sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-text-secondary sm:grid-cols-5">
+          <span className="rounded-lg border border-border bg-bg-tertiary/70 px-2 py-1.5">
+            Motores: {getEnginePresetLabel(selectedPreset.settings.engine_preset_id)}
+          </span>
           <span className="rounded-lg border border-border bg-bg-tertiary/70 px-2 py-1.5">OCR: {selectedPreset.settings.ocr_sensitivity}</span>
           <span className="rounded-lg border border-border bg-bg-tertiary/70 px-2 py-1.5">SFX: {selectedPreset.settings.sfx_mode}</span>
           <span className="rounded-lg border border-border bg-bg-tertiary/70 px-2 py-1.5">Inpaint: {selectedPreset.settings.inpaint_mode}</span>

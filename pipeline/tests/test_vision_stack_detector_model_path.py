@@ -24,3 +24,17 @@ def test_get_model_path_skips_empty_configured_checkpoint(monkeypatch, tmp_path)
     detector = TextDetector.__new__(TextDetector)
 
     assert detector._get_model_path("comic-text-detector") == bundled_model
+
+
+def test_get_model_path_resolves_anime_text_yolo_hf_file(monkeypatch, tmp_path):
+    configured = tmp_path / "configured"
+    model_dir = configured / "huggingface" / "models--mayocream--anime-text-yolo"
+    model_dir.mkdir(parents=True)
+    model_file = model_dir / "yolo12n_animetext.safetensors"
+    model_file.write_bytes(b"x" * 2048)
+
+    monkeypatch.setattr(detector_module, "MODELS_DIR", configured)
+
+    detector = TextDetector.__new__(TextDetector)
+
+    assert detector._get_model_path("anime-text-yolo-n") == model_file

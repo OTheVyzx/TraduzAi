@@ -37,6 +37,7 @@ function labelForAction(cmd: ReturnType<typeof getTopAction>): string {
       return "Pincel";
     case "toggle-visibility": return "Alternar visibilidade";
     case "toggle-lock": return "Alternar bloqueio";
+    case "page-snapshot": return cmd.label;
     case "batch": return cmd.label;
     default: return "Ação";
   }

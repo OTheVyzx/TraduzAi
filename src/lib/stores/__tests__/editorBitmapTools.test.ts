@@ -10,7 +10,10 @@ const {
   updateReinpaintRegion,
   healInpaintRegion,
   patchEditorTextLayer,
+  processBlock,
+  runProcessRegion,
   runPageActionWithOptionalMask,
+  writeMaskFromPng,
   loadEditorPage,
 } = vi.hoisted(() => ({
   updateBrushRegion: vi.fn(async () => "images/brush.png"),
@@ -24,6 +27,24 @@ const {
     bbox: [10, 10, 40, 40] as [number, number, number, number],
   })),
   patchEditorTextLayer: vi.fn(async () => ({})),
+  processBlock: vi.fn(async () => "translated/001.png"),
+  runProcessRegion: vi.fn(async () => ({
+    page_index: 0,
+    overlay: {
+      id: "process-1",
+      page_index: 0,
+      bbox: [12, 14, 62, 54] as [number, number, number, number],
+      crop_path: "editor_cache/process_regions/page-0001/process-1.png",
+      text_layer_ids: ["text-a"],
+      visible: true,
+      locked: false,
+      order: 0,
+    },
+    changed_assets: ["project_json", "inpaint", "rendered"],
+    changed_layers: ["text-a"],
+    message: "ok",
+  })),
+  writeMaskFromPng: vi.fn(async () => "editor_cache/masks/lasso-area.png"),
   runPageActionWithOptionalMask: vi.fn(async () => ({
     action: "ocr",
     mode: "regional",
@@ -61,10 +82,21 @@ vi.mock("../../editorBackend", () => ({
     updateReinpaintRegion,
     healInpaintRegion,
     patchEditorTextLayer,
+    processBlock,
+    runProcessRegion,
     runPageActionWithOptionalMask,
+    writeMaskFromPng,
     loadEditorPage,
   })),
 }));
+
+vi.mock("../../lassoSelection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lassoSelection")>();
+  return {
+    ...actual,
+    rasterizeLassoToPng: vi.fn(() => "data:image/png;base64,lasso"),
+  };
+});
 
 function makeLayer(): TextEntry {
   const estilo: TextLayerStyle = {
@@ -107,17 +139,18 @@ function makeLayer(): TextEntry {
   };
 }
 
-function makePage(): PageData {
+function makePage(pageNumber = 1): PageData {
   const layer = makeLayer();
+  const padded = String(pageNumber).padStart(3, "0");
   return {
-    numero: 1,
-    arquivo_original: "originals/001.png",
-    arquivo_traduzido: "translated/001.png",
+    numero: pageNumber,
+    arquivo_original: `originals/${padded}.png`,
+    arquivo_traduzido: `translated/${padded}.png`,
     image_layers: {
-      base: { key: "base", path: "originals/001.png", visible: true, locked: true },
-      inpaint: { key: "inpaint", path: "images/001.png", visible: true, locked: false },
-      brush: { key: "brush", path: "images/brush.png", visible: true, locked: false },
-      mask: { key: "mask", path: "images/mask.png", visible: true, locked: false },
+      base: { key: "base", path: `originals/${padded}.png`, visible: true, locked: true },
+      inpaint: { key: "inpaint", path: `images/${padded}.png`, visible: true, locked: false },
+      brush: { key: "brush", path: `images/brush-${padded}.png`, visible: true, locked: false },
+      mask: { key: "mask", path: `images/mask-${padded}.png`, visible: true, locked: false },
       recovery: { key: "recovery", path: null, visible: false, locked: false },
     },
     inpaint_blocks: [],
@@ -126,7 +159,8 @@ function makePage(): PageData {
   };
 }
 
-function makeProject(page: PageData): Project {
+function makeProject(page: PageData | PageData[]): Project {
+  const paginas = Array.isArray(page) ? page : [page];
   return {
     id: "project-a",
     obra: "Obra",
@@ -147,11 +181,11 @@ function makeProject(page: PageData): Project {
       memoria_lexical: {},
       fontes_usadas: [],
     },
-    paginas: [page],
+    paginas,
     status: "done",
     source_path: "D:/tmp/project.json",
     output_path: "D:/tmp/project.json",
-    totalPages: 1,
+    totalPages: paginas.length,
     mode: "manual",
   };
 }
@@ -326,7 +360,7 @@ describe("editor bitmap tools", () => {
     expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe("images/reinpaint.png");
   });
 
-  it("runs lasso page actions with the selected region bbox", async () => {
+  it("runs lasso page actions with the selected region mask and manga engines", async () => {
     useEditorStore.setState({
       activeLassoSelection: {
         pageKey: useEditorStore.getState().currentPageKey(),
@@ -345,13 +379,126 @@ describe("editor bitmap tools", () => {
 
     await useEditorStore.getState().runMaskedActionFromLasso("ocr");
 
+    expect(writeMaskFromPng).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      png_data: "data:image/png;base64,lasso",
+      layer_key: "mask",
+      op: "replace",
+    });
     expect(runPageActionWithOptionalMask).toHaveBeenCalledWith({
       project_path: "D:/tmp/project.json",
       page_index: 0,
       action: "ocr",
       bbox: [12, 14, 50, 40],
+      mask_path: "editor_cache/masks/lasso-area.png",
+      engine_preset_id: "manga",
+      idioma_origem: "en",
+      idioma_destino: "pt-BR",
     });
     expect(useEditorStore.getState().activeLassoSelection).toBeNull();
+  });
+
+  it("runs the automatic process tool with a lasso mask and stores the returned crop overlay", async () => {
+    const selection = {
+      pageKey: useEditorStore.getState().currentPageKey(),
+      pageIndex: 0,
+      points: [
+        [12, 14],
+        [62, 14],
+        [62, 54],
+        [12, 54],
+      ] as Array<[number, number]>,
+      bbox: [12, 14, 62, 54] as [number, number, number, number],
+      width: 100,
+      height: 100,
+    };
+
+    await useEditorStore.getState().runProcessRegionFromSelection(selection);
+
+    expect(writeMaskFromPng).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      png_data: "data:image/png;base64,lasso",
+      layer_key: "mask",
+      op: "replace",
+    });
+    expect(runProcessRegion).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      bbox: [12, 14, 62, 54],
+      mask_path: "editor_cache/masks/lasso-area.png",
+      engine_preset_id: "manga",
+      idioma_origem: "en",
+      idioma_destino: "pt-BR",
+    });
+    expect(useEditorStore.getState().currentPage?.process_overlays?.[0]).toMatchObject({
+      id: "process-1",
+      crop_path: "editor_cache/process_regions/page-0001/process-1.png",
+      text_layer_ids: ["text-a"],
+      visible: true,
+    });
+    expect(useEditorStore.getState().selectedLayerId).toBe("text-a");
+  });
+
+  it("makes the automatic process result undoable and redoable", async () => {
+    const selection = {
+      pageKey: useEditorStore.getState().currentPageKey(),
+      pageIndex: 0,
+      points: [
+        [12, 14],
+        [62, 14],
+        [62, 54],
+        [12, 54],
+      ] as Array<[number, number]>,
+      bbox: [12, 14, 62, 54] as [number, number, number, number],
+      width: 100,
+      height: 100,
+    };
+
+    await useEditorStore.getState().runProcessRegionFromSelection(selection);
+    expect(useEditorStore.getState().currentPage?.process_overlays?.map((overlay) => overlay.id)).toEqual(["process-1"]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.process_overlays ?? []).toEqual([]);
+
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.process_overlays?.map((overlay) => overlay.id)).toEqual(["process-1"]);
+  });
+
+  it("passes the selected source language to page OCR actions", async () => {
+    const page = makePage();
+    useAppStore.setState({ project: { ...makeProject(page), idioma_origem: "ko" } });
+    useEditorStore.setState({ currentPage: page, currentPageIndex: 0 });
+
+    await useEditorStore.getState().runMaskedAction("ocr");
+
+    expect(runPageActionWithOptionalMask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_path: "D:/tmp/project.json",
+        page_index: 0,
+        action: "ocr",
+        idioma_origem: "ko",
+      }),
+    );
+  });
+
+  it("passes the selected source language when reprocessing a text block OCR", async () => {
+    const page = makePage();
+    useAppStore.setState({ project: { ...makeProject(page), idioma_origem: "ko" } });
+    useEditorStore.setState({ currentPage: page, currentPageIndex: 0, selectedLayerId: "text-a" });
+
+    await useEditorStore.getState().reProcessBlock("ocr");
+
+    expect(processBlock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_path: "D:/tmp/project.json",
+        page_index: 0,
+        block_id: "text-a",
+        mode: "ocr",
+        idioma_origem: "ko",
+      }),
+    );
   });
 
   it("applies healing brush result with undoable inpaint paths", async () => {
@@ -404,5 +551,101 @@ describe("editor bitmap tools", () => {
 
     expect(updateBrushRegion).toHaveBeenCalledTimes(1);
     expect(useEditorStore.getState().currentPage?.image_layers?.brush?.path).toBe("data:image/png;base64,newer");
+  });
+
+  it("applies page-scoped bitmap persistence to the captured page after navigation", async () => {
+    let resolveBrush!: (path: string) => void;
+    updateBrushRegion.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveBrush = resolve;
+        }),
+    );
+    const pageA = makePage(1);
+    const pageB = makePage(2);
+    useAppStore.setState({ project: makeProject([pageA, pageB]) });
+    useEditorStore.getState().resetEditor();
+    useEditorStore.setState({
+      currentPageIndex: 0,
+      currentPage: pageA,
+      toolMode: "brush",
+      lastPaintedLayer: "brush",
+      eraserTarget: null,
+    });
+    const pageAKey = useEditorStore.getState().currentPageKey();
+
+    const strokePromise = useEditorStore.getState().applyBitmapStroke({
+      pageKey: pageAKey,
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      strokes: [[[10, 10], [20, 20]]],
+      layerKey: "brush",
+      erase: false,
+    });
+    await vi.waitFor(() => expect(updateBrushRegion).toHaveBeenCalledTimes(1));
+
+    useEditorStore.setState({ currentPageIndex: 1, currentPage: pageB });
+    resolveBrush("images/page-a-brush-after-nav.png");
+    await strokePromise;
+
+    expect(updateBrushRegion).toHaveBeenCalledWith(expect.objectContaining({ page_index: 0 }));
+    expect(useAppStore.getState().project?.paginas[0].image_layers?.brush?.path).toBe(
+      "images/page-a-brush-after-nav.png",
+    );
+    expect(useAppStore.getState().project?.paginas[1].image_layers?.brush?.path).toBe("images/brush-002.png");
+    expect(useEditorStore.getState().currentPageIndex).toBe(1);
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.path).toBe("images/brush-002.png");
+  });
+
+  it("applies page-scoped healing persistence to the captured page after navigation", async () => {
+    let resolveHealing!: (result: {
+      page_index: number;
+      inpaint_path: string;
+      before_inpaint_path: string;
+      bbox: [number, number, number, number];
+    }) => void;
+    healInpaintRegion.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealing = resolve;
+        }),
+    );
+    const pageA = makePage(1);
+    const pageB = makePage(2);
+    useAppStore.setState({ project: makeProject([pageA, pageB]) });
+    useEditorStore.getState().resetEditor();
+    useEditorStore.setState({
+      currentPageIndex: 0,
+      currentPage: pageA,
+      pendingEdits: {},
+      pendingStructuralEdits: { created: [], deleted: {}, order: undefined },
+    });
+    const pageAKey = useEditorStore.getState().currentPageKey();
+
+    const healingPromise = useEditorStore.getState().healPaintedRegion({
+      pageKey: pageAKey,
+      pageIndex: 0,
+      bbox: [10, 10, 40, 40],
+      maskPath: "editor_cache/healing_masks/page-0001/mask.png",
+    });
+    await vi.waitFor(() => expect(healInpaintRegion).toHaveBeenCalledTimes(1));
+
+    useEditorStore.setState({ currentPageIndex: 1, currentPage: pageB });
+    resolveHealing({
+      page_index: 0,
+      inpaint_path: "images/page-a-healed-after-nav.png",
+      before_inpaint_path: "images/001.png",
+      bbox: [10, 10, 40, 40],
+    });
+    await healingPromise;
+
+    expect(healInpaintRegion).toHaveBeenCalledWith(expect.objectContaining({ page_index: 0 }));
+    expect(useAppStore.getState().project?.paginas[0].image_layers?.inpaint?.path).toBe(
+      "images/page-a-healed-after-nav.png",
+    );
+    expect(useAppStore.getState().project?.paginas[1].image_layers?.inpaint?.path).toBe("images/002.png");
+    expect(useEditorStore.getState().currentPageIndex).toBe(1);
+    expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe("images/002.png");
   });
 });

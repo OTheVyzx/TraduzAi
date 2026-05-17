@@ -184,6 +184,33 @@ class MainEmitTests(unittest.TestCase):
             qa = json.loads((output_dir / "qa_report.json").read_text(encoding="utf-8"))
             self.assertEqual(qa["summary"]["critical"], 1)
 
+    def test_runner_cli_writes_engine_preset_to_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+
+            with patch.object(main, "_run_pipeline") as run_pipeline:
+                exit_code = main._run_pipeline_runner_cli(
+                    {
+                        "source_path": str(input_dir),
+                        "obra": "Fixture",
+                        "idioma_origem": "ko",
+                        "idioma_destino": "pt-BR",
+                        "engine_preset_id": "manhwa_manhua_ocr_guided",
+                        "mode": "real",
+                        "debug": True,
+                        "strict": False,
+                        "work_dir": str(output_dir),
+                    }
+                )
+
+            self.assertEqual(exit_code, 0)
+            run_pipeline.assert_called_once()
+            config = json.loads((output_dir / "runner_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["engine_preset_id"], "manhwa_manhua_ocr_guided")
+
     def test_load_json_file_accepts_utf8_bom_from_windows_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
@@ -351,6 +378,7 @@ class MainEmitTests(unittest.TestCase):
                 "_ollama_host": "http://localhost:11434",
                 "idioma_origem": "en",
                 "contexto": {},
+                "qa": {"summary": {"total": 0}},
                 "paginas": [
                     {
                         "numero": 1,
@@ -382,16 +410,18 @@ class MainEmitTests(unittest.TestCase):
                         "layout_group_size": 2,
                         "balloon_subregions": [[8, 18, 60, 130], [62, 18, 118, 130]],
                         "layout_profile": "connected_balloon",
+                        "qa_flags": ["low_ocr_confidence"],
                     }
                 ],
                 "_vision_blocks": [{"bbox": [10, 20, 110, 120], "confidence": 0.88}],
             }
 
-            def fake_run_ocr(image_path, models_dir, vision_worker_path, idioma_origem):
+            def fake_run_ocr(image_path, models_dir, vision_worker_path, idioma_origem, engine_preset_id=""):
                 self.assertEqual(Path(image_path), originals_dir / "001.jpg")
                 self.assertEqual(models_dir, "D:/traduzai_data/models")
                 self.assertEqual(vision_worker_path, project["_vision_worker_path"])
                 self.assertEqual(idioma_origem, "en")
+                self.assertEqual(engine_preset_id, project.get("engine_preset_id", ""))
                 return ocr_page
 
             with patch("ocr.detector.run_ocr", side_effect=fake_run_ocr):
@@ -421,6 +451,8 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(saved["paginas"][0]["textos"][0]["ocr_source"], "vision-paddleocr")
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["bbox"], [10, 20, 110, 120])
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["confidence"], 0.88)
+            self.assertEqual(saved["qa"]["summary"]["total"], 1)
+            self.assertEqual(saved["qa"]["summary"]["counts"], {"low_ocr_confidence": 1})
 
     def test_project_inpaint_block_preserves_raw_bbox_with_text_anchor_metadata(self) -> None:
         block = main._project_inpaint_block_from_vision_block(
@@ -503,7 +535,7 @@ class MainEmitTests(unittest.TestCase):
 
             calls = []
 
-            def fake_run_ocr_on_block(image_path, bbox):
+            def fake_run_ocr_on_block(image_path, bbox, **_kwargs):
                 calls.append((Path(image_path), list(bbox)))
                 if bbox == [10, 20, 110, 120]:
                     return ("HELLO", 0.91)
@@ -529,6 +561,28 @@ class MainEmitTests(unittest.TestCase):
                 (originals_dir / "001.jpg", [10, 20, 110, 120]),
                 (originals_dir / "001.jpg", [130, 140, 230, 280]),
             ])
+
+    def test_page_action_options_parse_engine_preset_and_languages(self) -> None:
+        region, options = main._page_action_options_from_args(
+            [
+                "--region-bbox",
+                "10,20,110,120",
+                "--source-lang",
+                "ja",
+                "--target-lang",
+                "pt-BR",
+                "--engine-preset",
+                "manga",
+            ]
+        )
+        project = {}
+
+        main._apply_page_action_language_options(project, options)
+
+        self.assertEqual(region["bbox"], [10, 20, 110, 120])
+        self.assertEqual(project["idioma_origem"], "ja")
+        self.assertEqual(project["idioma_destino"], "pt-BR")
+        self.assertEqual(project["engine_preset_id"], "manga")
 
     def test_normalize_text_layer_repairs_local_text_pixel_bbox_and_polygons(self) -> None:
         layer = main._normalize_text_layer_for_renderer(
@@ -696,7 +750,7 @@ class MainEmitTests(unittest.TestCase):
 
             bbox_calls = []
 
-            def fake_run_ocr_on_block(image_path, bbox):
+            def fake_run_ocr_on_block(image_path, bbox, **_kwargs):
                 bbox_calls.append(list(bbox))
                 return ("TEXT", 0.95)
 

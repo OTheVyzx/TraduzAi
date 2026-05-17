@@ -82,6 +82,7 @@ import {
   isTraduzAiProjectSourceError,
   shouldLeaveProcessingForCompletedProject,
 } from "../lib/projectSourceGuards";
+import { resolveEnginePresetId } from "../lib/projectPresets";
 
 interface CompletionData {
   obra: string;
@@ -326,6 +327,7 @@ export function Processing() {
           idioma_origem: project.idioma_origem,
           idioma_destino: project.idioma_destino,
           qualidade: project.qualidade,
+          engine_preset_id: resolveEnginePresetId(project.preset, project.idioma_origem),
           glossario: project.contexto.glossario,
           work_context: project.work_context ?? null,
           preset: project.preset ?? null,
