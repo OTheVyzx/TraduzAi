@@ -196,7 +196,7 @@ def _is_speech_balloon_block(block: dict[str, Any]) -> bool:
     if block.get("balloon_polygon") or block.get("balloon_subregions") or block.get("connected_lobe_bboxes"):
         return True
     detector = str(block.get("detector") or "")
-    return "balloon" in detector or block.get("balloon_type") == "white"
+    return "balloon" in detector
 
 
 def _bbox_matches_text(block_bbox, text_bbox) -> bool:

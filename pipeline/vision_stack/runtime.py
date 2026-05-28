@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 import json
@@ -29,48 +30,52 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 if TYPE_CHECKING:
     # Hints para o IDE - Ignorar avisos de resolução pois o sys.path é dinâmico
     from ocr.postprocess import ( # type: ignore
-        _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
+        _find_hf_model, analyze_style, classify_content, classify_text_type, fix_ocr_errors,
         infer_block_profile, infer_page_profile,
         is_editorial_credit, is_non_english, is_punctuation_only_noise,
-        is_ghost_ocr_noise, is_hallucination,
-        is_cover_title_logo, is_short_ornamental_text, is_short_textured_sfx_or_noise,
+        is_ghost_ocr_noise, is_hallucination, is_short_ornamental_text, is_short_textured_sfx_or_noise,
         is_structured_ocr_payload, is_watermark,
-        is_vlm_failure_phrase,
-        has_run_on_tokens, looks_suspicious, suspicious_confidence_threshold,
-        is_korean_sfx, should_preserve_cjk_sfx_candidate,
+            is_vlm_failure_phrase,
+            has_run_on_tokens, looks_suspicious, suspicious_confidence_threshold,
+            should_retain_low_confidence_dialogue_ocr,
+            is_korean_sfx, should_preserve_cjk_sfx_candidate, split_sfx_inline,
+            SCANLATOR_RE, URL_RE,
     )
+    from ocr.text_router import ROUTE_ACTIONS, apply_route_action, route_action_requires_inpaint
     from ocr.semantic_reviewer import semantic_refine_text # type: ignore
     from inpainter.classical import _extract_textured_balloon_mask, _expand_overlay_bbox # type: ignore
-    from .ocr import _derive_text_pixel_bbox, normalize_paddleocr_language # type: ignore
+    from .ocr import _derive_text_pixel_bbox, infer_rotation_deg_from_line_polygons, normalize_paddleocr_language # type: ignore
 else:
     # Imports relativos com fallback para garantir portabilidade no runtime
     try:
         from ocr.postprocess import (
-            _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
+            _find_hf_model, analyze_style, classify_content, classify_text_type, fix_ocr_errors,
             infer_block_profile, infer_page_profile,
             is_editorial_credit, is_non_english, is_punctuation_only_noise,
-            is_ghost_ocr_noise, is_hallucination,
-            is_cover_title_logo, is_short_ornamental_text, is_short_textured_sfx_or_noise,
-            is_textured_top_narration_cover_logo,
+            is_ghost_ocr_noise, is_hallucination, is_short_ornamental_text, is_short_textured_sfx_or_noise,
             is_structured_ocr_payload, is_watermark,
             is_vlm_failure_phrase,
             has_run_on_tokens, looks_suspicious, suspicious_confidence_threshold,
-            is_korean_sfx, should_preserve_cjk_sfx_candidate,
+            should_retain_low_confidence_dialogue_ocr,
+            is_korean_sfx, should_preserve_cjk_sfx_candidate, split_sfx_inline,
+            SCANLATOR_RE, URL_RE,
         )
+        from ocr.text_router import ROUTE_ACTIONS, apply_route_action, route_action_requires_inpaint
         from ocr.semantic_reviewer import semantic_refine_text
     except ImportError:
         from ..ocr.postprocess import ( 
-            _find_hf_model, analyze_style, classify_text_type, fix_ocr_errors,
+            _find_hf_model, analyze_style, classify_content, classify_text_type, fix_ocr_errors,
             infer_block_profile, infer_page_profile,
             is_editorial_credit, is_non_english, is_punctuation_only_noise,
-            is_ghost_ocr_noise, is_hallucination,
-            is_cover_title_logo, is_short_ornamental_text, is_short_textured_sfx_or_noise,
-            is_textured_top_narration_cover_logo,
+            is_ghost_ocr_noise, is_hallucination, is_short_ornamental_text, is_short_textured_sfx_or_noise,
             is_structured_ocr_payload, is_watermark,
             is_vlm_failure_phrase,
             has_run_on_tokens, looks_suspicious, suspicious_confidence_threshold,
-            is_korean_sfx, should_preserve_cjk_sfx_candidate,
+            should_retain_low_confidence_dialogue_ocr,
+            is_korean_sfx, should_preserve_cjk_sfx_candidate, split_sfx_inline,
+            SCANLATOR_RE, URL_RE,
         )
+        from ..ocr.text_router import ROUTE_ACTIONS, apply_route_action, route_action_requires_inpaint
         from ..ocr.semantic_reviewer import semantic_refine_text
 
     try:
@@ -78,7 +83,7 @@ else:
     except ImportError:
         from ..inpainter.classical import _extract_textured_balloon_mask, _expand_overlay_bbox
 
-    from .ocr import _derive_text_pixel_bbox, normalize_paddleocr_language
+    from .ocr import _derive_text_pixel_bbox, infer_rotation_deg_from_line_polygons, normalize_paddleocr_language
 
 try:
     from utils.decision_log import infer_page_number, record_decision
@@ -126,12 +131,7 @@ def _resolve_runtime_engine_preset(engine_preset_id: str = "", idioma_origem: st
 
 
 def _preserve_cjk_sfx_for_engine_preset(engine_preset: EnginePreset | None) -> bool:
-    override = os.getenv("TRADUZAI_CJK_PRESERVE_SFX")
-    if override is not None and str(override).strip():
-        return str(override).strip().lower() in {"1", "true", "yes", "on"}
-    if engine_preset is None:
-        return True
-    return bool(getattr(engine_preset, "preserve_sfx", True))
+    return False
 
 
 def _runtime_engine_steps(preset: EnginePreset, *, legacy_default: bool = False) -> list[str]:
@@ -149,16 +149,56 @@ def _attach_engine_preset_metadata(
     engine_steps: list[str] | None = None,
 ) -> dict:
     steps = list(engine_steps if engine_steps is not None else _runtime_engine_steps(preset))
+    detector_loader = _detector_model_for_preset(preset)
     metadata = {
         "engine_preset_id": preset.id,
         "content_family": preset.content_family,
+        "detector": preset.detector,
+        "detector_engine_id": preset.detector,
+        "detector_loader": detector_loader,
+        "segmenter": preset.segmenter,
+        "bubble_segmenter": preset.bubble_segmenter,
+        "ocr": preset.ocr,
+        "inpainter": preset.inpainter,
         "mask_strategy": preset.mask_strategy,
         "engine_steps": steps,
     }
     page_result["engine_preset_id"] = preset.id
     page_result["engine_preset"] = preset.to_dict()
     page_result["_engine_preset"] = metadata
+    page_result.setdefault("_pipeline_artifacts", _pipeline_artifacts_for_preset(preset))
+    for block in page_result.get("_vision_blocks") or []:
+        if isinstance(block, dict):
+            _attach_detector_candidate_metadata(block, preset, detector_loader)
     return page_result
+
+
+def _attach_detector_candidate_metadata(
+    block: dict,
+    preset: EnginePreset,
+    detector_loader: str | None = None,
+) -> dict:
+    loader = detector_loader or _detector_model_for_preset(preset)
+    block["detector_preset_id"] = preset.id
+    block["detector_engine_id"] = preset.detector
+    block["detector_loader"] = loader
+    block.setdefault("candidate_kind", "detector_block")
+    block.setdefault("validated_by_segment_mask", False)
+    return block
+
+
+def _pipeline_artifacts_for_preset(preset: EnginePreset) -> dict:
+    return {
+        "TextBoxes": {"producer": preset.detector, "status": "ok" if preset.detector != "disabled" else "skipped"},
+        "SegmentMask": {"producer": preset.segmenter, "status": "ok" if preset.segmenter != "disabled" else "skipped"},
+        "BubbleMask": {
+            "producer": preset.bubble_segmenter,
+            "status": "ok" if preset.bubble_segmenter != "disabled" else "skipped",
+        },
+        "OcrText": {"producer": preset.ocr, "status": "ok" if preset.ocr != "disabled" else "skipped"},
+        "Inpainted": {"producer": preset.inpainter, "status": "pending"},
+        "FinalRender": {"producer": "traduzai-typesetter", "status": "pending"},
+    }
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -166,6 +206,22 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None or not str(raw).strip():
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        value = int(default)
+    else:
+        try:
+            value = int(str(raw).strip())
+        except Exception:
+            value = int(default)
+    if min_value is not None:
+        value = max(int(min_value), value)
+    if max_value is not None:
+        value = min(int(max_value), value)
+    return value
 
 
 def _white_balloon_whitening_enabled() -> bool:
@@ -187,6 +243,10 @@ def _cleanup_selective_enabled() -> bool:
 
 def _inpaint_roi_tighten_enabled() -> bool:
     return _env_flag("TRADUZAI_INPAINT_ROI_TIGHTEN", False)
+
+
+def _inpaint_clustered_crop_windows_enabled() -> bool:
+    return _env_flag("TRADUZAI_INPAINT_CLUSTERED_CROP_WINDOWS", False)
 
 
 def _koharu_blockwise_inpaint_enabled() -> bool:
@@ -285,6 +345,76 @@ def _normalize_line_polygons(raw_line_polygons) -> list[list[list[int]]]:
         if len(points) >= 4:
             normalized.append(points)
     return normalized
+
+
+def _bbox_from_line_polygons(line_polygons) -> list[int] | None:
+    polygons = _normalize_line_polygons(line_polygons)
+    if not polygons:
+        return None
+    xs: list[int] = []
+    ys: list[int] = []
+    for polygon in polygons:
+        for px, py in polygon:
+            xs.append(int(px))
+            ys.append(int(py))
+    if not xs or not ys:
+        return None
+    return [min(xs), min(ys), max(xs) + 1, max(ys) + 1]
+
+
+def _split_line_polygons_by_large_vertical_gap(line_polygons) -> list[list[list[list[int]]]]:
+    entries: list[tuple[list[int], list[list[int]]]] = []
+    for polygon in _normalize_line_polygons(line_polygons):
+        bbox = _bbox_from_line_polygons([polygon])
+        if bbox is not None:
+            entries.append((bbox, polygon))
+    if len(entries) < 2:
+        return []
+
+    entries.sort(key=lambda item: (item[0][1], item[0][0]))
+    heights = [max(1, bbox[3] - bbox[1]) for bbox, _polygon in entries]
+    median_height = sorted(heights)[len(heights) // 2]
+    all_bbox = _bbox_from_line_polygons([polygon for _bbox, polygon in entries])
+    if all_bbox is None:
+        return []
+    total_height = max(1, all_bbox[3] - all_bbox[1])
+    threshold = max(42, int(median_height * 2.4), int(total_height * 0.18))
+
+    groups: list[list[list[int]]] = [[entries[0][1]]]
+    for previous, current in zip(entries, entries[1:]):
+        previous_bbox = previous[0]
+        current_bbox = current[0]
+        gap = max(0, current_bbox[1] - previous_bbox[3])
+        if gap >= threshold:
+            groups.append([])
+        groups[-1].append(current[1])
+
+    return [group for group in groups if group]
+
+
+def _split_white_cleanup_candidate_by_line_gaps(text: dict) -> list[dict]:
+    groups = _split_line_polygons_by_large_vertical_gap(text.get("line_polygons") or [])
+    if len(groups) < 2:
+        return []
+
+    split_items: list[dict] = []
+    for index, group in enumerate(groups):
+        bbox = _bbox_from_line_polygons(group)
+        if bbox is None:
+            continue
+        if (bbox[2] - bbox[0]) < 16 or (bbox[3] - bbox[1]) < 8:
+            continue
+        child = dict(text)
+        child["bbox"] = list(bbox)
+        child["text_pixel_bbox"] = list(bbox)
+        child["source_bbox"] = list(bbox)
+        child["layout_bbox"] = list(bbox)
+        child["line_polygons"] = [polygon for polygon in group]
+        child["_white_cleanup_split_parent_bbox"] = list(text.get("bbox") or text.get("text_pixel_bbox") or [])
+        child["_white_cleanup_split_index"] = index
+        child["_white_cleanup_split_count"] = len(groups)
+        split_items.append(child)
+    return split_items
 
 
 def _quick_text_presence_details(image_rgb: np.ndarray) -> tuple[bool, str]:
@@ -466,14 +596,25 @@ def _strip_paddle_crop_fallback_max() -> int:
         return 1
 
 
+def _strip_paddle_sparse_crop_fallback_max() -> int:
+    raw = (
+        os.getenv("TRADUZAI_STRIP_PADDLE_SPARSE_CROP_FALLBACK_MAX")
+        or os.getenv("TRADUZAI_PADDLE_SPARSE_CROP_FALLBACK_MAX")
+    )
+    if raw is None:
+        return _strip_paddle_crop_fallback_max()
+    try:
+        return max(0, int(str(raw).strip()))
+    except Exception:
+        return _strip_paddle_crop_fallback_max()
+
+
 def _strip_quick_text_skip_enabled() -> bool:
-    raw = os.getenv("TRADUZAI_STRIP_QUICK_TEXT_SKIP", "1")
-    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+    return False
 
 
 def _strip_scanlation_credit_skip_enabled() -> bool:
-    raw = os.getenv("TRADUZAI_STRIP_SCANLATION_CREDIT_SKIP", "1")
-    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+    return False
 
 
 def _looks_like_scanlation_credit_band(image_rgb: np.ndarray, blocks: list) -> bool:
@@ -805,6 +946,9 @@ def _build_koharu_worker_page_result(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     engine_preset = _resolve_runtime_engine_preset(engine_preset_id, idioma_origem)
     worker_text_blocks = list(worker_payload.get("text_blocks") or worker_payload.get("textBlocks") or [])
@@ -847,6 +991,9 @@ def _build_koharu_worker_page_result(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
     page_result["_bubble_regions"] = worker_bubble_regions
     _attach_worker_bubble_geometry(page_result, worker_bubble_regions)
@@ -870,24 +1017,52 @@ def _bbox_center_inside_for_geometry(container: list[int], inner: list[int]) -> 
 
 
 def _attach_worker_bubble_geometry(page_result: dict, bubble_regions: list) -> None:
-    bubbles = []
-    for region in bubble_regions or []:
+    page_width = int(page_result.get("width", 0) or 0)
+    page_height = int(page_result.get("height", 0) or 0)
+
+    def _inner_bbox_for_bubble(bbox: list[int]) -> list[int] | None:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        pad = max(4, int(min(max(1, x2 - x1), max(1, y2 - y1)) * 0.07))
+        inner = [
+            max(0, x1 + pad),
+            max(0, y1 + pad),
+            min(page_width or x2, x2 - pad),
+            min(page_height or y2, y2 - pad),
+        ]
+        if inner[2] <= inner[0] or inner[3] <= inner[1]:
+            return None
+        return inner
+
+    bubbles: list[dict] = []
+    for index, region in enumerate(bubble_regions or [], start=1):
         if not isinstance(region, dict):
             continue
         bbox = _coerce_bbox(region.get("bbox") or region.get("box"))
         if bbox is not None:
-            bubbles.append(bbox)
+            bubble_id = str(region.get("bubble_id") or region.get("bubbleId") or region.get("id") or f"bubble_{index:03d}")
+            bubble = dict(region)
+            bubble["bbox"] = list(bbox)
+            bubble["bubble_id"] = bubble_id
+            bubble["bubble_mask_bbox"] = _coerce_bbox(
+                region.get("bubble_mask_bbox") or region.get("bubbleMaskBbox")
+            ) or list(bbox)
+            bubble["bubble_inner_bbox"] = _coerce_bbox(
+                region.get("bubble_inner_bbox") or region.get("bubbleInnerBbox")
+            ) or _inner_bbox_for_bubble(bbox)
+            bubbles.append(bubble)
     if not bubbles:
         return
+    page_result["_bubble_regions"] = [dict(bubble) for bubble in bubbles]
 
-    def _best_bubble_for_bbox(bbox: list[int] | None) -> list[int] | None:
+    def _best_bubble_for_bbox(bbox: list[int] | None) -> dict | None:
         if bbox is None:
             return None
         best = None
         best_score = 0
         for bubble in bubbles:
-            overlap = _bbox_overlap_area_for_geometry(bubble, bbox)
-            if _bbox_center_inside_for_geometry(bubble, bbox):
+            bubble_bbox = bubble.get("bbox")
+            overlap = _bbox_overlap_area_for_geometry(bubble_bbox, bbox)
+            if _bbox_center_inside_for_geometry(bubble_bbox, bbox):
                 overlap += max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
             if overlap > best_score:
                 best = bubble
@@ -902,8 +1077,13 @@ def _attach_worker_bubble_geometry(page_result: dict, bubble_regions: list) -> N
             bubble = _best_bubble_for_bbox(bbox)
             if bubble is None:
                 continue
-            item.setdefault("balloon_bbox", list(bubble))
-            item.setdefault("balloon_polygon", _rect_polygon_from_bbox_for_geometry(bubble))
+            bubble_bbox = list(bubble.get("bbox") or [])
+            item.setdefault("balloon_bbox", bubble_bbox)
+            item.setdefault("balloon_polygon", _rect_polygon_from_bbox_for_geometry(bubble_bbox))
+            for key in ("bubble_id", "bubble_mask_bbox", "bubble_inner_bbox"):
+                value = bubble.get(key)
+                if value not in (None, [], ""):
+                    item.setdefault(key, copy.deepcopy(value))
 
 
 def _read_koharu_worker_json_payload(result: subprocess.CompletedProcess, context: str) -> dict:
@@ -936,6 +1116,9 @@ def _run_koharu_worker_detect_ocr(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     worker_path = Path(str(vision_worker_path).strip())
     if not worker_path.exists():
@@ -988,6 +1171,9 @@ def _run_koharu_worker_detect_ocr(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         engine_preset_id=engine_preset.id,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
     page_result["_koharu_worker"] = {
         "engine_preset_id": engine_preset.id,
@@ -1083,6 +1269,9 @@ def _run_koharu_worker_detect_ocr_batch(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> list[dict]:
     worker_path = Path(str(vision_worker_path).strip())
     if not worker_path.exists():
@@ -1203,6 +1392,9 @@ def _run_koharu_worker_detect_ocr_batch(
             progress_callback=progress_callback,
             idioma_origem=idioma_origem,
             engine_preset_id=engine_preset.id,
+            work_title=work_title or str(job.get("work_title") or ""),
+            work_title_aliases=work_title_aliases or job.get("work_title_aliases"),
+            work_title_user_provided=bool(work_title_user_provided or job.get("work_title_user_provided")),
         )
         page_result["_vision_backend"] = "koharu-worker-batch"
         page_result["_koharu_worker_batch"] = {
@@ -1373,6 +1565,9 @@ class _KoharuHttpOcrClient:
         progress_callback=None,
         idioma_origem: str = "en",
         engine_preset_id: str = "",
+        work_title: str = "",
+        work_title_aliases: list[str] | tuple[str, ...] | None = None,
+        work_title_user_provided: bool = False,
     ) -> dict:
         engine_preset = _resolve_runtime_engine_preset(engine_preset_id, idioma_origem)
         engine_steps = _runtime_engine_steps(engine_preset, legacy_default=True)
@@ -1410,6 +1605,10 @@ class _KoharuHttpOcrClient:
             profile=profile,
             progress_callback=progress_callback,
             idioma_origem=idioma_origem,
+            engine_preset_id=engine_preset.id,
+            work_title=work_title,
+            work_title_aliases=work_title_aliases,
+            work_title_user_provided=work_title_user_provided,
         )
         page_result["_vision_backend"] = "koharu-http"
         page_result["_koharu_http"] = {
@@ -1429,6 +1628,9 @@ class _KoharuHttpOcrClient:
         progress_callback=None,
         idioma_origem: str = "en",
         engine_preset_id: str = "",
+        work_title: str = "",
+        work_title_aliases: list[str] | tuple[str, ...] | None = None,
+        work_title_user_provided: bool = False,
     ) -> list[dict]:
         clean_jobs = [job for job in jobs if isinstance(job, dict) and job.get("image_path") is not None]
         if not clean_jobs:
@@ -1482,6 +1684,10 @@ class _KoharuHttpOcrClient:
                 profile=profile,
                 progress_callback=progress_callback,
                 idioma_origem=idioma_origem,
+                engine_preset_id=engine_preset.id,
+                work_title=work_title or str(job.get("work_title") or ""),
+                work_title_aliases=work_title_aliases or job.get("work_title_aliases"),
+                work_title_user_provided=bool(work_title_user_provided or job.get("work_title_user_provided")),
             )
             page_result["_vision_backend"] = "koharu-http"
             page_result["_koharu_http"] = {
@@ -1572,6 +1778,9 @@ def _run_koharu_cjk_http_detect_ocr(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     koharu_exe = _resolve_koharu_exe(models_dir)
     if koharu_exe is None:
@@ -1584,6 +1793,9 @@ def _run_koharu_cjk_http_detect_ocr(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         engine_preset_id=engine_preset_id,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
 
 
@@ -1594,6 +1806,9 @@ def _run_koharu_cjk_http_detect_ocr_batch(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> list[dict]:
     koharu_exe = _resolve_koharu_exe(models_dir)
     if koharu_exe is None:
@@ -1605,6 +1820,9 @@ def _run_koharu_cjk_http_detect_ocr_batch(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         engine_preset_id=engine_preset_id,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
 
 
@@ -1626,8 +1844,11 @@ def _get_detector(profile: str = "quality", model: str = "comic-text-detector"):
 
 
 def _detector_model_for_preset(engine_preset: EnginePreset | None) -> str:
-    if engine_preset is not None and engine_preset.detector == "anime-text-yolo-n":
+    detector_id = str(getattr(engine_preset, "detector", "") or "").strip().lower()
+    if detector_id in {"anime-text-yolo", "anime-text-yolo-n"}:
         return "anime-text-yolo-n"
+    if detector_id in {"anime-text-yolo-s", "anime-text-yolo-m", "anime-text-yolo-l", "anime-text-yolo-x"}:
+        return detector_id
     return "comic-text-detector"
 
 
@@ -1653,9 +1874,9 @@ def _get_ocr_engine(profile: str = "quality", lang: str = "en"):
     return _ocr_engine
 
 
-def _get_inpainter(profile: str = "quality", model: str = "lama-manga"):
+def _get_inpainter(profile: str = "quality", model: str = "aot-inpainting"):
     global _inpainter, _inpainter_model
-    desired_model = str(model or "lama-manga")
+    desired_model = str(model or "aot-inpainting")
     if _inpainter is None or _inpainter_model != desired_model:
         with _inpainter_lock:
             if _inpainter is None or _inpainter_model != desired_model:
@@ -1670,29 +1891,40 @@ def _get_inpainter(profile: str = "quality", model: str = "lama-manga"):
     return _inpainter
 
 
+def _force_koharu_visual_engines(preset: dict | None) -> dict:
+    normalized = dict(preset or {})
+    normalized["segmenter"] = "comic-text-detector-seg"
+    normalized["bubble_segmenter"] = "speech-bubble-segmentation"
+    normalized["inpainter"] = "aot-inpainting"
+    return normalized
+
+
 def _page_engine_preset_dict(ocr_data: dict | None) -> dict:
     if not isinstance(ocr_data, dict):
         return {}
     preset = ocr_data.get("engine_preset")
     if isinstance(preset, dict):
-        return preset
+        return _force_koharu_visual_engines(preset)
     preset_id = str(ocr_data.get("engine_preset_id") or "").strip()
     if preset_id:
-        return resolve_engine_preset({"engine_preset_id": preset_id}).to_dict()
+        return _force_koharu_visual_engines(resolve_engine_preset({"engine_preset_id": preset_id}).to_dict())
     internal = ocr_data.get("_engine_preset")
     if isinstance(internal, dict):
         internal_id = str(internal.get("engine_preset_id") or "").strip()
         if internal_id:
-            return resolve_engine_preset({"engine_preset_id": internal_id}).to_dict()
+            return _force_koharu_visual_engines(resolve_engine_preset({"engine_preset_id": internal_id}).to_dict())
+        return _force_koharu_visual_engines(internal)
     return {}
 
 
 def _inpainter_model_for_page(ocr_data: dict | None) -> str:
     preset = _page_engine_preset_dict(ocr_data)
     inpainter = str(preset.get("inpainter") or "").strip()
+    if inpainter == "lama-manga":
+        return "lama-manga"
     if inpainter == "aot-inpainting":
         return "aot-inpainting"
-    return "lama-manga"
+    return "aot-inpainting"
 
 
 def _page_mask_strategy(ocr_data: dict | None) -> str:
@@ -1882,69 +2114,27 @@ def _call_inpainter(
         return inpainter.inpaint(image_np, mask, batch_size=batch_size)
 
 
+def _block_should_skip_inpaint_mask(block: dict | None) -> bool:
+    return not isinstance(block, dict)
+
+
 def _text_cleanup_kinds(texts: list[dict] | None) -> tuple[bool, bool]:
     has_white = False
     has_textured = False
     for text in texts or []:
         if not isinstance(text, dict):
             continue
-        balloon_type = str(text.get("balloon_type") or "").strip().lower()
-        profiles = {
-            str(text.get("layout_profile") or "").strip().lower(),
-            str(text.get("block_profile") or "").strip().lower(),
-            str(text.get("background_type") or "").strip().lower(),
-        }
-        if balloon_type == "white" or bool(profiles & {"white_balloon", "connected_balloon"}):
+        if text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("bubble_mask_bbox"):
             has_white = True
-        if balloon_type == "textured" or bool(
-            profiles
-            & {
-                "textured",
-                "textured_background",
-                "colored_balloon",
-                "dark_background",
-                "gradient_background",
-                "top_narration",
-            }
-        ):
-            has_textured = True
     return has_white, has_textured
 
 
 def _text_has_nonwhite_cleanup_marker(text: dict) -> bool:
-    balloon_type = str(text.get("balloon_type") or "").strip().lower()
-    profiles = {
-        str(text.get("layout_profile") or "").strip().lower(),
-        str(text.get("block_profile") or "").strip().lower(),
-        str(text.get("background_type") or "").strip().lower(),
-        str(text.get("tipo") or "").strip().lower(),
-    }
-    if balloon_type in {"textured", "colored", "dark", "sfx", "sound_effect"}:
-        return True
-    return bool(
-        profiles
-        & {
-            "textured",
-            "textured_background",
-            "colored_balloon",
-            "dark_background",
-            "gradient_background",
-            "sfx",
-            "sound_effect",
-        }
-    )
+    return False
 
 
 def _text_has_white_cleanup_marker(text: dict) -> bool:
-    balloon_type = str(text.get("balloon_type") or "").strip().lower()
-    profiles = {
-        str(text.get("layout_profile") or "").strip().lower(),
-        str(text.get("block_profile") or "").strip().lower(),
-        str(text.get("background_type") or "").strip().lower(),
-    }
-    return balloon_type == "white" or bool(
-        profiles & {"white_balloon", "speech_balloon", "connected_balloon", "top_narration"}
-    )
+    return False
 
 
 def _text_background_looks_translucent_or_textured(image_rgb: np.ndarray, text: dict) -> bool:
@@ -2020,7 +2210,12 @@ def _text_background_looks_translucent_or_textured(image_rgb: np.ndarray, text: 
     return spread >= 14.0 or std >= 5.5 or grad_p90 >= 18.0
 
 
-def _text_anchor_has_white_cleanup_context(image_rgb: np.ndarray, text: dict) -> bool:
+def _text_anchor_has_white_cleanup_context(
+    image_rgb: np.ndarray,
+    text: dict,
+    *,
+    include_source_bbox: bool = True,
+) -> bool:
     if not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0 or not isinstance(text, dict):
         return False
     height, width = image_rgb.shape[:2]
@@ -2037,7 +2232,8 @@ def _text_anchor_has_white_cleanup_context(image_rgb: np.ndarray, text: dict) ->
         if xs and ys:
             candidates.append([min(xs), min(ys), max(xs) + 1, max(ys) + 1])
 
-    for key in ("text_pixel_bbox", "layout_bbox"):
+    candidate_keys = ("source_bbox", "text_pixel_bbox", "layout_bbox") if include_source_bbox else ("text_pixel_bbox", "layout_bbox")
+    for key in candidate_keys:
         bbox = _coerce_bbox(text.get(key))
         if bbox is not None and bbox not in candidates:
             candidates.append(bbox)
@@ -2074,25 +2270,30 @@ def _text_anchor_has_white_cleanup_context(image_rgb: np.ndarray, text: dict) ->
 
 
 def _text_is_white_cleanup_safe(image_rgb: np.ndarray, text: dict) -> bool:
-    if not isinstance(text, dict) or text.get("skip_processing"):
+    if not isinstance(text, dict):
         return False
-    anchor_white_context = _text_anchor_has_white_cleanup_context(image_rgb, text)
-    sfx_markers = {
-        str(text.get("layout_profile") or "").strip().lower(),
-        str(text.get("block_profile") or "").strip().lower(),
-        str(text.get("tipo") or "").strip().lower(),
-    }
-    if sfx_markers & {"sfx", "sound_effect"}:
-        return False
-    if _text_has_nonwhite_cleanup_marker(text):
+    white_marker = _text_has_white_cleanup_marker(text)
+    nonwhite_marker = _text_has_nonwhite_cleanup_marker(text)
+    anchor_white_context = _text_anchor_has_white_cleanup_context(
+        image_rgb,
+        text,
+        include_source_bbox=False,
+    )
+    if nonwhite_marker:
         if not _normalize_line_polygons(text.get("line_polygons") or []):
             return False
         return anchor_white_context
+    if anchor_white_context and _normalize_line_polygons(text.get("line_polygons") or []):
+        return True
+    if text.get("_white_cleanup_split_count") and anchor_white_context:
+        return True
+    if white_marker and anchor_white_context:
+        return True
     if anchor_white_context and not _text_background_looks_translucent_or_textured(image_rgb, text):
         return True
     if _text_background_looks_translucent_or_textured(image_rgb, text):
         return False
-    if _text_has_white_cleanup_marker(text):
+    if white_marker:
         return True
     for key in ("balloon_bbox", "bbox", "text_pixel_bbox"):
         bbox = _coerce_bbox(text.get(key))
@@ -2102,7 +2303,17 @@ def _text_is_white_cleanup_safe(image_rgb: np.ndarray, text: dict) -> bool:
 
 
 def _white_cleanup_texts(image_rgb: np.ndarray, texts: list[dict] | None) -> list[dict]:
-    return [text for text in texts or [] if _text_is_white_cleanup_safe(image_rgb, text)]
+    cleanup_texts: list[dict] = []
+    for text in texts or []:
+        if not isinstance(text, dict):
+            continue
+        if _text_is_white_cleanup_safe(image_rgb, text):
+            cleanup_texts.append(text)
+            continue
+        for split_text in _split_white_cleanup_candidate_by_line_gaps(text):
+            if _text_is_white_cleanup_safe(image_rgb, split_text):
+                cleanup_texts.append(split_text)
+    return cleanup_texts
 
 
 def _build_post_cleanup_limit_mask(
@@ -2320,6 +2531,75 @@ def _strict_cjk_aot_crop_windows(
     return unique
 
 
+def _clustered_inpaint_crop_windows(
+    mask: np.ndarray,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    *,
+    texts: list[dict] | None = None,
+) -> list[list[int]] | None:
+    if not _inpaint_clustered_crop_windows_enabled():
+        return None
+    if not isinstance(mask, np.ndarray) or not np.any(mask):
+        return None
+    if len(image_shape) == 3:
+        height, width = image_shape[:2]
+    else:
+        height, width = image_shape
+    full_area = max(1, int(width) * int(height))
+    single_roi, _single_uses_roi = _select_inpaint_roi(mask, image_shape, prefer_roi=True, texts=texts)
+    single_roi_area = max(1, _bbox_area_safe(single_roi))
+
+    margin = _env_int("TRADUZAI_INPAINT_CLUSTERED_CROP_MARGIN", 72, min_value=8, max_value=256)
+    max_windows = _env_int("TRADUZAI_INPAINT_CLUSTERED_CROP_MAX_WINDOWS", 12, min_value=2, max_value=80)
+    min_component_area = _env_int("TRADUZAI_INPAINT_CLUSTERED_CROP_MIN_COMPONENT_AREA", 16, min_value=1)
+
+    binary = (mask > 0).astype(np.uint8)
+    num_labels, _labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    windows: list[list[int]] = []
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_component_area:
+            continue
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w_box = int(stats[label, cv2.CC_STAT_WIDTH])
+        h_box = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if w_box <= 0 or h_box <= 0:
+            continue
+        window = _expand_bbox_by_pixels([x, y, x + w_box, y + h_box], image_shape, margin)
+        if window is not None:
+            windows.append(window)
+
+    if len(windows) <= 1:
+        return None
+
+    merged = _merge_nearby_bboxes(windows, gap_x=0, gap_y=0)
+    merged = sorted(
+        merged,
+        key=lambda box: (
+            int(box[1]),
+            int(box[0]),
+            -_bbox_area_safe(box),
+        ),
+    )
+    if len(merged) <= 1 or len(merged) > max_windows:
+        return None
+
+    crop_area = sum(max(1, _bbox_area_safe(window)) for window in merged)
+    savings_ratio = crop_area / float(max(1, single_roi_area))
+    full_ratio = crop_area / float(full_area)
+    max_single_roi_ratio = float(
+        _env_int("TRADUZAI_INPAINT_CLUSTERED_CROP_MAX_SINGLE_ROI_PCT", 72, min_value=10, max_value=95)
+    ) / 100.0
+    max_full_ratio = float(
+        _env_int("TRADUZAI_INPAINT_CLUSTERED_CROP_MAX_FULL_PCT", 80, min_value=10, max_value=98)
+    ) / 100.0
+    if savings_ratio > max_single_roi_ratio or full_ratio > max_full_ratio:
+        return None
+
+    return merged
+
+
 def _call_inpainter_in_roi(
     inpainter,
     image_np: np.ndarray,
@@ -2396,7 +2676,11 @@ def _serialize_block(block, page_shape: tuple[int, int]) -> dict:
         "balloon_polygon",
         "balloon_subregions",
         "connected_lobe_bboxes",
+        "connected_lobe_ids",
         "connected_lobe_polygons",
+        "bubble_id",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
     ):
         value = getattr(block, key, None)
         if value not in (None, [], ""):
@@ -2406,8 +2690,6 @@ def _serialize_block(block, page_shape: tuple[int, int]) -> dict:
 
 def _apply_text_geometry_to_serialized_block(serialized_block: dict, text_entry: dict) -> dict:
     enriched = dict(serialized_block)
-    for key in ("balloon_subregions", "connected_lobe_bboxes", "connected_lobe_polygons"):
-        enriched.pop(key, None)
     anchor_bbox = resolve_text_anchor_bbox(text_entry)
     source_bbox = _coerce_bbox(enriched.get("bbox")) or _coerce_bbox(text_entry.get("bbox"))
     if source_bbox is not None:
@@ -2417,17 +2699,93 @@ def _apply_text_geometry_to_serialized_block(serialized_block: dict, text_entry:
         enriched["text_pixel_bbox"] = list(anchor_bbox)
     for key in (
         "line_polygons",
+        "balloon_bbox",
         "balloon_polygon",
+        "balloon_subregions",
+        "connected_lobe_bboxes",
+        "connected_lobe_ids",
+        "connected_lobe_polygons",
+        "bubble_id",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
         "balloon_type",
         "tipo",
         "block_profile",
         "page_profile",
+        "_merged_source_bboxes",
+        "merged_source_bboxes",
         "text",
+        "original",
+        "raw_ocr",
+        "translated",
+        "traduzido",
+        "skip_processing",
+        "skip_reason",
+        "preserve_original",
+        "translate_policy",
+        "render_policy",
+        "route_action",
+        "route_reason",
+        "content_class",
+        "is_watermark",
+        "is_non_english",
+        "qa_flags",
+        "qa_metrics",
+        "_validated_text_source_bboxes",
+        "_rejected_text_source_bboxes",
+        "_raw_text_evidence_bbox",
+        "_raw_text_evidence_pixels",
+        "validated_by_segment_mask",
+        "detector_preset_id",
+        "detector_engine_id",
+        "detector_loader",
+        "candidate_kind",
+        "rotation_deg",
+        "rotation_source",
     ):
         value = text_entry.get(key)
         if value not in (None, [], ""):
             enriched[key] = value
     return enriched
+
+
+def _normalize_rotation_metadata_value(value) -> float:
+    try:
+        numeric = float(value or 0)
+    except Exception:
+        return 0.0
+    normalized = numeric % 360.0
+    if normalized > 180.0:
+        normalized -= 360.0
+    if normalized <= -180.0:
+        normalized += 360.0
+    if abs(normalized) < 0.01:
+        return 0.0
+    return round(normalized, 2)
+
+
+def _rotation_metadata_from_ocr(raw_record: dict, block, line_polygons: list) -> tuple[float, str]:
+    candidates = (
+        (
+            raw_record.get("rotation_deg") if isinstance(raw_record, dict) else None,
+            raw_record.get("rotation_source") if isinstance(raw_record, dict) else None,
+            "ocr",
+        ),
+        (
+            getattr(block, "rotation_deg", None) if not isinstance(block, dict) else block.get("rotation_deg"),
+            getattr(block, "rotation_source", None) if not isinstance(block, dict) else block.get("rotation_source"),
+            "detector",
+        ),
+    )
+    for value, source, fallback_source in candidates:
+        rotation = _normalize_rotation_metadata_value(value)
+        if rotation != 0.0:
+            return rotation, str(source or fallback_source)
+
+    inferred = infer_rotation_deg_from_line_polygons(line_polygons)
+    if inferred != 0.0:
+        return inferred, "line_polygons"
+    return 0.0, ""
 
 
 def _normalize_geometry_polygon(value, page_shape: tuple[int, int]) -> list[list[int]] | None:
@@ -2503,6 +2861,8 @@ def _apply_balloon_geometry_to_text_entry(
     for key, camel in (
         ("balloon_subregions", "balloonSubregions"),
         ("connected_lobe_bboxes", "connectedLobeBboxes"),
+        ("_validated_text_source_bboxes", "validatedTextSourceBboxes"),
+        ("_rejected_text_source_bboxes", "rejectedTextSourceBboxes"),
     ):
         values = _geometry_value(raw_record, block, key, camel)
         bboxes = []
@@ -2513,6 +2873,33 @@ def _apply_balloon_geometry_to_text_entry(
                     bboxes.append(bbox)
         if bboxes:
             text_entry[key] = bboxes
+
+    for key, camel in (
+        ("bubble_mask_bbox", "bubbleMaskBbox"),
+        ("bubble_inner_bbox", "bubbleInnerBbox"),
+    ):
+        bbox = _coerce_bbox(_geometry_value(raw_record, block, key, camel))
+        if bbox is not None:
+            text_entry[key] = bbox
+    for key, camel in (
+        ("bubble_id", "bubbleId"),
+        ("connected_lobe_ids", "connectedLobeIds"),
+    ):
+        value = _geometry_value(raw_record, block, key, camel)
+        if value not in (None, [], ""):
+            text_entry[key] = value
+    for key in (
+        "_raw_text_evidence_bbox",
+        "_raw_text_evidence_pixels",
+        "validated_by_segment_mask",
+        "detector_preset_id",
+        "detector_engine_id",
+        "detector_loader",
+        "candidate_kind",
+    ):
+        value = _geometry_value(raw_record, block, key)
+        if value not in (None, [], ""):
+            text_entry[key] = value
     return text_entry
 
 
@@ -2530,6 +2917,226 @@ def _clone_page_result(page_result: dict) -> dict:
         "texts": cloned_texts,
         "_vision_blocks": cloned_blocks,
     }
+
+
+def _normalized_bbox_list(values) -> list[list[int]]:
+    normalized: list[list[int]] = []
+    if not isinstance(values, (list, tuple)):
+        return normalized
+    for value in values:
+        bbox = _coerce_bbox(value)
+        if bbox is None:
+            continue
+        if not any(_bbox_iou(bbox, existing) >= 0.94 for existing in normalized):
+            normalized.append(bbox)
+    return normalized
+
+
+def _bbox_union_many(bboxes: list[list[int]]) -> list[int] | None:
+    union_bbox = None
+    for bbox in bboxes:
+        union_bbox = list(bbox) if union_bbox is None else _bbox_union(union_bbox, bbox)
+    return union_bbox
+
+
+def _copy_validated_source_metadata(target: dict, source: dict) -> None:
+    for key in (
+        "_validated_text_source_bboxes",
+        "_rejected_text_source_bboxes",
+        "_raw_text_evidence_bbox",
+        "_raw_text_evidence_pixels",
+        "validated_by_segment_mask",
+        "detector_preset_id",
+        "detector_engine_id",
+        "detector_loader",
+        "candidate_kind",
+    ):
+        value = source.get(key)
+        if value not in (None, [], "") and target.get(key) in (None, [], ""):
+            target[key] = value
+
+
+def _validated_source_bboxes_for_text(text: dict, vision_blocks: list[dict]) -> list[list[int]]:
+    direct = _normalized_bbox_list(text.get("_validated_text_source_bboxes"))
+    if direct:
+        return direct
+    text_bbox = _coerce_bbox(text.get("source_bbox") or text.get("text_pixel_bbox") or text.get("bbox"))
+    if text_bbox is None:
+        return []
+    best_block = None
+    best_score = 0.0
+    for block in vision_blocks:
+        candidates = _normalized_bbox_list(block.get("_validated_text_source_bboxes"))
+        if not candidates:
+            continue
+        block_bbox = _coerce_bbox(block.get("source_bbox") or block.get("text_pixel_bbox") or block.get("bbox"))
+        union_bbox = _bbox_union_many(candidates)
+        score = 0.0
+        if block_bbox is not None:
+            score = max(score, _bbox_inner_overlap_ratio(text_bbox, block_bbox))
+            score = max(score, _bbox_inner_overlap_ratio(block_bbox, text_bbox))
+        if union_bbox is not None:
+            score = max(score, _bbox_inner_overlap_ratio(union_bbox, text_bbox))
+        if score > best_score:
+            best_score = score
+            best_block = block
+    if best_block is None or best_score < 0.18:
+        return []
+    _copy_validated_source_metadata(text, best_block)
+    return _normalized_bbox_list(best_block.get("_validated_text_source_bboxes"))
+
+
+def _validated_sources_are_separated(bboxes: list[list[int]]) -> bool:
+    if len(bboxes) < 2:
+        return False
+    ordered = sorted(bboxes, key=lambda bbox: (bbox[1], bbox[0]))
+    for previous, current in zip(ordered, ordered[1:]):
+        vertical_gap = int(current[1]) - int(previous[3])
+        horizontal_gap = int(current[0]) - int(previous[2])
+        min_h = max(1, min(previous[3] - previous[1], current[3] - current[1]))
+        min_w = max(1, min(previous[2] - previous[0], current[2] - current[0]))
+        if vertical_gap > max(18, int(min_h * 0.70)) or horizontal_gap > max(24, int(min_w * 0.70)):
+            return True
+    return False
+
+
+def _split_text_value_for_validated_sources(text: dict, split_count: int) -> list[str] | None:
+    for key in ("line_texts", "text_lines", "ocr_lines", "source_lines"):
+        raw_lines = text.get(key)
+        if not isinstance(raw_lines, (list, tuple)):
+            continue
+        lines: list[str] = []
+        for raw_line in raw_lines:
+            if isinstance(raw_line, dict):
+                value = raw_line.get("text") or raw_line.get("value") or raw_line.get("content")
+            else:
+                value = raw_line
+            normalized = str(value or "").strip()
+            if normalized:
+                lines.append(normalized)
+        if len(lines) == split_count:
+            return lines
+    raw_text = str(text.get("text") or text.get("original") or "").strip()
+    if raw_text:
+        lines = [line.strip() for line in re.split(r"\r?\n+", raw_text) if line.strip()]
+        if len(lines) == split_count:
+            return lines
+    return None
+
+
+def _line_polygons_by_validated_source(
+    line_polygons,
+    validated_bboxes: list[list[int]],
+) -> list[list[list[list[int]]]] | None:
+    polygons = _normalize_line_polygons(line_polygons)
+    if len(polygons) < len(validated_bboxes) or len(validated_bboxes) < 2:
+        return None
+    groups: list[list[list[list[int]]]] = [[] for _ in validated_bboxes]
+    for polygon in polygons:
+        polygon_bbox = _bbox_from_line_polygons([polygon])
+        if polygon_bbox is None:
+            return None
+        best_index = -1
+        best_score = 0.0
+        center_x = (polygon_bbox[0] + polygon_bbox[2]) / 2.0
+        center_y = (polygon_bbox[1] + polygon_bbox[3]) / 2.0
+        for index, source_bbox in enumerate(validated_bboxes):
+            score = _bbox_inner_overlap_ratio(polygon_bbox, source_bbox)
+            if source_bbox[0] <= center_x <= source_bbox[2] and source_bbox[1] <= center_y <= source_bbox[3]:
+                score = max(score, 0.95)
+            if score > best_score:
+                best_score = score
+                best_index = index
+        if best_index < 0 or best_score < 0.45:
+            return None
+        groups[best_index].append(polygon)
+    if any(not group for group in groups):
+        return None
+    return groups
+
+
+def _split_text_by_validated_sources(text: dict, validated_bboxes: list[list[int]]) -> list[dict]:
+    if len(validated_bboxes) < 2 or not _validated_sources_are_separated(validated_bboxes):
+        return []
+    polygon_groups = _line_polygons_by_validated_source(text.get("line_polygons"), validated_bboxes)
+    if not polygon_groups:
+        return []
+    line_texts = _split_text_value_for_validated_sources(text, len(validated_bboxes))
+    if line_texts is None:
+        return []
+    split_items: list[dict] = []
+    parent_id = str(text.get("id") or text.get("text_id") or text.get("trace_id") or "ocr")
+    for index, (source_bbox, group, line_text) in enumerate(zip(validated_bboxes, polygon_groups, line_texts), start=1):
+        polygon_bbox = _bbox_from_line_polygons(group) or list(source_bbox)
+        child = dict(text)
+        child["text"] = line_text
+        if "original" in child:
+            child["original"] = line_text
+        child_id = f"{parent_id}_validated_{index:02d}"
+        child["id"] = child_id
+        child["text_id"] = child_id
+        child["bbox"] = list(polygon_bbox)
+        child["text_pixel_bbox"] = list(polygon_bbox)
+        child["source_bbox"] = list(source_bbox)
+        child["layout_bbox"] = list(source_bbox)
+        child["line_polygons"] = [polygon for polygon in group]
+        child["_validated_text_source_bboxes"] = [list(source_bbox)]
+        child["validated_by_segment_mask"] = True
+        child["_render_target_source"] = "validated_text_source"
+        child["_validated_source_split_parent_id"] = parent_id
+        child["_validated_source_split_index"] = index
+        child["_validated_source_split_count"] = len(validated_bboxes)
+        flags = child.setdefault("qa_flags", [])
+        if isinstance(flags, list) and "ocr_split_validated_sources" not in flags:
+            flags.append("ocr_split_validated_sources")
+        split_items.append(child)
+    return split_items
+
+
+def _reconcile_ocr_with_validated_sources(page_result: dict) -> dict:
+    if not isinstance(page_result, dict):
+        return page_result
+    vision_blocks = [block for block in page_result.get("_vision_blocks", []) if isinstance(block, dict)]
+    reconciled_texts: list[dict] = []
+    for text in page_result.get("texts", []) or []:
+        if not isinstance(text, dict):
+            reconciled_texts.append(text)
+            continue
+        validated_bboxes = _validated_source_bboxes_for_text(text, vision_blocks)
+        if not validated_bboxes:
+            text.setdefault("validated_by_segment_mask", False)
+            reconciled_texts.append(text)
+            continue
+        union_bbox = _bbox_union_many(validated_bboxes)
+        if union_bbox is None:
+            reconciled_texts.append(text)
+            continue
+        split_items = _split_text_by_validated_sources(text, validated_bboxes)
+        if split_items:
+            reconciled_texts.extend(split_items)
+            continue
+        text["_validated_text_source_bboxes"] = validated_bboxes
+        text["validated_by_segment_mask"] = True
+        original_bbox = _coerce_bbox(text.get("ocr_text_bbox") or text.get("bbox") or text.get("text_pixel_bbox"))
+        if original_bbox is not None:
+            original_area = max(1, _bbox_area_safe(original_bbox))
+            union_area = max(1, _bbox_area_safe(union_bbox))
+            if original_area >= union_area * 1.85 or _bbox_inner_overlap_ratio(union_bbox, original_bbox) < 0.86:
+                flags = text.setdefault("qa_flags", [])
+                if isinstance(flags, list) and "ocr_overmerged_validated_sources" not in flags:
+                    flags.append("ocr_overmerged_validated_sources")
+        if _validated_sources_are_separated(validated_bboxes):
+            flags = text.setdefault("qa_flags", [])
+            if isinstance(flags, list) and "ocr_multiple_validated_sources" not in flags:
+                flags.append("ocr_multiple_validated_sources")
+            text["_render_target_source"] = "validated_text_source"
+        text["layout_bbox"] = list(union_bbox)
+        if not text.get("line_polygons"):
+            text["text_pixel_bbox"] = list(union_bbox)
+        text.setdefault("ocr_text_bbox", original_bbox or list(union_bbox))
+        reconciled_texts.append(text)
+    page_result["texts"] = reconciled_texts
+    return page_result
 
 
 def _orientation_recovery_enabled() -> bool:
@@ -2688,6 +3295,8 @@ def _remap_orientation_recovery_page(
         "connected_text_groups",
         "connected_position_bboxes",
         "connected_focus_bboxes",
+        "_validated_text_source_bboxes",
+        "_rejected_text_source_bboxes",
     )
 
     for text in remapped.get("texts", []):
@@ -2738,6 +3347,29 @@ def _remap_orientation_recovery_page(
                     original_shape,
                     rotated_shape,
                 )
+        for key in (
+            "source_bbox",
+            "layout_bbox",
+            "text_pixel_bbox",
+            "balloon_bbox",
+            "_raw_text_evidence_bbox",
+        ):
+            value = block.get(key)
+            if isinstance(value, (list, tuple)) and len(value) == 4:
+                block[key] = _rotate_bbox_from_view_to_original(value, rotation_deg, original_shape)
+        for key in (
+            "balloon_subregions",
+            "connected_lobe_bboxes",
+            "_validated_text_source_bboxes",
+            "_rejected_text_source_bboxes",
+        ):
+            value = block.get(key)
+            if isinstance(value, list):
+                block[key] = [
+                    _rotate_bbox_from_view_to_original(item, rotation_deg, original_shape)
+                    for item in value
+                    if isinstance(item, (list, tuple)) and len(item) == 4
+                ]
         polygon = block.get("balloon_polygon")
         if isinstance(polygon, list):
             rotated = _rotate_polygon_from_view_to_original(polygon, rotation_deg, original_shape)
@@ -2776,6 +3408,20 @@ def _should_try_orientation_recovery(page_result: dict) -> bool:
 
 def _normalize_text_key(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _text_matches_work_title(text: str, work_title: str = "", aliases: list[str] | tuple[str, ...] | None = None) -> bool:
+    text_key = _normalize_text_key(text).replace(" ", "")
+    if len(text_key) < 3:
+        return False
+    candidates = [work_title, *(aliases or [])]
+    for candidate in candidates:
+        candidate_key = _normalize_text_key(candidate).replace(" ", "")
+        if len(candidate_key) < 3:
+            continue
+        if text_key == candidate_key or text_key in candidate_key or candidate_key in text_key:
+            return True
+    return False
 
 
 def _tokenize_text(text: str) -> list[str]:
@@ -2899,8 +3545,6 @@ def _merge_nearby_bboxes(boxes: list[list[int]], gap_x: int = 60, gap_y: int = 4
 def _group_text_indices_by_balloon(texts: list[dict], gap_x: int = 90, gap_y: int = 54) -> list[list[int]]:
     clusters: list[list[int]] = []
     for index, text in enumerate(texts):
-        if text.get("skip_processing"):
-            continue
         bbox = text.get("bbox", [0, 0, 0, 0])
         attached = False
         for cluster in clusters:
@@ -3020,42 +3664,20 @@ def _text_fragment_source_bbox(text: dict) -> list[int] | None:
     source_bbox = _coerce_bbox(text.get("source_bbox"))
     if source_bbox is not None:
         return source_bbox
-    balloon_bbox = _coerce_bbox(text.get("balloon_bbox"))
     raw_bbox = _coerce_bbox(text.get("bbox"))
     text_bbox = _coerce_bbox(text.get("text_pixel_bbox"))
-    if balloon_bbox is not None and raw_bbox is not None and text_bbox is not None:
-        balloon_area = max(0, balloon_bbox[2] - balloon_bbox[0]) * max(0, balloon_bbox[3] - balloon_bbox[1])
-        raw_area = max(0, raw_bbox[2] - raw_bbox[0]) * max(0, raw_bbox[3] - raw_bbox[1])
-        text_area = max(0, text_bbox[2] - text_bbox[0]) * max(0, text_bbox[3] - text_bbox[1])
-        if balloon_area <= max(1, int(text_area * 1.15)) and raw_area >= max(1, int(balloon_area * 1.35)):
-            return raw_bbox
-    return balloon_bbox or raw_bbox
+    return text_bbox or raw_bbox
 
 
 def _text_fragment_has_white_balloon_marker(text: dict) -> bool:
-    balloon_type = str(text.get("balloon_type", "") or "").strip().lower()
-    profiles = {
-        str(text.get("layout_profile", "") or "").strip().lower(),
-        str(text.get("block_profile", "") or "").strip().lower(),
-        str(text.get("background_type", "") or "").strip().lower(),
-    }
-    return balloon_type == "white" or bool(profiles & {"white_balloon", "speech_balloon"})
+    return bool(text.get("bubble_id") or text.get("bubble_mask_bbox") or text.get("bubble_mask"))
 
 
-def _text_fragment_can_merge_across_balloon_type(text: dict) -> bool:
-    if text.get("skip_processing") or text.get("preserve_original"):
-        return False
+def _text_fragment_can_merge_by_geometry(text: dict) -> bool:
     cleaned = str(text.get("text", "") or "").strip()
     if not cleaned:
         return False
-    tipo = str(text.get("tipo", "") or "").strip().lower()
-    if tipo in {"sfx", "sound_effect", "onomatopeia"}:
-        return False
-    profiles = {
-        str(text.get("layout_profile", "") or "").strip().lower(),
-        str(text.get("block_profile", "") or "").strip().lower(),
-    }
-    return not bool(profiles & {"cover_title_logo", "decorative_noise"})
+    return True
 
 
 def _text_fragment_line_height(text: dict, bbox: list[int]) -> float:
@@ -3169,12 +3791,14 @@ def _text_fragments_are_stacked_same_balloon(first: dict, second: dict, region_b
     )
 
 
-def _should_merge_mixed_balloon_type_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool:
+def _should_merge_marker_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool:
     if len(texts) < 2:
         return False
-    if not all(_text_fragment_can_merge_across_balloon_type(text) for text in texts):
+    if not all(_text_fragment_can_merge_by_geometry(text) for text in texts):
         return False
     if not any(_text_fragment_has_white_balloon_marker(text) for text in texts):
+        return False
+    if _mixed_balloon_cluster_has_card_title_veto(texts, region_bbox):
         return False
 
     ordered = sorted(
@@ -3191,21 +3815,183 @@ def _should_merge_mixed_balloon_type_ocr_cluster(texts: list[dict], region_bbox:
     )
 
 
+_UI_SYSTEM_MESSAGE_TERMS = {
+    "ALERT",
+    "CANDIDATE",
+    "CLEAR",
+    "COLLECTION",
+    "COMPLETE",
+    "COMPLETED",
+    "CONFIRM",
+    "ERROR",
+    "FAILED",
+    "HOT",
+    "LEVEL",
+    "MISSION",
+    "NEWS",
+    "NOTICE",
+    "PLAYER",
+    "PREPARE",
+    "QUEST",
+    "RANK",
+    "RECORD",
+    "RECORDS",
+    "REWARD",
+    "SEARCH",
+    "STATUS",
+    "SUCCESS",
+    "SUCCESSFUL",
+    "SYSTEM",
+    "TITLE",
+    "TRIAL",
+    "WARNING",
+}
+
+
+def _rgb_luma_value(rgb: object) -> float | None:
+    if not isinstance(rgb, (list, tuple)) or len(rgb) < 3:
+        return None
+    try:
+        r, g, b = (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+    except (TypeError, ValueError):
+        return None
+    return (r * 0.299) + (g * 0.587) + (b * 0.114)
+
+
+def _text_fragment_background_luma(text: dict) -> float | None:
+    for key in ("background_rgb", "median_rgb", "dominant_rgb"):
+        luma = _rgb_luma_value(text.get(key))
+        if luma is not None:
+            return luma
+    return None
+
+
+def _text_words_upper(text: str) -> list[str]:
+    return [word.upper() for word in re.findall(r"[A-Za-z]+", str(text or ""))]
+
+
+def _text_tokens_upper(text: str) -> list[str]:
+    return [token.upper() for token in re.findall(r"[A-Za-z0-9]+", str(text or ""))]
+
+
+def _looks_like_system_ui_message_text(text: str) -> bool:
+    words = _text_words_upper(text)
+    if not words:
+        return False
+    tokens = _text_tokens_upper(text)
+    token_set = set(tokens)
+    strong_art_label_terms = {"SIDE", "STEREO", "VINYL", "LP", "EP", "SOUL", "LOVE", "YEARS"}
+    if token_set & strong_art_label_terms:
+        return False
+    if {"SYSTEM", "ERROR"}.issubset(set(words)):
+        return True
+    ui_terms = [word for word in words if word in _UI_SYSTEM_MESSAGE_TERMS]
+    has_mixed_code = any(any(char.isalpha() for char in token) and any(char.isdigit() for char in token) for token in tokens)
+    if ui_terms:
+        if len(words) <= 5:
+            return True
+        if has_mixed_code or len(ui_terms) >= 2:
+            return True
+    if any(token in _UI_SYSTEM_MESSAGE_TERMS for token in tokens):
+        return len(words) <= 5
+    return False
+
+
+def _looks_like_textured_art_label_text(text: str, line_polygons: list) -> bool:
+    tokens = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+    if not (4 <= len(tokens) <= 16):
+        return False
+    mixed_code_tokens = [
+        token
+        for token in tokens
+        if len(token) >= 4
+        and any(char.isalpha() for char in token)
+        and any(char.isdigit() for char in token)
+    ]
+    if len(mixed_code_tokens) < 2:
+        return False
+    alpha_words = [token.upper() for token in tokens if any(char.isalpha() for char in token)]
+    label_terms = {"SIDE", "STEREO", "VINYL", "LP", "EP", "SOUL", "LOVE", "YEARS"}
+    has_label_term = any(word in label_terms for word in alpha_words)
+    dense_multiline_label = len(line_polygons or []) >= 3
+    return has_label_term or dense_multiline_label
+
+
+def _mixed_balloon_cluster_has_card_title_veto(texts: list[dict], region_bbox: list[int]) -> bool:
+    if len(texts) < 2:
+        return False
+    white_items = [text for text in texts if _text_fragment_has_white_balloon_marker(text)]
+    non_white_items = [text for text in texts if not _text_fragment_has_white_balloon_marker(text)]
+    if not white_items or not non_white_items:
+        return False
+    region_h = max(1, int(region_bbox[3]) - int(region_bbox[1]))
+    for white in white_items:
+        white_bbox = _text_fragment_bbox(white) or _coerce_bbox(white.get("bbox"))
+        white_luma = _text_fragment_background_luma(white)
+        if white_bbox is None:
+            continue
+        for other in non_white_items:
+            other_bbox = _text_fragment_bbox(other) or _coerce_bbox(other.get("bbox"))
+            other_luma = _text_fragment_background_luma(other)
+            if other_bbox is None:
+                continue
+            other_text = str(other.get("text") or other.get("original") or "").strip()
+            other_words = _text_words_upper(other_text)
+            if not other_words or len(other_words) > 5:
+                continue
+            title_like = (
+                _looks_like_system_ui_message_text(other_text)
+                or any(word in {"NEWS", "COLLECTION", "HOT", "SYSTEM", "ERROR", "LEVEL", "TRIAL"} for word in other_words)
+            )
+            if not title_like:
+                continue
+            background_split = (
+                white_luma is not None
+                and white_luma >= 220
+                and other_luma is not None
+                and other_luma <= 205
+            )
+            gap_x, gap_y = _bbox_gaps(white_bbox, other_bbox)
+            stacked_separate = (
+                gap_y >= 0
+                and gap_y <= max(64.0, region_h * 0.06)
+                and other_bbox[1] >= white_bbox[3] - 12
+            )
+            if background_split and stacked_separate and gap_x <= max(48.0, (white_bbox[2] - white_bbox[0]) * 0.16):
+                return True
+    return False
+
+
 def _should_merge_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool:
     if len(texts) < 2:
         return False
     if len(texts) >= 3:
+        if _ocr_cluster_has_broad_container_with_separate_lower_fragments(texts):
+            return False
+        ordered = sorted(
+            texts,
+            key=lambda item: (
+                int(item.get("bbox", [0, 0, 0, 0])[1]),
+                int(item.get("bbox", [0, 0, 0, 0])[0]),
+            ),
+        )
+        for index in range(len(ordered) - 1):
+            if _ocr_cluster_merge_veto_reason([ordered[index], ordered[index + 1]], region_bbox) is not None:
+                return False
         return True
+
+    if _ocr_cluster_merge_veto_reason(texts, region_bbox) is not None:
+        return False
 
     first, second = sorted(
         texts,
         key=lambda item: (
-            int(item.get("bbox", [0, 0, 0, 0])[1]),
-            int(item.get("bbox", [0, 0, 0, 0])[0]),
+            int((_text_fragment_bbox(item) or item.get("bbox", [0, 0, 0, 0]))[1]),
+            int((_text_fragment_bbox(item) or item.get("bbox", [0, 0, 0, 0]))[0]),
         ),
     )[:2]
-    a = [int(v) for v in first.get("bbox", [0, 0, 0, 0])]
-    b = [int(v) for v in second.get("bbox", [0, 0, 0, 0])]
+    a = [int(v) for v in (_text_fragment_bbox(first) or first.get("bbox", [0, 0, 0, 0]))]
+    b = [int(v) for v in (_text_fragment_bbox(second) or second.get("bbox", [0, 0, 0, 0]))]
     if a[2] <= a[0] or a[3] <= a[1] or b[2] <= b[0] or b[3] <= b[1]:
         return False
 
@@ -3220,16 +4006,10 @@ def _should_merge_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool
     second_center = _bbox_center(b)
     dx = abs(first_center[0] - second_center[0])
     dy = abs(first_center[1] - second_center[1])
-    white_pair = all(
-        str(item.get("balloon_type", "") or "").strip().lower() == "white"
-        for item in texts[:2]
-    )
-
-    if white_pair and gap_y >= max(18.0, min_h * 0.35) and dx >= min_w * 0.18:
+    if gap_y >= max(18.0, min_h * 0.35) and dx >= min_w * 0.18:
         return False
     if (
-        white_pair
-        and dy >= min_h * 0.55
+        dy >= min_h * 0.55
         and dx >= min_w * 0.45
         and overlap_y <= max(10.0, min_h * 0.16)
     ):
@@ -3261,6 +4041,118 @@ def _should_merge_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool
     return stacked_lines or touching_stacked_lines or same_line_fragments or short_fragment_pair
 
 
+def _ocr_cluster_has_broad_container_with_separate_lower_fragments(texts: list[dict]) -> bool:
+    if len(texts) < 3:
+        return False
+
+    bboxes: list[tuple[dict, list[int], int]] = []
+    for text in texts:
+        bbox = _coerce_bbox(text.get("bbox")) or _text_fragment_bbox(text)
+        if bbox is None:
+            continue
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        if w <= 0 or h <= 0:
+            continue
+        bboxes.append((text, [int(v) for v in bbox], int(w * h)))
+    if len(bboxes) < 3:
+        return False
+
+    for container, container_bbox, container_area in bboxes:
+        container_w = max(1, container_bbox[2] - container_bbox[0])
+        container_h = max(1, container_bbox[3] - container_bbox[1])
+        lower_children: list[tuple[dict, list[int], int]] = []
+        for child, child_bbox, child_area in bboxes:
+            if child is container:
+                continue
+            child_w = max(1, child_bbox[2] - child_bbox[0])
+            child_h = max(1, child_bbox[3] - child_bbox[1])
+            overlap = _bbox_overlap_area_for_geometry(container_bbox, child_bbox)
+            child_overlap_ratio = overlap / float(max(1, child_area))
+            child_center_y = _bbox_center(child_bbox)[1]
+            lower_in_container = child_center_y >= container_bbox[1] + container_h * 0.55
+            broad_container = (
+                container_area >= child_area * 4.0
+                and container_w >= child_w * 1.8
+                and container_h >= child_h * 2.0
+            )
+            if broad_container and child_overlap_ratio >= 0.55 and lower_in_container:
+                lower_children.append((child, child_bbox, child_area))
+        if len(lower_children) < 2:
+            continue
+
+        for index, (_first_child, first_bbox, _first_area) in enumerate(lower_children):
+            for _second_child, second_bbox, _second_area in lower_children[index + 1:]:
+                min_h = max(1, min(first_bbox[3] - first_bbox[1], second_bbox[3] - second_bbox[1]))
+                gap_x, gap_y = _bbox_gaps(first_bbox, second_bbox)
+                dx = abs(_bbox_center(first_bbox)[0] - _bbox_center(second_bbox)[0])
+                vertically_separated = gap_y >= max(16.0, min_h * 0.35)
+                diagonally_separated = gap_y >= 0 and dx >= max(48.0, min(container_w, 220) * 0.20)
+                if vertically_separated or (diagonally_separated and gap_x <= container_w * 0.60):
+                    return True
+    return False
+
+
+def _ocr_cluster_merge_veto_reason(texts: list[dict], region_bbox: list[int]) -> tuple[str, dict] | None:
+    if len(texts) != 2:
+        return None
+    try:
+        first, second = sorted(
+            texts,
+            key=lambda item: (
+                int((_text_fragment_bbox(item) or item.get("bbox", [0, 0, 0, 0]))[1]),
+                int((_text_fragment_bbox(item) or item.get("bbox", [0, 0, 0, 0]))[0]),
+            ),
+        )[:2]
+        a = [int(v) for v in (_text_fragment_bbox(first) or first.get("bbox", [0, 0, 0, 0]))]
+        b = [int(v) for v in (_text_fragment_bbox(second) or second.get("bbox", [0, 0, 0, 0]))]
+    except Exception:
+        return None
+    if a[2] <= a[0] or a[3] <= a[1] or b[2] <= b[0] or b[3] <= b[1]:
+        return None
+
+    area_a = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    min_area = min(area_a, area_b)
+    max_area = max(area_a, area_b)
+    dominant_ratio = max_area / float(min_area)
+    overlap_x = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    overlap_y = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    overlap_area = overlap_x * overlap_y
+    small_overlap_ratio = overlap_area / float(min_area)
+    min_w = max(1, min(a[2] - a[0], b[2] - b[0]))
+    min_h = max(1, min(a[3] - a[1], b[3] - b[1]))
+    first_center = _bbox_center(a)
+    second_center = _bbox_center(b)
+    dx = abs(first_center[0] - second_center[0])
+    dy = abs(first_center[1] - second_center[1])
+    gap_x, gap_y = _bbox_gaps(a, b)
+    details = {
+        "bbox_a": a,
+        "bbox_b": b,
+        "dominant_area_ratio": round(dominant_ratio, 3),
+        "small_overlap_ratio": round(small_overlap_ratio, 3),
+        "overlap_x": int(overlap_x),
+        "overlap_y": int(overlap_y),
+        "gap_x": round(gap_x, 3),
+        "gap_y": round(gap_y, 3),
+        "dx": round(dx, 3),
+        "dy": round(dy, 3),
+    }
+
+    if (
+        dominant_ratio >= 6.0
+        and 0.15 <= small_overlap_ratio <= 0.85
+        and (dx >= min_w * 0.45 or dy >= min_h * 0.9)
+    ):
+        return "dominant_partial_overlap", details
+
+    if gap_y > min_h * 2.5 and overlap_x < min_w * 0.5:
+        return "text_fragment_gap_too_large", details
+
+    return None
+
+
 def _raw_region_bbox_for_texts(texts: list[dict]) -> list[int]:
     bbox = _coerce_bbox(texts[0].get("bbox")) or _text_fragment_bbox(texts[0]) or [0, 0, 0, 0]
     for text in texts[1:]:
@@ -3282,19 +4174,119 @@ def _select_merge_subset_from_region(region_texts: list[dict]) -> tuple[list[dic
     )
     for index in range(len(ordered) - 1):
         pair = [ordered[index], ordered[index + 1]]
-        pair_types = {
-            str(text.get("balloon_type", "") or "").strip().lower()
-            for text in pair
-            if str(text.get("balloon_type", "") or "").strip()
-        }
         pair_bbox = _raw_region_bbox_for_texts(pair)
-        if len(pair_types) > 1:
-            if _should_merge_mixed_balloon_type_ocr_cluster(pair, pair_bbox):
-                return pair, pair_bbox, True
-            continue
         if _should_merge_ocr_cluster(pair, pair_bbox):
             return pair, pair_bbox, False
     return None
+
+
+def _add_unique_string(values: list[str], value) -> None:
+    if value is None:
+        return
+    text = str(value).strip()
+    if text and text not in values:
+        values.append(text)
+
+
+def _merge_source_ids_for_texts(texts: list[dict]) -> tuple[list[str], list[str]]:
+    source_text_ids: list[str] = []
+    source_trace_ids: list[str] = []
+    for text in texts:
+        for value in text.get("source_text_ids") or text.get("_source_text_ids") or []:
+            _add_unique_string(source_text_ids, value)
+        _add_unique_string(source_text_ids, text.get("text_id") or text.get("id"))
+
+        for value in text.get("source_trace_ids") or text.get("_source_trace_ids") or []:
+            _add_unique_string(source_trace_ids, value)
+        _add_unique_string(source_trace_ids, text.get("trace_id"))
+    return source_text_ids, source_trace_ids
+
+
+def _qa_flags_for_text(text: dict) -> set[str]:
+    return {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+
+
+def _append_qa_flag(text: dict, flag: str) -> None:
+    flag = str(flag or "").strip()
+    if not flag:
+        return
+    flags = list(text.get("qa_flags") or [])
+    if flag not in flags:
+        flags.append(flag)
+    text["qa_flags"] = flags
+
+
+def _mark_partial_ocr_review_required(text: dict, *, reason: str) -> None:
+    _append_qa_flag(text, "ocr_partial_low_confidence_fragment")
+    text["needs_review"] = False
+    apply_route_action(text)
+
+
+def _bbox_fragment_neighbor(candidate: list[int] | None, other: list[int] | None) -> bool:
+    candidate_bbox = _coerce_bbox(candidate)
+    other_bbox = _coerce_bbox(other)
+    if candidate_bbox is None or other_bbox is None:
+        return False
+    c_w = max(1, candidate_bbox[2] - candidate_bbox[0])
+    c_h = max(1, candidate_bbox[3] - candidate_bbox[1])
+    o_w = max(1, other_bbox[2] - other_bbox[0])
+    o_h = max(1, other_bbox[3] - other_bbox[1])
+    vertical_gap = max(0, max(candidate_bbox[1], other_bbox[1]) - min(candidate_bbox[3], other_bbox[3]))
+    if vertical_gap > max(80, int(min(c_h, o_h) * 2.5)):
+        return False
+    horizontal_overlap = max(0, min(candidate_bbox[2], other_bbox[2]) - max(candidate_bbox[0], other_bbox[0]))
+    overlap_ratio = horizontal_overlap / max(1, min(c_w, o_w))
+    c_center = (candidate_bbox[0] + candidate_bbox[2]) / 2.0
+    o_center = (other_bbox[0] + other_bbox[2]) / 2.0
+    center_distance = abs(c_center - o_center)
+    return overlap_ratio >= 0.20 or center_distance <= max(120, max(c_w, o_w))
+
+
+def _propagate_partial_ocr_review_to_neighbors(
+    page_texts: list[dict],
+    vision_blocks: list[dict],
+    page_number: int | None,
+) -> tuple[list[dict], list[dict]]:
+    if len(page_texts) < 2 or len(page_texts) != len(vision_blocks):
+        return page_texts, vision_blocks
+    review_indices = [
+        index
+        for index, text in enumerate(page_texts)
+        if "ocr_partial_low_confidence_fragment" in _qa_flags_for_text(text)
+    ]
+    if not review_indices:
+        return page_texts, vision_blocks
+
+    changed = False
+    for review_index in review_indices:
+        review_text = page_texts[review_index]
+        review_bbox = review_text.get("text_pixel_bbox") or review_text.get("bbox")
+        for index, text in enumerate(page_texts):
+            if index == review_index:
+                continue
+            if str(text.get("route_action") or "").strip().lower() == "review_required":
+                continue
+            text_bbox = text.get("text_pixel_bbox") or text.get("bbox")
+            if not _bbox_fragment_neighbor(review_bbox, text_bbox):
+                continue
+            _mark_partial_ocr_review_required(text, reason="ocr_partial_low_confidence_neighbor")
+            block = vision_blocks[index]
+            block["route_action"] = text.get("route_action")
+            block["route_reason"] = text.get("route_reason")
+            block["skip_processing"] = text.get("skip_processing")
+            block["qa_flags"] = list(text.get("qa_flags") or [])
+            changed = True
+            record_decision(
+                stage="ocr",
+                action="flag_block",
+                reason="ocr_partial_low_confidence_neighbor",
+                page=page_number,
+                layer=text.get("id") or text.get("text_id"),
+                text=_ocr_text_from_entry(text),
+                bbox=text.get("bbox", []),
+                details={"review_fragment": _ocr_text_from_entry(review_text)},
+            )
+    return page_texts, vision_blocks
 
 
 def _merge_ocr_clusters(
@@ -3320,44 +4312,21 @@ def _merge_ocr_clusters(
         region_texts = [text for text in region.get("texts", []) if id(text) in index_by_identity]
         if len(region_texts) < 2:
             continue
-        if str(region.get("tipo", "") or "").strip().lower() == "sfx":
-            continue
-        balloon_types = {
-            str(text.get("balloon_type", "") or "").strip().lower()
-            for text in region_texts
-            if str(text.get("balloon_type", "") or "").strip()
-        }
         region_bbox = [int(v) for v in region.get("bbox", [0, 0, 0, 0])]
-        mixed_balloon_type_merge = False
-        if len(balloon_types) > 1:
-            mixed_balloon_type_merge = _should_merge_mixed_balloon_type_ocr_cluster(region_texts, region_bbox)
-            if not mixed_balloon_type_merge:
-                merge_subset = _select_merge_subset_from_region(region_texts)
-                if merge_subset is not None:
-                    region_texts, region_bbox, mixed_balloon_type_merge = merge_subset
-                    balloon_types = {
-                        str(text.get("balloon_type", "") or "").strip().lower()
-                        for text in region_texts
-                        if str(text.get("balloon_type", "") or "").strip()
-                    }
-                else:
-                    record_decision(
-                        stage="ocr",
-                        action="keep_block_separate",
-                        reason="mixed_balloon_type_cluster",
-                        page=page_number,
-                        bbox=region_bbox,
-                        details={"count": len(region_texts), "balloon_types": sorted(balloon_types)},
-                    )
-                    continue
-        if not mixed_balloon_type_merge and not _should_merge_ocr_cluster(region_texts, region_bbox):
+        marker_merge = _should_merge_marker_ocr_cluster(region_texts, region_bbox)
+        veto = None if marker_merge else _ocr_cluster_merge_veto_reason(region_texts, region_bbox)
+        if not marker_merge and (veto is not None or not _should_merge_ocr_cluster(region_texts, region_bbox)):
+            reason = veto[0] if veto is not None else "cluster_not_line_merge"
+            details = {"count": len(region_texts)}
+            if veto is not None:
+                details.update(veto[1])
             record_decision(
                 stage="ocr",
                 action="keep_block_separate",
-                reason="cluster_not_line_merge",
+                reason=reason,
                 page=page_number,
                 bbox=region_bbox,
-                details={"count": len(region_texts)},
+                details=details,
             )
             continue
 
@@ -3418,9 +4387,14 @@ def _merge_ocr_clusters(
         merged_text["source_bbox"] = [int(v) for v in merged_source_bbox]
         merged_text["line_polygons"] = merged_line_polygons
         merged_text["confidence"] = merged_confidence
-        if mixed_balloon_type_merge and any(_text_fragment_has_white_balloon_marker(item) for item in ordered_texts):
-            merged_text["balloon_type"] = "white"
-            merged_text["block_profile"] = "white_balloon"
+        source_text_ids, source_trace_ids = _merge_source_ids_for_texts(ordered_texts)
+        if source_text_ids:
+            merged_text["source_text_ids"] = source_text_ids
+        if source_trace_ids:
+            merged_text["source_trace_ids"] = source_trace_ids
+            merged_text["_source_trace_ids"] = source_trace_ids
+        if len(source_text_ids) > 1 or len(source_trace_ids) > 1:
+            merged_text["merge_reason"] = "clustered_line_fragments"
         merged_text["qa_flags"] = sorted(
             {
                 str(flag)
@@ -3429,13 +4403,22 @@ def _merge_ocr_clusters(
                 if str(flag).strip()
             }
         )
+        if any(str(item.get("route_action") or "").strip().lower() == "review_required" for item in ordered_texts) or (
+            "ocr_partial_low_confidence_fragment" in merged_text["qa_flags"]
+        ):
+            _mark_partial_ocr_review_required(
+                merged_text,
+                reason="ocr_partial_low_confidence_fragment",
+            )
         merged_text["ocr_merged_source_count"] = len(ordered_texts)
-        merged_text["_merged_source_bboxes"] = [
+        merged_source_bboxes = [
             [int(v) for v in text.get("bbox", [0, 0, 0, 0])]
             for text in ordered_texts
         ]
+        merged_text["_merged_source_bboxes"] = merged_source_bboxes
+        merged_text["merged_source_bboxes"] = merged_source_bboxes
 
-        if is_editorial_credit(str(merged_text.get("text", "") or "")):
+        if False and is_editorial_credit(str(merged_text.get("text", "") or "")):
             merged_indices.update(ordered_indices)
             record_decision(
                 stage="ocr",
@@ -3460,7 +4443,20 @@ def _merge_ocr_clusters(
             "block_profile": merged_text.get("block_profile"),
             "page_profile": merged_text.get("page_profile"),
             "text": merged_text.get("text"),
+            "_merged_source_bboxes": merged_source_bboxes,
+            "merged_source_bboxes": merged_source_bboxes,
+            "route_action": merged_text.get("route_action"),
+            "route_reason": merged_text.get("route_reason"),
+            "skip_processing": merged_text.get("skip_processing"),
+            "qa_flags": list(merged_text.get("qa_flags") or []),
         }
+        if source_text_ids:
+            merged_block["source_text_ids"] = source_text_ids
+        if source_trace_ids:
+            merged_block["source_trace_ids"] = source_trace_ids
+            merged_block["_source_trace_ids"] = source_trace_ids
+        if merged_text.get("merge_reason"):
+            merged_block["merge_reason"] = merged_text.get("merge_reason")
         merged_pairs.append((merged_text, merged_block))
         merged_indices.update(ordered_indices)
 
@@ -3592,12 +4588,59 @@ def _drop_contained_duplicate_ocr_texts(
                 large_bbox, small_bbox = second_bbox, first_bbox
                 large_area, small_area = second_area, first_area
 
+            large_source_bbox = (
+                _coerce_bbox(large_text.get("source_bbox"))
+                or _coerce_bbox(large_text.get("bbox"))
+                or large_bbox
+            )
+            large_source_area = _bbox_area_safe(large_source_bbox)
             if large_area < int(small_area * 1.75):
-                continue
+                if (
+                    large_source_area >= int(small_area * 1.75)
+                    and (
+                        _bbox_contains_center(large_source_bbox, small_bbox, margin=16)
+                        or _bbox_inner_overlap_ratio(small_bbox, large_source_bbox) >= 0.62
+                    )
+                ):
+                    large_bbox = large_source_bbox
+                    large_area = large_source_area
+                else:
+                    continue
             if not (
                 _bbox_contains_center(large_bbox, small_bbox, margin=16)
                 or _bbox_inner_overlap_ratio(small_bbox, large_bbox) >= 0.62
             ):
+                continue
+
+            large_key = _ocr_compact_key(str(large_text.get("text", "") or ""))
+            small_key = _ocr_compact_key(str(small_text.get("text", "") or ""))
+            large_conf = float(large_text.get("confidence", 0.0) or 0.0)
+            small_conf = float(small_text.get("confidence", 0.0) or 0.0)
+            if (
+                small_key
+                and large_key
+                and small_key in large_key
+                and large_key != small_key
+                and large_conf <= small_conf + 0.2
+            ):
+                drop_indices.add(large_index)
+                record_decision(
+                    stage="ocr",
+                    action="drop_block",
+                    reason="overmerged_container_ocr_block",
+                    page=page_number,
+                    text=large_text.get("text", ""),
+                    bbox=large_text.get("bbox", large_bbox),
+                    details={
+                        "kept_text": small_text.get("text", ""),
+                        "kept_bbox": small_text.get("bbox", small_bbox),
+                        "area_ratio": round(float(large_area) / float(max(1, small_area)), 2),
+                        "large_confidence": round(large_conf, 3),
+                        "small_confidence": round(small_conf, 3),
+                    },
+                )
+                if drop_index := (large_index == first_index):
+                    break
                 continue
 
             if similarity < 0.72:
@@ -3675,81 +4718,512 @@ def _ocr_block_from_text_entry(text: dict) -> dict:
         "block_profile": text.get("block_profile"),
         "page_profile": text.get("page_profile"),
         "text": _ocr_text_from_entry(text),
+        "rotation_deg": text.get("rotation_deg"),
+        "rotation_source": text.get("rotation_source"),
     }
 
 
 def _looks_like_short_art_ocr_noise(text: dict) -> bool:
-    if text.get("skip_processing") or text.get("preserve_original"):
-        return False
-
-    raw_text = _ocr_text_from_entry(text)
-    normalized = _normalize_text_key(raw_text)
-    compact = normalized.replace(" ", "")
-    if len(compact) < 2:
-        return False
-
-    if _ocr_text_has_line_geometry(text):
-        return False
-
-    bbox = _ocr_text_bbox_for_cleanup(text)
-    if bbox is None:
-        return False
-    width = max(0, int(bbox[2]) - int(bbox[0]))
-    height = max(0, int(bbox[3]) - int(bbox[1]))
-    area = width * height
-    if area <= 0:
-        return False
-    area_per_char = float(area) / float(max(1, len(compact)))
-
-    if re.search(r"https?://|www\.|readfirst|scan", str(raw_text or ""), flags=re.IGNORECASE):
-        return True
-
-    # Falsos positivos como "THE SA" e strings soltas de arte costumam vir sem
-    # poligonos de linha e com uma caixa muito maior que o texto reconhecido.
-    if (
-        len(compact) <= 8
-        and area >= max(14_000, len(compact) * 1_600)
-        and area_per_char >= 4_000.0
-        and max(width, height) >= 90
-    ):
-        return True
-    if (
-        len(compact) <= 14
-        and area >= max(24_000, len(compact) * 2_200)
-        and area_per_char >= 4_500.0
-        and width >= 120
-        and height >= 45
-        and len(normalized.split()) <= 2
-    ):
-        return True
     return False
 
 
-def _looks_like_cover_title_overlay_noise(text: dict) -> bool:
-    if text.get("skip_processing") or text.get("preserve_original"):
+def _looks_like_final_project_text_entry(text: dict) -> bool:
+    """Return true for OCR entries that already passed translation/typeset flow."""
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    if not translated:
         return False
-    page_profile = str(text.get("page_profile", "") or "").strip().lower()
-    if page_profile not in {"cover_opening", "cover", "cover_title"}:
+    has_trace = bool(
+        text.get("trace_id")
+        or text.get("text_instance_id")
+        or text.get("source_trace_ids")
+        or text.get("_source_trace_ids")
+    )
+    has_pipeline_anchor = bool(
+        text.get("band_id")
+        or text.get("render_bbox")
+        or text.get("safe_text_box")
+        or text.get("layout_safe_bbox")
+    )
+    return has_trace and has_pipeline_anchor
+
+
+def _image_height_from_shape(
+    image_shape: tuple[int, int, int] | tuple[int, int] | None,
+) -> int | None:
+    if not image_shape:
+        return None
+    try:
+        return max(1, int(image_shape[0]))
+    except Exception:
+        return None
+
+
+def _cover_title_overlay_scope_allows_drop(
+    bbox: list[int],
+    image_shape: tuple[int, int, int] | tuple[int, int] | None,
+    page_number: int | None,
+    total_pages: int | None = None,
+) -> bool:
+    try:
+        page_no = int(page_number) if page_number is not None else None
+    except Exception:
+        page_no = None
+    if page_no is None:
         return False
-    tipo = str(text.get("tipo", "") or "").strip().lower()
-    if tipo not in {"narracao", "narration", ""}:
+
+    try:
+        total = int(total_pages) if total_pages is not None else None
+    except Exception:
+        total = None
+
+    # This filter is intentionally narrow: it is for title/credit overlays at
+    # chapter boundaries, not for regular narration boxes on middle pages.
+    if total and total > 1 and 1 < page_no < total:
         return False
-    raw_text = _ocr_text_from_entry(text)
-    normalized = _normalize_text_key(raw_text)
+    if not total and page_no > 1:
+        return False
+
+    page_height = _image_height_from_shape(image_shape)
+    y1 = int(bbox[1])
+    y2 = int(bbox[3])
+
+    if page_no <= 1:
+        if page_height is None:
+            return y1 <= 220
+        top_limit = max(180, int(page_height * 0.18))
+        bottom_limit = max(top_limit + 1, int(page_height * 0.45))
+        return y1 <= top_limit and y2 <= bottom_limit
+
+    if total and page_no >= total:
+        if page_height is None:
+            return False
+        footer_edge = page_height - max(180, int(page_height * 0.16))
+        footer_body = int(page_height * 0.55)
+        return y2 >= footer_edge and y1 >= footer_body
+
+    return False
+
+
+def _looks_like_cover_title_overlay_noise(
+    text: dict,
+    image_shape: tuple[int, int, int] | tuple[int, int] | None = None,
+    page_number: int | None = None,
+    total_pages: int | None = None,
+) -> bool:
+    return False
+
+
+def _ocr_pre_translation_skip_policy(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    *,
+    tipo: str,
+    page_profile: str,
+    block_profile: str,
+    is_white_balloon: bool,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    line_polygons: list,
+    run_on_suspect: bool,
+    pre_semantic_run_on: bool,
+    source_lang: str,
+    background_rgb: list[int] | tuple[int, int, int] | None = None,
+    title_rules_enabled: bool = False,
+    text_matches_work_title: bool = False,
+) -> dict | None:
+    stripped = " ".join(str(text or "").split()).strip()
+    if not stripped:
+        return {
+            "skip_reason": "ocr_noise_empty",
+            "content_class": "noise",
+            "qa_flags": ["ocr_noise_skip"],
+            "needs_review": False,
+        }
+
+    normalized = _normalize_text_key(stripped)
     compact = normalized.replace(" ", "")
-    if len(compact) < 14:
-        return False
-    if re.search(r"[?!:,.]", str(raw_text or "")):
-        return False
-    bbox = _coerce_bbox(text.get("bbox")) or _ocr_text_bbox_for_cleanup(text)
-    if bbox is None or _bbox_area_safe(bbox) < 30_000:
-        return False
-    profiles = {
-        str(text.get("block_profile", "") or "").strip().lower(),
-        str(text.get("layout_profile", "") or "").strip().lower(),
-        str(text.get("background_type", "") or "").strip().lower(),
+    words = re.findall(r"[A-Za-z]+", stripped)
+    unique_words = {word.upper() for word in words}
+    has_sentence_punctuation = bool(re.search(r"[?!.,:;]", stripped))
+    plain_bright_background = False
+    if isinstance(background_rgb, (list, tuple)) and len(background_rgb) >= 3:
+        try:
+            channels = [int(value) for value in background_rgb[:3]]
+            plain_bright_background = min(channels) >= 235 and (max(channels) - min(channels)) <= 18
+        except (TypeError, ValueError):
+            plain_bright_background = False
+    image_h = int(image_shape[0])
+    image_w = int(image_shape[1])
+    bbox_area = _bbox_area_safe(bbox)
+    page_area = max(1, image_h * image_w)
+    area_ratio = bbox_area / float(page_area)
+    box_w = max(1, int(bbox[2]) - int(bbox[0]))
+    box_h = max(1, int(bbox[3]) - int(bbox[1]))
+    width_ratio = box_w / float(max(1, image_w))
+    height_ratio = box_h / float(max(1, image_h))
+    line_bbox = _bbox_from_line_polygons(line_polygons)
+    compact_line_geometry_in_broad_region = False
+    if line_bbox is not None:
+        line_area = _bbox_area_safe(line_bbox)
+        line_w = max(1, int(line_bbox[2]) - int(line_bbox[0]))
+        line_h = max(1, int(line_bbox[3]) - int(line_bbox[1]))
+        compact_line_geometry_in_broad_region = bool(
+            bbox_area >= max(1, line_area * 8)
+            and (line_w / float(box_w) <= 0.45 or line_h / float(box_h) <= 0.24)
+            and len(words) >= 2
+            and confidence >= 0.50
+        )
+    profile_clean = str(block_profile or "").strip().lower()
+    page_profile_clean = str(page_profile or "").strip().lower()
+    normalized_source_lang = str(source_lang or "").strip().lower()
+    line_geometry_missing = not bool(line_polygons)
+    speech_like_white_balloon = bool(
+        is_white_balloon
+        and has_sentence_punctuation
+        and len(words) >= 4
+    )
+    sentence_like_plain_dialogue = bool(
+        has_sentence_punctuation
+        and len(words) >= 3
+        and confidence >= 0.55
+        and (is_white_balloon or plain_bright_background or profile_clean in {"white_balloon", "standard"})
+    )
+    short_punctuated_white_balloon = bool(
+        is_white_balloon
+        and has_sentence_punctuation
+        and confidence >= 0.50
+        and 1 <= len(words) <= 2
+    )
+    system_ui_message = bool(
+        normalized_source_lang == "en"
+        and confidence >= 0.72
+        and _looks_like_system_ui_message_text(stripped)
+    )
+
+    cover_logo_art_rules_enabled = bool(title_rules_enabled and text_matches_work_title)
+
+    if cover_logo_art_rules_enabled and page_profile_clean == "cover_opening":
+        repeated_cover_words = len(words) >= 3 and len(unique_words) < len(words)
+        alpha_chars = [char for char in stripped if char.isalpha()]
+        uppercase_ratio = (
+            sum(1 for char in alpha_chars if char.isupper()) / float(len(alpha_chars))
+            if alpha_chars
+            else 0.0
+        )
+        title_case_ratio = sum(1 for word in words if word[:1].isupper()) / float(max(1, len(words)))
+        work_title_like_cover_text = bool(
+            not system_ui_message
+            and (
+                repeated_cover_words
+                or uppercase_ratio >= 0.58
+                or title_case_ratio >= 0.72
+                or profile_clean in {"cover_title_logo", "decorative_noise"}
+            )
+        )
+        short_plain_white_balloon_text = bool(
+            is_white_balloon
+            and line_polygons
+            and confidence >= 0.55
+            and not repeated_cover_words
+            and 2 <= len(words) <= 8
+            and any(
+                word.upper()
+                in {
+                    "I",
+                    "YOU",
+                    "WE",
+                    "HE",
+                    "SHE",
+                    "THEY",
+                    "MY",
+                    "YOUR",
+                    "HIS",
+                    "HER",
+                    "HAVE",
+                    "HAD",
+                    "HID",
+                    "CAN",
+                    "DO",
+                    "ARE",
+                    "IS",
+                    "WAS",
+                }
+                for word in words
+            )
+        )
+        long_plain_sentence_text = bool(
+            len(words) >= 6
+            and confidence >= 0.70
+            and not repeated_cover_words
+            and (is_white_balloon or plain_bright_background)
+            and any(word.upper() in {"I", "YOU", "WE", "HE", "SHE", "THE", "MY", "YOUR", "HAVE", "CAN", "DO"} for word in words)
+        )
+        short_ornamental = (
+            2 <= len(compact) <= 6
+            and len(words) <= 1
+            and not short_punctuated_white_balloon
+        )
+        logo_like_title = (
+            not has_sentence_punctuation
+            and not long_plain_sentence_text
+            and not short_plain_white_balloon_text
+            and work_title_like_cover_text
+            and len(compact) >= 8
+            and (
+                repeated_cover_words
+                or area_ratio >= 0.025
+                or width_ratio >= 0.30
+                or profile_clean in {"cover_title_logo", "decorative_noise"}
+            )
+        )
+        cover_noise = (
+            repeated_cover_words
+            and not speech_like_white_balloon
+            and not sentence_like_plain_dialogue
+        ) or short_ornamental or logo_like_title
+        if cover_noise:
+            reason = "cover_repeated_words_noise" if repeated_cover_words else "cover_logo_or_art_ocr"
+            if short_ornamental:
+                reason = "cover_short_ornamental_noise"
+            return {
+                "skip_reason": reason,
+                "content_class": "noise",
+                "qa_flags": [reason],
+                "needs_review": False,
+            }
+
+    logo_or_emblem = bool(
+        normalized_source_lang == "en"
+        and not is_white_balloon
+        and not plain_bright_background
+        and not system_ui_message
+        and not compact_line_geometry_in_broad_region
+        and not has_sentence_punctuation
+        and 1 <= len(words) <= 4
+        and 3 <= len(compact) <= 28
+        and not any(char.isdigit() for char in compact)
+        and (
+            line_geometry_missing
+            or confidence < 0.72
+            or area_ratio >= 0.015
+            or width_ratio >= 0.18
+            or height_ratio >= 0.08
+        )
+        and not any(word.upper() in {"I", "YOU", "WE", "HE", "SHE", "THEY", "WHAT", "WHY", "HOW", "PLEASE"} for word in words)
+    )
+    if cover_logo_art_rules_enabled and logo_or_emblem:
+        return {
+            "skip_reason": "logo_or_emblem_preserved",
+            "content_class": "logo",
+            "qa_flags": ["logo_or_emblem_preserved"],
+            "needs_review": False,
+            "preserve_original": False,
+        }
+
+    textured_art_label = bool(
+        normalized_source_lang == "en"
+        and not is_white_balloon
+        and not plain_bright_background
+        and not system_ui_message
+        and not re.search(r"[?!.,;]", stripped)
+        and confidence >= 0.52
+        and (area_ratio >= 0.008 or width_ratio >= 0.16 or height_ratio >= 0.045)
+        and _looks_like_textured_art_label_text(stripped, line_polygons)
+    )
+    if cover_logo_art_rules_enabled and textured_art_label:
+        return {
+            "skip_reason": "textured_art_label_preserved",
+            "content_class": "logo",
+            "qa_flags": ["textured_art_label_preserved"],
+            "needs_review": False,
+            "preserve_original": False,
+        }
+
+    large_textured_region = area_ratio >= 0.015 or width_ratio >= 0.30 or height_ratio >= 0.10
+    common_short_plain_dialogue = {
+        "I",
+        "ME",
+        "MY",
+        "YOU",
+        "WE",
+        "HE",
+        "SHE",
+        "THEY",
+        "WHAT",
+        "WHY",
+        "HOW",
+        "YES",
+        "NO",
+        "MOM",
+        "DAD",
+        "OK",
+        "OKAY",
+        "SURE",
+        "WAIT",
+        "HEY",
+        "HUH",
+        "HMM",
+        "FOUR",
+        "THREE",
+        "TWO",
+        "ONE",
     }
-    return bool(profiles & {"white_balloon", "top_narration", "cover_title_logo", "decorative_noise", "standard"})
+    short_low_signal_white_art_ocr = bool(
+        normalized_source_lang == "en"
+        and is_white_balloon
+        and line_geometry_missing
+        and confidence < 0.62
+        and not has_sentence_punctuation
+        and 1 <= len(words) <= 2
+        and 2 <= len(compact) <= 8
+        and compact.upper() not in common_short_plain_dialogue
+        and large_textured_region
+        and (not plain_bright_background or height_ratio >= 0.12 or area_ratio >= 0.02)
+    )
+    if cover_logo_art_rules_enabled and short_low_signal_white_art_ocr:
+        return {
+            "skip_reason": "suspicious_art_ocr_low_confidence",
+            "content_class": "noise",
+            "qa_flags": ["suspicious_art_ocr", "ocr_needs_review"],
+            "needs_review": True,
+            "preserve_original": False,
+        }
+    joined_word_art_marker = bool(re.search(r"\b(?:VHEN|IGETBACK|TOWORK|DOYOU|MAKINGUS)\b", stripped, re.IGNORECASE))
+    run_on_art_suspect = bool(run_on_suspect or pre_semantic_run_on or joined_word_art_marker)
+    if (
+        cover_logo_art_rules_enabled
+        and
+        normalized_source_lang == "en"
+        and joined_word_art_marker
+        and not plain_bright_background
+        and confidence < 0.66
+        and line_geometry_missing
+        and large_textured_region
+    ):
+        return {
+            "skip_reason": "suspicious_art_ocr_low_confidence",
+            "content_class": "noise",
+            "qa_flags": ["suspicious_art_ocr", "ocr_needs_review"],
+            "needs_review": True,
+        }
+    if (
+        cover_logo_art_rules_enabled
+        and
+        normalized_source_lang == "en"
+        and not is_white_balloon
+        and not plain_bright_background
+        and confidence < 0.66
+        and line_geometry_missing
+        and large_textured_region
+        and (run_on_art_suspect or looks_suspicious(stripped, confidence) or confidence < 0.52)
+    ):
+        return {
+            "skip_reason": "suspicious_art_ocr_low_confidence",
+            "content_class": "noise",
+            "qa_flags": ["suspicious_art_ocr", "ocr_needs_review"],
+            "needs_review": True,
+        }
+
+    return None
+
+
+def _is_scanlation_credit_text_entry(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    raw_text = str(text.get("text") or text.get("original") or "").strip()
+    return bool(
+        "scanlation_credit" in flags
+        or "scanlator_credit" in flags
+        or SCANLATOR_RE.search(raw_text)
+        or URL_RE.search(raw_text)
+        or _looks_like_hyphenated_credit_name_list(raw_text)
+    )
+
+
+def _looks_like_hyphenated_credit_name_list(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    letters = re.findall(r"[A-Za-z]", raw)
+    if not letters or any(letter != letter.upper() for letter in letters):
+        return False
+    normalized = re.sub(r"\s+", " ", raw.upper())
+    tokens = re.findall(r"-?[A-Z0-9][A-Z0-9_]{2,}", normalized)
+    hyphenated = [token for token in tokens if token.startswith("-")]
+    if len(hyphenated) < 2 or not tokens:
+        return False
+    hyphen_ratio = len(hyphenated) / float(max(1, len(tokens)))
+    return hyphen_ratio >= 0.66 or (len(hyphenated) >= 3 and hyphen_ratio >= 0.50)
+
+
+def _looks_like_scanlation_promotional_title(text: dict, image_shape: tuple[int, int, int] | tuple[int, int]) -> bool:
+    if not isinstance(text, dict):
+        return False
+    raw_text = str(text.get("text") or "").strip()
+    if not raw_text:
+        return False
+    if re.search(r"[?!:;]", raw_text):
+        return False
+    words = re.findall(r"[A-Za-z]+", raw_text)
+    compact = _normalize_text_key(raw_text).replace(" ", "")
+    if not (1 <= len(words) <= 7 and 3 <= len(compact) <= 64):
+        return False
+    bbox = _coerce_bbox(text.get("bbox")) or _coerce_bbox(text.get("text_pixel_bbox"))
+    if bbox is None:
+        return False
+    height = max(1, int(image_shape[0]))
+    width = max(1, int(image_shape[1]))
+    box_w = max(1, int(bbox[2]) - int(bbox[0]))
+    box_h = max(1, int(bbox[3]) - int(bbox[1]))
+    return bool(
+        box_h <= max(72, int(height * 0.20))
+        and box_w <= max(260, int(width * 0.55))
+    )
+
+
+def _scanlation_title_strip_is_coherent(entries: list[dict], image_shape: tuple[int, int, int] | tuple[int, int]) -> bool:
+    if len(entries) < 3:
+        return False
+    bboxes = [_coerce_bbox(entry.get("bbox")) or _coerce_bbox(entry.get("text_pixel_bbox")) for entry in entries]
+    bboxes = [bbox for bbox in bboxes if bbox is not None]
+    if len(bboxes) < 3:
+        return False
+    height = max(1, int(image_shape[0]))
+    y_span = max(bbox[3] for bbox in bboxes) - min(bbox[1] for bbox in bboxes)
+    center_span = max((bbox[1] + bbox[3]) / 2.0 for bbox in bboxes) - min((bbox[1] + bbox[3]) / 2.0 for bbox in bboxes)
+    return bool(y_span <= max(96, int(height * 0.35)) and center_span <= max(48, int(height * 0.18)))
+
+
+def _mark_scanlation_promotional_text(text: dict, reason: str) -> None:
+    # Compatibility hook only. Scanlation/title proximity can no longer rewrite
+    # normal OCR into preserve/skip routes in the automatic pipeline.
+    text["skip_processing"] = False
+    text["preserve_original"] = False
+    text["skip_reason"] = reason
+    text["content_class"] = "text"
+    text["translate_policy"] = "translate"
+    text["render_policy"] = "normal"
+    text["route_action"] = "translate_inpaint_render"
+    text["route_reason"] = reason
+    text["needs_review"] = bool(text.get("needs_review", False))
+    flags = list(text.get("qa_flags") or [])
+    for flag in ("scanlation_credit", reason):
+        if flag not in flags:
+            flags.append(flag)
+    text["qa_flags"] = flags
+
+
+def _propagate_scanlation_credit_band_policy(
+    page_texts: list[dict],
+    vision_blocks: list[dict],
+    image_shape: tuple[int, int, int] | tuple[int, int],
+) -> tuple[list[dict], list[dict]]:
+    del image_shape
+    # Scanlation/credit/title proximity is no longer allowed to rewrite normal
+    # text into a preserve/skip route. Keep the function as a compatibility
+    # hook for older callers, but leave text and blocks unchanged.
+    return page_texts, vision_blocks
 
 
 def _ocr_partial_duplicate_similarity(first: str, second: str) -> float:
@@ -3765,7 +5239,7 @@ def _ocr_partial_duplicate_similarity(first: str, second: str) -> float:
 
 
 def _is_partial_duplicate_ocr_fragment(candidate: dict, other: dict) -> bool:
-    if candidate.get("skip_processing") or candidate.get("preserve_original"):
+    if not isinstance(candidate, dict) or not isinstance(other, dict):
         return False
     if _ocr_text_has_line_geometry(candidate):
         return False
@@ -3803,6 +5277,8 @@ def _filter_page_ocr_noise(
     page_texts: list[dict],
     vision_blocks: list[dict],
     page_number: int | None,
+    image_shape: tuple[int, int, int] | tuple[int, int] | None = None,
+    total_pages: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     if len(page_texts) < 2 or len(page_texts) != len(vision_blocks):
         return page_texts, vision_blocks
@@ -3810,7 +5286,7 @@ def _filter_page_ocr_noise(
     drop_indices: set[int] = set()
     for index, text in enumerate(page_texts):
         drop_reason = ""
-        if _looks_like_cover_title_overlay_noise(text):
+        if _looks_like_cover_title_overlay_noise(text, image_shape, page_number, total_pages):
             drop_reason = "cover_title_overlay_noise"
         elif _looks_like_short_art_ocr_noise(text):
             drop_reason = "short_art_ocr_noise"
@@ -3860,6 +5336,7 @@ def _finalize_page_ocr_texts(
     vision_blocks: list[dict],
     image_shape: tuple[int, int, int],
     page_number: int | None,
+    total_pages: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     texts = [dict(text) for text in page_texts if isinstance(text, dict)]
     blocks = [dict(block) for block in vision_blocks if isinstance(block, dict)]
@@ -3868,10 +5345,11 @@ def _finalize_page_ocr_texts(
     if len(blocks) != len(texts):
         blocks = [_ocr_block_from_text_entry(text) for text in texts]
 
-    texts, blocks = _filter_page_ocr_noise(texts, blocks, page_number)
+    texts, blocks = _filter_page_ocr_noise(texts, blocks, page_number, image_shape, total_pages)
     texts, blocks = _drop_contained_duplicate_ocr_texts(texts, blocks, page_number)
     texts, blocks = _merge_ocr_clusters(texts, blocks, image_shape, page_number)
     texts, blocks = _drop_contained_duplicate_ocr_texts(texts, blocks, page_number)
+    texts, blocks = _propagate_partial_ocr_review_to_neighbors(texts, blocks, page_number)
     final_pairs = list(zip(texts, blocks))
     final_pairs.sort(
         key=lambda pair: (
@@ -4730,7 +6208,12 @@ def _build_rounded_rect_mask(height: int, width: int, radius: int) -> np.ndarray
     return mask
 
 
-def _apply_white_balloon_fill(image_rgb: np.ndarray, bbox: list[int]) -> np.ndarray:
+def _apply_white_balloon_fill(
+    image_rgb: np.ndarray,
+    bbox: list[int],
+    *,
+    text_bbox: list[int] | None = None,
+) -> np.ndarray:
     if not _white_balloon_whitening_enabled():
         return image_rgb.copy()
     result = image_rgb.copy()
@@ -4744,8 +6227,38 @@ def _apply_white_balloon_fill(image_rgb: np.ndarray, bbox: list[int]) -> np.ndar
         return _apply_white_text_overlay(result, bbox)
     mask_binary = (balloon_mask > 0).astype(np.uint8)
     distance = cv2.distanceTransform(mask_binary, cv2.DIST_L2, 5)
-    preserve_band = ((distance > 0.0) & (distance <= 2.0)).astype(np.uint8) * 255
+    preserve_band = ((distance > 0.0) & (distance <= 4.0)).astype(np.uint8) * 255
     fill_mask = cv2.bitwise_and(balloon_mask, cv2.bitwise_not(preserve_band))
+    if text_bbox is not None:
+        tx1, ty1, tx2, ty2 = [int(v) for v in text_bbox[:4]]
+        height, width = result.shape[:2]
+        tx1 = max(0, min(width, tx1))
+        tx2 = max(0, min(width, tx2))
+        ty1 = max(0, min(height, ty1))
+        ty2 = max(0, min(height, ty2))
+        if tx2 > tx1 and ty2 > ty1:
+            text_zone = np.zeros(result.shape[:2], dtype=np.uint8)
+            pad_x = max(5, int(round((tx2 - tx1) * 0.06)))
+            pad_y = max(5, int(round((ty2 - ty1) * 0.12)))
+            text_zone[
+                max(0, ty1 - pad_y) : min(height, ty2 + pad_y),
+                max(0, tx1 - pad_x) : min(width, tx2 + pad_x),
+            ] = 255
+            gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+            outline_sample = gray[(balloon_mask > 0) & (text_zone == 0)]
+            if outline_sample.size:
+                white_level = float(np.percentile(outline_sample, 80))
+                line_threshold = min(220.0, max(150.0, white_level - 28.0))
+            else:
+                line_threshold = 150.0
+            dark_line_art = ((gray <= line_threshold) & (balloon_mask > 0) & (text_zone == 0)).astype(np.uint8) * 255
+            if np.any(dark_line_art):
+                line_guard = cv2.dilate(
+                    dark_line_art,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                    iterations=1,
+                )
+                fill_mask = cv2.bitwise_and(fill_mask, cv2.bitwise_not(line_guard))
     result[fill_mask > 0] = 255
     if np.any(preserve_band):
         result[preserve_band > 0] = image_rgb[preserve_band > 0]
@@ -5043,7 +6556,7 @@ def _apply_textured_balloon_seam_cleanup(
 
     seam_mask = np.zeros(result.shape[:2], dtype=np.uint8)
     for text in texts:
-        if text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         bbox = text.get("bbox") or [0, 0, 0, 0]
         if len(bbox) != 4:
@@ -5093,7 +6606,7 @@ def _apply_textured_balloon_band_artifact_cleanup(
 
     height, width = result.shape[:2]
     for text in texts:
-        if text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
 
         text_bbox = text.get("bbox") or [0, 0, 0, 0]
@@ -5193,6 +6706,56 @@ def _apply_textured_balloon_band_artifact_cleanup(
         )
         blended = roi_rgb.astype(np.float32) * (1.0 - alpha[..., None]) + gradient * alpha[..., None]
         result[ry1:ry2, rx1:rx2] = blended.clip(0, 255).astype(np.uint8)
+
+    return result
+
+
+def _apply_textured_light_text_residual_cleanup(
+    original_rgb: np.ndarray,
+    cleaned_rgb: np.ndarray,
+    texts: list[dict],
+) -> np.ndarray:
+    result = cleaned_rgb.copy()
+    if result.size == 0 or not texts:
+        return result
+
+    try:
+        from inpainter.mask_builder import build_inpaint_mask
+        from qa.inpaint_residual import detect_residual_text
+    except ImportError:
+        from ..inpainter.mask_builder import build_inpaint_mask
+        from ..qa.inpaint_residual import detect_residual_text
+
+    height, width = result.shape[:2]
+    max_mask_pixels = int(height * width * 0.18)
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        mask = build_inpaint_mask(text, (height, width), image_rgb=original_rgb)
+        if mask is None or not np.any(mask):
+            continue
+        mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+        mask_pixels = int(np.count_nonzero(mask))
+        if mask_pixels < 8 or mask_pixels > max_mask_pixels:
+            continue
+
+        residual = detect_residual_text(
+            original_rgb,
+            result,
+            mask,
+            include_light_residual=True,
+            min_pixels=max(8, int(mask_pixels * 0.004)),
+            min_ratio=0.004,
+        )
+        if not residual.get("has_residual") or "light_residual_pixels" not in set(residual.get("flags") or []):
+            continue
+
+        cleanup_mask = cv2.dilate(
+            mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        )
+        result = cv2.inpaint(result, cleanup_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
     return result
 
@@ -5404,12 +6967,16 @@ def _extract_white_balloon_text_boxes(image_rgb: np.ndarray, bbox: list[int]) ->
     max_component_h = max(18, int(bbox_h * 0.20))
     max_component_area = max(1600, int(bbox_w * bbox_h * 0.028))
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
-    min_area = max(4, int((x2 - x1) * (y2 - y1) * 0.0007))
+    min_area = max(3, min(6, int((x2 - x1) * (y2 - y1) * 0.00008)))
     for label in range(1, num_labels):
         area = int(stats[label, cv2.CC_STAT_AREA])
         w = int(stats[label, cv2.CC_STAT_WIDTH])
         h = int(stats[label, cv2.CC_STAT_HEIGHT])
         if area < min_area or w < 2 or h < 2:
+            continue
+        slender = max(w, h) / float(max(1, min(w, h)))
+        horizontal_text_stroke = w > h and h <= 16 and area <= max_component_area
+        if slender >= 9.0 and area >= 45 and not horizontal_text_stroke:
             continue
         if h > max_component_h or area > max_component_area:
             continue
@@ -5573,8 +7140,7 @@ def _apply_white_balloon_text_box_cleanup(
         x1, y1, x2, y2 = [int(v) for v in focus]
         box_w = max(1, x2 - x1)
         box_h = max(1, y2 - y1)
-        profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
-        top_factor = 1.35 if profile == "top_narration" else 0.95
+        top_factor = 0.95
         pad_x = max(14, int(round(box_w * 0.32)))
         pad_top = max(18, int(round(box_h * top_factor)))
         pad_bottom = max(12, int(round(box_h * 0.45)))
@@ -5586,7 +7152,7 @@ def _apply_white_balloon_text_box_cleanup(
         ]
 
     for text in texts:
-        if text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         bbox = text.get("bbox") or [0, 0, 0, 0]
         if len(bbox) != 4:
@@ -5796,7 +7362,7 @@ def _apply_white_balloon_near_text_residual_cleanup(
     height, width = cleaned_gray.shape[:2]
 
     for text in texts:
-        if not isinstance(text, dict) or text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         focus = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox"))
         if focus is None:
@@ -5820,10 +7386,12 @@ def _apply_white_balloon_near_text_residual_cleanup(
                 if isinstance(legacy_mask, np.ndarray):
                     balloon_mask = legacy_mask
             if np.any(balloon_mask):
-                distance = cv2.distanceTransform((balloon_mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
-                interior = (distance > 2.0).astype(np.uint8) * 255
-                clip_mask = interior if np.any(interior) else balloon_mask.astype(np.uint8)
-                search = cv2.bitwise_and(search, clip_mask[sy1:sy2, sx1:sx2])
+                balloon_roi = (balloon_mask[sy1:sy2, sx1:sx2] > 0).astype(np.uint8)
+                if np.any(balloon_roi):
+                    distance = cv2.distanceTransform(balloon_roi, cv2.DIST_L2, 5)
+                    interior = (distance > 2.0).astype(np.uint8) * 255
+                    clip_mask = interior if np.any(interior) else (balloon_roi * 255)
+                    search = cv2.bitwise_and(search, clip_mask)
 
         original_roi_gray = original_gray[sy1:sy2, sx1:sx2].astype(np.float32)
         cleaned_roi_gray = cleaned_gray[sy1:sy2, sx1:sx2].astype(np.float32)
@@ -5880,6 +7448,51 @@ def _apply_white_balloon_near_text_residual_cleanup(
     return result
 
 
+def _bbox_gap_pixels(a: list[int], b: list[int]) -> int:
+    x_gap = max(0, max(int(a[0]) - int(b[2]), int(b[0]) - int(a[2])))
+    y_gap = max(0, max(int(a[1]) - int(b[3]), int(b[1]) - int(a[3])))
+    return max(x_gap, y_gap)
+
+
+def _tight_reference_bbox_for_text_geometry(text: dict, width: int, height: int) -> list[int] | None:
+    geometry_bbox = _bbox_from_line_polygons(text.get("line_polygons") or [])
+    if geometry_bbox is None:
+        geometry_bbox = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox"))
+    if geometry_bbox is None:
+        return None
+
+    geometry_area = _bbox_area_safe(geometry_bbox)
+    if geometry_area <= 0:
+        return None
+    geometry_w = max(1, int(geometry_bbox[2]) - int(geometry_bbox[0]))
+    geometry_h = max(1, int(geometry_bbox[3]) - int(geometry_bbox[1]))
+
+    for key in ("source_bbox", "balloon_bbox"):
+        reference = _coerce_bbox(text.get(key))
+        if reference is None:
+            continue
+        reference_area = _bbox_area_safe(reference)
+        if reference_area <= 0:
+            continue
+        reference_w = max(1, int(reference[2]) - int(reference[0]))
+        reference_h = max(1, int(reference[3]) - int(reference[1]))
+        if _bbox_gap_pixels(reference, geometry_bbox) > max(18, int(round(max(geometry_w, geometry_h) * 0.35))):
+            continue
+        if reference_area > max(geometry_area + 4096, int(round(geometry_area * 2.4))):
+            continue
+        if reference_w > max(geometry_w + 96, int(round(geometry_w * 2.1))):
+            continue
+        if reference_h > max(geometry_h + 96, int(round(geometry_h * 2.1))):
+            continue
+        x1 = max(0, min(width, int(reference[0])))
+        y1 = max(0, min(height, int(reference[1])))
+        x2 = max(0, min(width, int(reference[2])))
+        y2 = max(0, min(height, int(reference[3])))
+        if x2 > x1 and y2 > y1:
+            return [x1, y1, x2, y2]
+    return None
+
+
 def _restore_dark_line_art_outside_text_geometry(
     original_rgb: np.ndarray,
     cleaned_rgb: np.ndarray,
@@ -5892,9 +7505,33 @@ def _restore_dark_line_art_outside_text_geometry(
     height, width = result.shape[:2]
     original_gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
     cleaned_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+    global_text_halo: np.ndarray | None = None
+    global_guard = np.zeros((height, width), dtype=np.uint8)
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        has_line_polygons = bool(_normalize_line_polygons(text.get("line_polygons") or []))
+        guard = _build_text_geometry_guard_mask(
+            text,
+            height,
+            width,
+            include_text_bbox=not has_line_polygons,
+        )
+        if guard is not None and np.any(guard):
+            global_guard = np.maximum(global_guard, guard)
+        reference_bbox = _tight_reference_bbox_for_text_geometry(text, width, height)
+        if reference_bbox is not None:
+            rx1, ry1, rx2, ry2 = reference_bbox
+            global_guard[ry1:ry2, rx1:rx2] = 255
+    if np.any(global_guard):
+        global_text_halo = cv2.dilate(
+            global_guard,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (33, 33)),
+            iterations=1,
+        )
 
     for text in texts:
-        if not isinstance(text, dict) or text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         focus = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox"))
         if focus is None:
@@ -5919,20 +7556,47 @@ def _restore_dark_line_art_outside_text_geometry(
                 [[int(px) - sx1, int(py) - sy1] for px, py in polygon]
                 for polygon in polygons
             ]
+            polygons = roi_text["line_polygons"]
 
         roi_h = sy2 - sy1
         roi_w = sx2 - sx1
-        guard = _build_text_geometry_guard_mask(roi_text, roi_h, roi_w)
+        guard = _build_text_geometry_guard_mask(
+            roi_text,
+            roi_h,
+            roi_w,
+            include_text_bbox=not bool(polygons),
+        )
         if guard is None or not np.any(guard):
             continue
+        line_band_guard = np.zeros((roi_h, roi_w), dtype=np.uint8)
+        for polygon in polygons:
+            if not polygon:
+                continue
+            xs = [int(point[0]) for point in polygon if len(point) >= 2]
+            ys = [int(point[1]) for point in polygon if len(point) >= 2]
+            if not xs or not ys:
+                continue
+            lx1 = max(0, min(xs) - 12)
+            ly1 = max(0, min(ys) - 6)
+            lx2 = min(roi_w, max(xs) + 12)
+            ly2 = min(roi_h, max(ys) + 6)
+            if lx2 > lx1 and ly2 > ly1:
+                cv2.rectangle(line_band_guard, (lx1, ly1), (lx2, ly2), 255, -1)
+        focus_w = max(1, fx2 - fx1)
+        focus_h = max(1, fy2 - fy1)
+        halo_px = max(16, min(36, int(round(max(focus_w, focus_h) * 0.12))))
         text_halo = cv2.dilate(
             guard,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
-            iterations=2,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (halo_px * 2 + 1, halo_px * 2 + 1)),
+            iterations=1,
         )
+        if global_text_halo is not None:
+            text_halo = np.maximum(text_halo, global_text_halo[sy1:sy2, sx1:sx2])
+        global_guard_roi = global_guard[sy1:sy2, sx1:sx2]
         candidate = (
             (original_gray[sy1:sy2, sx1:sx2].astype(np.float32) < 245.0)
             & (guard == 0)
+            & (global_guard_roi == 0)
         ).astype(np.uint8) * 255
         if not np.any(candidate):
             continue
@@ -5949,10 +7613,31 @@ def _restore_dark_line_art_outside_text_geometry(
             overlaps_text_area = bool(np.any(component & (text_halo > 0)))
             thin_horizontal = comp_h <= max(4, int(comp_w * 0.14))
             thin_vertical = comp_w <= max(4, int(comp_h * 0.14))
+            component_box_area = max(1, comp_w * comp_h)
+            elongated_sparse = (
+                max(comp_w, comp_h) >= 28
+                and (
+                    min(comp_w, comp_h) <= max(8, int(max(comp_w, comp_h) * 0.30))
+                    or area <= int(component_box_area * 0.48)
+                )
+            )
             large_line_art = area > 1200 or comp_w > 140 or comp_h > 70
-            if overlaps_text_area:
+            line_art_like = thin_horizontal or thin_vertical or elongated_sparse or large_line_art
+            near_text_line_band = bool(np.any(component & (line_band_guard > 0)))
+            near_text_line_band_ratio = (
+                float(np.count_nonzero(component & (line_band_guard > 0))) / float(max(1, area))
+                if near_text_line_band
+                else 0.0
+            )
+            if near_text_line_band_ratio >= 0.30 and not large_line_art:
                 continue
-            if outside_halo or thin_horizontal or thin_vertical or large_line_art:
+            if overlaps_text_area:
+                if line_art_like:
+                    restore_mask[component] = 255
+                elif outside_halo and large_line_art:
+                    restore_mask[component & (text_halo == 0)] = 255
+                continue
+            if outside_halo or line_art_like:
                 restore_mask[component] = 255
         if np.any(restore_mask):
             result_roi = result[sy1:sy2, sx1:sx2]
@@ -6301,6 +7986,16 @@ def _build_glyph_residual_cleanup_mask(
         raw_mask = None
     if raw_mask is None or not np.any(raw_mask):
         return None
+    line_guard = _build_text_geometry_guard_mask(
+        text,
+        shape[0],
+        shape[1],
+        include_text_bbox=False,
+    )
+    if line_guard is not None and np.any(line_guard):
+        raw_mask = cv2.bitwise_and(raw_mask.astype(np.uint8), line_guard)
+        if not np.any(raw_mask):
+            return None
     focus_bbox = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox"))
     if focus_bbox is not None:
         fx1, fy1, fx2, fy2 = focus_bbox
@@ -6361,7 +8056,7 @@ def _apply_glyph_residual_cleanup_for_texts(
         return result
     shape = result.shape[:2]
     for text in texts:
-        if not isinstance(text, dict) or text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         if not _text_is_white_cleanup_safe(original_rgb, text):
             continue
@@ -6376,6 +8071,34 @@ def _apply_glyph_residual_cleanup_for_texts(
             continue
         result = _fill_dark_text_pixels_from_bright_context(result, glyph_mask)
     return result
+
+
+def _glyph_cleanup_limit_mask(
+    original_rgb: np.ndarray,
+    limit_mask: np.ndarray | None,
+    texts: list[dict],
+    shape: tuple[int, int],
+) -> np.ndarray | None:
+    if not isinstance(limit_mask, np.ndarray) or limit_mask.shape[:2] != shape:
+        return limit_mask
+    allowed = (limit_mask > 0).astype(np.uint8) * 255
+    if original_rgb.size == 0 or not texts:
+        return allowed
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        if not _text_is_white_cleanup_safe(original_rgb, text):
+            continue
+        clip_mask = _resolve_glyph_cleanup_clip_mask(original_rgb, text, shape)
+        glyph_mask = _build_glyph_residual_cleanup_mask(
+            original_rgb,
+            text,
+            shape,
+            balloon_mask=clip_mask,
+        )
+        if glyph_mask is not None and np.any(glyph_mask):
+            allowed = np.maximum(allowed, glyph_mask.astype(np.uint8))
+    return allowed
 
 
 def _apply_geometry_white_balloon_cleanup(
@@ -6406,6 +8129,16 @@ def _apply_geometry_white_balloon_cleanup(
             bbox = _coerce_bbox(text.get(key))
             if bbox is not None and bbox not in candidates:
                 candidates.append(bbox)
+                expanded = _expand_bbox(
+                    bbox,
+                    original_rgb.shape,
+                    pad_x_ratio=0.30,
+                    pad_y_ratio=0.80,
+                    min_pad_x=24,
+                    min_pad_y=28,
+                )
+                if expanded not in candidates:
+                    candidates.append(expanded)
         return candidates
 
     def _explicit_white_context(text: dict) -> bool:
@@ -6455,47 +8188,31 @@ def _apply_geometry_white_balloon_cleanup(
         return best_mask if best_mask is not None and best_area > 0 else None
 
     def _text_geometry_protected_line_mask(text: dict) -> np.ndarray | None:
-        guard = _build_text_geometry_guard_mask(text, shape[0], shape[1])
+        guard = _build_text_geometry_guard_mask(
+            text,
+            shape[0],
+            shape[1],
+            include_text_bbox=False,
+        )
+        if guard is None or not np.any(guard):
+            guard = _build_text_geometry_guard_mask(text, shape[0], shape[1])
         if guard is None or not np.any(guard):
             return None
         gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
         dark_outside_text = ((gray < 150) & (guard == 0)).astype(np.uint8) * 255
         if not np.any(dark_outside_text):
             return None
-        profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
-        if profile != "top_narration":
-            return cv2.dilate(
-                dark_outside_text,
-                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-                iterations=1,
-            )
-        protected = np.zeros_like(dark_outside_text)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark_outside_text, connectivity=8)
-        for label in range(1, num_labels):
-            area = int(stats[label, cv2.CC_STAT_AREA])
-            comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
-            comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
-            if area < 3:
-                continue
-            thin_horizontal = comp_h <= max(5, int(comp_w * 0.12))
-            thin_vertical = comp_w <= max(5, int(comp_h * 0.12))
-            large_line_art = area > 1800 or comp_w > 180 or comp_h > 80
-            if thin_horizontal or thin_vertical or large_line_art:
-                protected[labels == label] = 255
-        if not np.any(protected):
-            return None
         return cv2.dilate(
-            protected,
+            dark_outside_text,
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
             iterations=1,
         )
 
     for text in texts:
-        if not isinstance(text, dict) or text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         if not _text_is_white_cleanup_safe(original_rgb, text):
             continue
-        balloon_type = str(text.get("balloon_type") or "").strip().lower()
         candidates = _candidate_bboxes(text)
         explicit_context = _explicit_white_context(text)
         white_context = (
@@ -6503,7 +8220,7 @@ def _apply_geometry_white_balloon_cleanup(
             or _text_anchor_has_white_cleanup_context(original_rgb, text)
             or any(_bbox_has_bright_context(bbox) for bbox in candidates)
         )
-        if balloon_type and balloon_type != "white" and not white_context:
+        if not white_context:
             continue
 
         text_mask = build_inpaint_mask(text, shape, image_rgb=original_rgb)
@@ -6538,10 +8255,36 @@ def _apply_geometry_white_balloon_cleanup(
             )
             if glyph_mask is not None and np.any(glyph_mask):
                 result = _fill_dark_text_pixels_from_bright_context(result, glyph_mask)
+            line_cleanup_mask = _build_text_geometry_guard_mask(
+                text,
+                shape[0],
+                shape[1],
+                include_text_bbox=False,
+            )
+            if line_cleanup_mask is not None and np.any(line_cleanup_mask):
+                if line_cleanup_mask.shape[:2] == balloon_mask.shape[:2]:
+                    line_cleanup_mask = cv2.bitwise_and(
+                        line_cleanup_mask.astype(np.uint8),
+                        (balloon_mask > 0).astype(np.uint8) * 255,
+                    )
+                if np.any(line_cleanup_mask):
+                    result = _fill_dark_text_pixels_from_bright_context(result, line_cleanup_mask)
+            protected_mask = _text_geometry_protected_line_mask(text)
+            if (
+                protected_mask is not None
+                and protected_mask.shape[:2] == balloon_mask.shape[:2]
+                and not text.get("line_polygons")
+            ):
+                balloon_interior = cv2.erode(
+                    (balloon_mask > 0).astype(np.uint8) * 255,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+                    iterations=1,
+                )
+                protected_mask = cv2.bitwise_and(protected_mask, cv2.bitwise_not(balloon_interior))
             result = cleanup_white_balloon_residuals(
                 result,
                 balloon_mask,
-                protected_mask=_text_geometry_protected_line_mask(text),
+                protected_mask=protected_mask,
             )
     return result
 
@@ -6575,6 +8318,7 @@ def _apply_post_inpaint_cleanup_timed(
     stats = {
         "_t_cleanup_seam_ms": 0.0,
         "_t_cleanup_band_artifact_ms": 0.0,
+        "_t_cleanup_textured_light_residual_ms": 0.0,
         "_t_cleanup_white_line_ms": 0.0,
         "_t_cleanup_white_box_ms": 0.0,
         "_t_cleanup_geometry_white_ms": 0.0,
@@ -6582,6 +8326,7 @@ def _apply_post_inpaint_cleanup_timed(
         "_t_cleanup_micro_ms": 0.0,
         "cleanup_skipped_seam": False,
         "cleanup_skipped_band_artifact": False,
+        "cleanup_skipped_textured_light_residual": False,
         "cleanup_skipped_white_line": False,
         "cleanup_skipped_white_box": False,
         "cleanup_skipped_geometry_white": False,
@@ -6608,9 +8353,14 @@ def _apply_post_inpaint_cleanup_timed(
             "_t_cleanup_band_artifact_ms",
             lambda: _apply_textured_balloon_band_artifact_cleanup(original_rgb, final, texts),
         )
+        final = _run_step(
+            "_t_cleanup_textured_light_residual_ms",
+            lambda: _apply_textured_light_text_residual_cleanup(original_rgb, final, texts),
+        )
     else:
         stats["cleanup_skipped_seam"] = True
         stats["cleanup_skipped_band_artifact"] = True
+        stats["cleanup_skipped_textured_light_residual"] = True
 
     if ((not selective) or has_white) and has_white_cleanup:
         final = _run_step(
@@ -6659,6 +8409,22 @@ def _apply_post_inpaint_cleanup_timed(
     if has_white_cleanup:
         final = _restore_dark_line_art_outside_text_geometry(original_rgb, final, white_texts)
         final = _apply_glyph_residual_cleanup_for_texts(original_rgb, final, white_texts)
+        glyph_limit_mask = _glyph_cleanup_limit_mask(
+            original_rgb,
+            limit_mask,
+            white_texts,
+            final.shape[:2],
+        )
+        final, final_limit_pixels, final_changed_outside = _clamp_image_to_limit_mask(
+            cleaned_rgb,
+            final,
+            glyph_limit_mask,
+            texts,
+            include_text_bboxes=include_text_bboxes_in_limit,
+        )
+        stats["cleanup_limit_mask_pixels"] = max(stats["cleanup_limit_mask_pixels"], final_limit_pixels)
+        stats["cleanup_changed_outside_limit_mask"] += final_changed_outside
+        final = _restore_dark_line_art_outside_text_geometry(original_rgb, final, white_texts)
     stats["_t_cleanup_total_ms"] = round((time.perf_counter() - total_start) * 1000.0, 3)
     return final, stats
 
@@ -6695,7 +8461,7 @@ def _has_white_balloon_text_residual(
         box_w = max(1, x2 - x1)
         box_h = max(1, y2 - y1)
         profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
-        top_factor = 1.35 if profile == "top_narration" else 0.95
+        top_factor = 0.95
         pad_x = max(14, int(round(box_w * 0.32)))
         pad_top = max(18, int(round(box_h * top_factor)))
         pad_bottom = max(12, int(round(box_h * 0.45)))
@@ -6707,7 +8473,7 @@ def _has_white_balloon_text_residual(
         ]
 
     for text in texts:
-        if text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
 
         bbox = _normalize_focus_bbox(text.get("bbox"))
@@ -6797,85 +8563,275 @@ def _has_white_balloon_text_residual(
     return False
 
 
+def _build_white_balloon_residual_line_box_mask(
+    original_rgb: np.ndarray,
+    text: dict,
+    interior: np.ndarray,
+) -> np.ndarray | None:
+    height, width = original_rgb.shape[:2]
+    focus = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox"))
+    if focus is None:
+        return None
+    focus = _expand_bbox(
+        focus,
+        original_rgb.shape,
+        pad_x_ratio=0.03,
+        pad_y_ratio=0.08,
+        min_pad_x=3,
+        min_pad_y=3,
+    )
+    fx1, fy1, fx2, fy2 = [int(v) for v in focus]
+    if fx2 <= fx1 or fy2 <= fy1:
+        return None
+
+    gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
+    local_mean = cv2.blur(gray, (21, 21))
+    search = np.zeros((height, width), dtype=np.uint8)
+    search[fy1:fy2, fx1:fx2] = 255
+    search = cv2.bitwise_and(search, interior.astype(np.uint8))
+    if not np.any(search):
+        return None
+
+    candidate = (
+        (((local_mean.astype(np.int16) - gray.astype(np.int16)) >= 18) | (gray <= 190))
+        & (search > 0)
+    ).astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(
+        candidate,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)),
+        iterations=1,
+    )
+    if not np.any(candidate):
+        return None
+
+    component_boxes: list[list[int]] = []
+    num_labels, _labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+    focus_w = max(1, fx2 - fx1)
+    focus_h = max(1, fy2 - fy1)
+    max_component_area = max(1800, int(focus_w * focus_h * 0.08))
+    max_component_h = max(64, int(focus_h * 0.70))
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if area < 4 or comp_w < 2 or comp_h < 2:
+            continue
+        if area > max_component_area or comp_h > max_component_h:
+            continue
+        slender = max(comp_w, comp_h) / float(max(1, min(comp_w, comp_h)))
+        if slender >= 9.0 and area >= 45:
+            continue
+        component_boxes.append([x, y, x + comp_w, y + comp_h])
+
+    if not component_boxes:
+        return None
+
+    median_h = int(np.median([max(1, box[3] - box[1]) for box in component_boxes]))
+    row_gap_y = max(4, int(median_h * 0.90))
+    line_gap_x = max(8, int(median_h * 1.10))
+    rows = _cluster_component_boxes_by_rows(component_boxes, gap_y=row_gap_y)
+    line_mask = np.zeros((height, width), dtype=np.uint8)
+    pad_x = max(3, int(round(median_h * 0.20)))
+    pad_y = max(3, int(round(median_h * 0.24)))
+    for row in rows:
+        for box in _merge_component_boxes_into_lines(row, gap_x=line_gap_x, gap_y=max(2, int(median_h * 0.35))):
+            x1, y1, x2, y2 = _expand_bbox(
+                box,
+                original_rgb.shape,
+                pad_x_ratio=0.0,
+                pad_y_ratio=0.0,
+                min_pad_x=pad_x,
+                min_pad_y=pad_y,
+            )
+            line_mask[y1:y2, x1:x2] = 255
+
+    line_mask = cv2.bitwise_and(line_mask, interior.astype(np.uint8))
+    line_pixels = int(np.count_nonzero(line_mask))
+    interior_pixels = int(np.count_nonzero(interior))
+    if line_pixels < 8 or line_pixels > int(max(1, interior_pixels) * 0.48):
+        return None
+    return line_mask
+
+
+def _merged_source_text_boxes_for_white_fill(
+    text: dict,
+    shape: tuple[int, ...],
+    focus: list[int] | None,
+) -> list[list[int]]:
+    height = int(shape[0]) if shape else 0
+    width = int(shape[1]) if len(shape) > 1 else 0
+    if height <= 0 or width <= 0 or not isinstance(text, dict):
+        return []
+
+    focus_area = _bbox_area_safe(focus) if focus is not None else 0
+    raw_boxes: list = []
+    for key in ("_merged_source_bboxes", "merged_source_bboxes"):
+        values = text.get(key)
+        if isinstance(values, list):
+            raw_boxes.extend(values)
+
+    source_boxes: list[list[int]] = []
+    for raw_box in raw_boxes:
+        box = _coerce_bbox(raw_box)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        normalized = [x1, y1, x2, y2]
+        if focus_area > 0 and _bbox_area_safe(normalized) >= int(focus_area * 0.92):
+            continue
+        if normalized not in source_boxes:
+            source_boxes.append(normalized)
+    return source_boxes
+
+
+def _line_mask_from_white_source_boxes(
+    original_rgb: np.ndarray,
+    source_boxes: list[list[int]],
+    interior: np.ndarray,
+) -> np.ndarray | None:
+    if original_rgb.size == 0 or not source_boxes:
+        return None
+    line_mask = np.zeros(original_rgb.shape[:2], dtype=np.uint8)
+    heights = [max(1, int(box[3]) - int(box[1])) for box in source_boxes]
+    median_height = int(np.median(np.asarray(heights, dtype=np.int32))) if heights else 12
+    pad_x = max(4, int(round(median_height * 0.18)))
+    pad_y = max(4, int(round(median_height * 0.18)))
+    for box in source_boxes:
+        x1, y1, x2, y2 = _expand_bbox(
+            box,
+            original_rgb.shape,
+            pad_x_ratio=0.0,
+            pad_y_ratio=0.0,
+            min_pad_x=pad_x,
+            min_pad_y=pad_y,
+        )
+        line_mask[y1:y2, x1:x2] = 255
+
+    line_mask = cv2.bitwise_and(line_mask, interior.astype(np.uint8))
+    line_pixels = int(np.count_nonzero(line_mask))
+    interior_pixels = int(np.count_nonzero(interior))
+    if line_pixels < 24 or line_pixels > int(max(1, interior_pixels) * 0.42):
+        return None
+    return line_mask
+
+
+def _build_white_balloon_text_line_fill_mask(original_rgb: np.ndarray, text: dict) -> np.ndarray | None:
+    if original_rgb.size == 0 or not isinstance(text, dict):
+        return None
+    resolved_bbox = _resolve_white_balloon_bbox(original_rgb, text)
+    raw_balloon_bbox = _coerce_bbox(text.get("balloon_bbox"))
+    candidate_bboxes = [bbox for bbox in (resolved_bbox, raw_balloon_bbox) if bbox is not None]
+    if not candidate_bboxes:
+        return None
+    balloon_mask = None
+    balloon_pixels = -1
+    for candidate_bbox in candidate_bboxes:
+        candidate_mask = _extract_white_balloon_fill_mask(original_rgb, candidate_bbox)
+        if not np.any(candidate_mask):
+            legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, candidate_bbox)
+            if isinstance(legacy_mask, np.ndarray):
+                candidate_mask = legacy_mask
+        candidate_pixels = int(np.count_nonzero(candidate_mask))
+        if candidate_pixels > balloon_pixels:
+            balloon_pixels = candidate_pixels
+            balloon_mask = candidate_mask
+    if balloon_mask is None:
+        return None
+    if not np.any(balloon_mask):
+        return None
+    distance = cv2.distanceTransform((balloon_mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    interior = (distance > 2.0).astype(np.uint8) * 255
+    if not np.any(interior):
+        interior = (distance > 1.0).astype(np.uint8) * 255
+    if not np.any(interior):
+        return None
+    focus = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox")) or raw_balloon_bbox
+    source_line_mask = _line_mask_from_white_source_boxes(
+        original_rgb,
+        _merged_source_text_boxes_for_white_fill(text, original_rgb.shape, focus),
+        interior,
+    )
+    if source_line_mask is not None:
+        return source_line_mask
+    extracted_boxes = _extract_white_balloon_text_boxes(original_rgb, focus) if focus is not None else []
+    if extracted_boxes:
+        line_mask = np.zeros(original_rgb.shape[:2], dtype=np.uint8)
+        for box in extracted_boxes:
+            x1, y1, x2, y2 = _expand_bbox(
+                box,
+                original_rgb.shape,
+                pad_x_ratio=0.0,
+                pad_y_ratio=0.0,
+                min_pad_x=4,
+                min_pad_y=4,
+            )
+            line_mask[y1:y2, x1:x2] = 255
+        line_mask = cv2.bitwise_and(line_mask, interior.astype(np.uint8))
+        line_pixels = int(np.count_nonzero(line_mask))
+        interior_pixels = int(np.count_nonzero(interior))
+        min_line_pixels = max(64, int(_bbox_area_safe(focus) * 0.006))
+        if min_line_pixels <= line_pixels <= int(max(1, interior_pixels) * 0.48):
+            return line_mask
+    return _build_white_balloon_residual_line_box_mask(original_rgb, text, interior)
+
+
+def _sample_white_balloon_fill_color(
+    original_rgb: np.ndarray,
+    interior_mask: np.ndarray,
+    exclude_mask: np.ndarray | None = None,
+    sample_bbox: list[int] | None = None,
+) -> np.ndarray:
+    if original_rgb.size == 0 or not isinstance(interior_mask, np.ndarray) or not np.any(interior_mask):
+        return np.asarray([255, 255, 255], dtype=np.uint8)
+    if interior_mask.shape[:2] != original_rgb.shape[:2]:
+        return np.asarray([255, 255, 255], dtype=np.uint8)
+
+    sample_mask = interior_mask > 0
+    if sample_bbox is not None:
+        height, width = original_rgb.shape[:2]
+        x1, y1, x2, y2 = [int(v) for v in sample_bbox]
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 > x1 and y2 > y1:
+            local_mask = np.zeros(interior_mask.shape[:2], dtype=bool)
+            local_mask[y1:y2, x1:x2] = True
+            local_sample = sample_mask & local_mask
+            if int(np.count_nonzero(local_sample)) >= 24:
+                sample_mask = local_sample
+    if isinstance(exclude_mask, np.ndarray) and exclude_mask.shape[:2] == interior_mask.shape[:2]:
+        sample_mask &= exclude_mask == 0
+    if not np.any(sample_mask):
+        sample_mask = interior_mask > 0
+
+    gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2HSV)
+    bright_non_text = sample_mask & (gray >= 190) & (hsv[:, :, 2] >= 190) & (hsv[:, :, 1] <= 96)
+    if int(np.count_nonzero(bright_non_text)) >= 24:
+        sample_mask = bright_non_text
+    elif int(np.count_nonzero(sample_mask)) < 24:
+        return np.asarray([255, 255, 255], dtype=np.uint8)
+
+    fill = np.median(original_rgb[sample_mask].astype(np.float32), axis=0).clip(0, 255)
+    return np.asarray([int(round(float(v))) for v in fill], dtype=np.uint8)
+
+
 def _apply_white_balloon_residual_force_fill(
     original_rgb: np.ndarray,
     cleaned_rgb: np.ndarray,
     texts: list[dict],
 ) -> np.ndarray:
-    result = cleaned_rgb.copy()
-    if result.size == 0 or not texts:
-        return result
-
-    original_gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY)
-    cleaned_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
-    height, width = cleaned_gray.shape[:2]
-
-    for text in texts:
-        if text.get("skip_processing"):
-            continue
-        balloon_bbox = _resolve_white_balloon_bbox(original_rgb, text)
-        if balloon_bbox is None:
-            continue
-        balloon_mask = _extract_white_balloon_fill_mask(original_rgb, balloon_bbox)
-        if not np.any(balloon_mask):
-            legacy_mask = _extract_white_balloon_mask_legacy(original_rgb, balloon_bbox)
-            if isinstance(legacy_mask, np.ndarray):
-                balloon_mask = legacy_mask
-        if not np.any(balloon_mask):
-            continue
-
-        focus = _coerce_bbox(text.get("text_pixel_bbox")) or _coerce_bbox(text.get("bbox"))
-        if focus is None:
-            continue
-        focus = _expand_bbox(
-            focus,
-            result.shape,
-            pad_x_ratio=0.08,
-            pad_y_ratio=0.14,
-            min_pad_x=3,
-            min_pad_y=3,
-        )
-        fx1, fy1, fx2, fy2 = [int(v) for v in focus]
-        if fx2 <= fx1 or fy2 <= fy1:
-            continue
-
-        distance = cv2.distanceTransform((balloon_mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
-        interior = (distance > 2.0).astype(np.uint8) * 255
-        if not np.any(interior):
-            interior = (distance > 1.0).astype(np.uint8) * 255
-        if not np.any(interior):
-            continue
-
-        search = np.zeros((height, width), dtype=np.uint8)
-        search[fy1:fy2, fx1:fx2] = 255
-        search = cv2.bitwise_and(search, interior)
-        if not np.any(search):
-            continue
-
-        balloon_pixels = original_gray[interior > 0]
-        if balloon_pixels.size == 0:
-            continue
-        white_level = float(np.percentile(balloon_pixels, 75))
-        if white_level < 198.0:
-            continue
-
-        dark_threshold = min(225.0, max(165.0, white_level - 14.0))
-        residual = (
-            ((cleaned_gray.astype(np.float32) <= dark_threshold) | (original_gray.astype(np.float32) <= dark_threshold))
-            & (search > 0)
-        ).astype(np.uint8) * 255
-        if int(np.count_nonzero(residual)) < 6:
-            continue
-        residual = cv2.dilate(
-            residual,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-            iterations=1,
-        )
-        residual = cv2.bitwise_and(residual, interior)
-        result[residual > 0] = 255
-        cleaned_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
-
-    return result
+    return cleaned_rgb.copy()
 
 
 def _run_koharu_blockwise_inpaint_page(
@@ -6974,6 +8930,19 @@ def _run_masked_inpaint_passes(
         )
     else:
         expanded = mask.astype(np.uint8, copy=True)
+
+    if (
+        crop_windows is None
+        and prefer_roi
+        and not multi_pass
+        and not seam_cleanup
+        and force_no_tiling
+    ):
+        crop_windows = _clustered_inpaint_crop_windows(
+            expanded,
+            image_np.shape,
+            texts=texts,
+        )
 
     if crop_windows:
         crop_started = time.perf_counter()
@@ -7224,18 +9193,22 @@ def _apply_inpainting_round(
     vision_blocks = ocr_data.get("_vision_blocks", [])
     texts = list(ocr_data.get("texts", [])) + list(ocr_data.get("_oar_ocr_regions", []))
     text_segmenter = _get_text_segmenter_for_page(ocr_data) if vision_blocks else None
-    full_mask = (
-        vision_blocks_to_mask(
-            image_np.shape,
-            vision_blocks,
-            image_rgb=image_np,
-            mask_strategy=((ocr_data.get("_engine_preset") or {}).get("mask_strategy") if isinstance(ocr_data.get("_engine_preset"), dict) else ""),
-            ocr_texts=texts,
-            text_segmenter=text_segmenter,
+    precomputed_mask = ocr_data.get("_precomputed_inpaint_mask") if isinstance(ocr_data, dict) else None
+    if isinstance(precomputed_mask, np.ndarray) and precomputed_mask.shape[:2] == image_np.shape[:2]:
+        full_mask = np.where(precomputed_mask > 0, 255, 0).astype(np.uint8)
+    else:
+        full_mask = (
+            vision_blocks_to_mask(
+                image_np.shape,
+                vision_blocks,
+                image_rgb=image_np,
+                mask_strategy=((ocr_data.get("_engine_preset") or {}).get("mask_strategy") if isinstance(ocr_data.get("_engine_preset"), dict) else ""),
+                ocr_texts=texts,
+                text_segmenter=text_segmenter,
+            )
+            if vision_blocks
+            else np.zeros(image_np.shape[:2], dtype=np.uint8)
         )
-        if vision_blocks
-        else np.zeros(image_np.shape[:2], dtype=np.uint8)
-    )
     if np.any(full_mask):
         strict_mask_only = _strict_inpaint_mask_only_for_page(ocr_data)
         strict_crop_windows = (
@@ -7283,18 +9256,19 @@ def _apply_inpainting_round(
             }
             if isinstance(ocr_data, dict):
                 ocr_data["_inpaint_round_stats"] = stats
+            limited_raw, raw_limit_pixels, raw_changed_outside = _clamp_image_to_limit_mask(
+                image_np,
+                result["final_output"],
+                result.get("expanded_mask"),
+                texts,
+                include_text_bboxes=not strict_mask_only,
+            )
+            result["final_output"] = limited_raw
+            if isinstance(ocr_data, dict):
+                ocr_data["_inpaint_raw_limit_mask_pixels"] = raw_limit_pixels
+                ocr_data["_inpaint_raw_changed_outside_limit_mask"] = raw_changed_outside
             if ocr_data.get("_skip_internal_post_cleanup"):
-                limited, limit_pixels, changed_outside = _clamp_image_to_limit_mask(
-                    image_np,
-                    result["final_output"],
-                    result.get("expanded_mask"),
-                    texts,
-                    include_text_bboxes=not strict_mask_only,
-                )
-                if isinstance(ocr_data, dict):
-                    ocr_data["_inpaint_raw_limit_mask_pixels"] = limit_pixels
-                    ocr_data["_inpaint_raw_changed_outside_limit_mask"] = changed_outside
-                return limited
+                return limited_raw
             cleaned, cleanup_limit_stats = _apply_post_inpaint_cleanup_timed(
                 image_np,
                 result["final_output"],
@@ -7324,6 +9298,7 @@ def _apply_inpainting_round(
                         limited_forced = forced.copy()
                         limited_forced[~allowed] = cleaned[~allowed]
                         forced = limited_forced
+                forced = _restore_dark_line_art_outside_text_geometry(image_np, forced, _white_cleanup_texts(image_np, texts))
                 if isinstance(ocr_data, dict):
                     ocr_data["_inpaint_white_residual_force_fill"] = bool(np.any(forced != cleaned))
                 return forced
@@ -7340,7 +9315,7 @@ def _select_recovery_match(base_texts: list[dict], recovered_text: dict) -> int 
     best_score = -1e9
 
     for index, base in enumerate(base_texts):
-        if base.get("skip_processing"):
+        if not isinstance(base, dict):
             continue
         base_bbox = base.get("bbox", [0, 0, 0, 0])
         base_norm = _normalize_text_key(base.get("text", ""))
@@ -7398,7 +9373,7 @@ def _integrate_recovery_page(base_page: dict, recovered_page: dict) -> tuple[dic
     recovered_blocks = recovered_page.get("_vision_blocks", [])
 
     for recovered_text, recovered_block in zip(recovered_texts, recovered_blocks):
-        if recovered_text.get("skip_processing"):
+        if not isinstance(recovered_text, dict):
             continue
         match_index = _select_recovery_match(updated_page["texts"], recovered_text)
         if match_index is None:
@@ -7415,6 +9390,9 @@ def _integrate_recovery_page(base_page: dict, recovered_page: dict) -> tuple[dic
         target["bbox"] = _bbox_union(target.get("bbox", [0, 0, 0, 0]), recovered_text.get("bbox", [0, 0, 0, 0]))
         target["confidence"] = max(float(target.get("confidence", 0.0)), float(recovered_text.get("confidence", 0.0)))
         target["ocr_second_pass"] = True
+        for key in ("rotation_deg", "rotation_source", "line_polygons", "text_pixel_bbox"):
+            if recovered_text.get(key) not in (None, [], "") and target.get(key) in (None, [], "", 0, 0.0):
+                target[key] = recovered_text[key]
         if match_index < len(updated_page["_vision_blocks"]):
             updated_page["_vision_blocks"][match_index]["bbox"] = _bbox_union(
                 updated_page["_vision_blocks"][match_index].get("bbox", [0, 0, 0, 0]),
@@ -7424,6 +9402,12 @@ def _integrate_recovery_page(base_page: dict, recovered_page: dict) -> tuple[dic
                 float(updated_page["_vision_blocks"][match_index].get("confidence", 0.0)),
                 float(recovered_block.get("confidence", 0.0)),
             )
+            for key in ("rotation_deg", "rotation_source", "line_polygons", "text_pixel_bbox"):
+                if (
+                    recovered_block.get(key) not in (None, [], "")
+                    and updated_page["_vision_blocks"][match_index].get(key) in (None, [], "", 0, 0.0)
+                ):
+                    updated_page["_vision_blocks"][match_index][key] = recovered_block[key]
 
         merged_recovery_text = dict(target)
         merged_recovery_block = (
@@ -7458,6 +9442,9 @@ def build_page_result(
     progress_callback=None,
     idioma_origem: str = "en",
     preserve_cjk_sfx: bool = True,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     height, width = image_rgb.shape[:2]
     page_texts = []
@@ -7534,12 +9521,69 @@ def build_page_result(
                 bbox=bbox,
             )
             continue
+        informative_qa_flags: list[str] = []
 
-        if is_watermark(cleaned):
+        if False and is_watermark(cleaned):
+            line_polygons: list = []
+            text_pixel_bbox = _derive_text_pixel_bbox(image_rgb, raw_record.get("bbox") or bbox, line_polygons)
+            if text_pixel_bbox is None:
+                text_pixel_bbox = bbox
+            text_entry = {
+                "id": layer_ref,
+                "text_id": layer_ref,
+                "text": cleaned,
+                "bbox": bbox,
+                "confidence": confidence,
+                "confidence_raw": confidence,
+                "tipo": "text",
+                "estilo": analyze_style(image_rgb, bbox),
+                "style_origin": "auto",
+                "ocr_source": f"vision-{ocr_backend}",
+                "ocr_reviewed": False,
+                "ocr_profile": profile,
+                "ocr_semantic_reviewed": False,
+                "ocr_mode": ocr_backend,
+                "skip_processing": False,
+                "skip_reason": None,
+                "preserve_original": False,
+                "content_class": "text",
+                "is_watermark": False,
+                "is_non_english": False,
+                "translate_policy": "translate",
+                "render_policy": "normal",
+                "route_action": "translate_inpaint_render",
+                "route_reason": "watermark_detected",
+                "needs_review": False,
+                "line_polygons": line_polygons,
+                "text_pixel_bbox": text_pixel_bbox,
+                "balloon_type": "white",
+                "page_profile": page_profile,
+                "block_profile": "watermark",
+                "qa_flags": [],
+            }
+            apply_route_action(
+                text_entry,
+                route_action=text_entry["route_action"],
+                route_reason=text_entry["route_reason"],
+            )
+            _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
+            page_texts.append(text_entry)
+            serialized_block = _apply_text_geometry_to_serialized_block(
+                _serialize_block(block, (height, width)),
+                text_entry,
+            )
+            serialized_block["text_id"] = layer_ref
+            serialized_block["confidence_raw"] = confidence
+            serialized_block["content_class"] = text_entry["content_class"]
+            serialized_block["is_watermark"] = True
+            serialized_block["route_action"] = text_entry["route_action"]
+            serialized_block["route_reason"] = text_entry["route_reason"]
+            serialized_block["skip_processing"] = text_entry["skip_processing"]
+            vision_blocks.append(serialized_block)
             record_decision(
                 stage="ocr",
-                action="drop_block",
-                reason="watermark",
+                action="route_block",
+                reason="watermark_detected",
                 page=page_number,
                 layer=layer_ref,
                 text=cleaned,
@@ -7547,7 +9591,7 @@ def build_page_result(
             )
             continue
 
-        if is_editorial_credit(cleaned):
+        if False and is_editorial_credit(cleaned):
             editorial_credit_drop_count += 1
             record_decision(
                 stage="ocr",
@@ -7574,11 +9618,63 @@ def build_page_result(
 
         # Ignorar textos não-latinos apenas se a origem for inglês.
         # Se a origem for CJK, devemos manter o texto para tradução.
-        if normalized_source_lang == "en" and is_non_english(cleaned):
+        if False and normalized_source_lang == "en" and is_non_english(cleaned):
+            line_polygons: list = []
+            text_pixel_bbox = _derive_text_pixel_bbox(image_rgb, raw_record.get("bbox") or bbox, line_polygons)
+            if text_pixel_bbox is None:
+                text_pixel_bbox = bbox
+            korean_sfx = is_korean_sfx(cleaned)
+            text_entry = {
+                "id": layer_ref,
+                "text_id": layer_ref,
+                "text": cleaned,
+                "bbox": bbox,
+                "confidence": confidence,
+                "confidence_raw": confidence,
+                "tipo": "sfx" if korean_sfx else "preserved_text",
+                "estilo": analyze_style(image_rgb, bbox),
+                "style_origin": "auto",
+                "ocr_source": f"vision-{ocr_backend}",
+                "ocr_reviewed": False,
+                "ocr_profile": profile,
+                "ocr_semantic_reviewed": False,
+                "ocr_mode": ocr_backend,
+                "skip_processing": False,
+                "skip_reason": None,
+                "preserve_original": False,
+                "ignored_reason": "cjk_sfx_preserved" if korean_sfx else "non_english_text_preserved",
+                "content_class": "sfx" if korean_sfx else "preserved_non_english",
+                "is_non_english": True,
+                "translate_policy": "translate",
+                "render_policy": "normal",
+                "route_action": "translate_inpaint_render",
+                "route_reason": "korean_sfx_preserved_by_default" if korean_sfx else "non_english_text_preserved",
+                "needs_review": False,
+                "line_polygons": line_polygons,
+                "text_pixel_bbox": text_pixel_bbox,
+                "balloon_type": "textured",
+                "page_profile": page_profile,
+                "block_profile": "non_english_text",
+                "qa_flags": ["sfx_preserved"] if korean_sfx else ["non_english_preserved"],
+            }
+            apply_route_action(
+                text_entry,
+                route_action=text_entry["route_action"],
+                route_reason=text_entry["route_reason"],
+            )
+            _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
+            page_texts.append(text_entry)
+            serialized_block = _apply_text_geometry_to_serialized_block(
+                _serialize_block(block, (height, width)),
+                text_entry,
+            )
+            serialized_block["text_id"] = layer_ref
+            serialized_block["confidence_raw"] = confidence
+            vision_blocks.append(serialized_block)
             record_decision(
                 stage="ocr",
-                action="drop_block",
-                reason="non_latin_source_mismatch",
+                action="preserve_block",
+                reason=text_entry["route_reason"],
                 page=page_number,
                 layer=layer_ref,
                 text=cleaned,
@@ -7599,7 +9695,19 @@ def build_page_result(
             )
             continue
 
-        tipo = classify_text_type(cleaned, bbox, width)
+        early_white_balloon_context = _is_white_balloon_context_for_text(
+            image_rgb,
+            bbox,
+            cleaned,
+            source_lang=normalized_source_lang,
+            raw_record=raw_record,
+            block=block,
+        )
+        tipo = "text"
+        content_class_value = "text"
+        credit_name_list = False
+        sfx_split_off = None
+        skip_translation_content = False
         pre_semantic_run_on = _ocr_run_on_guard_enabled() and has_run_on_tokens(cleaned)
         original_cleaned = cleaned
         cleaned = semantic_refine_text(cleaned, tipo=tipo, confidence=confidence)
@@ -7628,7 +9736,7 @@ def build_page_result(
                 bbox=bbox,
                 details={"confidence": confidence},
             )
-        if is_editorial_credit(cleaned):
+        if False and is_editorial_credit(cleaned):
             editorial_credit_drop_count += 1
             record_decision(
                 stage="ocr",
@@ -7641,14 +9749,7 @@ def build_page_result(
                 details={"phase": "semantic_review"},
             )
             continue
-        is_white_balloon = _is_white_balloon_context_for_text(
-            image_rgb,
-            bbox,
-            cleaned,
-            source_lang=normalized_source_lang,
-            raw_record=raw_record,
-            block=block,
-        )
+        is_white_balloon = early_white_balloon_context
         if is_ghost_ocr_noise(
             cleaned,
             bbox,
@@ -7675,6 +9776,19 @@ def build_page_result(
             page_profile=page_profile,
             is_white_balloon=is_white_balloon,
         )
+        title_rules_enabled = bool(work_title_user_provided and str(work_title or "").strip())
+        text_matches_work_title = bool(
+            title_rules_enabled
+            and _text_matches_work_title(cleaned, work_title, work_title_aliases)
+        )
+        if block_profile == "cover_title_logo" and not text_matches_work_title:
+            block_profile = "standard"
+        elif (
+            text_matches_work_title
+            and page_profile == "cover_opening"
+            and not is_white_balloon
+        ):
+            block_profile = "cover_title_logo"
         if block_profile != "standard":
             record_decision(
                 stage="ocr",
@@ -7686,75 +9800,63 @@ def build_page_result(
                 bbox=bbox,
                 details={"confidence": confidence, "tipo": tipo, "page_profile": page_profile},
             )
-        cover_title_logo = is_cover_title_logo(
-            cleaned,
-            bbox,
-            confidence,
-            image_rgb.shape,
-            tipo,
-            is_white_balloon,
-            page_profile=page_profile,
-        )
-        detector_name = str(getattr(block, "detector", "") or "").strip().lower()
-        if (
-            cover_title_logo
-            and detector_name in {"white_text_line_orphan_scan", "white_balloon_orphan_scan"}
-        ):
-            cover_title_logo = False
-        if cover_title_logo and block_profile == "white_balloon":
-            box_h = max(1, int(bbox[3]) - int(bbox[1]))
-            if box_h <= max(48, int(height * 0.12)):
-                cover_title_logo = False
-        top_narration_cover_logo = (
-            block_profile == "top_narration"
-            and not is_white_balloon
-            and is_textured_top_narration_cover_logo(
-                cleaned,
-                bbox,
-                confidence,
-                image_rgb.shape,
-                tipo,
-                page_profile=page_profile,
-            )
-        )
-        if cover_title_logo and (block_profile != "top_narration" or top_narration_cover_logo):
-            record_decision(
-                stage="ocr",
-                action="drop_block",
-                reason="cover_title_logo",
-                page=page_number,
-                layer=layer_ref,
-                text=cleaned,
-                bbox=bbox,
-                details={
-                    "confidence": confidence,
-                    "tipo": tipo,
-                    "page_profile": page_profile,
-                    "block_profile": block_profile,
-                    "balloon_type": "white" if is_white_balloon else "textured",
-                },
-            )
-            continue
         suspicious_threshold = suspicious_confidence_threshold(block_profile, page_profile)
+        force_review_low_confidence_fragment = False
         if looks_suspicious(cleaned, confidence) and confidence < suspicious_threshold:
-            record_decision(
-                stage="ocr",
-                action="drop_block",
-                reason="suspicious_low_confidence",
-                page=page_number,
-                layer=layer_ref,
-                text=cleaned,
-                bbox=bbox,
-                details={
-                    "confidence": confidence,
-                    "threshold": suspicious_threshold,
-                    "block_profile": block_profile,
-                    "page_profile": page_profile,
-                },
+            retain_for_review = bool(
+                is_white_balloon
+                and block_profile == "white_balloon"
+                and should_retain_low_confidence_dialogue_ocr(
+                    {
+                        "text": cleaned,
+                        "confidence": confidence,
+                        "bbox": bbox,
+                        "balloon_bbox": raw_record.get("balloon_bbox") or bbox,
+                        "tipo": tipo,
+                        "content_class": content_class_value,
+                    }
+                )
             )
-            continue
+            if retain_for_review:
+                for flag in ("low_ocr_confidence", "ocr_partial_low_confidence_fragment"):
+                    if flag not in informative_qa_flags:
+                        informative_qa_flags.append(flag)
+                record_decision(
+                    stage="ocr",
+                    action="flag_block",
+                    reason="ocr_partial_low_confidence_fragment",
+                    page=page_number,
+                    layer=layer_ref,
+                    text=cleaned,
+                    bbox=bbox,
+                    details={
+                        "confidence": confidence,
+                        "threshold": suspicious_threshold,
+                        "block_profile": block_profile,
+                        "page_profile": page_profile,
+                    },
+                )
+            else:
+                for flag in ("low_ocr_confidence", "suspicious_low_confidence"):
+                    if flag not in informative_qa_flags:
+                        informative_qa_flags.append(flag)
+                record_decision(
+                    stage="ocr",
+                    action="flag_block",
+                    reason="suspicious_low_confidence",
+                    page=page_number,
+                    layer=layer_ref,
+                    text=cleaned,
+                    bbox=bbox,
+                    details={
+                        "confidence": confidence,
+                        "threshold": suspicious_threshold,
+                        "block_profile": block_profile,
+                        "page_profile": page_profile,
+                    },
+                )
         estilo = analyze_style(image_rgb, bbox)
-        if is_short_textured_sfx_or_noise(
+        if False and is_short_textured_sfx_or_noise(
             cleaned,
             bbox,
             confidence,
@@ -7776,7 +9878,18 @@ def build_page_result(
                 },
             )
             continue
-        if preserve_cjk_sfx and should_preserve_cjk_sfx_candidate(
+        line_polygons = _normalize_line_polygons(
+            raw_record.get("line_polygons")
+            or getattr(block, "line_polygons", None)
+            or []
+        )
+        text_pixel_bbox = _coerce_bbox(raw_record.get("text_pixel_bbox"))
+        if text_pixel_bbox is None:
+            text_pixel_bbox = _derive_text_pixel_bbox(image_rgb, raw_record.get("bbox") or bbox, line_polygons)
+        if text_pixel_bbox is None:
+            text_pixel_bbox = bbox
+        rotation_deg, rotation_source = _rotation_metadata_from_ocr(raw_record, block, line_polygons)
+        if False and preserve_cjk_sfx and should_preserve_cjk_sfx_candidate(
             cleaned,
             bbox,
             confidence,
@@ -7785,20 +9898,13 @@ def build_page_result(
             image_shape=image_rgb.shape,
             block_profile=block_profile,
         ):
-            line_polygons = _normalize_line_polygons(
-                raw_record.get("line_polygons")
-                or getattr(block, "line_polygons", None)
-                or []
-            )
-            text_pixel_bbox = _coerce_bbox(raw_record.get("text_pixel_bbox"))
-            if text_pixel_bbox is None:
-                text_pixel_bbox = _derive_text_pixel_bbox(image_rgb, raw_record.get("bbox") or bbox, line_polygons)
-            if text_pixel_bbox is None:
-                text_pixel_bbox = bbox
             text_entry = {
+                "id": layer_ref,
+                "text_id": layer_ref,
                 "text": cleaned,
                 "bbox": bbox,
                 "confidence": confidence,
+                "confidence_raw": confidence,
                 "tipo": "sfx",
                 "estilo": analyze_style(image_rgb, bbox),
                 "style_origin": "auto",
@@ -7807,9 +9913,15 @@ def build_page_result(
                 "ocr_profile": profile,
                 "ocr_semantic_reviewed": False,
                 "ocr_mode": ocr_backend,
-                "skip_processing": True,
-                "preserve_original": True,
+                "skip_processing": False,
+                "preserve_original": False,
                 "ignored_reason": "cjk_sfx_preserved",
+                "content_class": "sfx",
+                "is_non_english": True,
+                "translate_policy": "translate",
+                "render_policy": "normal",
+                "route_action": "translate_inpaint_render",
+                "route_reason": "korean_sfx_preserved_by_default",
                 "line_polygons": line_polygons,
                 "text_pixel_bbox": text_pixel_bbox,
                 "balloon_type": "white" if is_white_balloon else "textured",
@@ -7817,6 +9929,14 @@ def build_page_result(
                 "block_profile": block_profile,
                 "qa_flags": ["sfx_preserved"],
             }
+            apply_route_action(
+                text_entry,
+                route_action=text_entry["route_action"],
+                route_reason=text_entry["route_reason"],
+            )
+            if rotation_deg != 0.0:
+                text_entry["rotation_deg"] = rotation_deg
+                text_entry["rotation_source"] = rotation_source
             _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
             page_texts.append(text_entry)
             record_decision(
@@ -7835,7 +9955,28 @@ def build_page_result(
                 },
             )
             continue
-        if is_short_ornamental_text(
+        style_bbox = raw_record.get("balloon_bbox") or raw_record.get("layout_bbox") or bbox
+        background_rgb = sample_text_background_rgb(image_rgb, style_bbox)
+        pre_translation_skip = None
+        if False and not credit_name_list:
+            pre_translation_skip = _ocr_pre_translation_skip_policy(
+                cleaned,
+                bbox,
+                confidence,
+                tipo=tipo,
+                page_profile=page_profile,
+                block_profile=block_profile,
+                is_white_balloon=is_white_balloon,
+                image_shape=image_rgb.shape,
+                line_polygons=line_polygons,
+                run_on_suspect=run_on_suspect,
+                pre_semantic_run_on=pre_semantic_run_on,
+                source_lang=normalized_source_lang,
+                background_rgb=background_rgb,
+                title_rules_enabled=title_rules_enabled,
+                text_matches_work_title=text_matches_work_title,
+            )
+        if False and is_short_ornamental_text(
             cleaned,
             confidence,
             bbox,
@@ -7865,32 +10006,40 @@ def build_page_result(
         # Classificamos como 'square' inicialmente, mas serah refinado no layout.
         # Mantemos fontes base deterministicamente no OCR e deixamos ajustes mais finos
         # para o layout/typesetter. Isso evita custo extra e ruído de detector neste estágio.
-        style_bbox = raw_record.get("balloon_bbox") or raw_record.get("layout_bbox") or bbox
-        background_rgb = sample_text_background_rgb(image_rgb, style_bbox)
         estilo = normalize_auto_typesetting_style(
             estilo,
             background_rgb=background_rgb,
             force_black_text=is_white_balloon,
         )
         estilo["force_upper"] = True
-        line_polygons = _normalize_line_polygons(
-            raw_record.get("line_polygons")
-            or getattr(block, "line_polygons", None)
-            or []
-        )
-        text_pixel_bbox = _coerce_bbox(raw_record.get("text_pixel_bbox"))
-        if text_pixel_bbox is None:
-            text_pixel_bbox = _derive_text_pixel_bbox(image_rgb, raw_record.get("bbox") or bbox, line_polygons)
-        if text_pixel_bbox is None:
-            text_pixel_bbox = bbox
-        qa_flags = [block_profile] if block_profile in {"top_narration", "decorative_noise"} else []
+        qa_flags = [block_profile] if block_profile == "decorative_noise" else []
+        for flag in informative_qa_flags:
+            if flag in {"low_confidence_visual_noise", "low_ocr_confidence", "suspicious_low_confidence", "ocr_partial_low_confidence_fragment"}:
+                continue
+            if flag not in qa_flags:
+                qa_flags.append(flag)
         if run_on_suspect and "ocr_run_on_suspect" not in qa_flags:
             qa_flags.append("ocr_run_on_suspect")
+        if pre_translation_skip:
+            for flag in pre_translation_skip.get("qa_flags", []):
+                if flag and flag not in qa_flags:
+                    qa_flags.append(str(flag))
+        skip_reason = None
+        content_class_value = "text"
+        needs_review = False
+        translate_policy = "translate"
+        render_policy = "normal"
+        if pre_translation_skip:
+            needs_review = bool(pre_translation_skip.get("needs_review", False))
+        force_review_low_confidence_fragment = False
         text_entry = {
+            "id": layer_ref,
+            "text_id": layer_ref,
             "text": cleaned,
             "bbox": bbox,
             "confidence": confidence,
-            "tipo": tipo,
+            "confidence_raw": confidence,
+            "tipo": "text",
             "estilo": estilo,
             "style_origin": "auto",
             "background_rgb": list(background_rgb),
@@ -7900,13 +10049,34 @@ def build_page_result(
             "ocr_semantic_reviewed": False,
             "ocr_mode": ocr_backend,
             "skip_processing": False,
+            "skip_reason": skip_reason,
+            "preserve_original": False,
+            "content_class": content_class_value,
+            "is_watermark": False,
+            "is_non_english": is_non_english(cleaned),
+            "translate_policy": translate_policy,
+            "render_policy": render_policy,
+            "needs_review": needs_review,
             "line_polygons": line_polygons,
             "text_pixel_bbox": text_pixel_bbox,
-            "balloon_type": "white" if is_white_balloon else "textured",
+            "balloon_type": "",
             "page_profile": page_profile,
             "block_profile": block_profile,
             "qa_flags": qa_flags,
         }
+        if False and force_review_low_confidence_fragment and not credit_name_list:
+            apply_route_action(
+                text_entry,
+                route_action="review_required",
+                route_reason="ocr_partial_low_confidence_fragment",
+            )
+        else:
+            apply_route_action(text_entry)
+        if rotation_deg != 0.0:
+            text_entry["rotation_deg"] = rotation_deg
+            text_entry["rotation_source"] = rotation_source
+        if sfx_split_off:
+            text_entry["_sfx_split_off"] = sfx_split_off
         _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
         page_texts.append(text_entry)
         record_decision(
@@ -7919,18 +10089,20 @@ def build_page_result(
             bbox=bbox,
             details={
                 "confidence": confidence,
-                "tipo": tipo,
-                "balloon_type": "white" if is_white_balloon else "textured",
+                "tipo": "text",
+                "balloon_type": "",
                 "page_profile": page_profile,
                 "block_profile": block_profile,
+                "skip_reason": skip_reason,
             },
         )
-        vision_blocks.append(
-            _apply_text_geometry_to_serialized_block(
-                _serialize_block(block, (height, width)),
-                text_entry,
-            )
+        serialized_block = _apply_text_geometry_to_serialized_block(
+            _serialize_block(block, (height, width)),
+            text_entry,
         )
+        serialized_block["text_id"] = layer_ref
+        serialized_block["confidence_raw"] = confidence
+        vision_blocks.append(serialized_block)
         finalize_progress = 0.90 + (index / total_blocks) * 0.08
         _emit_stage_progress(progress_callback, "finalize_blocks", finalize_progress, "Finalizando blocos OCR")
 
@@ -7940,6 +10112,11 @@ def build_page_result(
             vision_blocks,
             page_number=page_number,
         )
+    page_texts, vision_blocks = _propagate_scanlation_credit_band_policy(
+        page_texts,
+        vision_blocks,
+        image_rgb.shape,
+    )
     if run_on_suspect_count:
         record_decision(
             stage="ocr",
@@ -8213,6 +10390,9 @@ def _run_detect_ocr_on_image(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset: EnginePreset | None = None,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     _emit_stage_progress(progress_callback, "load_detector", 0.08, "Carregando detector de texto")
     detector = _get_detector(profile, model=_detector_model_for_preset(engine_preset))
@@ -8258,7 +10438,25 @@ def _run_detect_ocr_on_image(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
+    if _should_run_rotated_text_recovery(page_result, blocks, backend_name, ocr):
+        page_result = _run_rotated_text_recovery_pass(
+            image_rgb=image_rgb,
+            image_label=image_label,
+            page_result=page_result,
+            ocr=ocr,
+            profile=profile,
+            backend_name=backend_name,
+            idioma_origem=idioma_origem,
+            progress_callback=progress_callback,
+            engine_preset=engine_preset,
+            work_title=work_title,
+            work_title_aliases=work_title_aliases,
+            work_title_user_provided=work_title_user_provided,
+        )
     if _should_run_sparse_page_recovery(page_result, blocks, backend_name):
         recovery_page = _run_sparse_page_recovery_pass(
             image_rgb=image_rgb,
@@ -8268,6 +10466,9 @@ def _run_detect_ocr_on_image(
             idioma_origem=idioma_origem,
             progress_callback=progress_callback,
             engine_preset=engine_preset,
+            work_title=work_title,
+            work_title_aliases=work_title_aliases,
+            work_title_user_provided=work_title_user_provided,
         )
         if recovery_page and recovery_page.get("texts"):
             if page_result.get("texts"):
@@ -8285,7 +10486,11 @@ def _run_detect_ocr_on_image(
         idioma_origem=idioma_origem,
         progress_callback=progress_callback,
         preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
+    page_result = _reconcile_ocr_with_validated_sources(page_result)
     return page_result
 
 
@@ -8297,6 +10502,9 @@ def _run_orientation_recovery(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset: EnginePreset | None = None,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict | None:
     if not _should_try_orientation_recovery(baseline_page):
         return None
@@ -8320,6 +10528,9 @@ def _run_orientation_recovery(
                 progress_callback=progress_callback,
                 idioma_origem=idioma_origem,
                 engine_preset=engine_preset,
+                work_title=work_title,
+                work_title_aliases=work_title_aliases,
+                work_title_user_provided=work_title_user_provided,
             )
         except Exception as exc:
             logger.warning("Orientation recovery %s falhou em %s: %s", rotation_deg, image_label, exc)
@@ -8375,6 +10586,9 @@ def _apply_adaptive_cjk_reocr(
     idioma_origem: str,
     progress_callback=None,
     preserve_cjk_sfx: bool = True,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     try:
         from qa.page_quality import evaluate_page_quality
@@ -8437,6 +10651,9 @@ def _apply_adaptive_cjk_reocr(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         preserve_cjk_sfx=preserve_cjk_sfx,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
     if recovery_page.get("texts"):
         if page_result.get("texts"):
@@ -8503,6 +10720,8 @@ def _expanded_namespace_block(block, image_shape: tuple[int, ...], *, ratio: flo
         balloon_subregions=getattr(block, "balloon_subregions", None) if not isinstance(block, dict) else block.get("balloon_subregions"),
         connected_lobe_bboxes=getattr(block, "connected_lobe_bboxes", None) if not isinstance(block, dict) else block.get("connected_lobe_bboxes"),
         connected_lobe_polygons=getattr(block, "connected_lobe_polygons", None) if not isinstance(block, dict) else block.get("connected_lobe_polygons"),
+        rotation_deg=getattr(block, "rotation_deg", None) if not isinstance(block, dict) else block.get("rotation_deg"),
+        rotation_source=getattr(block, "rotation_source", None) if not isinstance(block, dict) else block.get("rotation_source"),
     )
 
 
@@ -8514,6 +10733,9 @@ def _run_sparse_page_recovery_pass(
     idioma_origem: str,
     progress_callback=None,
     engine_preset: EnginePreset | None = None,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict | None:
     if not hasattr(ocr, "recognize_full_page_lines"):
         return None
@@ -8537,6 +10759,8 @@ def _run_sparse_page_recovery_pass(
                 detector="full_page_recovery",
                 line_polygons=record.get("line_polygons"),
                 source_direction=None,
+                rotation_deg=record.get("rotation_deg"),
+                rotation_source=record.get("rotation_source"),
             )
         )
         recovery_texts.append(dict(record))
@@ -8555,7 +10779,351 @@ def _run_sparse_page_recovery_pass(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
+
+
+def _rotated_text_recovery_enabled() -> bool:
+    raw = os.getenv("TRADUZAI_ROTATED_TEXT_RECOVERY", "1")
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _bbox_intersection_fraction(a: list[int], b: list[int]) -> float:
+    ax1, ay1, ax2, ay2 = [float(v) for v in a]
+    bx1, by1, bx2, by2 = [float(v) for v in b]
+    inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+    return inter / area_a
+
+
+def _expanded_bbox_for_recovery(bbox: list[int], margin: int = 24) -> list[int]:
+    return [
+        int(bbox[0]) - margin,
+        int(bbox[1]) - margin,
+        int(bbox[2]) + margin,
+        int(bbox[3]) + margin,
+    ]
+
+
+def _rotated_record_overlaps_existing(record: dict, existing_bboxes: list[list[int]]) -> bool:
+    bbox = _coerce_bbox(record.get("source_bbox") or record.get("bbox"))
+    if bbox is None:
+        return True
+    expanded = _expanded_bbox_for_recovery(bbox, margin=12)
+    for existing in existing_bboxes:
+        if _bbox_intersection_fraction(expanded, _expanded_bbox_for_recovery(existing, margin=20)) >= 0.20:
+            return True
+    return False
+
+
+def _rotated_text_needs_recovery(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    rotation = text.get("rotation_deg")
+    try:
+        rotation_abs = abs(float(rotation or 0.0))
+    except (TypeError, ValueError):
+        rotation_abs = 0.0
+    if rotation_abs < 35.0:
+        rotation_abs = abs(float(infer_rotation_deg_from_line_polygons(text.get("line_polygons")) or 0.0))
+    if rotation_abs < 35.0:
+        return False
+    flags = {str(flag).strip().upper() for flag in (text.get("qa_flags") or [])}
+    try:
+        confidence = float(text.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return "TEXT_CLIPPED" in flags or confidence < 0.62
+
+
+def _text_len_for_recovery(text: dict) -> int:
+    value = text.get("text") or text.get("raw_text") or text.get("texto_original") or ""
+    return len(str(value).strip())
+
+
+def _bbox_area_for_recovery(bbox: list[int] | None) -> int:
+    if not bbox:
+        return 0
+    return max(0, int(bbox[2]) - int(bbox[0])) * max(0, int(bbox[3]) - int(bbox[1]))
+
+
+def _best_rotated_overlap_index(record: dict, texts: list[dict]) -> int | None:
+    bbox = _coerce_bbox(record.get("source_bbox") or record.get("bbox"))
+    if bbox is None:
+        return None
+    expanded = _expanded_bbox_for_recovery(bbox, margin=16)
+    best_index: int | None = None
+    best_score = 0.0
+    for index, text in enumerate(texts):
+        if not isinstance(text, dict):
+            continue
+        existing = _coerce_bbox(text.get("source_bbox") or text.get("text_pixel_bbox") or text.get("bbox"))
+        if existing is None:
+            continue
+        score = max(
+            _bbox_intersection_fraction(expanded, _expanded_bbox_for_recovery(existing, margin=20)),
+            _bbox_intersection_fraction(_expanded_bbox_for_recovery(existing, margin=20), expanded),
+        )
+        if score > best_score:
+            best_score = score
+            best_index = index
+    return best_index if best_score >= 0.18 else None
+
+
+def _rotated_recovery_record_is_better(record: dict, existing: dict) -> bool:
+    if not _rotated_text_needs_recovery(existing):
+        return False
+    record_len = _text_len_for_recovery(record)
+    existing_len = _text_len_for_recovery(existing)
+    if record_len >= max(existing_len + 12, int(existing_len * 1.25)):
+        return True
+    record_polygons = record.get("line_polygons") or []
+    existing_polygons = existing.get("line_polygons") or []
+    if len(record_polygons) > len(existing_polygons):
+        return True
+    record_bbox = _coerce_bbox(record.get("source_bbox") or record.get("bbox"))
+    existing_bbox = _coerce_bbox(existing.get("source_bbox") or existing.get("text_pixel_bbox") or existing.get("bbox"))
+    if _bbox_area_for_recovery(record_bbox) >= int(_bbox_area_for_recovery(existing_bbox) * 1.35):
+        return True
+    return False
+
+
+def _merge_rotated_recovery_metadata(target: dict, source: dict, *, text_entry: bool) -> None:
+    preserved_id = target.get("id")
+    preserved_text_id = target.get("text_id")
+    for key in (
+        "text",
+        "raw_text",
+        "normalized_text",
+        "bbox",
+        "source_bbox",
+        "text_pixel_bbox",
+        "line_polygons",
+        "confidence",
+        "rotation_deg",
+        "rotation_source",
+        "balloon_type",
+        "source_direction",
+        "detector",
+    ):
+        value = source.get(key)
+        if value not in (None, [], ""):
+            target[key] = copy.deepcopy(value)
+    if preserved_id not in (None, ""):
+        target["id"] = preserved_id
+    if preserved_text_id not in (None, ""):
+        target["text_id"] = preserved_text_id
+    flags = list(target.get("qa_flags") or [])
+    for flag in list(source.get("qa_flags") or []) + ["rotated_text_recovery"]:
+        if flag not in flags:
+            flags.append(flag)
+    target["qa_flags"] = flags
+    target["allow_broad_bbox_text_search"] = True
+    if not text_entry:
+        target["detector"] = target.get("detector") or "rotated_full_page_recovery"
+
+
+def _expand_rotated_recovery_bbox(bbox: list[int], image_shape: tuple[int, ...]) -> list[int]:
+    height = int(image_shape[0]) if image_shape else 0
+    width = int(image_shape[1]) if len(image_shape) > 1 else 0
+    box_w = max(1, int(bbox[2]) - int(bbox[0]))
+    box_h = max(1, int(bbox[3]) - int(bbox[1]))
+    pad = max(48, min(96, int(max(box_w, box_h) * 0.16)))
+    return [
+        max(0, int(bbox[0]) - pad),
+        max(0, int(bbox[1]) - pad),
+        min(width, int(bbox[2]) + pad),
+        min(height, int(bbox[3]) + pad),
+    ]
+
+
+def _should_run_rotated_text_recovery(page_result: dict, blocks: list, backend_name: str, ocr) -> bool:
+    if not _rotated_text_recovery_enabled():
+        return False
+    if backend_name != "paddleocr":
+        return False
+    if not hasattr(ocr, "recognize_rotated_full_page_lines"):
+        return False
+    if not blocks:
+        return False
+    accepted = len(page_result.get("texts") or [])
+    detected = len(blocks)
+    if accepted < detected:
+        return True
+    return any(_rotated_text_needs_recovery(text) for text in list(page_result.get("texts") or []))
+
+
+def _append_rotated_recovery_page(base_page: dict, recovered_page: dict) -> tuple[dict, int]:
+    updated_page = _clone_page_result(base_page)
+    existing_bboxes = [
+        _coerce_bbox(text.get("text_pixel_bbox") or text.get("bbox"))
+        for text in list(updated_page.get("texts") or [])
+        if isinstance(text, dict)
+    ]
+    existing_bboxes = [bbox for bbox in existing_bboxes if bbox is not None]
+    appended = 0
+    recovered_texts = [text for text in list(recovered_page.get("texts") or []) if isinstance(text, dict)]
+    recovered_blocks = [block for block in list(recovered_page.get("_vision_blocks") or []) if isinstance(block, dict)]
+    for recovered_text, recovered_block in zip(recovered_texts, recovered_blocks):
+        bbox = _coerce_bbox(recovered_text.get("text_pixel_bbox") or recovered_text.get("bbox"))
+        if bbox is None:
+            continue
+        target_index = _best_rotated_overlap_index(recovered_text, list(updated_page.get("texts") or []))
+        if target_index is not None:
+            existing_texts = list(updated_page.get("texts") or [])
+            existing_text = existing_texts[target_index]
+            if _rotated_recovery_record_is_better(recovered_text, existing_text):
+                _merge_rotated_recovery_metadata(existing_text, recovered_text, text_entry=True)
+                existing_blocks = list(updated_page.get("_vision_blocks") or [])
+                if target_index < len(existing_blocks) and isinstance(existing_blocks[target_index], dict):
+                    _merge_rotated_recovery_metadata(existing_blocks[target_index], recovered_block, text_entry=False)
+                    for key in (
+                        "rotation_deg",
+                        "rotation_source",
+                        "qa_flags",
+                        "balloon_type",
+                        "line_polygons",
+                        "text_pixel_bbox",
+                        "bbox",
+                        "source_bbox",
+                        "allow_broad_bbox_text_search",
+                    ):
+                        value = existing_text.get(key)
+                        if value not in (None, [], ""):
+                            existing_blocks[target_index][key] = copy.deepcopy(value)
+                appended += 1
+                existing_bboxes.append(bbox)
+            continue
+        appended += 1
+        new_id = f"rotocr_{len(updated_page.get('texts') or []) + appended:03d}"
+        text_entry = dict(recovered_text)
+        text_entry["id"] = new_id
+        text_entry["text_id"] = new_id
+        text_entry["ocr_second_pass"] = True
+        flags = list(text_entry.get("qa_flags") or [])
+        if "rotated_text_recovery" not in flags:
+            flags.append("rotated_text_recovery")
+        text_entry["qa_flags"] = flags
+        text_entry["allow_broad_bbox_text_search"] = True
+
+        block_entry = dict(recovered_block)
+        block_entry["text_id"] = new_id
+        block_entry["detector"] = block_entry.get("detector") or "rotated_full_page_recovery"
+        block_entry["allow_broad_bbox_text_search"] = True
+        for key in (
+            "rotation_deg",
+            "rotation_source",
+            "qa_flags",
+            "balloon_type",
+            "line_polygons",
+            "text_pixel_bbox",
+            "bbox",
+            "source_bbox",
+        ):
+            value = text_entry.get(key)
+            if value not in (None, [], ""):
+                block_entry[key] = copy.deepcopy(value)
+        updated_page.setdefault("texts", []).append(text_entry)
+        updated_page.setdefault("_vision_blocks", []).append(block_entry)
+        existing_bboxes.append(bbox)
+
+    if appended:
+        stats = dict(updated_page.get("_ocr_stats") or {})
+        stats["rotated_text_recovery_count"] = int(appended)
+        updated_page["_ocr_stats"] = stats
+    return updated_page, appended
+
+
+def _run_rotated_text_recovery_pass(
+    image_rgb: np.ndarray,
+    image_label: str,
+    page_result: dict,
+    ocr,
+    profile: str,
+    backend_name: str,
+    idioma_origem: str,
+    progress_callback=None,
+    engine_preset: EnginePreset | None = None,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
+) -> dict:
+    _emit_stage_progress(progress_callback, "recover_rotated_text", 0.69, "Recuperando texto rotacionado")
+    records = ocr.recognize_rotated_full_page_lines(image_rgb)
+    if not records:
+        return page_result
+    existing_bboxes = [
+        _coerce_bbox(text.get("text_pixel_bbox") or text.get("bbox"))
+        for text in list(page_result.get("texts") or [])
+        if isinstance(text, dict)
+    ]
+    existing_bboxes = [bbox for bbox in existing_bboxes if bbox is not None]
+    filtered_records = [
+        record
+        for record in records
+        if not _rotated_record_overlaps_existing(record, existing_bboxes)
+        or (
+            (index := _best_rotated_overlap_index(record, list(page_result.get("texts") or []))) is not None
+            and _rotated_recovery_record_is_better(record, list(page_result.get("texts") or [])[index])
+        )
+    ]
+    if not filtered_records:
+        return page_result
+
+    recovery_blocks = []
+    for record in filtered_records:
+        bbox = _coerce_bbox(record.get("source_bbox") or record.get("bbox"))
+        if bbox is None:
+            continue
+        expanded_bbox = _expand_rotated_recovery_bbox(bbox, image_rgb.shape)
+        recovery_blocks.append(
+            SimpleNamespace(
+                xyxy=tuple(expanded_bbox),
+                mask=None,
+                confidence=float(record.get("confidence", 0.0) or 0.0),
+                detector="rotated_full_page_recovery",
+                line_polygons=record.get("line_polygons"),
+                source_direction=None,
+                rotation_deg=record.get("rotation_deg"),
+                rotation_source=record.get("rotation_source"),
+            )
+        )
+    if not recovery_blocks:
+        return page_result
+
+    recovery_page = build_page_result(
+        image_path=image_label,
+        image_rgb=image_rgb,
+        blocks=recovery_blocks,
+        texts=filtered_records,
+        profile=profile,
+        ocr_backend=f"{backend_name}-rotated",
+        enable_font_detection=True,
+        progress_callback=progress_callback,
+        idioma_origem=idioma_origem,
+        preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
+    )
+    if not recovery_page.get("texts"):
+        return page_result
+    updated_page, appended = _append_rotated_recovery_page(page_result, recovery_page)
+    if appended:
+        record_decision(
+            stage="ocr",
+            action="recover_block",
+            reason="rotated_text_recovery",
+            page=infer_page_number(image_label),
+            details={"recovered_text_count": int(appended)},
+        )
+    return updated_page
 
 
 def run_ocr_stage(
@@ -8565,6 +11133,9 @@ def run_ocr_stage(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     """Roda OCR em blocos já detectados (para o pipeline strip-based)."""
     # Converter dicionários de blocos para SimpleNamespace (formato que build_page_result espera)
@@ -8597,7 +11168,13 @@ def run_ocr_stage(
                 balloon_polygon=b.get("balloon_polygon"),
                 balloon_subregions=b.get("balloon_subregions"),
                 connected_lobe_bboxes=b.get("connected_lobe_bboxes"),
+                connected_lobe_ids=b.get("connected_lobe_ids"),
                 connected_lobe_polygons=b.get("connected_lobe_polygons"),
+                bubble_id=b.get("bubble_id"),
+                bubble_mask_bbox=b.get("bubble_mask_bbox"),
+                bubble_inner_bbox=b.get("bubble_inner_bbox"),
+                rotation_deg=b.get("rotation_deg"),
+                rotation_source=b.get("rotation_source"),
             )
         )
 
@@ -8619,6 +11196,7 @@ def run_ocr_stage(
             "height": height,
             "texts": [],
             "_vision_blocks": list(page_dict.get("_vision_blocks", [])),
+            "_bubble_regions": list(page_dict.get("_bubble_regions", [])),
             "scanlation_credit_skipped": True,
             "sem_texto_detectado": True,
             "_ocr_stats": {
@@ -8640,6 +11218,7 @@ def run_ocr_stage(
             "height": height,
             "texts": [],
             "_vision_blocks": list(page_dict.get("_vision_blocks", [])),
+            "_bubble_regions": list(page_dict.get("_bubble_regions", [])),
             "quick_skipped_no_text": True,
             "sem_texto_detectado": True,
             "_ocr_stats": {
@@ -8659,6 +11238,7 @@ def run_ocr_stage(
             "height": height,
             "texts": [],
             "_vision_blocks": list(page_dict.get("_vision_blocks", [])),
+            "_bubble_regions": list(page_dict.get("_bubble_regions", [])),
             "cover_editorial_skipped": True,
             "sem_texto_detectado": True,
             "_ocr_stats": {
@@ -8718,12 +11298,14 @@ def run_ocr_stage(
         and enable_paddle_full_page
         and hasattr(ocr, "recognize_blocks_from_page")
     ):
+        allow_sparse_mapping = not bool(page_dict.get("_disable_sparse_ocr_mapping"))
         try:
             texts = ocr.recognize_blocks_from_page(
                 image_rgb,
                 blocks,
-                allow_sparse_mapping=True,
+                allow_sparse_mapping=allow_sparse_mapping,
                 crop_fallback_max=_strip_paddle_crop_fallback_max(),
+                sparse_crop_fallback_max=_strip_paddle_sparse_crop_fallback_max(),
             )
         except TypeError:
             texts = ocr.recognize_blocks_from_page(image_rgb, blocks)
@@ -8752,6 +11334,9 @@ def run_ocr_stage(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
     ocr_stats = getattr(ocr, "_last_recognize_blocks_stats", None)
     existing_stats = page_result.get("_ocr_stats")
@@ -8766,6 +11351,23 @@ def run_ocr_stage(
         page_result["_ocr_stats"].update(batch_cache_stats)
     if quick_text_check_stage:
         page_result["_ocr_stats"]["quick_text_check_stage"] = quick_text_check_stage
+    if page_dict.get("_bubble_regions") and not page_result.get("_bubble_regions"):
+        page_result["_bubble_regions"] = [dict(item) for item in page_dict.get("_bubble_regions", []) if isinstance(item, dict)]
+    if _should_run_rotated_text_recovery(page_result, blocks, backend_name, ocr):
+        page_result = _run_rotated_text_recovery_pass(
+            image_rgb=image_rgb,
+            image_label=_band_image_label(),
+            page_result=page_result,
+            ocr=ocr,
+            profile=profile,
+            backend_name=backend_name,
+            idioma_origem=idioma_origem,
+            progress_callback=progress_callback,
+            engine_preset=engine_preset,
+            work_title=work_title,
+            work_title_aliases=work_title_aliases,
+            work_title_user_provided=work_title_user_provided,
+        )
     page_result = _apply_adaptive_cjk_reocr(
         image_rgb=image_rgb,
         image_label=_band_image_label(),
@@ -8777,7 +11379,11 @@ def run_ocr_stage(
         idioma_origem=idioma_origem,
         progress_callback=progress_callback,
         preserve_cjk_sfx=_preserve_cjk_sfx_for_engine_preset(engine_preset),
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
+    page_result = _reconcile_ocr_with_validated_sources(page_result)
     return _with_engine_preset(page_result)
 
 
@@ -8848,7 +11454,13 @@ def _build_text_geometry_block_mask(block: dict, height: int, width: int) -> np.
     return block_mask if np.any(block_mask) else None
 
 
-def _build_text_geometry_guard_mask(block: dict, height: int, width: int) -> np.ndarray | None:
+def _build_text_geometry_guard_mask(
+    block: dict,
+    height: int,
+    width: int,
+    *,
+    include_text_bbox: bool = True,
+) -> np.ndarray | None:
     if not isinstance(block, dict):
         return None
     guard = np.zeros((height, width), dtype=np.uint8)
@@ -8864,7 +11476,7 @@ def _build_text_geometry_guard_mask(block: dict, height: int, width: int) -> np.
         if points.shape[0] >= 4:
             cv2.fillPoly(guard, [points], 255)
 
-    text_bbox = _coerce_bbox(block.get("text_pixel_bbox"))
+    text_bbox = _coerce_bbox(block.get("text_pixel_bbox")) if include_text_bbox else None
     if text_bbox is not None:
         x1, y1, x2, y2 = text_bbox
         x1 = max(0, min(width, x1))
@@ -8896,6 +11508,35 @@ def _protect_dark_line_art_outside_text_geometry(
         guard = _build_text_geometry_guard_mask(block, height, width)
         if guard is not None:
             text_guard = np.maximum(text_guard, guard)
+        qa_metrics = block.get("qa_metrics") if isinstance(block, dict) else None
+        allow_tight_reference_guard = isinstance(qa_metrics, dict) and bool(
+            qa_metrics.get("tight_reference_geometry_extra_pixels")
+        )
+        if not allow_tight_reference_guard:
+            try:
+                try:
+                    from inpainter.mask_builder import _balloon_bbox_is_tight_text_anchor
+                except ImportError:
+                    from ..inpainter.mask_builder import _balloon_bbox_is_tight_text_anchor
+
+                allow_tight_reference_guard = _balloon_bbox_is_tight_text_anchor(block, (height, width))
+            except Exception:
+                allow_tight_reference_guard = False
+        if allow_tight_reference_guard:
+            try:
+                try:
+                    from inpainter.mask_builder import build_inpaint_mask
+                except ImportError:
+                    from ..inpainter.mask_builder import build_inpaint_mask
+
+                tight_guard = build_inpaint_mask(dict(block), (height, width), image_rgb=image_rgb)
+            except Exception:
+                tight_guard = None
+            if isinstance(tight_guard, np.ndarray) and np.any(tight_guard):
+                guard_area = int(np.count_nonzero(guard)) if isinstance(guard, np.ndarray) else 0
+                tight_area = int(np.count_nonzero(tight_guard))
+                if guard_area <= 0 or tight_area <= max(guard_area + 4096, int(guard_area * 1.45)):
+                    text_guard = np.maximum(text_guard, tight_guard.astype(np.uint8))
     if not np.any(text_guard):
         return mask
 
@@ -8905,7 +11546,7 @@ def _protect_dark_line_art_outside_text_geometry(
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
         iterations=2,
     )
-    dark_outside_text = ((gray < 96) & (text_guard == 0)).astype(np.uint8) * 255
+    dark_outside_text = ((gray < 170) & (text_guard == 0)).astype(np.uint8) * 255
     if not np.any(dark_outside_text):
         return mask
     protected = np.zeros_like(dark_outside_text)
@@ -8951,7 +11592,11 @@ def vision_blocks_to_mask(
     else:
         height, width = image_shape
 
+    vision_blocks = [block for block in list(vision_blocks or []) if not _block_should_skip_inpaint_mask(block)]
+    ocr_texts = [text for text in list(ocr_texts or []) if not _block_should_skip_inpaint_mask(text)]
     mask = np.zeros((height, width), dtype=np.uint8)
+    if not vision_blocks:
+        return mask
     strategy = str(mask_strategy or "").strip().lower()
     cjk_strategies = {
         "segmentation_assisted",
@@ -8985,7 +11630,7 @@ def vision_blocks_to_mask(
                     image_rgb,
                     vision_blocks,
                     None,
-                    ocr_texts=ocr_texts or [],
+                    ocr_texts=ocr_texts,
                     segmenter=text_segmenter,
                     bubble_segmenter=bubble_segmenter,
                 )
@@ -8993,13 +11638,13 @@ def vision_blocks_to_mask(
                 mask = build_manhwa_manhua_roi_segmentation_mask(
                     image_rgb,
                     vision_blocks,
-                    ocr_texts or [],
+                    ocr_texts,
                     segmenter=text_segmenter,
                     bubble_segmenter=bubble_segmenter,
                 )
             if strategy in {"ocr_guided_segmentation", "ocr_guided_roi_segmentation"}:
                 evidence = normalize_text_evidence(
-                    {"texts": ocr_texts or [], "_vision_blocks": vision_blocks},
+                    {"texts": ocr_texts, "_vision_blocks": vision_blocks},
                     width,
                     height,
                 )
@@ -9010,7 +11655,7 @@ def vision_blocks_to_mask(
                     support = None
                     if strategy in {"ocr_guided_segmentation", "ocr_guided_roi_segmentation"}:
                         evidence = normalize_text_evidence(
-                            {"texts": ocr_texts or [], "_vision_blocks": vision_blocks},
+                            {"texts": ocr_texts, "_vision_blocks": vision_blocks},
                             width,
                             height,
                         )
@@ -9051,6 +11696,108 @@ def vision_blocks_to_mask(
                 bbox_mask[by1:by2, bx1:bx2] = 255
         return bbox_mask
 
+    def _explicit_geometry_mask_for_block(block: dict, bbox_area: int) -> np.ndarray | None:
+        if not (block.get("line_polygons") or block.get("text_pixel_bbox")):
+            return None
+        try:
+            try:
+                from inpainter.mask_builder import build_inpaint_mask
+            except ImportError:
+                from ..inpainter.mask_builder import build_inpaint_mask
+
+            geometry_mask = build_inpaint_mask(dict(block), (height, width), image_rgb=image_rgb)
+        except Exception:
+            return None
+        if geometry_mask is None or not np.any(geometry_mask):
+            return None
+        geometry_area = int(np.count_nonzero(geometry_mask))
+        if geometry_area < max(8, int(bbox_area * 0.006)):
+            return None
+        return geometry_mask.astype(np.uint8)
+
+    def _local_mask_to_canvas(local_mask: np.ndarray, bbox_value: list[int]) -> np.ndarray | None:
+        candidate = local_mask
+        if candidate.ndim == 3:
+            candidate = candidate[:, :, 0]
+        if candidate.shape == (height, width):
+            return candidate.astype(np.uint8)
+        bx1, by1, bx2, by2 = bbox_value
+        target_h = by2 - by1
+        target_w = bx2 - bx1
+        if target_h <= 0 or target_w <= 0:
+            return None
+        patch = candidate
+        if patch.shape != (target_h, target_w):
+            patch = cv2.resize(patch, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        canvas = np.zeros((height, width), dtype=np.uint8)
+        canvas[by1:by2, bx1:bx2] = patch.astype(np.uint8)
+        return canvas
+
+    def _should_prefer_geometry_mask(local_candidate: np.ndarray, geometry_mask: np.ndarray, bbox_area: int) -> bool:
+        local_area = int(np.count_nonzero(local_candidate))
+        geometry_area = int(np.count_nonzero(geometry_mask))
+        if local_area <= 0 or geometry_area <= 0:
+            return False
+        extra_area = int(np.count_nonzero((local_candidate > 0) & (geometry_mask == 0)))
+        extra_ratio = extra_area / float(max(1, local_area))
+        area_limit = max(int(geometry_area * 2.8), geometry_area + max(256, int(bbox_area * 0.06)))
+        return local_area >= area_limit and extra_ratio >= 0.45
+
+    def _merge_missing_geometry_into_local_mask(
+        block: dict,
+        local_candidate: np.ndarray,
+        geometry_mask: np.ndarray | None,
+    ) -> np.ndarray:
+        if geometry_mask is None or not np.any(geometry_mask):
+            return local_candidate
+        if not _normalize_line_polygons(block.get("line_polygons") or []):
+            return local_candidate
+        try:
+            try:
+                from inpainter.mask_builder import _merge_missing_geometry_components
+            except ImportError:
+                from ..inpainter.mask_builder import _merge_missing_geometry_components
+        except Exception:
+            return local_candidate
+        tight_reference_extra_pixels = 0
+        try:
+            try:
+                from inpainter.mask_builder import _balloon_bbox_is_tight_text_anchor
+            except ImportError:
+                from ..inpainter.mask_builder import _balloon_bbox_is_tight_text_anchor
+
+            if _balloon_bbox_is_tight_text_anchor(block, (height, width)):
+                local_area = int(np.count_nonzero(local_candidate))
+                geometry_area = int(np.count_nonzero(geometry_mask))
+                extra_pixels = int(np.count_nonzero((geometry_mask > 0) & (local_candidate == 0)))
+                if (
+                    extra_pixels > 0
+                    and geometry_area <= max(local_area + 4096, int(local_area * 1.35))
+                    and extra_pixels <= max(4096, int(local_area * 0.45))
+                ):
+                    tight_reference_extra_pixels = extra_pixels
+        except Exception:
+            tight_reference_extra_pixels = 0
+        try:
+            merged, added_components = _merge_missing_geometry_components(
+                local_candidate.astype(np.uint8),
+                geometry_mask.astype(np.uint8),
+            )
+        except Exception:
+            return local_candidate
+        if added_components:
+            qa_metrics = block.setdefault("qa_metrics", {})
+            if isinstance(qa_metrics, dict):
+                qa_metrics["local_mask_missing_geometry_components"] = added_components
+        if tight_reference_extra_pixels > 0:
+            qa_metrics = block.setdefault("qa_metrics", {})
+            if isinstance(qa_metrics, dict):
+                qa_metrics["tight_reference_geometry_extra_pixels"] = int(tight_reference_extra_pixels)
+            remaining_extra = int(np.count_nonzero((geometry_mask > 0) & (merged == 0)))
+            if remaining_extra > 0:
+                merged = np.maximum(merged.astype(np.uint8), geometry_mask.astype(np.uint8))
+        return merged.astype(np.uint8)
+
     for block in vision_blocks:
         bbox = block.get("bbox") or [0, 0, 0, 0]
         x1, y1, x2, y2 = [int(v) for v in bbox]
@@ -9063,27 +11810,32 @@ def vision_blocks_to_mask(
 
         local_mask = block.get("mask")
         if isinstance(local_mask, np.ndarray) and local_mask.size > 0:
-            if local_mask.shape == (height, width):
-                mask = np.maximum(mask, local_mask.astype(np.uint8))
+            local_candidate = _local_mask_to_canvas(local_mask, [x1, y1, x2, y2])
+            if local_candidate is None:
+                continue
+            bbox_area = max(1, (x2 - x1) * (y2 - y1))
+            geometry_mask = _explicit_geometry_mask_for_block(block, bbox_area)
+            if geometry_mask is not None and _should_prefer_geometry_mask(local_candidate, geometry_mask, bbox_area):
+                mask = np.maximum(mask, geometry_mask)
             else:
-                target_h = y2 - y1
-                target_w = x2 - x1
-                patch = local_mask
-                if patch.shape != (target_h, target_w):
-                    patch = cv2.resize(patch, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-                mask[y1:y2, x1:x2] = np.maximum(mask[y1:y2, x1:x2], patch.astype(np.uint8))
+                local_candidate = _merge_missing_geometry_into_local_mask(block, local_candidate, geometry_mask)
+                mask = np.maximum(mask, local_candidate)
         else:
             applied_refined = False
             has_explicit_text_geometry = bool(block.get("line_polygons") or block.get("text_pixel_bbox"))
+            raw_text_mask_rejected = False
             try:
                 try:
-                    from inpainter.mask_builder import build_inpaint_mask
+                    from inpainter.mask_builder import build_inpaint_mask, raw_text_evidence_rejected
                 except ImportError:
-                    from ..inpainter.mask_builder import build_inpaint_mask
+                    from ..inpainter.mask_builder import build_inpaint_mask, raw_text_evidence_rejected
 
                 geometry_mask = build_inpaint_mask(block, (height, width), image_rgb=image_rgb)
+                raw_text_mask_rejected = raw_text_evidence_rejected(block)
             except Exception:
                 geometry_mask = None
+            if raw_text_mask_rejected:
+                continue
             if geometry_mask is not None and np.any(geometry_mask):
                 bbox_area = max(1, (x2 - x1) * (y2 - y1))
                 geometry_area = int(np.count_nonzero(geometry_mask))
@@ -9096,7 +11848,7 @@ def vision_blocks_to_mask(
                     applied_refined = True
                     if has_explicit_text_geometry:
                         continue
-            is_white_balloon = str(block.get("balloon_type", "") or "").strip().lower() == "white"
+            is_white_balloon = False
             if image_rgb is not None:
                 is_white_balloon = _is_white_balloon_region(image_rgb, [x1, y1, x2, y2])
                 balloon_mask = None
@@ -9223,6 +11975,9 @@ def run_detect_ocr(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
 
     engine_preset = _resolve_runtime_engine_preset(engine_preset_id, idioma_origem)
@@ -9258,6 +12013,9 @@ def run_detect_ocr(
                 progress_callback=progress_callback,
                 idioma_origem=idioma_origem,
                 engine_preset_id=engine_preset.id,
+                work_title=work_title,
+                work_title_aliases=work_title_aliases,
+                work_title_user_provided=work_title_user_provided,
             )
         except Exception as exc:
             logger.warning("Koharu vision worker falhou em %s; fallback para stack atual: %s", image_path, exc)
@@ -9268,6 +12026,9 @@ def run_detect_ocr(
                 progress_callback=progress_callback,
                 idioma_origem=idioma_origem,
                 engine_preset=engine_preset,
+                work_title=work_title,
+                work_title_aliases=work_title_aliases,
+                work_title_user_provided=work_title_user_provided,
             )
     elif use_koharu_cjk_http:
         try:
@@ -9279,6 +12040,9 @@ def run_detect_ocr(
                 progress_callback=progress_callback,
                 idioma_origem=idioma_origem,
                 engine_preset_id=engine_preset.id,
+                work_title=work_title,
+                work_title_aliases=work_title_aliases,
+                work_title_user_provided=work_title_user_provided,
             )
         except Exception as exc:
             logger.warning("Koharu HTTP OCR CJK falhou em %s; fallback para stack atual: %s", image_path, exc)
@@ -9302,6 +12066,9 @@ def run_detect_ocr(
                 progress_callback=progress_callback,
                 idioma_origem=idioma_origem,
                 engine_preset=engine_preset,
+                work_title=work_title,
+                work_title_aliases=work_title_aliases,
+                work_title_user_provided=work_title_user_provided,
             )
     else:
         if not _quick_text_presence_check(image_rgb):
@@ -9323,6 +12090,9 @@ def run_detect_ocr(
             progress_callback=progress_callback,
             idioma_origem=idioma_origem,
             engine_preset=engine_preset,
+            work_title=work_title,
+            work_title_aliases=work_title_aliases,
+            work_title_user_provided=work_title_user_provided,
         )
     recovered_page = _run_orientation_recovery(
         image_rgb=image_rgb,
@@ -9332,6 +12102,9 @@ def run_detect_ocr(
         progress_callback=progress_callback,
         idioma_origem=idioma_origem,
         engine_preset=engine_preset,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
     )
     if recovered_page is not None:
         logger.info(

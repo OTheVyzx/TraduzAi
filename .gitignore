@@ -52,6 +52,7 @@ data/worker/
 data/fast-page-tests/
 *.log
 debug_runs/
+DEBUGM/
 debug_pipeline_test/
 exemplos/
 pk/

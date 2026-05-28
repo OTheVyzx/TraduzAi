@@ -51,7 +51,58 @@ def _non_connected_profile(value: Any, fallback: str = "standard") -> str:
     return profile
 
 
-def sanitize_simple_text_geometry(text: dict) -> dict:
+def normalize_text_geometry(text: dict) -> dict:
+    """Normalize bbox aliases while preserving connected-balloon metadata."""
+
+    updated = dict(text)
+    anchor = resolve_text_anchor_bbox(updated)
+    layout_bbox = _valid_bbox(updated.get("layout_bbox"))
+    balloon_bbox = _valid_bbox(updated.get("balloon_bbox"))
+    text_pixel_bbox = _valid_bbox(updated.get("text_pixel_bbox"))
+
+    if layout_bbox is not None:
+        updated["layout_bbox"] = list(layout_bbox)
+    elif anchor is not None:
+        updated["layout_bbox"] = list(anchor)
+
+    if balloon_bbox is not None:
+        updated["balloon_bbox"] = list(balloon_bbox)
+    elif _valid_bbox(updated.get("layout_bbox")) is not None:
+        updated["balloon_bbox"] = list(updated["layout_bbox"])
+    elif anchor is not None:
+        updated["balloon_bbox"] = list(anchor)
+
+    if text_pixel_bbox is not None:
+        updated["text_pixel_bbox"] = list(text_pixel_bbox)
+    elif anchor is not None:
+        updated["text_pixel_bbox"] = list(anchor)
+
+    source_bbox = _valid_bbox(updated.get("source_bbox"))
+    raw_bbox = _valid_bbox(updated.get("bbox"))
+    updated["ocr_text_bbox"] = raw_bbox or source_bbox or resolve_text_anchor_bbox(updated) or []
+
+    if "layout_group_size" not in updated:
+        updated["layout_group_size"] = 1
+    for key in CONNECTED_LIST_KEYS:
+        if key not in updated or updated.get(key) is None:
+            updated[key] = []
+    for key in CONNECTED_CONFIDENCE_KEYS:
+        if key not in updated or updated.get(key) is None:
+            updated[key] = 0.0
+
+    updated.setdefault("connected_balloon_orientation", "")
+    updated.setdefault("connected_position_reasoner", "")
+    updated.setdefault("connected_reasoner_model", "")
+    updated.setdefault("connected_reasoner_notes", "")
+    updated.setdefault("_is_lobe_subregion", False)
+
+    fallback_profile = _non_connected_profile(updated.get("block_profile"))
+    if not str(updated.get("layout_profile") or "").strip():
+        updated["layout_profile"] = _non_connected_profile(updated.get("layout_profile"), fallback_profile)
+    return updated
+
+
+def sanitize_for_simple_text_only(text: dict) -> dict:
     """Keep raw OCR geometry while forcing layout/render geometry to one text."""
 
     updated = dict(text)
@@ -90,3 +141,9 @@ def sanitize_simple_text_geometry(text: dict) -> dict:
     fallback_profile = _non_connected_profile(updated.get("block_profile"))
     updated["layout_profile"] = _non_connected_profile(updated.get("layout_profile"), fallback_profile)
     return updated
+
+
+def sanitize_simple_text_geometry(text: dict) -> dict:
+    """Compatibility alias for the destructive simple-layout path."""
+
+    return sanitize_for_simple_text_only(text)

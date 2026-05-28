@@ -44,6 +44,9 @@ def run_ocr(
     progress_callback=None,
     idioma_origem: str = "en",
     engine_preset_id: str = "",
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool = False,
 ) -> dict:
     try:
         return run_detect_ocr(
@@ -54,6 +57,9 @@ def run_ocr(
             progress_callback=progress_callback,
             idioma_origem=idioma_origem,
             engine_preset_id=engine_preset_id,
+            work_title=work_title,
+            work_title_aliases=work_title_aliases,
+            work_title_user_provided=work_title_user_provided,
         )
     except Exception as exc:
         logger.warning("Novo stack visual falhou no OCR, fallback para legacy: %s", exc)

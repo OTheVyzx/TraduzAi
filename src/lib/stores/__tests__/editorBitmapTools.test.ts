@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageData, Project, TextEntry, TextLayerStyle } from "../appStore";
 import { useAppStore } from "../appStore";
 import { useEditorStore } from "../editorStore";
@@ -15,6 +15,7 @@ const {
   runPageActionWithOptionalMask,
   writeMaskFromPng,
   loadEditorPage,
+  preloadEditorVisionPage,
 } = vi.hoisted(() => ({
   updateBrushRegion: vi.fn(async () => "images/brush.png"),
   updateMaskRegion: vi.fn(async () => "images/mask.png"),
@@ -45,6 +46,7 @@ const {
     message: "ok",
   })),
   writeMaskFromPng: vi.fn(async () => "editor_cache/masks/lasso-area.png"),
+  preloadEditorVisionPage: vi.fn(async () => "queued"),
   runPageActionWithOptionalMask: vi.fn(async () => ({
     action: "ocr",
     mode: "regional",
@@ -87,6 +89,7 @@ vi.mock("../../editorBackend", () => ({
     runPageActionWithOptionalMask,
     writeMaskFromPng,
     loadEditorPage,
+    preloadEditorVisionPage,
   })),
 }));
 
@@ -213,6 +216,10 @@ beforeEach(() => {
     pendingEdits: {},
     pendingStructuralEdits: { created: [], deleted: {}, order: undefined },
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("editor bitmap tools", () => {
@@ -483,6 +490,23 @@ describe("editor bitmap tools", () => {
     );
   });
 
+  it("routes detector-only page action as a separate editor action", async () => {
+    const page = makePage();
+    useAppStore.setState({ project: makeProject(page) });
+    useEditorStore.setState({ currentPage: page, currentPageIndex: 0 });
+
+    await useEditorStore.getState().runMaskedAction("detect_boxes");
+
+    expect(runPageActionWithOptionalMask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_path: "D:/tmp/project.json",
+        page_index: 0,
+        action: "detect_boxes",
+        idioma_origem: "en",
+      }),
+    );
+  });
+
   it("passes the selected source language when reprocessing a text block OCR", async () => {
     const page = makePage();
     useAppStore.setState({ project: { ...makeProject(page), idioma_origem: "ko" } });
@@ -499,6 +523,46 @@ describe("editor bitmap tools", () => {
         idioma_origem: "ko",
       }),
     );
+  });
+
+  it("requests editor vision preload after loading a page", async () => {
+    vi.useFakeTimers();
+    const page = makePage();
+    useAppStore.setState({ project: makeProject(page) });
+    useEditorStore.setState({ currentPage: null, currentPageIndex: 0 });
+
+    await useEditorStore.getState().loadCurrentPage();
+    expect(preloadEditorVisionPage).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(950);
+
+    expect(preloadEditorVisionPage).toHaveBeenCalledWith(expect.objectContaining({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      idioma_origem: "en",
+      target: "detect_ocr",
+    }));
+  });
+
+  it("requests OCR-layer preload when the loaded page already has text layers", async () => {
+    vi.useFakeTimers();
+    const page = makePage();
+    loadEditorPage.mockResolvedValueOnce({
+      page_index: 0,
+      total_pages: 1,
+      page: page as never,
+    });
+    useAppStore.setState({ project: makeProject(page) });
+    useEditorStore.setState({ currentPage: null, currentPageIndex: 0 });
+
+    await useEditorStore.getState().loadCurrentPage();
+    await vi.advanceTimersByTimeAsync(950);
+
+    expect(preloadEditorVisionPage).toHaveBeenCalledWith(expect.objectContaining({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      idioma_origem: "en",
+      target: "ocr_layers",
+    }));
   });
 
   it("applies healing brush result with undoable inpaint paths", async () => {

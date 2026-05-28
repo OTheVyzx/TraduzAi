@@ -12,12 +12,20 @@ logger = logging.getLogger(__name__)
 _paddle_reader = None
 
 
+def _prefer_torch_cuda_dlls() -> None:
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        pass
+
+
 def choose_primary_ocr_engine(paddle_ready: bool) -> str:
     return "paddle" if paddle_ready else "easyocr"
 
 
 def is_paddle_available() -> bool:
     try:
+        _prefer_torch_cuda_dlls()
         from paddleocr import PaddleOCR  # noqa: F401
 
         return True
@@ -28,12 +36,15 @@ def is_paddle_available() -> bool:
 def get_paddle_reader(use_gpu: bool = False):
     global _paddle_reader
     if _paddle_reader is None:
+        _prefer_torch_cuda_dlls()
         from paddleocr import PaddleOCR
 
         logger.info("Inicializando PaddleOCR...")
         _paddle_reader = PaddleOCR(
             use_angle_cls=False,
             lang="en",
+            use_gpu=bool(use_gpu),
+            enable_mkldnn=not bool(use_gpu),
         )
         logger.info("PaddleOCR pronto.")
     return _paddle_reader
@@ -65,6 +76,6 @@ def normalize_paddle_results(raw_results) -> list[dict]:
 
 
 def run_paddle_primary_recognition(image_bgr, use_gpu: bool = False) -> list[dict]:
-    reader = get_paddle_reader()
+    reader = get_paddle_reader(use_gpu=use_gpu)
     raw_results = reader.ocr(image_bgr, det=True, rec=True, cls=False)
     return normalize_paddle_results(raw_results)

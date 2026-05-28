@@ -1,6 +1,6 @@
 import type { PageData, ProcessRegionOverlay, TextEntry } from "./stores/appStore";
 
-export type PageActionName = "detect" | "ocr" | "translate" | "inpaint";
+export type PageActionName = "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
 export type PageActionChangedAsset = "brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json";
 
 export interface EditorPagePayload {
@@ -112,7 +112,25 @@ export interface EditorBackendApi {
     idioma_destino?: string;
   }): Promise<ProcessRegionResult>;
   retypesetPage(args: { project_path: string; page_index: number }): Promise<string>;
-  detectPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string>;
+  detectPage(args: {
+    project_path: string;
+    page_index: number;
+    idioma_origem?: string;
+    engine_preset_id?: string;
+  }): Promise<string>;
+  detectBoxesPage?(args: {
+    project_path: string;
+    page_index: number;
+    idioma_origem?: string;
+    engine_preset_id?: string;
+  }): Promise<string>;
+  preloadEditorVisionPage?(args: {
+    project_path: string;
+    page_index: number;
+    idioma_origem?: string;
+    engine_preset_id?: string;
+    target?: "detect_ocr" | "ocr_layers";
+  }): Promise<string>;
   ocrPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string>;
   translatePage(args: {
     project_path: string;

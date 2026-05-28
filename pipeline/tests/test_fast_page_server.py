@@ -116,15 +116,16 @@ def test_fast_page_session_routes_editor_reinpaint_and_captures_stdout(tmp_path:
 
 
 def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, capsys) -> None:
-    calls: list[tuple[str, Path, int, dict | None, dict | None]] = []
+    project_path = tmp_path / "project.json"
+    calls: list[tuple[str, str, int, dict | None, dict | None]] = []
 
     def detect_runner(project_path: Path, page_index: int, region: dict | None, options: dict | None) -> None:
-        calls.append(("detect", project_path, page_index, region, options))
+        calls.append(("detect", str(project_path), page_index, region, options))
         print(json.dumps({"type": "progress", "step": "ocr", "message": "detectando"}))
         print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "001.png")}))
 
     def ocr_runner(project_path: Path, page_index: int, region: dict | None, options: dict | None) -> None:
-        calls.append(("ocr", project_path, page_index, region, options))
+        calls.append(("ocr", str(project_path), page_index, region, options))
         print(json.dumps({"type": "progress", "step": "ocr", "message": "lendo"}))
         print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "002.png")}))
 
@@ -138,8 +139,8 @@ def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, 
     detect_events = session.handle(
         {
             "type": "editor_detect_page",
-            "project_path": str(tmp_path / "project.json"),
-            "page_index": 1,
+            "project_path": str(project_path),
+            "page_index": 2,
             "idioma_origem": "ja",
             "engine_preset_id": "manga",
         }
@@ -147,7 +148,7 @@ def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, 
     ocr_events = session.handle(
         {
             "type": "editor_ocr_page",
-            "project_path": str(tmp_path / "project.json"),
+            "project_path": str(project_path),
             "page_index": 2,
             "region": {"bbox": [10, 20, 30, 40]},
             "idioma_origem": "ja",
@@ -158,16 +159,10 @@ def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert calls == [
-        (
-            "detect",
-            tmp_path / "project.json",
-            1,
-            None,
-            {"idioma_origem": "ja", "idioma_destino": None, "engine_preset_id": "manga"},
-        ),
+        ("detect", str(project_path), 2, None, {"idioma_origem": "ja", "idioma_destino": None, "engine_preset_id": "manga"}),
         (
             "ocr",
-            tmp_path / "project.json",
+            str(project_path),
             2,
             {"bbox": [10, 20, 30, 40]},
             {"idioma_origem": "ja", "idioma_destino": None, "engine_preset_id": "manga"},
@@ -179,6 +174,115 @@ def test_fast_page_session_routes_editor_detect_and_ocr_actions(tmp_path: Path, 
     assert [event["type"] for event in ocr_events] == ["progress", "complete"]
     assert ocr_events[0]["message"] == "lendo"
     assert ocr_events[1]["output_path"].endswith("002.png")
+
+
+def test_fast_page_session_routes_editor_detect_boxes_action(tmp_path: Path, capsys) -> None:
+    project_path = tmp_path / "project.json"
+    calls: list[tuple[str, int, dict | None, dict | None]] = []
+
+    def detect_boxes_runner(project_path_arg: Path, page_index: int, region: dict | None, options: dict | None) -> None:
+        calls.append((str(project_path_arg), page_index, region, options))
+        print(json.dumps({"type": "progress", "step": "detect", "message": "detectando caixas"}))
+        print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "001.png")}))
+
+    session = FastPageSession(
+        pipeline_runner=lambda _config_path: None,
+        detect_boxes_runner=detect_boxes_runner,
+        session_id="fixed-session",
+    )
+
+    events = session.handle(
+        {
+            "type": "editor_detect_boxes_page",
+            "project_path": str(project_path),
+            "page_index": 3,
+            "region": {"bbox": [10, 20, 30, 40]},
+            "source_lang": "ko",
+            "enginePresetId": "manhwa_manhua",
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert calls == [
+        (
+            str(project_path),
+            3,
+            {"bbox": [10, 20, 30, 40]},
+            {"idioma_origem": "ko", "idioma_destino": None, "engine_preset_id": "manhwa_manhua"},
+        )
+    ]
+    assert [event["type"] for event in events] == ["progress", "complete"]
+    assert events[0]["message"] == "detectando caixas"
+    assert events[1]["output_path"].endswith("001.png")
+
+
+def test_fast_page_session_routes_preload_detect_ocr_request(tmp_path: Path, capsys) -> None:
+    project_path = tmp_path / "project.json"
+    calls: list[tuple[str, int, dict | None]] = []
+
+    def preload_detect(project_path_arg: Path, page_index: int, options: dict | None) -> dict:
+        calls.append((str(project_path_arg), page_index, options))
+        print(json.dumps({"type": "progress", "message": "inner preload"}))
+        print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "001.png")}))
+        return {"cache": "ready", "kind": "detect_ocr"}
+
+    session = FastPageSession(
+        pipeline_runner=lambda _config_path: None,
+        preload_detect_runner=preload_detect,
+        session_id="fixed-session",
+    )
+
+    events = session.handle(
+        {
+            "type": "editor_preload_detect_ocr",
+            "project_path": str(project_path),
+            "page_index": 4,
+            "idioma_origem": "en",
+            "engine_preset_id": "manga",
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert calls == [
+        (str(project_path), 4, {"idioma_origem": "en", "idioma_destino": None, "engine_preset_id": "manga"})
+    ]
+    assert events == [{"type": "ready", "target": "detect_ocr", "cache": "ready", "session_id": "fixed-session"}]
+
+
+def test_fast_page_session_routes_preload_ocr_layers_request(tmp_path: Path, capsys) -> None:
+    project_path = tmp_path / "project.json"
+    calls: list[tuple[str, int, dict | None]] = []
+
+    def preload_ocr(project_path_arg: Path, page_index: int, options: dict | None) -> dict:
+        calls.append((str(project_path_arg), page_index, options))
+        print(json.dumps({"type": "complete", "output_path": str(tmp_path / "translated" / "002.png")}))
+        return {"cache": "accepted", "kind": "ocr_layers"}
+
+    session = FastPageSession(
+        pipeline_runner=lambda _config_path: None,
+        preload_ocr_runner=preload_ocr,
+        session_id="fixed-session",
+    )
+
+    events = session.handle(
+        {
+            "type": "editor_preload_ocr_layers",
+            "project_path": str(project_path),
+            "page_index": 5,
+            "source_lang": "ja",
+            "target_lang": "pt-BR",
+            "enginePresetId": "manga",
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert calls == [
+        (str(project_path), 5, {"idioma_origem": "ja", "idioma_destino": "pt-BR", "engine_preset_id": "manga"})
+    ]
+    assert events == [{"type": "accepted", "target": "ocr_layers", "cache": "accepted", "session_id": "fixed-session"}]
 
 
 def test_serve_jsonl_keeps_one_session_for_multiple_page_requests(tmp_path: Path) -> None:
@@ -221,6 +325,34 @@ def test_serve_jsonl_keeps_one_session_for_multiple_page_requests(tmp_path: Path
     assert len(page_complete_events) == 2
     assert {event["session_id"] for event in events} == {"fixed-session"}
     assert events[-1]["type"] == "bye"
+
+
+def test_write_fast_page_config_preserves_full_pipeline_config(tmp_path: Path) -> None:
+    from fast_page_server import write_fast_page_config
+
+    config_path = write_fast_page_config(
+        {
+            "type": "process_page",
+            "source_path": str(tmp_path / "001.png"),
+            "work_dir": str(tmp_path / "jobs" / "one"),
+            "models_dir": str(tmp_path / "models"),
+            "logs_dir": str(tmp_path / "logs"),
+            "qualidade": "alta",
+            "glossario": {"CEO": "diretor"},
+            "engine_preset_id": "manhwa_manhua",
+            "work_context": {"serie": "demo"},
+            "pause_file": str(tmp_path / "pause.flag"),
+        }
+    )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "type" not in config
+    assert config["qualidade"] == "alta"
+    assert config["glossario"] == {"CEO": "diretor"}
+    assert config["engine_preset_id"] == "manhwa_manhua"
+    assert config["work_context"] == {"serie": "demo"}
+    assert config["pause_file"].endswith("pause.flag")
 
 
 def test_fast_page_session_captures_inner_pipeline_stdout(tmp_path: Path, capsys) -> None:

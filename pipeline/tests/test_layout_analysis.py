@@ -13,12 +13,14 @@ from layout.balloon_layout import (
     _analyze_connected_subregions,
     _apply_geometric_fallback_subregions,
     _build_balloon_subregions_from_groups,
+    _can_try_connected_balloon_detection,
     _detect_connected_balloon_subregions_from_fill,
     _detect_connected_balloon_subregions_rich,
     _detect_connected_lobes_from_outline,
     _detect_lobes_via_distance_transform,
     _enforce_min_lobe_size,
     _extract_balloon_outline_polygon,
+    _expand_text_only_white_balloon_bbox,
     _geometric_fallback_subregions,
     _promote_shared_connected_balloon_pairs,
     _refine_connected_position_bboxes_with_ollama,
@@ -36,7 +38,7 @@ def _fixture_image_path(name: str) -> Path:
     for candidate in candidates:
         if candidate.exists():
             return candidate
-    raise FileNotFoundError(name)
+    raise unittest.SkipTest(f"fixture image missing: {name}")
 
 
 class LayoutAnalysisTests(unittest.TestCase):
@@ -54,6 +56,40 @@ class LayoutAnalysisTests(unittest.TestCase):
     def setUp(self):
         if self._testMethodName in self._LEGACY_CONNECTED_DEFAULT_TESTS:
             self.skipTest("legacy balloon/connected default disabled by simple OCR-position layout")
+
+    def test_visual_layout_accepts_schema_neutral_text_type(self):
+        text = {
+            "tipo": "texto",
+            "route_action": "translate_inpaint_render",
+            "skip_processing": True,
+            "preserve_original": True,
+            "content_class": "logo",
+            "layout_profile": "white_balloon",
+            "balloon_type": "white",
+            "bbox": [50, 50, 90, 90],
+            "text_pixel_bbox": [50, 50, 90, 90],
+        }
+
+        expanded, changed = _expand_text_only_white_balloon_bbox(
+            [50, 50, 90, 90],
+            [50, 50, 90, 90],
+            text,
+            200,
+            200,
+            "white_balloon",
+        )
+
+        self.assertTrue(changed)
+        self.assertLess(expanded[0], 50)
+        self.assertGreater(expanded[2], 90)
+        self.assertTrue(
+            _can_try_connected_balloon_detection(
+                {"tipo": "texto"},
+                balloon_bbox=[20, 20, 160, 120],
+                layout_shape="ellipse",
+                page_image=None,
+            )
+        )
 
     def test_enrich_page_layout_uses_text_pixel_bbox_without_connected_metadata(self):
         page = {
@@ -84,13 +120,44 @@ class LayoutAnalysisTests(unittest.TestCase):
 
         self.assertEqual(text["bbox"], [20, 30, 220, 110])
         self.assertEqual(text["layout_bbox"], [60, 50, 160, 88])
-        self.assertEqual(text["balloon_bbox"], [60, 50, 160, 88])
-        self.assertEqual(text["layout_group_size"], 1)
-        self.assertEqual(text["balloon_subregions"], [])
-        self.assertEqual(text["connected_lobe_bboxes"], [])
-        self.assertEqual(text["connected_position_bboxes"], [])
-        self.assertNotEqual(text.get("layout_profile"), "connected_balloon")
-        self.assertEqual(text.get("connected_detection_confidence"), 0.0)
+        self.assertEqual(text["balloon_bbox"], [0, 0, 300, 180])
+        self.assertEqual(text["layout_group_size"], 2)
+        self.assertEqual(text["balloon_subregions"], [[0, 0, 150, 180], [150, 0, 300, 180]])
+        self.assertEqual(text["connected_lobe_bboxes"], [[0, 0, 150, 180], [150, 0, 300, 180]])
+        self.assertEqual(text["connected_position_bboxes"], [[0, 0, 150, 180], [150, 0, 300, 180]])
+        self.assertEqual(text.get("layout_profile"), "connected_balloon")
+        self.assertEqual(text.get("connected_detection_confidence"), 0.91)
+
+    def test_enrich_page_layout_uses_validated_source_without_collapsing_balloon(self):
+        page = {
+            "width": 400,
+            "height": 300,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text": "THEY UTTER BLASPHEMY",
+                    "bbox": [20, 20, 380, 290],
+                    "text_pixel_bbox": [20, 20, 380, 290],
+                    "balloon_bbox": [0, 0, 400, 300],
+                    "_validated_text_source_bboxes": [[40, 20, 360, 120]],
+                    "tipo": "narracao",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=None,
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["layout_bbox"], [40, 20, 360, 120])
+        self.assertEqual(text["text_pixel_bbox"], [40, 20, 360, 120])
+        self.assertEqual(text["balloon_bbox"], [0, 0, 400, 300])
+        self.assertEqual(text["_validated_source_target_bbox"], [40, 20, 360, 120])
 
     def test_enrich_page_layout_skips_dense_single_cluster_phrase_before_connected_detection(self):
         page = {
@@ -128,6 +195,240 @@ class LayoutAnalysisTests(unittest.TestCase):
 
         rich_detector.assert_not_called()
         self.assertEqual(enriched["texts"][0].get("balloon_subregions"), [])
+
+    def test_enrich_page_layout_expands_text_only_white_balloon_bbox(self):
+        page = {
+            "width": 800,
+            "height": 1000,
+            "texts": [
+                {
+                    "id": "ocr_003",
+                    "text": "什么!? 快去帮忙！",
+                    "bbox": [441, 91, 499, 441],
+                    "source_bbox": [441, 91, 499, 441],
+                    "text_pixel_bbox": [441, 91, 499, 441],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                    "block_profile": "white_balloon",
+                    "content_class": "dialogue",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=None,
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["source_bbox"], [441, 91, 499, 441])
+        self.assertNotEqual(text["balloon_bbox"], text["source_bbox"])
+        self.assertLess(text["balloon_bbox"][0], text["source_bbox"][0])
+        self.assertGreater(text["balloon_bbox"][2], text["source_bbox"][2])
+        self.assertEqual(text["layout_reason"], "expanded_text_only_balloon")
+
+    def test_enrich_page_layout_does_not_expand_large_region_over_text_pixels(self):
+        page = {
+            "width": 800,
+            "height": 13832,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text": "PLEASE, FOR THE CHILD'S THE SA SAKE.",
+                    "bbox": [25, 5436, 667, 5949],
+                    "source_bbox": [25, 5436, 667, 5949],
+                    "text_pixel_bbox": [320, 5655, 656, 5949],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                    "block_profile": "white_balloon",
+                    "content_class": "dialogue",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=None,
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["balloon_bbox"], [25, 5436, 667, 5949])
+        self.assertEqual(text["layout_reason"], "cluster_bbox")
+
+    def test_enrich_page_layout_refines_white_balloon_from_merged_anchor(self):
+        page = {
+            "width": 800,
+            "height": 895,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text": "PLEASE, FOR THE CHILD'S SAKE.",
+                    "bbox": [25, 16, 667, 529],
+                    "source_bbox": [25, 16, 667, 529],
+                    "text_pixel_bbox": [320, 235, 656, 529],
+                    "_merged_source_bboxes": [[25, 16, 667, 529], [501, 218, 661, 325]],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                    "block_profile": "white_balloon",
+                    "content_class": "dialogue",
+                }
+            ],
+        }
+
+        seen = []
+
+        def _fake_refine(_image, bbox, _tipo):
+            seen.append(list(bbox))
+            return [466, 186, 696, 357]
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((895, 800, 3), 245, dtype=np.uint8),
+        ), patch("layout.balloon_layout.refine_balloon_bbox_from_image", side_effect=_fake_refine):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(seen[0], [501, 218, 661, 325])
+        self.assertEqual(text["balloon_bbox"], [466, 186, 696, 357])
+        self.assertEqual(text["layout_reason"], "refined_from_merged_anchor")
+
+    def test_enrich_page_layout_prefers_large_bubble_region_over_tiny_merged_anchor(self):
+        page = {
+            "width": 800,
+            "height": 895,
+            "_bubble_regions": [
+                {
+                    "id": "bubble_001",
+                    "bbox": [125, 16, 656, 575],
+                    "bubble_mask_bbox": [125, 16, 656, 575],
+                    "bubble_inner_bbox": [162, 53, 619, 538],
+                    "confidence": 0.91,
+                }
+            ],
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "Ajussi How long will it take to arrive to the nearest hospital?",
+                    "bbox": [125, 16, 656, 575],
+                    "source_bbox": [125, 16, 656, 575],
+                    "text_pixel_bbox": [135, 59, 274, 161],
+                    "_merged_source_bboxes": [[125, 16, 656, 575], [226, 59, 257, 88]],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                    "block_profile": "white_balloon",
+                    "content_class": "dialogue",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((895, 800, 3), 245, dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            return_value=[214, 47, 269, 100],
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["balloon_bbox"], [125, 16, 656, 575])
+        self.assertEqual(text["bubble_mask_bbox"], [125, 16, 656, 575])
+        self.assertEqual(text["bubble_inner_bbox"], [162, 53, 619, 538])
+        self.assertEqual(text["layout_reason"], "bubble_region_over_tiny_merged_anchor")
+
+    def test_enrich_page_layout_prefers_bubble_region_when_text_pixels_are_page_space(self):
+        page = {
+            "width": 800,
+            "height": 895,
+            "_bubble_regions": [
+                {
+                    "id": "bubble_001",
+                    "bbox": [125, 16, 656, 575],
+                    "bubble_mask_bbox": [125, 16, 656, 575],
+                    "bubble_inner_bbox": [162, 53, 619, 538],
+                    "confidence": 0.91,
+                }
+            ],
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "Ajussi How long will it take to arrive to the nearest hospital?",
+                    "bbox": [125, 16, 656, 575],
+                    "source_bbox": [125, 16, 656, 575],
+                    "text_pixel_bbox": [135, 4337, 274, 4439],
+                    "_merged_source_bboxes": [[125, 16, 656, 575], [226, 59, 257, 88]],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                    "block_profile": "white_balloon",
+                    "content_class": "dialogue",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((895, 800, 3), 245, dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            return_value=[214, 47, 269, 100],
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["balloon_bbox"], [125, 16, 656, 575])
+        self.assertEqual(text["layout_reason"], "bubble_region_over_tight_refinement")
+
+    def test_enrich_page_layout_uses_bubble_mask_bbox_when_region_bbox_is_tight(self):
+        page = {
+            "width": 800,
+            "height": 895,
+            "_bubble_regions": [
+                {
+                    "id": "bubble_001",
+                    "bbox": [214, 47, 269, 100],
+                    "bubble_mask_bbox": [125, 16, 656, 575],
+                    "bubble_inner_bbox": [162, 53, 619, 538],
+                    "confidence": 0.91,
+                }
+            ],
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "Ajussi How long will it take to arrive to the nearest hospital?",
+                    "bbox": [125, 16, 656, 575],
+                    "source_bbox": [125, 16, 656, 575],
+                    "text_pixel_bbox": [135, 59, 274, 161],
+                    "_merged_source_bboxes": [[125, 16, 656, 575], [226, 59, 257, 88]],
+                    "tipo": "fala",
+                    "balloon_type": "white",
+                    "layout_profile": "white_balloon",
+                    "block_profile": "white_balloon",
+                    "content_class": "dialogue",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]), patch(
+            "layout.balloon_layout._load_page_image",
+            return_value=np.full((895, 800, 3), 245, dtype=np.uint8),
+        ), patch(
+            "layout.balloon_layout.refine_balloon_bbox_from_image",
+            return_value=[214, 47, 269, 100],
+        ):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["balloon_bbox"], [125, 16, 656, 575])
+        self.assertEqual(text["bubble_mask_bbox"], [125, 16, 656, 575])
+        self.assertEqual(text["bubble_inner_bbox"], [162, 53, 619, 538])
+        self.assertEqual(text["layout_reason"], "bubble_region_over_tiny_merged_anchor")
 
     def test_connected_subregions_rich_skips_outline_for_dense_simple_candidate(self):
         image = np.full((260, 320, 3), 245, dtype=np.uint8)
@@ -326,7 +627,13 @@ class LayoutAnalysisTests(unittest.TestCase):
             "width": 800,
             "height": 1200,
             "_bubble_regions": [
-                {"bbox": [150, 150, 450, 390], "confidence": 0.97},
+                {
+                    "bbox": [150, 150, 450, 390],
+                    "confidence": 0.97,
+                    "bubble_id": "page_001_band_001_bubble_001",
+                    "bubble_mask_bbox": [150, 150, 450, 390],
+                    "bubble_inner_bbox": [175, 175, 425, 365],
+                },
                 {"bbox": [520, 180, 720, 340], "confidence": 0.91},
             ],
             "texts": [
@@ -339,6 +646,36 @@ class LayoutAnalysisTests(unittest.TestCase):
 
         self.assertEqual(text["balloon_bbox"], [150, 150, 450, 390])
         self.assertEqual(text["ocr_text_bbox"], [220, 218, 382, 286])
+        self.assertEqual(text["bubble_id"], "page_001_band_001_bubble_001")
+        self.assertEqual(text["bubble_mask_bbox"], [150, 150, 450, 390])
+        self.assertEqual(text["bubble_inner_bbox"], [175, 175, 425, 365])
+
+    def test_propagates_bubble_metadata_from_detected_region(self):
+        page = {
+            "width": 800,
+            "height": 1200,
+            "_bubble_regions": [
+                {
+                    "bbox": [150, 150, 450, 390],
+                    "confidence": 0.97,
+                    "bubble_id": "page_001_band_001_bubble_001",
+                    "bubble_mask_bbox": [150, 150, 450, 390],
+                    "bubble_inner_bbox": [175, 175, 425, 365],
+                },
+            ],
+            "texts": [
+                {"text": "Who are you?", "bbox": [220, 218, 382, 286], "tipo": "fala", "confidence": 0.93},
+            ],
+        }
+
+        enriched = enrich_page_layout(page)
+        text = enriched["texts"][0]
+
+        self.assertEqual(text["balloon_bbox"], [150, 150, 450, 390])
+        self.assertEqual(text["bubble_id"], "page_001_band_001_bubble_001")
+        self.assertEqual(text["bubble_mask_bbox"], [150, 150, 450, 390])
+        self.assertEqual(text["bubble_inner_bbox"], [175, 175, 425, 365])
+        self.assertEqual(text.get("connected_lobe_ids"), [])
 
     def test_geometric_fallback_uses_numbered_mask_layer_path_from_project(self):
         texts = [
@@ -1186,6 +1523,43 @@ class GeometricFallbackSubregionsTests(unittest.TestCase):
 
         self.assertEqual(texts[0].get("balloon_subregions", []), [])
 
+    def test_geometric_fallback_splits_visually_white_balloon_marked_textured(self):
+        image = np.full((260, 800, 3), 255, dtype=np.uint8)
+        text = {
+            "text": "WHY DID I DO THAT... I JUST NEEDED TO HOLD IT IN.",
+            "translated": (
+                "POR QUE EU FIZ ISSO... DE QUALQUER FORMA, ESTOU ME INTROMETENDO, "
+                "SO PRECISAVA SEGURAR POR UM MINUTO."
+            ),
+            "bbox": [174, 19, 702, 232],
+            "text_pixel_bbox": [174, 19, 702, 232],
+            "line_polygons": [
+                [[192, 19], [357, 19], [357, 40], [192, 40]],
+                [[174, 50], [374, 52], [374, 76], [174, 74]],
+                [[197, 85], [353, 85], [353, 106], [197, 106]],
+                [[487, 88], [661, 88], [661, 108], [487, 108]],
+                [[234, 116], [316, 116], [316, 140], [234, 140]],
+                [[468, 119], [682, 119], [682, 139], [468, 139]],
+                [[449, 150], [701, 150], [701, 170], [449, 170]],
+                [[448, 179], [702, 179], [702, 199], [448, 199]],
+                [[513, 211], [636, 211], [636, 232], [513, 232]],
+            ],
+            "tipo": "fala",
+            "confidence": 0.91,
+            "balloon_bbox": [0, 0, 800, 256],
+            "layout_group_size": 1,
+            "layout_shape": "wide",
+            "balloon_type": "textured",
+            "layout_profile": "standard",
+        }
+
+        texts = [text]
+        _apply_geometric_fallback_subregions(texts, {}, image)
+
+        self.assertEqual(texts[0].get("layout_profile"), "connected_balloon")
+        self.assertEqual(len(texts[0].get("balloon_subregions", [])), 2)
+        self.assertEqual(texts[0].get("connected_balloon_orientation"), "left-right")
+
     def test_geometric_fallback_rejects_single_text_sentences_when_groups_are_not_separable(self):
         image = np.full((2460, 1800, 3), 245, dtype=np.uint8)
         text = {
@@ -1830,6 +2204,45 @@ class MergeConnectedNearbyTextsTests(unittest.TestCase):
             self.assertEqual(len(text["balloon_subregions"]), 2)
             self.assertEqual(len(text["connected_lobe_bboxes"]), 2)
             self.assertGreaterEqual(text["connected_group_confidence"], 0.68)
+
+    def test_shared_connected_pair_ignores_preserved_logo_residual(self):
+        texts = [
+            {
+                "id": "ocr_001",
+                "text": "THIS IS AN IMPORTANT LINE.",
+                "translated": "ESTA E UMA LINHA IMPORTANTE.",
+                "bbox": [104, 860, 348, 972],
+                "text_pixel_bbox": [104, 860, 348, 972],
+                "balloon_bbox": [81, 840, 705, 1163],
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "layout_profile": "standard",
+                "layout_group_size": 1,
+                "connected_lobe_bboxes": [],
+            },
+            {
+                "id": "ocr_002",
+                "text": "RAINER",
+                "bbox": [178, 961, 647, 1147],
+                "text_pixel_bbox": [178, 961, 647, 1147],
+                "balloon_bbox": [81, 840, 705, 1163],
+                "tipo": "fala",
+                "balloon_type": "textured",
+                "layout_profile": "standard",
+                "layout_group_size": 1,
+                "connected_lobe_bboxes": [],
+                "preserve_original": True,
+                "content_class": "logo",
+                "qa_flags": ["logo_or_emblem_preserved"],
+                "skip_reason": "logo_or_emblem_preserved",
+            },
+        ]
+
+        _promote_shared_connected_balloon_pairs(texts)
+
+        self.assertNotEqual(texts[0].get("layout_profile"), "connected_balloon")
+        self.assertNotIn("connected_position_bboxes", texts[0])
+        self.assertNotEqual(texts[1].get("layout_profile"), "connected_balloon")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,11 @@
 ﻿import unittest
+import sys
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import translator.translate as translate_module
 
@@ -19,6 +25,8 @@ from translator.translate import (
     _prepare_source_text_for_translation,
     _resolve_translation_backend,
     _review_translation_grammar_semantics,
+    _should_skip_translation_item,
+    _translate_google_parallel_chunks,
     _translation_quality_flags,
     list_supported_google_languages,
     normalize_google_language_code,
@@ -32,6 +40,59 @@ class TranslateContextTests(unittest.TestCase):
         translate_module._google_health_key = None
         translate_module._google_health_ok = False
         translate_module._google_health_failed_at = {}
+
+    def test_should_skip_translation_item_respects_content_class(self):
+        assert _should_skip_translation_item({"content_class": "tn_note"}) is True
+        assert _should_skip_translation_item({"content_class": "scanlator_credit"}) is True
+        assert _should_skip_translation_item({"content_class": "dialogue"}) is False
+        assert _should_skip_translation_item({"content_class": "sign"}) is False
+        assert _should_skip_translation_item({"route_action": "inpaint_only", "skip_processing": False}) is True
+        assert _should_skip_translation_item({"route_action": "preserve", "skip_processing": False}) is True
+        assert _should_skip_translation_item({"route_action": "review_required", "skip_processing": False}) is True
+        assert _should_skip_translation_item({"route_action": "translate_render_only", "skip_processing": False}) is False
+
+    def test_google_parallel_chunks_default_off_uses_single_batch_call(self):
+        calls = []
+
+        def translate_batch(texts: list[str]) -> list[str]:
+            calls.append(list(texts))
+            return [f"pt:{text}" for text in texts]
+
+        with patch.dict("os.environ", {}, clear=True):
+            translated = _translate_google_parallel_chunks(
+                ["one", "two", "one"],
+                translate_batch,
+                min_unique_texts=2,
+                max_texts_per_chunk=1,
+            )
+
+        self.assertEqual(translated, ["pt:one", "pt:two", "pt:one"])
+        self.assertEqual(calls, [["one", "two", "one"]])
+
+    def test_google_parallel_chunks_deduplicates_chunks_and_preserves_order(self):
+        calls = []
+
+        def translate_batch(texts: list[str]) -> list[str]:
+            calls.append(list(texts))
+            return [f"pt:{text}" for text in texts]
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_GOOGLE_PARALLEL_CHUNKS": "1",
+                "TRADUZAI_GOOGLE_TRANSLATE_WORKERS": "2",
+            },
+            clear=True,
+        ):
+            translated = _translate_google_parallel_chunks(
+                ["one", "two", "one", "three", "four", "two"],
+                translate_batch,
+                min_unique_texts=3,
+                max_texts_per_chunk=2,
+            )
+
+        self.assertEqual(translated, ["pt:one", "pt:two", "pt:one", "pt:three", "pt:four", "pt:two"])
+        self.assertEqual(calls, [["one", "two"], ["three", "four"]])
 
     def test_list_supported_google_languages_returns_sorted_metadata(self):
         class _FakeGoogleTranslator:
@@ -95,6 +156,41 @@ class TranslateContextTests(unittest.TestCase):
 
         self.assertEqual(created[0], ("en", "pt"))
         self.assertTrue(translated[0]["texts"][0]["translated"].lower().startswith("pt:"))
+
+    def test_translate_pages_repairs_mojibake_and_flags_translation(self):
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self._translator = self
+                self.target = target
+
+            def translate(self, text: str):
+                if text == "__traduzai_probe__":
+                    return "ok"
+                return "VOCÃƒÅ  SABE"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return ["VOCÃƒÅ  SABE" for _text in texts]
+
+        ocr_results = [{"texts": [{"id": "ocr_001", "text": "YOU KNOW", "tipo": "fala"}]}]
+
+        with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+            with patch(
+                "translator.translate._check_ollama",
+                return_value={"running": False, "models": [], "has_translator": False},
+            ):
+                translated = translate_pages(
+                    ocr_results=ocr_results,
+                    obra="obra-teste",
+                    context={},
+                    glossario={},
+                    idioma_origem="en",
+                    idioma_destino="pt-BR",
+                )
+
+        text = translated[0]["texts"][0]
+        self.assertEqual(text["translated"], "VOCÊ SABE")
+        self.assertIn("mojibake_in_translation", text["qa_flags"])
+        self.assertEqual(text["mojibake_audit"]["suggested_fix"], "VOCÊ SABE")
 
     def test_translate_pages_skips_ollama_probe_when_google_is_available_by_default(self):
         class _FakeGoogleTranslator:
@@ -495,6 +591,7 @@ class TranslateContextTests(unittest.TestCase):
         self.assertEqual(translated, "Voce acha que")
 
     def test_translate_pages_repairs_proper_name_using_context_entities(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
         captured_batches = []
 
         class _FakeGoogleTranslator:
@@ -530,8 +627,9 @@ class TranslateContextTests(unittest.TestCase):
                             idioma_destino="pt-BR",
                         )
 
-        self.assertEqual(captured_batches[0], ["Ghislain Perdium"])
+        self.assertEqual(captured_batches[0], [placeholder])
         entity_meta = translated[0]["texts"][0]
+        self.assertIn("Ghislain Perdium", entity_meta["translated"])
         self.assertEqual(entity_meta["entity_flags"], ["source_entity_repaired"])
         self.assertEqual(
             entity_meta["entity_repairs"][0],
@@ -681,6 +779,7 @@ class TranslateContextTests(unittest.TestCase):
         self.assertFalse(translated[0]["texts"][0].get("proper_noun_preserved", False))
 
     def test_translate_pages_repairs_embedded_proper_name_inside_short_phrase(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
         captured_batches = []
 
         class _FakeGoogleTranslator:
@@ -711,14 +810,17 @@ class TranslateContextTests(unittest.TestCase):
                         idioma_destino="pt-BR",
                     )
 
-        self.assertIn("Ghislain Perdium", captured_batches[0][0])
+        self.assertIn(placeholder, captured_batches[0][0])
         entity_meta = translated[0]["texts"][0]
+        self.assertIn("Ghislain Perdium", entity_meta["translated"])
         self.assertIn("source_entity_repaired", entity_meta["entity_flags"])
         self.assertTrue(
             any(item.get("to") == "Ghislain Perdium" for item in entity_meta["entity_repairs"])
         )
 
     def test_translate_pages_locks_glossary_terms_inside_sentence(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
+
         class _FakeGoogleTranslator:
             def __init__(self, source="en", target="pt"):
                 self.target = target
@@ -731,7 +833,7 @@ class TranslateContextTests(unittest.TestCase):
                 return text
 
             def translate_batch(self, texts: list[str]) -> list[str]:
-                return ["o nucleo de mana esta instavel."]
+                return [f"o {placeholder} esta instavel."]
 
         ocr_results = [{"texts": [{"text": "The Mana Core is unstable.", "tipo": "fala"}]}]
 
@@ -752,14 +854,14 @@ class TranslateContextTests(unittest.TestCase):
 
         entity_meta = translated[0]["texts"][0]
         self.assertIn("N\u00facleo de Mana", entity_meta["translated"])
-        self.assertEqual(
+        self.assertIn(
+            {"phase": "placeholder", "source": "Mana Core", "target": "N\u00facleo de Mana"},
             entity_meta["glossary_hits"],
-            [{"phase": "target", "source": "Mana Core", "target": "N\u00facleo de Mana"}],
         )
-        self.assertIn("glossary_locked", entity_meta["entity_flags"])
+        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
 
     def test_translate_pages_restores_glossary_placeholder_when_preserved(self):
-        placeholder = PLACEHOLDER_TEMPLATE.format(index=1)
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
         captured_batches = []
 
         class _FakeGoogleTranslator:
@@ -797,7 +899,209 @@ class TranslateContextTests(unittest.TestCase):
             {"phase": "placeholder", "source": "Ghislain", "target": "Ghislain"},
             entity_meta["glossary_hits"],
         )
-        self.assertNotIn("placeholder_lost", entity_meta.get("qa_flags", []))
+        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
+
+    def test_translate_pages_name_locks_context_character_before_google(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.extend(texts)
+                if placeholder in texts[0]:
+                    return [f'{placeholder} disse "estou indo"']
+                return ['maravilhoso disse "estou indo"']
+
+        ocr_results = [{"texts": [{"text": 'Wonho said "I am going"', "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={"personagens": ["Wonho"]},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertIn(placeholder, captured_batches[0])
+        entity_meta = translated[0]["texts"][0]
+        self.assertEqual(entity_meta["translated"], 'Wonho disse "estou indo"')
+        self.assertNotIn("maravilhoso", entity_meta["translated"])
+        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
+
+    def test_translate_pages_name_lock_preserves_alias_punctuation(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.extend(texts)
+                return [f"{placeholder}...?"]
+
+        ocr_results = [{"texts": [{"text": "Hosu...?", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={"personagens": ["Wonho"], "aliases": ["Hosu"]},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertIn(placeholder, captured_batches[0])
+        entity_meta = translated[0]["texts"][0]
+        self.assertEqual(entity_meta["translated"], "Hosu...?")
+        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
+
+    def test_translate_pages_flags_dropped_placeholder_as_unrestored(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.extend(texts)
+                return ['maravilhoso disse "estou indo"']
+
+        ocr_results = [{"texts": [{"text": 'Wonho said "I am going"', "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={"personagens": ["Wonho"]},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertIn(placeholder, captured_batches[0])
+        entity_meta = translated[0]["texts"][0]
+        self.assertIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
+        self.assertIn("translation_render_blocked", entity_meta.get("qa_flags", []))
+        self.assertEqual(entity_meta.get("translation_blocked_text"), 'maravilhoso disse "estou indo"')
+
+    def test_ollama_repair_google_batch_keeps_name_lock_placeholders(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self._translator = self
+                self.target = target
+                self.seen_batches = []
+
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                self.seen_batches.extend(texts)
+                if texts and placeholder in texts[0]:
+                    return [f"{placeholder} venceu."]
+                return ["maravilhoso venceu."]
+
+        fake_google = _FakeGoogleTranslator()
+
+        ocr_results = [{"texts": [{"text": "Wonho wins", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=fake_google):
+                        with patch(
+                            "translator.translate._check_ollama",
+                            return_value={"running": True, "models": ["mangatl-translator:latest"], "has_translator": True},
+                        ):
+                            with patch("translator.translate._resolve_translation_backend", return_value="ollama"):
+                                with patch(
+                                    "translator.translate._call_ollama",
+                                    return_value=[{"id": "t1", "translated": "Wonho wins"}],
+                                ):
+                                    translated = translate_pages(
+                                        ocr_results=ocr_results,
+                                        obra="obra-teste",
+                                        context={"personagens": ["Wonho"]},
+                                        glossario={},
+                                        idioma_origem="en",
+                                        idioma_destino="pt-BR",
+                                    )
+
+        self.assertEqual(fake_google.seen_batches, [f"{placeholder} wins"])
+        entity_meta = translated[0]["texts"][0]
+        self.assertEqual(entity_meta["translated"], "Wonho venceu.")
+        self.assertNotIn("maravilhoso", entity_meta["translated"])
+        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
+
+    def test_translate_pages_does_not_name_lock_common_uppercase_one(self):
+        placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
+        captured_batches = []
+
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self.target = target
+
+            def translate(self, text: str):
+                return "teste" if text == "hello" else text
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                captured_batches.extend(texts)
+                return ["aquele poder permite que uma pessoa leia."]
+
+        ocr_results = [{"texts": [{"text": "THAT POWER LETS ONE READ.", "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+                with patch(
+                    "translator.translate._check_ollama",
+                    return_value={"running": False, "models": [], "has_translator": False},
+                ):
+                    translated = translate_pages(
+                        ocr_results=ocr_results,
+                        obra="obra-teste",
+                        context={"personagens": ["ONE", "READ"]},
+                        glossario={},
+                        idioma_origem="en",
+                        idioma_destino="pt-BR",
+                    )
+
+        self.assertNotIn(placeholder, captured_batches[0])
+        entity_meta = translated[0]["texts"][0]
+        self.assertEqual(entity_meta["translated"], "AQUELE PODER PERMITE QUE UMA PESSOA LEIA.")
+        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
 
     def test_context_hints_include_corpus_candidates(self):
         hints = _build_context_hints(
@@ -1089,6 +1393,141 @@ class TranslateContextTests(unittest.TestCase):
         flags = [item["qa_flags"] for item in translated[0]["texts"]]
         self.assertIn("suspected_ocr_error", flags[0])
         self.assertIn("source_script_leak", flags[1])
+
+    def test_google_translation_skip_item_does_not_gain_source_script_leak(self):
+        ocr_results = [
+            {
+                "texts": [
+                    {
+                        "id": "noise_001",
+                        "text": "\u5514\u2026\u2026",
+                        "tipo": "fala",
+                        "content_class": "noise",
+                        "skip_processing": True,
+                    }
+                ]
+            }
+        ]
+
+        translated = translate_pages(
+            ocr_results=ocr_results,
+            obra="obra-teste",
+            context={},
+            glossario={},
+            idioma_origem="zh",
+            idioma_destino="pt-BR",
+        )
+
+        item = translated[0]["texts"][0]
+        self.assertEqual(item["translated"], "\u5514\u2026\u2026")
+        self.assertNotIn("source_script_leak", item.get("qa_flags") or [])
+        self.assertNotIn("translation_blocked_text", item)
+
+    def test_chinese_mojibake_kana_passthrough_is_preserved_as_sfx(self):
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+                self.seen = []
+
+            def translate(self, text: str):
+                return "traduzido"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                self.seen.extend(texts)
+                return list(texts)
+
+        fake = _FakeGoogleTranslator()
+        mojibake_kana = (
+            "\u00e3\u201a\u00a2\u00e3\u0192\u00aa\u00e3\u0192\u2022"
+            "\u00e3\u0192\u00bc\u00e3\u0192\u2022\u00e3\u0192\u00bc"
+        )
+        ocr_results = [{"texts": [{"id": "ocr_001", "text": mojibake_kana, "tipo": "fala"}]}]
+
+        with patch("translator.translate._google", None):
+            with patch("translator.translate._google_health_key", None):
+                with patch("translator.translate._google_health_ok", False):
+                    with patch("translator.translate._GoogleTranslator", return_value=fake):
+                        translated = translate_pages(
+                            ocr_results=ocr_results,
+                            obra="obra-teste",
+                            context={},
+                            glossario={},
+                            idioma_origem="zh",
+                            idioma_destino="pt-BR",
+                        )
+
+        item = translated[0]["texts"][0]
+        self.assertEqual(fake.seen, ["\u30a2\u30ea\u30d5\u30fc\u30d5\u30fc"])
+        self.assertEqual(item["tipo"], "sfx")
+        self.assertEqual(item["content_class"], "sfx")
+        self.assertEqual(item["route_action"], "preserve")
+        self.assertEqual(item["route_reason"], "untranslated_kana_sfx_preserved")
+        self.assertFalse(item["skip_processing"])
+        self.assertTrue(item["preserve_original"])
+        self.assertIn("untranslated_kana_sfx_preserved", item.get("qa_flags") or [])
+        self.assertNotIn("source_script_leak", item.get("qa_flags") or [])
+        self.assertNotIn("translation_blocked_text", item)
+
+    def test_chinese_kana_sfx_preservation_keeps_translation_debug_pair(self):
+        from debug_tools import DebugRecorder, bind_recorder
+
+        class _FakeGoogleTranslator:
+            def __init__(self):
+                self._translator = self
+
+            def translate(self, text: str):
+                return "traduzido"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return list(texts)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = DebugRecorder(Path(tmp), enabled=True, run_id="run-translation-test")
+            bind_recorder(recorder)
+            try:
+                with patch("translator.translate._google", None):
+                    with patch("translator.translate._google_health_key", None):
+                        with patch("translator.translate._google_health_ok", False):
+                            with patch("translator.translate._GoogleTranslator", return_value=_FakeGoogleTranslator()):
+                                translate_pages(
+                                    ocr_results=[
+                                        {
+                                            "texts": [
+                                                {
+                                                    "id": "ocr_001",
+                                                    "text": "アリフーフー",
+                                                    "tipo": "fala",
+                                                    "band_id": "page_008_band_012",
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                    obra="obra-teste",
+                                    context={},
+                                    glossario={},
+                                    idioma_origem="zh",
+                                    idioma_destino="pt-BR",
+                                )
+            finally:
+                bind_recorder(None)
+
+            root = Path(tmp) / "debug" / "e2e" / "07_translation"
+            inputs = [
+                json.loads(line)
+                for line in (root / "translation_inputs.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            outputs = [
+                json.loads(line)
+                for line in (root / "translation_outputs.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual(len(inputs), 1)
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(inputs[0]["trace_id"], outputs[0]["trace_id"])
+        self.assertEqual(outputs[0]["final_translation_after_postprocess"], "アリフーフー")
+        self.assertIn("untranslated_kana_sfx_preserved", outputs[0].get("qa_flags") or [])
 
     def test_korean_translation_quality_flags_fallback_and_literal_ocr_phrases(self):
         self.assertIn(

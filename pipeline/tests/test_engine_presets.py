@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from pipeline.vision_stack.engine_presets import engine_steps_for_preset, resolve_engine_preset
+from pipeline.vision_stack.engine_presets import (
+    COMIC_TEXT_DETECTOR_HF_REPO,
+    COMIC_TEXT_DETECTOR_SEGMENTER,
+    engine_steps_for_preset,
+    list_engine_presets,
+    resolve_engine_preset,
+)
 
 
 def test_resolve_manga_engine_preset_from_config():
@@ -9,9 +15,9 @@ def test_resolve_manga_engine_preset_from_config():
     assert preset.to_dict() == {
         "id": "manga",
         "content_family": "manga",
-        "detector": "anime-text-yolo-n",
+        "detector": "comic-text-bubble-detector",
         "font_detector": "yuzumarker-font-detection",
-        "segmenter": "manga-text-segmentation-2025",
+        "segmenter": "comic-text-detector-seg",
         "bubble_segmenter": "speech-bubble-segmentation",
         "ocr": "paddle-ocr-vl-1.5",
         "inpainter": "aot-inpainting",
@@ -32,7 +38,7 @@ def test_resolve_manhwa_manhua_engine_preset_from_preset_settings():
 
     assert preset.id == "manhwa_manhua"
     assert preset.detector == "comic-text-bubble-detector"
-    assert preset.segmenter == "manga-text-segmentation-2025"
+    assert preset.segmenter == "comic-text-detector-seg"
     assert preset.bubble_segmenter == "speech-bubble-segmentation"
     assert preset.ocr == "paddle-ocr-vl-1.5"
     assert preset.inpainter == "aot-inpainting"
@@ -44,7 +50,7 @@ def test_resolve_manga_ocr_guided_engine_preset_from_config():
 
     assert preset.id == "manga_ocr_guided"
     assert preset.mask_strategy == "ocr_guided_segmentation"
-    assert preset.segmenter == "manga-text-segmentation-2025"
+    assert preset.segmenter == "comic-text-detector-seg"
     assert preset.inpainter == "aot-inpainting"
     assert preset.preserve_sfx is False
 
@@ -76,12 +82,36 @@ def test_engine_steps_exclude_default_and_disabled_stages():
     default_preset = resolve_engine_preset({"engine_preset_id": "default"})
     manga_preset = resolve_engine_preset({"engine_preset_id": "manga"})
 
-    assert engine_steps_for_preset(default_preset) == []
+    assert default_preset.segmenter == "comic-text-detector-seg"
+    assert default_preset.bubble_segmenter == "speech-bubble-segmentation"
+    assert default_preset.inpainter == "aot-inpainting"
+    assert engine_steps_for_preset(default_preset) == [
+        "comic-text-detector-seg",
+        "speech-bubble-segmentation",
+        "aot-inpainting",
+    ]
     assert engine_steps_for_preset(manga_preset) == [
-        "anime-text-yolo-n",
+        "comic-text-bubble-detector",
         "yuzumarker-font-detection",
-        "manga-text-segmentation-2025",
+        "comic-text-detector-seg",
         "speech-bubble-segmentation",
         "paddle-ocr-vl-1.5",
         "aot-inpainting",
     ]
+
+
+def test_comic_text_detector_segmenter_records_real_model_repo():
+    assert COMIC_TEXT_DETECTOR_SEGMENTER == "comic-text-detector-seg"
+    assert COMIC_TEXT_DETECTOR_HF_REPO == "mayocream/comic-text-detector"
+
+
+def test_all_presets_keep_segmenter_and_bubble_segmenter_enabled():
+    for preset in list_engine_presets():
+        assert preset.segmenter == "comic-text-detector-seg"
+        assert preset.bubble_segmenter == "speech-bubble-segmentation"
+        assert preset.segmenter not in {"", "default", "disabled"}
+        assert preset.bubble_segmenter not in {"", "default", "disabled"}
+        steps = engine_steps_for_preset(preset)
+        assert "comic-text-detector-seg" in steps
+        assert "speech-bubble-segmentation" in steps
+        assert "aot-inpainting" in steps

@@ -134,6 +134,29 @@ def finalize_decision_trace(run_meta: dict[str, Any] | None = None) -> dict[str,
             "flagged_pages": flagged_pages,
             "entries_preview": _ENTRIES[:200],
         }
+        export_gate = _RUN_META.get("export_gate") if isinstance(_RUN_META.get("export_gate"), dict) else None
+        if export_gate:
+            issues = [issue for issue in (export_gate.get("issues") or []) if isinstance(issue, dict)]
+            report["export_gate"] = export_gate
+            report["issues"] = issues
+            report["needs_review"] = bool(
+                export_gate.get("status") == "BLOCK"
+                or export_gate.get("needs_review")
+                or int(export_gate.get("review_issue_count", 0) or 0) > 0
+            )
+            report["summary"].update(
+                {
+                    "export_gate_status": export_gate.get("status"),
+                    "qa_issue_count": int(export_gate.get("issue_count", len(issues)) or 0),
+                    "critical_issue_count": int(export_gate.get("critical_issue_count", 0) or 0),
+                    "critical_flag_count": int(export_gate.get("critical_flag_count", 0) or 0),
+                    "review_issue_count": int(export_gate.get("review_issue_count", 0) or 0),
+                    "review_flag_count": int(export_gate.get("review_flag_count", 0) or 0),
+                }
+            )
+        qa_summary = _RUN_META.get("qa_summary") if isinstance(_RUN_META.get("qa_summary"), dict) else None
+        if qa_summary:
+            report["qa_summary"] = qa_summary
 
         if _QA_PATH is not None:
             _QA_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

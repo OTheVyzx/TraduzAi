@@ -18,6 +18,7 @@ InpaintWarmupRunner = Callable[..., None]
 PageActionOptions = dict[str, str | None]
 PageActionRunner = Callable[[Path, int, dict | None, PageActionOptions | None], None]
 RegionalPageActionRunner = Callable[[Path, int, dict | None], None]
+PreloadRunner = Callable[[Path, int, PageActionOptions | None], dict]
 
 
 class FastPageSession:
@@ -27,16 +28,22 @@ class FastPageSession:
         warmup_runner: WarmupRunner | None = None,
         inpaint_warmup_runner: InpaintWarmupRunner | None = None,
         detect_runner: PageActionRunner | None = None,
+        detect_boxes_runner: PageActionRunner | None = None,
         ocr_runner: PageActionRunner | None = None,
         reinpaint_runner: RegionalPageActionRunner | None = None,
+        preload_detect_runner: PreloadRunner | None = None,
+        preload_ocr_runner: PreloadRunner | None = None,
         session_id: str | None = None,
     ) -> None:
         self._pipeline_runner = pipeline_runner
         self._warmup_runner = warmup_runner or _default_warmup_runner
         self._inpaint_warmup_runner = inpaint_warmup_runner or _default_inpaint_warmup_runner
         self._detect_runner = detect_runner or _load_default_detect_runner()
+        self._detect_boxes_runner = detect_boxes_runner or _load_default_detect_boxes_runner()
         self._ocr_runner = ocr_runner or _load_default_ocr_runner()
         self._reinpaint_runner = reinpaint_runner or _load_default_reinpaint_runner()
+        self._preload_detect_runner = preload_detect_runner or _load_default_preload_detect_runner()
+        self._preload_ocr_runner = preload_ocr_runner or _load_default_preload_ocr_runner()
         self._warmed_keys: set[tuple[str, str, str]] = set()
         self._warmed_inpaint_keys: set[tuple[str, str]] = set()
         self.session_id = session_id or f"fast-page-{uuid.uuid4().hex}"
@@ -51,10 +58,16 @@ class FastPageSession:
             return self._handle_process_page(request)
         if request_type == "editor_detect_page":
             return self._handle_editor_page_action(request, self._detect_runner, "editor_detect_page")
+        if request_type == "editor_detect_boxes_page":
+            return self._handle_editor_page_action(request, self._detect_boxes_runner, "editor_detect_boxes_page")
         if request_type == "editor_ocr_page":
             return self._handle_editor_page_action(request, self._ocr_runner, "editor_ocr_page")
         if request_type == "editor_reinpaint":
             return self._handle_editor_reinpaint(request)
+        if request_type == "editor_preload_detect_ocr":
+            return self._handle_editor_preload(request, self._preload_detect_runner, "detect_ocr")
+        if request_type == "editor_preload_ocr_layers":
+            return self._handle_editor_preload(request, self._preload_ocr_runner, "ocr_layers")
         if request_type == "shutdown":
             return [{"type": "bye", "session_id": self.session_id}]
         raise ValueError(f"tipo de request desconhecido: {request_type!r}")
@@ -171,6 +184,33 @@ class FastPageSession:
             raise RuntimeError(f"{action_name} terminou sem evento complete/error")
         return events
 
+    def _handle_editor_preload(
+        self,
+        request: dict,
+        runner: PreloadRunner,
+        target: str,
+    ) -> list[dict]:
+        project_path = Path(_require_text(request, "project_path"))
+        page_index = _require_int(request, "page_index")
+        options = _page_action_options_from_request(request)
+
+        captured_stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured_stdout):
+                result = runner(project_path, page_index, options) or {}
+        except SystemExit as exc:
+            raise RuntimeError(f"pipeline saiu durante editor_preload_{target}: {exc}") from exc
+
+        state = str(result.get("cache") or "ready")
+        return [
+            {
+                "type": "ready" if state == "ready" else "accepted",
+                "target": target,
+                "cache": state,
+                "session_id": self.session_id,
+            }
+        ]
+
 
 @contextlib.contextmanager
 def _temporary_env(overrides: dict[str, str]):
@@ -205,17 +245,10 @@ def write_fast_page_config(request: dict) -> Path:
         "idioma_destino": request.get("idioma_destino") or request.get("dst_lang") or "pt-BR",
         "mode": request.get("mode") or "auto",
     }
-    for optional_key in (
-        "contexto",
-        "debug",
-        "export_mode",
-        "runtime_profile",
-        "skip_inpaint",
-        "skip_ocr",
-        "vision_worker_path",
-    ):
-        if optional_key in request:
-            config[optional_key] = request[optional_key]
+    for key, value in request.items():
+        if key == "type" or value is None:
+            continue
+        config[key] = value
 
     config_path = work_dir / "runner_config.json"
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -233,6 +266,8 @@ def serve_jsonl(
     detect_runner: PageActionRunner | None = None,
     ocr_runner: PageActionRunner | None = None,
     reinpaint_runner: RegionalPageActionRunner | None = None,
+    preload_detect_runner: PreloadRunner | None = None,
+    preload_ocr_runner: PreloadRunner | None = None,
 ) -> None:
     active_session = session or FastPageSession(
         pipeline_runner=pipeline_runner or _load_default_pipeline_runner(),
@@ -241,6 +276,8 @@ def serve_jsonl(
         detect_runner=detect_runner,
         ocr_runner=ocr_runner,
         reinpaint_runner=reinpaint_runner,
+        preload_detect_runner=preload_detect_runner,
+        preload_ocr_runner=preload_ocr_runner,
     )
     for raw_line in input_stream:
         line = raw_line.strip()
@@ -270,6 +307,8 @@ def serve_stdio(
     detect_runner: PageActionRunner | None = None,
     ocr_runner: PageActionRunner | None = None,
     reinpaint_runner: RegionalPageActionRunner | None = None,
+    preload_detect_runner: PreloadRunner | None = None,
+    preload_ocr_runner: PreloadRunner | None = None,
 ) -> int:
     serve_jsonl(
         sys.stdin,
@@ -280,6 +319,8 @@ def serve_stdio(
         detect_runner=detect_runner,
         ocr_runner=ocr_runner,
         reinpaint_runner=reinpaint_runner,
+        preload_detect_runner=preload_detect_runner,
+        preload_ocr_runner=preload_ocr_runner,
     )
     return 0
 
@@ -422,6 +463,12 @@ def _load_default_detect_runner() -> PageActionRunner:
     return _run_detect_page
 
 
+def _load_default_detect_boxes_runner() -> PageActionRunner:
+    from main import _run_detect_boxes_page
+
+    return _run_detect_boxes_page
+
+
 def _load_default_ocr_runner() -> PageActionRunner:
     from main import _run_ocr_page
 
@@ -432,6 +479,18 @@ def _load_default_reinpaint_runner() -> RegionalPageActionRunner:
     from main import _run_reinpaint
 
     return _run_reinpaint
+
+
+def _load_default_preload_detect_runner() -> PreloadRunner:
+    from main import _preload_detect_ocr_page
+
+    return _preload_detect_ocr_page
+
+
+def _load_default_preload_ocr_runner() -> PreloadRunner:
+    from main import _preload_ocr_layers_page
+
+    return _preload_ocr_layers_page
 
 
 if __name__ == "__main__":

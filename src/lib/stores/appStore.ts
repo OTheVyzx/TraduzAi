@@ -1,5 +1,11 @@
 import { create } from "zustand";
 import { sanitizeFavoriteWorks, upsertFavoriteWork } from "../favoriteWorks";
+import type {
+  AppProjectStatus,
+  CompletionStatus,
+  OutputReviewState,
+  PipelineExportGateSummary,
+} from "../pipelineCompletion";
 import type { WorkContext } from "../workContext";
 
 export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" | "rendered";
@@ -161,8 +167,15 @@ export interface Project {
   /** Contexto rico da obra para guiar a tradução (persiste no project.json) */
   translation_context?: WorkContext;
   qa?: unknown;
+  output_review_state?: OutputReviewState;
+  completion_status?: CompletionStatus;
+  export_gate?: PipelineExportGateSummary;
+  blocking_flags?: string[];
+  review_flags?: string[];
+  critical_issue_count?: number;
+  review_issue_count?: number;
   paginas: PageData[];
-  status: "idle" | "setup" | "processing" | "done" | "error";
+  status: AppProjectStatus;
   source_path: string;
   output_path?: string;
   totalPages: number;
@@ -230,6 +243,9 @@ export type RecentProject = {
   status: string;
   project_path?: string;
   output_path?: string;
+  output_review_state?: OutputReviewState;
+  critical_issue_count?: number;
+  review_issue_count?: number;
 };
 
 export interface BatchCompletionChapter {
@@ -242,6 +258,9 @@ export interface BatchCompletionChapter {
   first_page_path: string | null;
   cover_url: string | null;
   paginas: PageData[];
+  status?: "done" | "done_blocked" | "needs_review";
+  critical_issue_count?: number;
+  review_issue_count?: number;
 }
 
 export interface BatchCompletionSummary {
@@ -293,6 +312,20 @@ function sanitizeRecentProjects(value: unknown): RecentProject[] {
         pages: typeof item.pages === "number" ? item.pages : 0,
         date: typeof item.date === "string" ? item.date : new Date(0).toISOString(),
         status: typeof item.status === "string" ? item.status : "done",
+        output_review_state:
+          item.output_review_state === "blocked_preview" ||
+          item.output_review_state === "approved" ||
+          item.output_review_state === "overridden"
+            ? item.output_review_state
+            : undefined,
+        critical_issue_count:
+          typeof item.critical_issue_count === "number" && Number.isFinite(item.critical_issue_count)
+            ? item.critical_issue_count
+            : undefined,
+        review_issue_count:
+          typeof item.review_issue_count === "number" && Number.isFinite(item.review_issue_count)
+            ? item.review_issue_count
+            : undefined,
         ...(projectPath ? { project_path: projectPath } : {}),
         ...(outputPath ? { output_path: outputPath } : {}),
       };

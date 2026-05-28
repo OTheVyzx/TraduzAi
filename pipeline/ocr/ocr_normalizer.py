@@ -6,6 +6,21 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
+try:
+    from ocr.text_router import ROUTE_ACTIONS, apply_route_action
+    from ocr.postprocess import (
+        is_ocr_truncated_or_joined,
+        normalize_rotated_text_metadata,
+        should_retain_low_confidence_dialogue_ocr,
+    )
+except ImportError:  # pragma: no cover - supports package imports
+    from .text_router import ROUTE_ACTIONS, apply_route_action
+    from .postprocess import (
+        is_ocr_truncated_or_joined,
+        normalize_rotated_text_metadata,
+        should_retain_low_confidence_dialogue_ocr,
+    )
+
 
 MANDATORY_CORRECTIONS = {
     "RAID SOUAD": "RAID SQUAD",
@@ -14,6 +29,19 @@ MANDATORY_CORRECTIONS = {
     "CARBAGE": "GARBAGE",
     "TRAE": "TRAP",
     "FENRISNOW": "FENRIS NOW",
+}
+
+TRUNCATED_JOINED_REPAIRS = {
+    "WEDO": "WE DO",
+    "ITTOUS": "IT TO US",
+    "LYINGIL": "LYING. I'LL",
+    "NOTECPR": "NOTE CPR",
+}
+
+_LEGACY_SKIP_REASONS_TO_KEEP = {
+    "duplicate_lower_confidence",
+    "ocr_artifact",
+    "ocr_gibberish",
 }
 
 INLINE_MANDATORY_CORRECTIONS: list[tuple[str, str, int]] = [
@@ -136,6 +164,77 @@ def _apply_inline_mandatory(text: str) -> tuple[str, list[OcrCorrection]]:
     return result, corrections
 
 
+def _apply_punctuation_spacing(text: str) -> tuple[str, list[OcrCorrection]]:
+    result = str(text or "")
+    updated = re.sub(r"([!?]+)([\"']?)(?=[A-Za-z])", r"\1\2 ", result)
+    updated = re.sub(r",(?=[A-Za-z])", ", ", updated)
+    if updated == result:
+        return result, []
+    return updated, [OcrCorrection(result, updated, "repair_missing_punctuation_spacing", 0.98)]
+
+
+def _repair_truncated_or_joined_text(text: str) -> tuple[str, list[OcrCorrection]]:
+    result = str(text or "")
+    corrections: list[OcrCorrection] = []
+    updated = result
+    for source, replacement in TRUNCATED_JOINED_REPAIRS.items():
+        updated = re.sub(
+            rf"\b{re.escape(source)}\b",
+            replacement,
+            updated,
+            flags=re.IGNORECASE,
+        )
+    updated = re.sub(r"([!?]+)([\"']?)(?=[A-Za-z])", r"\1\2 ", updated)
+    updated = re.sub(r",(?=[A-Za-z])", ", ", updated)
+    if updated != result:
+        corrections.append(OcrCorrection(result, updated, "repair_truncated_or_joined_ocr", 0.9))
+    return updated, corrections
+
+
+def repair_ocr_truncated_or_joined(record: dict[str, Any]) -> dict[str, Any]:
+    """Try deterministic OCR join repair before leaving a record in review."""
+
+    updated = dict(record)
+    original = str(updated.get("text") or updated.get("raw_ocr") or updated.get("original") or "")
+    repaired, spacing_corrections = _apply_punctuation_spacing(original)
+    repaired, joined_corrections = _repair_truncated_or_joined_text(repaired)
+    corrections = [*spacing_corrections, *joined_corrections]
+
+    if repaired != original:
+        updated["text"] = repaired
+        updated["normalized_ocr"] = repaired
+        updated["ocr_repair_status"] = "repaired"
+        flags = [flag for flag in list(updated.get("qa_flags") or []) if flag != "ocr_truncated_or_joined"]
+        if "ocr_joined_repaired" not in flags:
+            flags.append("ocr_joined_repaired")
+        updated["qa_flags"] = flags
+        updated["needs_review"] = False
+        if str(updated.get("route_reason") or "").strip().lower() == "ocr_truncated_or_joined":
+            updated.pop("route_action", None)
+            updated.pop("route_reason", None)
+        updated.pop("preserve_original", None)
+        updated["normalization"] = {
+            "changed": True,
+            "corrections": [item.to_json() for item in corrections],
+            "is_gibberish": _is_gibberish(repaired),
+        }
+        updated["content_class"] = "text"
+        updated["route"] = "text"
+        updated["skip_processing"] = False
+        apply_route_action(updated, route_reason=updated.get("route_reason"))
+        return updated
+
+    updated["ocr_repair_status"] = "unrepaired" if is_ocr_truncated_or_joined(original) else "not_needed"
+    if updated["ocr_repair_status"] == "unrepaired":
+        updated["needs_review"] = True
+        flags = list(updated.get("qa_flags") or [])
+        if "ocr_truncated_or_joined" not in flags:
+            flags.append("ocr_truncated_or_joined")
+        updated["qa_flags"] = flags
+        apply_route_action(updated, route_action="review_required", route_reason="ocr_truncated_or_joined")
+    return updated
+
+
 def _is_scanlation_credit(text: str) -> bool:
     normalized = _norm_key(text)
     compact = re.sub(r"[^A-Z0-9]+", "", normalized)
@@ -147,7 +246,26 @@ def _is_scanlation_credit(text: str) -> bool:
         return True
     if ". COM" in normalized or normalized.endswith(".COM") or "DISCORD" in normalized:
         return True
+    if "@" in text and any(token in normalized for token in (".COM", "NAVER", "GMAIL", "MAIL")):
+        return True
+    if re.search(r"[A-Z0-9_+-]+@[A-Z0-9.-]+", normalized):
+        return True
+    if compact.endswith("COM") and any(ch.isdigit() for ch in compact):
+        return True
+    if _is_hyphenated_credit_name_list(normalized):
+        return True
     return False
+
+
+def _is_hyphenated_credit_name_list(normalized: str) -> bool:
+    tokens = re.findall(r"-?[A-Z0-9][A-Z0-9_]{2,}", normalized)
+    hyphenated = [token for token in tokens if token.startswith("-")]
+    if len(hyphenated) < 2:
+        return False
+    if not tokens:
+        return False
+    hyphen_ratio = len(hyphenated) / float(max(1, len(tokens)))
+    return hyphen_ratio >= 0.66 or (len(hyphenated) >= 3 and hyphen_ratio >= 0.50)
 
 
 def _is_short_quoted_dialogue(text: str) -> bool:
@@ -209,6 +327,10 @@ def normalize_ocr_text(text: str, glossary: dict[str, str] | None = None) -> dic
     if not corrections:
         normalized, new = _apply_inline_mandatory(normalized)
         corrections.extend(new)
+    normalized, new = _apply_punctuation_spacing(normalized)
+    corrections.extend(new)
+    normalized, new = _repair_truncated_or_joined_text(normalized)
+    corrections.extend(new)
     if not corrections:
         normalized, new = _apply_glossary_fuzzy(normalized, glossary)
         corrections.extend(new)
@@ -230,23 +352,38 @@ def normalize_ocr_record(record: dict[str, Any], glossary: dict[str, str] | None
     normalized = normalize_ocr_text(raw, glossary)
     updated = dict(record)
     updated.update(normalized)
+    normalize_rotated_text_metadata(updated)
+    _neutralize_low_confidence_visual_noise_filter(updated)
+    explicit_route_action = str(updated.get("route_action") or "").strip().lower()
+    has_explicit_route_action = explicit_route_action in ROUTE_ACTIONS
+    retain_low_confidence_dialogue = (
+        not has_explicit_route_action
+        and should_retain_low_confidence_dialogue_ocr(updated)
+    )
     if _is_known_latin_ocr_artifact(raw):
         flags = list(updated.get("qa_flags") or [])
         if "suspected_ocr_error" not in flags:
             flags.append("suspected_ocr_error")
         updated["qa_flags"] = flags
         updated["text"] = raw
-        updated["skip_processing"] = True
-        updated["skip_reason"] = "ocr_artifact"
+        updated["route"] = "text"
+        updated["content_class"] = "text"
+        route_action = explicit_route_action if has_explicit_route_action else "translate_inpaint_render"
+        apply_route_action(updated, route_action=route_action, route_reason=updated.get("route_reason") or "ocr_artifact")
         return updated
-    if _is_scanlation_credit(raw) or _is_scanlation_credit(normalized["normalized_ocr"]):
+    stale_truncated_review = (
+        explicit_route_action == "review_required"
+        and str(updated.get("route_reason") or "").strip().lower() == "ocr_truncated_or_joined"
+    )
+    if not stale_truncated_review and (_is_scanlation_credit(raw) or _is_scanlation_credit(normalized["normalized_ocr"])):
         flags = list(updated.get("qa_flags") or [])
-        if "scanlation_credit" not in flags:
-            flags.append("scanlation_credit")
         updated["qa_flags"] = flags
         updated["text"] = raw
-        updated["skip_processing"] = True
-        updated["skip_reason"] = "scanlation_credit"
+        updated["route"] = "text"
+        updated["content_class"] = "text"
+        updated["needs_review"] = False
+        apply_route_action(updated, route_action="translate_inpaint_render", route_reason="dialogue_balloon_with_english_text")
+        updated["skip_reason"] = None
         return updated
     if not normalized["normalization"]["is_gibberish"]:
         updated["text"] = normalized["normalized_ocr"]
@@ -255,8 +392,100 @@ def normalize_ocr_record(record: dict[str, Any], glossary: dict[str, str] | None
         if "ocr_gibberish" not in flags:
             flags.append("ocr_gibberish")
         updated["qa_flags"] = flags
-        updated["skip_processing"] = True
+        updated["route"] = "text"
+        updated["content_class"] = "text"
+        if not has_explicit_route_action:
+            apply_route_action(updated, route_action="translate_inpaint_render", route_reason="dialogue_balloon_with_english_text")
+    flags = list(updated.get("qa_flags") or [])
+    if retain_low_confidence_dialogue:
+        updated["skip_processing"] = False
+        updated["skip_reason"] = None
+        if not has_explicit_route_action:
+            apply_route_action(
+                updated,
+                route_action="translate_inpaint_render",
+                route_reason="ocr_retention_low_confidence_dialogue",
+            )
+    truncated_or_joined = is_ocr_truncated_or_joined(str(updated.get("text") or raw))
+    if truncated_or_joined:
+        if "ocr_truncated_or_joined" not in flags:
+            flags.append("ocr_truncated_or_joined")
+        updated["needs_review"] = True
+        apply_route_action(
+            updated,
+            route_action="review_required",
+            route_reason="ocr_truncated_or_joined",
+        )
+    elif is_ocr_truncated_or_joined(raw):
+        flags = [flag for flag in flags if flag != "ocr_truncated_or_joined"]
+        if "ocr_joined_repaired" not in flags:
+            flags.append("ocr_joined_repaired")
+        updated["needs_review"] = False
+        if explicit_route_action == "review_required" and str(updated.get("route_reason") or "").strip().lower() == "ocr_truncated_or_joined":
+            updated.pop("route_action", None)
+            updated.pop("route_reason", None)
+            explicit_route_action = ""
+            has_explicit_route_action = False
+    if flags:
+        updated["qa_flags"] = flags
+    if has_explicit_route_action and not truncated_or_joined:
+        apply_route_action(updated, route_action=explicit_route_action, route_reason=updated.get("route_reason"))
+    elif bool(record.get("skip_processing")) and _should_preserve_legacy_skip_route(updated):
+        updated["route"] = "text"
+        updated["content_class"] = "text"
+        apply_route_action(updated, route_action="translate_inpaint_render", route_reason="dialogue_balloon_with_english_text")
+    elif not updated.get("route_action"):
+        updated["content_class"] = "text"
+        apply_route_action(updated, route_reason=updated.get("route_reason"))
+    updated["content_class"] = "text"
+    updated["route"] = "text"
+    updated["skip_processing"] = False
+    updated.pop("preserve_original", None)
+    updated["skip_reason"] = None
     return updated
+
+
+def _neutralize_low_confidence_visual_noise_filter(record: dict[str, Any]) -> None:
+    flags = list(record.get("qa_flags") or [])
+    had_filter_flag = "low_confidence_visual_noise" in flags
+    if had_filter_flag:
+        record["qa_flags"] = [flag for flag in flags if flag != "low_confidence_visual_noise"]
+
+    reasons = {
+        str(record.get("skip_reason") or "").strip().lower(),
+        str(record.get("route_reason") or "").strip().lower(),
+        str(record.get("reason") or "").strip().lower(),
+    }
+    rules = record.get("rules_applied") or []
+    if isinstance(rules, list):
+        reasons.update(str(rule or "").strip().lower() for rule in rules)
+    if not had_filter_flag and "low_confidence_visual_noise" not in reasons:
+        return
+
+    record["skip_processing"] = False
+    record["skip_reason"] = None
+    record.pop("preserve_original", None)
+    record["content_class"] = "text"
+    record["route"] = "text"
+    action = str(record.get("route_action") or "").strip().lower()
+    if action in {"skip", "preserve", "review_required"}:
+        record.pop("route_action", None)
+        record.pop("route_reason", None)
+    if str(record.get("render_policy") or "").strip().lower() in {"skip", "preserve", "preserve_original"}:
+        record.pop("render_policy", None)
+    if str(record.get("translate_policy") or "").strip().lower() == "skip_translation":
+        record.pop("translate_policy", None)
+
+
+def _should_preserve_legacy_skip_route(record: dict[str, Any]) -> bool:
+    reason = str(record.get("skip_reason") or "").strip().lower()
+    if "duplicate" in reason:
+        return True
+    if reason in _LEGACY_SKIP_REASONS_TO_KEEP:
+        return True
+    if bool(record.get("has_better_duplicate") or record.get("better_duplicate")):
+        return True
+    return bool(record.get("duplicate_of") or record.get("duplicate_replaced_by"))
 
 
 def _similarity(left: str, right: str) -> float:

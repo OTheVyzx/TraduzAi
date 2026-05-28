@@ -1,10 +1,11 @@
 import { Search, ScanText, Languages, Sparkles, ClipboardCheck, X } from "lucide-react";
 import { useEditorStore } from "../../lib/stores/editorStore";
 
-type PageAction = "detect" | "ocr" | "translate" | "inpaint";
+type PageAction = "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
 
 const ACTIONS: { action: PageAction; label: string; icon: typeof Search }[] = [
   { action: "detect", label: "Detectar area", icon: Search },
+  { action: "detect_boxes", label: "Caixas area", icon: Search },
   { action: "ocr", label: "OCR area", icon: ScanText },
   { action: "translate", label: "Traduzir area", icon: Languages },
   { action: "inpaint", label: "Inpaint area", icon: Sparkles },

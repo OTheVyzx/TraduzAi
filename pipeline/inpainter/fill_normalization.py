@@ -32,9 +32,6 @@ def normalize_white_balloon_fill(
         return image_rgb
 
     block = block or {}
-    balloon_type = str(block.get("balloon_type") or "").strip().lower()
-    if balloon_type and balloon_type != "white":
-        return image_rgb
 
     mask = (target_mask > 0).astype(np.uint8) * 255
     sample_ring = cv2.dilate(

@@ -50,6 +50,10 @@ import {
 import { shouldOpenExistingProjectFromImport } from "../lib/projectSourceGuards";
 import { Card, Badge } from "../components/ui";
 import { ONBOARDING_FLOW } from "../lib/onboarding";
+import {
+  buildRecentProjectReviewBadge,
+  deriveProjectStatusFromReviewState,
+} from "../lib/pipelineCompletion";
 
 export function Home() {
   const navigate = useNavigate();
@@ -87,6 +91,8 @@ export function Home() {
       (typeof raw.output_path === "string" && raw.output_path.trim()) ||
       (typeof rawWorkDir === "string" && rawWorkDir.trim()) ||
       outputDir;
+    const status = deriveProjectStatusFromReviewState(raw);
+    const gate = raw.export_gate ?? ((raw.qa as { export_gate?: typeof raw.export_gate } | undefined)?.export_gate);
     return {
       id: crypto.randomUUID(),
       obra: raw.obra || "",
@@ -123,7 +129,12 @@ export function Home() {
         : null,
       preset: raw.preset ?? null,
       paginas: raw.paginas ?? [],
-      status: "done" as const,
+      status,
+      qa: raw.qa,
+      output_review_state: raw.output_review_state,
+      export_gate: gate,
+      critical_issue_count: gate?.critical_issue_count ?? 0,
+      review_issue_count: gate?.review_issue_count ?? 0,
       source_path: projectDir,
       output_path: projectDir,
       _work_dir: projectDir,
@@ -490,7 +501,10 @@ export function Home() {
               </span>
             </div>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              {recentProjects.map((proj) => (
+              {recentProjects.map((proj) => {
+                const reviewBadge = buildRecentProjectReviewBadge(proj);
+                const isBlocked = proj.status === "done_blocked";
+                return (
                 <Card
                   key={proj.id}
                   role="button"
@@ -533,8 +547,15 @@ export function Home() {
                   <p className="text-sm font-medium text-text-primary truncate mb-2">
                     {proj.obra || "Sem nome"}
                   </p>
+                  <div className="mb-2">
+                    <Badge tone={reviewBadge.tone} size="sm">
+                      {reviewBadge.label}
+                    </Badge>
+                  </div>
                   <div className="flex items-center gap-1.5">
-                    {proj.status === "done" ? (
+                    {isBlocked ? (
+                      <AlertCircle size={12} className="text-status-error" />
+                    ) : proj.status === "done" ? (
                       <CheckCircle2 size={12} className="text-status-success" />
                     ) : (
                       <AlertCircle size={12} className="text-status-warning" />
@@ -544,7 +565,8 @@ export function Home() {
                     </span>
                   </div>
                 </Card>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}

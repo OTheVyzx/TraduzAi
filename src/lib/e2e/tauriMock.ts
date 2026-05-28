@@ -1,4 +1,4 @@
-import type { EditorPagePayload, ProjectJson } from "../tauri";
+import type { EditorPagePayload, PipelineCompleteEvent, ProjectJson } from "../tauri";
 import {
   useAppStore,
   type ImageLayerKey,
@@ -20,7 +20,7 @@ function updatePage(pageIndex: number, updater: (page: PageData) => PageData) {
   setE2EFixtureProject({ ...project, paginas });
 }
 
-let pipelineCompleteCallback: ((result: { success: boolean; output_path: string }) => void) | null = null;
+let pipelineCompleteCallback: ((result: PipelineCompleteEvent) => void) | null = null;
 const pipelineOutputs = new Map<string, Project>();
 
 export const tauriMock = {
@@ -44,6 +44,59 @@ export const tauriMock = {
 
   async saveProjectJson(config: { project_json: Project }): Promise<void> {
     setE2EFixtureProject(clone(config.project_json));
+  },
+
+  async cacheGoogleFont(config: {
+    family: string;
+    css_family: string;
+    variant: string;
+    filename: string;
+  }): Promise<{
+    family: string;
+    css_family: string;
+    variant: string;
+    filename: string;
+    path: string;
+  }> {
+    return {
+      family: config.family,
+      css_family: config.css_family,
+      variant: config.variant,
+      filename: config.filename,
+      path: `/e2e/fonts/google/${config.filename}`,
+    };
+  },
+
+  async searchGoogleFonts(query: string): Promise<
+    Array<{
+      family: string;
+      css_family: string;
+      variant: string;
+      filename: string;
+      download_url: string;
+      category?: string | null;
+    }>
+  > {
+    const normalized = query.trim().toLowerCase();
+    const fonts = [
+      {
+        family: "Bebas Neue",
+        css_family: "Bebas Neue",
+        variant: "regular",
+        filename: "GoogleFont__Bebas_Neue__regular.ttf",
+        download_url: "https://raw.githubusercontent.com/google/fonts/main/ofl/bebasneue/BebasNeue-Regular.ttf",
+        category: "Display",
+      },
+      {
+        family: "Noto Sans",
+        css_family: "Noto Sans",
+        variant: "regular",
+        filename: "GoogleFont__Noto_Sans__regular.ttf",
+        download_url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf",
+        category: "Sans Serif",
+      },
+    ];
+    return fonts.filter((font) => font.family.toLowerCase().includes(normalized));
   },
 
   async loadEditorPage(config: { page_index: number }): Promise<EditorPagePayload> {
@@ -189,12 +242,12 @@ export const tauriMock = {
 
   async runPageActionWithOptionalMask(config: {
     page_index: number;
-    action: "detect" | "ocr" | "translate" | "inpaint";
+    action: "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
     bbox?: [number, number, number, number] | null;
     mask_path?: string | null;
     engine_preset_id?: string;
   }): Promise<{
-    action: "detect" | "ocr" | "translate" | "inpaint";
+    action: "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
     mode: "global" | "regional";
     bbox?: [number, number, number, number] | null;
     changed_assets: Array<"brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json">;
@@ -269,7 +322,12 @@ export const tauriMock = {
     };
   },
 
-  async startPipeline(config?: { source_path?: string; obra?: string; capitulo?: number }): Promise<{ job_id: string }> {
+  async startPipeline(config?: {
+    source_path?: string;
+    obra?: string;
+    work_title_user_provided?: boolean;
+    capitulo?: number;
+  }): Promise<{ job_id: string }> {
     const capitulo = Number(config?.capitulo ?? getE2EFixtureProject().capitulo);
     const outputPath = `e2e/project-cap-${capitulo}.json`;
     const project = clone(getE2EFixtureProject());
@@ -287,6 +345,17 @@ export const tauriMock = {
       pipelineCompleteCallback?.({
         success: true,
         output_path: outputPath,
+        job_id: "e2e-job",
+        completion_status: "approved",
+        export_gate: {
+          status: "PASS",
+          critical_issue_count: 0,
+          critical_flag_count: 0,
+          review_issue_count: 0,
+          needs_review: false,
+        },
+        blocking_flags: [],
+        review_flags: [],
       });
     }, 25);
     return { job_id: "e2e-job" };
@@ -298,7 +367,7 @@ export const tauriMock = {
 
   async onPipelineComplete(callback?: unknown): Promise<() => void> {
     if (typeof callback === "function") {
-      pipelineCompleteCallback = callback as (result: { success: boolean; output_path: string }) => void;
+      pipelineCompleteCallback = callback as (result: PipelineCompleteEvent) => void;
     }
     return () => {
       pipelineCompleteCallback = null;

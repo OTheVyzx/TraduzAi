@@ -90,7 +90,7 @@ def _item_to_evidence(item: dict[str, Any], *, width: int, height: int, source: 
         line_polygons=_normalize_line_polygons(item.get("line_polygons")),
         word_boxes=_normalize_boxes(item.get("word_boxes") or item.get("wordBoxes"), width, height),
         char_boxes=_normalize_boxes(item.get("char_boxes") or item.get("charBoxes"), width, height),
-        preserve_original=bool(item.get("skip_processing") or item.get("preserve_original")),
+        preserve_original=False,
     )
 
 
@@ -102,7 +102,7 @@ def normalize_text_evidence(page_result: dict[str, Any], width: int, height: int
             if not isinstance(item, dict):
                 continue
             candidate = _item_to_evidence(item, width=width, height=height, source=source)
-            if candidate is None or candidate.preserve_original:
+            if candidate is None:
                 continue
             dedupe_key = (*candidate.bbox, candidate.text)
             if dedupe_key in seen:

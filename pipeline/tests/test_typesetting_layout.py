@@ -28,7 +28,8 @@ from typesetter.renderer import (
 
 
 class TypesettingLayoutTests(unittest.TestCase):
-    _LEGACY_CONNECTED_DEFAULT_TESTS = {
+    _LEGACY_CONNECTED_DEFAULT_TESTS = set()
+    _LEGACY_CONNECTED_DEFAULT_TESTS_DISABLED = {
         "test_build_render_blocks_assigns_each_text_to_matching_subregion",
         "test_build_render_blocks_ignores_low_confidence_connected_subregions",
         "test_build_render_blocks_infers_connected_bodies_from_fragment_shift",
@@ -71,13 +72,34 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["text"], real_text["text"])
 
+    def test_white_narration_overbroad_balloon_keeps_capacity_near_ocr_anchor(self):
+        plan = plan_text_layout(
+            {
+                "text": "fOr twO Days, Then we'll RUN A RESTAURANT FOR FIVE DAYS.",
+                "translated": "Durante dois dias, depois administraremos um restaurante por cinco dias.",
+                "bbox": [556, 477, 896, 607],
+                "source_bbox": [556, 477, 896, 607],
+                "text_pixel_bbox": [560, 533, 895, 604],
+                "balloon_bbox": [110, 0, 1513, 623],
+                "tipo": "narracao",
+                "balloon_type": "white",
+                "layout_profile": "white_balloon",
+                "layout_group_size": 1,
+            }
+        )
+
+        self.assertLessEqual(plan["safe_text_box"][1], 540)
+        self.assertGreaterEqual(plan["safe_text_box"][3], 590)
+        self.assertLess(plan["safe_text_box"][2] - plan["safe_text_box"][0], 520)
+
     def setUp(self):
         if self._testMethodName in self._LEGACY_CONNECTED_DEFAULT_TESTS:
             self.skipTest("legacy balloon/connected render behavior disabled by simple OCR-position layout")
 
-    def test_build_render_blocks_splits_legacy_connected_group_by_default(self):
+    def test_build_render_blocks_preserves_connected_group_by_default(self):
         texts = [
             {
+                "id": "left",
                 "text": "LEFT",
                 "translated": "ESQUERDA",
                 "bbox": [20, 40, 110, 90],
@@ -93,6 +115,7 @@ class TypesettingLayoutTests(unittest.TestCase):
                 "connected_detection_confidence": 0.9,
             },
             {
+                "id": "right",
                 "text": "RIGHT",
                 "translated": "DIREITA",
                 "bbox": [150, 44, 240, 94],
@@ -111,13 +134,55 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         blocks = build_render_blocks(texts)
 
-        self.assertEqual(len(blocks), 2)
-        self.assertEqual([block["translated"] for block in blocks], ["ESQUERDA", "DIREITA"])
-        self.assertEqual(blocks[0]["balloon_bbox"], [24, 44, 104, 84])
-        self.assertEqual(blocks[1]["balloon_bbox"], [156, 50, 232, 88])
-        self.assertTrue(all(block.get("layout_group_size") == 1 for block in blocks))
-        self.assertTrue(all(block.get("balloon_subregions") == [] for block in blocks))
-        self.assertTrue(all(block.get("layout_profile") != "connected_balloon" for block in blocks))
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertEqual(block["translated"], "ESQUERDA DIREITA")
+        self.assertEqual(block["balloon_bbox"], [0, 0, 260, 140])
+        self.assertEqual(block["balloon_subregions"], [[0, 0, 130, 140], [130, 0, 260, 140]])
+        self.assertEqual(block["layout_group_size"], 2)
+        self.assertEqual(block["layout_profile"], "connected_balloon")
+        self.assertEqual(block.get("_source_text_ids"), ["left", "right"])
+        self.assertEqual(
+            [child["balloon_bbox"] for child in block.get("connected_children", [])],
+            [[0, 0, 130, 140], [130, 0, 260, 140]],
+        )
+
+    def test_typeset_target_uses_validated_source_when_ocr_bbox_is_broad(self):
+        text = {
+            "text": "THEY UTTER BLASPHEMY",
+            "translated": "ELES PROFEREM BLASFEMIAS",
+            "bbox": [20, 20, 380, 290],
+            "balloon_bbox": [20, 20, 380, 290],
+            "layout_bbox": [20, 20, 380, 290],
+            "_validated_text_source_bboxes": [[40, 20, 360, 120]],
+            "tipo": "narracao",
+            "balloon_type": "white",
+        }
+
+        plan = plan_text_layout(text)
+
+        self.assertEqual(plan["target_bbox"], [40, 20, 360, 120])
+        self.assertEqual(plan["_target_source"], "validated_text_source")
+        self.assertEqual(text["_validated_source_target_bbox"], [40, 20, 360, 120])
+
+    def test_connected_lobe_priority_beats_validated_source_target(self):
+        text = {
+            "text": "LEFT RIGHT",
+            "translated": "ESQUERDA DIREITA",
+            "bbox": [20, 20, 260, 140],
+            "balloon_bbox": [0, 0, 280, 160],
+            "_validated_text_source_bboxes": [[24, 30, 120, 80]],
+            "balloon_subregions": [[0, 0, 140, 160], [140, 0, 280, 160]],
+            "connected_lobe_bboxes": [[0, 0, 140, 160], [140, 0, 280, 160]],
+            "connected_balloon_orientation": "left-right",
+            "tipo": "fala",
+            "balloon_type": "white",
+        }
+
+        plan = plan_text_layout(text)
+
+        self.assertNotEqual(plan["target_bbox"], [24, 30, 120, 80])
+        self.assertEqual(plan["_target_source"], "")
 
     def test_build_render_blocks_splits_single_ocr_when_line_polygons_have_two_visual_lobes(self):
         text = {
@@ -168,7 +233,7 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertEqual(_resolve_english_anchor_bbox(text_data), [64, 72, 196, 116])
 
-    def test_plan_text_layout_uses_english_anchor_bbox_for_position_and_capacity(self):
+    def test_plan_text_layout_centers_simple_balloon_instead_of_english_anchor(self):
         text_data = {
             "translated": "CURTO",
             "bbox": [40, 60, 360, 260],
@@ -190,9 +255,12 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         plan = plan_text_layout(text_data)
 
-        self.assertEqual(plan["position_bbox"], [96, 100, 208, 132])
-        self.assertEqual(plan["max_width"], 112)
-        self.assertEqual(plan["max_height"], 32)
+        self.assertTrue(plan["_center_on_balloon_bbox"])
+        self.assertFalse(plan["_follow_english_anchor_position"])
+        self.assertEqual(plan["position_bbox"], [40, 60, 360, 260])
+        self.assertEqual(plan["capacity_bbox"], [40, 60, 360, 260])
+        self.assertEqual(plan["max_width"], 265)
+        self.assertEqual(plan["max_height"], 140)
 
     def test_plan_text_layout_relaxes_tiny_anchor_capacity_for_long_white_balloon_text(self):
         text_data = {
@@ -217,7 +285,12 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         plan = plan_text_layout(text_data)
 
-        self.assertEqual(plan["position_bbox"], [0, 0, 800, 269])
+        position_cx = (plan["position_bbox"][0] + plan["position_bbox"][2]) / 2
+        position_cy = (plan["position_bbox"][1] + plan["position_bbox"][3]) / 2
+        self.assertTrue(plan["_center_on_balloon_bbox"])
+        self.assertFalse(plan["_follow_english_anchor_position"])
+        self.assertAlmostEqual(position_cx, 400.0, delta=1.0)
+        self.assertAlmostEqual(position_cy, 134.5, delta=1.0)
         self.assertGreater(plan["max_width"], 300)
         self.assertFalse(plan["_anchor_capacity_locked"])
 
@@ -286,6 +359,63 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertEqual(plan["line_spacing_ratio"], 0.04)
 
+    def test_connected_single_ocr_anchors_lobes_to_original_line_positions(self):
+        subregions = [[0, 4292, 400, 4548], [400, 4292, 800, 4548]]
+        text_data = {
+            "translated": (
+                "POR QUE EU FIZ ISSO... DE QUALQUER FORMA, ESTOU ME INTROMETENDO, "
+                "SO PRECISAVA DE UM POUCO. PARA SEGURAR POR UM MINUTO, MAS EU "
+                "SIMPLESMENTE NAO CONSEGUIA MAIS ME CONTER."
+            ),
+            "bbox": [185, 4308, 708, 4532],
+            "balloon_bbox": [0, 4292, 800, 4548],
+            "balloon_subregions": subregions,
+            "connected_balloon_orientation": "left-right",
+            "connected_text_groups": [[32, 4312, 312, 4492], [464, 4338, 768, 4523]],
+            "connected_position_bboxes": [[10, 4292, 334, 4513], [448, 4327, 792, 4545]],
+            "line_polygons": [
+                [[192, 4311], [357, 4311], [357, 4332], [192, 4332]],
+                [[174, 4342], [374, 4344], [374, 4368], [174, 4366]],
+                [[197, 4377], [353, 4377], [353, 4398], [197, 4398]],
+                [[487, 4380], [661, 4380], [661, 4400], [487, 4400]],
+                [[234, 4408], [316, 4408], [316, 4432], [234, 4432]],
+                [[468, 4411], [682, 4411], [682, 4431], [468, 4431]],
+                [[449, 4442], [701, 4442], [701, 4462], [449, 4462]],
+                [[448, 4471], [702, 4471], [702, 4491], [448, 4491]],
+                [[513, 4503], [636, 4503], [636, 4524], [513, 4524]],
+            ],
+            "tipo": "fala",
+            "estilo": {"tamanho": 24, "alinhamento": "center"},
+            "layout_shape": "wide",
+            "layout_align": "center",
+            "layout_group_size": 1,
+        }
+
+        candidate = _build_connected_children_candidates(
+            text_data,
+            text_data["translated"],
+            subregions,
+        )[0]
+        left_child, right_child = candidate["children"]
+
+        self.assertEqual(left_child["_connected_source_bbox"], [174, 4311, 374, 4432])
+        self.assertEqual(right_child["_connected_source_bbox"], [448, 4380, 702, 4524])
+
+        left_plan = plan_text_layout(left_child)
+        right_plan = plan_text_layout(right_child)
+
+        def center(bbox):
+            return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+
+        self.assertAlmostEqual(center(left_plan["position_bbox"])[0], center(left_child["_connected_source_bbox"])[0], delta=1.0)
+        self.assertAlmostEqual(center(left_plan["position_bbox"])[1], center(left_child["_connected_source_bbox"])[1], delta=1.0)
+        self.assertAlmostEqual(center(right_plan["position_bbox"])[0], center(right_child["_connected_source_bbox"])[0], delta=1.0)
+        self.assertAlmostEqual(center(right_plan["position_bbox"])[1], center(right_child["_connected_source_bbox"])[1], delta=1.0)
+        self.assertGreater(left_plan["position_bbox"][0], 120)
+        self.assertLess(right_plan["position_bbox"][0], 430)
+        self.assertEqual(left_plan["vertical_bias_px"], 0)
+        self.assertEqual(right_plan["vertical_bias_px"], 0)
+
     def test_recenter_safe_text_positions_recenters_horizontally(self):
         fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
         font = SafeTextPathFont(fonts_dir / "ComicNeue-Bold.ttf", 32)
@@ -328,7 +458,7 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertGreater(len(layout["lines"]), 1)
         self.assertGreaterEqual(layout["font_size"], 10)
 
-    def test_plan_text_layout_limits_overbroad_white_balloon_to_text_anchor(self):
+    def test_plan_text_layout_uses_safe_area_for_overbroad_white_balloon(self):
         text_data = {
             "translated": "COMO PODERIA UM PEDACO DE MERDA FUTIL COMO VOCE QUERER-",
             "bbox": [366, 2937, 838, 3126],
@@ -351,10 +481,13 @@ class TypesettingLayoutTests(unittest.TestCase):
         plan = plan_text_layout(text_data)
         layout = _resolve_text_layout(text_data, plan)
 
-        self.assertLessEqual(plan["max_width"], 465)
-        self.assertGreaterEqual(plan["safe_text_box"][0], 360)
-        self.assertLessEqual(plan["safe_text_box"][2], 850)
-        self.assertGreater(len(layout["lines"]), 2)
+        self.assertTrue(plan["_center_on_balloon_bbox"])
+        self.assertFalse(plan["_follow_english_anchor_position"])
+        self.assertEqual(plan["layout_safe_reason"], "edge_clipped_white_balloon")
+        self.assertGreaterEqual(plan["max_width"], 700)
+        self.assertGreaterEqual(plan["safe_text_box"][0], plan["layout_safe_bbox"][0])
+        self.assertLessEqual(plan["safe_text_box"][2], plan["layout_safe_bbox"][2])
+        self.assertLessEqual(len(layout["lines"]), 3)
 
     def test_plan_text_layout_uses_balloon_polygon_safe_area_for_cjk_balloon(self):
         text_data = {
@@ -377,9 +510,9 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(plan["layout_safe_reason"], "balloon_polygon")
         self.assertGreater(plan["safe_text_box"][0], text_data["balloon_bbox"][0])
         self.assertLess(plan["safe_text_box"][2], text_data["balloon_bbox"][2])
-        safe_center = (plan["safe_text_box"][0] + plan["safe_text_box"][2]) / 2.0
-        balloon_center = (text_data["balloon_bbox"][0] + text_data["balloon_bbox"][2]) / 2.0
-        self.assertLess(abs(safe_center - balloon_center), 12)
+        self.assertTrue(plan["_center_on_balloon_bbox"])
+        self.assertFalse(plan["_follow_english_anchor_position"])
+        self.assertEqual(plan["position_bbox"], plan["layout_safe_bbox"])
 
     def test_plan_text_layout_ignores_textual_page_profile_for_safe_area(self):
         text_data = {
@@ -735,6 +868,55 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertNotIn("\n\n", blocks[0]["translated"])
         self.assertIn("DE UM ACORDO", blocks[0]["translated"])
 
+    def test_build_render_blocks_flags_low_confidence_lobe_assignment(self):
+        text = {
+            "translated": "VOCE ESTA CERTO.",
+            "bbox": [80, 50, 180, 92],
+            "tipo": "fala",
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "balloon_bbox": [0, 0, 320, 160],
+            "balloon_subregions": [[0, 0, 160, 160], [160, 0, 320, 160]],
+            "connected_lobe_bboxes": [[0, 0, 160, 160], [160, 0, 320, 160]],
+            "layout_profile": "connected_balloon",
+            "layout_group_size": 2,
+            "connected_balloon_orientation": "left-right",
+            "connected_detection_confidence": 0.92,
+            "connected_group_confidence": 0.52,
+            "connected_position_confidence": 0.58,
+            "lobe_assignment_confidence": 0.58,
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("lobe_assignment_low_confidence", text.get("qa_flags", []))
+        self.assertTrue(text.get("needs_review"))
+        self.assertEqual(text.get("lobe_assignment_confidence"), 0.58)
+        self.assertEqual(blocks[0].get("connected_lobe_bboxes", []), [])
+
+    def test_build_render_blocks_keeps_connected_geometry_when_position_confidence_is_unknown(self):
+        text = {
+            "translated": "VOCE ESTA SUANDO?",
+            "bbox": [552, 595, 567, 632],
+            "tipo": "fala",
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "balloon_bbox": [0, 0, 800, 797],
+            "balloon_subregions": [[0, 0, 430, 797], [430, 0, 800, 797]],
+            "connected_lobe_bboxes": [[0, 0, 430, 797], [430, 0, 800, 797]],
+            "layout_profile": "connected_balloon",
+            "layout_group_size": 1,
+            "connected_balloon_orientation": "horizontal",
+            "connected_detection_confidence": 0.72,
+            "connected_group_confidence": 0.72,
+            "connected_position_confidence": 0.0,
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertNotIn("lobe_assignment_low_confidence", text.get("qa_flags", []))
+        self.assertEqual(text.get("lobe_assignment_confidence"), 0.72)
+        self.assertEqual(blocks[0].get("connected_lobe_bboxes"), [[0, 0, 430, 797], [430, 0, 800, 797]])
+
     def test_build_render_blocks_infers_connected_bodies_from_fragment_shift(self):
         texts = [
             {
@@ -866,7 +1048,7 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertGreaterEqual(plan["max_width"], 280)
         self.assertLessEqual(len(layout["lines"]), 4)
 
-    def test_wide_narration_anchors_near_top(self):
+    def test_wide_narration_centers_without_top_narration_profile(self):
         style = {"tamanho": 26, "alinhamento": "center"}
         text_data = {
             "translated": "Three days later...",
@@ -880,7 +1062,8 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         plan = plan_text_layout(text_data)
 
-        self.assertEqual(plan["vertical_anchor"], "top")
+        self.assertEqual(plan["vertical_anchor"], "center")
+        self.assertTrue(plan["_center_on_balloon_bbox"])
         self.assertGreater(plan["max_width"], 500)
 
     def test_corpus_benchmark_reduces_size_and_strengthens_outline(self):
@@ -1144,6 +1327,48 @@ class TypesettingLayoutTests(unittest.TestCase):
                 "connected_position_confidence": 0.712,
                 "subregion_confidence": 1.0,
                 "layout_profile": "connected_balloon",
+            }
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].get("balloon_subregions", []), [])
+        self.assertNotEqual(blocks[0].get("layout_profile"), "connected_balloon")
+
+    def test_build_render_blocks_rejects_single_stack_crossing_connected_seam(self):
+        texts = [
+            {
+                "translated": (
+                    "WON BIN SO PENSA EM HOJE, ENTAO POR QUE NAO POSSO... "
+                    "EU CUIDAREI DOS PROBLEMAS DE AMANHA AMANHA, CERTO?"
+                ),
+                "bbox": [293, 12523, 616, 12704],
+                "text_pixel_bbox": [296, 12529, 613, 12699],
+                "tipo": "fala",
+                "estilo": {"tamanho": 24, "alinhamento": "center"},
+                "balloon_bbox": [293, 12523, 616, 12704],
+                "balloon_type": "white",
+                "balloon_subregions": [[293, 12523, 454, 12704], [454, 12523, 616, 12704]],
+                "connected_text_groups": [[305, 12537, 419, 12665], [479, 12555, 604, 12686]],
+                "connected_position_bboxes": [[296, 12523, 428, 12679], [473, 12548, 614, 12701]],
+                "layout_shape": "wide",
+                "layout_align": "center",
+                "layout_group_size": 2,
+                "source_text_count": 1,
+                "connected_balloon_orientation": "left-right",
+                "connected_detection_confidence": 1.0,
+                "connected_group_confidence": 0.62,
+                "connected_position_confidence": 0.848,
+                "subregion_confidence": 1.0,
+                "layout_profile": "connected_balloon",
+                "line_polygons": [
+                    [[316, 12529], [594, 12529], [594, 12550], [316, 12550]],
+                    [[296, 12565], [615, 12565], [615, 12588], [296, 12588]],
+                    [[311, 12601], [588, 12601], [588, 12625], [311, 12625]],
+                    [[299, 12640], [611, 12640], [611, 12660], [299, 12660]],
+                    [[330, 12676], [577, 12676], [577, 12699], [330, 12699]],
+                ],
             }
         ]
 

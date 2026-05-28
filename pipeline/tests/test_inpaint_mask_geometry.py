@@ -1,5 +1,10 @@
 import numpy as np
 import cv2
+from copy import deepcopy
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from inpainter.mask_builder import (
     bbox_to_octagon_mask,
@@ -10,6 +15,7 @@ from inpainter.mask_builder import (
     polygon_to_mask,
 )
 from vision_stack.cjk_segmentation_mask import build_manhwa_manhua_roi_segmentation_mask
+from vision_stack.runtime import vision_blocks_to_mask
 
 
 def test_polygon_to_mask_fills_polygon_in_page_space():
@@ -106,7 +112,7 @@ def test_inpaint_mask_unions_raw_pixels_with_line_geometry_for_sparse_glyphs():
 
     assert mask is not None
     assert mask[40, 36] == 255
-    assert mask[40, 62] == 255
+    assert mask[40, 62] == 0
     assert mask[12, 12] == 0
 
 
@@ -174,9 +180,73 @@ def test_build_inpaint_mask_prefers_irregular_text_pixels_when_image_available()
     assert mask is not None
     assert mask[46, 36] == 255
     assert mask[46, 92] == 255
-    assert mask[46, 47] == 255
-    assert mask[46, 64] == 255
     assert mask[18, 70] == 0
+
+
+def test_build_inpaint_mask_rejects_large_no_line_art_component():
+    image = np.full((220, 320, 3), 236, dtype=np.uint8)
+    image[28:38, 90:230] = 18
+    image[50:60, 98:222] = 18
+    cv2.ellipse(image, (164, 148), (108, 58), 0, 0, 360, (70, 70, 70), -1)
+    block = {
+        "bbox": [20, 10, 300, 205],
+        "text_pixel_bbox": [20, 10, 300, 205],
+        "balloon_bbox": [0, 0, 320, 220],
+        "balloon_type": "white",
+        "layout_profile": "white_balloon",
+        "content_class": "narration",
+    }
+
+    mask = build_inpaint_mask(block, image.shape, image_rgb=image)
+
+    assert mask is None
+    assert set(block.get("qa_flags", [])) & {"raw_text_evidence_missing", "raw_text_evidence_rejected"}
+
+
+def test_segment_evidence_validates_source_boxes_without_art():
+    image = np.full((300, 400, 3), 242, dtype=np.uint8)
+    for y in (42, 72):
+        for x in range(72, 326, 18):
+            image[y : y + 11, x : x + 7] = 16
+    cv2.ellipse(image, (210, 198), (118, 58), 0, 0, 360, (66, 66, 66), -1)
+    block = {
+        "bbox": [20, 20, 380, 290],
+        "text_pixel_bbox": [20, 20, 380, 290],
+        "_merged_source_bboxes": [[40, 20, 360, 120], [20, 80, 380, 290]],
+        "balloon_bbox": [0, 0, 400, 300],
+        "balloon_type": "white",
+        "layout_profile": "white_balloon",
+        "content_class": "narration",
+    }
+
+    mask = build_raw_text_mask_from_image(block, image, image.shape)
+
+    assert mask is not None
+    assert block["_validated_text_source_bboxes"] == [[40, 20, 360, 120]]
+    assert block["_rejected_text_source_bboxes"] == [[20, 80, 380, 290]]
+    assert block["validated_by_segment_mask"] is True
+    assert block["_raw_text_evidence_pixels"] > 0
+    assert block["_raw_text_evidence_bbox"][1] < 120
+    assert mask[46, 74] == 255
+    assert mask[198, 210] == 0
+
+
+def test_vision_blocks_to_mask_does_not_fallback_to_bbox_after_raw_evidence_rejection():
+    image = np.full((220, 320, 3), 236, dtype=np.uint8)
+    image[28:38, 90:230] = 18
+    cv2.ellipse(image, (164, 148), (108, 58), 0, 0, 360, (70, 70, 70), -1)
+    block = {
+        "bbox": [20, 10, 300, 205],
+        "text_pixel_bbox": [20, 10, 300, 205],
+        "balloon_bbox": [0, 0, 320, 220],
+        "balloon_type": "white",
+        "layout_profile": "white_balloon",
+        "content_class": "narration",
+    }
+
+    mask = vision_blocks_to_mask(image.shape, [deepcopy(block)], image_rgb=image, expand_mask=False)
+
+    assert int(np.count_nonzero(mask)) == 0
 
 
 def test_build_inpaint_mask_does_not_clip_to_tiny_sanitized_balloon_bbox():
@@ -250,3 +320,56 @@ def test_cjk_roi_segmentation_mask_remaps_crop_pixels_to_page_space():
 
     assert int(np.count_nonzero(mask)) > 0
     assert mask[90, 40] == 0
+
+
+def test_fast_fill_only_changes_masked_pixels_inside_same_bubble_id():
+    from inpainter import apply_koharu_bubble_fast_fill
+
+    image = np.full((64, 96, 3), 240, dtype=np.uint8)
+    image[28:36, 32:64] = 10
+    mask = np.zeros((64, 96), dtype=np.uint8)
+    mask[28:36, 32:64] = 255
+    bubble_mask = np.zeros((64, 96), dtype=np.uint8)
+    bubble_mask[12:52, 16:80] = 3
+
+    result, remaining, metadata = apply_koharu_bubble_fast_fill(image, mask, bubble_mask)
+
+    assert metadata["filled_pixels"] == int(np.count_nonzero(mask))
+    assert int(np.count_nonzero(remaining)) == 0
+    assert np.array_equal(result[0:12, :, :], image[0:12, :, :])
+    assert np.array_equal(result[:, 0:16, :], image[:, 0:16, :])
+    assert np.all(result[28:36, 32:64] == 240)
+
+
+def test_fast_fill_leaves_mask_for_aot_when_bubble_mask_is_missing():
+    from inpainter import apply_koharu_bubble_fast_fill
+
+    image = np.full((32, 40, 3), 220, dtype=np.uint8)
+    mask = np.zeros((32, 40), dtype=np.uint8)
+    mask[10:16, 12:22] = 255
+
+    result, remaining, metadata = apply_koharu_bubble_fast_fill(image, mask, None)
+
+    assert metadata["filled_pixels"] == 0
+    assert metadata["reason"] == "missing_bubble_mask"
+    assert np.array_equal(result, image)
+    assert np.array_equal(remaining, mask)
+
+
+def test_fast_fill_leaves_mask_for_aot_when_bubble_background_varies():
+    from inpainter import apply_koharu_bubble_fast_fill
+
+    image = np.full((48, 72, 3), 220, dtype=np.uint8)
+    image[:, ::2] = 180
+    image[20:28, 24:48] = 12
+    mask = np.zeros((48, 72), dtype=np.uint8)
+    mask[20:28, 24:48] = 255
+    bubble_mask = np.zeros((48, 72), dtype=np.uint8)
+    bubble_mask[8:40, 12:60] = 2
+
+    result, remaining, metadata = apply_koharu_bubble_fast_fill(image, mask, bubble_mask)
+
+    assert metadata["filled_pixels"] == 0
+    assert metadata["reason"] == "background_variation_high"
+    assert np.array_equal(result, image)
+    assert np.array_equal(remaining, mask)

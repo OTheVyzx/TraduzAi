@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import logging
+import math
 import os
 import sys
 import types
@@ -50,6 +51,7 @@ ANIME_TEXT_YOLO_HF_REPO = "mayocream/anime-text-yolo"
 ANIME_TEXT_YOLO_HF_DIR = "models--mayocream--anime-text-yolo"
 
 MIN_VALID_MODEL_BYTES = 1024
+DETECTOR_ROTATION_MIN_DEG = 12.0
 
 def _default_models_dir() -> Path:
     env_dir = (os.getenv("TRADUZAI_MODELS_DIR") or os.getenv("MANGATL_MODELS_DIR") or "").strip()
@@ -87,6 +89,96 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None or not str(raw).strip():
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_detector_rotation_deg(value) -> float:
+    try:
+        numeric = float(value or 0)
+    except Exception:
+        return 0.0
+    normalized = numeric % 360.0
+    if normalized > 180.0:
+        normalized -= 360.0
+    if normalized <= -180.0:
+        normalized += 360.0
+    if abs(normalized) < 0.01:
+        return 0.0
+    return round(normalized, 2)
+
+
+def _normalize_detector_edge_angle(dx: float, dy: float) -> float:
+    if abs(dx) < 0.01 and abs(dy) < 0.01:
+        return 0.0
+    angle = math.degrees(math.atan2(dy, dx))
+    while angle <= -180.0:
+        angle += 360.0
+    while angle > 180.0:
+        angle -= 360.0
+    if angle > 90.0:
+        angle -= 180.0
+    elif angle < -90.0:
+        angle += 180.0
+    if abs(angle) < 0.01:
+        return 0.0
+    return angle
+
+
+def _normalize_detector_polygon(value, width: int, height: int) -> list[list[int]] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    points: list[list[int]] = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            x = int(round(float(point[0])))
+            y = int(round(float(point[1])))
+        except Exception:
+            return None
+        points.append([max(0, min(max(0, width - 1), x)), max(0, min(max(0, height - 1), y))])
+    return points if len(points) >= 4 else None
+
+
+def _infer_detector_rotation_deg_from_polygon(polygon) -> float:
+    points: list[tuple[float, float]] = []
+    for point in polygon or []:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            points.append((float(point[0]), float(point[1])))
+        except Exception:
+            continue
+    if len(points) < 4:
+        return 0.0
+
+    edges: list[tuple[float, float, float]] = []
+    for index, (x1, y1) in enumerate(points):
+        x2, y2 = points[(index + 1) % len(points)]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length >= 8.0:
+            edges.append((length, dx, dy))
+    if not edges:
+        return 0.0
+
+    length, dx, dy = max(edges, key=lambda item: item[0])
+    del length
+    angle = _normalize_detector_edge_angle(dx, dy)
+    if abs(angle) < DETECTOR_ROTATION_MIN_DEG:
+        return 0.0
+    if abs(abs(angle) - 90.0) <= 5.0:
+        return 90.0 if angle >= 0.0 else -90.0
+    return _normalize_detector_rotation_deg(angle)
+
+
+def _detector_text_orientation(angle: float) -> str:
+    abs_angle = abs(float(angle or 0.0))
+    if abs_angle >= 45.0:
+        return "vertical"
+    if abs_angle > 5.0:
+        return "rotated"
+    return "horizontal"
 
 
 def _pop_module_namespace(prefixes: tuple[str, ...]) -> dict[str, types.ModuleType]:
@@ -179,6 +271,12 @@ class TextBlock:
     translated_text: str = ""
     font_size: int = 0
     is_vertical: bool = False
+    line_polygons: list[list[list[int]]] | None = None
+    rotation_deg: float = 0.0
+    rotation_source: str = ""
+    text_angle_degrees: float | None = None
+    text_orientation: str = ""
+    rotated_polygon: list[list[int]] | None = None
     color: tuple = (0, 0, 0)
 
     @property
@@ -336,6 +434,8 @@ class TextDetector:
         self._model = PaddleOCR(
             use_angle_cls=False,
             lang="en",
+            use_gpu=use_gpu,
+            enable_mkldnn=not use_gpu,
         )
         self._backend = "paddle-det"
         logger.info("Detector carregado via paddle-det (gpu=%s)", use_gpu)
@@ -805,14 +905,28 @@ class TextDetector:
 
         page = results[0] if results else []
         for box in page or []:
-            xs = [point[0] for point in box]
-            ys = [point[1] for point in box]
-            blocks.append(
-                TextBlock(
-                    xyxy=(min(xs) * sx, min(ys) * sy, max(xs) * sx, max(ys) * sy),
-                    confidence=1.0,
-                )
+            polygon = _normalize_detector_polygon(
+                [[float(point[0]) * sx, float(point[1]) * sy] for point in box],
+                orig_w,
+                orig_h,
             )
+            if polygon is None:
+                continue
+            xs = [point[0] for point in polygon]
+            ys = [point[1] for point in polygon]
+            rotation_deg = _infer_detector_rotation_deg_from_polygon(polygon)
+            block = TextBlock(
+                xyxy=(min(xs), min(ys), max(xs), max(ys)),
+                confidence=1.0,
+                line_polygons=[polygon],
+            )
+            if rotation_deg != 0.0:
+                block.rotation_deg = rotation_deg
+                block.rotation_source = "detector_polygon"
+                block.text_angle_degrees = rotation_deg
+                block.text_orientation = _detector_text_orientation(rotation_deg)
+                block.rotated_polygon = polygon
+            blocks.append(block)
         return blocks
 
     def crop(self, img_np: np.ndarray, block: TextBlock, padding: int = 4) -> np.ndarray:

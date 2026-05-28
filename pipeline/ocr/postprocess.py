@@ -7,8 +7,9 @@ outside the main detector orchestration.
 from __future__ import annotations
 
 import re
+from enum import Enum
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -47,6 +48,7 @@ WATERMARK_PATTERNS = [
         r"mangaball",
         r"ursaring",
         r"READ\s*ONLY\s*AT",
+        r"READER\s*THAT\s*DOES\s*NOT\s*SUPPORT\s*OUR\s*WEBSITE\s*HAS\s*BEEN\s*DETECTED",
         r"FOR\s+THE\s+FASTEST\s+RELEASES",
         r"WARNING\s*!",
         r"BETTER\s*QUALITY",
@@ -77,6 +79,7 @@ EDITORIAL_CREDIT_PHRASE_PATTERNS = [
         r"\bSUPPORT\s+US\b.*\bDONATIONS?\b",
         r"\bWE\s+ARE\s+RECRUITING\b",
         r"\bJOIN\s+OUR\s+(?:DISCORD|STAFF|TEAM)\b",
+        r"\bCOVER\b(?=[^\n]{0,180}\bVIEWS?\b)(?=[^\n]*[=\[\]/~])",
     ]
 ]
 
@@ -115,6 +118,30 @@ CJK_PATTERN = re.compile(
     r"[\u1100-\u11FF\u3000-\u303F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]"
 )
 
+
+class ContentClass(str, Enum):
+    DIALOGUE = "dialogue"
+    THOUGHT = "thought"
+    NARRATION = "narration"
+    SFX = "sfx"
+    TN_NOTE = "tn_note"
+    URL_WATERMARK = "url_watermark"
+    SCANLATOR_CREDIT = "scanlator_credit"
+    SIGN = "sign"
+    LOGO = "logo"
+    TITLE_COVER = "title_cover"
+    NOISE = "noise"
+
+
+SFX_INLINE_RE = re.compile(r"\bSFX\s*:\s*([A-Za-z0-9'_-]+)", re.IGNORECASE)
+TN_RE = re.compile(r"^\s*T\s*/\s*N\s*:", re.IGNORECASE)
+URL_RE = re.compile(r"https?://|www\.|discord|patreon|mzfamily", re.IGNORECASE)
+SCANLATOR_RE = re.compile(
+    r"secret\s+scans|scanlator|translation\s+team|cleaning|typesetting",
+    re.IGNORECASE,
+)
+SIGN_RE = re.compile(r"^\s*TEXT\s*:\s*", re.IGNORECASE)
+
 NON_LATIN_PATTERN = re.compile(
     r"[\u0400-\u04FF"   # Cirílico
     r"\u0600-\u06FF"    # Árabe
@@ -151,6 +178,77 @@ RUN_ON_WORDS = {
     "TIMES", "TITLE", "TO", "WAS", "WE", "WHAT", "WHEN", "WHO", "WHY",
     "WITH", "YOU", "YOUR",
 }
+
+
+def _normalize_rotation_degrees(value: Any) -> float:
+    try:
+        numeric = float(value or 0)
+    except Exception:
+        return 0.0
+    normalized = numeric % 360.0
+    if normalized > 180.0:
+        normalized -= 360.0
+    if normalized <= -180.0:
+        normalized += 360.0
+    if abs(normalized) < 0.01:
+        return 0.0
+    return round(normalized, 2)
+
+
+def _normalize_polygon_points(value: Any) -> list[list[int]] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    points: list[list[int]] = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            points.append([int(round(float(point[0]))), int(round(float(point[1])))])
+        except Exception:
+            return None
+    return points if len(points) >= 3 else None
+
+
+def _first_valid_polygon(value: Any) -> list[list[int]] | None:
+    polygon = _normalize_polygon_points(value)
+    if polygon:
+        return polygon
+    if not isinstance(value, (list, tuple)):
+        return None
+    for item in value:
+        polygon = _normalize_polygon_points(item)
+        if polygon:
+            return polygon
+    return None
+
+
+def normalize_rotated_text_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    """Attach stable angle aliases while preserving existing trace metadata."""
+
+    if not isinstance(record, dict):
+        return record
+    has_angle = record.get("text_angle_degrees") is not None or record.get("rotation_deg") is not None
+    if not has_angle:
+        return record
+
+    raw_angle = record.get("text_angle_degrees")
+    if raw_angle is None:
+        raw_angle = record.get("rotation_deg")
+    angle = _normalize_rotation_degrees(raw_angle)
+    record["text_angle_degrees"] = angle
+    abs_angle = abs(angle)
+    if abs_angle >= 45.0:
+        record["text_orientation"] = "vertical"
+    elif abs_angle > 5.0:
+        record["text_orientation"] = "rotated"
+    else:
+        record["text_orientation"] = "horizontal"
+
+    if abs_angle > 5.0 and not _first_valid_polygon(record.get("rotated_polygon")):
+        polygon = _first_valid_polygon(record.get("line_polygons"))
+        if polygon:
+            record["rotated_polygon"] = polygon
+    return record
 
 
 def _dictionary_split_yields_words(token: str, min_words: int = 2) -> bool:
@@ -194,6 +292,69 @@ def has_run_on_tokens(text: str) -> bool:
         if vowels >= 3 and consonants >= 6 and rare_clusters >= 1 and transitions >= 4:
             return True
     return False
+
+
+_KNOWN_TRUNCATED_OR_JOINED_TOKENS = {"WEDO", "ITTOUS", "LYINGIL", "NOTECPR"}
+
+
+def is_ocr_truncated_or_joined(text: str) -> bool:
+    """Detect short OCR joins/truncations that need human review before render."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if re.search(r"[?!]{1,2}[\"']?[A-Za-z]", raw):
+        return True
+    for token in re.findall(r"[A-Za-z]+", raw):
+        if token.upper() in _KNOWN_TRUNCATED_OR_JOINED_TOKENS:
+            return True
+    return has_run_on_tokens(raw)
+
+
+def _valid_bbox4(value: object) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return False
+    try:
+        x1, y1, x2, y2 = [int(v) for v in value]
+    except (TypeError, ValueError):
+        return False
+    return x2 > x1 and y2 > y1
+
+
+def _has_better_duplicate(record: dict) -> bool:
+    if bool(record.get("has_better_duplicate") or record.get("better_duplicate")):
+        return True
+    if record.get("duplicate_of") or record.get("duplicate_replaced_by"):
+        return True
+    reason = str(record.get("skip_reason") or "").strip().lower()
+    return "duplicate" in reason
+
+
+def should_retain_low_confidence_dialogue_ocr(record: dict) -> bool:
+    try:
+        confidence = float(record.get("confidence", record.get("confidence_raw", 1.0)) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 1.0
+    if confidence >= 0.55:
+        return False
+    if not _valid_bbox4(record.get("balloon_bbox")):
+        return False
+    if _has_better_duplicate(record):
+        return False
+
+    text = " ".join(str(record.get("text") or record.get("raw_ocr") or record.get("original") or "").split()).strip()
+    if not text:
+        return False
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", text):
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z']*", text)
+    if not words or len(words) > 8:
+        return False
+    letters = re.findall(r"[A-Za-z]", text)
+    if len(letters) < 2:
+        return False
+    if re.search(r"[?!.,\"']", text):
+        return True
+    return any(word.upper() in _SAFE_SHORT_DIALOGUE_WORDS for word in words)
 
 
 _DIGIT_TO_LETTER = {
@@ -311,6 +472,23 @@ def fix_ocr_errors(text: str, idioma_origem: str = "en") -> str:
 
 def is_watermark(text: str) -> bool:
     return any(pattern.search(text) for pattern in WATERMARK_PATTERNS)
+
+
+def classify_content(text: str, tipo: str = "fala") -> ContentClass:
+    text_clean = str(text or "").strip()
+    if not text_clean:
+        return ContentClass.NOISE
+    return ContentClass.DIALOGUE
+
+
+def split_sfx_inline(text: str) -> tuple[str, str | None]:
+    match = SFX_INLINE_RE.search(str(text or ""))
+    if not match:
+        return str(text or ""), None
+    sfx_word = match.group(1).upper()
+    cleaned = SFX_INLINE_RE.sub("", str(text or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned, sfx_word
 
 
 def _editorial_words(text: str) -> list[str]:
@@ -570,6 +748,50 @@ def is_hallucination(text: str, bbox: list[int], confidence: float) -> bool:
     return False
 
 
+_SAFE_SHORT_DIALOGUE_WORDS = {
+    "AH",
+    "EH",
+    "ER",
+    "HA",
+    "HE",
+    "HI",
+    "HM",
+    "HUH",
+    "I",
+    "ME",
+    "NO",
+    "OH",
+    "OK",
+    "OW",
+    "UH",
+    "UM",
+    "US",
+    "WE",
+    "WHAT",
+    "WHY",
+    "YES",
+    "YOU",
+}
+
+_SAFE_SHORT_DIALOGUE_PHRASES = {
+    "FOR NOW",
+}
+
+_LOW_CONFIDENCE_VISUAL_NOISE_THRESHOLD = 0.39
+
+
+def is_low_confidence_visual_noise(
+    text: str,
+    bbox: list[int],
+    confidence: float,
+    *,
+    is_white_balloon: bool,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+) -> bool:
+    """Legacy compatibility hook; low confidence is retained as metadata only."""
+    return False
+
+
 def is_ghost_ocr_noise(
     text: str,
     bbox: list[int],
@@ -738,7 +960,6 @@ def should_preserve_cjk_sfx_candidate(
         inside_speech_balloon = is_white_balloon or normalized_block_profile in {
             "white_balloon",
             "speech_balloon",
-            "top_narration",
         }
         if is_korean_sfx(stripped):
             return not inside_speech_balloon
@@ -830,7 +1051,18 @@ def is_cover_title_logo(
     tipo: str,
     is_white_balloon: bool,
     page_profile: str = "standard",
+    *,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool | None = None,
 ) -> bool:
+    if not _matches_user_provided_title(
+        text,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=bool(work_title_user_provided),
+    ):
+        return False
     if page_profile != "cover_opening":
         return False
 
@@ -885,6 +1117,9 @@ def is_cover_title_logo(
             and confidence <= 0.84
         )
 
+    if confidence < 0.58:
+        return False
+
     return (
         tipo == "narracao"
         and 2 <= word_count <= 10
@@ -902,8 +1137,19 @@ def is_textured_top_narration_cover_logo(
     image_shape: tuple[int, int, int] | tuple[int, int],
     tipo: str,
     page_profile: str = "standard",
+    *,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool | None = None,
 ) -> bool:
     if page_profile != "cover_opening" or tipo != "narracao" or confidence < 0.85:
+        return False
+    if work_title_user_provided is not None and not _matches_user_provided_title(
+        text,
+        work_title=work_title,
+        work_title_aliases=work_title_aliases,
+        work_title_user_provided=work_title_user_provided,
+    ):
         return False
 
     stripped = " ".join((text or "").split()).strip()
@@ -944,6 +1190,29 @@ def is_textured_top_narration_cover_logo(
     )
 
 
+def _matches_user_provided_title(
+    text: str,
+    *,
+    work_title: str = "",
+    work_title_aliases: list[str] | tuple[str, ...] | None = None,
+    work_title_user_provided: bool | None = False,
+) -> bool:
+    if not work_title_user_provided:
+        return False
+    value = _title_match_key(text)
+    if len(value) < 4:
+        return False
+    for candidate in [work_title, *(work_title_aliases or [])]:
+        key = _title_match_key(str(candidate or ""))
+        if len(key) >= 4 and (key == value or key in value or value in key):
+            return True
+    return False
+
+
+def _title_match_key(text: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(text or "").upper())
+
+
 def infer_block_profile(
     text: str,
     bbox: list[int],
@@ -971,9 +1240,6 @@ def infer_block_profile(
     ):
         return "decorative_noise"
 
-    if tipo == "narracao" and y1 <= int(image_h * 0.18) and box_w >= int(image_w * 0.32):
-        return "top_narration"
-
     if is_white_balloon:
         return "white_balloon"
 
@@ -985,8 +1251,6 @@ def suspicious_confidence_threshold(block_profile: str, page_profile: str = "sta
         return 0.68
     if block_profile == "white_balloon":
         return 0.55
-    if block_profile == "top_narration":
-        return 0.58
     if page_profile == "cover_opening":
         return 0.64
     return 0.60

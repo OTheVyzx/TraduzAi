@@ -79,7 +79,7 @@ class AotConfig:
 
 def aot_inpainting_enabled() -> bool:
     raw = os.getenv("TRADUZAI_AOT_INPAINT", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return raw not in {"0", "false", "no", "off", "disabled"}
 
 
 def _env_path(name: str) -> Path | None:
@@ -114,6 +114,9 @@ def find_aot_model_paths(models_dir: str | Path | None = None) -> AotModelPaths 
     env_models = _env_path("TRADUZAI_MODELS_DIR") or _env_path("MANGATL_MODELS_DIR")
     if env_models is not None:
         bases.append(env_models)
+    repo_root = Path(__file__).resolve().parents[2]
+    bases.append(repo_root / "models")
+    bases.append(repo_root / "data" / "models")
     bases.append(Path.cwd() / "models")
     bases.append(Path.home() / ".traduzai" / "models")
     bases.append(Path.home() / ".mangatl" / "models")

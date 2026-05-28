@@ -5,8 +5,10 @@ Batching para máxima performance na GPU
 """
 
 import logging
+import math
 import os
 import hashlib
+import re
 from collections import OrderedDict
 from difflib import SequenceMatcher
 from typing import Optional, Union
@@ -16,6 +18,11 @@ import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ocr.postprocess import normalize_rotated_text_metadata
+except ImportError:  # pragma: no cover - supports package imports
+    from ..ocr.postprocess import normalize_rotated_text_metadata
 
 PADDLE_DIRECT_LANGUAGE_CODES = {"ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka"}
 PADDLE_LATIN_LANGUAGE_CODES = {
@@ -32,6 +39,8 @@ PADDLE_CYRILLIC_LANGUAGE_CODES = {
 PADDLE_DEVANAGARI_LANGUAGE_CODES = {
     "hi", "mr", "ne", "bh", "mai", "ang", "bho", "mah", "sck", "new", "gom", "sa", "bgc",
 }
+SKEWED_TEXT_MIN_ROTATION_DEG = 12.0
+SKEWED_TEXT_MAX_DESKEW_DEG = 44.0
 
 
 def _env_int(name: str, default: int) -> int:
@@ -49,6 +58,47 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None or not str(raw).strip():
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ocr_fallback_shadow_enabled() -> bool:
+    return _env_bool("TRADUZAI_OCR_FALLBACK_SHADOW", False)
+
+
+def _ocr_fallback_shadow_limit(default: int = 1) -> int:
+    return max(0, _env_int("TRADUZAI_OCR_FALLBACK_SHADOW_MAX", default))
+
+
+def _attach_rotated_text_metadata(record: dict) -> dict:
+    return normalize_rotated_text_metadata(record)
+
+
+def _experimental_gpu_ocr_preprocess_enabled() -> bool:
+    return _env_bool("TRADUZAI_EXPERIMENTAL_GPU_OCR_PREPROCESS", False)
+
+
+def _gpu_image_ops_backend() -> str:
+    return os.getenv("TRADUZAI_GPU_IMAGE_OPS_BACKEND", "auto").strip() or "auto"
+
+
+def _resize_for_ocr_preprocess(
+    image: np.ndarray,
+    size: tuple[int, int],
+    *,
+    interpolation: int,
+) -> np.ndarray:
+    if _experimental_gpu_ocr_preprocess_enabled():
+        try:
+            from vision_stack.gpu_image_ops import resize_crops_batch
+
+            return resize_crops_batch(
+                [image],
+                size=size,
+                backend=_gpu_image_ops_backend(),
+                interpolation=interpolation,
+            )[0]
+        except Exception:
+            pass
+    return cv2.resize(image, size, interpolation=interpolation)
 
 
 PADDLE_LANGUAGE_ALIASES = {
@@ -174,6 +224,82 @@ def _bbox_from_polygons(line_polygons) -> list[int] | None:
     ]
 
 
+def normalize_rotation_deg(value) -> float:
+    try:
+        numeric = float(value or 0)
+    except Exception:
+        return 0.0
+    normalized = numeric % 360.0
+    if normalized > 180.0:
+        normalized -= 360.0
+    if normalized <= -180.0:
+        normalized += 360.0
+    if abs(normalized) < 0.01:
+        return 0.0
+    return round(normalized, 2)
+
+
+def _normalize_source_edge_angle(dx: float, dy: float) -> float:
+    if abs(dx) < 0.01 and abs(dy) < 0.01:
+        return 0.0
+    angle = math.degrees(math.atan2(dy, dx))
+    while angle <= -180.0:
+        angle += 360.0
+    while angle > 180.0:
+        angle -= 360.0
+    if angle > 90.0:
+        angle -= 180.0
+    elif angle < -90.0:
+        angle += 180.0
+    if abs(angle) < 0.01:
+        return 0.0
+    return angle
+
+
+def infer_rotation_deg_from_line_polygons(line_polygons) -> float:
+    weighted_angles: list[tuple[float, float]] = []
+    for polygon in line_polygons or []:
+        points: list[tuple[float, float]] = []
+        for point in polygon or []:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                points.append((float(point[0]), float(point[1])))
+            except Exception:
+                continue
+        if len(points) < 4:
+            continue
+
+        edges: list[tuple[float, float, float]] = []
+        for index, (x1, y1) in enumerate(points):
+            x2, y2 = points[(index + 1) % len(points)]
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.hypot(dx, dy)
+            if length >= 8.0:
+                edges.append((length, dx, dy))
+        if not edges:
+            continue
+
+        length, dx, dy = max(edges, key=lambda item: item[0])
+        angle = _normalize_source_edge_angle(dx, dy)
+        if abs(angle) < SKEWED_TEXT_MIN_ROTATION_DEG:
+            continue
+        weighted_angles.append((angle, length))
+
+    if not weighted_angles:
+        return 0.0
+    total_weight = sum(weight for _angle, weight in weighted_angles)
+    if total_weight <= 0.0:
+        return 0.0
+    average = sum(angle * weight for angle, weight in weighted_angles) / total_weight
+    if abs(average) < SKEWED_TEXT_MIN_ROTATION_DEG:
+        return 0.0
+    if abs(abs(average) - 90.0) <= 5.0:
+        return 90.0 if average >= 0.0 else -90.0
+    return normalize_rotation_deg(average)
+
+
 def _select_text_mask(gray_crop: np.ndarray) -> np.ndarray:
     if gray_crop.size == 0:
         return np.zeros(gray_crop.shape, dtype=np.uint8)
@@ -283,6 +409,161 @@ def _scale_polygon_points(points: list[list[int]], scale_x: float, scale_y: floa
     return scaled
 
 
+def _rotate_orthogonal(image: np.ndarray, rotation_deg: int) -> np.ndarray:
+    normalized = int(rotation_deg) % 360
+    if normalized == 90:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if normalized == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    if normalized == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return image
+
+
+def _unrotate_orthogonal_point(
+    point: list[int] | tuple[int, int],
+    *,
+    original_width: int,
+    original_height: int,
+    rotation_deg: int,
+) -> list[int]:
+    x_rot = float(point[0])
+    y_rot = float(point[1])
+    normalized = int(rotation_deg) % 360
+    if normalized == 90:
+        x = y_rot
+        y = float(original_height - 1) - x_rot
+    elif normalized == 180:
+        x = float(original_width - 1) - x_rot
+        y = float(original_height - 1) - y_rot
+    elif normalized == 270:
+        x = float(original_width - 1) - y_rot
+        y = x_rot
+    else:
+        x = x_rot
+        y = y_rot
+    x = max(0.0, min(float(max(0, original_width - 1)), x))
+    y = max(0.0, min(float(max(0, original_height - 1)), y))
+    return [int(round(x)), int(round(y))]
+
+
+def _unrotate_orthogonal_polygon(
+    polygon: list[list[int]],
+    *,
+    original_width: int,
+    original_height: int,
+    rotation_deg: int,
+) -> list[list[int]]:
+    return [
+        _unrotate_orthogonal_point(
+            point,
+            original_width=original_width,
+            original_height=original_height,
+            rotation_deg=rotation_deg,
+        )
+        for point in polygon or []
+    ]
+
+
+def _bbox_union_for_ocr(a: list[int], b: list[int]) -> list[int]:
+    return [
+        min(int(a[0]), int(b[0])),
+        min(int(a[1]), int(b[1])),
+        max(int(a[2]), int(b[2])),
+        max(int(a[3]), int(b[3])),
+    ]
+
+
+def _expanded_bboxes_touch(a: list[int], b: list[int], margin: int = 48) -> bool:
+    return not (
+        int(a[2]) + margin < int(b[0])
+        or int(b[2]) + margin < int(a[0])
+        or int(a[3]) + margin < int(b[1])
+        or int(b[3]) + margin < int(a[1])
+    )
+
+
+def _group_rotated_ocr_records(records: list[dict]) -> list[dict]:
+    groups: list[dict] = []
+    for record in records:
+        bbox = _coerce_bbox(record.get("source_bbox"))
+        if bbox is None:
+            continue
+        rotation = normalize_rotation_deg(record.get("rotation_deg"))
+        matched_group = None
+        for group in groups:
+            if abs(normalize_rotation_deg(group.get("rotation_deg")) - rotation) > 20.0:
+                continue
+            if _expanded_bboxes_touch(group["bbox"], bbox, margin=64):
+                matched_group = group
+                break
+        if matched_group is None:
+            groups.append(
+                {
+                    "bbox": bbox,
+                    "rotation_deg": rotation,
+                    "records": [record],
+                }
+            )
+            continue
+        matched_group["bbox"] = _bbox_union_for_ocr(matched_group["bbox"], bbox)
+        matched_group["records"].append(record)
+
+    grouped: list[dict] = []
+    for group in groups:
+        lines = list(group.get("records") or [])
+        lines.sort(
+            key=lambda item: (
+                int(item.get("_rotated_ocr_angle", 0) or 0),
+                (item.get("_rotated_line_bbox") or [0, 0, 0, 0])[1],
+                (item.get("_rotated_line_bbox") or [0, 0, 0, 0])[0],
+            )
+        )
+        text = " ".join(str(item.get("text") or "").strip() for item in lines).strip()
+        if not text:
+            continue
+        line_polygons = [
+            polygon
+            for item in lines
+            for polygon in (item.get("line_polygons") or [])
+            if polygon
+        ]
+        bbox = group["bbox"]
+        confidence_values = []
+        for item in lines:
+            try:
+                confidence_values.append(float(item.get("confidence") or 0.0))
+            except Exception:
+                pass
+        confidence = sum(confidence_values) / max(1, len(confidence_values))
+        rotation_deg = infer_rotation_deg_from_line_polygons(line_polygons)
+        if rotation_deg == 0.0:
+            rotation_deg = normalize_rotation_deg(group.get("rotation_deg"))
+        grouped.append(
+            _attach_rotated_text_metadata({
+                "text": text,
+                "source_bbox": bbox,
+                "bbox": bbox,
+                "line_polygons": line_polygons,
+                "text_pixel_bbox": _bbox_from_polygons(line_polygons) or bbox,
+                "confidence": round(float(confidence), 3),
+                "rotation_deg": rotation_deg,
+                "rotation_source": "rotated_page_ocr",
+                "detector": "rotated_full_page_recovery",
+                "_rotated_ocr_angle": lines[0].get("_rotated_ocr_angle") if lines else None,
+            })
+        )
+    return grouped
+
+
+def _repair_rotated_ocr_edge_clipping(text: str) -> str:
+    repaired = str(text or "").strip()
+    repaired = re.sub(r"(?i)^ppoint\b", "Appoint", repaired)
+    if repaired.count("]") > repaired.count("[") and not repaired.lstrip().startswith("["):
+        repaired = repaired.replace("]", "", 1)
+    return repaired.strip()
+
+
 class OCREngine:
     """
     Motor de OCR com suporte a batching.
@@ -389,6 +670,7 @@ class OCREngine:
         self._model = PaddleOCR(
             use_angle_cls=use_angle_cls,
             lang=mapped_lang,
+            use_gpu=use_gpu,
             enable_mkldnn=not use_gpu,  # MKL-DNN acelera CPU
             show_log=show_log,
         )
@@ -475,6 +757,7 @@ class OCREngine:
         blocks: list,
         allow_sparse_mapping: bool = False,
         crop_fallback_max: int | None = None,
+        sparse_crop_fallback_max: int | None = None,
     ) -> list[str | dict]:
         """Reconhece texto para cada bloco detectado, alinhando o resultado ao `blocks`.
 
@@ -519,10 +802,17 @@ class OCREngine:
         if crop_fallback_max is None:
             crop_fallback_max = _env_int("TRADUZAI_PADDLE_CROP_FALLBACK_MAX", 3)
         max_fallback = max(0, int(crop_fallback_max))
+        if sparse_crop_fallback_max is None:
+            sparse_crop_fallback_max = max_fallback
+        max_sparse_fallback = max(0, int(sparse_crop_fallback_max))
+        shadow_enabled = _ocr_fallback_shadow_enabled()
+        shadow_limit = _ocr_fallback_shadow_limit()
         if texts is None:
             recovered_by_crop: list[str] = [""] * len(blocks)
             attempts = 0
             recovered_count = 0
+            shadow_would_skip = 0
+            shadow_recovered_after_limit = 0
             for index, block in enumerate(blocks):
                 if attempts >= max_fallback:
                     break
@@ -540,14 +830,29 @@ class OCREngine:
                 recovered_by_crop[index] = recovered
                 if str(recovered or "").strip():
                     recovered_count += 1
+                if shadow_enabled and attempts > shadow_limit:
+                    shadow_would_skip += 1
+                    if str(recovered or "").strip():
+                        shadow_recovered_after_limit += 1
             self._last_recognize_blocks_stats = {
                 "block_count": len(blocks),
                 "full_page_mapping_failed": True,
                 "full_page_mapped": 0,
                 "crop_fallback_max": int(max_fallback),
+                "sparse_crop_fallback_max": int(max_sparse_fallback),
                 "crop_fallback_attempts": int(attempts),
                 "crop_fallback_recovered": int(recovered_count),
+                "crop_fallback_suppressed": 0,
             }
+            if shadow_enabled:
+                self._last_recognize_blocks_stats.update(
+                    {
+                        "fallback_shadow_attempt_limit": int(shadow_limit),
+                        "fallback_shadow_attempts_saved_or_would_skip": int(shadow_would_skip),
+                        "fallback_shadow_recovered_after_limit": int(shadow_recovered_after_limit),
+                        "fallback_shadow_full_page_already_resolved_count": 0,
+                    }
+                )
             if _env_bool("TRADUZAI_OCR_DEDUP", False):
                 self._last_recognize_blocks_stats["ocr_dedup_removed"] = int(
                     self._dedupe_ocr_records_in_place(recovered_by_crop, blocks)
@@ -567,12 +872,16 @@ class OCREngine:
             "full_page_mapping_failed": False,
             "full_page_mapped": int(full_page_mapped),
             "crop_fallback_max": int(max_fallback),
+            "sparse_crop_fallback_max": int(max_sparse_fallback),
             "crop_fallback_attempts": 0,
             "crop_fallback_recovered": 0,
+            "crop_fallback_suppressed": 0,
         }
+        shadow_would_skip = 0
+        shadow_recovered_after_limit = 0
         attempted = 0
         for index, text in enumerate(texts):
-            if attempted >= max_fallback:
+            if attempted >= max_sparse_fallback:
                 break
             current_text = text.get("text", "") if isinstance(text, dict) else text
             if str(current_text or "").strip():
@@ -591,12 +900,40 @@ class OCREngine:
             recovered = self._recognize_single_paddle_with_retry(crop)
             if str(recovered or "").strip():
                 stats["crop_fallback_recovered"] += 1
+            if shadow_enabled and attempted > shadow_limit:
+                shadow_would_skip += 1
+                if str(recovered or "").strip():
+                    shadow_recovered_after_limit += 1
             if isinstance(texts[index], dict):
                 updated = dict(texts[index])
                 updated["text"] = recovered
                 texts[index] = updated
             else:
                 texts[index] = recovered
+        if max_sparse_fallback <= 0:
+            suppressed = 0
+            for index, text in enumerate(texts):
+                current_text = text.get("text", "") if isinstance(text, dict) else text
+                if str(current_text or "").strip():
+                    continue
+                try:
+                    block_confidence = float(getattr(blocks[index], "confidence", 1.0) or 0.0)
+                except Exception:
+                    block_confidence = 1.0
+                if block_confidence >= 0.45:
+                    crop = self._crop_block_from_page(page_rgb, blocks[index])
+                    if self._crop_might_have_text(crop):
+                        suppressed += 1
+            stats["crop_fallback_suppressed"] = int(suppressed)
+        if shadow_enabled:
+            stats.update(
+                {
+                    "fallback_shadow_attempt_limit": int(shadow_limit),
+                    "fallback_shadow_attempts_saved_or_would_skip": int(shadow_would_skip),
+                    "fallback_shadow_recovered_after_limit": int(shadow_recovered_after_limit),
+                    "fallback_shadow_full_page_already_resolved_count": int(full_page_mapped),
+                }
+            )
 
         if _env_bool("TRADUZAI_OCR_DEDUP", False):
             stats["ocr_dedup_removed"] = int(self._dedupe_ocr_records_in_place(texts, blocks))
@@ -785,7 +1122,11 @@ class OCREngine:
 
     def _build_paddle_retry_variants(self, crop: np.ndarray) -> list[np.ndarray]:
         variants: list[np.ndarray] = []
-        up2 = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        up2 = _resize_for_ocr_preprocess(
+            crop,
+            (max(1, int(round(crop.shape[1] * 2.0))), max(1, int(round(crop.shape[0] * 2.0)))),
+            interpolation=cv2.INTER_CUBIC,
+        )
         variants.append(up2)
 
         # Reuse up2 for grayscale base (avoid redundant resize)
@@ -795,7 +1136,11 @@ class OCREngine:
 
         blur = cv2.GaussianBlur(gray_up2, (0, 0), sigmaX=1.2)
         sharp = cv2.addWeighted(gray_up2, 1.8, blur, -0.8, 0)
-        sharp_up15 = cv2.resize(sharp, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+        sharp_up15 = _resize_for_ocr_preprocess(
+            sharp,
+            (max(1, int(round(sharp.shape[1] * 1.5))), max(1, int(round(sharp.shape[0] * 1.5)))),
+            interpolation=cv2.INTER_CUBIC,
+        )
         variants.append(cv2.cvtColor(sharp_up15, cv2.COLOR_GRAY2RGB))
         return variants
 
@@ -927,7 +1272,7 @@ class OCREngine:
         max_dim = max(height, width)
         if max_dim > 256:
             scale = 256.0 / float(max_dim)
-            resized = cv2.resize(
+            resized = _resize_for_ocr_preprocess(
                 gray,
                 (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
                 interpolation=cv2.INTER_AREA,
@@ -958,6 +1303,146 @@ class OCREngine:
             return 0
         return int((ix2 - ix1) * (iy2 - iy1))
 
+    @staticmethod
+    def _rotate_bound_with_inverse(image: np.ndarray, rotation_deg: float) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+        if not isinstance(image, np.ndarray) or image.size == 0:
+            return None, None
+        height, width = image.shape[:2]
+        if height <= 0 or width <= 0:
+            return None, None
+        matrix = cv2.getRotationMatrix2D((width / 2.0, height / 2.0), float(rotation_deg), 1.0)
+        cos = abs(float(matrix[0, 0]))
+        sin = abs(float(matrix[0, 1]))
+        new_width = int((height * sin) + (width * cos))
+        new_height = int((height * cos) + (width * sin))
+        if new_width <= 0 or new_height <= 0:
+            return None, None
+        matrix[0, 2] += (new_width / 2.0) - (width / 2.0)
+        matrix[1, 2] += (new_height / 2.0) - (height / 2.0)
+        rotated = cv2.warpAffine(
+            image,
+            matrix,
+            (new_width, new_height),
+            flags=cv2.INTER_CUBIC,
+            borderValue=(255, 255, 255),
+        )
+        return rotated, cv2.invertAffineTransform(matrix)
+
+    @staticmethod
+    def _map_rotated_box_to_original_polygon(box, inverse_matrix: np.ndarray, offset_x: int, offset_y: int) -> list[list[int]]:
+        polygon: list[list[int]] = []
+        if inverse_matrix is None:
+            return polygon
+        for point in box or []:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                x = float(point[0])
+                y = float(point[1])
+            except Exception:
+                continue
+            mapped_x = (float(inverse_matrix[0, 0]) * x) + (float(inverse_matrix[0, 1]) * y) + float(inverse_matrix[0, 2])
+            mapped_y = (float(inverse_matrix[1, 0]) * x) + (float(inverse_matrix[1, 1]) * y) + float(inverse_matrix[1, 2])
+            polygon.append([int(round(mapped_x + offset_x)), int(round(mapped_y + offset_y))])
+        return polygon
+
+    @staticmethod
+    def _join_line_entries(lines: list[dict]) -> str:
+        return " ".join(entry["text"] for entry in lines if str(entry.get("text", "")).strip()).strip()
+
+    @staticmethod
+    def _ocr_text_gain_score(text: str) -> tuple[int, int, int]:
+        cleaned = str(text or "").strip()
+        alnum = sum(ch.isalnum() for ch in cleaned)
+        words = len(re.findall(r"[A-Za-z0-9']+", cleaned))
+        return alnum, words, len(cleaned)
+
+    def _recognize_skewed_block_lines(
+        self,
+        page_bgr: np.ndarray,
+        block_bbox: list[int],
+        rotation_deg: float,
+    ) -> list[dict]:
+        if abs(float(rotation_deg or 0.0)) < SKEWED_TEXT_MIN_ROTATION_DEG:
+            return []
+        if abs(float(rotation_deg or 0.0)) > SKEWED_TEXT_MAX_DESKEW_DEG:
+            return []
+        if not isinstance(page_bgr, np.ndarray) or page_bgr.size == 0:
+            return []
+        page_h, page_w = page_bgr.shape[:2]
+        x1, y1, x2, y2 = [int(v) for v in block_bbox]
+        box_w = max(1, x2 - x1)
+        box_h = max(1, y2 - y1)
+        pad = max(12, int(round(min(box_w, box_h) * 0.08)))
+        cx1 = max(0, x1 - pad)
+        cy1 = max(0, y1 - pad)
+        cx2 = min(page_w, x2 + pad)
+        cy2 = min(page_h, y2 + pad)
+        if cx2 <= cx1 or cy2 <= cy1:
+            return []
+        crop = page_bgr[cy1:cy2, cx1:cx2]
+        rotated, inverse_matrix = self._rotate_bound_with_inverse(crop, float(rotation_deg))
+        if rotated is None or inverse_matrix is None:
+            return []
+        try:
+            result = self._model.ocr(rotated, det=True, rec=True, cls=False)
+        except Exception as exc:
+            logger.debug("OCR deskew para texto inclinado falhou: %s", exc)
+            return []
+        raw_lines = result[0] if isinstance(result, list) and result else []
+        recovered: list[dict] = []
+        for item in raw_lines or []:
+            if not item or len(item) < 2:
+                continue
+            box = item[0]
+            meta = item[1]
+            text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
+            text = str(text or "").strip()
+            if not text:
+                continue
+            confidence = float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0
+            if confidence < 0.45:
+                continue
+            rotated_polygon = _normalize_line_polygons([box])
+            rotated_line_bbox = _bbox_from_polygons(rotated_polygon) or []
+            polygon = self._map_rotated_box_to_original_polygon(box, inverse_matrix, cx1, cy1)
+            polygon = _normalize_line_polygons([polygon])
+            normalized_polygon = polygon[0] if polygon else []
+            line_bbox = _bbox_from_polygons([normalized_polygon]) if normalized_polygon else None
+            if not line_bbox:
+                continue
+            recovered.append(
+                {
+                    "line_bbox": line_bbox,
+                    "text": text,
+                    "line_polygon": normalized_polygon,
+                    "confidence": confidence,
+                    "_rotated_line_bbox": rotated_line_bbox,
+                }
+            )
+        recovered.sort(
+            key=lambda entry: (
+                (entry.get("_rotated_line_bbox") or [0, 0, 0, 0])[1],
+                (entry.get("_rotated_line_bbox") or [0, 0, 0, 0])[0],
+            )
+        )
+        return recovered
+
+    def _should_replace_with_skewed_recovery(self, current_lines: list[dict], recovered_lines: list[dict]) -> bool:
+        if len(recovered_lines) < 2:
+            return False
+        current_text = self._join_line_entries(current_lines)
+        recovered_text = self._join_line_entries(recovered_lines)
+        if not recovered_text.strip():
+            return False
+        current_score = self._ocr_text_gain_score(current_text)
+        recovered_score = self._ocr_text_gain_score(recovered_text)
+        if recovered_score[0] >= current_score[0] + max(8, int(current_score[0] * 0.12)):
+            return True
+        if len(recovered_lines) > len(current_lines) and recovered_score[0] >= int(current_score[0] * 0.95):
+            return True
+        return False
+
     def _paddle_ocr_full_page_to_blocks(
         self,
         page_bgr: np.ndarray,
@@ -975,7 +1460,11 @@ class OCREngine:
             scaled_w = max(1, int(round(input_w * downscale)))
             scaled_h = max(1, int(round(input_h * downscale)))
             if scaled_w < input_w or scaled_h < input_h:
-                model_input = cv2.resize(page_bgr, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+                model_input = _resize_for_ocr_preprocess(
+                    page_bgr,
+                    (scaled_w, scaled_h),
+                    interpolation=cv2.INTER_AREA,
+                )
                 scale_x = scaled_w / float(max(1, input_w))
                 scale_y = scaled_h / float(max(1, input_h))
         try:
@@ -988,10 +1477,10 @@ class OCREngine:
         if not raw_lines:
             return None
 
-        block_bboxes: list[list[int]] = []
+        original_block_bboxes: list[list[int]] = []
         for block in blocks:
             try:
-                block_bboxes.append(
+                original_block_bboxes.append(
                     [
                         int(getattr(block, "x1")),
                         int(getattr(block, "y1")),
@@ -1001,7 +1490,8 @@ class OCREngine:
                 )
             except Exception:
                 xyxy = getattr(block, "xyxy", (0, 0, 0, 0))
-                block_bboxes.append([int(v) for v in xyxy])
+                original_block_bboxes.append([int(v) for v in xyxy])
+        block_bboxes: list[list[int]] = [list(bbox) for bbox in original_block_bboxes]
         if scale_x != 1.0 or scale_y != 1.0:
             block_bboxes = [_scale_bbox(bbox, scale_x, scale_y) for bbox in block_bboxes]
 
@@ -1068,8 +1558,20 @@ class OCREngine:
 
         texts: list[dict] = []
         non_empty = 0
-        for lines in assigned:
+        for block_index, lines in enumerate(assigned):
             lines.sort(key=lambda entry: (entry["line_bbox"][1], entry["line_bbox"][0]))
+            deskew_recovered = False
+            pre_recovery_polygons = [entry["line_polygon"] for entry in lines if entry.get("line_polygon")]
+            pre_recovery_rotation = infer_rotation_deg_from_line_polygons(pre_recovery_polygons)
+            if abs(pre_recovery_rotation) >= SKEWED_TEXT_MIN_ROTATION_DEG and abs(pre_recovery_rotation) <= SKEWED_TEXT_MAX_DESKEW_DEG:
+                recovered_lines = self._recognize_skewed_block_lines(
+                    page_bgr,
+                    original_block_bboxes[block_index] if block_index < len(original_block_bboxes) else block_bboxes[block_index],
+                    pre_recovery_rotation,
+                )
+                if self._should_replace_with_skewed_recovery(lines, recovered_lines):
+                    lines = recovered_lines
+                    deskew_recovered = True
             joined = " ".join(entry["text"] for entry in lines if str(entry.get("text", "")).strip()).strip()
             if joined:
                 non_empty += 1
@@ -1084,13 +1586,22 @@ class OCREngine:
                 ]
             else:
                 source_bbox = []
+            rotation_deg = infer_rotation_deg_from_line_polygons(combined_polygons)
+            record = {
+                "text": joined,
+                "source_bbox": source_bbox,
+                "line_polygons": combined_polygons,
+                "text_pixel_bbox": _derive_text_pixel_bbox(page_rgb, source_bbox, combined_polygons) or source_bbox,
+            }
+            if rotation_deg != 0.0:
+                record["rotation_deg"] = rotation_deg
+                record["rotation_source"] = "line_polygons"
+            _attach_rotated_text_metadata(record)
+            if deskew_recovered:
+                record["ocr_recovery"] = "skewed_block_deskew"
+                record["qa_flags"] = ["skewed_text_deskew_recovery"]
             texts.append(
-                {
-                    "text": joined,
-                    "source_bbox": source_bbox,
-                    "line_polygons": combined_polygons,
-                    "text_pixel_bbox": _derive_text_pixel_bbox(page_rgb, source_bbox, combined_polygons) or source_bbox,
-                }
+                record
             )
 
         if non_empty == 0:
@@ -1106,6 +1617,90 @@ class OCREngine:
             return None
 
         return texts
+
+    def recognize_rotated_full_page_lines(
+        self,
+        page_rgb: np.ndarray,
+        rotations: tuple[int, ...] = (90, 270),
+        min_confidence: float = 0.80,
+    ) -> list[dict]:
+        if getattr(self, "_backend", "") != "paddleocr":
+            return []
+        if not isinstance(page_rgb, np.ndarray) or page_rgb.size == 0:
+            return []
+
+        original_height, original_width = page_rgb.shape[:2]
+        records: list[dict] = []
+        for rotation_deg in rotations:
+            rotated = _rotate_orthogonal(page_rgb, int(rotation_deg))
+            try:
+                result = self._model.ocr(rotated, det=True, rec=True, cls=False)
+            except Exception as exc:
+                logger.debug("PaddleOCR rotated-page recovery falhou (%s): %s", rotation_deg, exc)
+                continue
+            raw_lines = result[0] if isinstance(result, list) and result else []
+            if raw_lines is None:
+                raw_lines = []
+            for item in raw_lines:
+                if not item or len(item) < 2:
+                    continue
+                box = item[0]
+                meta = item[1]
+                text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
+                text = _repair_rotated_ocr_edge_clipping(str(text or "").strip())
+                if not text:
+                    continue
+                try:
+                    confidence = float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0
+                except Exception:
+                    confidence = 0.0
+                if confidence < float(min_confidence):
+                    continue
+                rotated_polygons = _normalize_line_polygons([box])
+                if not rotated_polygons:
+                    continue
+                polygon = _unrotate_orthogonal_polygon(
+                    rotated_polygons[0],
+                    original_width=original_width,
+                    original_height=original_height,
+                    rotation_deg=int(rotation_deg),
+                )
+                if len(polygon) < 4:
+                    continue
+                line_polygons = [polygon]
+                source_bbox = _bbox_from_polygons(line_polygons)
+                if source_bbox is None:
+                    continue
+                rotation = infer_rotation_deg_from_line_polygons(line_polygons)
+                if abs(rotation) < 35.0:
+                    continue
+                xs = [float(p[0]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+                ys = [float(p[1]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
+                rotated_line_bbox = [
+                    int(min(xs)),
+                    int(min(ys)),
+                    int(max(xs)),
+                    int(max(ys)),
+                ] if xs and ys else [0, 0, 0, 0]
+                records.append(
+                    _attach_rotated_text_metadata({
+                        "text": text,
+                        "source_bbox": source_bbox,
+                        "bbox": source_bbox,
+                        "line_polygons": line_polygons,
+                        "text_pixel_bbox": _derive_text_pixel_bbox(page_rgb, source_bbox, line_polygons) or source_bbox,
+                        "confidence": round(confidence, 3),
+                        "rotation_deg": rotation,
+                        "rotation_source": "rotated_page_ocr",
+                        "detector": "rotated_full_page_recovery",
+                        "_rotated_ocr_angle": int(rotation_deg) % 360,
+                        "_rotated_line_bbox": rotated_line_bbox,
+                    })
+                )
+
+        if not records:
+            return []
+        return _group_rotated_ocr_records(records)
 
     @staticmethod
     def _pad_to_square(img: Image.Image, size: int = 224) -> Image.Image:

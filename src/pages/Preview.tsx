@@ -54,6 +54,8 @@ import {
 import { getPreviewImageCandidates, getPreviewToggleLabel } from "./previewImage";
 import { EXPORT_MODE_OPTIONS, exportBlockReason, exportModeForBackend, type ExportMode } from "../lib/exportModes";
 import { renderPageWithKonvaToDataUrl, shouldUseKonvaPreviewRenderer } from "../lib/konvaExportRenderer";
+import { PipelineBlockedBanner } from "../components/PipelineBlockedBanner";
+import { buildPipelineBlockedBannerModel } from "../lib/pipelineCompletion";
 
 function waitForImageLoad(src: string) {
   return new Promise<void>((resolve, reject) => {
@@ -253,6 +255,7 @@ export function Preview() {
   const qaIssues = collectQaIssues(project);
   const ignoredQaActions = collectIgnoredQaActions(project);
   const qaReviewSummary = buildQaReviewSummary(project);
+  const blockedBannerModel = buildPipelineBlockedBannerModel(project);
   const activeIgnoreIssue = qaIssues.find((issue) => issue.id === ignoreIssueId) ?? null;
   const qaGroups = Object.entries(qaReviewSummary.groups);
 
@@ -957,6 +960,15 @@ export function Preview() {
           </button>
         </div>
       </div>
+
+      <PipelineBlockedBanner
+        model={blockedBannerModel}
+        onOpenDetails={() => {
+          const firstBlockedIssue =
+            qaIssues.find((issue) => issue.severity === "critical" || issue.severity === "high") ?? qaIssues[0];
+          if (firstBlockedIssue) goToQaIssue(firstBlockedIssue);
+        }}
+      />
 
       <div className="flex flex-1 overflow-hidden">
         <div className="relative flex-1 overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(72,176,255,0.08),_transparent_38%),linear-gradient(180deg,_rgba(255,255,255,0.02),_transparent_28%)]">

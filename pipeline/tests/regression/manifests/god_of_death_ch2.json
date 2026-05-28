@@ -1,0 +1,48 @@
+{
+  "manifest_version": 1,
+  "run_id": "god_of_death_ch2",
+  "run_path": "N:/TraduzAI/DEBUGM/runs/2026-05-25_global_text_ocr_fixes_other_chapters_v4i/god_of_death_ch2",
+  "ci_fixture": false,
+  "schema_version": 12,
+  "current_issue_classes": [
+    "balloon_bbox_collapsed_to_text",
+    "compact_small_text_capacity",
+    "cover_logo_or_art_ocr",
+    "cover_repeated_words_noise",
+    "decorative_noise",
+    "logo_or_emblem_preserved",
+    "scanlation_credit",
+    "scanlation_promotional_title_near_credit",
+    "tiny_bubble_inner_bbox_rejected",
+    "weak_text_residual_after_inpaint"
+  ],
+  "target_issue_classes_after_fix": [
+    "PASS_or_REVIEW_without_BLOCK",
+    "waive_known_review_flags_explicitly"
+  ],
+  "pages_of_interest": [
+    1,
+    6
+  ],
+  "sample_artifacts": [
+    {
+      "page": 1,
+      "issue_class": "balloon_bbox_collapsed_to_text",
+      "crop_path": "debug/e2e/08_inpaint/page_001_band_000/00_band_original.jpg"
+    }
+  ],
+  "baseline_total_sec": 82.4342,
+  "qa_report_sha256_at_record_time": "a853e3e00f13367d8820b3f8b78862bd7f19c1e9849f0ee87a139d1a7ffa2c44",
+  "waivers": [
+    {
+      "waiver_id": "debug_2026_05_26_god_of_death_ch2_review_flags",
+      "flag": "known_review_flags",
+      "scope": "debug_only",
+      "reason": "fixture records known visual review classes while the target is PASS or REVIEW after fixes",
+      "expires": "2026-06-15",
+      "approved_by": "codex-r4.3"
+    }
+  ],
+  "recorded_at": "2026-05-26",
+  "recorded_by": "codex-r4.3"
+}

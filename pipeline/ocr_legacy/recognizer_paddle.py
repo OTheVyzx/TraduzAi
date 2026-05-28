@@ -12,12 +12,20 @@ logger = logging.getLogger(__name__)
 _paddle_readers: dict[str, object] = {}
 
 
+def _prefer_torch_cuda_dlls() -> None:
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        pass
+
+
 def choose_primary_ocr_engine(paddle_ready: bool) -> str:
     return "paddle" if paddle_ready else "easyocr"
 
 
 def is_paddle_available() -> bool:
     try:
+        _prefer_torch_cuda_dlls()
         from paddleocr import PaddleOCR  # noqa: F401
 
         return True
@@ -27,7 +35,10 @@ def is_paddle_available() -> bool:
 
 def get_paddle_reader(use_gpu: bool = False, lang: str = "en"):
     normalized_lang = (lang or "en").strip() or "en"
-    if normalized_lang not in _paddle_readers:
+    use_gpu = bool(use_gpu)
+    reader_key = f"{normalized_lang}|gpu={int(use_gpu)}"
+    if reader_key not in _paddle_readers:
+        _prefer_torch_cuda_dlls()
         try:
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
@@ -37,12 +48,14 @@ def get_paddle_reader(use_gpu: bool = False, lang: str = "en"):
         from paddleocr import PaddleOCR
 
         logger.info("Inicializando PaddleOCR lang=%s...", normalized_lang)
-        _paddle_readers[normalized_lang] = PaddleOCR(
+        _paddle_readers[reader_key] = PaddleOCR(
             use_angle_cls=False,
             lang=normalized_lang,
+            use_gpu=use_gpu,
+            enable_mkldnn=not use_gpu,
         )
         logger.info("PaddleOCR pronto lang=%s.", normalized_lang)
-    return _paddle_readers[normalized_lang]
+    return _paddle_readers[reader_key]
 
 
 def normalize_paddle_results(raw_results) -> list[dict]:

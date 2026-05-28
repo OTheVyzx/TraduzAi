@@ -14,6 +14,7 @@ import {
   Image,
   Layers,
   Undo2,
+  Search,
   ScanText,
   Languages,
   Loader2,
@@ -209,6 +210,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     (pendingCount === 0 && renderPreviewState.status === "fresh");
   const runSelectionAwareAction = (action: Parameters<typeof runMaskedAction>[0]) =>
     activeLassoSelection ? runMaskedActionFromLasso(action) : runMaskedAction(action);
+  const activePageActionLabel = activePageAction === "detect_boxes" ? "caixas" : activePageAction;
 
   useEffect(() => {
     let disposed = false;
@@ -577,9 +579,18 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
           <div className="flex items-center gap-0.5 rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
             {activePageAction !== null && (
               <span className="px-1.5 text-[10px] font-medium text-brand animate-pulse">
-                {activePageAction}...
+                {activePageActionLabel}...
               </span>
             )}
+            <button
+              disabled={pagePipelineBusy || activePageAction !== null}
+              onClick={() => void runSelectionAwareAction("detect_boxes")}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
+              title="Detectar apenas caixas"
+            >
+              <Search size={12} className={activePageAction === "detect_boxes" ? "animate-pulse" : ""} />
+              <span className="hidden xl:inline">Caixas</span>
+            </button>
             <button
               disabled={pagePipelineBusy || activePageAction !== null}
               onClick={() => void runSelectionAwareAction("detect")}

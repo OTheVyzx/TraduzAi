@@ -40,6 +40,8 @@ class RunChapterMetadataTests(unittest.TestCase):
                 "tipo": "fala",
             }],
             "_vision_blocks": [{"bbox": [50, 50, 150, 150], "confidence": 0.9}],
+            "_engine_preset": {"engine_preset_id": "manga", "detector_loader": "comic-text-detector"},
+            "_pipeline_artifacts": {"TextBoxes": {"producer": "comic-text-bubble-detector"}},
         }
 
         translator = MagicMock()
@@ -52,6 +54,8 @@ class RunChapterMetadataTests(unittest.TestCase):
                 "tipo": "fala",
             }],
             "_vision_blocks": [{"bbox": [50, 50, 150, 150], "confidence": 0.9}],
+            "_engine_preset": {"engine_preset_id": "manga", "detector_loader": "comic-text-detector"},
+            "_pipeline_artifacts": {"TextBoxes": {"producer": "comic-text-bubble-detector"}},
         }]
 
         inpainter = MagicMock()
@@ -134,6 +138,41 @@ class RunChapterMetadataTests(unittest.TestCase):
                 self.assertIn("y_in_strip_bottom", p.page_profile)
                 self.assertIsNotNone(p.inpaint_blocks, "inpaint_blocks deve estar presente")
                 self.assertIsInstance(p.inpaint_blocks, list)
+
+    def test_output_pages_keep_pipeline_artifacts_by_band(self):
+        from strip.run import run_chapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            output = tmp / "out"
+            output.mkdir()
+
+            files = self._make_pages(tmp)
+            detector, runtime, translator, inpainter, typesetter = self._make_mocks()
+
+            pages = run_chapter(
+                image_files=files,
+                output_dir=output,
+                target_count=3,
+                detector=detector,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+            )
+
+            pages_with_artifacts = [
+                p
+                for p in pages
+                if isinstance(p.ocr_result, dict) and p.ocr_result.get("_pipeline_artifacts_by_band")
+            ]
+            self.assertGreaterEqual(len(pages_with_artifacts), 1)
+            first = pages_with_artifacts[0].ocr_result
+            self.assertEqual(first["_engine_preset"]["detector_loader"], "comic-text-detector")
+            self.assertEqual(
+                first["_pipeline_artifacts"]["TextBoxes"]["producer"],
+                "comic-text-bubble-detector",
+            )
 
     def test_no_bbox_less_text_survives_in_output(self):
         """Textos sem 'bbox' definido não devem aparecer no output final."""

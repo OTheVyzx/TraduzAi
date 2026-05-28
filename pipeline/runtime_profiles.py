@@ -23,6 +23,22 @@ PROFILE_ALIASES = {
     "economia": "eco",
 }
 
+VISUAL_PIPELINE_FLAGS: dict[str, bool | str] = {
+    "strict_export_gate": True,
+    "safe_fast_fill": True,
+    "ocr_residual_check": "targeted",
+    "name_lock": True,
+    "connected_balloon_v2": False,
+    "rotated_text_v2": False,
+}
+
+ROTATED_TEXT_POLICY: dict[str, dict[str, Any]] = {
+    "dialogue": {"render_same_angle_if_abs_angle_in": (5, 35), "block_if_vertical": True},
+    "signage": {"render_same_angle": True},
+    "sfx_preserve": {"inpaint": False, "render": False},
+    "title_card": {"preserve_by_default": True},
+}
+
 
 @dataclass(frozen=True)
 class RuntimeProfileDecision:
@@ -37,6 +53,8 @@ class RuntimeProfileDecision:
     cpu_thread_limit: int | None
     env_defaults: dict[str, str]
     blocked_features: list[str]
+    visual_pipeline_flags: dict[str, bool | str]
+    rotated_text_policy: dict[str, dict[str, Any]]
     notes: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,12 +65,30 @@ def resolve_runtime_profile(config: dict[str, Any] | None) -> RuntimeProfileDeci
     config = config or {}
     requested = _requested_profile(config)
     profile = _normalize_profile(requested)
+    visual_pipeline_flags = resolve_visual_pipeline_flags()
 
     common_env = {
         "TRADUZAI_SEMANTIC_REVIEW": "0",
     }
+    automatic_pipeline_env = {
+        "TRADUZAI_STRIP_SCHEDULER_EXECUTOR": "overlap_context_release",
+        "TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS": "3",
+        "TRADUZAI_STRIP_FAST_SOLID_INPAINT": "0",
+        "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+        "TRADUZAI_STRIP_FAST_WHITE_NARRATION": "0",
+        "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "0",
+        "TRADUZAI_PAGE_CLEANUP_RERENDER": "0",
+        "TRADUZAI_PADDLE_FULL_PAGE": "1",
+        "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+        "TRADUZAI_GOOGLE_PARALLEL_CHUNKS": "1",
+        "TRADUZAI_GOOGLE_TRANSLATE_WORKERS": "3",
+    }
 
     if profile == "performance":
+        env_defaults = {
+            **common_env,
+            **automatic_pipeline_env,
+        }
         return RuntimeProfileDecision(
             requested_profile=requested,
             profile="performance",
@@ -63,11 +99,14 @@ def resolve_runtime_profile(config: dict[str, Any] | None) -> RuntimeProfileDeci
             smart_skip="off",
             macro_ocr="off",
             cpu_thread_limit=None,
-            env_defaults=common_env,
+            env_defaults=env_defaults,
             blocked_features=["TRADUZAI_SMART_SKIP", "TRADUZAI_MACRO_OCR"],
+            visual_pipeline_flags=visual_pipeline_flags,
+            rotated_text_policy=ROTATED_TEXT_POLICY,
             notes=[
-                "Performance profile is declared but real accelerators remain disabled until gates pass.",
-                "Use shadow diagnostics separately when investigating Smart Skip or Macro OCR.",
+                "Performance profile keeps safe automatic pipeline accelerators enabled.",
+                "Macro OCR real is opt-in only until the geometry gate is proven on production samples.",
+                "Use shadow diagnostics separately when investigating Smart Skip.",
             ],
         )
 
@@ -92,6 +131,8 @@ def resolve_runtime_profile(config: dict[str, Any] | None) -> RuntimeProfileDeci
             cpu_thread_limit=2,
             env_defaults=env_defaults,
             blocked_features=[],
+            visual_pipeline_flags=visual_pipeline_flags,
+            rotated_text_policy=ROTATED_TEXT_POLICY,
             notes=[
                 "Eco profile avoids optional prewarm and keeps Google-only translation.",
                 "It may be slower on cold starts, but should reduce background warmup pressure.",
@@ -108,10 +149,30 @@ def resolve_runtime_profile(config: dict[str, Any] | None) -> RuntimeProfileDeci
         smart_skip="off",
         macro_ocr="off",
         cpu_thread_limit=None,
-        env_defaults=common_env,
+        env_defaults={
+            **common_env,
+            **automatic_pipeline_env,
+        },
         blocked_features=[],
-        notes=["Balanced profile preserves current default behavior."],
+        visual_pipeline_flags=visual_pipeline_flags,
+        rotated_text_policy=ROTATED_TEXT_POLICY,
+        notes=["Balanced profile enables the current automatic pipeline defaults without real macro OCR."],
     )
+
+
+def resolve_visual_pipeline_flags() -> dict[str, bool | str]:
+    flags: dict[str, bool | str] = {}
+    for name, default in VISUAL_PIPELINE_FLAGS.items():
+        raw = os.getenv(f"TRADUZAI_FLAG_{name.upper()}")
+        if raw is None or not str(raw).strip():
+            flags[name] = default
+            continue
+        value = str(raw).strip()
+        if isinstance(default, bool):
+            flags[name] = value.lower() in {"1", "true", "yes", "on"}
+        else:
+            flags[name] = value
+    return flags
 
 
 def apply_runtime_profile_environment(decision: RuntimeProfileDecision) -> dict[str, str]:

@@ -1,0 +1,61 @@
+{
+  "manifest_version": 1,
+  "run_id": "one_second_ch2",
+  "run_path": "N:/TraduzAI/DEBUGM/runs/2026-05-25_global_text_ocr_fixes_other_chapters_v4i/one_second_ch2",
+  "ci_fixture": false,
+  "schema_version": 12,
+  "current_issue_classes": [
+    "TEXT_CLIPPED",
+    "TEXT_OVERFLOW",
+    "balloon_bbox_collapsed_to_text",
+    "compact_small_text_capacity",
+    "cover_short_ornamental_noise",
+    "fast_fill_insufficient_coverage",
+    "logo_or_emblem_preserved",
+    "mask_outside_balloon",
+    "ocr_needs_review",
+    "ocr_run_on_suspect",
+    "render_outside_balloon",
+    "safe_text_box_recomputed",
+    "scanlation_credit",
+    "scanlation_promotional_title_near_credit",
+    "scanlation_promotional_title_strip",
+    "suspicious_art_ocr",
+    "textured_art_label_preserved",
+    "tiny_bubble_inner_bbox_rejected",
+    "weak_text_residual_after_inpaint"
+  ],
+  "target_issue_classes_after_fix": [
+    "PASS_or_REVIEW_without_BLOCK",
+    "waive_known_review_flags_explicitly"
+  ],
+  "pages_of_interest": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "sample_artifacts": [
+    {
+      "page": 2,
+      "issue_class": "TEXT_CLIPPED",
+      "crop_path": "debug/e2e/06_mask_segmentation/page_002_band_004/01_glyph_mask.png"
+    }
+  ],
+  "baseline_total_sec": 79.6068,
+  "qa_report_sha256_at_record_time": "dbfe6cd8d7e9f8319ec62ffa7ecd108c6b1787fd62d9d7749332fd4b6845ee75",
+  "waivers": [
+    {
+      "waiver_id": "debug_2026_05_26_one_second_ch2_review_flags",
+      "flag": "known_review_flags",
+      "scope": "debug_only",
+      "reason": "fixture records known visual review classes while the target is PASS or REVIEW after fixes",
+      "expires": "2026-06-15",
+      "approved_by": "codex-r4.3"
+    }
+  ],
+  "recorded_at": "2026-05-26",
+  "recorded_by": "codex-r4.3"
+}

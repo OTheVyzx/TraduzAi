@@ -16,28 +16,39 @@ def _entry_terms(entry: dict[str, Any]) -> list[str]:
     return [term for term in terms if term.strip()]
 
 
+def _term_pattern(term: str) -> re.Pattern[str]:
+    parts = [re.escape(part) for part in str(term or "").split() if part]
+    body = r"\s+".join(parts) if parts else re.escape(str(term or ""))
+    return re.compile(rf"(?<![A-Za-z0-9_]){body}(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
 def detect_entities(text: str, glossary_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
-    lowered = _norm(text)
     for entry in glossary_entries:
         for term in _entry_terms(entry):
             term_norm = _norm(term)
-            start = lowered.find(term_norm)
-            if start < 0:
-                continue
-            matches.append(
-                {
-                    "entry_id": entry.get("id", term_norm),
-                    "source": term,
-                    "target": entry.get("target", term),
-                    "type": entry.get("type", entry.get("entry_type", "generic_term")),
-                    "protect": bool(entry.get("protect", False)),
-                    "start": start,
-                    "end": start + len(term_norm),
-                    "mode": "preserve" if entry.get("protect") else "translate_fixed",
-                    "forbidden": list(entry.get("forbidden", []) or []),
-                }
-            )
-            break
-    return sorted(matches, key=lambda item: (item["start"], -(item["end"] - item["start"])))
+            for match in _term_pattern(term).finditer(text or ""):
+                matches.append(
+                    {
+                        "entry_id": entry.get("id", term_norm),
+                        "source": term,
+                        "target": entry.get("target", term),
+                        "type": entry.get("type", entry.get("entry_type", "generic_term")),
+                        "protect": bool(entry.get("protect", False)),
+                        "start": match.start(),
+                        "end": match.end(),
+                        "mode": "preserve" if entry.get("protect") else "translate_fixed",
+                        "forbidden": list(entry.get("forbidden", []) or []),
+                    }
+                )
+
+    filtered: list[dict[str, Any]] = []
+    occupied: list[tuple[int, int]] = []
+    for match in sorted(matches, key=lambda item: (item["start"], -(item["end"] - item["start"]))):
+        span = (int(match["start"]), int(match["end"]))
+        if any(span[0] < end and start < span[1] for start, end in occupied):
+            continue
+        filtered.append(match)
+        occupied.append(span)
+    return filtered
 

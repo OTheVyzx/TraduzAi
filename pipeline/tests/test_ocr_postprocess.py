@@ -1,4 +1,8 @@
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ocr.postprocess import (
     classify_text_type,
@@ -9,12 +13,14 @@ from ocr.postprocess import (
     is_ghost_ocr_noise,
     is_hallucination,
     is_korean_sfx,
+    is_low_confidence_visual_noise,
     is_short_textured_sfx_or_noise,
     is_vlm_failure_phrase,
     is_watermark,
     looks_suspicious,
     should_preserve_cjk_sfx_candidate,
 )
+from ocr.text_router import route_text_record
 
 
 class OcrPostprocessTests(unittest.TestCase):
@@ -23,6 +29,8 @@ class OcrPostprocessTests(unittest.TestCase):
         self.assertTrue(is_watermark("Read only at ASURACOMIC.NET"))
         self.assertTrue(is_watermark("ASURASOANS. COM"))
         self.assertTrue(is_watermark("FOR THE FASTEST RELEASES"))
+        self.assertTrue(is_watermark("Reader that does not support our website has been detected!"))
+        self.assertTrue(is_watermark("READERTHATDOESNOTSUPPORT OURWEBSITEHASBEENDETECTED!"))
 
     def test_editorial_credit_keeps_ambiguous_single_words(self):
         self.assertFalse(is_editorial_credit("STAFF"))
@@ -40,8 +48,15 @@ class OcrPostprocessTests(unittest.TestCase):
         self.assertTrue(is_editorial_credit("TL/NAISHISAFORMOF IRRITATED OR ANNOYED EXPRESSION IN KOREA."))
         self.assertFalse(is_editorial_credit("PLEASE, FOR THE CHILD'S SAKE."))
 
-    def test_cover_title_logo_catches_large_misread_opening_logo(self):
+    def test_editorial_credit_detects_cover_view_metadata_line(self):
         self.assertTrue(
+            is_editorial_credit(
+                "'COVER ~\"ABSOLUTE\" = WOOJIN'S KANG L CARA VER:] MILEY [KOREAN I EGO ALTER / VIEWS IS. EEM"
+            )
+        )
+
+    def test_cover_title_logo_requires_user_provided_title(self):
+        self.assertFalse(
             is_cover_title_logo(
                 "SIE ooi",
                 [53, 1226, 800, 2283],
@@ -50,8 +65,66 @@ class OcrPostprocessTests(unittest.TestCase):
                 "fala",
                 False,
                 page_profile="cover_opening",
+                work_title_user_provided=False,
             )
         )
+        self.assertTrue(
+            is_cover_title_logo(
+                "The Regressed Mercenary",
+                [53, 1226, 800, 2283],
+                0.74,
+                (2400, 800, 3),
+                "fala",
+                False,
+                page_profile="cover_opening",
+                work_title="The Regressed Mercenary Has a Plan",
+                work_title_aliases=["The Regressed Mercenary"],
+                work_title_user_provided=True,
+            )
+        )
+
+    def test_cover_logo_rules_are_disabled_without_user_title(self):
+        routed = route_text_record(
+            {
+                "text": "REGIONAL FIREMAN RECRUITMENT TEST",
+                "bbox": [10, 10, 320, 80],
+                "confidence": 0.91,
+                "page_number": 1,
+                "page_height": 900,
+            },
+            work_title="",
+            work_title_aliases=[],
+            work_title_user_provided=False,
+        )
+
+        self.assertIn(routed.get("route_action"), (None, "", "translate_inpaint_render"))
+        self.assertIn(routed.get("content_class"), (None, "", "text", "dialogue"))
+        self.assertIsNot(routed.get("skip_processing"), True)
+        self.assertIsNot(routed.get("preserve_original"), True)
+
+    def test_router_treats_legacy_noise_credit_and_note_as_text(self):
+        for text in (
+            "",
+            "T/N: translator note",
+            "Read at scanlator.com",
+            "Kgm sini_@naver.com llshinheell",
+            "TEXT: hospital sign",
+        ):
+            routed = route_text_record(
+                {
+                    "text": text,
+                    "bbox": [10, 10, 320, 80],
+                    "confidence": 0.91,
+                },
+                work_title="",
+                work_title_aliases=[],
+                work_title_user_provided=False,
+            )
+
+            self.assertEqual(routed.get("route_action"), "translate_inpaint_render")
+            self.assertEqual(routed.get("content_class"), "text")
+            self.assertFalse(routed.get("skip_processing"))
+            self.assertIsNot(routed.get("preserve_original"), True)
 
     def test_korean_dialogue_is_not_forced_to_sfx(self):
         self.assertFalse(is_korean_sfx("도저히 생문을 찾을 수가 없다"))
@@ -168,6 +241,53 @@ class OcrPostprocessTests(unittest.TestCase):
         text = "The image is too blurry to recognize any text content."
         self.assertTrue(is_vlm_failure_phrase(text))
         self.assertTrue(is_hallucination(text, [12, 18, 420, 58], 0.99))
+
+    def test_low_confidence_visual_noise_is_metric_only_not_a_drop_gate(self):
+        self.assertFalse(
+            is_low_confidence_visual_noise(
+                "Oq ^ I s9aat",
+                [396, 864, 621, 1008],
+                0.38,
+                is_white_balloon=True,
+                image_shape=(5000, 1600, 3),
+            )
+        )
+        self.assertFalse(
+            is_low_confidence_visual_noise(
+                "W I KO",
+                [217, 147, 1322, 388],
+                0.38,
+                is_white_balloon=True,
+                image_shape=(5000, 1600, 3),
+            )
+        )
+        self.assertFalse(
+            is_low_confidence_visual_noise(
+                "W I KO",
+                [217, 147, 1322, 388],
+                0.40,
+                is_white_balloon=True,
+                image_shape=(5000, 1600, 3),
+            )
+        )
+        self.assertFalse(
+            is_low_confidence_visual_noise(
+                "LET'S GO!",
+                [92, 16, 233, 38],
+                0.457,
+                is_white_balloon=True,
+                image_shape=(307, 371, 3),
+            )
+        )
+        self.assertFalse(
+            is_low_confidence_visual_noise(
+                "WHAT?",
+                [120, 180, 280, 260],
+                0.38,
+                is_white_balloon=True,
+                image_shape=(5000, 1600, 3),
+            )
+        )
 
     def test_ghost_ocr_noise_drops_tiny_outside_balloon_tokens(self):
         self.assertTrue(
