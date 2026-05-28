@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ocr import ocr_normalizer
 from ocr.ocr_normalizer import normalize_ocr_record, normalize_ocr_text
 
 
@@ -55,14 +61,123 @@ def test_required_corrections_are_applied_inside_sentences():
         assert result["normalization"]["changed"] is True
 
 
-def test_scanlation_credit_is_skipped_in_record():
+def test_punctuation_joined_dialogue_is_repaired_before_review_route():
+    record = normalize_ocr_record(
+        {
+            "text": "What!Then,why did we come to the cafe,what are you hiding?",
+            "confidence": 0.82,
+            "bbox": [32, 120, 312, 198],
+            "balloon_bbox": [20, 88, 344, 226],
+            "tipo": "fala",
+            "content_class": "dialogue",
+        }
+    )
+
+    assert record["text"] == "What! Then, why did we come to the cafe, what are you hiding?"
+    assert record["normalized_ocr"] == "What! Then, why did we come to the cafe, what are you hiding?"
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["route_reason"] == "dialogue_balloon_with_english_text"
+    assert record.get("needs_review") is not True
+    assert "ocr_truncated_or_joined" not in record.get("qa_flags", [])
+    assert record["normalization"]["corrections"][0]["reason"] == "repair_missing_punctuation_spacing"
+
+
+def test_joined_ocr_is_repaired_before_review_flag_survives():
+    assert hasattr(ocr_normalizer, "repair_ocr_truncated_or_joined")
+    repair_ocr_truncated_or_joined = ocr_normalizer.repair_ocr_truncated_or_joined
+
+    repaired = repair_ocr_truncated_or_joined(
+        {
+            "text": "What!Then,why did we come to the cafe,what are you hiding?",
+            "bbox": [24, 18, 300, 120],
+            "qa_flags": ["ocr_truncated_or_joined"],
+            "route_action": "review_required",
+            "route_reason": "ocr_truncated_or_joined",
+            "line_polygons": [
+                [[24, 18], [290, 18], [290, 50], [24, 50]],
+                [[24, 54], [280, 54], [280, 88], [24, 88]],
+            ],
+        }
+    )
+
+    assert repaired["text"] == "What! Then, why did we come to the cafe, what are you hiding?"
+    assert repaired.get("ocr_repair_status") == "repaired"
+    assert "ocr_truncated_or_joined" not in repaired.get("qa_flags", [])
+    assert repaired.get("route_action") not in {"review_required", "preserve_original"}
+    assert repaired.get("needs_review") is not True
+
+
+def test_scanlation_credit_is_text_not_a_skip_or_inpaint_only_rule():
     for raw in ["ASURASOANS. COM", "FOR THE FASTEST RELEASES", "ILEAFSKY PR"]:
         record = normalize_ocr_record({"text": raw})
 
         assert record["text"] == raw
-        assert record["skip_processing"] is True
-        assert "scanlation_credit" in record["qa_flags"]
-        assert record["skip_reason"] == "scanlation_credit"
+        assert record["route_action"] == "translate_inpaint_render"
+        assert record["skip_processing"] is False
+        assert record["route_reason"] == "dialogue_balloon_with_english_text"
+        assert record["content_class"] == "text"
+
+
+def test_no_dot_scanlation_credit_domain_artifact_is_text_in_record():
+    for raw in ("sb3ag9 NEWIOKLGOCOM", "TRAIOIE a3aoag9 CKVGCOM"):
+        record = normalize_ocr_record({"text": raw})
+
+        assert record["text"] == raw
+        assert record["route_action"] == "translate_inpaint_render"
+        assert record["skip_processing"] is False
+        assert record["content_class"] == "text"
+
+
+def test_email_like_scanlation_credit_is_text():
+    record = normalize_ocr_record({"text": "Kgm sini_@naver.com llshinheell choiplinonavercom kwangn"})
+
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["skip_processing"] is False
+    assert record["content_class"] == "text"
+
+
+def test_scanlation_credit_does_not_override_translate_route_action():
+    record = normalize_ocr_record(
+        {
+            "text": "Kgm sini_@naver.com llshinheell choiplinonavercom kwangn",
+            "route_action": "translate_inpaint_render",
+            "route_reason": "dialogue_balloon_with_english_text",
+        }
+    )
+
+    assert record["content_class"] == "text"
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["route_reason"] == "dialogue_balloon_with_english_text"
+    assert record["skip_processing"] is False
+
+
+def test_hyphenated_credit_name_list_is_text():
+    record = normalize_ocr_record({"text": "-NISMOI29O -ARCTICWOLF"})
+
+    assert record["content_class"] == "text"
+    assert record["route_action"] == "translate_inpaint_render"
+
+
+def test_hyphenated_credit_name_list_with_trailing_names_does_not_override_review_route():
+    record = normalize_ocr_record(
+        {
+            "text": "-KANJI2E2 -NEONNIGHTMARE -DRAGON EMPRYEAN SHADOWLESS",
+            "content_class": "narration",
+            "route_action": "review_required",
+            "route_reason": "ocr_truncated_or_joined",
+            "needs_review": True,
+            "qa_flags": [
+                "ocr_run_on_suspect",
+                "ocr_truncated_or_joined",
+                "mask_outside_balloon_critical",
+            ],
+        }
+    )
+
+    assert record["content_class"] == "text"
+    assert record["route_action"] == "review_required"
+    assert record["route_reason"] == "ocr_truncated_or_joined"
+    assert record.get("needs_review") is True
 
 
 def test_low_confidence_common_word_is_not_fuzzy_corrected():
@@ -77,7 +192,8 @@ def test_gibberish_is_flagged_and_skipped_in_record():
 
     assert record["raw_ocr"] == "///// 12345"
     assert record["normalization"]["is_gibberish"] is True
-    assert record["skip_processing"] is True
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["skip_processing"] is False
     assert "ocr_gibberish" in record["qa_flags"]
 
 
@@ -85,8 +201,8 @@ def test_known_low_confidence_latin_artifact_is_skipped_in_record():
     record = normalize_ocr_record({"text": "Hfor"})
 
     assert record["text"] == "Hfor"
-    assert record["skip_processing"] is True
-    assert record["skip_reason"] == "ocr_artifact"
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["skip_processing"] is False
     assert "suspected_ocr_error" in record["qa_flags"]
 
 
@@ -95,7 +211,17 @@ def test_short_quoted_dialogue_is_not_marked_gibberish():
 
     assert record["text"] == '"WE"?!'
     assert record["normalization"]["is_gibberish"] is False
+    assert record["route_action"] == "translate_inpaint_render"
     assert record.get("skip_processing") is not True
+
+
+def test_normal_dialogue_gets_translate_route_action():
+    record = normalize_ocr_record({"text": "What are you doing here?"})
+
+    assert record["text"] == "What are you doing here?"
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["route_reason"] == "dialogue_balloon_with_english_text"
+    assert record["skip_processing"] is False
 
 
 def test_short_korean_dialogue_is_not_marked_gibberish():

@@ -22,6 +22,416 @@ pub struct ValidationResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheGoogleFontRequest {
+    pub family: String,
+    pub css_family: String,
+    pub variant: String,
+    pub url: String,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CachedGoogleFont {
+    pub family: String,
+    pub css_family: String,
+    pub variant: String,
+    pub filename: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GoogleFontSearchResult {
+    pub family: String,
+    pub css_family: String,
+    pub variant: String,
+    pub filename: String,
+    pub download_url: String,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GoogleFontsMetadataResponse {
+    #[serde(rename = "familyMetadataList", default)]
+    family_metadata_list: Vec<GoogleFontFamilyMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct GoogleFontFamilyMetadata {
+    pub family: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub popularity: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct GoogleFontRepoEntry {
+    pub name: String,
+    #[serde(default)]
+    pub download_url: Option<String>,
+    #[serde(rename = "type")]
+    pub entry_type: String,
+}
+
+const GOOGLE_FONTS_METADATA_URL: &str = "https://fonts.google.com/metadata/fonts";
+const GOOGLE_FONTS_REPO_CONTENTS_URL: &str = "https://api.github.com/repos/google/fonts/contents";
+const GOOGLE_FONT_LICENSE_DIRS: [&str; 3] = ["ofl", "apache", "ufl"];
+const GOOGLE_FONT_SEARCH_LIMIT: usize = 12;
+
+#[tauri::command]
+pub async fn cache_google_font(
+    family: String,
+    css_family: String,
+    variant: String,
+    url: String,
+    filename: String,
+) -> Result<CachedGoogleFont, String> {
+    cache_google_font_in_dir(
+        CacheGoogleFontRequest {
+            family,
+            css_family,
+            variant,
+            url,
+            filename,
+        },
+        &google_fonts_cache_dir()?,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn search_google_fonts(query: String) -> Result<Vec<GoogleFontSearchResult>, String> {
+    let normalized_query = normalize_google_font_query(&query);
+    if normalized_query.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let client = reqwest::Client::new();
+    let metadata = client
+        .get(GOOGLE_FONTS_METADATA_URL)
+        .header(reqwest::header::USER_AGENT, "TraduzAi")
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao consultar Google Fonts: {e}"))?;
+
+    if !metadata.status().is_success() {
+        return Err(format!(
+            "Falha ao consultar Google Fonts: HTTP {}",
+            metadata.status()
+        ));
+    }
+
+    let metadata_text = metadata
+        .text()
+        .await
+        .map_err(|e| format!("Falha ao ler resposta do Google Fonts: {e}"))?;
+    let families =
+        search_google_fonts_metadata_json(&metadata_text, &query, GOOGLE_FONT_SEARCH_LIMIT)?;
+    let mut results = Vec::new();
+
+    for family in families {
+        if let Ok(repo_file) = fetch_google_font_repo_file(&client, &family.family).await {
+            if let Some(download_url) = repo_file.download_url {
+                let family_name = family.family;
+                let extension = Path::new(&repo_file.name)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("ttf");
+                results.push(GoogleFontSearchResult {
+                    family: family_name.clone(),
+                    css_family: family_name.clone(),
+                    variant: "regular".to_string(),
+                    filename: google_font_cache_filename(&family_name, extension),
+                    download_url,
+                    category: family.category,
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+fn google_fonts_cache_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| {
+            "Nao foi possivel localizar a pasta do usuario para cache de fontes".to_string()
+        })?;
+
+    Ok(PathBuf::from(home)
+        .join(".traduzai")
+        .join("fonts")
+        .join("google"))
+}
+
+fn sanitize_google_font_filename(filename: &str) -> Result<String, String> {
+    let trimmed = filename.trim();
+    if trimmed.is_empty() {
+        return Err("Nome de fonte vazio".to_string());
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
+        return Err("Nome de fonte invalido".to_string());
+    }
+    if trimmed.chars().any(|ch| {
+        matches!(
+            ch,
+            '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*'
+        ) || ch.is_control()
+    }) {
+        return Err("Nome de fonte deve ser um arquivo simples".to_string());
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.ends_with(".ttf") && !lower.ends_with(".otf") {
+        return Err("Fonte Google deve terminar em .ttf ou .otf".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn normalize_google_font_query(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn google_font_cache_slug(family: &str) -> String {
+    let mut slug = String::new();
+    let mut needs_separator = false;
+
+    for ch in family.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if needs_separator && !slug.is_empty() {
+                slug.push('_');
+            }
+            slug.push(ch);
+            needs_separator = false;
+        } else {
+            needs_separator = true;
+        }
+    }
+
+    if slug.is_empty() {
+        "Google_Font".to_string()
+    } else {
+        slug
+    }
+}
+
+fn google_font_cache_filename(family: &str, extension: &str) -> String {
+    let normalized_extension = match extension.to_ascii_lowercase().as_str() {
+        "otf" => "otf",
+        _ => "ttf",
+    };
+    format!(
+        "GoogleFont__{}__regular.{}",
+        google_font_cache_slug(family),
+        normalized_extension
+    )
+}
+
+fn search_google_fonts_metadata_json(
+    metadata_json: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<GoogleFontFamilyMetadata>, String> {
+    let parsed: GoogleFontsMetadataResponse = serde_json::from_str(metadata_json)
+        .map_err(|e| format!("Resposta invalida do Google Fonts: {e}"))?;
+    let normalized_query = normalize_google_font_query(query);
+    if normalized_query.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
+    let mut matches: Vec<GoogleFontFamilyMetadata> = parsed
+        .family_metadata_list
+        .into_iter()
+        .filter(|font| {
+            let family = normalize_google_font_query(&font.family);
+            query_tokens.iter().all(|token| family.contains(token))
+        })
+        .collect();
+
+    matches.sort_by(|a, b| {
+        let a_family = normalize_google_font_query(&a.family);
+        let b_family = normalize_google_font_query(&b.family);
+        google_font_match_rank(&a_family, &normalized_query)
+            .cmp(&google_font_match_rank(&b_family, &normalized_query))
+            .then_with(|| {
+                a.popularity
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.popularity.unwrap_or(i64::MAX))
+            })
+            .then_with(|| a.family.cmp(&b.family))
+    });
+    matches.truncate(limit);
+    Ok(matches)
+}
+
+fn google_font_match_rank(family: &str, query: &str) -> i32 {
+    if family == query {
+        0
+    } else if family.starts_with(query) {
+        1
+    } else if family.contains(query) {
+        2
+    } else {
+        3
+    }
+}
+
+fn google_font_repo_slug(family: &str) -> String {
+    family
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn select_google_font_repo_file(entries: &[GoogleFontRepoEntry]) -> Option<&GoogleFontRepoEntry> {
+    entries
+        .iter()
+        .filter(|entry| {
+            entry.entry_type == "file"
+                && entry.download_url.is_some()
+                && matches!(
+                    Path::new(&entry.name)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("ttf") | Some("otf")
+                )
+        })
+        .min_by(|a, b| {
+            google_font_repo_file_rank(&a.name).cmp(&google_font_repo_file_rank(&b.name))
+        })
+}
+
+fn google_font_repo_file_rank(name: &str) -> (i32, usize, String) {
+    let lower = name.to_ascii_lowercase();
+    let regular = lower.contains("regular");
+    let italic = lower.contains("italic");
+    let variable = lower.contains('[') && lower.contains(']');
+    let rank = if regular && !italic {
+        0
+    } else if variable && !italic {
+        1
+    } else if !italic {
+        2
+    } else if regular {
+        3
+    } else {
+        4
+    };
+    (rank, name.len(), name.to_string())
+}
+
+async fn fetch_google_font_repo_file(
+    client: &reqwest::Client,
+    family: &str,
+) -> Result<GoogleFontRepoEntry, String> {
+    let slug = google_font_repo_slug(family);
+    for license_dir in GOOGLE_FONT_LICENSE_DIRS {
+        let url = format!("{GOOGLE_FONTS_REPO_CONTENTS_URL}/{license_dir}/{slug}");
+        let response = client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "TraduzAi")
+            .send()
+            .await
+            .map_err(|e| format!("Falha ao localizar fonte no repositorio Google Fonts: {e}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+        if !response.status().is_success() {
+            continue;
+        }
+        let entries = response
+            .json::<Vec<GoogleFontRepoEntry>>()
+            .await
+            .map_err(|e| format!("Falha ao ler repositorio Google Fonts: {e}"))?;
+        if let Some(selected) = select_google_font_repo_file(&entries) {
+            return Ok(selected.clone());
+        }
+    }
+
+    Err(format!(
+        "Nao foi encontrado arquivo TTF/OTF para a fonte Google: {family}"
+    ))
+}
+
+async fn cache_google_font_in_dir(
+    request: CacheGoogleFontRequest,
+    cache_dir: &Path,
+) -> Result<CachedGoogleFont, String> {
+    let filename = sanitize_google_font_filename(&request.filename)?;
+    let target_path = cache_dir.join(&filename);
+
+    if let Ok(metadata) = std::fs::metadata(&target_path) {
+        if metadata.is_file() && metadata.len() > 0 {
+            return Ok(CachedGoogleFont {
+                family: request.family,
+                css_family: request.css_family,
+                variant: request.variant,
+                filename,
+                path: target_path.to_string_lossy().to_string(),
+            });
+        }
+    }
+
+    let parsed_url = reqwest::Url::parse(&request.url)
+        .map_err(|e| format!("URL de fonte Google invalida: {e}"))?;
+    if parsed_url.scheme() != "https" && parsed_url.scheme() != "http" {
+        return Err("URL de fonte Google deve usar http ou https".to_string());
+    }
+
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("Falha ao criar cache de fontes Google: {e}"))?;
+
+    let response = reqwest::Client::new()
+        .get(parsed_url)
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao baixar fonte Google: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Falha ao baixar fonte Google: HTTP {}",
+            response.status()
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Falha ao ler fonte Google baixada: {e}"))?;
+    if bytes.is_empty() {
+        return Err("Fonte Google baixada esta vazia".to_string());
+    }
+
+    std::fs::write(&target_path, &bytes)
+        .map_err(|e| format!("Falha ao gravar fonte Google em cache: {e}"))?;
+
+    Ok(CachedGoogleFont {
+        family: request.family,
+        css_family: request.css_family,
+        variant: request.variant,
+        filename,
+        path: target_path.to_string_lossy().to_string(),
+    })
+}
+
 #[tauri::command]
 pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let file = app
@@ -3112,8 +3522,8 @@ pub async fn run_page_action_with_optional_mask(
     config: PageActionConfig,
 ) -> Result<PageActionResult, String> {
     use crate::commands::pipeline::{
-        detect_page_with_region, ocr_page_with_region, reinpaint_page_with_region,
-        translate_page_with_region, PageRegionConfig,
+        detect_boxes_page_with_region, detect_page_with_region, ocr_page_with_region,
+        reinpaint_page_with_region, translate_page_with_region, PageRegionConfig,
     };
 
     // Carregar project.json pelo mesmo caminho normalizado dos demais commands do editor.
@@ -3189,6 +3599,18 @@ pub async fn run_page_action_with_optional_mask(
             .await?;
             // detect re-renderiza a página ao final (render_page_image em main.py)
             vec![ChangedAsset::ProjectJson, ChangedAsset::Rendered]
+        }
+        "detect_boxes" => {
+            detect_boxes_page_with_region(
+                app,
+                config.project_path.clone(),
+                page_index_u32,
+                Some(region.clone()),
+                config.engine_preset_id.clone(),
+                config.idioma_origem.clone(),
+            )
+            .await?;
+            vec![ChangedAsset::ProjectJson]
         }
         "ocr" => {
             ocr_page_with_region(
@@ -3409,6 +3831,115 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn google_font_filename_accepts_only_simple_font_files() {
+        assert_eq!(
+            sanitize_google_font_filename("NotoSans-Regular.ttf").unwrap(),
+            "NotoSans-Regular.ttf"
+        );
+        assert_eq!(
+            sanitize_google_font_filename("ComicNeue_Bold.otf").unwrap(),
+            "ComicNeue_Bold.otf"
+        );
+
+        assert!(sanitize_google_font_filename("NotoSans.woff2").is_err());
+    }
+
+    #[test]
+    fn google_font_filename_rejects_path_traversal() {
+        for filename in [
+            "../NotoSans-Regular.ttf",
+            "..\\NotoSans-Regular.ttf",
+            "fonts/NotoSans-Regular.ttf",
+            "C:\\fonts\\NotoSans-Regular.ttf",
+        ] {
+            assert!(
+                sanitize_google_font_filename(filename).is_err(),
+                "filename deveria ser rejeitado: {filename}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_google_font_uses_existing_non_empty_file_without_network() {
+        let root = unique_temp_dir();
+        let cache_dir = root.join("google-fonts");
+        let filename = "NotoSans-Regular.ttf";
+        let font_path = cache_dir.join(filename);
+        write_file(&font_path, b"cached-font");
+
+        let cached = cache_google_font_in_dir(
+            CacheGoogleFontRequest {
+                family: "Noto Sans".to_string(),
+                css_family: "Noto+Sans".to_string(),
+                variant: "regular".to_string(),
+                url: "http://127.0.0.1:9/should-not-be-called.ttf".to_string(),
+                filename: filename.to_string(),
+            },
+            &cache_dir,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cached.family, "Noto Sans");
+        assert_eq!(cached.css_family, "Noto+Sans");
+        assert_eq!(cached.variant, "regular");
+        assert_eq!(cached.filename, filename);
+        assert_eq!(cached.path, font_path.to_string_lossy());
+        assert_eq!(std::fs::read(&font_path).unwrap(), b"cached-font");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn google_fonts_metadata_search_filters_remote_families() {
+        let metadata = r#"{
+          "familyMetadataList": [
+            { "family": "Roboto", "category": "Sans Serif", "popularity": 2 },
+            { "family": "Bebas Neue", "category": "Display", "popularity": 1 },
+            { "family": "Noto Sans", "category": "Sans Serif", "popularity": 3 }
+          ]
+        }"#;
+
+        let results = search_google_fonts_metadata_json(metadata, "bebas", 5).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].family, "Bebas Neue");
+        assert_eq!(results[0].category.as_deref(), Some("Display"));
+    }
+
+    #[test]
+    fn google_font_cache_filename_is_stable_for_remote_results() {
+        assert_eq!(
+            google_font_cache_filename("Bebas Neue", "ttf"),
+            "GoogleFont__Bebas_Neue__regular.ttf"
+        );
+    }
+
+    #[test]
+    fn google_font_directory_entry_prefers_regular_ttf() {
+        let entries = vec![
+            GoogleFontRepoEntry {
+                name: "BebasNeue-Italic.ttf".to_string(),
+                download_url: Some("https://example.test/italic.ttf".to_string()),
+                entry_type: "file".to_string(),
+            },
+            GoogleFontRepoEntry {
+                name: "BebasNeue-Regular.ttf".to_string(),
+                download_url: Some("https://example.test/regular.ttf".to_string()),
+                entry_type: "file".to_string(),
+            },
+        ];
+
+        let selected = select_google_font_repo_file(&entries).unwrap();
+
+        assert_eq!(selected.name, "BebasNeue-Regular.ttf");
+        assert_eq!(
+            selected.download_url.as_deref(),
+            Some("https://example.test/regular.ttf")
+        );
     }
 
     fn write_zip_entries(path: &PathBuf, entries: &[(&str, &[u8])]) {

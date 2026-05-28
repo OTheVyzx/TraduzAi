@@ -1,6 +1,7 @@
 """Regressões do adapter de inpaint do pipeline strip."""
 
 import os
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +9,10 @@ from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
 
 
 _FAST_WHITE_ENV = {
@@ -35,6 +40,35 @@ class StripInpaintAdapterTests(unittest.TestCase):
         self.assertEqual(result, "warm")
         get_inpainter.assert_called_once_with("quality")
 
+    def test_prewarm_band_inpainter_runs_dummy_inpaint_when_available(self):
+        import inpainter
+
+        class FakeInpainter:
+            def __init__(self):
+                self.calls = []
+
+            def inpaint(self, image, mask, **kwargs):
+                self.calls.append((image, mask, kwargs))
+                return image.copy()
+
+        fake = FakeInpainter()
+
+        with patch("vision_stack.runtime._get_inpainter", return_value=fake):
+            result = inpainter.prewarm_band_inpainter("speed")
+
+        self.assertIs(result, fake)
+        self.assertEqual(len(fake.calls), 1)
+        image, mask, kwargs = fake.calls[0]
+        self.assertIsInstance(image, np.ndarray)
+        self.assertEqual(image.shape[:2], (128, 128))
+        self.assertEqual(image.ndim, 3)
+        self.assertEqual(image.shape[2], 3)
+        self.assertEqual(image.dtype, np.uint8)
+        self.assertIsInstance(mask, np.ndarray)
+        self.assertEqual(mask.shape, image.shape[:2])
+        self.assertEqual(mask.dtype, np.uint8)
+        self.assertGreater(int(np.count_nonzero(mask)), 0)
+
     def test_delegates_to_runtime_inpainting_round(self):
         from inpainter import inpaint_band_image
 
@@ -45,10 +79,21 @@ class StripInpaintAdapterTests(unittest.TestCase):
         }
         expected = np.full_like(band, 127)
 
-        with patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter") as get_inpainter, patch(
+        with patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "0",
+            },
+            clear=False,
+        ), patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter") as get_inpainter, patch(
             "vision_stack.runtime._apply_inpainting_round",
             return_value=expected,
         ) as apply_round, patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ), patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
             side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
@@ -74,7 +119,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "texts": [{"id": "t1", "text": "점화", "bbox": [20, 18, 120, 58], "tipo": "sfx"}],
             "_vision_blocks": [{"bbox": [20, 18, 120, 58], "confidence": 0.92}],
             "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
-            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "engine_preset": {"segmenter": "comic-text-detector-seg"},
         }
         expected = np.full_like(band, 180)
         mask = np.zeros(band.shape[:2], dtype=np.uint8)
@@ -117,7 +162,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "texts": [{"text": "점화", "bbox": [30, 230, 120, 280]}],
             "_vision_blocks": [{"bbox": [30, 230, 120, 280], "confidence": 0.91}],
             "engine_preset_id": "manhwa_manhua_ocr_guided",
-            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "engine_preset": {"segmenter": "comic-text-detector-seg"},
             "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
         }
 
@@ -130,7 +175,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(mapped["engine_preset_id"], "manhwa_manhua_ocr_guided")
-        self.assertEqual(mapped["engine_preset"]["segmenter"], "manga-text-segmentation-2025")
+        self.assertEqual(mapped["engine_preset"]["segmenter"], "comic-text-detector-seg")
         self.assertEqual(mapped["_engine_preset"]["mask_strategy"], "ocr_guided_roi_segmentation")
 
     def test_strip_translation_merge_preserves_engine_preset_metadata(self):
@@ -140,16 +185,23 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "texts": [{"id": "t1", "text": "점화"}],
             "_vision_blocks": [{"bbox": [20, 18, 120, 58]}],
             "engine_preset_id": "manhwa_manhua_ocr_guided",
-            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "engine_preset": {"segmenter": "comic-text-detector-seg"},
             "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
+            "_pipeline_artifacts": {
+                "TextBoxes": {"producer": "comic-text-bubble-detector"},
+            },
         }
         translated_page = {"texts": [{"id": "t1", "translated": "IGNICAO"}]}
 
         merged = _merge_translated_page_metadata(ocr_page, translated_page)
 
         self.assertEqual(merged["engine_preset_id"], "manhwa_manhua_ocr_guided")
-        self.assertEqual(merged["engine_preset"]["segmenter"], "manga-text-segmentation-2025")
+        self.assertEqual(merged["engine_preset"]["segmenter"], "comic-text-detector-seg")
         self.assertEqual(merged["_engine_preset"]["mask_strategy"], "ocr_guided_roi_segmentation")
+        self.assertEqual(
+            merged["_pipeline_artifacts"]["TextBoxes"]["producer"],
+            "comic-text-bubble-detector",
+        )
 
     def test_copy_back_preserves_cjk_inpaint_mask_outside_balloon_boxes(self):
         from strip.process_bands import _apply_copy_back_outside_balloons
@@ -172,7 +224,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "texts": [],
             "_vision_blocks": [{"bbox": [24, 22, 72, 44], "confidence": 0.81}],
             "_engine_preset": {"mask_strategy": "ocr_guided_roi_segmentation"},
-            "engine_preset": {"segmenter": "manga-text-segmentation-2025"},
+            "engine_preset": {"segmenter": "comic-text-detector-seg"},
         }
 
         with patch("vision_stack.runtime._get_text_segmenter_for_page", return_value="segmenter"), patch(
@@ -223,6 +275,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
                 {
                     "id": "t1",
                     "bbox": [80, 35, 140, 55],
+                    "text_pixel_bbox": [80, 35, 140, 55],
                     "balloon_bbox": [50, 20, 170, 75],
                     "tipo": "fala",
                     "text": "HELLO",
@@ -230,14 +283,11 @@ class StripInpaintAdapterTests(unittest.TestCase):
             ],
             "_vision_blocks": [{"bbox": [76, 32, 144, 58], "confidence": 0.92}],
         }
-        filled = band.copy()
-        filled[25:70, 55:165] = 255
 
         with patch.dict(os.environ, _FAST_WHITE_ENV), patch(
             "vision_stack.runtime._resolve_white_balloon_bbox", return_value=[50, 20, 170, 75]
         ), patch(
             "vision_stack.runtime._apply_white_balloon_fill",
-            return_value=filled,
         ) as apply_fill, patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
             side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
@@ -248,11 +298,12 @@ class StripInpaintAdapterTests(unittest.TestCase):
         ) as apply_round:
             cleaned = inpaint_band_image(band, page)
 
-        apply_fill.assert_called_once()
+        apply_fill.assert_not_called()
         post_cleanup.assert_not_called()
         get_inpainter.assert_not_called()
         apply_round.assert_not_called()
-        self.assertTrue(np.array_equal(cleaned, filled))
+        self.assertTrue(np.all(cleaned[37:53, 82:138] == 255))
+        self.assertEqual(int(cleaned[24, 58, 0]), 230)
         self.assertEqual(page["_strip_fast_white_balloon_count"], 1)
         self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
 
@@ -265,32 +316,31 @@ class StripInpaintAdapterTests(unittest.TestCase):
                 {
                     "id": "t1",
                     "bbox": [80, 35, 140, 55],
+                    "text_pixel_bbox": [80, 35, 140, 55],
                     "balloon_bbox": [50, 20, 170, 75],
                     "tipo": "narracao",
                     "balloon_type": "white",
-                    "layout_profile": "top_narration",
+                    "layout_profile": "white_balloon",
                     "text": "BECAUSE.",
                 }
             ],
             "_vision_blocks": [{"bbox": [76, 32, 144, 58], "confidence": 0.92}],
         }
-        filled = band.copy()
-        filled[25:70, 55:165] = 255
 
         with patch.dict(os.environ, _FAST_WHITE_ENV), patch(
             "vision_stack.runtime._resolve_white_balloon_bbox", return_value=[50, 20, 170, 75]
         ), patch(
             "vision_stack.runtime._apply_white_balloon_fill",
-            return_value=filled,
         ) as apply_fill, patch("vision_stack.runtime._get_inpainter") as get_inpainter, patch(
             "vision_stack.runtime._apply_inpainting_round",
         ) as apply_round:
             cleaned = inpaint_band_image(band, page)
 
-        apply_fill.assert_called_once()
+        apply_fill.assert_not_called()
         get_inpainter.assert_not_called()
         apply_round.assert_not_called()
-        self.assertTrue(np.array_equal(cleaned, filled))
+        self.assertTrue(np.all(cleaned[37:53, 82:138] == 255))
+        self.assertEqual(int(cleaned[24, 58, 0]), 230)
         self.assertEqual(page["_strip_fast_white_balloon_count"], 1)
         self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
 
@@ -447,7 +497,47 @@ class StripInpaintAdapterTests(unittest.TestCase):
         self.assertGreater(int(np.count_nonzero(fast_mask)), 0)
         self.assertEqual(page["_strip_fast_white_balloon_count"], 1)
 
-    def test_fast_white_narration_is_enabled_only_when_flag_is_on_for_speed_profile(self):
+    def test_fast_white_debug_dir_prefers_canonical_band_id(self):
+        from inpainter import inpaint_band_image
+
+        band = np.full((80, 160, 3), 245, dtype=np.uint8)
+        page = {
+            "_band_id": "page_002_band_004",
+            "_band_index": 5,
+            "_source_page_number": 2,
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [56, 28, 100, 48],
+                    "text_pixel_bbox": [56, 28, 100, 48],
+                    "balloon_bbox": [40, 16, 120, 64],
+                    "tipo": "fala",
+                    "text": "HELLO",
+                    "balloon_type": "white",
+                    "confidence": 0.95,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [56, 28, 100, 48], "confidence": 0.92}],
+        }
+
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                **_FAST_WHITE_ENV,
+                "TRADUZAI_INPAINT_DEBUG_DIR": tmp,
+            },
+        ), patch(
+            "vision_stack.runtime._resolve_white_balloon_bbox",
+            return_value=[40, 16, 120, 64],
+        ), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            side_effect=AssertionError("fast fill should consume covered block"),
+        ):
+            inpaint_band_image(band, page)
+            self.assertTrue((Path(tmp) / "page_002_band_004" / "metadata.json").exists())
+            self.assertFalse((Path(tmp) / "page_002_band_005").exists())
+
+    def test_fast_white_requires_geometry_without_tipo_gate(self):
         from inpainter import _fast_white_rejection_reason
 
         text = {
@@ -458,9 +548,9 @@ class StripInpaintAdapterTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_fast_white_rejection_reason(text), "narration_disabled")
+            self.assertEqual(_fast_white_rejection_reason(text), "missing_text_geometry")
         with patch.dict(os.environ, {"TRADUZAI_STRIP_FAST_WHITE_NARRATION": "1"}, clear=True):
-            self.assertEqual(_fast_white_rejection_reason(text), "")
+            self.assertEqual(_fast_white_rejection_reason(text), "missing_text_geometry")
 
     def test_fast_white_balloon_fill_accepts_edge_clipped_strip_balloon(self):
         from inpainter import inpaint_band_image
@@ -496,6 +586,9 @@ class StripInpaintAdapterTests(unittest.TestCase):
 
         with patch.dict(os.environ, _FAST_WHITE_ENV), patch(
             "vision_stack.runtime._resolve_white_balloon_bbox", return_value=None
+        ), patch(
+            "inpainter._detect_inpaint_residual_text",
+            return_value={"has_residual": False, "flags": [], "score": 0.0},
         ), patch(
             "vision_stack.runtime._get_inpainter",
         ) as get_inpainter, patch(
@@ -543,6 +636,9 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "vision_stack.runtime._apply_inpainting_round",
             side_effect=lambda image_np, payload, inp: image_np.copy(),
         ) as apply_round, patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ), patch(
             "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
             side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
         ):
@@ -550,7 +646,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
 
         resolve_white.assert_not_called()
         apply_fill.assert_not_called()
-        local_fill.assert_called_once()
+        local_fill.assert_not_called()
         get_inpainter.assert_called_once_with("quality")
         apply_round.assert_called_once()
         self.assertEqual(cleaned.shape, band.shape)
@@ -587,18 +683,23 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "vision_stack.runtime._try_koharu_balloon_fill", side_effect=_local_fill
         ) as local_fill, patch(
             "vision_stack.runtime._get_inpainter",
+            return_value="fake-inpainter",
         ) as get_inpainter, patch(
             "vision_stack.runtime._apply_inpainting_round",
-        ) as apply_round:
+            side_effect=lambda image_np, payload, inp: image_np.copy(),
+        ) as apply_round, patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
+        ):
             cleaned = inpaint_band_image(band, page)
 
-        local_fill.assert_called_once()
-        get_inpainter.assert_not_called()
-        apply_round.assert_not_called()
-        self.assertTrue(np.array_equal(cleaned, filled))
+        local_fill.assert_not_called()
+        get_inpainter.assert_called_once_with("quality")
+        apply_round.assert_called_once()
+        self.assertEqual(cleaned.shape, band.shape)
         self.assertEqual(page["_strip_fast_white_balloon_count"], 0)
-        self.assertEqual(page["_strip_fast_local_balloon_count"], 1)
-        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
+        self.assertEqual(page["_strip_fast_local_balloon_count"], 0)
+        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 1)
 
     def test_fast_local_solid_background_fill_skips_lama_when_contour_fill_declines(self):
         from inpainter import inpaint_band_image
@@ -627,20 +728,22 @@ class StripInpaintAdapterTests(unittest.TestCase):
             "vision_stack.runtime._try_koharu_balloon_fill", return_value=None
         ) as contour_fill, patch(
             "vision_stack.runtime._get_inpainter",
+            return_value="fake-inpainter",
         ) as get_inpainter, patch(
             "vision_stack.runtime._apply_inpainting_round",
-        ) as apply_round:
+            side_effect=lambda image_np, payload, inp: image_np.copy(),
+        ) as apply_round, patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
+        ):
             cleaned = inpaint_band_image(band, page)
 
-        contour_fill.assert_called_once()
-        get_inpainter.assert_not_called()
-        apply_round.assert_not_called()
-        self.assertLess(int(cleaned[55, 180, 0]), 32)
-        self.assertLess(int(cleaned[55, 74, 0]), 32)
-        self.assertLess(int(cleaned[55, 286, 0]), 32)
-        self.assertEqual(int(cleaned[10, 10, 0]), 8)
-        self.assertEqual(page["_strip_fast_local_balloon_count"], 1)
-        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
+        contour_fill.assert_not_called()
+        get_inpainter.assert_called_once_with("quality")
+        apply_round.assert_called_once()
+        self.assertEqual(cleaned.shape, band.shape)
+        self.assertEqual(page["_strip_fast_local_balloon_count"], 0)
+        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 1)
 
     def test_fast_local_solid_background_leaves_large_uniform_dark_caption_for_lama(self):
         from inpainter import inpaint_band_image
@@ -796,6 +899,7 @@ class StripInpaintAdapterTests(unittest.TestCase):
                 {
                     "id": "t1",
                     "bbox": [70, 32, 132, 54],
+                    "text_pixel_bbox": [70, 32, 132, 54],
                     "balloon_bbox": [48, 18, 166, 78],
                     "tipo": "fala",
                     "text": "HELLO",
@@ -813,20 +917,20 @@ class StripInpaintAdapterTests(unittest.TestCase):
                 {"bbox": [214, 58, 292, 96], "confidence": 0.88},
             ],
         }
-        filled = band.copy()
-        filled[18:78, 48:166] = 255
 
         def _capture_round(image_np, payload, inpainter):
             self.assertEqual(inpainter, "fake-inpainter")
-            self.assertTrue(np.array_equal(image_np, filled))
-            self.assertEqual(payload["_vision_blocks"], [{"bbox": [214, 58, 292, 96], "confidence": 0.88}])
+            self.assertTrue(np.all(image_np[34:52, 72:130] == 255))
+            self.assertEqual(int(image_np[20, 50, 0]), 210)
+            self.assertEqual(len(payload["_vision_blocks"]), 1)
+            self.assertEqual(payload["_vision_blocks"][0]["bbox"], [214, 58, 292, 96])
+            self.assertEqual(payload["_vision_blocks"][0]["confidence"], 0.88)
             return image_np.copy()
 
         with patch.dict(os.environ, _FAST_WHITE_ENV), patch(
             "vision_stack.runtime._resolve_white_balloon_bbox", return_value=[48, 18, 166, 78]
         ), patch(
             "vision_stack.runtime._apply_white_balloon_fill",
-            return_value=filled,
         ), patch("vision_stack.runtime._get_inpainter", return_value="fake-inpainter") as get_inpainter, patch(
             "vision_stack.runtime._apply_inpainting_round",
             side_effect=_capture_round,

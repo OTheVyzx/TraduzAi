@@ -126,8 +126,9 @@ function addTextLayer(layer: Konva.Layer, entry: TextEntry) {
 
 export function shouldUseKonvaPreviewRenderer() {
   const raw = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-    ?.VITE_TRADUZAI_KONVA_RENDER_PREVIEW;
-  return raw !== "0";
+    ?.VITE_TRADUZAI_KONVA_RENDER_PREVIEW
+    ?? (typeof process !== "undefined" ? process.env?.VITE_TRADUZAI_KONVA_RENDER_PREVIEW : undefined);
+  return ["1", "true", "yes", "on"].includes((raw ?? "").trim().toLowerCase());
 }
 
 export async function renderPageWithKonvaToDataUrl({

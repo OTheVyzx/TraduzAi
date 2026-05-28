@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -58,15 +59,75 @@ def _fake_process_band_factory(records: list, ocr_extras: dict | None = None):
     return fake_pb
 
 
+class DarkPanelCleanupTests(unittest.TestCase):
+    def test_page_dark_panel_cleanup_rerenders_solid_black_text_region(self):
+        from strip.run import _cleanup_dark_panel_page_and_rerender
+
+        clean = np.full((90, 180, 3), 7, dtype=np.uint8)
+        clean[34:50, 48:132] = [210, 208, 184]
+        rendered = clean.copy()
+        texts = [
+            {
+                "id": "ocr_001",
+                "bbox": [48, 34, 132, 50],
+                "text_pixel_bbox": [48, 34, 132, 50],
+                "line_polygons": [[[48, 34], [132, 34], [132, 50], [48, 50]]],
+                "balloon_bbox": [28, 20, 152, 66],
+                "balloon_type": "textured",
+                "layout_profile": "standard",
+                "tipo": "narracao",
+            }
+        ]
+        typesetter = MagicMock()
+        typesetter.render_band_image.side_effect = lambda image, _page: image.copy()
+
+        fixed_clean, fixed_rendered, did_fix = _cleanup_dark_panel_page_and_rerender(
+            clean_image=clean,
+            rendered_image=rendered,
+            page_texts=texts,
+            typesetter=typesetter,
+            breakdown={},
+        )
+
+        self.assertFalse(did_fix)
+        typesetter.render_band_image.assert_not_called()
+        np.testing.assert_array_equal(fixed_clean, clean)
+        np.testing.assert_array_equal(fixed_rendered, rendered)
+
+
 class RunChapterSmokeTests(unittest.TestCase):
-    def test_strip_band_margin_is_larger_for_cjk_sources(self):
+    def test_write_output_pages_jpegs_can_use_parallel_workers(self):
+        from strip.run import _write_output_pages_jpegs
+
+        pages = [
+            SimpleNamespace(path=None, image=np.full((32, 48, 3), 80 + i, dtype=np.uint8))
+            for i in range(3)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_PARALLEL_IMAGE_IO": "1",
+                "TRADUZAI_IMAGE_IO_WORKERS": "2",
+            },
+            clear=False,
+        ):
+            output_dir = Path(tmpdir) / "out"
+            seconds = _write_output_pages_jpegs(pages, output_dir)
+
+            self.assertGreaterEqual(seconds, 0.0)
+            self.assertEqual([page.path.name for page in pages], ["001.jpg", "002.jpg", "003.jpg"])
+            for page in pages:
+                self.assertTrue(page.path.exists())
+
+    def test_strip_band_margin_is_safe_for_all_sources(self):
         from strip.run import _strip_band_margin_px
 
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(_strip_band_margin_px("ko"), 96)
             self.assertEqual(_strip_band_margin_px("ja"), 96)
             self.assertEqual(_strip_band_margin_px("zh-cn"), 96)
-            self.assertEqual(_strip_band_margin_px("en"), 16)
+            self.assertEqual(_strip_band_margin_px("en"), 96)
 
     def test_strip_band_margin_env_override_wins(self):
         from strip.run import _strip_band_margin_px
@@ -91,6 +152,122 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertIsNotNone(mask)
         self.assertGreater(int(mask[50, 80]), 0)
         self.assertEqual(int(mask[88, 80]), 0)
+
+    def test_page_inpaint_clamp_restores_artifact_outside_mask_without_erasing_rendered_text(self):
+        from strip.run import _clamp_page_inpaint_to_mask
+
+        original = np.full((120, 180, 3), 210, dtype=np.uint8)
+        clean = original.copy()
+        clean[34:44, 52:76] = [245, 245, 245]
+        clean[92:108, 138:162] = [255, 255, 255]
+        rendered = clean.copy()
+        rendered[30:38, 54:92] = [0, 0, 0]
+        mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        mask[28:50, 44:98] = 255
+        texts = [
+            {
+                "bbox": [50, 28, 98, 48],
+                "text_pixel_bbox": [54, 30, 92, 38],
+                "translated": "TEXTO",
+                "original": "TEXT",
+                "balloon_type": "white",
+            }
+        ]
+        inpaint_blocks = [{"bbox": [44, 28, 98, 50], "text_pixel_bbox": [54, 30, 92, 38]}]
+
+        with patch("vision_stack.runtime.vision_blocks_to_mask", return_value=mask):
+            fixed_clean, fixed_rendered, did_fix = _clamp_page_inpaint_to_mask(
+                original_image=original,
+                clean_image=clean,
+                rendered_image=rendered,
+                page_texts=texts,
+                inpaint_blocks=inpaint_blocks,
+            )
+
+        self.assertTrue(did_fix)
+        self.assertEqual(fixed_clean[96, 145].tolist(), original[96, 145].tolist())
+        self.assertEqual(fixed_rendered[96, 145].tolist(), original[96, 145].tolist())
+        self.assertEqual(fixed_clean[36, 60].tolist(), [245, 245, 245])
+        self.assertEqual(fixed_rendered[32, 60].tolist(), [0, 0, 0])
+
+    def test_page_inpaint_clamp_restores_balloon_outline_outside_text_geometry(self):
+        from strip.run import _clamp_page_inpaint_to_mask
+
+        original = np.full((180, 260, 3), 255, dtype=np.uint8)
+        cv2.ellipse(original, (130, 92), (90, 54), 0, 0, 360, (140, 140, 140), 2, cv2.LINE_AA)
+        original[84:96, 78:180] = 12
+        original[106:118, 92:168] = 12
+        clean = original.copy()
+        clean[34:60, 72:190] = 255
+        clean[78:124, 70:186] = 255
+        rendered = clean.copy()
+        rendered[90:116, 92:168] = 0
+        text = {
+            "bbox": [76, 82, 182, 120],
+            "text_pixel_bbox": [76, 82, 182, 120],
+            "line_polygons": [
+                [[78, 84], [180, 84], [180, 96], [78, 96]],
+                [[92, 106], [168, 106], [168, 118], [92, 118]],
+            ],
+            "translated": "TEXTO",
+            "original": "TEXT",
+            "balloon_type": "white",
+        }
+        mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        mask[76:126, 66:190] = 255
+
+        with patch("vision_stack.runtime.vision_blocks_to_mask", return_value=mask):
+            fixed_clean, fixed_rendered, did_fix = _clamp_page_inpaint_to_mask(
+                original_image=original,
+                clean_image=clean,
+                rendered_image=rendered,
+                page_texts=[text],
+                inpaint_blocks=[dict(text)],
+            )
+
+        self.assertTrue(did_fix)
+        self.assertTrue(np.array_equal(fixed_clean[38, 130], original[38, 130]))
+        self.assertTrue(np.array_equal(fixed_rendered[38, 130], original[38, 130]))
+        self.assertTrue(np.all(fixed_clean[88:92, 90:170] == 255))
+        self.assertTrue(np.all(fixed_rendered[98:104, 102:158] == 0))
+
+    def test_page_inpaint_clamp_does_not_restore_source_bbox_glyph_outside_line_polygon(self):
+        from strip.run import _clamp_page_inpaint_to_mask
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        original[22:44, 38:46] = 12
+        original[22:26, 35:49] = 12
+        original[40:44, 35:49] = 12
+        original[26:44, 55:126] = 12
+        original[94:104, 150:164] = 80
+        clean = original.copy()
+        clean[18:58, 34:142] = 255
+        clean[94:104, 150:164] = 255
+        rendered = clean.copy()
+        rendered[30:50, 58:122] = 0
+        text = {
+            "bbox": [55, 20, 142, 54],
+            "text_pixel_bbox": [55, 20, 142, 54],
+            "source_bbox": [34, 18, 142, 54],
+            "balloon_bbox": [34, 18, 142, 54],
+            "line_polygons": [[[55, 20], [142, 20], [142, 54], [55, 54]]],
+            "translated": "TEXTO",
+            "original": "I will reach",
+            "balloon_type": "white",
+        }
+
+        fixed_clean, fixed_rendered, did_fix = _clamp_page_inpaint_to_mask(
+            original_image=original,
+            clean_image=clean,
+            rendered_image=rendered,
+            page_texts=[text],
+            inpaint_blocks=[dict(text)],
+        )
+
+        self.assertTrue(did_fix)
+        self.assertTrue(np.all(fixed_clean[30:40, 38:46] == 255))
+        self.assertTrue(np.all(fixed_rendered[30:40, 38:46] == 255))
+        self.assertTrue(np.array_equal(fixed_clean[98, 156], original[98, 156]))
 
     def test_page_final_cleanup_skips_textured_translucent_balloons(self):
         from strip.run import _cleanup_page_inpaint_and_rerender
@@ -197,7 +374,15 @@ class RunChapterSmokeTests(unittest.TestCase):
         typesetter = MagicMock()
         typesetter.render_band_image.return_value = rerendered
 
-        with patch.dict("os.environ", {"TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1"}, clear=True), patch(
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "0",
+                "TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA": "0",
+            },
+            clear=True,
+        ), patch(
             "vision_stack.runtime._white_cleanup_texts",
             return_value=texts,
         ), patch(
@@ -214,8 +399,367 @@ class RunChapterSmokeTests(unittest.TestCase):
 
         self.assertTrue(did_fix)
         self.assertIs(fixed_clean, fixed)
-        self.assertIs(fixed_rendered, rerendered)
+        self.assertTrue(np.array_equal(fixed_rendered, rerendered))
         typesetter.render_band_image.assert_called_once()
+
+    def test_page_final_small_roi_cleanup_rerenders_only_crop_and_preserves_outside(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((140, 200, 3), 255, dtype=np.uint8)
+        clean = np.full((140, 200, 3), 232, dtype=np.uint8)
+        rendered = np.full((140, 200, 3), 37, dtype=np.uint8)
+        fixed = clean.copy()
+        fixed[72:79, 92:105] = [248, 248, 248]
+        texts = [
+            {
+                "bbox": [78, 56, 124, 95],
+                "text_pixel_bbox": [86, 66, 116, 86],
+                "line_polygons": [[[86, 66], [116, 66], [116, 86], [86, 86]]],
+                "translated": "TEXTO",
+                "original": "TEXT",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            }
+        ]
+        render_calls = []
+
+        def fake_render_band_image(image_rgb, ocr_page):
+            render_calls.append((image_rgb.copy(), dict(ocr_page)))
+            return np.full_like(image_rgb, [9, 123, 222])
+
+        typesetter = MagicMock()
+        typesetter.render_band_image.side_effect = fake_render_band_image
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "1",
+                "TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA": "0",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ):
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertTrue(did_fix)
+        self.assertEqual(fixed_clean.shape, clean.shape)
+        self.assertEqual(fixed_rendered.shape, rendered.shape)
+        self.assertEqual(len(render_calls), 1)
+        crop_rgb, crop_page = render_calls[0]
+        self.assertNotEqual(crop_rgb.shape[:2], clean.shape[:2])
+        self.assertLess(crop_rgb.shape[0] * crop_rgb.shape[1], clean.shape[0] * clean.shape[1])
+        self.assertIn("texts", crop_page)
+        np.testing.assert_array_equal(fixed_rendered[:24, :24], rendered[:24, :24])
+        np.testing.assert_array_equal(fixed_rendered[118:, 172:], rendered[118:, 172:])
+
+    def test_page_final_small_roi_includes_neighbor_texts_inside_final_crop(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        clean = np.full((120, 180, 3), 232, dtype=np.uint8)
+        rendered = np.full((120, 180, 3), 37, dtype=np.uint8)
+        fixed = clean.copy()
+        fixed[50:56, 70:80] = [248, 248, 248]
+        texts = [
+            {
+                "bbox": [60, 40, 90, 70],
+                "text_pixel_bbox": [68, 48, 82, 62],
+                "balloon_bbox": [56, 36, 96, 76],
+                "translated": "A",
+                "original": "OLD A",
+                "balloon_type": "white",
+            },
+            {
+                "bbox": [100, 40, 130, 70],
+                "text_pixel_bbox": [106, 48, 124, 62],
+                "balloon_bbox": [96, 36, 136, 76],
+                "translated": "B",
+                "original": "OLD B",
+                "balloon_type": "white",
+            },
+        ]
+        render_calls = []
+
+        def fake_render_band_image(image_rgb, ocr_page):
+            render_calls.append((image_rgb.copy(), dict(ocr_page)))
+            return np.full_like(image_rgb, [9, 123, 222])
+
+        typesetter = MagicMock()
+        typesetter.render_band_image.side_effect = fake_render_band_image
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "1",
+                "TRADUZAI_PAGE_CLEANUP_RERENDER_MARGIN": "32",
+                "TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA": "0",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ):
+            _fixed_clean, _fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertTrue(did_fix)
+        self.assertEqual(len(render_calls), 1)
+        _crop_rgb, crop_page = render_calls[0]
+        self.assertEqual([text["translated"] for text in crop_page["texts"]], ["A", "B"])
+
+    def test_page_final_small_roi_does_not_mutate_original_text_metadata(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        clean = np.full((120, 180, 3), 232, dtype=np.uint8)
+        rendered = np.full((120, 180, 3), 37, dtype=np.uint8)
+        fixed = clean.copy()
+        fixed[50:56, 70:80] = [248, 248, 248]
+        text = {
+            "bbox": [60, 40, 90, 70],
+            "text_pixel_bbox": [68, 48, 82, 62],
+            "balloon_bbox": [56, 36, 96, 76],
+            "translated": "TEXTO",
+            "original": "TEXT",
+            "balloon_type": "white",
+            "estilo": {"cor": "#000000"},
+        }
+        texts = [text]
+
+        def fake_render_band_image(image_rgb, ocr_page):
+            ocr_page["texts"][0]["estilo"]["cor"] = "#ffffff"
+            ocr_page["texts"][0]["render_bbox"] = [1, 2, 3, 4]
+            return np.full_like(image_rgb, [9, 123, 222])
+
+        typesetter = MagicMock()
+        typesetter.render_band_image.side_effect = fake_render_band_image
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "1",
+                "TRADUZAI_PAGE_CLEANUP_RERENDER_MARGIN": "16",
+                "TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA": "0",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ):
+            _fixed_clean, _fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertTrue(did_fix)
+        self.assertEqual(text["estilo"]["cor"], "#000000")
+        self.assertNotIn("render_bbox", text)
+
+    def test_page_final_large_roi_cleanup_falls_back_to_full_page_render(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((140, 200, 3), 255, dtype=np.uint8)
+        clean = np.full((140, 200, 3), 232, dtype=np.uint8)
+        rendered = np.full((140, 200, 3), 37, dtype=np.uint8)
+        fixed = clean.copy()
+        fixed[:, :150] = [248, 248, 248]
+        texts = [
+            {
+                "bbox": [18, 16, 182, 126],
+                "text_pixel_bbox": [30, 30, 170, 112],
+                "line_polygons": [[[30, 30], [170, 30], [170, 112], [30, 112]]],
+                "translated": "TEXTO GRANDE",
+                "original": "LARGE TEXT",
+                "balloon_type": "white",
+                "block_profile": "white_balloon",
+            }
+        ]
+        render_calls = []
+        rerendered = np.full_like(rendered, [11, 22, 33])
+
+        def fake_render_band_image(image_rgb, ocr_page):
+            render_calls.append((image_rgb.copy(), dict(ocr_page)))
+            return rerendered
+
+        typesetter = MagicMock()
+        typesetter.render_band_image.side_effect = fake_render_band_image
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "1",
+                "TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA": "0",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ):
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+        )
+
+        self.assertTrue(did_fix)
+        np.testing.assert_array_equal(fixed_clean, fixed)
+        np.testing.assert_array_equal(fixed_rendered, rerendered)
+        self.assertEqual(len(render_calls), 1)
+        page_rgb, page = render_calls[0]
+        self.assertEqual(page_rgb.shape, clean.shape)
+        np.testing.assert_array_equal(page_rgb, fixed)
+        self.assertIn("texts", page)
+
+    def test_page_final_cleanup_applies_background_delta_without_rerender(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((80, 120, 3), 255, dtype=np.uint8)
+        clean = np.full((80, 120, 3), 232, dtype=np.uint8)
+        rendered = clean.copy()
+        rendered[32:38, 42:68] = [0, 0, 0]
+        fixed = clean.copy()
+        fixed[30:42, 40:70] = [248, 248, 248]
+        texts = [
+            {
+                "bbox": [34, 24, 76, 48],
+                "text_pixel_bbox": [40, 30, 70, 42],
+                "balloon_bbox": [28, 20, 82, 52],
+                "translated": "TEXTO",
+                "original": "TEXT",
+                "balloon_type": "white",
+            }
+        ]
+        typesetter = MagicMock()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "1",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "1",
+                "TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA": "1",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._apply_white_balloon_near_text_residual_cleanup",
+            return_value=fixed,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=False,
+        ):
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertTrue(did_fix)
+        self.assertIs(fixed_clean, fixed)
+        typesetter.render_band_image.assert_not_called()
+        np.testing.assert_array_equal(fixed_rendered[34, 50], rendered[34, 50])
+        np.testing.assert_array_equal(fixed_rendered[30, 40], fixed[30, 40])
+        np.testing.assert_array_equal(fixed_rendered[0, 0], rendered[0, 0])
+
+    def test_page_final_cleanup_rejects_text_residual_regression(self):
+        from strip.run import _cleanup_page_inpaint_and_rerender
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        original[44:66, 60:130] = [0, 0, 0]
+        clean = np.full((120, 180, 3), 255, dtype=np.uint8)
+        rendered = clean.copy()
+        bad_fixed = clean.copy()
+        bad_fixed[44:66, 60:130] = [0, 0, 0]
+        texts = [
+            {
+                "bbox": [40, 40, 140, 70],
+                "text_pixel_bbox": [44, 44, 136, 66],
+                "line_polygons": [[[44, 44], [136, 44], [136, 66], [44, 66]]],
+                "translated": "TEXTO LIMPO",
+                "original": "TEXT",
+                "balloon_type": "white",
+            }
+        ]
+        typesetter = MagicMock()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_ENABLE_PAGE_FINAL_NEAR_TEXT_CLEANUP": "0",
+                "TRADUZAI_PAGE_FINAL_FULL_CLEANUP": "1",
+            },
+            clear=False,
+        ), patch(
+            "vision_stack.runtime._white_cleanup_texts",
+            return_value=texts,
+        ), patch(
+            "vision_stack.runtime._has_white_balloon_text_residual",
+            return_value=True,
+        ), patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            return_value=(bad_fixed, {}),
+        ):
+            fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+                original_image=original,
+                clean_image=clean,
+                page_texts=texts,
+                rendered_image=rendered,
+                typesetter=typesetter,
+            )
+
+        self.assertFalse(did_fix)
+        self.assertIs(fixed_clean, clean)
+        self.assertIs(fixed_rendered, rendered)
+        typesetter.render_band_image.assert_not_called()
 
     def test_inpaint_block_from_vision_block_preserves_text_geometry_without_connected_metadata(self):
         from strip.run import _inpaint_block_from_vision_block
@@ -235,9 +779,28 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(block["bbox"], [10, 20, 90, 70])
         self.assertEqual(block["text_pixel_bbox"], [18, 26, 82, 62])
         self.assertEqual(block["line_polygons"][0][2], [82, 62])
-        self.assertEqual(block["balloon_type"], "white")
+        self.assertNotIn("balloon_type", block)
         self.assertNotIn("connected_lobe_bboxes", block)
         self.assertNotIn("balloon_subregions", block)
+
+    def test_inpaint_block_from_vision_block_drops_legacy_decision_fields(self):
+        from strip.run import _inpaint_block_from_vision_block
+
+        block = _inpaint_block_from_vision_block(
+            {
+                "bbox": [10, 20, 90, 70],
+                "confidence": 0.9,
+                "skip_processing": True,
+                "preserve_original": True,
+                "tipo": "sfx",
+                "content_class": "sound_effect",
+                "balloon_type": "textured",
+            }
+        )
+
+        self.assertEqual(block["bbox"], [10, 20, 90, 70])
+        for key in ("skip_processing", "preserve_original", "tipo", "content_class", "balloon_type"):
+            self.assertNotIn(key, block)
 
     def test_finalize_output_page_ocr_metadata_runs_same_cleanup_after_band_assignment(self):
         from strip.run import _finalize_output_page_ocr_metadata
@@ -304,9 +867,13 @@ class RunChapterSmokeTests(unittest.TestCase):
         changed = _finalize_output_page_ocr_metadata(page, page_number=1)
 
         self.assertTrue(changed)
-        self.assertEqual([text["text"] for text in page.text_layers["texts"]], ["PLEASE, FOR THE CHILD'S SAKE."])
-        self.assertEqual(page.text_layers["texts"][0]["translated"], "POR FAVOR, PELO BEM DA CRIANCA.")
-        self.assertEqual(len(page.ocr_result["_vision_blocks"]), 1)
+        self.assertEqual(
+            [text["text"] for text in page.text_layers["texts"]],
+            ["PLEASE, FOR THE CHILD'S", "THE SA", "SAKE."],
+        )
+        self.assertEqual(page.text_layers["texts"][0]["tipo"], "fala")
+        self.assertEqual(page.text_layers["texts"][0]["balloon_type"], "textured")
+        self.assertEqual(len(page.ocr_result["_vision_blocks"]), 3)
 
     def test_strip_inpainter_prewarm_is_enabled_by_default(self):
         from strip.run import _strip_inpainter_prewarm_enabled
@@ -378,7 +945,7 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(page["_vision_blocks"][0]["line_polygons"][0][0], [22, 10])
         self.assertTrue(page["_ocr_stats"]["koharu_cjk_precompute"])
 
-    def test_koharu_precompute_batches_roi_jobs_and_filters_non_translatable_text(self):
+    def test_koharu_precompute_batches_roi_jobs_and_filters_empty_non_text(self):
         from strip.run import _build_precomputed_koharu_cjk_pages
         from strip.types import BBox, Balloon, Band, VerticalStrip
 
@@ -470,12 +1037,13 @@ class RunChapterSmokeTests(unittest.TestCase):
             )
 
         runtime.run_koharu_cjk_pages.assert_called_once()
-        self.assertEqual(mapped[0]["texts"], [])
-        self.assertEqual(mapped[0]["_vision_blocks"], [])
-        self.assertEqual(mapped[0]["_ocr_stats"]["koharu_cjk_filtered_text_count"], 2)
+        self.assertEqual(len(mapped[0]["texts"]), 1)
+        self.assertEqual(mapped[0]["texts"][0]["tipo"], "sfx")
+        self.assertTrue(mapped[0]["_vision_blocks"])
+        self.assertEqual(mapped[0]["_ocr_stats"]["koharu_cjk_filtered_text_count"], 1)
         self.assertEqual(mapped[1]["texts"][0]["text"], "도저히 생문을 찾을 수가 없다.")
         self.assertEqual(telemetry["batch_mode"], "roi")
-        self.assertEqual(telemetry["filtered_text_count"], 2)
+        self.assertEqual(telemetry["filtered_text_count"], 1)
         self.assertTrue(all(job.get("known_text_bboxes") for job in runtime.run_koharu_cjk_pages.call_args.args[0]))
 
     def test_koharu_precompute_can_skip_empty_roi_before_worker(self):
@@ -578,7 +1146,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                 idioma_origem="ko",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             _koharu_cjk_text_is_translatable(
                 {
                     "text": "\ud558\ud558\ud558",
@@ -590,7 +1158,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                 idioma_origem="ko",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             _koharu_cjk_text_is_translatable(
                 {
                     "text": "\ud558\ud558\ud558",
@@ -600,7 +1168,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                 }
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             _koharu_cjk_text_is_translatable(
                 {
                     "text": "\ube44\ud2c0",
@@ -613,7 +1181,28 @@ class RunChapterSmokeTests(unittest.TestCase):
             )
         )
 
-    def test_koharu_roi_page_fallback_recovers_text_filtered_from_roi(self):
+    def test_koharu_precompute_translatability_ignores_legacy_type_fields(self):
+        from strip.run import _koharu_cjk_text_is_translatable
+
+        legacy_sfx = {
+            "text": "\ud558\ud558\ud558",
+            "tipo": "sfx",
+            "balloon_type": "textured",
+            "content_class": "sound_effect",
+            "confidence": 0.486,
+        }
+        legacy_noise_class = {
+            "text": "bloto",
+            "tipo": "narracao",
+            "balloon_type": "textured",
+            "content_class": "narration",
+            "confidence": 0.72,
+        }
+
+        self.assertTrue(_koharu_cjk_text_is_translatable(legacy_sfx, idioma_origem="ko"))
+        self.assertTrue(_koharu_cjk_text_is_translatable(legacy_noise_class, idioma_origem="ko"))
+
+    def test_koharu_roi_keeps_legacy_sfx_without_page_fallback(self):
         from strip.run import _build_precomputed_koharu_cjk_pages
         from strip.types import BBox, Balloon, Band, VerticalStrip
 
@@ -695,10 +1284,10 @@ class RunChapterSmokeTests(unittest.TestCase):
                 telemetry=telemetry,
             )
 
-        self.assertEqual(runtime.run_koharu_cjk_pages.call_count, 2)
-        self.assertEqual(mapped[0]["texts"][0]["text"], "\uc820\uc7a5!")
-        self.assertEqual(telemetry["page_fallback_candidate_count"], 1)
-        self.assertEqual(telemetry["page_fallback_text_count"], 1)
+        self.assertEqual(runtime.run_koharu_cjk_pages.call_count, 1)
+        self.assertEqual(mapped[0]["texts"][0]["text"], "\ube44\ud2c0")
+        self.assertEqual(telemetry.get("page_fallback_candidate_count", 0), 0)
+        self.assertEqual(telemetry.get("page_fallback_text_count", 0), 0)
 
     def test_koharu_roi_page_fallback_prioritizes_large_textlike_empty_balloon(self):
         from strip.run import _build_precomputed_koharu_cjk_pages
@@ -785,10 +1374,10 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(telemetry["page_fallback_job_count"], 1)
         self.assertEqual(telemetry["page_fallback_text_count"], 1)
 
-    def test_koharu_precompute_skips_short_non_hangul_noise_for_korean_source(self):
+    def test_koharu_precompute_keeps_text_when_legacy_metadata_looks_like_noise(self):
         from strip.run import _koharu_cjk_text_is_translatable
 
-        self.assertFalse(
+        self.assertTrue(
             _koharu_cjk_text_is_translatable(
                 {
                     "text": "おおお",
@@ -799,7 +1388,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                 idioma_origem="ko",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             _koharu_cjk_text_is_translatable(
                 {
                     "text": "bloto",
@@ -821,7 +1410,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                 idioma_origem="ko",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             _koharu_cjk_text_is_translatable(
                 {
                     "text": "逃生天魔",
@@ -964,6 +1553,64 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(captured["_source_page_number"], 3)
         self.assertEqual(captured["_band_y_top"], 120)
 
+    def test_process_band_does_not_copy_original_for_legacy_skip_processing_texts(self):
+        from strip.process_bands import BandImageStageOutput, BandStageOutput, process_band
+        from strip.types import BBox, Balloon, Band
+
+        original = np.full((80, 120, 3), 10, dtype=np.uint8)
+        cleaned = np.full((80, 120, 3), 80, dtype=np.uint8)
+        rendered = np.full((80, 120, 3), 180, dtype=np.uint8)
+        page = {
+            "numero": 1,
+            "width": 120,
+            "height": 80,
+            "_band_id": "page_001_band_000",
+            "_band_y_top": 0,
+            "_band_index": 1,
+            "_source_page_number": 1,
+            "_vision_blocks": [{"bbox": [10, 10, 80, 60]}],
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "HELLO",
+                    "original": "HELLO",
+                    "translated": "OLA",
+                    "bbox": [20, 20, 70, 42],
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "route_action": "translate_inpaint_render",
+                }
+            ],
+        }
+        band = Band(
+            y_top=0,
+            y_bottom=80,
+            balloons=[Balloon(BBox(10, 10, 80, 60), 0.9)],
+            strip_slice=original.copy(),
+            original_slice=original.copy(),
+        )
+
+        with patch("strip.process_bands._run_band_ocr_stage", return_value=BandStageOutput("ocr", page)), \
+            patch("strip.process_bands._run_review_layout_stage", return_value=BandStageOutput("review", page)), \
+            patch("strip.process_bands._run_translate_stage", return_value=BandStageOutput("translate", page)), \
+            patch("strip.process_bands._run_inpaint_stage", return_value=BandImageStageOutput("inpaint", cleaned)) as inpaint_stage, \
+            patch("strip.process_bands._run_typeset_stage", return_value=BandImageStageOutput("typeset", rendered)) as typeset_stage, \
+            patch("strip.process_bands._run_copy_back_stage", return_value=BandImageStageOutput("copy_back", rendered)):
+            process_band(
+                band,
+                runtime=MagicMock(),
+                translator=MagicMock(),
+                inpainter=MagicMock(),
+                typesetter=MagicMock(),
+                page_idx=0,
+            )
+
+        inpaint_stage.assert_called_once()
+        typeset_stage.assert_called_once()
+        self.assertFalse(band.perf.get("skip_processing_copy"))
+        self.assertTrue(np.array_equal(band.cleaned_slice, cleaned))
+        self.assertTrue(np.array_equal(band.rendered_slice, rendered))
+
     def test_run_chapter_produces_target_count_pages(self):
         from strip.run import run_chapter
 
@@ -1064,6 +1711,7 @@ class RunChapterSmokeTests(unittest.TestCase):
                     "ocr_full_page_mapped": 1,
                     "ocr_crop_fallback_attempts": 2,
                     "ocr_crop_fallback_recovered": 1,
+                    "ocr_crop_fallback_suppressed": idx,
                     "ocr_quick_skipped_no_text": idx == 1,
                     "ocr_scanlation_credit_skipped": idx == 0,
                     "ocr_cover_editorial_skipped": idx == 1,
@@ -1105,6 +1753,7 @@ class RunChapterSmokeTests(unittest.TestCase):
             self.assertEqual(summary["ocr_full_page_mapped"], 2)
             self.assertEqual(summary["ocr_crop_fallback_attempts"], 4)
             self.assertEqual(summary["ocr_crop_fallback_recovered"], 2)
+            self.assertEqual(summary["ocr_crop_fallback_suppressed"], 1)
             self.assertEqual(summary["ocr_quick_skipped_no_text_band_count"], 1)
             self.assertEqual(summary["ocr_scanlation_credit_skipped_band_count"], 1)
             self.assertEqual(summary["ocr_cover_editorial_skipped_band_count"], 1)
@@ -1393,7 +2042,11 @@ class RunChapterSmokeTests(unittest.TestCase):
                 band.ocr_result = {"texts": [], "_vision_blocks": []}
                 return band
 
-            with patch.dict("os.environ", {"TRADUZAI_MACRO_OCR": "1"}, clear=False), patch(
+            with patch.dict(
+                "os.environ",
+                {"TRADUZAI_MACRO_OCR": "1", "TRADUZAI_STRIP_SCANLATION_CREDIT_SKIP": "1"},
+                clear=False,
+            ), patch(
                 "ocr.macro_ocr.recognize_macro_ocr_windows",
                 return_value=(["HELLO"], {"macro_window_count": 1, "full_page_mapped": 1}, []),
             ) as macro_ocr, patch("strip.run.process_band", side_effect=fake_process_band):
@@ -1433,7 +2086,14 @@ class RunChapterSmokeTests(unittest.TestCase):
                 band.ocr_result = {"texts": [], "_vision_blocks": []}
                 return band
 
-            with patch.dict("os.environ", {"TRADUZAI_MACRO_OCR": "1"}, clear=False), patch(
+            with patch.dict(
+                "os.environ",
+                {"TRADUZAI_MACRO_OCR": "1", "TRADUZAI_STRIP_SCANLATION_CREDIT_SKIP": "1"},
+                clear=False,
+            ), patch(
+                "vision_stack.runtime._strip_scanlation_credit_skip_enabled",
+                return_value=True,
+            ), patch(
                 "vision_stack.runtime._looks_like_scanlation_credit_band",
                 return_value=True,
             ), patch(
@@ -1759,6 +2419,72 @@ class RunChapterSmokeTests(unittest.TestCase):
             self.assertTrue(all(record["has_gpu_lock"] for record in records))
             self.assertEqual(records[1]["glossario"]["EARLY"], "cedo")
 
+    def test_run_chapter_parallel_inpaint_flag_splits_ocr_and_inpaint_locks(self):
+        import threading
+        from strip.run import run_chapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            files = _write_pages(tmp_path, 2)
+            output = tmp_path / "out"
+            records = []
+            band1_started = threading.Event()
+
+            def fake_process_band(band, **kw):
+                idx = kw["page_idx"]
+                records.append({
+                    "idx": idx,
+                    "gpu_stage_lock": kw.get("gpu_stage_lock"),
+                    "ocr_stage_lock": kw.get("ocr_stage_lock"),
+                    "inpaint_stage_lock": kw.get("inpaint_stage_lock"),
+                })
+                if idx == 0:
+                    callback = kw.get("ordered_context_after_translate_callback")
+                    self.assertIsNotNone(callback)
+                    callback({"texts": [{"id": "early", "translated": "CEDO"}]})
+                    self.assertTrue(
+                        band1_started.wait(1.0),
+                        "parallel inpaint executor did not release the next band after translate",
+                    )
+                elif idx == 1:
+                    band1_started.set()
+                band.cleaned_slice = band.strip_slice.copy()
+                band.rendered_slice = band.strip_slice.copy()
+                band.ocr_result = {"texts": [], "_vision_blocks": []}
+                return band
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "TRADUZAI_STRIP_SCHEDULER_EXECUTOR": "overlap",
+                    "TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS": "2",
+                },
+                clear=False,
+            ), patch("strip.run.process_band", side_effect=fake_process_band):
+                output_pages = run_chapter(
+                    image_files=files,
+                    output_dir=output,
+                    target_count=2,
+                    detector=_make_detector_with_n_balloons(2),
+                    runtime=MagicMock(),
+                    translator=MagicMock(),
+                    inpainter=MagicMock(),
+                    typesetter=MagicMock(),
+                )
+
+            summary = output_pages[0].page_profile["strip_perf_summary"]
+            scheduler_executor = summary["scheduler_executor"]
+            self.assertEqual(scheduler_executor["mode"], "overlap_context_release")
+            self.assertEqual(scheduler_executor["parallel_inpaint_threads"], 2)
+            self.assertTrue(scheduler_executor["ocr_serialized"])
+            self.assertEqual(scheduler_executor["inpaint_lock_mode"], "bounded_semaphore")
+            self.assertTrue(all(record["gpu_stage_lock"] is None for record in records))
+            ocr_locks = {id(record["ocr_stage_lock"]) for record in records}
+            inpaint_locks = {id(record["inpaint_stage_lock"]) for record in records}
+            self.assertEqual(len(ocr_locks), 1)
+            self.assertEqual(len(inpaint_locks), 1)
+            self.assertNotEqual(next(iter(ocr_locks)), next(iter(inpaint_locks)))
+
 
 class RunningHistoryTests(unittest.TestCase):
     """H.4 — history rolante de bandas passado para contextual reviewer."""
@@ -1969,3 +2695,49 @@ class RunningGlossaryTests(unittest.TestCase):
             self.assertEqual(records[1]["glossario"]["EARLY"], "cedo")
             self.assertNotIn("LATE", records[1]["glossario"])
             self.assertEqual(records[1]["band_history"][0]["texts"][0]["id"], "early")
+
+
+class PageSpaceTypesetTests(unittest.TestCase):
+    def test_page_texts_from_text_layers_accepts_list_shape(self):
+        from strip.run import _page_texts_from_text_layers
+
+        text_layers = [
+            {"translated": "FUNCIONOU...", "balloon_subregions": [[1, 2, 3, 4]]},
+            "invalid",
+            {"translated": "BEM, FOI REVIVIDO"},
+        ]
+
+        self.assertEqual(_page_texts_from_text_layers(text_layers), [text_layers[0], text_layers[2]])
+
+    def test_page_space_typeset_required_for_wide_white_box(self):
+        from strip.run import _page_requires_page_space_typeset
+
+        self.assertTrue(
+            _page_requires_page_space_typeset(
+                [
+                    {
+                        "translated": "ANTES, JAKE SEMPRE PARECIA PERDIDO PARA MIM.",
+                        "tipo": "fala",
+                        "balloon_type": "white",
+                        "layout_profile": "white_balloon",
+                        "balloon_bbox": [89, 3884, 582, 4033],
+                    }
+                ]
+            )
+        )
+
+    def test_page_space_typeset_required_for_connected_lobes(self):
+        from strip.run import _page_requires_page_space_typeset
+
+        self.assertTrue(
+            _page_requires_page_space_typeset(
+                [
+                    {
+                        "translated": "TEM CERTEZA QUE NAO SE ARREPENDE?",
+                        "balloon_type": "white",
+                        "layout_profile": "connected_balloon",
+                        "connected_lobe_bboxes": [[0, 273, 287, 463], [301, 273, 636, 463]],
+                    }
+                ]
+            )
+        )

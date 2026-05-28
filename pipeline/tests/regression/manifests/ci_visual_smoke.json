@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "run_id": "ci_visual_smoke",
+  "run_path": "../fixtures/ci_visual_smoke",
+  "ci_fixture": true,
+  "schema_version": 12,
+  "current_issue_classes": [
+    "TEXT_CLIPPED"
+  ],
+  "target_issue_classes_after_fix": [
+    "none_or_waived"
+  ],
+  "pages_of_interest": [
+    1
+  ],
+  "sample_artifacts": [
+    {
+      "page": 1,
+      "issue_class": "TEXT_CLIPPED",
+      "crop_path": "debug/e2e/09_typeset/page_001_text_clipped.png"
+    }
+  ],
+  "recorded_at": "2026-05-25",
+  "recorded_by": "codex-r1.4"
+}

@@ -6,6 +6,7 @@ import json
 import importlib
 import contextlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,6 +33,20 @@ class MainEmitTests(unittest.TestCase):
         log_output = stderr.getvalue()
         self.assertIn("Falha ao emitir evento JSON no stdout", log_output)
         self.assertEqual(log_output.count("Falha ao emitir evento JSON no stdout"), 1)
+
+    def test_emit_falls_back_to_ascii_json_on_unicode_encode_error(self) -> None:
+        calls = []
+
+        def fake_print(value, *args, **kwargs):
+            calls.append(value)
+            if len(calls) == 1:
+                raise UnicodeEncodeError("cp1252", "第", 0, 1, "character maps to <undefined>")
+
+        with patch("builtins.print", side_effect=fake_print):
+            main.emit("error", message="Arquivo não encontrado: 第270话.cbz")
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("\\u7b2c270\\u8bdd.cbz", calls[1])
 
     def test_main_lists_supported_languages_in_cli_mode(self) -> None:
         stdout = io.StringIO()
@@ -158,6 +173,9 @@ class MainEmitTests(unittest.TestCase):
             self.assertTrue((output_dir / "qa_report.json").exists())
             self.assertTrue((output_dir / "qa_report.md").exists())
             self.assertTrue((output_dir / "issues.csv").exists())
+            project = json.loads((output_dir / "project.json").read_text(encoding="utf-8"))
+            self.assertEqual(project["qa"]["timing"]["sidecar_path"], "performance_timing.json")
+            self.assertGreater(project["qa"]["timing"]["total_sec"], 0)
 
     def test_runner_cli_strict_returns_nonzero_when_mock_has_critical_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,6 +201,79 @@ class MainEmitTests(unittest.TestCase):
             self.assertNotEqual(exit_code, 0)
             qa = json.loads((output_dir / "qa_report.json").read_text(encoding="utf-8"))
             self.assertEqual(qa["summary"]["critical"], 1)
+
+    def test_runner_cli_mock_critical_persists_blocked_preview_without_path_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+
+            exit_code = main._run_pipeline_runner_cli(
+                {
+                    "source_path": str(input_dir),
+                    "obra": "Fixture",
+                    "idioma_origem": "en",
+                    "idioma_destino": "pt-BR",
+                    "mode": "mock",
+                    "debug": True,
+                    "strict": False,
+                    "mock_critical": True,
+                    "work_dir": str(output_dir),
+                }
+            )
+
+            self.assertEqual(exit_code, 0)
+            project = json.loads((output_dir / "project.json").read_text(encoding="utf-8"))
+            self.assertEqual(project["output_review_state"], "blocked_preview")
+            self.assertEqual(project["qa"]["export_gate"]["status"], "BLOCK")
+            self.assertEqual(project["paginas"][0]["arquivo_traduzido"], "translated/001.png")
+            self.assertTrue((output_dir / "translated" / "001.png").exists())
+            self.assertFalse((output_dir / "translated" / "approved").exists())
+            self.assertFalse((output_dir / "translated" / "blocked_preview").exists())
+
+    def test_runner_cli_strict_mock_emits_error_as_last_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+            emitted = []
+
+            with patch.object(main, "emit", side_effect=lambda msg_type, **kwargs: emitted.append({"type": msg_type, **kwargs})):
+                exit_code = main._run_pipeline_runner_cli(
+                    {
+                        "source_path": str(input_dir),
+                        "obra": "Fixture",
+                        "idioma_origem": "en",
+                        "idioma_destino": "pt-BR",
+                        "mode": "mock",
+                        "debug": True,
+                        "strict": True,
+                        "mock_critical": True,
+                        "work_dir": str(output_dir),
+                    }
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(emitted[-1]["type"], "error")
+            self.assertNotIn("complete", [event["type"] for event in emitted])
+
+    def test_build_strip_inpainter_honors_skip_inpaint_without_calling_real_inpaint(self) -> None:
+        calls = []
+
+        def real_inpaint(band_rgb, ocr_page):
+            calls.append((band_rgb, ocr_page))
+            return "inpainted"
+
+        inpainter = main._build_strip_inpainter_for_config({"skip_inpaint": True}, real_inpaint)
+        page = {"texts": [{"id": "ocr_001"}]}
+        result = inpainter.inpaint_band_image("original-band", page)
+
+        self.assertEqual(result, "original-band")
+        self.assertEqual(calls, [])
+        self.assertTrue(page["_skip_inpaint_honored"])
+        self.assertFalse(page["_strip_used_real_inpaint"])
 
     def test_runner_cli_writes_engine_preset_to_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,6 +301,208 @@ class MainEmitTests(unittest.TestCase):
             run_pipeline.assert_called_once()
             config = json.loads((output_dir / "runner_config.json").read_text(encoding="utf-8"))
             self.assertEqual(config["engine_preset_id"], "manhwa_manhua_ocr_guided")
+
+    def test_runner_cli_writes_strict_to_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+
+            with patch.object(main, "_run_pipeline") as run_pipeline:
+                exit_code = main._run_pipeline_runner_cli(
+                    {
+                        "source_path": str(input_dir),
+                        "obra": "Fixture",
+                        "idioma_origem": "en",
+                        "idioma_destino": "pt-BR",
+                        "engine_preset_id": "manga",
+                        "mode": "real",
+                        "debug": True,
+                        "strict": True,
+                        "work_dir": str(output_dir),
+                    }
+                )
+
+            self.assertEqual(exit_code, 0)
+            run_pipeline.assert_called_once()
+            config = json.loads((output_dir / "runner_config.json").read_text(encoding="utf-8"))
+            self.assertTrue(config["strict"])
+
+    def test_debug_export_gate_artifacts_write_consistency_and_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            recorder = DebugRecorder(Path(tmp), enabled=True, run_id="run-test")
+            project = {
+                "qa": {
+                    "summary": {
+                        "critical_count": 1,
+                        "highest_severity": "critical",
+                    },
+                    "export_gate": {
+                        "status": "BLOCK",
+                        "critical_issue_count": 1,
+                        "review_issue_count": 0,
+                        "issues": [
+                            {
+                                "page": 1,
+                                "layer": "t1",
+                                "type": "p0_render_blocker",
+                                "severity": "critical",
+                                "flags": ["bbox_overreach_critical"],
+                            }
+                        ],
+                    },
+                }
+            }
+
+            consistency = main._write_debug_export_gate_artifacts(recorder, project)
+
+            root = Path(tmp) / "debug" / "e2e"
+            consistency_path = root / "11_qa_export_gate" / "qa_export_gate_consistency.json"
+            report_path = root / "13_report" / "debug_report.md"
+            saved = json.loads(consistency_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(consistency["consistent"])
+            self.assertTrue(saved["consistency"]["critical_count_matches"])
+            self.assertTrue(report_path.exists())
+
+    def test_debug_export_gate_rewrites_render_plan_final_from_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp) / "debug" / "e2e"
+            stale_plan = root / "09_typeset" / "render_plan_final.jsonl"
+            stale_plan.parent.mkdir(parents=True, exist_ok=True)
+            stale_plan.write_text(
+                json.dumps(
+                    {
+                        "stage": "typeset",
+                        "source": "stale",
+                        "text_id": "ocr_001",
+                        "trace_id": "ocr_001@page_003_band_042",
+                        "page_id": "page_003",
+                        "band_id": "page_003_band_042",
+                        "coordinate_space": "page",
+                        "balloon_bbox": [343, 11293, 538, 11317],
+                        "safe_text_box": [343, 11293, 538, 11317],
+                        "render_bbox": [350, 11300, 530, 11310],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(Path(tmp), enabled=True, run_id="run-test")
+            project = {
+                "paginas": [
+                    {
+                        "numero": 3,
+                        "text_layers": [
+                            {
+                                "id": "ocr_001",
+                                "text_id": "ocr_001",
+                                "trace_id": "ocr_001@page_003_band_042",
+                                "band_id": "page_003_band_042",
+                                "balloon_bbox": [0, 10726, 800, 11410],
+                                "safe_text_box": [343, 11293, 538, 11317],
+                                "render_bbox": [350, 11300, 530, 11310],
+                                "original": "HELLO",
+                                "translated": "OLA",
+                                "qa_flags": ["bbox_overreach_critical"],
+                            }
+                        ],
+                    }
+                ],
+                "qa": {
+                    "summary": {"critical_count": 1, "highest_severity": "critical"},
+                    "export_gate": {
+                        "status": "BLOCK",
+                        "critical_issue_count": 1,
+                        "review_issue_count": 0,
+                        "issues": [],
+                    },
+                },
+            }
+
+            consistency = main._write_debug_export_gate_artifacts(recorder, project)
+
+            rows = [
+                json.loads(line)
+                for line in stale_plan.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            sync_audit = json.loads(
+                (root / "09_typeset" / "render_plan_final_sync.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["source"], "project_json_final")
+            self.assertEqual(rows[0]["page_id"], "page_003")
+            self.assertEqual(rows[0]["band_id"], "page_003_band_042")
+            self.assertEqual(rows[0]["balloon_bbox"], [0, 10726, 800, 11410])
+            self.assertEqual(rows[0]["safe_text_box"], [343, 11293, 538, 11317])
+            self.assertEqual(rows[0]["render_bbox"], [350, 11300, 530, 11310])
+            self.assertEqual(rows[0]["qa_flags"], ["bbox_overreach_critical"])
+            self.assertEqual(consistency["render_plan_sync"]["written_count"], 1)
+            self.assertEqual(sync_audit["summary"]["written_count"], 1)
+
+    def test_normalize_project_render_balloon_bboxes_uses_renderer_target(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 4,
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "trace_id": "ocr_001@page_004_band_071",
+                            "translated": "PI",
+                            "balloon_bbox": [174, 8816, 225, 8869],
+                            "safe_text_box": [184, 8821, 276, 8864],
+                            "render_bbox": [198, 8826, 261, 8859],
+                            "_render_debug": {
+                                "target_bbox": [174, 8816, 285, 8869],
+                                "position_bbox": [174, 8816, 285, 8869],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        fixed = main._normalize_project_render_balloon_bboxes(project)
+        layer = project["paginas"][0]["text_layers"][0]
+
+        self.assertEqual(fixed, 1)
+        self.assertEqual(layer["balloon_bbox"], [174, 8816, 285, 8869])
+        self.assertEqual(layer["_original_balloon_bbox_before_render_sync"], [174, 8816, 225, 8869])
+        self.assertTrue(layer["_balloon_bbox_synced_from_render_debug"])
+
+    def test_normalize_project_render_balloon_bboxes_leaves_valid_balloon_unchanged(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 1,
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "balloon_bbox": [10, 10, 100, 80],
+                            "safe_text_box": [20, 20, 90, 70],
+                            "render_bbox": [30, 30, 80, 60],
+                            "_render_debug": {"target_bbox": [0, 0, 500, 500]},
+                        }
+                    ],
+                }
+            ]
+        }
+
+        fixed = main._normalize_project_render_balloon_bboxes(project)
+        layer = project["paginas"][0]["text_layers"][0]
+
+        self.assertEqual(fixed, 0)
+        self.assertEqual(layer["balloon_bbox"], [10, 10, 100, 80])
+        self.assertNotIn("_balloon_bbox_synced_from_render_debug", layer)
 
     def test_load_json_file_accepts_utf8_bom_from_windows_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,6 +540,18 @@ class MainEmitTests(unittest.TestCase):
             )
 
         self.assertIsNone(selected)
+
+    def test_maybe_reexec_local_venv_preserves_child_exit_code(self) -> None:
+        completed = type("Completed", (), {"returncode": 2})()
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch.object(main, "_select_local_venv_python", return_value=Path("venv/Scripts/python.exe")):
+                with patch.object(main.subprocess, "run", return_value=completed) as run:
+                    with self.assertRaises(SystemExit) as raised:
+                        main._maybe_reexec_local_venv()
+
+        self.assertEqual(raised.exception.code, 2)
+        run.assert_called_once()
 
     def test_configure_pipeline_logging_uses_info_level_and_force(self) -> None:
         with patch.object(main.logging, "basicConfig") as basic_config:
@@ -307,6 +612,53 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(qa["summary"]["by_action"]["drop_block"], 1)
             self.assertEqual(qa["summary"]["by_reason"]["top_caption_overexpand"], 1)
             self.assertEqual(qa["flagged_pages"], [27, 41])
+
+    def test_decision_trace_qa_report_includes_export_gate_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            decision_log = importlib.import_module("utils.decision_log")
+
+            decision_log.configure_decision_trace(tmp)
+            decision_log.record_decision(
+                stage="layout",
+                action="flag_block",
+                reason="render_outside_balloon",
+                page=3,
+                layer="ocr_001",
+            )
+            decision_log.finalize_decision_trace(
+                {
+                    "obra": "Teste",
+                    "qa_summary": {
+                        "highest_severity": "critical",
+                        "critical_issue_count": 1,
+                    },
+                    "export_gate": {
+                        "status": "BLOCK",
+                        "allowed": False,
+                        "issue_count": 1,
+                        "critical_issue_count": 1,
+                        "critical_flag_count": 1,
+                        "review_issue_count": 0,
+                        "review_flag_count": 0,
+                        "needs_review": False,
+                        "issues": [
+                            {
+                                "type": "p0_render_blocker",
+                                "severity": "critical",
+                                "flags": ["render_outside_balloon"],
+                                "trace_id": "ocr_001@page_003_band_001",
+                            }
+                        ],
+                    },
+                }
+            )
+
+            qa = json.loads((Path(tmp) / "qa_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(qa["summary"]["export_gate_status"], "BLOCK")
+            self.assertEqual(qa["summary"]["critical_issue_count"], 1)
+            self.assertEqual(qa["export_gate"]["status"], "BLOCK")
+            self.assertEqual(qa["issues"][0]["type"], "p0_render_blocker")
+            self.assertTrue(qa["needs_review"])
 
     def test_run_translate_page_maps_original_field_and_persists_returned_translations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -416,12 +768,20 @@ class MainEmitTests(unittest.TestCase):
                 "_vision_blocks": [{"bbox": [10, 20, 110, 120], "confidence": 0.88}],
             }
 
-            def fake_run_ocr(image_path, models_dir, vision_worker_path, idioma_origem, engine_preset_id=""):
+            def fake_run_ocr(
+                image_path,
+                models_dir,
+                vision_worker_path,
+                idioma_origem,
+                engine_preset_id="",
+                **kwargs,
+            ):
                 self.assertEqual(Path(image_path), originals_dir / "001.jpg")
                 self.assertEqual(models_dir, "D:/traduzai_data/models")
                 self.assertEqual(vision_worker_path, project["_vision_worker_path"])
                 self.assertEqual(idioma_origem, "en")
                 self.assertEqual(engine_preset_id, project.get("engine_preset_id", ""))
+                self.assertFalse(kwargs.get("work_title_user_provided", False))
                 return ocr_page
 
             with patch("ocr.detector.run_ocr", side_effect=fake_run_ocr):
@@ -439,20 +799,421 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(layer["original"], "HELLO")
             self.assertEqual(layer["translated"], "")
             self.assertEqual(layer["source_bbox"], [10, 20, 110, 120])
-            self.assertEqual(layer["balloon_bbox"], [12, 24, 106, 116])
+            self.assertEqual(layer["balloon_bbox"], [8, 18, 118, 130])
             self.assertEqual(layer["text_pixel_bbox"], [12, 24, 106, 116])
-            self.assertEqual(layer["layout_group_size"], 1)
-            self.assertNotEqual(layer["layout_profile"], "connected_balloon")
-            self.assertEqual(layer["balloon_subregions"], [])
-            self.assertEqual(saved["paginas"][0]["textos"][0]["layout_group_size"], 1)
-            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_bbox"], [12, 24, 106, 116])
+            self.assertEqual(layer["layout_group_size"], 2)
+            self.assertEqual(layer["layout_profile"], "connected_balloon")
+            self.assertEqual(layer["balloon_subregions"], [[8, 18, 60, 130], [62, 18, 118, 130]])
+            self.assertEqual(saved["paginas"][0]["textos"][0]["layout_group_size"], 2)
+            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_bbox"], [8, 18, 118, 130])
             self.assertEqual(saved["paginas"][0]["textos"][0]["text_pixel_bbox"], [12, 24, 106, 116])
-            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_subregions"], [])
+            self.assertEqual(saved["paginas"][0]["textos"][0]["balloon_subregions"], [[8, 18, 60, 130], [62, 18, 118, 130]])
             self.assertEqual(saved["paginas"][0]["textos"][0]["ocr_source"], "vision-paddleocr")
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["bbox"], [10, 20, 110, 120])
             self.assertEqual(saved["paginas"][0]["inpaint_blocks"][0]["confidence"], 0.88)
             self.assertEqual(saved["qa"]["summary"]["total"], 1)
             self.assertEqual(saved["qa"]["summary"]["counts"], {"low_ocr_confidence": 1})
+
+    def test_run_detect_page_with_default_preset_keeps_bubble_layout_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            originals_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+
+            project = {
+                "idioma_origem": "en",
+                "contexto": {},
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+            ocr_page = {
+                "texts": [
+                    {
+                        "id": "tl_001_001",
+                        "bbox": [12, 24, 90, 80],
+                        "text": "HELLO",
+                        "confidence": 0.91,
+                        "tipo": "fala",
+                    }
+                ],
+                "_vision_blocks": [{"bbox": [12, 24, 90, 80], "confidence": 0.86}],
+                "_bubble_regions": [{"bbox": [8, 18, 100, 92], "confidence": 0.77}],
+            }
+
+            def fake_run_ocr(image_path, models_dir, vision_worker_path, idioma_origem, engine_preset_id="", **_kwargs):
+                self.assertEqual(Path(image_path), originals_dir / "001.jpg")
+                self.assertEqual(idioma_origem, "ja")
+                self.assertEqual(engine_preset_id, "default")
+                return ocr_page
+
+            def fake_enrich(page):
+                self.assertEqual(page["_bubble_regions"][0]["bbox"], [8, 18, 100, 92])
+                enriched = dict(page)
+                enriched["texts"] = [dict(page["texts"][0], balloon_bbox=[8, 18, 100, 92], layout_profile="bubble_region")]
+                return enriched
+
+            with patch("ocr.detector.run_ocr", side_effect=fake_run_ocr):
+                with patch("ocr.contextual_reviewer.contextual_review_page", side_effect=lambda page, *_: page):
+                    with patch("layout.balloon_layout.enrich_page_layout", side_effect=fake_enrich) as enrich:
+                        with patch("main.render_page_image"):
+                            with patch("main.emit_progress"):
+                                with patch("main.emit"):
+                                    main._run_detect_page(
+                                        project_path,
+                                        0,
+                                        None,
+                                        {"idioma_origem": "ja", "engine_preset_id": "default"},
+                                    )
+
+            enrich.assert_called_once()
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["idioma_origem"], "ja")
+            self.assertEqual(saved["engine_preset_id"], "default")
+            layer = saved["paginas"][0]["text_layers"][0]
+            self.assertEqual(layer["balloon_bbox"], [8, 18, 100, 92])
+            self.assertEqual(layer["layout_profile"], "bubble_region")
+
+    def test_run_detect_boxes_page_updates_only_inpaint_blocks(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            originals_dir.mkdir()
+            Image.new("RGB", (32, 24), "white").save(originals_dir / "001.png")
+
+            existing_layer = {
+                "id": "tl_001_001",
+                "bbox": [2, 2, 16, 12],
+                "source_bbox": [2, 2, 16, 12],
+                "layout_bbox": [2, 2, 16, 12],
+                "original": "KEEP ME",
+                "translated": "MANTER",
+            }
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "manga",
+                "contexto": {},
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.png",
+                        "arquivo_traduzido": "translated/001.png",
+                        "text_layers": [existing_layer],
+                        "textos": [existing_layer],
+                        "inpaint_blocks": [{"bbox": [20, 2, 28, 10], "confidence": 0.5}],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+            class FakeDetector:
+                def __init__(self) -> None:
+                    self.calls: list[tuple[tuple[int, ...], float]] = []
+
+                def detect(self, image, conf_threshold=0.5):
+                    self.calls.append((tuple(image.shape), conf_threshold))
+                    return [SimpleNamespace(xyxy=(1, 3, 18, 14), confidence=0.87)]
+
+            detector = FakeDetector()
+            emitted: list[dict] = []
+
+            with patch("vision_stack.runtime._get_detector", return_value=detector) as get_detector:
+                with patch("vision_stack.runtime._profile_to_detection_threshold", return_value=0.42):
+                    with patch("main.render_page_image") as render_page_image:
+                        with patch("main.emit_progress"):
+                            with patch.object(main, "emit", side_effect=lambda msg_type, **kwargs: emitted.append({"type": msg_type, **kwargs})):
+                                main._run_detect_boxes_page(
+                                    project_path,
+                                    0,
+                                    None,
+                                    {"idioma_origem": "ko", "engine_preset_id": "manhwa_manhua"},
+                                )
+
+            get_detector.assert_called_once_with("max")
+            self.assertEqual(detector.calls, [((24, 32, 3), 0.42)])
+            render_page_image.assert_not_called()
+
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            page = saved["paginas"][0]
+            self.assertEqual(saved["idioma_origem"], "ko")
+            self.assertEqual(saved["engine_preset_id"], "manhwa_manhua")
+            self.assertEqual(page["text_layers"][0]["original"], "KEEP ME")
+            self.assertEqual(page["textos"][0]["original"], "KEEP ME")
+            self.assertEqual(page["inpaint_blocks"], [{"bbox": [1, 3, 18, 14], "confidence": 0.87, "source_bbox": [1, 3, 18, 14], "text_pixel_bbox": [1, 3, 18, 14]}])
+            self.assertEqual(emitted[-1]["type"], "complete")
+            self.assertTrue(emitted[-1]["output_path"].replace("\\", "/").endswith("translated/001.png"))
+
+    def test_run_detect_page_cache_is_reused_without_live_ocr_on_second_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            translated_dir = Path(tmp) / "translated"
+            originals_dir.mkdir()
+            translated_dir.mkdir()
+            (originals_dir / "001.png").write_bytes(b"fake")
+
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "",
+                "contexto": {},
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.png",
+                        "arquivo_traduzido": "translated/001.png",
+                        "text_layers": [],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+            ocr_page = {
+                "texts": [
+                    {
+                        "id": "tl_001_001",
+                        "bbox": [10, 20, 110, 120],
+                        "balloon_bbox": [8, 18, 118, 130],
+                        "text": "HELLO",
+                        "confidence": 0.93,
+                        "tipo": "fala",
+                    }
+                ],
+                "_vision_blocks": [{"bbox": [10, 20, 110, 120], "confidence": 0.88}],
+            }
+            run_ocr_calls = {"count": 0}
+
+            def fake_run_ocr(
+                image_path,
+                models_dir,
+                vision_worker_path,
+                idioma_origem,
+                engine_preset_id="",
+                **kwargs,
+            ):
+                run_ocr_calls["count"] += 1
+                self.assertEqual(Path(image_path), originals_dir / "001.png")
+                self.assertEqual(idioma_origem, "en")
+                self.assertEqual(engine_preset_id, "")
+                self.assertFalse(kwargs.get("work_title_user_provided", False))
+                return ocr_page
+
+            with patch("ocr.detector.run_ocr", side_effect=fake_run_ocr):
+                with patch("ocr.contextual_reviewer.contextual_review_page", side_effect=lambda page, *_: page):
+                    with patch("layout.balloon_layout.enrich_page_layout", side_effect=lambda page: page):
+                        with patch("main.render_page_image") as render_page:
+                            with patch("main.emit_progress") as emit_progress:
+                                with patch("main.emit"):
+                                    main._run_detect_page(
+                                        project_path,
+                                        0,
+                                        None,
+                                        {"idioma_origem": "en", "engine_preset_id": ""},
+                                    )
+                                    main._run_detect_page(
+                                        project_path,
+                                        0,
+                                        None,
+                                        {"idioma_origem": "en", "engine_preset_id": ""},
+                                    )
+
+            self.assertEqual(run_ocr_calls["count"], 1)
+            self.assertEqual(render_page.call_count, 2)
+            progress_messages = [call.kwargs.get("message") for call in emit_progress.call_args_list]
+            self.assertIn("Aplicando deteccao em cache...", progress_messages)
+
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            page = saved["paginas"][0]
+            self.assertEqual(page["text_layers"][0]["original"], "HELLO")
+            self.assertEqual(page["inpaint_blocks"][0]["bbox"], [10, 20, 110, 120])
+
+    def test_run_detect_page_region_bypasses_detect_ocr_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            translated_dir = Path(tmp) / "translated"
+            originals_dir.mkdir()
+            translated_dir.mkdir()
+            (originals_dir / "001.png").write_bytes(b"fake")
+
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "",
+                "contexto": {},
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.png",
+                        "arquivo_traduzido": "translated/001.png",
+                        "text_layers": [],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+            run_ocr_calls = {"count": 0}
+
+            def fake_run_ocr(*_args, **_kwargs):
+                run_ocr_calls["count"] += 1
+                return {
+                    "texts": [
+                        {
+                            "id": f"tl_001_{run_ocr_calls['count']:03}",
+                            "bbox": [10, 20, 110, 120],
+                            "balloon_bbox": [8, 18, 118, 130],
+                            "text": f"HELLO {run_ocr_calls['count']}",
+                            "confidence": 0.93,
+                            "tipo": "fala",
+                        }
+                    ],
+                    "_vision_blocks": [{"bbox": [10, 20, 110, 120], "confidence": 0.88}],
+                }
+
+            with patch("ocr.detector.run_ocr", side_effect=fake_run_ocr):
+                with patch("ocr.contextual_reviewer.contextual_review_page", side_effect=lambda page, *_: page):
+                    with patch("layout.balloon_layout.enrich_page_layout", side_effect=lambda page: page):
+                        with patch("main.render_page_image"):
+                            with patch("main.emit_progress"):
+                                with patch("main.emit"):
+                                    main._run_detect_page(project_path, 0)
+                                    main._run_detect_page(project_path, 0, region={"bbox": [0, 0, 200, 200]})
+
+            self.assertEqual(run_ocr_calls["count"], 2)
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["paginas"][0]["text_layers"][0]["original"], "HELLO 2")
+
+    def test_preload_detect_ocr_page_writes_cache_without_mutating_project(self) -> None:
+        from editor_vision_cache import build_detect_ocr_cache_key, read_cache_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            originals_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+
+            project = {
+                "idioma_origem": "en",
+                "contexto": {},
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [],
+                        "textos": [],
+                    }
+                ],
+            }
+            original_project_json = json.dumps(project, ensure_ascii=False)
+            project_path.write_text(original_project_json, encoding="utf-8")
+
+            cache_key = build_detect_ocr_cache_key(
+                project_path=project_path,
+                page_index=0,
+                image_path=originals_dir / "001.jpg",
+                idioma_origem="en",
+                engine_preset_id="",
+                schema_version=1,
+            )
+            ocr_page = {
+                "texts": [
+                    {
+                        "id": "tl_001_001",
+                        "bbox": [10, 20, 110, 120],
+                        "balloon_bbox": [10, 20, 110, 120],
+                        "text": "HELLO",
+                        "confidence": 0.93,
+                        "tipo": "fala",
+                    }
+                ],
+                "_vision_blocks": [{"bbox": [10, 20, 110, 120], "confidence": 0.88}],
+            }
+
+            with patch("ocr.detector.run_ocr", return_value=ocr_page) as run_ocr:
+                with patch("ocr.contextual_reviewer.contextual_review_page", side_effect=lambda page, *_: page):
+                    with patch("layout.balloon_layout.enrich_page_layout", side_effect=lambda page: page):
+                        with patch("main.render_page_image") as render_page:
+                            with patch("main.emit") as emit:
+                                result = main._preload_detect_ocr_page(project_path, 0)
+
+            self.assertEqual(result["cache"], "ready")
+            run_ocr.assert_called_once()
+            render_page.assert_not_called()
+            emit.assert_not_called()
+            self.assertEqual(project_path.read_text(encoding="utf-8"), original_project_json)
+            cached = read_cache_entry(cache_key)
+            self.assertEqual(cached["text_layers"][0]["original"], "HELLO")
+            self.assertEqual(cached["inpaint_blocks"][0]["bbox"], [10, 20, 110, 120])
+
+    def test_preload_ocr_layers_page_writes_cache_without_mutating_project(self) -> None:
+        from editor_vision_cache import build_ocr_layers_cache_key, read_cache_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            originals_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+
+            layer = {
+                "id": "current",
+                "bbox": [10, 20, 110, 120],
+                "source_bbox": [10, 20, 110, 120],
+                "layout_bbox": [10, 20, 110, 120],
+                "original": "",
+                "translated": "",
+                "tipo": "fala",
+            }
+            project = {
+                "idioma_origem": "en",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [layer],
+                        "textos": [],
+                    }
+                ],
+            }
+            original_project_json = json.dumps(project, ensure_ascii=False)
+            project_path.write_text(original_project_json, encoding="utf-8")
+
+            cache_key = build_ocr_layers_cache_key(
+                project_path=project_path,
+                page_index=0,
+                image_path=originals_dir / "001.jpg",
+                layers=[layer],
+                idioma_origem="en",
+                engine_preset_id="",
+                schema_version=1,
+            )
+
+            with patch("ocr.detector.run_ocr_on_block", return_value=("CACHED OCR", 0.96)) as run_ocr_on_block:
+                with patch("main.render_page_image") as render_page:
+                    with patch("main.emit") as emit:
+                        result = main._preload_ocr_layers_page(project_path, 0)
+
+            self.assertEqual(result["cache"], "ready")
+            run_ocr_on_block.assert_called_once()
+            render_page.assert_not_called()
+            emit.assert_not_called()
+            self.assertEqual(project_path.read_text(encoding="utf-8"), original_project_json)
+            cached = read_cache_entry(cache_key)
+            self.assertEqual(cached["layer_updates"][0]["id"], "current")
+            self.assertEqual(cached["layer_updates"][0]["original"], "CACHED OCR")
+            self.assertEqual(cached["layer_updates"][0]["ocr_confidence"], 0.96)
 
     def test_project_inpaint_block_preserves_raw_bbox_with_text_anchor_metadata(self) -> None:
         block = main._project_inpaint_block_from_vision_block(
@@ -504,7 +1265,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(legacy["ocr_source"], "vision-paddleocr")
         self.assertEqual(legacy["ocr_confidence"], 0.93)
         self.assertEqual(legacy["confianca_ocr"], 0.93)
-        self.assertEqual(legacy["balloon_type"], "white")
+        self.assertEqual(legacy["balloon_type"], "")
 
     def test_run_ocr_page_uses_detected_blocks_when_text_layers_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -562,6 +1323,284 @@ class MainEmitTests(unittest.TestCase):
                 (originals_dir / "001.jpg", [130, 140, 230, 280]),
             ])
 
+    def test_run_ocr_page_ignores_cache_when_updates_match_no_layers(self) -> None:
+        from editor_vision_cache import build_ocr_layers_cache_key, build_ocr_layers_payload, write_cache_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            translated_dir = Path(tmp) / "translated"
+            originals_dir.mkdir()
+            translated_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+            (translated_dir / "001.jpg").write_bytes(b"fake")
+
+            layer = {
+                "id": "current",
+                "bbox": [10, 20, 110, 120],
+                "source_bbox": [10, 20, 110, 120],
+                "layout_bbox": [10, 20, 110, 120],
+                "original": "",
+                "translated": "",
+                "tipo": "fala",
+            }
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [layer],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+            cache_key = build_ocr_layers_cache_key(
+                project_path=project_path,
+                page_index=0,
+                image_path=originals_dir / "001.jpg",
+                layers=[layer],
+                idioma_origem="en",
+                engine_preset_id="",
+                schema_version=1,
+            )
+            write_cache_entry(
+                cache_key,
+                build_ocr_layers_payload(
+                    page_index=0,
+                    layer_updates=[{"id": "other", "original": "CACHED", "ocr_confidence": 0.1, "confianca_ocr": 0.1}],
+                ),
+            )
+
+            calls = []
+
+            def fake_run_ocr_on_block(image_path, bbox, **_kwargs):
+                calls.append((Path(image_path), list(bbox)))
+                return ("LIVE", 0.92)
+
+            with patch("ocr.detector.run_ocr_on_block", side_effect=fake_run_ocr_on_block):
+                with patch("main.render_page_image"):
+                    with patch("main.emit_progress"):
+                        with patch("main.emit"):
+                            main._run_ocr_page(project_path, 0)
+
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            saved_layer = saved["paginas"][0]["text_layers"][0]
+            self.assertEqual(saved_layer["original"], "LIVE")
+            self.assertEqual(saved_layer["ocr_confidence"], 0.92)
+            self.assertEqual(calls, [(originals_dir / "001.jpg", [10, 20, 110, 120])])
+
+    def test_run_ocr_page_ignores_cache_updates_with_empty_ids(self) -> None:
+        from editor_vision_cache import build_ocr_layers_cache_key, build_ocr_layers_payload, write_cache_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            translated_dir = Path(tmp) / "translated"
+            originals_dir.mkdir()
+            translated_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+            (translated_dir / "001.jpg").write_bytes(b"fake")
+
+            layer = {
+                "id": "",
+                "bbox": [10, 20, 110, 120],
+                "source_bbox": [10, 20, 110, 120],
+                "layout_bbox": [10, 20, 110, 120],
+                "original": "",
+                "translated": "",
+                "tipo": "fala",
+            }
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [layer],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+            cache_key = build_ocr_layers_cache_key(
+                project_path=project_path,
+                page_index=0,
+                image_path=originals_dir / "001.jpg",
+                layers=[layer],
+                idioma_origem="en",
+                engine_preset_id="",
+                schema_version=1,
+            )
+            write_cache_entry(
+                cache_key,
+                build_ocr_layers_payload(
+                    page_index=0,
+                    layer_updates=[
+                        {"original": "NO_ID", "ocr_confidence": 0.1, "confianca_ocr": 0.1},
+                        {"id": "", "original": "EMPTY", "ocr_confidence": 0.2, "confianca_ocr": 0.2},
+                        {"id": "   ", "original": "BLANK", "ocr_confidence": 0.3, "confianca_ocr": 0.3},
+                    ],
+                ),
+            )
+
+            calls = []
+
+            def fake_run_ocr_on_block(image_path, bbox, **_kwargs):
+                calls.append((Path(image_path), list(bbox)))
+                return ("LIVE_EMPTY_ID", 0.94)
+
+            with patch("ocr.detector.run_ocr_on_block", side_effect=fake_run_ocr_on_block):
+                with patch("main.render_page_image"):
+                    with patch("main.emit_progress"):
+                        with patch("main.emit"):
+                            main._run_ocr_page(project_path, 0)
+
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            saved_layer = saved["paginas"][0]["text_layers"][0]
+            self.assertEqual(saved_layer["original"], "LIVE_EMPTY_ID")
+            self.assertEqual(saved_layer["ocr_confidence"], 0.94)
+            self.assertEqual(calls, [(originals_dir / "001.jpg", [10, 20, 110, 120])])
+
+    def test_run_ocr_page_applies_matching_cache_without_live_ocr(self) -> None:
+        from editor_vision_cache import build_ocr_layers_cache_key, build_ocr_layers_payload, write_cache_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            translated_dir = Path(tmp) / "translated"
+            originals_dir.mkdir()
+            translated_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+            (translated_dir / "001.jpg").write_bytes(b"fake")
+
+            layer = {
+                "id": "current",
+                "bbox": [10, 20, 110, 120],
+                "source_bbox": [10, 20, 110, 120],
+                "layout_bbox": [10, 20, 110, 120],
+                "original": "",
+                "translated": "",
+                "tipo": "fala",
+            }
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [layer],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+            cache_key = build_ocr_layers_cache_key(
+                project_path=project_path,
+                page_index=0,
+                image_path=originals_dir / "001.jpg",
+                layers=[layer],
+                idioma_origem="en",
+                engine_preset_id="",
+                schema_version=1,
+            )
+            write_cache_entry(
+                cache_key,
+                build_ocr_layers_payload(
+                    page_index=0,
+                    layer_updates=[{"id": "current", "original": "CACHED", "ocr_confidence": 0.97, "confianca_ocr": 0.97}],
+                ),
+            )
+
+            with patch("ocr.detector.run_ocr_on_block") as run_ocr_on_block:
+                with patch("main.render_page_image"):
+                    with patch("main.emit_progress"):
+                        with patch("main.emit"):
+                            main._run_ocr_page(project_path, 0)
+
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            saved_layer = saved["paginas"][0]["text_layers"][0]
+            self.assertEqual(saved_layer["original"], "CACHED")
+            self.assertEqual(saved_layer["ocr_confidence"], 0.97)
+            run_ocr_on_block.assert_not_called()
+
+    def test_run_ocr_page_region_bypasses_matching_cache(self) -> None:
+        from editor_vision_cache import build_ocr_layers_cache_key, build_ocr_layers_payload, write_cache_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            originals_dir = Path(tmp) / "originals"
+            translated_dir = Path(tmp) / "translated"
+            originals_dir.mkdir()
+            translated_dir.mkdir()
+            (originals_dir / "001.jpg").write_bytes(b"fake")
+            (translated_dir / "001.jpg").write_bytes(b"fake")
+
+            layer = {
+                "id": "current",
+                "bbox": [10, 20, 110, 120],
+                "source_bbox": [10, 20, 110, 120],
+                "layout_bbox": [10, 20, 110, 120],
+                "original": "",
+                "translated": "",
+                "tipo": "fala",
+            }
+            project = {
+                "idioma_origem": "en",
+                "engine_preset_id": "",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_original": "originals/001.jpg",
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [layer],
+                        "textos": [],
+                    }
+                ],
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+            cache_key = build_ocr_layers_cache_key(
+                project_path=project_path,
+                page_index=0,
+                image_path=originals_dir / "001.jpg",
+                layers=[layer],
+                idioma_origem="en",
+                engine_preset_id="",
+                schema_version=1,
+            )
+            write_cache_entry(
+                cache_key,
+                build_ocr_layers_payload(
+                    page_index=0,
+                    layer_updates=[{"id": "current", "original": "CACHED", "ocr_confidence": 0.97, "confianca_ocr": 0.97}],
+                ),
+            )
+
+            calls = []
+
+            def fake_run_ocr_on_block(image_path, bbox, **_kwargs):
+                calls.append((Path(image_path), list(bbox)))
+                return ("REGION_LIVE", 0.89)
+
+            with patch("ocr.detector.run_ocr_on_block", side_effect=fake_run_ocr_on_block):
+                with patch("main.render_page_image"):
+                    with patch("main.emit_progress"):
+                        with patch("main.emit"):
+                            main._run_ocr_page(project_path, 0, region={"bbox": [0, 0, 200, 200]})
+
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            saved_layer = saved["paginas"][0]["text_layers"][0]
+            self.assertEqual(saved_layer["original"], "REGION_LIVE")
+            self.assertEqual(saved_layer["ocr_confidence"], 0.89)
+            self.assertEqual(calls, [(originals_dir / "001.jpg", [10, 20, 110, 120])])
+
     def test_page_action_options_parse_engine_preset_and_languages(self) -> None:
         region, options = main._page_action_options_from_args(
             [
@@ -604,6 +1643,75 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["text_pixel_bbox"], [436, 1395, 760, 1545])
         self.assertEqual(layer["line_polygons"][0][0], [436, 1395])
         self.assertEqual(layer["line_polygons"][0][2], [760, 1545])
+
+    def test_normalize_text_layer_for_renderer_preserves_trace_metadata(self) -> None:
+        layer = main._normalize_text_layer_for_renderer(
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "trace_id": "ocr_001@page_006_band_112",
+                "source_trace_ids": [
+                    "ocr_001@page_006_band_112",
+                    "ocr_002@page_006_band_112",
+                ],
+                "source_text_ids": ["ocr_001", "ocr_002"],
+                "merge_reason": "clustered_line_fragments",
+                "ocr_merged_source_count": 2,
+                "text_instance_id": "instance-112",
+                "page_id": "page_006",
+                "band_id": "page_006_band_112",
+                "strip_band_y_top": 6400,
+                "band_y_top": 120,
+                "bbox": [153, 6430, 322, 6449],
+                "text_pixel_bbox": [153, 6430, 322, 6449],
+                "translated": "O QUE E ISSO?!",
+            },
+            page_number=6,
+            layer_index=4,
+        )
+
+        self.assertEqual(layer["trace_id"], "ocr_001@page_006_band_112")
+        self.assertEqual(
+            layer["source_trace_ids"],
+            ["ocr_001@page_006_band_112", "ocr_002@page_006_band_112"],
+        )
+        self.assertEqual(layer["source_text_ids"], ["ocr_001", "ocr_002"])
+        self.assertEqual(layer["merge_reason"], "clustered_line_fragments")
+        self.assertEqual(layer["ocr_merged_source_count"], 2)
+        self.assertEqual(layer["text_instance_id"], "instance-112")
+        self.assertEqual(layer["page_id"], "page_006")
+        self.assertEqual(layer["band_id"], "page_006_band_112")
+        self.assertEqual(layer["strip_band_y_top"], 6400)
+        self.assertEqual(layer["band_y_top"], 120)
+
+    def test_normalize_text_layer_for_renderer_preserves_ocr_normalization_metadata(self) -> None:
+        layer = main._normalize_text_layer_for_renderer(
+            {
+                "id": "ocr_001",
+                "original": "What!Then,why did we come to the cafe,what are you hiding?",
+                "raw_ocr": "What!Then,why did we come to the cafe,what are you hiding?",
+                "normalized_ocr": "What! Then, why did we come to the cafe, what are you hiding?",
+                "normalized_text_final": "What! Then, why did we come to the cafe, what are you hiding?",
+                "normalization": {
+                    "changed": True,
+                    "rules_applied": ["repair_missing_punctuation_spacing"],
+                },
+                "normalization_trace": {
+                    "changed": True,
+                    "rules_applied": ["repair_missing_punctuation_spacing"],
+                },
+                "translated": "O QUE! ENTAO, POR QUE VIEMOS AO CAFE?",
+                "bbox": [72, 1286, 313, 1382],
+            },
+            page_number=17,
+            layer_index=1,
+        )
+
+        self.assertEqual(layer["raw_ocr"], "What!Then,why did we come to the cafe,what are you hiding?")
+        self.assertEqual(layer["normalized_ocr"], "What! Then, why did we come to the cafe, what are you hiding?")
+        self.assertEqual(layer["normalized_text_final"], "What! Then, why did we come to the cafe, what are you hiding?")
+        self.assertTrue(layer["normalization"]["changed"])
+        self.assertEqual(layer["normalization_trace"]["rules_applied"], ["repair_missing_punctuation_spacing"])
 
     def test_carry_translations_for_detected_layers_matches_by_geometry_not_index(self) -> None:
         existing_layers = [
@@ -768,7 +1876,7 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(layer["bbox"], [110, 220, 310, 430])
             self.assertEqual(layer["ocr_confidence"], 0.95)
 
-    def test_build_text_layer_strips_connected_balloon_metadata_by_default(self) -> None:
+    def test_build_text_layer_preserves_connected_balloon_metadata(self) -> None:
         ocr_text = {
             "id": "tl_001_003",
             "text": "IT MAY BE NOTHING MORE THAN A HALF-FINISHED CULTIVATION METHOD...",
@@ -812,14 +1920,14 @@ class MainEmitTests(unittest.TestCase):
 
         blocks = build_render_blocks([layer])
 
-        self.assertEqual(layer.get("connected_position_bboxes"), [])
-        self.assertEqual(layer.get("connected_text_groups"), [])
-        self.assertEqual(layer.get("connected_detection_confidence"), 0.0)
-        self.assertEqual(layer.get("layout_group_size"), 1)
-        self.assertEqual(layer.get("balloon_subregions"), [])
+        self.assertEqual(layer.get("connected_position_bboxes"), [[113, 1513, 345, 1712], [462, 1568, 705, 1767]])
+        self.assertEqual(layer.get("connected_text_groups"), [[113, 1513, 373, 1722], [432, 1558, 705, 1767]])
+        self.assertEqual(layer.get("connected_detection_confidence"), 1.0)
+        self.assertEqual(layer.get("layout_group_size"), 2)
+        self.assertEqual(layer.get("balloon_subregions"), [[113, 1513, 395, 1767], [409, 1513, 705, 1767]])
         self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0].get("balloon_subregions"), [])
-        self.assertEqual(blocks[0].get("connected_position_bboxes"), [])
+        self.assertEqual(blocks[0].get("balloon_subregions"), [[113, 1513, 395, 1767], [409, 1513, 705, 1767]])
+        self.assertEqual(blocks[0].get("connected_position_bboxes"), [[113, 1513, 345, 1712], [462, 1568, 705, 1767]])
 
     def test_build_text_layer_sanitizes_auto_style_before_project_json(self) -> None:
         layer = main.build_text_layer(
@@ -925,6 +2033,7 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [10, 10, 180, 40],
                 "skip_processing": True,
                 "skip_reason": "smart_skip",
+                "content_class": "url_watermark",
                 "smart_skip_decision": {
                     "category": "credit_or_watermark",
                     "reason": "opening-page credit or reader/update notice",
@@ -935,9 +2044,612 @@ class MainEmitTests(unittest.TestCase):
             corpus_textual_benchmark={},
         )
 
-        self.assertTrue(layer["skip_processing"])
-        self.assertEqual(layer["skip_reason"], "smart_skip")
+        self.assertFalse(layer["skip_processing"])
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertEqual(layer["route_reason"], "dialogue_balloon_with_english_text")
+        self.assertIsNone(layer["skip_reason"])
+        self.assertEqual(layer["content_class"], "text")
+        self.assertEqual(layer["translate_policy"], "translate")
+        self.assertEqual(layer["render_policy"], "normal")
         self.assertEqual(layer["smart_skip_decision"]["category"], "credit_or_watermark")
+
+    def test_build_text_layer_preserves_route_action_contract_for_project_json(self) -> None:
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "text": "Read at ASURACOMIC.NET",
+                "bbox": [10, 10, 180, 40],
+                "skip_processing": False,
+                "content_class": "url_watermark",
+                "translate_policy": "skip_translation",
+                "render_policy": "remove",
+                "route_action": "inpaint_only",
+                "route_reason": "watermark_detected",
+                "is_watermark": True,
+            },
+            translated="Read at ASURACOMIC.NET",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertFalse(layer["skip_processing"])
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertEqual(layer["route_reason"], "dialogue_balloon_with_english_text")
+        self.assertTrue(layer["is_watermark"])
+        self.assertFalse(layer["is_non_english"])
+        self.assertEqual(layer["translate_policy"], "translate")
+        self.assertEqual(layer["render_policy"], "normal")
+
+    def test_ensure_project_route_action_contract_fills_missing_route_actions(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "dialogue-1",
+                            "text": "What are you doing?",
+                            "content_class": "dialogue",
+                            "skip_processing": False,
+                        },
+                        {
+                            "id": "legacy-skip",
+                            "text": "////",
+                            "skip_processing": True,
+                            "skip_reason": "legacy_noise",
+                        },
+                    ],
+                    "texts": [
+                        {
+                            "id": "watermark-1",
+                            "text": "Read at example.com",
+                            "content_class": "url_watermark",
+                            "skip_processing": True,
+                        }
+                    ],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_route_action_contract(project)
+
+        layers = project["paginas"][0]["text_layers"]
+        texts = project["paginas"][0]["texts"]
+        self.assertEqual(audit["filled_missing_count"], 0)
+        self.assertEqual(layers[0]["route_action"], "translate_inpaint_render")
+        self.assertFalse(layers[0]["skip_processing"])
+        self.assertEqual(layers[1]["route_action"], "translate_inpaint_render")
+        self.assertFalse(layers[1]["skip_processing"])
+        self.assertEqual(texts[0]["route_action"], "translate_inpaint_render")
+        self.assertFalse(texts[0]["skip_processing"])
+
+    def test_ensure_project_route_action_contract_overrides_special_translate_routes(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "credit",
+                            "content_class": "scanlator_credit",
+                            "route_action": "translate_inpaint_render",
+                            "route_reason": "dialogue_balloon_with_english_text",
+                            "skip_processing": False,
+                        }
+                    ],
+                    "textos": [],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_route_action_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["overridden_special_count"], 0)
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertEqual(layer["route_reason"], "dialogue_balloon_with_english_text")
+        self.assertFalse(layer["skip_processing"])
+
+    def test_ensure_project_route_action_contract_overrides_noise_translate_routes(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "noise",
+                            "content_class": "noise",
+                            "route_action": "translate_inpaint_render",
+                            "route_reason": "translate_inpaint_render",
+                            "skip_processing": False,
+                        }
+                    ],
+                    "textos": [],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_route_action_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["overridden_special_count"], 0)
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertFalse(layer["skip_processing"])
+
+    def test_ensure_project_route_action_contract_preserves_noop_name_without_glyph_evidence(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "name-noop",
+                            "original": "Hosu?",
+                            "translated": "Hosu?",
+                            "content_class": "dialogue",
+                            "route_action": "translate_inpaint_render",
+                            "route_reason": "dialogue_balloon_with_english_text",
+                            "skip_processing": False,
+                            "mask_evidence": {
+                                "kind": "none",
+                                "raw_mask_pixels": 0,
+                                "expanded_mask_pixels": 0,
+                                "evidence_score": 0.0,
+                                "fast_fill_allowed": False,
+                                "fast_fill_reject_reasons": ["raw_mask_pixels_zero"],
+                            },
+                            "qa_flags": ["fast_fill_no_glyph_evidence"],
+                        }
+                    ],
+                    "textos": [],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_route_action_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["preserved_noop_without_glyph_count"], 0)
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertFalse(layer["skip_processing"])
+        self.assertEqual(layer["render_policy"], "normal")
+        self.assertIn("fast_fill_no_glyph_evidence", layer["qa_flags"])
+
+    def test_ensure_project_route_action_contract_preserves_noop_name_before_mask_flags(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "name-noop",
+                            "original": "Hosu?",
+                            "translated": "Hosu?",
+                            "content_class": "dialogue",
+                            "route_action": "translate_inpaint_render",
+                            "route_reason": "dialogue_balloon_with_english_text",
+                            "skip_processing": False,
+                            "qa_flags": [],
+                        }
+                    ],
+                    "textos": [],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_route_action_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["preserved_noop_without_glyph_count"], 0)
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertEqual(layer["route_reason"], "dialogue_balloon_with_english_text")
+        self.assertEqual(layer["render_policy"], "normal")
+
+    def test_filter_render_plan_qa_flags_drops_resolved_fit_flag(self) -> None:
+        flags = {"fit_below_minimum_legible", "TEXT_CLIPPED"}
+        entry = {
+            "fit_status": "ok",
+            "fit_attempts": [{"font_px": 13, "lines": 3, "status": "ok"}],
+            "render_bbox": [20, 20, 80, 50],
+            "safe_text_box": [10, 10, 90, 60],
+            "target_bbox": [0, 0, 100, 80],
+        }
+
+        filtered = main._filter_render_plan_qa_flags(entry, flags)
+
+        self.assertEqual(filtered, set())
+
+    def test_filter_render_plan_qa_flags_keeps_render_fit_overflow_evidence(self) -> None:
+        flags = {"TEXT_OVERFLOW", "safe_text_box_recomputed"}
+        entry = {
+            "fit_status": "ok",
+            "render_bbox": [173, 10900, 506, 10919],
+            "safe_text_box": [144, 10888, 535, 10919],
+            "target_bbox": [171, 10866, 262, 10905],
+            "balloon_bbox": [3, 10860, 651, 10986],
+            "qa_metrics": {
+                "render_balloon_containment": 0.3363,
+                "render_fit": {
+                    "flags": ["TEXT_OVERFLOW"],
+                    "render_bbox": [173, 10900, 506, 10919],
+                    "safe_text_box": [144, 10888, 535, 10919],
+                    "target_bbox": [3, 10860, 285, 10986],
+                    "balloon_bbox": [3, 10860, 285, 10986],
+                },
+            },
+        }
+
+        filtered = main._filter_render_plan_qa_flags(entry, flags)
+
+        self.assertIn("TEXT_OVERFLOW", filtered)
+        self.assertIn("safe_text_box_recomputed", filtered)
+
+    def test_filter_render_plan_qa_flags_drops_stale_tiny_render_fit_evidence(self) -> None:
+        flags = {"TEXT_CLIPPED", "TEXT_OVERFLOW", "weak_text_residual_after_inpaint"}
+        entry = {
+            "fit_status": "ok",
+            "render_bbox": [200, 3420, 661, 3902],
+            "safe_text_box": [200, 3455, 661, 3907],
+            "target_bbox": [0, 3402, 800, 4039],
+            "balloon_bbox": [0, 3402, 800, 4039],
+            "qa_metrics": {
+                "render_balloon_containment": 0.8814,
+                "render_fit": {
+                    "flags": ["TEXT_CLIPPED", "TEXT_OVERFLOW"],
+                    "render_bbox": [200, 3420, 318, 3458],
+                    "safe_text_box": [200, 3455, 370, 3464],
+                    "target_bbox": [134, 3415, 304, 3464],
+                    "balloon_bbox": [134, 3415, 304, 3464],
+                },
+            },
+        }
+
+        filtered = main._filter_render_plan_qa_flags(entry, flags)
+
+        self.assertEqual(filtered, {"weak_text_residual_after_inpaint"})
+
+    def test_filter_render_plan_qa_flags_drops_resolved_missing_render_flag(self) -> None:
+        flags = {"missing_render_bbox", "safe_text_box_recomputed"}
+        entry = {
+            "fit_status": "ok",
+            "render_bbox": [20, 20, 80, 50],
+            "safe_text_box": [10, 10, 90, 60],
+            "target_bbox": [0, 0, 100, 80],
+        }
+
+        filtered = main._filter_render_plan_qa_flags(entry, flags)
+
+        self.assertEqual(filtered, {"safe_text_box_recomputed"})
+
+    def test_hydrate_project_render_metadata_uses_candidates_before_render_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            debug_root = work_dir / "debug" / "e2e"
+            (debug_root / "09_typeset").mkdir(parents=True)
+            (debug_root / "05_layout_geometry").mkdir(parents=True)
+            (debug_root / "09_typeset" / "render_plan_candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "trace_id": "ocr_001@page_024_band_064",
+                        "text_id": "ocr_001",
+                        "band_id": "page_024_band_064",
+                        "page_id": "page_024",
+                        "target_bbox": [75, 96, 248, 396],
+                        "render_bbox": [97, 186, 226, 306],
+                        "safe_text_box": [94, 135, 228, 357],
+                        "fit_status": "ok",
+                        "qa_flags": ["safe_text_box_recomputed"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (debug_root / "05_layout_geometry" / "layout_blocks.jsonl").write_text(
+                json.dumps(
+                    {
+                        "trace_id": "ocr_001@page_024_band_064",
+                        "text_id": "ocr_001",
+                        "band_id": "page_024_band_064",
+                        "page_id": "page_024",
+                        "bboxes": {
+                            "bbox": {"value": [75, 1180, 248, 1480]},
+                            "text_pixel_bbox": {"value": [86, 1189, 241, 1482]},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            project = {
+                "_work_dir": str(work_dir),
+                "paginas": [
+                    {
+                        "text_layers": [
+                            {
+                                "id": "ocr_001",
+                                "text_id": "ocr_001",
+                                "trace_id": "ocr_001@page_024_band_064",
+                                "band_id": "page_024_band_064",
+                                "page_id": "page_024",
+                                "route_action": "translate_inpaint_render",
+                                "translated": "Quando estou atualizando meu equipamento...",
+                                "bbox": [86, 1189, 241, 1482],
+                                "text_pixel_bbox": [86, 1189, 241, 1482],
+                                "balloon_bbox": [75, 1180, 248, 1480],
+                                "qa_flags": [],
+                            }
+                        ]
+                    }
+                ],
+            }
+
+            audit = main._hydrate_project_render_metadata_from_debug_candidates(project)
+            contract = main._ensure_project_render_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["hydrated_layers"], 1)
+        self.assertEqual(layer["target_bbox"], [75, 1180, 248, 1480])
+        self.assertEqual(layer["render_bbox"], [97, 1270, 226, 1390])
+        self.assertEqual(layer["safe_text_box"], [94, 1219, 228, 1441])
+        self.assertEqual(layer["fit_status"], "ok")
+        self.assertNotIn("missing_render_bbox", layer.get("qa_flags") or [])
+        self.assertEqual(contract["missing_render_bbox_count"], 0)
+
+    def test_ensure_project_render_contract_drops_stale_fit_flag_when_fit_is_ok(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "dialogue",
+                            "route_action": "translate_inpaint_render",
+                            "skip_processing": False,
+                            "translated": "Claro, fique seguro!",
+                            "render_bbox": [466, 1734, 574, 1768],
+                            "safe_text_box": [462, 1724, 577, 1778],
+                            "fit_status": "ok",
+                            "fit_attempts": [{"font_px": 12, "lines": 2, "status": "ok"}],
+                            "qa_flags": ["fit_below_minimum_legible", "safe_text_box_recomputed"],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_render_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["dropped_stale_fit_flag_count"], 1)
+        self.assertEqual(layer["fit_status"], "ok")
+        self.assertEqual(layer["qa_flags"], ["safe_text_box_recomputed"])
+
+    def test_ensure_project_render_contract_normalizes_stale_fit_status_when_attempts_are_ok(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "dialogue",
+                            "route_action": "translate_inpaint_render",
+                            "skip_processing": False,
+                            "translated": "Uau... pensei que tinha voltado para o exército..",
+                            "render_bbox": [306, 249, 577, 348],
+                            "safe_text_box": [306, 222, 582, 359],
+                            "fit_status": "below_minimum_legible",
+                            "fit_attempts": [
+                                {"font_px": 12, "lines": 4, "status": "ok"},
+                                {"font_px": 12, "lines": 2, "status": "ok"},
+                            ],
+                            "qa_flags": ["fit_below_minimum_legible"],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_render_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["normalized_fit_status_count"], 1)
+        self.assertEqual(audit["dropped_stale_fit_flag_count"], 1)
+        self.assertEqual(layer["fit_status"], "ok")
+        self.assertEqual(layer["qa_flags"], [])
+
+    def test_ensure_project_render_contract_keeps_low_luma_render_on_art_for_non_white_layer(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "dialogue",
+                            "route_action": "translate_inpaint_render",
+                            "skip_processing": False,
+                            "translated": "Esta feito... vamos mudar!",
+                            "balloon_type": "textured",
+                            "render_bbox": [276, 5227, 524, 5244],
+                            "safe_text_box": [88, 5034, 712, 5438],
+                            "fit_status": "ok",
+                            "fit_attempts": [{"font_px": 19, "lines": 1, "status": "ok"}],
+                            "qa_flags": ["render_on_art_suspected", "safe_text_box_recomputed"],
+                            "qa_metrics": {"render_background_luma": 132.7},
+                        }
+                    ],
+                }
+            ]
+        }
+
+        audit = main._ensure_project_render_contract(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(audit["dropped_stale_render_background_flag_count"], 0)
+        self.assertEqual(layer["qa_flags"], ["render_on_art_suspected", "safe_text_box_recomputed"])
+
+    def test_filter_render_plan_qa_flags_drops_stale_render_on_art_when_background_is_white(self) -> None:
+        flags = {"render_on_art_suspected", "safe_text_box_recomputed"}
+        entry = {
+            "balloon_type": "white",
+            "qa_metrics": {"render_background_luma": 255.0},
+            "render_bbox": [463, 3541, 706, 3579],
+            "safe_text_box": [451, 3526, 706, 3579],
+            "target_bbox": [212, 3325, 706, 3613],
+        }
+
+        filtered = main._filter_render_plan_qa_flags(entry, flags)
+
+        self.assertEqual(filtered, {"safe_text_box_recomputed"})
+
+    def test_filter_render_plan_qa_flags_keeps_render_on_art_when_background_is_dark(self) -> None:
+        flags = {"render_on_art_suspected", "safe_text_box_recomputed"}
+        entry = {
+            "balloon_type": "textured",
+            "qa_metrics": {"render_background_luma": 132.7},
+            "render_bbox": [276, 5227, 524, 5244],
+            "safe_text_box": [88, 5034, 712, 5438],
+            "target_bbox": [252, 5018, 322, 5029],
+        }
+
+        filtered = main._filter_render_plan_qa_flags(entry, flags)
+
+        self.assertIn("render_on_art_suspected", filtered)
+        self.assertIn("safe_text_box_recomputed", filtered)
+
+    def test_debug_qa_propagation_does_not_readd_resolved_fit_flag(self) -> None:
+        project = {
+            "_work_dir": "dummy",
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "trace_id": "ocr_001@page_001_band_001",
+                            "route_action": "translate_inpaint_render",
+                            "skip_processing": False,
+                            "render_bbox": [20, 20, 80, 50],
+                            "safe_text_box": [10, 10, 90, 60],
+                            "fit_status": "ok",
+                            "qa_flags": [],
+                        }
+                    ]
+                }
+            ],
+        }
+        claim = {
+            "identity_groups": [["ocr_001@page_001_band_001", "ocr_001"]],
+            "flags": {"fit_below_minimum_legible"},
+            "source": "render_plan",
+        }
+
+        with patch.object(main, "_debug_root_from_project", return_value=Path("dummy-debug")):
+            with patch.object(main, "_collect_render_plan_qa_flags", return_value=[claim]):
+                with patch.object(main, "_collect_mask_decision_qa_flags", return_value=[]):
+                    with patch.object(main, "_collect_inpaint_decision_qa_flags", return_value=[]):
+                        audit = main._propagate_debug_qa_flags_to_project(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(layer["qa_flags"], [])
+        self.assertEqual(audit["summary"]["project_layer_flags"], 0)
+
+    def test_final_page_space_text_layers_drop_stale_safe_box_before_rerender(self) -> None:
+        normalized = main._final_page_space_text_layers_for_renderer(
+            {
+                "texts": [
+                    {
+                        "id": "sign",
+                        "original": "RIGHT TURN ONLY",
+                        "translated": "APENAS VIRAR À DIREITA",
+                        "bbox": [370, 7567, 435, 7640],
+                        "source_bbox": [370, 7567, 435, 7640],
+                        "balloon_bbox": [370, 7567, 435, 7640],
+                        "safe_text_box": [387, 7584, 418, 7623],
+                        "render_bbox": [391, 7585, 413, 7621],
+                        "fit_status": "below_minimum_legible",
+                        "qa_flags": ["fit_below_minimum_legible"],
+                        "route_action": "translate_inpaint_render",
+                    }
+                ]
+            },
+            page_number=1,
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertNotIn("safe_text_box", normalized[0])
+        self.assertNotIn("fit_status", normalized[0])
+        self.assertEqual(normalized[0]["qa_flags"], ["fit_below_minimum_legible"])
+
+    def test_final_page_space_text_layers_preserve_mask_evidence(self) -> None:
+        normalized = main._final_page_space_text_layers_for_renderer(
+            {
+                "texts": [
+                    {
+                        "id": "dialogue",
+                        "original": "Hello",
+                        "translated": "Olá",
+                        "bbox": [10, 10, 90, 40],
+                        "balloon_bbox": [0, 0, 100, 60],
+                        "route_action": "translate_inpaint_render",
+                        "mask_evidence": {
+                            "kind": "glyph_segmentation",
+                            "raw_mask_pixels": 120,
+                            "expanded_mask_pixels": 160,
+                            "evidence_score": 1.0,
+                            "fast_fill_allowed": True,
+                            "fast_fill_reject_reasons": [],
+                        },
+                    }
+                ]
+            },
+            page_number=1,
+        )
+
+        self.assertEqual(normalized[0]["mask_evidence"]["raw_mask_pixels"], 120)
+
+    def test_final_page_space_text_layers_preserve_bubble_geometry(self) -> None:
+        normalized = main._final_page_space_text_layers_for_renderer(
+            {
+                "texts": [
+                    {
+                        "id": "dialogue",
+                        "original": "Ajussi How long",
+                        "translated": "Ajussi quanto tempo",
+                        "bbox": [135, 4337, 274, 4439],
+                        "source_bbox": [125, 4294, 656, 4853],
+                        "text_pixel_bbox": [135, 4337, 274, 4439],
+                        "balloon_bbox": [214, 4325, 269, 4378],
+                        "bubble_mask_bbox": [125, 4294, 656, 4853],
+                        "bubble_inner_bbox": [162, 4331, 619, 4816],
+                        "source_trace_ids": [
+                            "ocr_001@page_003_band_049",
+                            "ocr_002@page_003_band_049",
+                        ],
+                        "route_action": "translate_inpaint_render",
+                    }
+                ]
+            },
+            page_number=3,
+        )
+
+        self.assertEqual(normalized[0]["bubble_mask_bbox"], [125, 4294, 656, 4853])
+        self.assertEqual(normalized[0]["bubble_inner_bbox"], [162, 4331, 619, 4816])
+        self.assertEqual(
+            normalized[0]["source_trace_ids"],
+            ["ocr_001@page_003_band_049", "ocr_002@page_003_band_049"],
+        )
+
+    def test_normalize_text_layer_for_renderer_preserves_content_class(self) -> None:
+        layer = main._normalize_text_layer_for_renderer(
+            {
+                "id": "sign-1",
+                "original": "TEXT: DARLING KARAOKE",
+                "translated": "TEXTO: QUERIDO KARAOKE",
+                "bbox": [45, 9305, 205, 9322],
+                "source_bbox": [45, 9305, 205, 9322],
+                "text_pixel_bbox": [118, 9311, 145, 9316],
+                "balloon_bbox": [10, 9293, 240, 9334],
+                "tipo": "narracao",
+                "balloon_type": "white",
+                "content_class": "sign",
+            },
+            3,
+            12,
+        )
+
+        self.assertEqual(layer["content_class"], "sign")
 
     def test_sync_page_legacy_aliases_prefers_render_bbox(self) -> None:
         page = {
@@ -952,6 +2664,7 @@ class MainEmitTests(unittest.TestCase):
                     "layout_bbox": [10, 12, 80, 90],
                     "source_bbox": [10, 12, 80, 90],
                     "tipo": "fala",
+                    "content_class": "dialogue",
                     "original": "HELLO",
                     "translated": "OLÁ",
                     "ocr_confidence": 0.91,
@@ -980,6 +2693,7 @@ class MainEmitTests(unittest.TestCase):
         main._sync_page_legacy_aliases(page)
 
         self.assertEqual(page["textos"][0]["bbox"], [14, 18, 72, 86])
+        self.assertEqual(page["textos"][0]["content_class"], "text")
 
 
 if __name__ == "__main__":

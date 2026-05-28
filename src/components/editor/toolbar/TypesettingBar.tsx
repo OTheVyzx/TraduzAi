@@ -21,18 +21,9 @@ import {
   RotateCw,
 } from "lucide-react";
 import { useEditorStore } from "../../../lib/stores/editorStore";
-import { BUNDLE_FONTS } from "../../../lib/fonts";
+import { ensureEditorFontOptionReady, type EditorFontOption } from "../../../lib/fontCatalog";
+import { EditorFontPicker } from "../EditorFontPicker";
 import { TextStylePresetPopover } from "./TextStylePresetPopover";
-
-// Lista canônica de fontes disponíveis extraída do BUNDLE_FONTS.
-// O `value` é o nome do arquivo (ex: "CCDaveGibbonsLower W00 Regular.ttf")
-// que corresponde ao campo `estilo.fonte` no project.json.
-const AVAILABLE_FONTS = Object.values(BUNDLE_FONTS).map((entry) => {
-  // Extrai o filename do path "/fonts/<filename>.ttf"
-  const path = entry.files.regular ?? Object.values(entry.files)[0] ?? "";
-  const filename = path.split("/").pop() ?? path;
-  return { label: entry.cssFamily, value: filename };
-});
 
 // Popover reutilizável para efeitos (Contorno / Sombra / Brilho)
 function EffectPopover({
@@ -152,9 +143,11 @@ export function TypesettingBar() {
   const currentPage = useEditorStore((s) => s.currentPage);
   const pendingEdits = useEditorStore((s) => s.pendingEdits);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
+  const [loadingFont, setLoadingFont] = useState<string | null>(null);
 
   const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
   if (!selectedLayer || !selectedLayerId) return null;
+  const activeLayerId = selectedLayerId;
 
   const edit = pendingEdits[selectedLayerId];
   const estilo = edit?.estilo ? { ...selectedLayer.estilo, ...edit.estilo } : (selectedLayer.estilo ?? {});
@@ -180,22 +173,28 @@ export function TypesettingBar() {
   const sombraOffsetY = estilo.sombra_offset?.[1] ?? 2;
   const rotacao = clampRotation(Number(estilo.rotacao ?? 0));
 
+  async function handleFontChange(value: string, option?: EditorFontOption) {
+    setLoadingFont(value);
+    try {
+      await ensureEditorFontOptionReady(option ?? value);
+      updateEstilo(activeLayerId, { fonte: value });
+    } catch (error) {
+      console.warn("[fonts] falha ao preparar fonte do editor:", error);
+    } finally {
+      setLoadingFont(null);
+    }
+  }
+
   return (
     <div className="flex items-center gap-1 border-b border-border bg-bg-secondary/80 px-3 py-1 overflow-x-auto overflow-y-visible">
       {/* Fonte */}
-      <select
+      <EditorFontPicker
         value={fonte}
-        title="Fonte"
-        data-testid="text-font-select"
-        onChange={(e) => updateEstilo(selectedLayerId, { fonte: e.target.value })}
-        className="h-7 rounded-md border border-border bg-bg-tertiary/60 px-2 text-[11px] text-text-primary focus:border-brand/40 focus:outline-none max-w-[160px]"
-      >
-        {AVAILABLE_FONTS.map((f) => (
-          <option key={f.value} value={f.value}>
-            {f.label}
-          </option>
-        ))}
-      </select>
+        loadingFont={loadingFont}
+        onChange={handleFontChange}
+        variant="toolbar"
+        selectTestId="text-font-select"
+      />
 
       <TextStylePresetPopover
         currentStyle={estilo}

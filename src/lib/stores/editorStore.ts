@@ -49,7 +49,7 @@ export type EditorToolMode =
   | "eraser"
   | "mask"
   | "process";
-export type EditorPageActionName = "detect" | "ocr" | "translate" | "inpaint";
+export type EditorPageActionName = "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
 export type EditorBusyActionName = EditorPageActionName | "process";
 export type EditorViewMode = "translated" | "inpainted" | "original";
 export type RenderPreviewStatus = "fresh" | "stale" | "rendering" | "error";
@@ -95,6 +95,61 @@ function projectLanguages() {
     idioma_origem: project?.idioma_origem?.trim() || "en",
     idioma_destino: project?.idioma_destino?.trim() || "pt-BR",
   };
+}
+
+function projectEnginePresetId() {
+  const project = useAppStore.getState().project as (Project & { engine_preset_id?: string }) | null;
+  return project?.engine_preset_id?.trim() || "default";
+}
+
+const EDITOR_VISION_PRELOAD_DELAY_MS = 900;
+let editorVisionPreloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearEditorVisionPreloadTimer() {
+  if (editorVisionPreloadTimer) {
+    clearTimeout(editorVisionPreloadTimer);
+    editorVisionPreloadTimer = null;
+  }
+}
+
+function scheduleEditorVisionPreload(pageIndex: number, page: PageData | null, expectedPageKey: string) {
+  clearEditorVisionPreloadTimer();
+  editorVisionPreloadTimer = setTimeout(() => {
+    editorVisionPreloadTimer = null;
+    void runEditorVisionPreload(pageIndex, page, expectedPageKey).catch((error) => {
+      console.warn("[EditorVisionPreload] falhou:", error);
+    });
+  }, EDITOR_VISION_PRELOAD_DELAY_MS);
+}
+
+async function runEditorVisionPreload(pageIndex: number, page: PageData | null, expectedPageKey: string) {
+  const state = useEditorStore.getState();
+  if (
+    state.currentPageIndex !== pageIndex ||
+    state.currentPageKey() !== expectedPageKey ||
+    state.isLoadingPage ||
+    state.isRetypesetting ||
+    state.isReinpainting ||
+    state.activePageAction
+  ) {
+    return;
+  }
+  const path = projectPath();
+  if (!path) return;
+  const { preloadEditorVisionPage } = await getTauriEditorApi();
+  if (!preloadEditorVisionPage) return;
+  const latest = useEditorStore.getState();
+  if (latest.currentPageIndex !== pageIndex || latest.currentPageKey() !== expectedPageKey || latest.activePageAction) {
+    return;
+  }
+  const languages = projectLanguages();
+  await preloadEditorVisionPage({
+    project_path: path,
+    page_index: pageIndex,
+    idioma_origem: languages.idioma_origem,
+    engine_preset_id: projectEnginePresetId(),
+    target: (page?.text_layers?.length ?? 0) > 0 ? "ocr_layers" : "detect_ocr",
+  });
 }
 
 function updateMaskLayerForSelection(page: PageData, maskPath: string): PageData {
@@ -937,6 +992,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const path = projectPath();
     const project = useAppStore.getState().project;
     if (!path || !project) {
+      clearEditorVisionPreloadTimer();
       set({ currentPage: null, isLoadingPage: false });
       return;
     }
@@ -961,6 +1017,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         selectedLayerId: retainedTextSelection,
         hoveredLayerId: null,
       });
+      scheduleEditorVisionPreload(payload.page_index, payload.page, getPageKey(project, payload.page_index));
     } catch (error) {
       const fallbackPage = useAppStore.getState().project?.paginas[get().currentPageIndex] ?? null;
       if (!fallbackPage) throw error;
@@ -2652,6 +2709,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         project_path: path,
         page_index: get().currentPageIndex,
         idioma_origem: projectLanguages().idioma_origem,
+        engine_preset_id: projectEnginePresetId(),
       });
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
@@ -2705,7 +2763,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
 
-  resetEditor: () =>
+  resetEditor: () => {
+    clearEditorVisionPreloadTimer();
     set({
       currentPageIndex: 0,
       currentPage: null,
@@ -2743,7 +2802,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       renderVersion: 0,
       renderInFlightVersion: null,
       renderError: null,
-    }),
+    });
+  },
 
   // ─── Contexto da Obra ────────────────────────────────────────────────────
 

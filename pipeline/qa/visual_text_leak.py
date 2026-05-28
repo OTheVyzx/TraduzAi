@@ -64,15 +64,9 @@ def _has_english_leak(text: str, allowed_terms: list[str], expected_layers: list
     filtered = text
     for term in allowed_terms:
         filtered = re.sub(re.escape(term), "", filtered, flags=re.I)
-    if all(layer.get("tipo") == "sfx" and layer.get("preserve_original") for layer in expected_layers):
-        return False
     return any(pattern.search(filtered) for pattern in ENGLISH_PATTERNS)
 
 
 def _layer_has_detectable_text(layer: dict[str, Any]) -> bool:
-    if layer.get("ignored_reason") or layer.get("skip_processing"):
-        return False
-    if layer.get("tipo") == "sfx" and layer.get("preserve_original"):
-        return False
     return bool(layer.get("original") or layer.get("raw_ocr") or layer.get("text"))
 

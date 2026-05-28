@@ -259,9 +259,6 @@ def detect_white_balloon_overlay(
     if not _white_balloon_overlay_enabled():
         return None
 
-    if region.get("tipo") not in {"fala", "narracao"}:
-        return None
-
     bbox = region.get("bbox")
     if not bbox:
         return None
@@ -409,8 +406,6 @@ def detect_textured_overlay(
     bg_type: str,
     bg_meta: dict,
 ) -> dict | None:
-    if region.get("tipo") not in {"fala", "narracao"}:
-        return None
     if bg_type not in {"textured", "textured_vertical", "textured_horizontal", "solid_mid", "gradient"}:
         return None
 

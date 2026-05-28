@@ -1,3 +1,5 @@
+import { resolveGoogleFontFilename } from "./googleFontsCatalog";
+
 /**
  * FONT_REGISTRY centraliza o mapeamento entre identificador interno (FontKey) e
  * nome `cssFamily` que tanto o `@font-face` (em globals.css) quanto o `Konva.Text`
@@ -11,9 +13,11 @@
  *    `data/projects/<id>/fonts/`. Carregados dinamicamente.
  *  - source 'system': fonte instalada no SO; sem path local. Resolvida pelo
  *    nome via `queryLocalFonts` ou Rust fallback.
+ *  - source 'google': fonte do catalogo Google Fonts local, resolvida para um
+ *    filename de cache estavel sem chamada runtime a API Google.
  */
 
-export type FontSource = "bundle" | "project" | "system";
+export type FontSource = "bundle" | "project" | "system" | "google";
 
 export interface FontFiles {
   regular?: string;
@@ -173,6 +177,23 @@ export async function registerImportedFont(
   registeredFamilies.add(cssFamily);
 }
 
+export async function registerRemoteFont(
+  cssFamily: string,
+  url: string,
+  weight: "400" | "700" = "400",
+  style: "normal" | "italic" = "normal",
+): Promise<void> {
+  if (typeof document === "undefined" || !("fonts" in document)) return;
+  const ff = new FontFace(cssFamily, `url(${url})`, {
+    weight,
+    style,
+    display: "block",
+  });
+  const loaded = await ff.load();
+  document.fonts.add(loaded);
+  registeredFamilies.add(cssFamily);
+}
+
 /** Lista famílias bundle + projeto registradas. */
 export function listLocalFontFamilies(): string[] {
   return Array.from(registeredFamilies).sort();
@@ -221,6 +242,8 @@ export function resolveLegacyFontFamily(legacyName: string): string {
     if (entry.files.regular && entry.files.regular.endsWith(legacyName)) return entry.cssFamily;
     if (entry.files.bold && entry.files.bold.endsWith(legacyName)) return entry.cssFamily;
   }
+  const googleFamily = resolveGoogleFontFilename(legacyName);
+  if (googleFamily) return googleFamily;
   // Heurísticas comuns
   if (/comic\s*neue/i.test(stripped)) return BUNDLE_FONTS.comicNeue.cssFamily;
   if (/newrotic/i.test(stripped)) return BUNDLE_FONTS.newrotic.cssFamily;

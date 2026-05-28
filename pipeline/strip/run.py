@@ -6,6 +6,7 @@ Chamado por `pipeline/main.py::_run_pipeline` após a Fase 6 do switchover.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,10 +23,88 @@ import numpy as np
 from strip._diagnostics import dump_strip_debug, is_debug_enabled
 from strip.bands import attach_band_slices, group_balloons_into_bands
 from strip.concat import build_strip
-from strip.detect_balloons import detect_strip_balloons
-from strip.process_bands import process_band
+from strip.detect_balloons import _inner_dark_text_evidence, detect_strip_balloons
+from strip.process_bands import _band_id_for, _page_id_for, process_band
 from strip.reassemble import assemble_output_pages
 from strip.types import Band, OutputPage, VerticalStrip
+
+
+_LEGACY_DECISION_FIELDS = frozenset(
+    {
+        "skip_processing",
+        "skip_reason",
+        "preserve_original",
+        "tipo",
+        "content_class",
+        "balloon_type",
+    }
+)
+
+
+def _without_legacy_decision_fields(record: dict) -> dict:
+    cleaned = copy.deepcopy(record)
+    for key in _LEGACY_DECISION_FIELDS:
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _texts_without_legacy_decision_fields(texts) -> list[dict]:
+    return [
+        _without_legacy_decision_fields(text)
+        for text in list(texts or [])
+        if isinstance(text, dict)
+    ]
+
+
+def _legacy_compat_key(record: dict, index: int) -> tuple[str, str | int]:
+    for key in ("trace_id", "text_id", "id"):
+        value = record.get(key)
+        if value not in (None, ""):
+            return key, str(value)
+    for key in ("bbox", "source_bbox", "text_pixel_bbox"):
+        value = record.get(key)
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            try:
+                return key, ",".join(str(int(round(float(v)))) for v in value[:4])
+            except Exception:
+                continue
+    return "index", int(index)
+
+
+def _legacy_decision_fields_by_record(records) -> dict[tuple[str, str | int], dict]:
+    payload: dict[tuple[str, str | int], dict] = {}
+    for index, record in enumerate(list(records or [])):
+        if not isinstance(record, dict):
+            continue
+        fields = {
+            key: copy.deepcopy(record[key])
+            for key in _LEGACY_DECISION_FIELDS
+            if record.get(key) not in (None, "")
+        }
+        if fields:
+            payload[_legacy_compat_key(record, index)] = fields
+    return payload
+
+
+def _restore_legacy_decision_fields(records, payload: dict[tuple[str, str | int], dict]) -> None:
+    if not isinstance(records, list) or not payload:
+        return
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        fields = payload.get(_legacy_compat_key(record, index)) or payload.get(("index", index))
+        if not fields:
+            continue
+        for key, value in fields.items():
+            if record.get(key) in (None, ""):
+                record[key] = copy.deepcopy(value)
+
+
+def _render_payload_without_legacy_decision_fields(texts, *, coordinate_space: str) -> dict:
+    return {
+        "texts": _texts_without_legacy_decision_fields(texts),
+        "_coordinate_space": coordinate_space,
+    }
 
 
 def _add_timing(telemetry: dict | None, stage: str, seconds: float) -> None:
@@ -61,10 +140,7 @@ def _strip_band_margin_px(idioma_origem: str = "") -> int:
             return max(0, int(raw))
         except ValueError:
             pass
-    lang = str(idioma_origem or "").strip().lower()
-    if lang in {"ja", "jp", "jpn", "ko", "kor", "kr", "zh", "zho", "chi", "cn", "zh-cn", "zh-tw"}:
-        return 96
-    return 16
+    return 96
 
 
 @dataclass(frozen=True)
@@ -131,6 +207,24 @@ def _shift_bbox_y(value, delta_y: int) -> list[int] | None:
     return [int(value[0]), int(value[1]) + delta_y, int(value[2]), int(value[3]) + delta_y]
 
 
+def _bbox4_or_none(value) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _same_bbox(a, b) -> bool:
+    left = _bbox4_or_none(a)
+    right = _bbox4_or_none(b)
+    return left is not None and right is not None and left == right
+
+
 def _shift_bbox_list_y(values, delta_y: int) -> list[list[int]]:
     shifted: list[list[int]] = []
     for value in values or []:
@@ -168,7 +262,25 @@ def _shift_polygons_y(polygons, delta_y: int):
 def _shift_text_geometry_y(text: dict, delta_y: int) -> dict:
     shifted = dict(text)
 
-    for key in ("bbox", "source_bbox", "balloon_bbox", "text_pixel_bbox"):
+    for key in (
+        "bbox",
+        "source_bbox",
+        "balloon_bbox",
+        "text_pixel_bbox",
+        "layout_bbox",
+        "_visual_rect_outer_bbox",
+        "_visual_rect_inner_bbox",
+        "render_bbox",
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "layout_safe_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "target_bbox",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
+        "balloon_inner_bbox",
+    ):
         bbox = _shift_bbox_y(shifted.get(key), delta_y)
         if bbox is not None:
             shifted[key] = bbox
@@ -180,6 +292,7 @@ def _shift_text_geometry_y(text: dict, delta_y: int) -> dict:
         "connected_position_bboxes",
         "connected_focus_bboxes",
         "_merged_source_bboxes",
+        "merged_source_bboxes",
     ):
         if key in shifted:
             shifted[key] = _shift_bbox_list_y(shifted.get(key), delta_y)
@@ -188,7 +301,38 @@ def _shift_text_geometry_y(text: dict, delta_y: int) -> dict:
         if key in shifted:
             shifted[key] = _shift_polygons_y(shifted.get(key), delta_y)
 
+    for key in ("qa_metrics", "_render_debug"):
+        if isinstance(shifted.get(key), dict):
+            shifted[key] = _shift_nested_debug_bboxes_y(shifted[key], delta_y)
+
     return shifted
+
+
+def _looks_like_debug_bbox_key(key: str) -> bool:
+    key = str(key)
+    return key.endswith("bbox") or key.endswith("_bbox") or key.endswith("_bboxes") or key in {
+        "safe_text_box",
+        "_debug_safe_text_box",
+    }
+
+
+def _shift_nested_debug_bboxes_y(value, delta_y: int):
+    if isinstance(value, dict):
+        shifted = {}
+        for key, item in value.items():
+            if _looks_like_debug_bbox_key(str(key)):
+                if str(key).endswith("bboxes"):
+                    shifted[key] = _shift_bbox_list_y(item, delta_y)
+                    continue
+                bbox = _shift_bbox_y(item, delta_y)
+                if bbox is not None:
+                    shifted[key] = bbox
+                    continue
+            shifted[key] = _shift_nested_debug_bboxes_y(item, delta_y)
+        return shifted
+    if isinstance(value, list):
+        return [_shift_nested_debug_bboxes_y(item, delta_y) for item in value]
+    return value
 
 
 def _inpaint_block_from_vision_block(block: dict) -> dict | None:
@@ -203,18 +347,241 @@ def _inpaint_block_from_vision_block(block: dict) -> dict | None:
         "line_polygons",
         "text_pixel_bbox",
         "source_bbox",
+        "_merged_source_bboxes",
+        "merged_source_bboxes",
         "balloon_bbox",
-        "balloon_type",
+        "layout_bbox",
         "block_profile",
         "background_type",
-        "tipo",
         "font_size_px",
         "font_size",
+        "rotation_deg",
+        "rotation_source",
+        "id",
+        "text_id",
+        "page_id",
+        "band_id",
+        "trace_id",
+        "render_policy",
+        "qa_flags",
     ):
         value = block.get(key)
         if value is not None and value != [] and value != "":
             out[key] = copy.deepcopy(value)
     return out
+
+
+def _enrich_inpaint_block_from_text_layers(block: dict, texts: list[dict]) -> dict:
+    if not isinstance(block, dict) or not texts:
+        return block
+    bbox = _bbox4_or_none(block.get("bbox"))
+    if bbox is None:
+        return block
+    block_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+    best_text = None
+    best_score = 0.0
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        text_bbox = _bbox4_or_none(text.get("bbox") or text.get("balloon_bbox") or text.get("text_pixel_bbox"))
+        if text_bbox is None:
+            continue
+        overlap = _bbox_overlap_area(bbox, text_bbox)
+        if overlap <= 0:
+            continue
+        text_area = max(1, (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]))
+        score = overlap / float(max(1, min(block_area, text_area)))
+        if score > best_score:
+            best_score = score
+            best_text = text
+    if best_text is None or best_score < 0.35:
+        return block
+    enriched = dict(block)
+    for key in (
+        "id",
+        "text_id",
+        "page_id",
+        "band_id",
+        "trace_id",
+        "text_instance_id",
+        "source_trace_ids",
+        "source_text_ids",
+        "_merged_source_bboxes",
+        "merged_source_bboxes",
+        "rotation_deg",
+        "rotation_source",
+        "qa_flags",
+        "allow_broad_bbox_text_search",
+        "block_profile",
+        "line_polygons",
+        "text_pixel_bbox",
+        "bbox",
+        "source_bbox",
+        "balloon_bbox",
+        "layout_bbox",
+        "render_policy",
+    ):
+        value = best_text.get(key)
+        if value not in (None, [], ""):
+            enriched[key] = copy.deepcopy(value)
+    return enriched
+
+
+def _trace_id_from_record(record: dict, *, fallback_index: int = 0) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    raw_trace_id = record.get("trace_id")
+    if raw_trace_id:
+        return str(raw_trace_id)
+    band_id = str(record.get("band_id") or "")
+    text_id = record.get("text_id") or record.get("id")
+    if text_id and band_id:
+        return f"{text_id}@{band_id}"
+    if text_id:
+        return str(text_id)
+    return None
+
+
+def _page_id_from_band_id(band_id: str | None) -> str | None:
+    if not band_id:
+        return None
+    match = re.match(r"^(page_\d{3})_band_\d{3}$", str(band_id))
+    if match:
+        return match.group(1)
+    return None
+
+
+def _trace_ids_by_band_from_page(page: OutputPage) -> dict[str, list[str]]:
+    by_band: dict[str, list[str]] = {}
+    ocr_result = getattr(page, "ocr_result", {}) if isinstance(getattr(page, "ocr_result", None), dict) else {}
+    records = (
+        list(ocr_result.get("texts") or [])
+        + list(ocr_result.get("_vision_blocks") or [])
+        + _page_text_layer_records(page)
+    )
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        band_id = str(record.get("band_id") or "")
+        if not band_id:
+            continue
+        trace_id = _trace_id_from_record(record, fallback_index=index)
+        if not trace_id:
+            continue
+        bucket = by_band.setdefault(band_id, [])
+        if trace_id not in bucket:
+            bucket.append(trace_id)
+    return by_band
+
+
+def _page_text_layer_records(page: OutputPage) -> list[dict]:
+    raw_layers = getattr(page, "text_layers", None)
+    if isinstance(raw_layers, list):
+        return [layer for layer in raw_layers if isinstance(layer, dict)]
+    if isinstance(raw_layers, dict):
+        for key in ("text_layers", "texts", "layers"):
+            value = raw_layers.get(key)
+            if isinstance(value, list):
+                return [layer for layer in value if isinstance(layer, dict)]
+    return []
+
+
+def _debug_bbox4(value) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (int(round(float(v))) for v in value[:4])
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _debug_bbox_area(bbox: tuple[int, int, int, int]) -> int:
+    return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
+
+
+def _debug_bbox_intersection_area(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> int:
+    return max(0, min(left[2], right[2]) - max(left[0], right[0])) * max(
+        0,
+        min(left[3], right[3]) - max(left[1], right[1]),
+    )
+
+
+def _record_debug_bboxes(record: dict) -> list[tuple[int, int, int, int]]:
+    boxes: list[tuple[int, int, int, int]] = []
+    for key in ("bbox", "source_bbox", "balloon_bbox", "layout_bbox", "text_pixel_bbox"):
+        bbox = _debug_bbox4(record.get(key))
+        if bbox and bbox not in boxes:
+            boxes.append(bbox)
+    return boxes
+
+
+def _best_inpaint_trace_source(payload: dict, page: OutputPage, source_blocks: list[dict]) -> dict:
+    payload_boxes = _record_debug_bboxes(payload)
+    if not payload_boxes:
+        return {}
+    ocr_result = getattr(page, "ocr_result", {}) if isinstance(getattr(page, "ocr_result", None), dict) else {}
+    candidates = (
+        list(source_blocks)
+        + [text for text in list(ocr_result.get("texts") or []) if isinstance(text, dict)]
+        + _page_text_layer_records(page)
+    )
+    best: tuple[float, dict] = (0.0, {})
+    for candidate in candidates:
+        candidate_boxes = _record_debug_bboxes(candidate)
+        if not candidate_boxes:
+            continue
+        best_candidate_score = 0.0
+        for left in payload_boxes:
+            left_area = _debug_bbox_area(left)
+            for right in candidate_boxes:
+                inter = _debug_bbox_intersection_area(left, right)
+                if inter <= 0:
+                    continue
+                right_area = _debug_bbox_area(right)
+                score = inter / float(max(1, min(left_area, right_area)))
+                best_candidate_score = max(best_candidate_score, score)
+        if best_candidate_score > best[0]:
+            best = (best_candidate_score, candidate)
+    return best[1] if best[0] >= 0.20 else {}
+
+
+def _enrich_inpaint_block_debug_payload(
+    payload: dict,
+    *,
+    page: OutputPage,
+    page_index: int,
+    block_index: int,
+    trace_ids_by_band: dict[str, list[str]],
+) -> dict:
+    ocr_result = getattr(page, "ocr_result", {}) if isinstance(getattr(page, "ocr_result", None), dict) else {}
+    source_blocks = [block for block in list(ocr_result.get("_vision_blocks") or []) if isinstance(block, dict)]
+    source_block = source_blocks[block_index] if block_index < len(source_blocks) else {}
+    if not _trace_id_from_record(source_block, fallback_index=block_index):
+        source_block = _best_inpaint_trace_source(payload, page, source_blocks)
+    for key in ("id", "text_id", "page_id", "band_id", "trace_id"):
+        value = source_block.get(key) if isinstance(source_block, dict) else None
+        if value is not None and value != "" and key not in payload:
+            payload[key] = copy.deepcopy(value)
+
+    band_id = str(payload.get("band_id") or "")
+    page_id = payload.get("page_id") or _page_id_from_band_id(band_id) or _page_id_for(page_index)
+    if page_id:
+        payload.setdefault("page_id", page_id)
+    trace_id = _trace_id_from_record(payload, fallback_index=block_index)
+    if trace_id:
+        payload.setdefault("trace_id", trace_id)
+        payload.setdefault("trace_ids", [trace_id])
+    if band_id and trace_ids_by_band.get(band_id):
+        payload.setdefault("trace_ids_in_band", list(trace_ids_by_band[band_id]))
+    elif trace_id:
+        payload.setdefault("trace_ids_in_band", [trace_id])
+    return payload
 
 
 def _ocr_metadata_signature(texts: list[dict], blocks: list[dict]) -> tuple:
@@ -230,6 +597,7 @@ def _ocr_metadata_signature(texts: list[dict], blocks: list[dict]) -> tuple:
             _bbox(text.get("bbox")),
             _bbox(text.get("text_pixel_bbox")),
             _bbox(text.get("source_bbox")),
+            _bbox(text.get("layout_bbox")),
             _bbox(block.get("bbox")) if isinstance(block, dict) else tuple(),
         )
         for text, block in zip(texts, blocks)
@@ -237,7 +605,11 @@ def _ocr_metadata_signature(texts: list[dict], blocks: list[dict]) -> tuple:
     )
 
 
-def _finalize_output_page_ocr_metadata(page: OutputPage, page_number: int) -> bool:
+def _finalize_output_page_ocr_metadata(
+    page: OutputPage,
+    page_number: int,
+    total_pages: int | None = None,
+) -> bool:
     if not isinstance(getattr(page, "text_layers", None), dict):
         return False
     if not isinstance(getattr(page, "ocr_result", None), dict):
@@ -259,17 +631,35 @@ def _finalize_output_page_ocr_metadata(page: OutputPage, page_number: int) -> bo
         image_shape = (page_height, page_width, 3)
 
     before = _ocr_metadata_signature(texts, blocks)
+    text_legacy_fields = _legacy_decision_fields_by_record(texts)
+    stage_texts = _texts_without_legacy_decision_fields(texts)
+    stage_blocks = [
+        _without_legacy_decision_fields(block)
+        for block in blocks
+        if isinstance(block, dict)
+    ]
     try:
         from vision_stack.runtime import _finalize_page_ocr_texts
 
         final_texts, final_blocks = _finalize_page_ocr_texts(
-            texts,
-            blocks,
+            stage_texts,
+            stage_blocks,
             image_shape,
             page_number=page_number,
+            total_pages=total_pages,
         )
     except Exception:
         return False
+    _restore_legacy_decision_fields(final_texts, text_legacy_fields)
+
+    for text in final_texts:
+        if not isinstance(text, dict):
+            continue
+        if _same_bbox(text.get("source_bbox"), text.get("balloon_bbox")):
+            text_pixel_bbox = _bbox4_or_none(text.get("text_pixel_bbox"))
+            if text_pixel_bbox is not None and not _same_bbox(text_pixel_bbox, text.get("balloon_bbox")):
+                text["source_bbox"] = text_pixel_bbox
+                text["source_bbox_origin"] = "text_pixel_bbox_repaired_from_balloon"
 
     after = _ocr_metadata_signature(final_texts, final_blocks)
     changed = before != after or len(final_texts) != len(texts) or len(final_blocks) != len(blocks)
@@ -298,6 +688,608 @@ def _source_page_number_for_band(strip: VerticalStrip, band: Band) -> int:
     return best_page
 
 
+def _write_strip_detect_debug_artifacts(
+    strip: VerticalStrip,
+    bands: list[Band],
+    *,
+    band_margin_px: int,
+) -> None:
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+    try:
+        band_records = []
+        for band_index, band in enumerate(bands):
+            source_page_number = _source_page_number_for_band(strip, band)
+            band_id = _band_id_for(source_page_number, band_index)
+            balloon_ids = [
+                f"{band_id}_balloon_{balloon_index:02d}"
+                for balloon_index, _balloon in enumerate(band.balloons)
+            ]
+            band_records.append(
+                {
+                    "band_id": band_id,
+                    "source_page_number": int(source_page_number),
+                    "band_index": int(band_index),
+                    "y_top": int(band.y_top),
+                    "y_bottom": int(band.y_bottom),
+                    "height": int(band.height),
+                    "balloon_count": int(len(band.balloons)),
+                    "balloon_ids": balloon_ids,
+                }
+            )
+
+        recorder.write_json(
+            "02_strip_detect/bands_manifest.json",
+            {
+                "band_count": len(band_records),
+                "strip_width": int(strip.width),
+                "strip_height": int(strip.height),
+                "source_page_breaks": [int(value) for value in list(strip.source_page_breaks or [])],
+                "page_x_offsets": [int(value) for value in list(strip.page_x_offsets or [])],
+                "band_margin_px": int(band_margin_px),
+                "bands": band_records,
+            },
+        )
+
+        for band_record, band in zip(band_records, bands):
+            band_id = band_record["band_id"]
+            source_page_number = int(band_record["source_page_number"])
+            page_y0, _page_y1 = _source_page_bounds(strip, source_page_number)
+            for balloon_index, balloon in enumerate(band.balloons):
+                candidate_id = f"{band_id}_cand_{balloon_index:03d}"
+                bbox_strip = [
+                    int(balloon.strip_bbox.x1),
+                    int(balloon.strip_bbox.y1),
+                    int(balloon.strip_bbox.x2),
+                    int(balloon.strip_bbox.y2),
+                ]
+                text_evidence = {
+                    "has_inner_dark_text": False,
+                    "inner_dark_component_count": 0,
+                    "inner_dark_area": 0,
+                    "significant_component_count": 0,
+                    "significant_area": 0,
+                    "bright_pixel_ratio": 0.0,
+                    "dark_pixel_ratio": 0.0,
+                }
+                try:
+                    text_evidence = _inner_dark_text_evidence(strip.image, balloon.strip_bbox)
+                except Exception:
+                    pass
+                recorder.write_jsonl(
+                    "02_strip_detect/detect_candidates.jsonl",
+                    {
+                        "candidate_id": candidate_id,
+                        "band_id": band_id,
+                        "bbox_strip": bbox_strip,
+                        "bbox_page": [
+                            bbox_strip[0],
+                            bbox_strip[1] - int(page_y0),
+                            bbox_strip[2],
+                            bbox_strip[3] - int(page_y0),
+                        ],
+                        "confidence": round(float(balloon.confidence), 4),
+                        "source": "strip_detector",
+                        "accepted": True,
+                        "reject_reason": None,
+                        "matched_text_id": None,
+                        **text_evidence,
+                    },
+                )
+    except Exception:
+        return
+
+
+def _bbox_overlap_area(a, b) -> int:
+    left = _bbox4_or_none(a)
+    right = _bbox4_or_none(b)
+    if left is None or right is None:
+        return 0
+    ix = max(0, min(left[2], right[2]) - max(left[0], right[0]))
+    iy = max(0, min(left[3], right[3]) - max(left[1], right[1]))
+    return ix * iy
+
+
+def _write_strip_detect_text_matching_debug_artifacts(
+    strip: VerticalStrip,
+    bands: list[Band],
+    output_pages: list[OutputPage],
+) -> None:
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+    try:
+        match_rows: list[dict] = []
+        texts_by_band: dict[str, list[dict]] = {}
+        for page in output_pages:
+            text_layers = getattr(page, "text_layers", None)
+            if not isinstance(text_layers, dict):
+                continue
+            for text in list(text_layers.get("texts") or []):
+                if not isinstance(text, dict):
+                    continue
+                band_id = str(text.get("band_id") or "")
+                if not band_id:
+                    continue
+                texts_by_band.setdefault(band_id, []).append(text)
+
+        for band_index, band in enumerate(bands):
+            source_page_number = _source_page_number_for_band(strip, band)
+            band_id = _band_id_for(source_page_number, band_index)
+            page_id = _page_id_for(source_page_number)
+            page_y0, _page_y1 = _source_page_bounds(strip, source_page_number)
+            band_texts = texts_by_band.get(band_id, [])
+            band_trace_ids = [
+                str(text.get("trace_id") or _trace_id_from_record(text, fallback_index=index))
+                for index, text in enumerate(band_texts)
+                if str(text.get("trace_id") or _trace_id_from_record(text, fallback_index=index))
+            ]
+            for balloon_index, balloon in enumerate(band.balloons):
+                candidate_id = f"{band_id}_cand_{balloon_index:03d}"
+                bbox_strip = [
+                    int(balloon.strip_bbox.x1),
+                    int(balloon.strip_bbox.y1),
+                    int(balloon.strip_bbox.x2),
+                    int(balloon.strip_bbox.y2),
+                ]
+                bbox_page = [
+                    bbox_strip[0],
+                    bbox_strip[1] - int(page_y0),
+                    bbox_strip[2],
+                    bbox_strip[3] - int(page_y0),
+                ]
+                matched = [
+                    text
+                    for text in band_texts
+                    if _bbox_overlap_area(
+                        bbox_page,
+                        text.get("balloon_bbox")
+                        or text.get("layout_bbox")
+                        or text.get("text_pixel_bbox")
+                        or text.get("bbox"),
+                    )
+                    > 0
+                ]
+                match_reason = "same_band_bbox_overlap"
+                if not matched and band_texts:
+                    matched = list(band_texts)
+                    match_reason = "same_band_fallback"
+                matched_trace_ids = [
+                    str(text.get("trace_id") or _trace_id_from_record(text, fallback_index=index))
+                    for index, text in enumerate(matched)
+                    if str(text.get("trace_id") or _trace_id_from_record(text, fallback_index=index))
+                ]
+                matched_text_ids = [
+                    str(text.get("text_id") or text.get("id") or "")
+                    for text in matched
+                    if str(text.get("text_id") or text.get("id") or "")
+                ]
+                match_method = match_reason if matched_trace_ids else "no_text_in_band"
+                row = {
+                    "candidate_id": candidate_id,
+                    "page_id": page_id,
+                    "band_id": band_id,
+                    "bbox_page": bbox_page,
+                    "matched_text_ids": matched_text_ids,
+                    "matched_trace_ids": matched_trace_ids,
+                    "band_text_count": len(band_texts),
+                    "band_trace_ids": band_trace_ids,
+                    "match_count": len(matched_trace_ids),
+                    "match_reason": match_method,
+                    "match_method": match_method,
+                }
+                match_rows.append(row)
+                recorder.write_jsonl(
+                    "02_strip_detect/candidate_text_matching.jsonl",
+                    row,
+                )
+        _enrich_detect_candidates_with_text_matches(recorder, match_rows)
+    except Exception:
+        return
+
+
+def _enrich_detect_candidates_with_text_matches(recorder, match_rows: list[dict]) -> None:
+    root = getattr(recorder, "_root", None)
+    if root is None:
+        return
+    target = root / "02_strip_detect" / "detect_candidates.jsonl"
+    if not target.exists() or not match_rows:
+        return
+    by_candidate = {
+        str(row.get("candidate_id") or ""): row
+        for row in match_rows
+        if str(row.get("candidate_id") or "")
+    }
+    rows: list[dict] = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        match = by_candidate.get(str(row.get("candidate_id") or ""))
+        if match is not None:
+            matched_text_ids = list(match.get("matched_text_ids") or [])
+            matched_trace_ids = list(match.get("matched_trace_ids") or [])
+            row.update(
+                {
+                    "page_id": match.get("page_id"),
+                    "matched_text_id": matched_text_ids[0] if matched_text_ids else None,
+                    "matched_text_ids": matched_text_ids,
+                    "matched_trace_ids": matched_trace_ids,
+                    "match_count": int(match.get("match_count") or 0),
+                    "match_reason": match.get("match_reason"),
+                    "match_method": match.get("match_method") or match.get("match_reason"),
+                    "band_text_count": int(match.get("band_text_count") or 0),
+                    "band_trace_ids": list(match.get("band_trace_ids") or []),
+                }
+            )
+        rows.append(row)
+    if not rows:
+        return
+    target.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    try:
+        stage = recorder._stage_from_rel("02_strip_detect/detect_candidates.jsonl")
+        recorder.register_artifact(stage=stage, rel_path="02_strip_detect/detect_candidates.jsonl", kind="jsonl")
+    except Exception:
+        pass
+
+
+def _build_ocr_confidence_audit(output_pages: list[OutputPage]) -> dict:
+    total_blocks = 0
+    blocks_with_available_confidence = 0
+    blocks_with_confidence_zero = 0
+    blocks_with_confidence_lt_05 = 0
+    by_band = []
+    for page_index, page in enumerate(output_pages, start=1):
+        text_layers = getattr(page, "text_layers", None)
+        texts = []
+        if isinstance(text_layers, dict):
+            texts = [text for text in list(text_layers.get("texts") or []) if isinstance(text, dict)]
+        total_blocks += len(texts)
+        for text in texts:
+            raw_available = text.get("confidence_raw") is not None
+            try:
+                confidence = float(text.get("confidence", 0.0) or 0.0)
+            except Exception:
+                confidence = 0.0
+            if raw_available:
+                blocks_with_available_confidence += 1
+                if confidence == 0.0:
+                    blocks_with_confidence_zero += 1
+                    by_band.append(
+                        {
+                            "page_number": int(page_index),
+                            "band_id": text.get("band_id"),
+                            "text_id": text.get("text_id") or text.get("id"),
+                            "confidence_at_accept": text.get("confidence_raw"),
+                            "confidence_in_project_json": confidence,
+                            "delta": round(confidence - float(text.get("confidence_raw") or 0.0), 4),
+                            "lost_between": "_finalize_page_ocr_texts | strip remap",
+                        }
+                    )
+                if confidence < 0.5:
+                    blocks_with_confidence_lt_05 += 1
+    summary = {
+        "total_blocks": int(total_blocks),
+        "blocks_with_available_confidence": int(blocks_with_available_confidence),
+        "blocks_with_confidence_zero": int(blocks_with_confidence_zero),
+        "blocks_with_confidence_lt_05": int(blocks_with_confidence_lt_05),
+    }
+    if blocks_with_available_confidence and blocks_with_confidence_zero == blocks_with_available_confidence:
+        summary["warning"] = "all_blocks_have_confidence_zero_likely_lost_in_metadata_flow"
+    return {
+        "schema_version": 1,
+        "summary": summary,
+        "by_band": by_band,
+    }
+
+
+def _write_ocr_confidence_audit(output_pages: list[OutputPage]) -> None:
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+    try:
+        recorder.write_json("03_ocr/ocr_confidence_audit.json", _build_ocr_confidence_audit(output_pages))
+    except Exception:
+        return
+
+
+def _write_pipeline_artifacts_debug(output_pages: list[OutputPage]) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    try:
+        pages = []
+        for page_index, page in enumerate(output_pages, start=1):
+            ocr_result = getattr(page, "ocr_result", {}) if isinstance(getattr(page, "ocr_result", {}), dict) else {}
+            artifacts = ocr_result.get("_pipeline_artifacts") if isinstance(ocr_result.get("_pipeline_artifacts"), dict) else {}
+            engine_preset = ocr_result.get("_engine_preset") if isinstance(ocr_result.get("_engine_preset"), dict) else {}
+            pages.append(
+                {
+                    "page_number": page_index,
+                    "engine_preset": engine_preset,
+                    "artifacts": artifacts,
+                    "by_band": list(ocr_result.get("_pipeline_artifacts_by_band") or []),
+                }
+            )
+        recorder.write_json("00_run/pipeline_artifacts.json", {"schema_version": 1, "pages": pages})
+    except Exception:
+        return
+
+
+def _attach_band_pipeline_metadata_to_page(page: OutputPage, band: Band, band_index: int) -> None:
+    if not isinstance(getattr(page, "ocr_result", None), dict):
+        page.ocr_result = {"_vision_blocks": []}
+    ocr_result = band.ocr_result if isinstance(getattr(band, "ocr_result", None), dict) else {}
+    if not ocr_result:
+        return
+    engine_preset = ocr_result.get("_engine_preset") if isinstance(ocr_result.get("_engine_preset"), dict) else {}
+    artifacts = (
+        ocr_result.get("_pipeline_artifacts")
+        if isinstance(ocr_result.get("_pipeline_artifacts"), dict)
+        else {}
+    )
+    if not engine_preset and not artifacts:
+        return
+
+    source_page_number = int(ocr_result.get("_source_page_number") or 0) or None
+    band_id = str(ocr_result.get("_band_id") or _band_id_for(source_page_number, band_index))
+    entry = {
+        "band_id": band_id,
+        "band_index": int(ocr_result.get("_band_index") or band_index),
+        "band_y_top": int(getattr(band, "y_top", 0)),
+        "band_y_bottom": int(getattr(band, "y_bottom", 0)),
+    }
+    if engine_preset:
+        entry["engine_preset"] = copy.deepcopy(engine_preset)
+        page.ocr_result.setdefault("_engine_preset", copy.deepcopy(engine_preset))
+    if artifacts:
+        entry["artifacts"] = copy.deepcopy(artifacts)
+        page.ocr_result.setdefault("_pipeline_artifacts", copy.deepcopy(artifacts))
+    page.ocr_result.setdefault("_pipeline_artifacts_by_band", []).append(entry)
+
+
+def _mark_pipeline_artifact_status(
+    page: OutputPage,
+    artifact_name: str,
+    status: str,
+    *,
+    producer: str | None = None,
+) -> None:
+    if not isinstance(getattr(page, "ocr_result", None), dict):
+        return
+    artifacts = page.ocr_result.get("_pipeline_artifacts")
+    if not isinstance(artifacts, dict):
+        return
+    artifact = artifacts.get(artifact_name)
+    if not isinstance(artifact, dict):
+        artifact = {}
+        artifacts[artifact_name] = artifact
+    if producer and not artifact.get("producer"):
+        artifact["producer"] = producer
+    artifact["status"] = status
+    artifact["updated_by"] = "strip_pipeline"
+    for band_entry in page.ocr_result.get("_pipeline_artifacts_by_band") or []:
+        if not isinstance(band_entry, dict):
+            continue
+        band_artifacts = band_entry.get("artifacts")
+        if not isinstance(band_artifacts, dict):
+            continue
+        band_artifact = band_artifacts.get(artifact_name)
+        if isinstance(band_artifact, dict):
+            if producer and not band_artifact.get("producer"):
+                band_artifact["producer"] = producer
+            band_artifact["status"] = status
+            band_artifact["updated_by"] = "strip_pipeline"
+    if isinstance(getattr(page, "page_profile", None), dict):
+        page.page_profile["_pipeline_artifacts"] = artifacts
+
+
+def _mark_pipeline_artifacts_after_render(output_pages: list[OutputPage]) -> None:
+    for page in output_pages:
+        inpaint_status = "ok" if isinstance(getattr(page, "inpainted_image", None), np.ndarray) else "skipped"
+        render_status = "ok" if isinstance(getattr(page, "image", None), np.ndarray) else "pending"
+        _mark_pipeline_artifact_status(page, "Inpainted", inpaint_status)
+        _mark_pipeline_artifact_status(
+            page,
+            "FinalRender",
+            render_status,
+            producer="traduzai-typesetter",
+        )
+
+
+def _get_debug_recorder():
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return None
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return None
+    return recorder
+
+
+def _write_empty_jsonl_artifact(recorder, rel_path: str) -> None:
+    try:
+        root = Path(getattr(recorder, "_root"))
+        target = root / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch(exist_ok=True)
+        recorder.register_artifact(
+            stage=getattr(recorder, "_stage_from_rel")(rel_path),
+            rel_path=rel_path,
+            kind="jsonl",
+        )
+    except Exception:
+        return
+
+
+def _write_input_manifest_debug(page_paths: list[Path], strip: VerticalStrip) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    try:
+        breaks = [int(value) for value in list(strip.source_page_breaks or [])]
+        files = []
+        for index, path in enumerate(page_paths):
+            y_top = breaks[index] if index < len(breaks) else None
+            y_bottom = breaks[index + 1] if index + 1 < len(breaks) else None
+            files.append(
+                {
+                    "page_number": index + 1,
+                    "path": str(path),
+                    "strip_y_top": y_top,
+                    "strip_y_bottom": y_bottom,
+                    "height": (int(y_bottom) - int(y_top)) if y_top is not None and y_bottom is not None else None,
+                }
+            )
+        recorder.write_json(
+            "01_input_extract/input_manifest.json",
+            {
+                "input_page_count": len(page_paths),
+                "strip_width": int(strip.width),
+                "strip_height": int(strip.height),
+                "source_page_breaks": breaks,
+                "files": files,
+            },
+        )
+    except Exception:
+        return
+
+
+def _write_reassemble_manifest_debug(
+    output_pages: list[OutputPage],
+    original_pages: list[OutputPage],
+    clean_pages: list[OutputPage],
+    *,
+    target_count: int,
+) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    try:
+        pages = []
+        for index, page in enumerate(output_pages):
+            image = getattr(page, "image", None)
+            height = int(image.shape[0]) if isinstance(image, np.ndarray) and image.ndim >= 2 else 0
+            width = int(image.shape[1]) if isinstance(image, np.ndarray) and image.ndim >= 2 else 0
+            pages.append(
+                {
+                    "page_number": index + 1,
+                    "y_top": int(getattr(page, "y_top", 0) or 0),
+                    "y_bottom": int(getattr(page, "y_bottom", 0) or 0),
+                    "height": height,
+                    "width": width,
+                }
+            )
+        recorder.write_json(
+            "10_copyback_reassemble/reassemble_manifest.json",
+            {
+                "target_count": int(target_count),
+                "rendered_page_count": len(output_pages),
+                "original_page_count": len(original_pages),
+                "clean_page_count": len(clean_pages),
+                "pages": pages,
+            },
+        )
+    except Exception:
+        return
+
+
+def _write_inpaint_blocks_debug(output_pages: list[OutputPage]) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    rel_path = "08_inpaint/inpaint_blocks.jsonl"
+    wrote = False
+    try:
+        for page_index, page in enumerate(output_pages, start=1):
+            trace_ids_by_band = _trace_ids_by_band_from_page(page)
+            for block_index, block in enumerate(list(getattr(page, "inpaint_blocks", None) or [])):
+                payload = dict(block) if isinstance(block, dict) else {"value": block}
+                payload.setdefault("page_number", page_index)
+                payload.setdefault("block_index", block_index)
+                payload = _enrich_inpaint_block_debug_payload(
+                    payload,
+                    page=page,
+                    page_index=page_index,
+                    block_index=block_index,
+                    trace_ids_by_band=trace_ids_by_band,
+                )
+                recorder.write_jsonl(rel_path, payload)
+                wrote = True
+        if not wrote:
+            _write_empty_jsonl_artifact(recorder, rel_path)
+    except Exception:
+        return
+
+
+def _write_page_cleanup_breakdown_debug(breakdown: dict[str, float]) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    try:
+        rounded = {key: round(float(value or 0.0), 4) for key, value in sorted(breakdown.items())}
+        cleanup_skipped = bool(rounded.pop("page_cleanup_skipped", 0.0))
+        recorder.write_json(
+            "10_copyback_reassemble/page_cleanup_breakdown.json",
+            {"durations_sec": rounded, "cleanup_skipped": cleanup_skipped},
+        )
+    except Exception:
+        return
+
+
+def _write_contact_sheets_debug(
+    original_pages: list[OutputPage],
+    output_pages: list[OutputPage],
+    bands: list[Band],
+) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    try:
+        from debug_tools.contact_sheets import problem_bands_sheet, translated_comparison_sheet
+
+        recorder.write_image(
+            "12_contact_sheets/translated_comparison.jpg",
+            translated_comparison_sheet(original_pages, output_pages),
+        )
+        recorder.write_image(
+            "12_contact_sheets/problem_bands.jpg",
+            problem_bands_sheet(bands),
+        )
+    except Exception:
+        return
+
+
+def _debug_skip_page_cleanup_rerender() -> bool:
+    rerender = os.getenv("TRADUZAI_PAGE_CLEANUP_RERENDER")
+    if rerender is not None:
+        return str(rerender).strip().lower() in {"0", "false", "no", "off"}
+    raw = os.getenv("TRADUZAI_DEBUG_SKIP_PAGE_CLEANUP_RERENDER", "")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _strip_inpainter_prewarm_enabled() -> bool:
     raw = os.getenv("TRADUZAI_STRIP_INPAINTER_PREWARM", "1")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
@@ -314,6 +1306,27 @@ def _strip_scheduler_executor_mode() -> str:
     if raw in {"1", "true", "yes", "on"}:
         return "sequential_safe"
     return ""
+
+
+def _strip_parallel_inpaint_threads() -> int:
+    explicit = os.getenv("TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS")
+    if explicit is None:
+        explicit = os.getenv("TRADUZAI_STRIP_INPAINT_WORKERS")
+    if explicit is not None:
+        raw = str(explicit).strip().lower()
+        if raw in {"", "0", "1", "false", "no", "off"}:
+            return 1
+        if raw in {"true", "yes", "on"}:
+            return 2
+        try:
+            return max(1, min(4, int(raw)))
+        except Exception:
+            return 1
+
+    enabled = str(os.getenv("TRADUZAI_STRIP_PARALLEL_INPAINT", "")).strip().lower()
+    if enabled in {"1", "true", "yes", "on"}:
+        return 2
+    return 1
 
 
 def _start_inpainter_prewarm(inpainter, work_available=True) -> tuple[ThreadPoolExecutor, Future] | None:
@@ -365,11 +1378,48 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _image_io_worker_count(page_count: int) -> int:
+    if page_count <= 1 or not _env_bool("TRADUZAI_PARALLEL_IMAGE_IO", True):
+        return 1
+    default_workers = min(4, max(1, os.cpu_count() or 1))
+    workers = max(1, _env_int("TRADUZAI_IMAGE_IO_WORKERS", default_workers))
+    return min(int(page_count), workers)
+
+
+def _write_jpeg_timed(path: Path, image: np.ndarray, *, quality: int = 92) -> float:
+    started = time.perf_counter()
+    ok = cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        raise IOError(f"Falha ao gravar imagem: {path}")
+    return time.perf_counter() - started
+
+
+def _write_output_pages_jpegs(output_pages: list[OutputPage], output_dir: Path, *, quality: int = 92) -> float:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for i, page in enumerate(output_pages):
+        page.path = output_dir / f"{i + 1:03d}.jpg"
+
+    workers = _image_io_worker_count(len(output_pages))
+    if workers <= 1:
+        return sum(_write_jpeg_timed(page.path, page.image, quality=quality) for page in output_pages)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="traduzai-image-io") as pool:
+        futures = [pool.submit(_write_jpeg_timed, page.path, page.image, quality=quality) for page in output_pages]
+        return sum(future.result() for future in futures)
 
 
 def _page_final_near_text_cleanup_enabled() -> bool:
@@ -637,6 +1687,9 @@ def _build_scheduler_executor_report(*, band_count: int, page_count: int) -> dic
         from pipeline.strip.scheduler import build_strip_scheduler_plan
 
     plan = build_strip_scheduler_plan(band_count=band_count, page_count=max(1, page_count))
+    parallel_inpaint_threads = _strip_parallel_inpaint_threads() if mode == "overlap_context_release" else 1
+    overlap_worker_count = max(2, parallel_inpaint_threads + 1) if mode == "overlap_context_release" else 1
+    inpaint_lock_mode = "bounded_semaphore" if parallel_inpaint_threads > 1 else "shared_gpu_lock"
     return {
         "enabled": True,
         "mode": mode,
@@ -647,11 +1700,16 @@ def _build_scheduler_executor_report(*, band_count: int, page_count: int) -> dic
         "stage_counts": dict(plan.stage_counts),
         "max_cpu_parallel": plan.max_cpu_parallel,
         "max_gpu_parallel": plan.max_gpu_parallel,
+        "parallel_inpaint_threads": parallel_inpaint_threads,
+        "overlap_worker_count": overlap_worker_count,
+        "ocr_serialized": True,
+        "inpaint_lock_mode": inpaint_lock_mode,
         "validation_status": plan.validation.status,
         "validation_reasons": list(plan.validation.reasons),
         "notes": [
             "Experimental flag only: validate produced output against the sequential baseline.",
             "overlap_context_release keeps a single GPU lane and releases ordered context after translate.",
+            "TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS enables bounded inpaint overlap only in overlap_context_release.",
             "Use scheduler shadow gate against the produced output before considering a parallel executor.",
         ],
     }
@@ -717,7 +1775,27 @@ def _shift_polygons_xy(polygons, dx: int, dy: int):
 
 def _shift_text_geometry_xy(text: dict, dx: int, dy: int) -> dict:
     shifted = dict(text)
-    for key in ("bbox", "source_bbox", "balloon_bbox", "text_pixel_bbox"):
+    for key in (
+        "bbox",
+        "source_bbox",
+        "balloon_bbox",
+        "text_pixel_bbox",
+        "layout_bbox",
+        "_visual_rect_outer_bbox",
+        "_visual_rect_inner_bbox",
+        "render_bbox",
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "layout_safe_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "target_bbox",
+        "sign_bbox",
+        "_connected_source_bbox",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
+        "balloon_inner_bbox",
+    ):
         bbox = _shift_bbox_xy(shifted.get(key), dx, dy)
         if bbox is not None:
             shifted[key] = bbox
@@ -728,13 +1806,39 @@ def _shift_text_geometry_xy(text: dict, dx: int, dy: int) -> dict:
         "connected_position_bboxes",
         "connected_focus_bboxes",
         "_merged_source_bboxes",
+        "merged_source_bboxes",
+        "_connected_source_anchor_bboxes",
     ):
         if key in shifted:
             shifted[key] = _shift_bbox_list_xy(shifted.get(key), dx, dy)
     for key in ("line_polygons", "connected_lobe_polygons", "balloon_polygon"):
         if key in shifted:
             shifted[key] = _shift_polygons_xy(shifted.get(key), dx, dy)
+    for key in ("qa_metrics", "_render_debug", "_render_debug_candidates", "_render_debug_skipped", "connected_children"):
+        if isinstance(shifted.get(key), dict):
+            shifted[key] = _shift_nested_debug_bboxes_xy(shifted[key], dx, dy)
+        elif isinstance(shifted.get(key), list):
+            shifted[key] = _shift_nested_debug_bboxes_xy(shifted[key], dx, dy)
     return shifted
+
+
+def _shift_nested_debug_bboxes_xy(value, dx: int, dy: int):
+    if isinstance(value, dict):
+        shifted = {}
+        for key, item in value.items():
+            if _looks_like_debug_bbox_key(str(key)):
+                if str(key).endswith("bboxes"):
+                    shifted[key] = _shift_bbox_list_xy(item, dx, dy)
+                    continue
+                bbox = _shift_bbox_xy(item, dx, dy)
+                if bbox is not None:
+                    shifted[key] = bbox
+                    continue
+            shifted[key] = _shift_nested_debug_bboxes_xy(item, dx, dy)
+        return shifted
+    if isinstance(value, list):
+        return [_shift_nested_debug_bboxes_xy(item, dx, dy) for item in value]
+    return value
 
 
 def _bbox_center_y(value) -> float | None:
@@ -942,7 +2046,7 @@ def _text_has_alnum_or_cjk(text: str) -> bool:
 
 
 def _text_requires_final_cleanup(text: dict) -> bool:
-    if not isinstance(text, dict) or text.get("skip_processing"):
+    if not isinstance(text, dict):
         return False
     translated = str(text.get("translated") or text.get("traduzido") or "").strip()
     if not translated:
@@ -953,6 +2057,408 @@ def _text_requires_final_cleanup(text: dict) -> bool:
     return True
 
 
+def _cleanup_text_geometry_mask(text: dict, shape: tuple[int, int]) -> np.ndarray | None:
+    try:
+        from inpainter.mask_builder import mask_from_text_geometry
+
+        mask = mask_from_text_geometry(text, shape)
+        if mask is not None and np.any(mask):
+            return mask.astype(np.uint8)
+    except Exception:
+        pass
+
+    bbox = text.get("text_pixel_bbox") or text.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    h, w = shape
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+    except Exception:
+        return None
+    x1 = max(0, min(w, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1))
+    y2 = max(0, min(h, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    mask = np.zeros(shape, dtype=np.uint8)
+    mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def _cleanup_reintroduces_text_residual(
+    clean_image: np.ndarray,
+    fixed_clean: np.ndarray,
+    texts: list[dict],
+) -> bool:
+    if clean_image is None or fixed_clean is None or clean_image.shape != fixed_clean.shape or clean_image.size == 0:
+        return False
+    clean_gray = cv2.cvtColor(clean_image, cv2.COLOR_RGB2GRAY)
+    fixed_gray = cv2.cvtColor(fixed_clean, cv2.COLOR_RGB2GRAY)
+    shape = clean_gray.shape[:2]
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        mask = _cleanup_text_geometry_mask(text, shape)
+        if mask is None or not np.any(mask):
+            continue
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        clean_dark = int(np.count_nonzero((clean_gray < 180) & (mask > 0)))
+        fixed_dark = int(np.count_nonzero((fixed_gray < 180) & (mask > 0)))
+        if fixed_dark >= max(clean_dark + 24, int(clean_dark * 1.45) + 12):
+            return True
+    return False
+
+
+def _page_cleanup_rerender_margin_px() -> int:
+    return max(0, _env_int("TRADUZAI_PAGE_CLEANUP_RERENDER_MARGIN", 48))
+
+
+def _page_cleanup_rerender_max_crop_ratio() -> float:
+    return max(0.05, min(1.0, _env_float("TRADUZAI_PAGE_CLEANUP_RERENDER_MAX_CROP_RATIO", 0.70)))
+
+
+def _page_cleanup_rerender_max_total_ratio() -> float:
+    return max(0.05, min(2.0, _env_float("TRADUZAI_PAGE_CLEANUP_RERENDER_MAX_TOTAL_RATIO", 0.95)))
+
+
+def _page_cleanup_rerender_max_crops() -> int:
+    return max(1, _env_int("TRADUZAI_PAGE_CLEANUP_RERENDER_MAX_CROPS", 12))
+
+
+def _page_cleanup_background_delta_enabled() -> bool:
+    return _env_bool("TRADUZAI_PAGE_CLEANUP_BACKGROUND_DELTA", True)
+
+
+def _bbox_area(bbox: list[int] | None) -> int:
+    if bbox is None:
+        return 0
+    return max(0, int(bbox[2]) - int(bbox[0])) * max(0, int(bbox[3]) - int(bbox[1]))
+
+
+def _bbox_union(bboxes: list[list[int] | None]) -> list[int] | None:
+    valid = [bbox for bbox in bboxes if bbox is not None and _bbox_area(bbox) > 0]
+    if not valid:
+        return None
+    return [
+        min(int(bbox[0]) for bbox in valid),
+        min(int(bbox[1]) for bbox in valid),
+        max(int(bbox[2]) for bbox in valid),
+        max(int(bbox[3]) for bbox in valid),
+    ]
+
+
+def _clip_bbox_to_shape(bbox: list[int] | None, shape: tuple[int, int]) -> list[int] | None:
+    bbox = _bbox4_or_none(bbox)
+    if bbox is None:
+        return None
+    h, w = int(shape[0]), int(shape[1])
+    x1 = max(0, min(w, int(bbox[0])))
+    y1 = max(0, min(h, int(bbox[1])))
+    x2 = max(0, min(w, int(bbox[2])))
+    y2 = max(0, min(h, int(bbox[3])))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _expand_bbox_to_shape(bbox: list[int] | None, shape: tuple[int, int], margin: int) -> list[int] | None:
+    bbox = _bbox4_or_none(bbox)
+    if bbox is None:
+        return None
+    return _clip_bbox_to_shape(
+        [
+            int(bbox[0]) - int(margin),
+            int(bbox[1]) - int(margin),
+            int(bbox[2]) + int(margin),
+            int(bbox[3]) + int(margin),
+        ],
+        shape,
+    )
+
+
+def _changed_pixel_component_bboxes(clean_image: np.ndarray, fixed_clean: np.ndarray) -> list[list[int]]:
+    if clean_image is None or fixed_clean is None or clean_image.shape != fixed_clean.shape or clean_image.size == 0:
+        return []
+    diff = cv2.absdiff(clean_image, fixed_clean)
+    if diff.ndim == 3:
+        mask = np.any(diff > 0, axis=2).astype(np.uint8)
+    else:
+        mask = (diff > 0).astype(np.uint8)
+    if not np.any(mask):
+        return []
+
+    try:
+        count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        ys, xs = np.where(mask > 0)
+        return [[int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]]
+
+    components: list[list[int]] = []
+    for idx in range(1, int(count)):
+        x = int(stats[idx, cv2.CC_STAT_LEFT])
+        y = int(stats[idx, cv2.CC_STAT_TOP])
+        w = int(stats[idx, cv2.CC_STAT_WIDTH])
+        h = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        if w > 0 and h > 0:
+            components.append([x, y, x + w, y + h])
+    if len(components) > max(1, _env_int("TRADUZAI_PAGE_CLEANUP_MAX_COMPONENTS", 128)):
+        union = _bbox_union(components)
+        return [union] if union is not None else []
+    return components
+
+
+def _page_cleanup_text_bboxes(text: dict) -> list[list[int]]:
+    if not isinstance(text, dict):
+        return []
+    bboxes: list[list[int]] = []
+    for key in (
+        "render_bbox",
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "position_bbox",
+        "capacity_bbox",
+        "target_bbox",
+        "balloon_bbox",
+        "layout_bbox",
+        "text_pixel_bbox",
+        "source_bbox",
+        "bbox",
+        "sign_bbox",
+        "_connected_source_bbox",
+    ):
+        bbox = _shift_bbox_xy(text.get(key), 0, 0)
+        if bbox is not None:
+            bboxes.append(bbox)
+    for key in (
+        "balloon_subregions",
+        "connected_lobe_bboxes",
+        "connected_text_groups",
+        "connected_position_bboxes",
+        "connected_focus_bboxes",
+        "_merged_source_bboxes",
+        "merged_source_bboxes",
+        "_connected_source_anchor_bboxes",
+    ):
+        bboxes.extend(_shift_bbox_list_xy(text.get(key), 0, 0))
+    return bboxes
+
+
+def _dedupe_texts_by_identity(texts: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen: set[int] = set()
+    for text in texts:
+        marker = id(text)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(text)
+    return unique
+
+
+def _merge_page_cleanup_jobs(jobs: list[dict], shape: tuple[int, int]) -> list[dict]:
+    merged: list[dict] = []
+    merge_margin = max(0, _env_int("TRADUZAI_PAGE_CLEANUP_RERENDER_MERGE_MARGIN", 8))
+    for job in jobs:
+        bbox = _clip_bbox_to_shape(job.get("bbox"), shape)
+        if bbox is None:
+            continue
+        pending = {"bbox": bbox, "texts": _dedupe_texts_by_identity(list(job.get("texts") or []))}
+        did_merge = True
+        while did_merge:
+            did_merge = False
+            for idx, existing in enumerate(list(merged)):
+                expanded = _expand_bbox_to_shape(pending["bbox"], shape, merge_margin) or pending["bbox"]
+                if not _bbox_intersects(expanded, existing.get("bbox")):
+                    continue
+                union = _bbox_union([pending["bbox"], existing.get("bbox")])
+                if union is None:
+                    continue
+                pending["bbox"] = _clip_bbox_to_shape(union, shape) or union
+                pending["texts"] = _dedupe_texts_by_identity(
+                    list(pending.get("texts") or []) + list(existing.get("texts") or [])
+                )
+                del merged[idx]
+                did_merge = True
+                break
+        merged.append(pending)
+    return sorted(merged, key=lambda item: (int(item["bbox"][1]), int(item["bbox"][0])))
+
+
+def _assign_page_cleanup_texts_to_jobs(jobs: list[dict], page_texts: list[dict]) -> list[dict]:
+    assigned: list[dict] = []
+    for job in jobs:
+        bbox = job.get("bbox")
+        texts: list[dict] = []
+        for text in page_texts:
+            text_boxes = _page_cleanup_text_bboxes(text)
+            if text_boxes and any(_bbox_intersects(box, bbox) for box in text_boxes):
+                texts.append(text)
+        updated = dict(job)
+        updated["texts"] = _dedupe_texts_by_identity(texts)
+        assigned.append(updated)
+    return assigned
+
+
+def _page_cleanup_crop_jobs(
+    clean_image: np.ndarray,
+    fixed_clean: np.ndarray,
+    page_texts: list[dict],
+) -> list[dict] | None:
+    shape = fixed_clean.shape[:2]
+    components = _changed_pixel_component_bboxes(clean_image, fixed_clean)
+    if not components:
+        return []
+
+    margin = _page_cleanup_rerender_margin_px()
+    jobs: list[dict] = []
+    for component in components:
+        selection_bbox = _expand_bbox_to_shape(component, shape, margin)
+        if selection_bbox is None:
+            continue
+        affected_texts: list[dict] = []
+        affected_boxes: list[list[int]] = []
+        for text in page_texts:
+            text_boxes = _page_cleanup_text_bboxes(text)
+            if not text_boxes:
+                continue
+            if any(_bbox_intersects(box, selection_bbox) for box in text_boxes):
+                affected_texts.append(text)
+                affected_boxes.extend(text_boxes)
+        crop_bbox = _bbox_union([component] + affected_boxes) or component
+        crop_bbox = _expand_bbox_to_shape(crop_bbox, shape, margin)
+        if crop_bbox is not None:
+            jobs.append({"bbox": crop_bbox, "texts": affected_texts})
+
+    jobs = _merge_page_cleanup_jobs(jobs, shape)
+    jobs = _assign_page_cleanup_texts_to_jobs(jobs, page_texts)
+    if len(jobs) > _page_cleanup_rerender_max_crops():
+        return None
+
+    page_area = max(1, int(shape[0]) * int(shape[1]))
+    max_crop_ratio = _page_cleanup_rerender_max_crop_ratio()
+    max_total_ratio = _page_cleanup_rerender_max_total_ratio()
+    total_area = 0
+    for job in jobs:
+        area = _bbox_area(job.get("bbox"))
+        total_area += area
+        if area / float(page_area) > max_crop_ratio:
+            return None
+    if total_area / float(page_area) > max_total_ratio:
+        return None
+    return jobs
+
+
+def _render_page_cleanup_regions(
+    *,
+    clean_image: np.ndarray,
+    fixed_clean: np.ndarray,
+    rendered_image: np.ndarray,
+    page_texts: list[dict],
+    typesetter,
+) -> tuple[np.ndarray, str]:
+    if _page_cleanup_background_delta_enabled():
+        delta_rendered = _apply_page_cleanup_background_delta(
+            clean_image=clean_image,
+            fixed_clean=fixed_clean,
+            rendered_image=rendered_image,
+        )
+        if delta_rendered is not None:
+            return delta_rendered, "delta"
+
+    jobs = _page_cleanup_crop_jobs(clean_image, fixed_clean, page_texts)
+    if jobs is None:
+        return (
+            typesetter.render_band_image(
+                fixed_clean,
+                _render_payload_without_legacy_decision_fields(page_texts, coordinate_space="page"),
+            ),
+            "full",
+        )
+    if not jobs:
+        return rendered_image.copy(), "noop"
+    if not isinstance(rendered_image, np.ndarray) or rendered_image.shape != fixed_clean.shape:
+        return (
+            typesetter.render_band_image(
+                fixed_clean,
+                _render_payload_without_legacy_decision_fields(page_texts, coordinate_space="page"),
+            ),
+            "full",
+        )
+
+    result = rendered_image.copy()
+    for job in jobs:
+        bbox = _clip_bbox_to_shape(job.get("bbox"), fixed_clean.shape[:2])
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        crop_clean = fixed_clean[y1:y2, x1:x2].copy()
+        crop_texts = [_shift_text_geometry_xy(copy.deepcopy(text), -x1, -y1) for text in list(job.get("texts") or [])]
+        if crop_texts:
+            crop_rendered = typesetter.render_band_image(
+                crop_clean,
+                {
+                    "texts": _texts_without_legacy_decision_fields(crop_texts),
+                    "_coordinate_space": "page_cleanup_crop",
+                    "_page_cleanup_crop_bbox": [x1, y1, x2, y2],
+                },
+            )
+        else:
+            crop_rendered = crop_clean
+        if not isinstance(crop_rendered, np.ndarray) or crop_rendered.shape[:2] != crop_clean.shape[:2]:
+            return (
+                typesetter.render_band_image(
+                    fixed_clean,
+                    _render_payload_without_legacy_decision_fields(page_texts, coordinate_space="page"),
+                ),
+                "full",
+            )
+        result[y1:y2, x1:x2] = crop_rendered[: y2 - y1, : x2 - x1]
+    return result, "roi"
+
+
+def _apply_page_cleanup_background_delta(
+    *,
+    clean_image: np.ndarray,
+    fixed_clean: np.ndarray,
+    rendered_image: np.ndarray,
+) -> np.ndarray | None:
+    if (
+        not isinstance(clean_image, np.ndarray)
+        or not isinstance(fixed_clean, np.ndarray)
+        or not isinstance(rendered_image, np.ndarray)
+        or clean_image.shape != fixed_clean.shape
+        or clean_image.shape != rendered_image.shape
+        or clean_image.size == 0
+    ):
+        return None
+
+    cleanup_diff = cv2.absdiff(clean_image, fixed_clean)
+    if cleanup_diff.ndim == 3:
+        cleanup_mask = np.any(cleanup_diff > 0, axis=2).astype(np.uint8)
+    else:
+        cleanup_mask = (cleanup_diff > 0).astype(np.uint8)
+    if not np.any(cleanup_mask):
+        return rendered_image.copy()
+
+    render_diff = cv2.absdiff(rendered_image, clean_image)
+    if render_diff.ndim == 3:
+        rendered_text_mask = np.any(render_diff > 8, axis=2).astype(np.uint8)
+    else:
+        rendered_text_mask = (render_diff > 8).astype(np.uint8)
+    if np.any(rendered_text_mask):
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        rendered_text_mask = cv2.dilate(rendered_text_mask, kernel, iterations=1)
+
+    copy_mask = (cleanup_mask > 0) & (rendered_text_mask == 0)
+    result = rendered_image.copy()
+    if np.any(copy_mask):
+        result[copy_mask] = fixed_clean[copy_mask]
+    return result
+
+
 def _cleanup_page_inpaint_and_rerender(
     *,
     original_image,
@@ -960,10 +2466,21 @@ def _cleanup_page_inpaint_and_rerender(
     page_texts: list[dict],
     rendered_image,
     typesetter,
+    breakdown: dict[str, float] | None = None,
 ) -> tuple[object, object, bool]:
-    cleanup_candidates = [text for text in page_texts if _text_requires_final_cleanup(text)]
+    cleanup_candidates = [
+        _without_legacy_decision_fields(text)
+        for text in page_texts
+        if _text_requires_final_cleanup(text)
+    ]
     if not cleanup_candidates:
         return clean_image, rendered_image, False
+
+    def _add_breakdown(stage: str, started_at: float) -> None:
+        if breakdown is None:
+            return
+        breakdown[stage] = float(breakdown.get(stage, 0.0) or 0.0) + (time.perf_counter() - started_at)
+
     try:
         from vision_stack.runtime import (
             _apply_white_balloon_near_text_residual_cleanup,
@@ -983,25 +2500,120 @@ def _cleanup_page_inpaint_and_rerender(
 
         fixed_clean = clean_image
         if near_text_cleanup_enabled:
+            cleanup_stage_started = time.perf_counter()
             fixed_clean = _apply_white_balloon_near_text_residual_cleanup(original_image, fixed_clean, cleanup_texts)
+            _add_breakdown("cleanup_inpaint", cleanup_stage_started)
         if full_cleanup_enabled and _has_white_balloon_text_residual(
             original_image,
             fixed_clean,
             cleanup_texts,
         ):
             limit_mask = _build_page_cleanup_limit_mask(original_image, cleanup_texts)
+            cleanup_stage_started = time.perf_counter()
             fixed_clean, _stats = _apply_post_inpaint_cleanup_timed(
                 original_image,
                 fixed_clean,
                 cleanup_texts,
                 limit_mask=limit_mask,
             )
+            _add_breakdown("cleanup_inpaint", cleanup_stage_started)
+        if _cleanup_reintroduces_text_residual(clean_image, fixed_clean, cleanup_candidates):
+            return clean_image, rendered_image, False
         if not np.any(cv2.absdiff(clean_image, fixed_clean)):
             return clean_image, rendered_image, False
-        fixed_rendered = typesetter.render_band_image(fixed_clean, {"texts": page_texts})
+        cleanup_stage_started = time.perf_counter()
+        fixed_rendered, render_mode = _render_page_cleanup_regions(
+            clean_image=clean_image,
+            fixed_clean=fixed_clean,
+            rendered_image=rendered_image,
+            page_texts=page_texts,
+            typesetter=typesetter,
+        )
+        _add_breakdown("cleanup_typeset", cleanup_stage_started)
+        if breakdown is not None:
+            breakdown[f"cleanup_{render_mode}_rerender_count"] = float(
+                breakdown.get(f"cleanup_{render_mode}_rerender_count", 0.0) or 0.0
+            ) + 1.0
         return fixed_clean, fixed_rendered, True
     except Exception:
         return clean_image, rendered_image, False
+
+
+def _cleanup_dark_panel_page_and_rerender(
+    *,
+    clean_image,
+    rendered_image,
+    page_texts: list[dict],
+    typesetter,
+    breakdown: dict[str, float] | None = None,
+) -> tuple[object, object, bool]:
+    if not page_texts or clean_image is None or not isinstance(clean_image, np.ndarray):
+        return clean_image, rendered_image, False
+    try:
+        from inpainter import _apply_dark_panel_text_fills
+
+        stage_texts = _texts_without_legacy_decision_fields(page_texts)
+        started = time.perf_counter()
+        fixed_clean, count = _apply_dark_panel_text_fills(clean_image, {"texts": stage_texts})
+        if breakdown is not None:
+            breakdown["cleanup_inpaint"] = float(breakdown.get("cleanup_inpaint", 0.0) or 0.0) + (
+                time.perf_counter() - started
+            )
+        if not count or not isinstance(fixed_clean, np.ndarray) or not np.any(cv2.absdiff(clean_image, fixed_clean)):
+            return clean_image, rendered_image, False
+        started = time.perf_counter()
+        fixed_rendered = typesetter.render_band_image(
+            fixed_clean,
+            _render_payload_without_legacy_decision_fields(
+                page_texts,
+                coordinate_space="page_dark_panel_cleanup",
+            ),
+        )
+        if breakdown is not None:
+            breakdown["cleanup_typeset"] = float(breakdown.get("cleanup_typeset", 0.0) or 0.0) + (
+                time.perf_counter() - started
+            )
+            breakdown["cleanup_dark_panel_rerender_count"] = float(
+                breakdown.get("cleanup_dark_panel_rerender_count", 0.0) or 0.0
+            ) + 1.0
+        return fixed_clean, fixed_rendered, True
+    except Exception:
+        return clean_image, rendered_image, False
+
+
+def _page_texts_from_text_layers(text_layers) -> list[dict]:
+    if isinstance(text_layers, dict):
+        return [text for text in list(text_layers.get("texts") or []) if isinstance(text, dict)]
+    if isinstance(text_layers, list):
+        return [text for text in list(text_layers) if isinstance(text, dict)]
+    return []
+
+
+def _page_requires_page_space_typeset(page_texts: list[dict]) -> bool:
+    for text in page_texts or []:
+        if not isinstance(text, dict):
+            continue
+        translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+        if not translated:
+            continue
+        if _shift_bbox_list_xy(text.get("balloon_subregions"), 0, 0) or _shift_bbox_list_xy(
+            text.get("connected_lobe_bboxes"),
+            0,
+            0,
+        ):
+            return True
+        bbox = _shift_bbox_xy(
+            text.get("balloon_bbox") or text.get("layout_bbox") or text.get("bbox"),
+            0,
+            0,
+        )
+        if bbox is None:
+            continue
+        width = max(1, int(bbox[2]) - int(bbox[0]))
+        height = max(1, int(bbox[3]) - int(bbox[1]))
+        if width >= 140 and height >= 55 and width / float(height) >= 1.45:
+            return True
+    return False
 
 
 def _build_page_cleanup_limit_mask(image_rgb, texts: list[dict]) -> np.ndarray | None:
@@ -1016,7 +2628,7 @@ def _build_page_cleanup_limit_mask(image_rgb, texts: list[dict]) -> np.ndarray |
         mask_from_text_geometry = None
 
     for text in texts:
-        if not isinstance(text, dict) or text.get("skip_processing"):
+        if not isinstance(text, dict):
             continue
         mask = None
         if build_inpaint_mask is not None:
@@ -1050,6 +2662,229 @@ def _build_page_cleanup_limit_mask(image_rgb, texts: list[dict]) -> np.ndarray |
             limit[y1:y2, x1:x2] = 255
 
     return limit if np.any(limit) else None
+
+
+def _build_page_inpaint_limit_mask(
+    image_rgb,
+    inpaint_blocks: list[dict] | None,
+    page_texts: list[dict] | None,
+) -> np.ndarray | None:
+    if image_rgb is None or not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0:
+        return None
+    shape = image_rgb.shape[:2]
+    height, width = shape
+    records = [dict(block) for block in list(inpaint_blocks or []) if isinstance(block, dict)]
+    if not records:
+        records = [dict(text) for text in list(page_texts or []) if isinstance(text, dict)]
+    if not records:
+        return None
+
+    limit = np.zeros(shape, dtype=np.uint8)
+
+    def _clip_point(x, y) -> list[int] | None:
+        try:
+            px = int(round(float(x)))
+            py = int(round(float(y)))
+        except Exception:
+            return None
+        return [max(0, min(width - 1, px)), max(0, min(height - 1, py))]
+
+    def _mark_polygon(points) -> bool:
+        if not isinstance(points, (list, tuple)) or len(points) < 3:
+            return False
+        clipped = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                return False
+            clipped_point = _clip_point(point[0], point[1])
+            if clipped_point is None:
+                return False
+            clipped.append(clipped_point)
+        if len(clipped) < 3:
+            return False
+        cv2.fillPoly(limit, [np.asarray(clipped, dtype=np.int32)], 255)
+        return True
+
+    def _mark_polygons(value) -> bool:
+        if not isinstance(value, (list, tuple)) or not value:
+            return False
+        first = value[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2 and not (
+            first and isinstance(first[0], (list, tuple))
+        ):
+            return _mark_polygon(value)
+        marked = False
+        for item in value:
+            marked = _mark_polygon(item) or marked
+        return marked
+
+    def _mark_bbox(value) -> bool:
+        bbox = _shift_bbox_y(value, 0)
+        if bbox is None:
+            return False
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return False
+        limit[y1:y2, x1:x2] = 255
+        return True
+
+    def _bbox_from_polygons(value) -> list[int] | None:
+        if not isinstance(value, (list, tuple)) or not value:
+            return None
+        polygons = value
+        first = value[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2 and not (
+            first and isinstance(first[0], (list, tuple))
+        ):
+            polygons = [value]
+        xs: list[int] = []
+        ys: list[int] = []
+        for polygon in polygons:
+            if not isinstance(polygon, (list, tuple)):
+                continue
+            for point in polygon:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
+                try:
+                    xs.append(int(round(float(point[0]))))
+                    ys.append(int(round(float(point[1]))))
+                except Exception:
+                    continue
+        if not xs or not ys:
+            return None
+        return [min(xs), min(ys), max(xs) + 1, max(ys) + 1]
+
+    def _bbox_gap(a: list[int], b: list[int]) -> int:
+        x_gap = max(0, max(int(a[0]) - int(b[2]), int(b[0]) - int(a[2])))
+        y_gap = max(0, max(int(a[1]) - int(b[3]), int(b[1]) - int(a[3])))
+        return max(x_gap, y_gap)
+
+    def _tight_reference_bbox(value, geometry_bbox: list[int] | None) -> list[int] | None:
+        reference = _shift_bbox_y(value, 0)
+        if reference is None or geometry_bbox is None:
+            return None
+        geometry_area = _bbox_area(geometry_bbox)
+        reference_area = _bbox_area(reference)
+        if geometry_area <= 0 or reference_area <= 0:
+            return None
+        geometry_w = max(1, int(geometry_bbox[2]) - int(geometry_bbox[0]))
+        geometry_h = max(1, int(geometry_bbox[3]) - int(geometry_bbox[1]))
+        reference_w = max(1, int(reference[2]) - int(reference[0]))
+        reference_h = max(1, int(reference[3]) - int(reference[1]))
+        if _bbox_gap(reference, geometry_bbox) > max(18, int(round(max(geometry_w, geometry_h) * 0.35))):
+            return None
+        if reference_area > max(geometry_area + 4096, int(round(geometry_area * 2.4))):
+            return None
+        if reference_w > max(geometry_w + 96, int(round(geometry_w * 2.1))):
+            return None
+        if reference_h > max(geometry_h + 96, int(round(geometry_h * 2.1))):
+            return None
+        return reference
+
+    def _mark_tight_reference_bbox(record: dict, geometry_bbox: list[int] | None) -> bool:
+        marked = False
+        for key in ("source_bbox", "balloon_bbox"):
+            reference = _tight_reference_bbox(record.get(key), geometry_bbox)
+            if reference is not None:
+                marked = _mark_bbox(reference) or marked
+        return marked
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        geometry_bbox = _bbox_from_polygons(record.get("line_polygons"))
+        if geometry_bbox is None:
+            geometry_bbox = _shift_bbox_y(record.get("text_pixel_bbox") or record.get("bbox"), 0)
+        if _mark_polygons(record.get("line_polygons")):
+            _mark_tight_reference_bbox(record, geometry_bbox)
+            continue
+        for key in ("text_pixel_bbox", "layout_bbox", "source_bbox", "bbox"):
+            if _mark_bbox(record.get(key)):
+                break
+
+    if not np.any(limit):
+        return None
+    pad = max(0, _env_int("TRADUZAI_PAGE_INPAINT_CLAMP_PAD_PX", 8))
+    if pad > 0:
+        kernel_size = max(3, pad * 2 + 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        limit = cv2.dilate(limit, kernel, iterations=1)
+    return (limit > 0).astype(np.uint8) * 255
+
+
+def _clamp_page_inpaint_to_mask(
+    *,
+    original_image,
+    clean_image,
+    rendered_image,
+    page_texts: list[dict],
+    inpaint_blocks: list[dict] | None,
+    breakdown: dict[str, float] | None = None,
+) -> tuple[object, object, bool]:
+    if (
+        original_image is None
+        or clean_image is None
+        or rendered_image is None
+        or not isinstance(original_image, np.ndarray)
+        or not isinstance(clean_image, np.ndarray)
+        or not isinstance(rendered_image, np.ndarray)
+        or original_image.shape != clean_image.shape
+        or clean_image.shape != rendered_image.shape
+        or clean_image.size == 0
+    ):
+        return clean_image, rendered_image, False
+
+    try:
+        from vision_stack.runtime import _clamp_image_to_limit_mask, _restore_dark_line_art_outside_text_geometry
+    except Exception:
+        return clean_image, rendered_image, False
+
+    limit_mask = _build_page_inpaint_limit_mask(original_image, inpaint_blocks, page_texts)
+    if limit_mask is None or not np.any(limit_mask):
+        return clean_image, rendered_image, False
+
+    clamped_clean, limit_pixels, changed_outside = _clamp_image_to_limit_mask(
+        original_image,
+        clean_image,
+        limit_mask,
+        page_texts,
+        include_text_bboxes=False,
+    )
+    restored_clean = _restore_dark_line_art_outside_text_geometry(
+        original_image,
+        clamped_clean,
+        page_texts,
+    )
+    restored_pixels = int(np.count_nonzero(np.any(restored_clean != clamped_clean, axis=2)))
+    if not changed_outside and not restored_pixels:
+        return clean_image, rendered_image, False
+
+    clamped_rendered = _apply_page_cleanup_background_delta(
+        clean_image=clean_image,
+        fixed_clean=restored_clean,
+        rendered_image=rendered_image,
+    )
+    if clamped_rendered is None:
+        clamped_rendered = rendered_image.copy()
+
+    if breakdown is not None:
+        breakdown["page_inpaint_clamp_count"] = float(
+            breakdown.get("page_inpaint_clamp_count", 0.0) or 0.0
+        ) + 1.0
+        breakdown["page_inpaint_clamp_limit_pixels"] = float(
+            breakdown.get("page_inpaint_clamp_limit_pixels", 0.0) or 0.0
+        ) + float(limit_pixels)
+        breakdown["page_inpaint_clamp_changed_outside"] = float(
+            breakdown.get("page_inpaint_clamp_changed_outside", 0.0) or 0.0
+        ) + float(changed_outside)
+        breakdown["page_line_art_restore_pixels"] = float(
+            breakdown.get("page_line_art_restore_pixels", 0.0) or 0.0
+        ) + float(restored_pixels)
+    return restored_clean, clamped_rendered, True
 
 
 def _is_korean_source_language(idioma_origem: str = "") -> bool:
@@ -1119,7 +2954,7 @@ def _koharu_text_bright_balloon_context(text: dict) -> tuple[bool, bool]:
         str(text.get("block_profile") or "").strip().lower(),
         str(text.get("layout_profile") or "").strip().lower(),
     }
-    structural = bool(profiles & {"white", "white_balloon", "connected_balloon", "top_narration"})
+    structural = bool(profiles & {"white", "white_balloon", "connected_balloon"})
     bright = structural
     background_rgb = text.get("background_rgb")
     if not bright and isinstance(background_rgb, (list, tuple)) and len(background_rgb) >= 3:
@@ -1134,38 +2969,7 @@ def _koharu_cjk_text_is_translatable(text: dict, *, idioma_origem: str = "") -> 
     raw = str(text.get("text") or text.get("original") or "").strip()
     if not raw:
         return False
-    if not _text_has_alnum_or_cjk(raw):
-        return False
-    tipo = str(text.get("tipo") or "").strip().lower()
-    confidence = float(text.get("confidence", text.get("ocr_confidence", 0.0)) or 0.0)
-    bright_balloon_context, structural_balloon_context = _koharu_text_bright_balloon_context(text)
-    keep_korean_sfx_dialogue = (
-        tipo == "sfx"
-        and _is_korean_source_language(idioma_origem)
-        and _korean_sfx_should_be_translated(raw, confidence)
-    )
-    keep_structural_korean_sfx_dialogue = (
-        tipo == "sfx"
-        and _is_korean_source_language(idioma_origem)
-        and _has_hangul_text(raw)
-        and structural_balloon_context
-    )
-    if tipo == "sfx" and not keep_korean_sfx_dialogue:
-        if not keep_structural_korean_sfx_dialogue:
-            return False
-    if _is_korean_source_language(idioma_origem) and _looks_like_korean_source_sfx_noise(
-        raw,
-        bright_balloon_context=bright_balloon_context,
-    ):
-        return False
-    try:
-        from ocr.postprocess import is_korean_sfx
-
-        if is_korean_sfx(raw) and not bright_balloon_context and not keep_korean_sfx_dialogue:
-            return False
-    except Exception:
-        pass
-    return True
+    return _text_has_alnum_or_cjk(raw)
 
 
 def _koharu_cjk_should_page_fallback(
@@ -1273,6 +3077,8 @@ def _run_koharu_cjk_pages_ocr(
     *,
     models_dir: str,
     idioma_origem: str,
+    work_title: str = "",
+    work_title_user_provided: bool = False,
 ) -> list[dict]:
     if not jobs:
         return []
@@ -1283,6 +3089,8 @@ def _run_koharu_cjk_pages_ocr(
                 jobs,
                 models_dir=models_dir,
                 idioma_origem=idioma_origem,
+                work_title=work_title,
+                work_title_user_provided=work_title_user_provided,
             )
         )
     from vision_stack.runtime import _run_koharu_cjk_http_detect_ocr_batch
@@ -1292,6 +3100,8 @@ def _run_koharu_cjk_pages_ocr(
         models_dir=models_dir,
         profile="max",
         idioma_origem=idioma_origem,
+        work_title=work_title,
+        work_title_user_provided=work_title_user_provided,
     )
 
 
@@ -1416,10 +3226,20 @@ def _run_koharu_cjk_page_ocr(
     image_path: Path,
     models_dir: str,
     idioma_origem: str,
+    work_title: str = "",
+    work_title_user_provided: bool = False,
 ) -> dict:
     runner = getattr(runtime, "run_koharu_cjk_page", None)
     if callable(runner):
-        return runner(image_rgb, str(image_path))
+        try:
+            return runner(
+                image_rgb,
+                str(image_path),
+                work_title=work_title,
+                work_title_user_provided=work_title_user_provided,
+            )
+        except TypeError:
+            return runner(image_rgb, str(image_path))
     from vision_stack.runtime import _run_koharu_cjk_http_detect_ocr
 
     return _run_koharu_cjk_http_detect_ocr(
@@ -1428,6 +3248,8 @@ def _run_koharu_cjk_page_ocr(
         models_dir=models_dir,
         profile="max",
         idioma_origem=idioma_origem,
+        work_title=work_title,
+        work_title_user_provided=work_title_user_provided,
     )
 
 
@@ -1439,6 +3261,8 @@ def _build_precomputed_koharu_cjk_pages(
     *,
     models_dir: str = "",
     idioma_origem: str = "en",
+    obra: str = "",
+    work_title_user_provided: bool = False,
     telemetry: dict | None = None,
 ) -> dict[int, dict]:
     started_at = time.perf_counter()
@@ -1541,6 +3365,8 @@ def _build_precomputed_koharu_cjk_pages(
                         "band_index": int(band_index),
                         "crop_bbox": crop_bbox,
                         "band": band,
+                        "work_title": obra,
+                        "work_title_user_provided": bool(work_title_user_provided),
                     }
                     if known_text_bboxes:
                         job["known_text_bboxes"] = known_text_bboxes
@@ -1554,6 +3380,8 @@ def _build_precomputed_koharu_cjk_pages(
                     jobs,
                     models_dir=models_dir,
                     idioma_origem=idioma_origem,
+                    work_title=obra,
+                    work_title_user_provided=bool(work_title_user_provided),
                 )
             except Exception as exc:
                 stats["failed_page_count"] = int(stats.get("failed_page_count", 0) or 0) + len(jobs)
@@ -1644,6 +3472,8 @@ def _build_precomputed_koharu_cjk_pages(
                             "mode": "page_fallback",
                             "page_number": int(page_number),
                             "page_bands": list(bands_by_page.get(page_number) or []),
+                            "work_title": obra,
+                            "work_title_user_provided": bool(work_title_user_provided),
                         }
                     )
                 stats["page_fallback_job_count"] = len(page_jobs)
@@ -1653,6 +3483,8 @@ def _build_precomputed_koharu_cjk_pages(
                         page_jobs,
                         models_dir=models_dir,
                         idioma_origem=idioma_origem,
+                        work_title=obra,
+                        work_title_user_provided=bool(work_title_user_provided),
                     )
                 except Exception as exc:
                     failures = list(stats.get("failures") or [])
@@ -1701,6 +3533,8 @@ def _build_precomputed_koharu_cjk_pages(
                 "mode": "page",
                 "page_number": int(page_number),
                 "page_bands": page_bands,
+                "work_title": obra,
+                "work_title_user_provided": bool(work_title_user_provided),
             }
         )
 
@@ -1710,6 +3544,8 @@ def _build_precomputed_koharu_cjk_pages(
             page_jobs,
             models_dir=models_dir,
             idioma_origem=idioma_origem,
+            work_title=obra,
+            work_title_user_provided=bool(work_title_user_provided),
         )
     except Exception:
         page_results = []
@@ -1746,6 +3582,8 @@ def _build_precomputed_koharu_cjk_pages(
                     image_path=Path(str(job["image_path"])),
                     models_dir=models_dir,
                     idioma_origem=idioma_origem,
+                    work_title=obra,
+                    work_title_user_provided=bool(work_title_user_provided),
                 )
             except Exception as exc:
                 stats["failed_page_count"] = int(stats.get("failed_page_count", 0) or 0) + 1
@@ -1957,8 +3795,12 @@ def _build_precomputed_macro_ocr_pages(
                 if not local_blocks:
                     continue
 
+                # Macro OCR is already operating on a band crop.  Do not pass a
+                # three-digit pseudo page label here, otherwise OCR postprocess
+                # can infer "page 001" and apply cover-opening filters to an
+                # ordinary band crop.
                 page_result = build_page_result(
-                    image_path=_band_image_label(page_number),
+                    image_path=f"macro_band_source_page_{int(page_number)}",
                     image_rgb=band.strip_slice,
                     blocks=local_blocks,
                     texts=band_texts,
@@ -2003,13 +3845,19 @@ def _summarize_band_perf(
     totals: dict[str, float] = {}
     entries: list[dict] = []
     text_count = 0
+    fast_solid_balloon_count = 0
+    fast_solid_white_count = 0
+    fast_solid_black_count = 0
+    fast_solid_colored_count = 0
     fast_white_balloon_count = 0
     fast_local_balloon_count = 0
     remaining_inpaint_blocks = 0
+    fast_solid_band_count = 0
     fast_white_band_count = 0
     fast_local_band_count = 0
     ocr_crop_fallback_attempts = 0
     ocr_crop_fallback_recovered = 0
+    ocr_crop_fallback_suppressed = 0
     ocr_full_page_mapped = 0
     ocr_precomputed_page_band_count = 0
     ocr_runtime_skipped_band_count = 0
@@ -2029,6 +3877,8 @@ def _summarize_band_perf(
     smart_skip_real_not_safe_count = 0
     smart_skip_real_applied_band_count = 0
     smart_skip_real_category_counts: dict[str, int] = {}
+    fast_solid_rejection_reasons: dict[str, int] = {}
+    fast_solid_fill_reject_reasons: dict[str, int] = {}
     fast_white_rejection_reasons: dict[str, int] = {}
     fast_local_rejection_reasons: dict[str, int] = {}
 
@@ -2057,6 +3907,22 @@ def _summarize_band_perf(
             band_texts = 0
         text_count += band_texts
         try:
+            band_fast_solid = int(perf.get("fast_solid_balloon_count", 0) or 0)
+        except Exception:
+            band_fast_solid = 0
+        try:
+            band_fast_solid_white = int(perf.get("fast_solid_white_count", 0) or 0)
+        except Exception:
+            band_fast_solid_white = 0
+        try:
+            band_fast_solid_black = int(perf.get("fast_solid_black_count", 0) or 0)
+        except Exception:
+            band_fast_solid_black = 0
+        try:
+            band_fast_solid_colored = int(perf.get("fast_solid_colored_count", 0) or 0)
+        except Exception:
+            band_fast_solid_colored = 0
+        try:
             band_fast_white = int(perf.get("fast_white_balloon_count", 0) or 0)
         except Exception:
             band_fast_white = 0
@@ -2068,11 +3934,19 @@ def _summarize_band_perf(
             band_remaining_inpaint = int(perf.get("remaining_inpaint_blocks", 0) or 0)
         except Exception:
             band_remaining_inpaint = 0
+        fast_solid_balloon_count += band_fast_solid
+        fast_solid_white_count += band_fast_solid_white
+        fast_solid_black_count += band_fast_solid_black
+        fast_solid_colored_count += band_fast_solid_colored
         fast_white_balloon_count += band_fast_white
         fast_local_balloon_count += band_fast_local
         remaining_inpaint_blocks += band_remaining_inpaint
+        _merge_counts(fast_solid_rejection_reasons, perf.get("fast_solid_rejection_reasons"))
+        _merge_counts(fast_solid_fill_reject_reasons, perf.get("fast_solid_fill_reject_reasons"))
         _merge_counts(fast_white_rejection_reasons, perf.get("fast_white_rejection_reasons"))
         _merge_counts(fast_local_rejection_reasons, perf.get("fast_local_rejection_reasons"))
+        if band_fast_solid > 0:
+            fast_solid_band_count += 1
         if band_fast_white > 0:
             fast_white_band_count += 1
         if band_fast_local > 0:
@@ -2089,9 +3963,14 @@ def _summarize_band_perf(
             band_ocr_fallback_recovered = int(perf.get("ocr_crop_fallback_recovered", 0) or 0)
         except Exception:
             band_ocr_fallback_recovered = 0
+        try:
+            band_ocr_fallback_suppressed = int(perf.get("ocr_crop_fallback_suppressed", 0) or 0)
+        except Exception:
+            band_ocr_fallback_suppressed = 0
         ocr_full_page_mapped += band_ocr_full_page_mapped
         ocr_crop_fallback_attempts += band_ocr_fallback_attempts
         ocr_crop_fallback_recovered += band_ocr_fallback_recovered
+        ocr_crop_fallback_suppressed += band_ocr_fallback_suppressed
         band_ocr_precomputed_page = bool(perf.get("ocr_precomputed_page"))
         band_ocr_runtime_skipped = bool(perf.get("ocr_runtime_skipped"))
         band_ocr_macro_ocr_real = bool(perf.get("ocr_macro_ocr_real"))
@@ -2166,14 +4045,22 @@ def _summarize_band_perf(
                 "height": int(perf.get("height", getattr(band, "height", 0)) or 0),
                 "balloon_count": int(perf.get("balloon_count", len(getattr(band, "balloons", []))) or 0),
                 "text_count": band_texts,
+                "fast_solid_balloon_count": band_fast_solid,
+                "fast_solid_white_count": band_fast_solid_white,
+                "fast_solid_black_count": band_fast_solid_black,
+                "fast_solid_colored_count": band_fast_solid_colored,
                 "fast_white_balloon_count": band_fast_white,
                 "fast_local_balloon_count": band_fast_local,
                 "remaining_inpaint_blocks": band_remaining_inpaint,
+                "fast_solid_rejection_reasons": dict(perf.get("fast_solid_rejection_reasons") or {}),
+                "fast_solid_fill_reject_reasons": dict(perf.get("fast_solid_fill_reject_reasons") or {}),
+                "fast_solid_fill_samples": list(perf.get("fast_solid_fill_samples") or []),
                 "fast_white_rejection_reasons": dict(perf.get("fast_white_rejection_reasons") or {}),
                 "fast_local_rejection_reasons": dict(perf.get("fast_local_rejection_reasons") or {}),
                 "ocr_full_page_mapped": band_ocr_full_page_mapped,
                 "ocr_crop_fallback_attempts": band_ocr_fallback_attempts,
                 "ocr_crop_fallback_recovered": band_ocr_fallback_recovered,
+                "ocr_crop_fallback_suppressed": band_ocr_fallback_suppressed,
                 "ocr_precomputed_page": band_ocr_precomputed_page,
                 "ocr_runtime_skipped": band_ocr_runtime_skipped,
                 "ocr_macro_ocr_real": band_ocr_macro_ocr_real,
@@ -2207,16 +4094,24 @@ def _summarize_band_perf(
     summary = {
         "band_count": len(bands),
         "text_count": text_count,
+        "fast_solid_balloon_count": fast_solid_balloon_count,
+        "fast_solid_white_count": fast_solid_white_count,
+        "fast_solid_black_count": fast_solid_black_count,
+        "fast_solid_colored_count": fast_solid_colored_count,
         "fast_white_balloon_count": fast_white_balloon_count,
         "fast_local_balloon_count": fast_local_balloon_count,
+        "fast_solid_band_count": fast_solid_band_count,
         "fast_white_band_count": fast_white_band_count,
         "fast_local_band_count": fast_local_band_count,
         "remaining_inpaint_blocks": remaining_inpaint_blocks,
+        "fast_solid_rejection_reasons": fast_solid_rejection_reasons,
+        "fast_solid_fill_reject_reasons": fast_solid_fill_reject_reasons,
         "fast_white_rejection_reasons": fast_white_rejection_reasons,
         "fast_local_rejection_reasons": fast_local_rejection_reasons,
         "ocr_full_page_mapped": ocr_full_page_mapped,
         "ocr_crop_fallback_attempts": ocr_crop_fallback_attempts,
         "ocr_crop_fallback_recovered": ocr_crop_fallback_recovered,
+        "ocr_crop_fallback_suppressed": ocr_crop_fallback_suppressed,
         "ocr_precomputed_page_band_count": ocr_precomputed_page_band_count,
         "ocr_runtime_skipped_band_count": ocr_runtime_skipped_band_count,
         "ocr_macro_ocr_real_band_count": ocr_macro_ocr_real_band_count,
@@ -2296,6 +4191,12 @@ def _summarize_band_perf(
             "stage_counts": dict(scheduler_executor.get("stage_counts") or {}),
             "max_cpu_parallel": int(scheduler_executor.get("max_cpu_parallel", 0) or 0),
             "max_gpu_parallel": int(scheduler_executor.get("max_gpu_parallel", 0) or 0),
+            "parallel_inpaint_threads": int(
+                scheduler_executor.get("parallel_inpaint_threads", 1) or 1
+            ),
+            "overlap_worker_count": int(scheduler_executor.get("overlap_worker_count", 1) or 1),
+            "ocr_serialized": bool(scheduler_executor.get("ocr_serialized", True)),
+            "inpaint_lock_mode": str(scheduler_executor.get("inpaint_lock_mode") or "shared_gpu_lock"),
             "validation_status": str(scheduler_executor.get("validation_status") or ""),
             "validation_reasons": list(scheduler_executor.get("validation_reasons") or []),
             "notes": list(scheduler_executor.get("notes") or []),
@@ -2318,12 +4219,14 @@ def run_chapter(
     idioma_origem: str = "en",
     idioma_destino: str = "pt-BR",
     obra: str = "",
+    work_title_user_provided: bool = False,
     connected_reasoner_config: dict | None = None,
     models_dir: str = "",
     ollama_host: str = "http://localhost:11434",
     ollama_model: str = "traduzai-translator",
     translation_context: dict | None = None,
     chapter_telemetry: dict | None = None,
+    skip_page_cleanup_rerender: bool = False,
 
     progress_callback=None,
 ) -> list[OutputPage]:
@@ -2338,6 +4241,7 @@ def run_chapter(
         chapter_telemetry["input_page_count"] = len(page_paths)
     with _timed(chapter_telemetry, "strip_build"):
         strip = build_strip(page_paths, progress_callback=progress_callback)
+    _write_input_manifest_debug(page_paths, strip)
     if chapter_telemetry is not None:
         chapter_telemetry["strip_width"] = int(strip.width)
         chapter_telemetry["strip_height"] = int(strip.height)
@@ -2362,6 +4266,7 @@ def run_chapter(
             chapter_telemetry["band_margin_px"] = int(band_margin)
         with _timed(chapter_telemetry, "strip_attach_band_slices"):
             attach_band_slices(strip, bands)
+        _write_strip_detect_debug_artifacts(strip, bands, band_margin_px=band_margin)
 
         if is_debug_enabled():
             with _timed(chapter_telemetry, "strip_debug_dump"):
@@ -2391,6 +4296,8 @@ def run_chapter(
                 models_dir=models_dir,
                 idioma_origem=idioma_origem,
                 telemetry=koharu_cjk_precompute_stats,
+                obra=obra,
+                work_title_user_provided=bool(work_title_user_provided),
             )
         precomputed_ocr_pages = {
             **precomputed_macro_ocr_pages,
@@ -2403,7 +4310,24 @@ def run_chapter(
             scheduler_executor_report is not None
             and scheduler_executor_report.get("mode") == "overlap_context_release"
         )
-        gpu_stage_lock = threading.Lock() if overlap_executor else None
+        parallel_inpaint_threads = (
+            int(scheduler_executor_report.get("parallel_inpaint_threads", 1) or 1)
+            if overlap_executor and scheduler_executor_report is not None
+            else 1
+        )
+        overlap_worker_count = (
+            int(scheduler_executor_report.get("overlap_worker_count", 2) or 2)
+            if overlap_executor and scheduler_executor_report is not None
+            else 2
+        )
+        if overlap_executor and parallel_inpaint_threads > 1:
+            gpu_stage_lock = None
+            ocr_stage_lock = threading.Lock()
+            inpaint_stage_lock = threading.BoundedSemaphore(parallel_inpaint_threads)
+        else:
+            gpu_stage_lock = threading.Lock() if overlap_executor else None
+            ocr_stage_lock = None
+            inpaint_stage_lock = None
         typeset_stage_lock = threading.Lock() if overlap_executor else None
 
         def _make_ordered_context_callback():
@@ -2425,7 +4349,19 @@ def run_chapter(
 
             return state, _merge_after_translate
 
+        debug_recorder_for_workers = _get_debug_recorder()
+
         def _process_one_band(idx: int, band: Band, ordered_kwargs: dict, callback):
+            if debug_recorder_for_workers is not None:
+                try:
+                    from debug_tools import bind_recorder
+
+                    bind_recorder(debug_recorder_for_workers)
+                except Exception:
+                    pass
+            source_page_number = _source_page_number_for_band(strip, band)
+            page_y0, page_y1 = _source_page_bounds(strip, source_page_number)
+            layout_page_image_bgr = cv2.cvtColor(strip.image[page_y0:page_y1, :, :], cv2.COLOR_RGB2BGR)
             return process_band(
                 band,
                 runtime=runtime,
@@ -2438,16 +4374,21 @@ def run_chapter(
                 idioma_origem=idioma_origem,
                 idioma_destino=idioma_destino,
                 obra=obra,
+                work_title_user_provided=work_title_user_provided,
                 connected_reasoner_config=connected_reasoner_config,
                 band_history=ordered_kwargs["band_history"],
-                source_page_number=_source_page_number_for_band(strip, band),
+                source_page_number=source_page_number,
                 models_dir=models_dir,
                 ollama_host=ollama_host,
                 ollama_model=ollama_model,
                 translation_context=translation_context,
                 precomputed_ocr_page=precomputed_ocr_pages.get(idx),
                 ordered_context_after_translate_callback=callback,
+                layout_page_image_bgr=layout_page_image_bgr,
+                layout_page_y_top=page_y0,
                 gpu_stage_lock=gpu_stage_lock,
+                ocr_stage_lock=ocr_stage_lock,
+                inpaint_stage_lock=inpaint_stage_lock,
                 typeset_stage_lock=typeset_stage_lock,
             )
 
@@ -2467,7 +4408,10 @@ def run_chapter(
         process_bands_started = time.perf_counter()
         if overlap_executor:
             futures = []
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="traduzai-strip-overlap") as executor:
+            with ThreadPoolExecutor(
+                max_workers=overlap_worker_count,
+                thread_name_prefix="traduzai-strip-overlap",
+            ) as executor:
                 for idx, band in enumerate(bands):
                     if progress_callback: progress_callback("process", idx, len(bands))
                     ordered_context = _build_ordered_band_context_snapshot(
@@ -2512,6 +4456,9 @@ def run_chapter(
                 )
                 ordered_context_merged = True
 
+            source_page_number = _source_page_number_for_band(strip, band)
+            page_y0, page_y1 = _source_page_bounds(strip, source_page_number)
+            layout_page_image_bgr = cv2.cvtColor(strip.image[page_y0:page_y1, :, :], cv2.COLOR_RGB2BGR)
             process_band(
                 band,
                 runtime=runtime,
@@ -2524,15 +4471,18 @@ def run_chapter(
                 idioma_origem=idioma_origem,
                 idioma_destino=idioma_destino,
                 obra=obra,
+                work_title_user_provided=work_title_user_provided,
                 connected_reasoner_config=connected_reasoner_config,
                 band_history=ordered_kwargs["band_history"],
-                source_page_number=_source_page_number_for_band(strip, band),
+                source_page_number=source_page_number,
                 models_dir=models_dir,
                 ollama_host=ollama_host,
                 ollama_model=ollama_model,
                 translation_context=translation_context,
                 precomputed_ocr_page=precomputed_ocr_pages.get(idx),
                 ordered_context_after_translate_callback=_merge_after_translate,
+                layout_page_image_bgr=layout_page_image_bgr,
+                layout_page_y_top=page_y0,
             )
             if scheduler_executor_report is not None:
                 scheduler_executor_report["processed_band_count"] = (
@@ -2583,6 +4533,12 @@ def run_chapter(
             balloons,
             target_count=target_count,
         )
+    _write_reassemble_manifest_debug(
+        output_pages,
+        original_pages,
+        clean_pages,
+        target_count=target_count,
+    )
 
     # Remapeamento de metadados para project.json
     remap_started = time.perf_counter()
@@ -2598,6 +4554,9 @@ def run_chapter(
             # bbox é OBRIGATÓRIO — pular texto sem bbox para evitar placeholder [0,0,32,32]
             if not new_txt.get("bbox"):
                 continue
+            new_txt["band_y_top"] = int(b_y)
+            new_txt["band_height"] = int(band.y_bottom - band.y_top)
+            new_txt.setdefault("source_coordinate_space", "band")
             new_txt = _shift_text_geometry_y(new_txt, b_y)
             all_texts.append(new_txt)
 
@@ -2605,6 +4564,9 @@ def run_chapter(
             new_vb = dict(vb)
             if not new_vb.get("bbox"):
                 continue
+            new_vb["band_y_top"] = int(b_y)
+            new_vb["band_height"] = int(band.y_bottom - band.y_top)
+            new_vb.setdefault("source_coordinate_space", "band")
             new_vb = _shift_text_geometry_y(new_vb, b_y)
             all_vision_blocks.append(new_vb)
     _add_timing(chapter_telemetry, "remap_band_metadata", time.perf_counter() - remap_started)
@@ -2626,6 +4588,14 @@ def run_chapter(
         page.ocr_result = {"_vision_blocks": []}
         page.text_layers = {"texts": []}
 
+    for band_index, band in enumerate(bands, start=1):
+        if not isinstance(getattr(band, "ocr_result", None), dict):
+            continue
+        for page in output_pages:
+            overlap = max(0, min(int(band.y_bottom), int(page.y_bottom)) - max(int(band.y_top), int(page.y_top)))
+            if overlap > 0:
+                _attach_band_pipeline_metadata_to_page(page, band, band_index)
+
     # Distribuir textos para as páginas por máxima intersecção (não centro-y)
     for txt in all_texts:
         tx1, ty1, tx2, ty2 = txt["bbox"]
@@ -2635,6 +4605,12 @@ def run_chapter(
         page = output_pages[pidx]
         p_y0 = page.y_top
         local_txt = _shift_text_geometry_y(txt, -p_y0)
+        if "band_y_top" in local_txt:
+            local_txt["strip_band_y_top"] = int(txt.get("band_y_top") or 0)
+            local_txt["band_y_top"] = int(local_txt["strip_band_y_top"]) - int(p_y0)
+        if "_band_y_top" in local_txt:
+            local_txt["_strip_band_y_top"] = int(txt.get("_band_y_top") or 0)
+            local_txt["_band_y_top"] = int(local_txt["_strip_band_y_top"]) - int(p_y0)
         page.text_layers["texts"].append(local_txt)
 
     # Distribuir vision_blocks igualmente
@@ -2646,6 +4622,12 @@ def run_chapter(
         page = output_pages[pidx]
         p_y0 = page.y_top
         local_vb = _shift_text_geometry_y(vb, -p_y0)
+        if "band_y_top" in local_vb:
+            local_vb["strip_band_y_top"] = int(vb.get("band_y_top") or 0)
+            local_vb["band_y_top"] = int(local_vb["strip_band_y_top"]) - int(p_y0)
+        if "_band_y_top" in local_vb:
+            local_vb["_strip_band_y_top"] = int(vb.get("_band_y_top") or 0)
+            local_vb["_band_y_top"] = int(local_vb["_strip_band_y_top"]) - int(p_y0)
         local_vb["bbox"] = [vx1, vy1 - p_y0, vx2, vy2 - p_y0]
         page.ocr_result["_vision_blocks"].append(local_vb)
     _add_timing(chapter_telemetry, "assign_metadata_to_pages", time.perf_counter() - assign_started)
@@ -2653,12 +4635,24 @@ def run_chapter(
     finalize_page_metadata_started = time.perf_counter()
     page_metadata_changed = [False for _ in output_pages]
     for page_index, page in enumerate(output_pages):
-        page_metadata_changed[page_index] = _finalize_output_page_ocr_metadata(page, page_index + 1)
+        page_metadata_changed[page_index] = _finalize_output_page_ocr_metadata(
+            page,
+            page_index + 1,
+            total_pages=len(output_pages),
+        )
     _add_timing(
         chapter_telemetry,
         "finalize_page_ocr_metadata",
         time.perf_counter() - finalize_page_metadata_started,
     )
+    _write_ocr_confidence_audit(output_pages)
+    try:
+        from debug_tools.bbox import write_layout_geometry_debug_artifacts
+
+        write_layout_geometry_debug_artifacts(output_pages)
+    except Exception:
+        pass
+    _write_strip_detect_text_matching_debug_artifacts(strip, bands, output_pages)
 
     with _timed(chapter_telemetry, "summarize_band_perf"):
         strip_perf_summary = _summarize_band_perf(
@@ -2685,37 +4679,98 @@ def run_chapter(
         }
         if page_index == 0:
             page.page_profile["strip_perf_summary"] = strip_perf_summary
+        if isinstance(page.ocr_result.get("_pipeline_artifacts"), dict):
+            page.page_profile["_pipeline_artifacts"] = page.ocr_result["_pipeline_artifacts"]
         page.ocr_result["page_profile"] = page.page_profile
+        page_text_layers = _page_texts_from_text_layers(page.text_layers)
         page.inpaint_blocks = [
-            block
-            for vb in page.ocr_result.get("_vision_blocks", [])
-            for block in [_inpaint_block_from_vision_block(vb)]
+            _enrich_inpaint_block_from_text_layers(block, page_text_layers)
+            for block in [
+                _inpaint_block_from_vision_block(vb)
+                for vb in page.ocr_result.get("_vision_blocks", [])
+            ]
             if block is not None
         ]
+    _write_inpaint_blocks_debug(output_pages)
     _add_timing(chapter_telemetry, "attach_page_profiles", time.perf_counter() - attach_profile_started)
 
+    cleanup_breakdown: dict[str, float] = {
+        "cleanup_inpaint": 0.0,
+        "cleanup_typeset": 0.0,
+        "cleanup_copyback": 0.0,
+        "cleanup_save": 0.0,
+    }
     cleanup_started = time.perf_counter()
+    skip_page_cleanup = bool(skip_page_cleanup_rerender) or _debug_skip_page_cleanup_rerender()
     for page_index, (page, original_page, clean_page) in enumerate(zip(output_pages, original_pages, clean_pages)):
-        page_texts = []
-        if isinstance(page.text_layers, dict):
-            page_texts = [text for text in list(page.text_layers.get("texts") or []) if isinstance(text, dict)]
-        fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+        page_texts = _page_texts_from_text_layers(page.text_layers)
+        stage_page_texts = _texts_without_legacy_decision_fields(page_texts)
+        page.original_image = original_page.image
+        clean_base, rendered_base, _did_page_clamp = _clamp_page_inpaint_to_mask(
             original_image=original_page.image,
             clean_image=clean_page.image,
-            page_texts=page_texts,
             rendered_image=page.image,
-            typesetter=typesetter,
+            page_texts=stage_page_texts,
+            inpaint_blocks=page.inpaint_blocks,
+            breakdown=cleanup_breakdown,
         )
-        page.original_image = original_page.image
+        if skip_page_cleanup:
+            page.inpainted_image = clean_base
+            page.image = rendered_base
+            continue
+        fixed_clean, fixed_rendered, did_fix = _cleanup_page_inpaint_and_rerender(
+            original_image=original_page.image,
+            clean_image=clean_base,
+            page_texts=stage_page_texts,
+            rendered_image=rendered_base,
+            typesetter=typesetter,
+            breakdown=cleanup_breakdown,
+        )
+        dark_clean, dark_rendered, did_dark_fix = _cleanup_dark_panel_page_and_rerender(
+            clean_image=fixed_clean,
+            rendered_image=fixed_rendered,
+            page_texts=stage_page_texts,
+            typesetter=typesetter,
+            breakdown=cleanup_breakdown,
+        )
+        if did_dark_fix:
+            fixed_clean = dark_clean
+            fixed_rendered = dark_rendered
+            did_fix = True
+        if _page_requires_page_space_typeset(page_texts):
+            try:
+                cleanup_stage_started = time.perf_counter()
+                fixed_rendered = typesetter.render_band_image(
+                    fixed_clean,
+                    _render_payload_without_legacy_decision_fields(
+                        page_texts,
+                        coordinate_space="page_rectframe_connected",
+                    ),
+                )
+                cleanup_breakdown["cleanup_typeset"] += time.perf_counter() - cleanup_stage_started
+                cleanup_breakdown["cleanup_page_space_typeset_count"] = float(
+                    cleanup_breakdown.get("cleanup_page_space_typeset_count", 0.0) or 0.0
+                ) + 1.0
+                did_fix = True
+            except Exception:
+                pass
         page.inpainted_image = fixed_clean
         if did_fix:
             page.image = fixed_rendered
         elif page_index < len(page_metadata_changed) and page_metadata_changed[page_index]:
             try:
-                page.image = typesetter.render_band_image(fixed_clean, {"texts": page_texts})
+                cleanup_stage_started = time.perf_counter()
+                page.image = typesetter.render_band_image(
+                    fixed_clean,
+                    _render_payload_without_legacy_decision_fields(page_texts, coordinate_space="page"),
+                )
+                cleanup_breakdown["cleanup_typeset"] += time.perf_counter() - cleanup_stage_started
             except Exception:
                 page.image = fixed_rendered
-    _add_timing(chapter_telemetry, "page_cleanup_rerender", time.perf_counter() - cleanup_started)
+    cleanup_total = time.perf_counter() - cleanup_started
+    cleanup_breakdown["cleanup_total"] = cleanup_total
+    cleanup_breakdown["page_cleanup_skipped"] = 1.0 if skip_page_cleanup else 0.0
+    _add_timing(chapter_telemetry, "page_cleanup_rerender", cleanup_total)
 
     if _macro_ocr_shadow_enabled() and output_pages:
         with _timed(chapter_telemetry, "macro_ocr_shadow"):
@@ -2727,11 +4782,39 @@ def run_chapter(
         output_pages[0].page_profile["macro_ocr_shadow"] = macro_shadow
         output_pages[0].ocr_result["page_profile"] = output_pages[0].page_profile
 
+    final_page_space_started = time.perf_counter()
+    final_page_space_count = 0
+    if not skip_page_cleanup:
+        for page in output_pages:
+            page_texts = _page_texts_from_text_layers(page.text_layers)
+            if not _page_requires_page_space_typeset(page_texts):
+                continue
+            clean_base = page.inpainted_image if isinstance(page.inpainted_image, np.ndarray) else None
+            if clean_base is None:
+                continue
+            try:
+                page.image = typesetter.render_band_image(
+                    clean_base,
+                    _render_payload_without_legacy_decision_fields(
+                        page_texts,
+                        coordinate_space="final_page_space_typeset",
+                    ),
+                )
+                final_page_space_count += 1
+            except Exception:
+                continue
+    if final_page_space_count:
+        cleanup_breakdown["final_page_space_typeset_count"] = float(final_page_space_count)
+    _add_timing(chapter_telemetry, "final_page_space_typeset", time.perf_counter() - final_page_space_started)
+
+    _mark_pipeline_artifacts_after_render(output_pages)
+    _write_pipeline_artifacts_debug(output_pages)
+    _write_contact_sheets_debug(original_pages, output_pages, bands)
+
     with _timed(chapter_telemetry, "write_translated_pages"):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for i, page in enumerate(output_pages):
-            page.path = output_dir / f"{i + 1:03d}.jpg"
-            cv2.imwrite(str(page.path), page.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        cleanup_breakdown["cleanup_save"] += _write_output_pages_jpegs(output_pages, output_dir)
+
+    _write_page_cleanup_breakdown_debug(cleanup_breakdown)
 
     if chapter_telemetry is not None:
         chapter_telemetry["wall_total_sec"] = round(time.perf_counter() - run_started, 4)

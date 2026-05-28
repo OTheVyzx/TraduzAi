@@ -254,6 +254,141 @@ class VisionStackOCRTests(unittest.TestCase):
         self.assertIn("text_pixel_bbox", records[0])
         self.assertGreater(records[0]["text_pixel_bbox"][2], records[0]["text_pixel_bbox"][0])
 
+    def test_paddle_full_page_records_rotation_from_slanted_line_polygons(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+
+        class FakeModel:
+            def ocr(self, page_bgr, det=True, rec=True, cls=False):
+                del page_bgr, det, rec, cls
+                return [[
+                    [
+                        [[40, 20], [56, 16], [96, 136], [80, 140]],
+                        ("TILTED", 0.96),
+                    ],
+                ]]
+
+        engine._model = FakeModel()
+        page = np.full((180, 160, 3), 210, dtype=np.uint8)
+
+        records = OCREngine._paddle_ocr_full_page_to_blocks(
+            engine,
+            cv2.cvtColor(page, cv2.COLOR_RGB2BGR),
+            [SimpleNamespace(x1=20, y1=0, x2=130, y2=160)],
+            allow_sparse_mapping=True,
+        )
+
+        self.assertIsInstance(records, list)
+        assert records is not None
+        self.assertEqual(records[0]["text"], "TILTED")
+        self.assertEqual(records[0]["rotation_source"], "line_polygons")
+        self.assertGreater(records[0]["rotation_deg"], 65.0)
+        self.assertLess(records[0]["rotation_deg"], 80.0)
+
+    def test_paddle_full_page_deskews_diagonal_text_when_initial_pass_misses_line(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+
+        class FakeModel:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, page_bgr, det=True, rec=True, cls=False):
+                del page_bgr, det, rec, cls
+                self.calls += 1
+                if self.calls == 1:
+                    return [[
+                        [
+                            [[44, 133], [140, 78], [154, 104], [58, 159]],
+                            ("AJUMMA,", 0.98),
+                        ],
+                        [
+                            [[91, 194], [289, 64], [305, 89], [107, 219]],
+                            ("USE YOUR MONEY.", 0.94),
+                        ],
+                        [
+                            [[116, 222], [319, 86], [334, 111], [131, 246]],
+                            ("WHAT'S UP WITH THE", 0.92),
+                        ],
+                        [
+                            [[142, 249], [327, 129], [341, 152], [156, 273]],
+                            ("KID'S EDUCATION?", 0.95),
+                        ],
+                        [
+                            [[164, 278], [257, 219], [271, 243], [178, 303]],
+                            ("BE WELL.", 0.98),
+                        ],
+                    ]]
+                return [[
+                    [[[40, 40], [120, 40], [120, 60], [40, 60]], ("AJUMMA,", 0.98)],
+                    [[[40, 66], [220, 66], [220, 86], [40, 86]], ("FROM NOW ON, DON'T", 0.93)],
+                    [[[40, 92], [210, 92], [210, 112], [40, 112]], ("USE YOUR MONEY.", 0.94)],
+                    [[[40, 118], [220, 118], [220, 138], [40, 138]], ("WHAT'S UP WITH THE", 0.92)],
+                    [[[40, 144], [205, 144], [205, 164], [40, 164]], ("KID'S EDUCATION?", 0.95)],
+                    [[[40, 170], [130, 170], [130, 190], [40, 190]], ("BE WELL.", 0.98)],
+                ]]
+
+        engine._model = FakeModel()
+        page = np.full((360, 360, 3), 255, dtype=np.uint8)
+
+        records = OCREngine._paddle_ocr_full_page_to_blocks(
+            engine,
+            cv2.cvtColor(page, cv2.COLOR_RGB2BGR),
+            [SimpleNamespace(x1=0, y1=0, x2=360, y2=360)],
+            allow_sparse_mapping=True,
+        )
+
+        self.assertIsInstance(records, list)
+        assert records is not None
+        self.assertIn("FROM NOW ON", records[0]["text"])
+        self.assertIn("DON'T", records[0]["text"])
+        self.assertGreaterEqual(len(records[0]["line_polygons"]), 6)
+        self.assertEqual(records[0]["rotation_source"], "line_polygons")
+        self.assertLess(records[0]["rotation_deg"], -20.0)
+        self.assertIn("skewed_text_deskew_recovery", records[0].get("qa_flags", []))
+
+    def test_paddle_full_page_resize_can_use_experimental_gpu_preprocess_hook(self):
+        from vision_stack import gpu_image_ops
+
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        seen_shapes = []
+
+        class FakeModel:
+            def ocr(self, page_bgr, det=True, rec=True, cls=False):
+                del det, rec, cls
+                seen_shapes.append(page_bgr.shape[:2])
+                return [[
+                    [
+                        [[4, 4], [24, 4], [24, 12], [4, 12]],
+                        ("HELLO", 0.99),
+                    ],
+                ]]
+
+        engine._model = FakeModel()
+        page = np.full((160, 320, 3), 255, dtype=np.uint8)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_PADDLE_FULL_PAGE_MAX_SIDE": "80",
+                "TRADUZAI_EXPERIMENTAL_GPU_OCR_PREPROCESS": "1",
+                "TRADUZAI_GPU_IMAGE_OPS_BACKEND": "cpu",
+            },
+            clear=False,
+        ), patch.object(gpu_image_ops, "resize_crops_batch", wraps=gpu_image_ops.resize_crops_batch) as resize_spy:
+            records = OCREngine._paddle_ocr_full_page_to_blocks(
+                engine,
+                cv2.cvtColor(page, cv2.COLOR_RGB2BGR),
+                [SimpleNamespace(x1=0, y1=0, x2=320, y2=160)],
+                allow_sparse_mapping=True,
+            )
+
+        self.assertEqual(seen_shapes, [(40, 80)])
+        self.assertIsInstance(records, list)
+        self.assertGreaterEqual(resize_spy.call_count, 1)
+        self.assertEqual(records[0]["text"], "HELLO")
+
     def test_recognize_blocks_from_page_crop_fallback_updates_rich_record_text(self):
         engine = OCREngine.__new__(OCREngine)
         engine._backend = "paddleocr"
@@ -445,6 +580,195 @@ class PaddleBlockMappingTests(unittest.TestCase):
         self.assertEqual(records[1]["text"], "")
         self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 1)
         self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 1)
+
+    def test_crop_fallback_shadow_records_recoveries_after_simulated_limit(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        blocks = [
+            SimpleNamespace(xyxy=(8, 8, 54, 34), confidence=0.9),
+            SimpleNamespace(xyxy=(70, 8, 118, 34), confidence=0.9),
+            SimpleNamespace(xyxy=(132, 8, 180, 34), confidence=0.9),
+        ]
+        mapped_records = [
+            {"text": "", "source_bbox": [], "line_polygons": []},
+            {"text": "", "source_bbox": [], "line_polygons": []},
+            {"text": "", "source_bbox": [], "line_polygons": []},
+        ]
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_OCR_FALLBACK_SHADOW": "1",
+                "TRADUZAI_OCR_FALLBACK_SHADOW_MAX": "1",
+            },
+            clear=False,
+        ), patch.object(
+            engine,
+            "_paddle_ocr_full_page_to_blocks",
+            return_value=mapped_records,
+        ), patch.object(
+            engine,
+            "_crop_block_from_page",
+            return_value=np.full((24, 60, 3), 255, dtype=np.uint8),
+        ), patch.object(
+            engine,
+            "_crop_might_have_text",
+            return_value=True,
+        ), patch.object(
+            engine,
+            "_recognize_single_paddle_with_retry",
+            side_effect=["", "SECOND", "THIRD"],
+        ):
+            records = engine.recognize_blocks_from_page(
+                np.full((100, 220, 3), 255, dtype=np.uint8),
+                blocks,
+                crop_fallback_max=3,
+            )
+
+        self.assertEqual([record["text"] for record in records], ["", "SECOND", "THIRD"])
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 3)
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 2)
+        self.assertEqual(engine._last_recognize_blocks_stats["fallback_shadow_attempt_limit"], 1)
+        self.assertEqual(
+            engine._last_recognize_blocks_stats["fallback_shadow_attempts_saved_or_would_skip"],
+            2,
+        )
+        self.assertEqual(engine._last_recognize_blocks_stats["fallback_shadow_recovered_after_limit"], 2)
+        self.assertEqual(
+            engine._last_recognize_blocks_stats["fallback_shadow_full_page_already_resolved_count"],
+            0,
+        )
+
+    def test_crop_fallback_shadow_stats_are_absent_by_default(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        blocks = [
+            SimpleNamespace(xyxy=(8, 8, 54, 34), confidence=0.9),
+            SimpleNamespace(xyxy=(70, 8, 118, 34), confidence=0.9),
+        ]
+        mapped_records = [
+            {"text": "", "source_bbox": [], "line_polygons": []},
+            {"text": "", "source_bbox": [], "line_polygons": []},
+        ]
+
+        with patch.dict(os.environ, {"TRADUZAI_OCR_FALLBACK_SHADOW": "0"}, clear=False), patch.object(
+            engine,
+            "_paddle_ocr_full_page_to_blocks",
+            return_value=mapped_records,
+        ), patch.object(
+            engine,
+            "_crop_block_from_page",
+            return_value=np.full((24, 60, 3), 255, dtype=np.uint8),
+        ), patch.object(
+            engine,
+            "_crop_might_have_text",
+            return_value=True,
+        ), patch.object(
+            engine,
+            "_recognize_single_paddle_with_retry",
+            side_effect=["HELLO", "WORLD"],
+        ):
+            records = engine.recognize_blocks_from_page(
+                np.full((100, 220, 3), 255, dtype=np.uint8),
+                blocks,
+                crop_fallback_max=2,
+            )
+
+        self.assertEqual([record["text"] for record in records], ["HELLO", "WORLD"])
+        for key in (
+            "fallback_shadow_attempt_limit",
+            "fallback_shadow_attempts_saved_or_would_skip",
+            "fallback_shadow_recovered_after_limit",
+            "fallback_shadow_full_page_already_resolved_count",
+        ):
+            self.assertNotIn(key, engine._last_recognize_blocks_stats)
+
+    def test_sparse_crop_fallback_can_be_disabled_separately(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        blocks = [
+            SimpleNamespace(xyxy=(8, 8, 54, 34), confidence=0.9),
+            SimpleNamespace(xyxy=(70, 8, 118, 34), confidence=0.9),
+        ]
+        mapped_records = [
+            {"text": "", "source_bbox": [], "line_polygons": []},
+            {"text": "", "source_bbox": [], "line_polygons": []},
+        ]
+
+        with patch.object(
+            engine,
+            "_paddle_ocr_full_page_to_blocks",
+            return_value=mapped_records,
+        ), patch.object(
+            engine,
+            "_crop_block_from_page",
+            return_value=np.full((24, 60, 3), 255, dtype=np.uint8),
+        ), patch.object(
+            engine,
+            "_crop_might_have_text",
+            return_value=True,
+        ), patch.object(
+            engine,
+            "_recognize_single_paddle_with_retry",
+            return_value="SHOULD NOT RUN",
+        ) as recognize:
+            records = engine.recognize_blocks_from_page(
+                np.full((100, 220, 3), 255, dtype=np.uint8),
+                blocks,
+                crop_fallback_max=3,
+                sparse_crop_fallback_max=0,
+            )
+
+        recognize.assert_not_called()
+        self.assertEqual(records[0]["text"], "")
+        self.assertEqual(records[1]["text"], "")
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 0)
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 0)
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_suppressed"], 2)
+        self.assertEqual(engine._last_recognize_blocks_stats["sparse_crop_fallback_max"], 0)
+
+    def test_sparse_crop_fallback_can_be_opted_in_separately(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        blocks = [
+            SimpleNamespace(xyxy=(8, 8, 54, 34), confidence=0.9),
+            SimpleNamespace(xyxy=(70, 8, 118, 34), confidence=0.9),
+        ]
+        mapped_records = [
+            {"text": "", "source_bbox": [], "line_polygons": []},
+            {"text": "", "source_bbox": [], "line_polygons": []},
+        ]
+
+        with patch.object(
+            engine,
+            "_paddle_ocr_full_page_to_blocks",
+            return_value=mapped_records,
+        ), patch.object(
+            engine,
+            "_crop_block_from_page",
+            return_value=np.full((24, 60, 3), 255, dtype=np.uint8),
+        ), patch.object(
+            engine,
+            "_crop_might_have_text",
+            return_value=True,
+        ), patch.object(
+            engine,
+            "_recognize_single_paddle_with_retry",
+            side_effect=["HELLO", "WORLD"],
+        ) as recognize:
+            records = engine.recognize_blocks_from_page(
+                np.full((100, 220, 3), 255, dtype=np.uint8),
+                blocks,
+                crop_fallback_max=3,
+                sparse_crop_fallback_max=1,
+            )
+
+        recognize.assert_called_once()
+        self.assertEqual(records[0]["text"], "HELLO")
+        self.assertEqual(records[1]["text"], "")
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 1)
+        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 1)
+        self.assertEqual(engine._last_recognize_blocks_stats["sparse_crop_fallback_max"], 1)
 
     def test_crop_fallback_max_limits_full_page_mapping_failures(self):
         engine = OCREngine.__new__(OCREngine)

@@ -12,8 +12,10 @@ Covers:
 import pytest
 
 from typesetter.text_fit_guard import validate_rendered_text_fit, blocks_clean_export
+from typesetter.renderer import build_render_blocks
 from layout.safe_area import build_safe_area
 from layout.connected_balloon_splitter import detect_connected_balloon
+from qa.export_gate import evaluate_export_gate
 
 
 # ---------------------------------------------------------------------------
@@ -229,3 +231,30 @@ class TestConnectedBalloonSplitter:
         )
         if result["connected_balloon"]:
             assert result["orientation"] == "vertical"
+
+    def test_low_confidence_lobe_assignment_blocks_export(self):
+        text = {
+            "id": "connected_low_conf",
+            "translated": "VOCE ESTA CERTO.",
+            "bbox": [80, 50, 180, 92],
+            "tipo": "fala",
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            "balloon_bbox": [0, 0, 320, 160],
+            "balloon_subregions": [[0, 0, 160, 160], [160, 0, 320, 160]],
+            "connected_lobe_bboxes": [[0, 0, 160, 160], [160, 0, 320, 160]],
+            "layout_profile": "connected_balloon",
+            "layout_group_size": 2,
+            "connected_balloon_orientation": "left-right",
+            "connected_detection_confidence": 0.92,
+            "connected_group_confidence": 0.59,
+            "lobe_assignment_confidence": 0.59,
+            "route_action": "translate_inpaint_render",
+        }
+
+        build_render_blocks([text])
+        gate = evaluate_export_gate({"paginas": [{"text_layers": [text]}]})
+
+        assert "lobe_assignment_low_confidence" in text.get("qa_flags", [])
+        assert gate["status"] == "BLOCK"
+        assert gate["allowed"] is False
+        assert gate["issues"][0]["flags"] == ["lobe_assignment_low_confidence"]

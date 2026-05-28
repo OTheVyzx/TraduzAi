@@ -7,7 +7,7 @@ import os
 import cv2
 import numpy as np
 
-from strip.types import Balloon, BBox
+from strip.types import Balloon, BBox, VerticalStrip
 
 
 def _iou(a: BBox, b: BBox) -> float:
@@ -143,6 +143,35 @@ def _has_inner_dark_text(image: np.ndarray, bbox: BBox) -> bool:
     if len(boxes) < 2:
         return False
     return sum(_bbox_area(box) for box in boxes) >= 18
+
+
+def _inner_dark_text_evidence(image: np.ndarray, bbox: BBox) -> dict:
+    height, width = image.shape[:2]
+    x1 = max(0, min(width, int(bbox.x1)))
+    x2 = max(0, min(width, int(bbox.x2)))
+    y1 = max(0, min(height, int(bbox.y1)))
+    y2 = max(0, min(height, int(bbox.y2)))
+    boxes = _extract_inner_dark_text_boxes(image, bbox)
+    inner_dark_area = sum(_bbox_area(box) for box in boxes)
+    significant_count, significant_area = _significant_text_component_count(boxes)
+    bright_ratio = 0.0
+    dark_ratio = 0.0
+    if x2 > x1 and y2 > y1:
+        crop = image[y1:y2, x1:x2]
+        if crop.size:
+            gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+            if gray.size:
+                bright_ratio = float(np.mean(gray >= 238))
+                dark_ratio = float(np.mean(gray <= 105))
+    return {
+        "has_inner_dark_text": len(boxes) >= 2 and inner_dark_area >= 18,
+        "inner_dark_component_count": int(len(boxes)),
+        "inner_dark_area": int(inner_dark_area),
+        "significant_component_count": int(significant_count),
+        "significant_area": int(significant_area),
+        "bright_pixel_ratio": round(bright_ratio, 4),
+        "dark_pixel_ratio": round(dark_ratio, 4),
+    }
 
 
 def _significant_text_components(boxes: list[BBox]) -> list[BBox]:
@@ -333,6 +362,48 @@ def _split_into_chunks(
     return chunks
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _source_page_chunks(strip: VerticalStrip) -> list[tuple[int, int]]:
+    breaks: list[int] = []
+    for value in strip.source_page_breaks or []:
+        try:
+            item = int(value)
+        except Exception:
+            continue
+        if item >= 0:
+            breaks.append(item)
+    if not breaks:
+        return [(0, int(strip.height))]
+    if breaks[0] != 0:
+        breaks.insert(0, 0)
+    if breaks[-1] != int(strip.height):
+        breaks.append(int(strip.height))
+    chunks: list[tuple[int, int]] = []
+    for y0, y1 in zip(breaks, breaks[1:]):
+        y0 = max(0, min(int(strip.height), int(y0)))
+        y1 = max(0, min(int(strip.height), int(y1)))
+        if y1 > y0:
+            chunks.append((y0, y1))
+    return chunks or [(0, int(strip.height))]
+
+
+def _detect_chunks_for_strip(
+    strip: VerticalStrip,
+    *,
+    chunk_height: int,
+    overlap: int,
+) -> tuple[list[tuple[int, int]], str]:
+    if _env_flag("TRADUZAI_STRIP_DETECT_FULL_PAGE", False):
+        return _source_page_chunks(strip), "source_page"
+    return _split_into_chunks(strip.height, chunk_height, overlap), "sliding_window"
+
+
 def _is_oversized(
     bbox: BBox,
     strip_width: int,
@@ -344,6 +415,14 @@ def _is_oversized(
     cap_h = int(strip_height * max_height_fraction)
     cap_w = int(strip_width * max_width_fraction)
     return bbox.height > cap_h or bbox.width > cap_w
+
+
+def _source_page_height_for_bbox(strip: VerticalStrip, bbox: BBox) -> int:
+    center_y = int(round((int(bbox.y1) + int(bbox.y2)) / 2.0))
+    for y0, y1 in _source_page_chunks(strip):
+        if y0 <= center_y < y1:
+            return max(1, y1 - y0)
+    return max(1, int(strip.height))
 
 
 def detect_strip_balloons(
@@ -362,7 +441,7 @@ def detect_strip_balloons(
     - Descarta bboxes com altura > `max_height_fraction` * strip.height
     - Descarta bboxes com largura > `max_width_fraction` * strip.width
     """
-    chunks = _split_into_chunks(strip.height, chunk_height, overlap)
+    chunks, chunk_mode = _detect_chunks_for_strip(strip, chunk_height=chunk_height, overlap=overlap)
     all_balloons: list[Balloon] = []
 
     for y0, y1 in chunks:
@@ -390,9 +469,27 @@ def detect_strip_balloons(
     after_nms = _nms_balloons(all_balloons, iou_threshold=iou_threshold)
 
     # Filtro pós-NMS: descartar false-positives gigantes
-    filtered = [
-        b for b in after_nms
-        if not _is_oversized(b.strip_bbox, strip.width, strip.height,
-                             max_height_fraction, max_width_fraction)
-    ]
-    return filtered
+    filtered = []
+    for balloon in after_nms:
+        filter_height = (
+            _source_page_height_for_bbox(strip, balloon.strip_bbox)
+            if chunk_mode == "source_page"
+            else strip.height
+        )
+        if not _is_oversized(
+            balloon.strip_bbox,
+            strip.width,
+            filter_height,
+            max_height_fraction,
+            max_width_fraction,
+        ):
+            filtered.append(balloon)
+    return sorted(
+        filtered,
+        key=lambda balloon: (
+            int(balloon.strip_bbox.y1),
+            int(balloon.strip_bbox.x1),
+            int(balloon.strip_bbox.y2),
+            int(balloon.strip_bbox.x2),
+        ),
+    )

@@ -73,8 +73,59 @@ class SplitIntoChunksTests(unittest.TestCase):
                 covered[y] = True
         self.assertTrue(all(covered))
 
+    def test_full_page_detect_chunks_follow_source_page_breaks(self):
+        from strip.detect_balloons import _detect_chunks_for_strip
+        from strip.types import VerticalStrip
+        import numpy as np
+        from unittest.mock import patch
+
+        strip = VerticalStrip(
+            image=np.zeros((9000, 720, 3), dtype=np.uint8),
+            width=720,
+            height=9000,
+            source_page_breaks=[0, 3100, 6200, 9000],
+        )
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_DETECT_FULL_PAGE": "1"}):
+            chunks, mode = _detect_chunks_for_strip(strip, chunk_height=4096, overlap=512)
+
+        self.assertEqual(mode, "source_page")
+        self.assertEqual(chunks, [(0, 3100), (3100, 6200), (6200, 9000)])
+
 
 class DetectStripBalloonsTests(unittest.TestCase):
+    def test_detect_strip_balloons_full_page_env_runs_one_detection_per_source_page(self):
+        from unittest.mock import MagicMock, patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        def make_block(_x1, _y1, _x2, _y2):
+            block = type("FakeBlock", (), {})()
+            block.x1, block.y1, block.x2, block.y2 = _x1, _y1, _x2, _y2
+            block.confidence = 0.9
+            return block
+
+        fake_detector = MagicMock()
+        fake_detector.detect.side_effect = [
+            [make_block(40, 100, 140, 180)],
+            [make_block(50, 200, 180, 290)],
+            [make_block(60, 300, 200, 390)],
+        ]
+
+        strip = VerticalStrip(
+            image=np.zeros((9000, 720, 3), dtype=np.uint8),
+            width=720,
+            height=9000,
+            source_page_breaks=[0, 3000, 6000, 9000],
+        )
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_DETECT_FULL_PAGE": "1"}):
+            balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertEqual(fake_detector.detect.call_count, 3)
+        self.assertEqual([balloon.strip_bbox.y1 for balloon in balloons], [100, 3200, 6300])
+
     def test_detect_strip_balloons_dedupes_overlap_zone(self):
         from unittest.mock import MagicMock
         from strip.detect_balloons import detect_strip_balloons

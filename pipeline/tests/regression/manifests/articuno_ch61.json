@@ -1,0 +1,45 @@
+{
+  "manifest_version": 1,
+  "run_id": "articuno_ch61",
+  "run_path": "N:/TraduzAI/DEBUGM/runs/2026-05-25_global_text_ocr_fixes_other_chapters_v4i/articuno_ch61",
+  "ci_fixture": false,
+  "schema_version": 12,
+  "current_issue_classes": [
+    "TEXT_CLIPPED",
+    "compact_small_text_capacity",
+    "logo_or_emblem_preserved",
+    "mask_density_high",
+    "mask_outside_balloon",
+    "ocr_run_on_suspect",
+    "rotated_text_recovery"
+  ],
+  "target_issue_classes_after_fix": [
+    "PASS_or_REVIEW_without_BLOCK",
+    "waive_known_review_flags_explicitly"
+  ],
+  "pages_of_interest": [
+    21,
+    27
+  ],
+  "sample_artifacts": [
+    {
+      "page": 21,
+      "issue_class": "mask_density_high",
+      "crop_path": "debug/e2e/08_inpaint/page_021_band_006/00_band_original.jpg"
+    }
+  ],
+  "baseline_total_sec": 100.5063,
+  "qa_report_sha256_at_record_time": "e104a35025d2496806368fa7bb1d614a79f03fb2af421bfe58fac85501ee2bf8",
+  "waivers": [
+    {
+      "waiver_id": "debug_2026_05_26_articuno_ch61_review_flags",
+      "flag": "known_review_flags",
+      "scope": "debug_only",
+      "reason": "fixture records known visual review classes while the target is PASS or REVIEW after fixes",
+      "expires": "2026-06-15",
+      "approved_by": "codex-r4.3"
+    }
+  ],
+  "recorded_at": "2026-05-26",
+  "recorded_by": "codex-r4.3"
+}

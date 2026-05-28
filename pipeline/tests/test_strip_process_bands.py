@@ -3,11 +3,42 @@
 import sys
 import unittest
 from pathlib import Path
+import json
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class BandToPageDictTests(unittest.TestCase):
+    def test_attach_ocr_trace_metadata_expands_merged_source_text_ids(self):
+        from strip.process_bands import _attach_ocr_trace_metadata
+
+        page = {
+            "numero": 3,
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "source_text_ids": ["ocr_001", "ocr_002"],
+                    "_merged_source_bboxes": [[10, 10, 30, 20], [34, 28, 70, 42]],
+                    "ocr_merged_source_count": 2,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [10, 10, 50, 50]}],
+        }
+
+        _attach_ocr_trace_metadata(page, band_id="page_003_band_019")
+
+        text = page["texts"][0]
+        block = page["_vision_blocks"][0]
+        self.assertEqual(
+            text["source_trace_ids"],
+            ["ocr_001@page_003_band_019", "ocr_002@page_003_band_019"],
+        )
+        self.assertEqual(text["_source_trace_ids"], text["source_trace_ids"])
+        self.assertEqual(text["merge_reason"], "clustered_line_fragments")
+        self.assertEqual(block["_source_trace_ids"], text["source_trace_ids"])
+        self.assertEqual(block["_merged_source_bboxes"], text["_merged_source_bboxes"])
+
     def test_band_to_page_dict_remaps_balloon_coords_to_local(self):
         from strip.process_bands import _band_to_page_dict
         from strip.types import Band, Balloon, BBox
@@ -163,7 +194,7 @@ class SmartSkipShadowTests(unittest.TestCase):
             1,
         )
 
-    def test_apply_smart_skip_real_marks_only_all_safe_bands(self):
+    def test_apply_smart_skip_real_records_audit_without_skip_processing_mutation(self):
         from strip.process_bands import _apply_smart_skip_real
 
         page = {
@@ -189,15 +220,15 @@ class SmartSkipShadowTests(unittest.TestCase):
 
         applied = _apply_smart_skip_real(page, perf)
 
-        self.assertTrue(applied)
-        self.assertTrue(page["texts"][0]["skip_processing"])
-        self.assertTrue(page["texts"][1]["skip_processing"])
-        self.assertEqual(page["texts"][0]["skip_reason"], "smart_skip")
-        self.assertEqual(page["texts"][1]["skip_reason"], "smart_skip")
+        self.assertFalse(applied)
+        self.assertFalse(page["texts"][0]["skip_processing"])
+        self.assertFalse(page["texts"][1]["skip_processing"])
+        self.assertNotIn("skip_reason", page["texts"][0])
+        self.assertNotIn("skip_reason", page["texts"][1])
         self.assertIn("smart_skip_decision", page["texts"][0])
         self.assertEqual(perf["smart_skip_real_candidate_count"], 2)
         self.assertEqual(perf["smart_skip_real_not_safe_count"], 0)
-        self.assertTrue(perf["smart_skip_real_applied"])
+        self.assertFalse(perf["smart_skip_real_applied"])
 
     def test_apply_smart_skip_real_does_not_mutate_mixed_bands(self):
         from strip.process_bands import _apply_smart_skip_real
@@ -246,6 +277,163 @@ class ProcessBandTests(unittest.TestCase):
             original_slice=slice_img.copy(),
         )
 
+    def test_process_band_does_not_recover_legacy_top_narration_visual_rect(self):
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        from strip.types import Band, Balloon, BBox
+        import copy
+        import cv2
+        import numpy as np
+
+        page_bgr = np.full((260, 800, 3), 255, dtype=np.uint8)
+        cv2.rectangle(page_bgr, (259, 30), (734, 230), (0, 0, 0), 2)
+        band_y_top = 80
+        band_rgb = cv2.cvtColor(page_bgr[band_y_top:224, :, :], cv2.COLOR_BGR2RGB)
+        band = Band(
+            y_top=band_y_top,
+            y_bottom=224,
+            balloons=[Balloon(strip_bbox=BBox(160, 80, 800, 224), confidence=0.9)],
+            strip_slice=band_rgb.copy(),
+            original_slice=band_rgb.copy(),
+        )
+
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [314, 16, 682, 128],
+                    "text": "LIVING IS NOT FUN BUT THAT DOESN'T MEAN I HAVE THE COURAGE TO DIE.",
+                    "tipo": "narracao",
+                    "block_profile": "top_narration",
+                    "layout_profile": "top_narration",
+                    "text_pixel_bbox": [317, 22, 680, 122],
+                }
+            ],
+            "_vision_blocks": [{"bbox": [160, 0, 800, 144], "confidence": 0.9}],
+        }
+        translator = MagicMock()
+        translator.translate_pages.side_effect = lambda pages, **_kw: pages
+        inpainter = MagicMock()
+        inpainter.inpaint_band_image.side_effect = lambda img, _page: img.copy()
+        captured = {}
+        typesetter = MagicMock()
+
+        def fake_render(img, page):
+            captured["page"] = copy.deepcopy(page)
+            return img.copy()
+
+        typesetter.render_band_image.side_effect = fake_render
+
+        with patch("ocr.contextual_reviewer.contextual_review_page", side_effect=lambda page, *_args: page):
+            with patch("layout.balloon_layout.enrich_page_layout", side_effect=lambda page: page):
+                process_band(
+                    band,
+                    runtime=runtime,
+                    translator=translator,
+                    inpainter=inpainter,
+                    typesetter=typesetter,
+                    page_idx=0,
+                    layout_page_image_bgr=page_bgr,
+                    layout_page_y_top=0,
+                )
+
+        text = captured["page"]["texts"][0]
+        self.assertNotEqual(text.get("layout_reason"), "visual_rect_full_page")
+        self.assertNotIn("_visual_rect_outer_bbox", text)
+        self.assertNotIn("layout_safe_reason", text)
+
+    def test_inpaint_stage_does_not_receive_legacy_decision_fields(self):
+        from strip.process_bands import _run_inpaint_stage
+        from strip.types import Band
+        import numpy as np
+
+        band = Band(
+            y_top=0,
+            y_bottom=80,
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+        translated_page = {
+            "numero": 1,
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [20, 20, 70, 44],
+                    "translated": "OLA",
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "tipo": "sfx",
+                    "content_class": "sound_effect",
+                    "balloon_type": "textured",
+                }
+            ],
+            "_vision_blocks": [
+                {
+                    "bbox": [18, 18, 74, 48],
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "tipo": "sfx",
+                    "content_class": "sound_effect",
+                    "balloon_type": "textured",
+                }
+            ],
+        }
+        captured = {}
+
+        class CapturingInpainter:
+            def inpaint_band_image(self, image, page):
+                captured["page"] = page
+                return image.copy()
+
+        _run_inpaint_stage(
+            band,
+            inpainter=CapturingInpainter(),
+            translated_page=translated_page,
+        )
+
+        for key in ("skip_processing", "preserve_original", "tipo", "content_class", "balloon_type"):
+            self.assertNotIn(key, captured["page"]["texts"][0])
+            self.assertNotIn(key, captured["page"]["_vision_blocks"][0])
+        self.assertTrue(translated_page["texts"][0]["skip_processing"])
+        self.assertEqual(translated_page["texts"][0]["tipo"], "sfx")
+
+    def test_typeset_stage_does_not_receive_legacy_decision_fields(self):
+        from strip.process_bands import _run_typeset_stage
+        import numpy as np
+
+        cleaned = np.full((80, 120, 3), 255, dtype=np.uint8)
+        translated_page = {
+            "texts": [
+                {
+                    "id": "t1",
+                    "bbox": [20, 20, 70, 44],
+                    "translated": "OLA",
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "tipo": "narracao",
+                    "content_class": "narration",
+                    "balloon_type": "white",
+                }
+            ]
+        }
+        captured = {}
+
+        class CapturingTypesetter:
+            def render_band_image(self, image, page):
+                captured["page"] = page
+                return image.copy()
+
+        _run_typeset_stage(
+            cleaned,
+            typesetter=CapturingTypesetter(),
+            translated_page=translated_page,
+        )
+
+        for key in ("skip_processing", "preserve_original", "tipo", "content_class", "balloon_type"):
+            self.assertNotIn(key, captured["page"]["texts"][0])
+        self.assertTrue(translated_page["texts"][0]["skip_processing"])
+        self.assertEqual(translated_page["texts"][0]["tipo"], "narracao")
+
     def test_process_band_populates_rendered_slice(self):
         from unittest.mock import MagicMock
         from strip.process_bands import process_band
@@ -254,9 +442,12 @@ class ProcessBandTests(unittest.TestCase):
         band = self._make_band()
         # Stages mockadas — só precisam retornar dict válido / ndarray
         runtime = MagicMock()
-        runtime.run_ocr_stage.return_value = {"texts": [
-            {"id": "t1", "bbox": [50, 20, 150, 80], "text": "HELLO", "tipo": "fala"},
-        ]}
+        runtime.run_ocr_stage.return_value = {
+            "texts": [
+                {"id": "t1", "bbox": [50, 20, 150, 80], "text": "HELLO", "tipo": "fala"},
+            ],
+            "_ocr_stats": {"sparse_crop_fallback_max": 0, "crop_fallback_suppressed": 2},
+        }
         translator = MagicMock()
         translator.translate_pages.return_value = ([{
             "texts": [{"id": "t1", "translated": "OLÁ", "tipo": "fala", "bbox": [50, 20, 150, 80]}]
@@ -265,10 +456,16 @@ class ProcessBandTests(unittest.TestCase):
 
         def fake_inpaint(_image, page):
             page["_strip_fast_white_balloon_count"] = 1
+            page["_strip_connected_white_geometry_fill_count"] = 1
+            page["_strip_connected_white_geometry_fill_mask_pixels"] = 42
             page["_strip_fast_local_balloon_count"] = 2
+            page["_strip_fast_dark_panel_fill_count"] = 3
+            page["_strip_dark_panel_fill_count"] = 3
             page["_strip_remaining_inpaint_blocks"] = 3
             page["_strip_fast_white_rejection_reasons"] = {"no_white_fill_mask": 4}
+            page["_strip_connected_white_rejection_reasons"] = {"mask_evidence:missing": 2}
             page["_strip_fast_local_rejection_reasons"] = {"no_flat_fill": 5}
+            page["_strip_fast_dark_rejection_reasons"] = {"mask_evidence:missing": 6}
             return np.full((100, 300, 3), 255, dtype=np.uint8)
 
         inpainter.inpaint_band_image.side_effect = fake_inpaint
@@ -296,12 +493,104 @@ class ProcessBandTests(unittest.TestCase):
         self.assertIn("translate", band.perf["durations_sec"])
         self.assertIn("inpaint", band.perf["durations_sec"])
         self.assertIn("typeset", band.perf["durations_sec"])
+        for stage in ("ocr", "inpaint", "typeset"):
+            self.assertIn(f"{stage}_wait", band.perf["durations_sec"])
+            self.assertIn(f"{stage}_compute", band.perf["durations_sec"])
         self.assertEqual(band.ocr_result.get("_perf", {}).get("ocr_text_count"), 1)
         self.assertEqual(band.perf["fast_white_balloon_count"], 1)
+        self.assertEqual(band.perf["connected_white_geometry_fill_count"], 1)
+        self.assertEqual(band.perf["connected_white_geometry_fill_mask_pixels"], 42)
         self.assertEqual(band.perf["fast_local_balloon_count"], 2)
+        self.assertEqual(band.perf["fast_dark_panel_fill_count"], 3)
+        self.assertEqual(band.perf["dark_panel_fill_count"], 3)
         self.assertEqual(band.perf["remaining_inpaint_blocks"], 3)
+        self.assertEqual(band.perf["ocr_sparse_crop_fallback_max"], 0)
+        self.assertEqual(band.perf["ocr_crop_fallback_suppressed"], 2)
         self.assertEqual(band.perf["fast_white_rejection_reasons"], {"no_white_fill_mask": 4})
+        self.assertEqual(
+            band.perf["connected_white_rejection_reasons"], {"mask_evidence:missing": 2}
+        )
         self.assertEqual(band.perf["fast_local_rejection_reasons"], {"no_flat_fill": 5})
+        self.assertEqual(band.perf["fast_dark_rejection_reasons"], {"mask_evidence:missing": 6})
+
+    def test_process_band_recovers_empty_ocr_with_candidate_crop_reocr(self):
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        from strip.types import Band, Balloon, BBox
+        import cv2
+        import numpy as np
+
+        slice_img = np.full((120, 300, 3), 255, dtype=np.uint8)
+        cv2.putText(
+            slice_img,
+            "ONE",
+            (74, 62),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        band = Band(
+            y_top=100,
+            y_bottom=220,
+            balloons=[Balloon(strip_bbox=BBox(40, 120, 220, 200), confidence=0.9)],
+            strip_slice=slice_img.copy(),
+            original_slice=slice_img.copy(),
+        )
+
+        runtime = MagicMock()
+        runtime.run_ocr_stage.side_effect = [
+            {"texts": [], "_vision_blocks": [], "_ocr_stats": {"quick_skipped_no_text": True}},
+            {
+                "texts": [
+                    {
+                        "id": "crop_001",
+                        "bbox": [42, 28, 92, 52],
+                        "text": "ONE",
+                        "confidence": 0.91,
+                    }
+                ],
+                "_vision_blocks": [{"bbox": [28, 14, 124, 64], "confidence": 0.9}],
+            },
+        ]
+        translator = MagicMock()
+        translator.translate_pages.side_effect = lambda pages, **_kw: [
+            {
+                **pages[0],
+                "texts": [
+                    {**text, "translated": "UM"}
+                    for text in pages[0].get("texts", [])
+                ],
+            }
+        ]
+        inpainter = MagicMock()
+        inpainter.inpaint_band_image.side_effect = lambda img, _page: img.copy()
+        typesetter = MagicMock()
+        typesetter.render_band_image.side_effect = lambda img, _page: img.copy()
+
+        with patch("ocr.contextual_reviewer.contextual_review_page", side_effect=lambda page, *_args: page):
+            with patch("layout.balloon_layout.enrich_page_layout", side_effect=lambda page: page):
+                process_band(
+                    band,
+                    runtime=runtime,
+                    translator=translator,
+                    inpainter=inpainter,
+                    typesetter=typesetter,
+                    page_idx=7,
+                    source_page_number=3,
+                )
+
+        self.assertEqual(runtime.run_ocr_stage.call_count, 2)
+        self.assertEqual(translator.translate_pages.call_count, 1)
+        self.assertEqual(band.ocr_result["texts"][0]["text"], "ONE")
+        self.assertEqual(band.ocr_result["texts"][0]["translated"], "UM")
+        self.assertEqual(band.ocr_result["texts"][0]["bbox"], [62, 28, 112, 52])
+        self.assertEqual(band.ocr_result["_perf"]["ocr_candidate_crop_recovered"], 1)
+        self.assertNotEqual(
+            band.ocr_result.get("_copyback_decision", {}).get("reason"),
+            "no_texts",
+        )
 
     def test_process_band_notifies_ordered_context_after_translate_before_inpaint(self):
         from unittest.mock import MagicMock
@@ -407,6 +696,69 @@ class ProcessBandTests(unittest.TestCase):
             ["lock_enter", "ocr", "lock_exit", "lock_enter", "inpaint", "lock_exit"],
         )
 
+    def test_process_band_can_use_separate_ocr_and_inpaint_locks(self):
+        from unittest.mock import MagicMock
+        from strip.process_bands import process_band
+        import numpy as np
+
+        class TrackingLock:
+            def __init__(self, label):
+                self.label = label
+                self.events = []
+
+            def __enter__(self):
+                self.events.append(f"{self.label}_enter")
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                self.events.append(f"{self.label}_exit")
+
+        band = self._make_band()
+        runtime = MagicMock()
+        ocr_lock = TrackingLock("ocr_lock")
+        inpaint_lock = TrackingLock("inpaint_lock")
+        legacy_gpu_lock = TrackingLock("legacy_gpu_lock")
+
+        def fake_ocr(_image, _page):
+            ocr_lock.events.append("ocr")
+            return {
+                "texts": [{"id": "t1", "bbox": [50, 20, 150, 80], "text": "HELLO", "tipo": "fala"}],
+                "_vision_blocks": [{"bbox": [40, 10, 160, 90], "confidence": 0.9}],
+            }
+
+        runtime.run_ocr_stage.side_effect = fake_ocr
+        translator = MagicMock()
+        translator.translate_pages.return_value = [
+            {"texts": [{"id": "t1", "translated": "OLA", "tipo": "fala"}]}
+        ]
+
+        def fake_inpaint(_image, _page):
+            inpaint_lock.events.append("inpaint")
+            return np.full((100, 300, 3), 255, dtype=np.uint8)
+
+        inpainter = MagicMock()
+        inpainter.inpaint_band_image.side_effect = fake_inpaint
+        typesetter = MagicMock()
+        typesetter.render_band_image.return_value = np.full((100, 300, 3), 100, dtype=np.uint8)
+
+        process_band(
+            band,
+            runtime=runtime,
+            translator=translator,
+            inpainter=inpainter,
+            typesetter=typesetter,
+            page_idx=0,
+            gpu_stage_lock=legacy_gpu_lock,
+            ocr_stage_lock=ocr_lock,
+            inpaint_stage_lock=inpaint_lock,
+        )
+
+        self.assertEqual(ocr_lock.events, ["ocr_lock_enter", "ocr", "ocr_lock_exit"])
+        self.assertEqual(
+            inpaint_lock.events,
+            ["inpaint_lock_enter", "inpaint", "inpaint_lock_exit"],
+        )
+        self.assertEqual(legacy_gpu_lock.events, [])
+
     def test_process_band_serializes_typeset_when_lock_is_provided(self):
         from unittest.mock import MagicMock
         from strip.process_bands import process_band
@@ -455,6 +807,71 @@ class ProcessBandTests(unittest.TestCase):
         )
 
         self.assertEqual(lock.events, ["typeset_lock_enter", "typeset", "typeset_lock_exit"])
+
+    def test_process_band_records_wait_and_compute_for_locked_stages(self):
+        from unittest.mock import MagicMock
+        from strip.process_bands import process_band
+        import numpy as np
+        import time
+
+        class SlowEnterLock:
+            def __enter__(self):
+                time.sleep(0.002)
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+        band = self._make_band()
+        runtime = MagicMock()
+
+        def fake_ocr(_image, _page):
+            time.sleep(0.002)
+            return {
+                "texts": [{"id": "t1", "bbox": [50, 20, 150, 80], "text": "HELLO", "tipo": "fala"}],
+                "_vision_blocks": [{"bbox": [40, 10, 160, 90], "confidence": 0.9}],
+            }
+
+        runtime.run_ocr_stage.side_effect = fake_ocr
+        translator = MagicMock()
+        translator.translate_pages.return_value = [
+            {"texts": [{"id": "t1", "translated": "OLA", "tipo": "fala"}]}
+        ]
+
+        inpainter = MagicMock()
+
+        def fake_inpaint(_image, _page):
+            time.sleep(0.002)
+            return np.full((100, 300, 3), 255, dtype=np.uint8)
+
+        inpainter.inpaint_band_image.side_effect = fake_inpaint
+        typesetter = MagicMock()
+
+        def fake_typeset(_image, _page):
+            time.sleep(0.002)
+            return np.full((100, 300, 3), 100, dtype=np.uint8)
+
+        typesetter.render_band_image.side_effect = fake_typeset
+
+        process_band(
+            band,
+            runtime=runtime,
+            translator=translator,
+            inpainter=inpainter,
+            typesetter=typesetter,
+            page_idx=0,
+            gpu_stage_lock=SlowEnterLock(),
+            typeset_stage_lock=SlowEnterLock(),
+        )
+
+        durations = band.perf["durations_sec"]
+        for stage in ("ocr", "inpaint", "typeset"):
+            self.assertGreater(durations[f"{stage}_compute"], 0)
+            self.assertGreater(durations[f"{stage}_wait"], 0)
+            self.assertAlmostEqual(
+                durations[stage],
+                durations[f"{stage}_wait"] + durations[f"{stage}_compute"],
+                delta=0.01,
+            )
 
     def test_process_band_restores_ocr_metadata_when_translation_payload_is_reduced(self):
         from unittest.mock import MagicMock
@@ -732,6 +1149,92 @@ class ProcessBandTests(unittest.TestCase):
 
         self.assertEqual(output.to_page_dict()["texts"][0]["text"], "HELLO")
 
+    def test_ocr_stage_rejects_precomputed_page_with_out_of_band_geometry(self):
+        from unittest.mock import MagicMock
+        from strip import process_bands
+
+        band = self._make_band()
+        page_dict = process_bands._band_to_page_dict(band, page_idx=3, source_page_number=2)
+        precomputed_ocr_page = {
+            "texts": [
+                {
+                    "id": "bad",
+                    "bbox": [50, 420, 150, 480],
+                    "balloon_bbox": [40, 400, 160, 490],
+                    "text": "WRONG SPACE",
+                    "tipo": "fala",
+                }
+            ],
+            "_vision_blocks": [{"bbox": [40, 400, 160, 490], "confidence": 0.9}],
+            "_ocr_stats": {"macro_ocr_real": True},
+        }
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "texts": [{"id": "fresh", "bbox": [50, 20, 150, 80], "text": "FRESH", "tipo": "fala"}],
+            "_vision_blocks": [{"bbox": [40, 10, 160, 90], "confidence": 0.9}],
+        }
+
+        output = process_bands._run_band_ocr_stage(
+            band,
+            runtime=runtime,
+            page_dict=page_dict,
+            precomputed_ocr_page=precomputed_ocr_page,
+        )
+
+        runtime.run_ocr_stage.assert_called_once()
+        self.assertEqual(output.to_page_dict()["texts"][0]["id"], "fresh")
+        self.assertEqual(output.perf_updates["ocr_precomputed_page"], False)
+        self.assertEqual(output.perf_updates["ocr_runtime_skipped"], False)
+        self.assertTrue(output.perf_updates["ocr_precomputed_page_rejected"])
+        self.assertIn("out_of_bounds", output.perf_updates["ocr_precomputed_page_reject_reason"])
+        self.assertEqual(
+            output.to_page_dict()["_ocr_stats"]["precomputed_ocr_reject_reason"],
+            output.perf_updates["ocr_precomputed_page_reject_reason"],
+        )
+
+    def test_ocr_stage_rejects_precomputed_page_when_text_misses_balloon(self):
+        from unittest.mock import MagicMock
+        from strip import process_bands
+
+        band = self._make_band()
+        page_dict = process_bands._band_to_page_dict(band, page_idx=0, source_page_number=1)
+        precomputed_ocr_page = {
+            "texts": [
+                {
+                    "id": "bad",
+                    "bbox": [5, 5, 30, 24],
+                    "balloon_bbox": [210, 60, 280, 95],
+                    "text": "WRONG BALLOON",
+                    "tipo": "fala",
+                }
+            ],
+            "_vision_blocks": [{"bbox": [210, 60, 280, 95], "confidence": 0.9}],
+        }
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "texts": [{"id": "fresh", "bbox": [50, 20, 150, 80], "text": "FRESH", "tipo": "fala"}],
+            "_vision_blocks": [{"bbox": [40, 10, 160, 90], "confidence": 0.9}],
+        }
+
+        output = process_bands._run_band_ocr_stage(
+            band,
+            runtime=runtime,
+            page_dict=page_dict,
+            precomputed_ocr_page=precomputed_ocr_page,
+        )
+
+        runtime.run_ocr_stage.assert_called_once()
+        self.assertEqual(output.to_page_dict()["texts"][0]["id"], "fresh")
+        self.assertIn("text_balloon_mismatch", output.perf_updates["ocr_precomputed_page_reject_reason"])
+
+    def test_band_page_dict_keeps_sparse_ocr_mapping_default(self):
+        from strip import process_bands
+
+        band = self._make_band()
+        page = process_bands._band_to_page_dict(band, page_idx=0, source_page_number=1)
+
+        self.assertNotIn("_disable_sparse_ocr_mapping", page)
+
     def test_translate_stage_result_merges_ocr_metadata_as_snapshot(self):
         from unittest.mock import MagicMock
         from strip import process_bands
@@ -828,6 +1331,21 @@ class ProcessBandTests(unittest.TestCase):
         inpainter = MagicMock()
 
         def fake_inpaint(_image, page):
+            page["texts"][0]["mask_evidence"] = {
+                "kind": "glyph_segmentation",
+                "raw_mask_pixels": 12,
+                "expanded_mask_pixels": 16,
+                "evidence_score": 1.0,
+                "fast_fill_allowed": True,
+                "fast_fill_reject_reasons": [],
+            }
+            page["_vision_blocks"] = [
+                {
+                    "id": "t1",
+                    "bbox": [50, 20, 150, 80],
+                    "mask_evidence": dict(page["texts"][0]["mask_evidence"]),
+                }
+            ]
             page["_strip_fast_white_balloon_count"] = 2
             page["_strip_fast_local_balloon_count"] = 1
             page["_strip_remaining_inpaint_blocks"] = 3
@@ -857,6 +1375,8 @@ class ProcessBandTests(unittest.TestCase):
         image_snapshot = output.to_image()
         image_snapshot[:, :, :] = 0
         self.assertEqual(int(output.to_image()[0, 0, 0]), 210)
+        self.assertEqual(translated_page["texts"][0]["mask_evidence"]["kind"], "glyph_segmentation")
+        self.assertEqual(translated_page["_vision_blocks"][0]["mask_evidence"]["raw_mask_pixels"], 12)
 
     def test_typeset_and_copy_back_stage_results_snapshot_images_without_mutating_band(self):
         from unittest.mock import MagicMock
@@ -997,12 +1517,15 @@ class ProcessBandTests(unittest.TestCase):
         self.assertTrue(band.perf["ocr_scanlation_credit_skipped"])
         self.assertTrue(band.perf["ocr_cover_editorial_skipped"])
 
-    def test_process_band_skips_repaint_when_all_texts_are_skip_processing(self):
+    def test_process_band_runs_pipeline_when_ocr_texts_are_legacy_skip_processing(self):
         from unittest.mock import MagicMock
         from strip.process_bands import process_band
+        from debug_tools import DebugRecorder, bind_recorder
         import numpy as np
 
         band = self._make_band()
+        cleaned = np.full_like(band.strip_slice, 80)
+        rendered = np.full_like(band.strip_slice, 180)
         runtime = MagicMock()
         runtime.run_ocr_stage.return_value = {
             "numero": 1,
@@ -1012,7 +1535,6 @@ class ProcessBandTests(unittest.TestCase):
                 {
                     "id": "t1",
                     "bbox": [50, 20, 150, 80],
-                    "balloon_bbox": [40, 10, 160, 90],
                     "text": "YOU...!!",
                     "original": "YOU...!!",
                     "translated": "YOU...!!",
@@ -1023,33 +1545,69 @@ class ProcessBandTests(unittest.TestCase):
             "_vision_blocks": [{"bbox": [40, 10, 160, 90], "confidence": 0.9}],
         }
         translator = MagicMock()
+        translator.translate_pages.return_value = [
+            {
+                "texts": [
+                    {
+                        "id": "t1",
+                        "bbox": [50, 20, 150, 80],
+                        "balloon_bbox": [40, 10, 160, 90],
+                        "original": "YOU...!!",
+                        "translated": "VOCE...!!",
+                        "tipo": "narracao",
+                        "skip_processing": True,
+                    }
+                ],
+            }
+        ]
         inpainter = MagicMock()
+        inpainter.inpaint_band_image.return_value = cleaned
         typesetter = MagicMock()
+        typesetter.render_band_image.return_value = rendered
 
-        result = process_band(
-            band,
-            runtime=runtime,
-            translator=translator,
-            inpainter=inpainter,
-            typesetter=typesetter,
-            page_idx=0,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = DebugRecorder(Path(tmp), enabled=True, run_id="skip-processing-test")
+            bind_recorder(recorder)
+            try:
+                result = process_band(
+                    band,
+                    runtime=runtime,
+                    translator=translator,
+                    inpainter=inpainter,
+                    typesetter=typesetter,
+                    page_idx=0,
+                )
+            finally:
+                bind_recorder(None)
+            decision_path = (
+                Path(tmp)
+                / "debug"
+                / "e2e"
+                / "08_inpaint"
+                / "page_001_band_000"
+                / "inpaint_decision.json"
+            )
+            self.assertFalse(decision_path.exists())
 
         self.assertIs(result, band)
-        translator.translate_pages.assert_not_called()
-        inpainter.inpaint_band_image.assert_not_called()
-        typesetter.render_band_image.assert_not_called()
-        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
-        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
-        self.assertTrue(band.perf["skip_processing_copy"])
+        translator.translate_pages.assert_called_once()
+        inpainter.inpaint_band_image.assert_called_once()
+        typesetter.render_band_image.assert_called_once()
+        self.assertTrue(np.array_equal(band.cleaned_slice, cleaned))
+        self.assertFalse(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertFalse(band.perf.get("skip_processing_copy", False))
         self.assertTrue(band.ocr_result["texts"][0]["skip_processing"])
+        self.assertIn("balloon_bbox", band.ocr_result["texts"][0])
 
-    def test_process_band_skips_repaint_when_translation_marks_all_texts_skip_processing(self):
+    def test_process_band_runs_pipeline_when_translation_marks_legacy_skip_processing(self):
         from unittest.mock import MagicMock
         from strip.process_bands import process_band
+        from debug_tools import DebugRecorder, bind_recorder
         import numpy as np
 
         band = self._make_band()
+        cleaned = np.full_like(band.strip_slice, 80)
+        rendered = np.full_like(band.strip_slice, 180)
         runtime = MagicMock()
         runtime.run_ocr_stage.return_value = {
             "numero": 1,
@@ -1074,7 +1632,7 @@ class ProcessBandTests(unittest.TestCase):
                     {
                         "id": "t1",
                         "original": "YOU...!!",
-                        "translated": "YOU...!!",
+                        "translated": "VOCE...!!",
                         "tipo": "narracao",
                         "skip_processing": True,
                     }
@@ -1082,25 +1640,43 @@ class ProcessBandTests(unittest.TestCase):
             }
         ]
         inpainter = MagicMock()
+        inpainter.inpaint_band_image.return_value = cleaned
         typesetter = MagicMock()
+        typesetter.render_band_image.return_value = rendered
 
-        result = process_band(
-            band,
-            runtime=runtime,
-            translator=translator,
-            inpainter=inpainter,
-            typesetter=typesetter,
-            page_idx=0,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = DebugRecorder(Path(tmp), enabled=True, run_id="post-translate-skip-test")
+            bind_recorder(recorder)
+            try:
+                result = process_band(
+                    band,
+                    runtime=runtime,
+                    translator=translator,
+                    inpainter=inpainter,
+                    typesetter=typesetter,
+                    page_idx=0,
+                )
+            finally:
+                bind_recorder(None)
+            decision_path = (
+                Path(tmp)
+                / "debug"
+                / "e2e"
+                / "08_inpaint"
+                / "page_001_band_000"
+                / "inpaint_decision.json"
+            )
+            self.assertFalse(decision_path.exists())
 
         self.assertIs(result, band)
         translator.translate_pages.assert_called_once()
-        inpainter.inpaint_band_image.assert_not_called()
-        typesetter.render_band_image.assert_not_called()
-        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
-        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
-        self.assertTrue(band.perf["skip_processing_copy"])
+        inpainter.inpaint_band_image.assert_called_once()
+        typesetter.render_band_image.assert_called_once()
+        self.assertTrue(np.array_equal(band.cleaned_slice, cleaned))
+        self.assertFalse(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertFalse(band.perf.get("skip_processing_copy", False))
         self.assertTrue(band.ocr_result["texts"][0]["skip_processing"])
+        self.assertIn("balloon_bbox", band.ocr_result["texts"][0])
 
     def test_process_band_skips_repaint_when_all_translations_are_unchanged(self):
         from unittest.mock import MagicMock
@@ -1158,6 +1734,7 @@ class ProcessBandTests(unittest.TestCase):
         self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
         self.assertTrue(band.perf["unchanged_translation_skip"])
         self.assertEqual(band.ocr_result["texts"][0]["translated"], "HYAAH!!")
+        self.assertIn("balloon_bbox", band.ocr_result["texts"][0])
 
 class BandAdaptersTests(unittest.TestCase):
     def test_inpaint_band_image_returns_same_shape(self):

@@ -48,6 +48,16 @@ import { setupApi, type WorkSearchResult } from "./projectSetupApi";
 import { assetUrl, projectApi, type ProjectLayerMap } from "./projectApi";
 import { editorApi } from "./editor/editorApi";
 import { WebEditorRoute } from "./editor/WebEditorRoute";
+import {
+  LegalIndex,
+  LegalTermsPage,
+  LegalPrivacyPage,
+  LegalCookiesPage,
+  LegalCopyrightPage,
+  LegalAcceptableUsePage,
+  LegalDisclaimerPage,
+} from "./legal/Legal";
+import { CookieBanner } from "./legal/CookieBanner";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "";
 const DEFAULT_CHAPTER = "1";
@@ -316,7 +326,17 @@ function Signup() {
         </label>
         <label className="auth-checkbox-row">
           <input type="checkbox" checked={acceptedTerms} onChange={(event) => setAcceptedTerms(event.target.checked)} />
-          <span>Eu aceito os Termos de Uso e a Política de Privacidade</span>
+          <span>
+            Eu li e aceito os{" "}
+            <Link className="auth-inline-link" to="/legal/termos" target="_blank" rel="noopener noreferrer">
+              Termos de Uso
+            </Link>{" "}
+            e a{" "}
+            <Link className="auth-inline-link" to="/legal/privacidade" target="_blank" rel="noopener noreferrer">
+              Política de Privacidade
+            </Link>
+            , e declaro ter no mínimo 16 anos.
+          </span>
         </label>
         {googleError && <p className="error">Não foi possível continuar com Google. Tente novamente.</p>}
         <p className="auth-note">Nesta build interna, o cadastro registra seu interesse e redireciona você para o acesso.</p>
@@ -632,7 +652,14 @@ function Landing() {
           <a href="#faq">FAQ</a>
           <a href="#plano">Planos</a>
           <a href="mailto:contato@traduzai.app">Contato</a>
-          <Link to="/legal">Termos</Link>
+        </div>
+        <div className="landing-footer-legal">
+          <Link to="/legal">Central legal</Link>
+          <Link to="/legal/termos">Termos de Uso</Link>
+          <Link to="/legal/privacidade">Privacidade</Link>
+          <Link to="/legal/cookies">Cookies</Link>
+          <Link to="/legal/direitos-autorais">Direitos autorais</Link>
+          <Link to="/legal/uso-aceitavel">Uso aceitável</Link>
         </div>
         <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
           © {new Date().getFullYear()} TraduzAI
@@ -2201,17 +2228,6 @@ function useJobTimerNow(job?: Job) {
   return now;
 }
 
-function Legal() {
-  return (
-    <section className="panel narrow legal-text">
-      <p className="eyebrow">Legal</p>
-      <h1>Privacidade</h1>
-      <p>O beta processa arquivos no worker local. A API registra jobs, artifacts, eventos e uso para validar o fluxo SaaS-ready.</p>
-      <p>O TraduzAI não hospeda nem fornece obras protegidas. O usuário é responsável pelos arquivos usados.</p>
-    </section>
-  );
-}
-
 function Admin() {
   const { data, isLoading } = useQuery({ queryKey: ["admin-overview"], queryFn: () => api<AdminOverview>("/api/admin/overview") });
   return (
@@ -2267,7 +2283,13 @@ function AppRoutes() {
       <Route path="/projects/:id/editor" element={<ProtectedFullScreen><WebEditorRoute /></ProtectedFullScreen>} />
       <Route path="/projects/:id/settings" element={<Protected><ProjectSettings /></Protected>} />
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
-      <Route path="/legal" element={<Legal />} />
+      <Route path="/legal" element={<LegalIndex />} />
+      <Route path="/legal/termos" element={<LegalTermsPage />} />
+      <Route path="/legal/privacidade" element={<LegalPrivacyPage />} />
+      <Route path="/legal/cookies" element={<LegalCookiesPage />} />
+      <Route path="/legal/direitos-autorais" element={<LegalCopyrightPage />} />
+      <Route path="/legal/uso-aceitavel" element={<LegalAcceptableUsePage />} />
+      <Route path="/legal/isencao" element={<LegalDisclaimerPage />} />
       <Route path="/admin" element={<Protected><Admin /></Protected>} />
     </Routes>
   );
@@ -2278,6 +2300,7 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AppRoutes />
+        <CookieBanner />
       </BrowserRouter>
     </QueryClientProvider>
   );

@@ -1,9 +1,11 @@
 import type { EditorBackendApi } from "../editorBackend";
 import {
+  detectBoxesPage,
   detectPage,
   loadEditorPage,
   ocrPage,
   patchEditorTextLayer,
+  preloadEditorVisionPage,
   processBlock,
   reinpaintPage,
   renderPreviewPage,
@@ -38,7 +40,9 @@ export const tauriEditorBackend: EditorBackendApi = {
   runPageActionWithOptionalMask,
   runProcessRegion,
   retypesetPage,
+  detectBoxesPage,
   detectPage,
+  preloadEditorVisionPage,
   ocrPage,
   translatePage,
   reinpaintPage,

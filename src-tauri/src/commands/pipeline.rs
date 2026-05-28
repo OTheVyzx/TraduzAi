@@ -74,10 +74,46 @@ pub struct PipelineProgress {
     pub eta_seconds: f64,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct ExportGateEventSummary {
+    status: String,
+    critical_issue_count: u64,
+    critical_flag_count: u64,
+    review_issue_count: u64,
+    needs_review: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportGateSummary {
+    completion_status: String,
+    export_gate: ExportGateEventSummary,
+    blocking_flags: Vec<String>,
+    review_flags: Vec<String>,
+}
+
+impl Default for ExportGateSummary {
+    fn default() -> Self {
+        Self {
+            completion_status: "approved".to_string(),
+            export_gate: ExportGateEventSummary {
+                status: "PASS".to_string(),
+                critical_issue_count: 0,
+                critical_flag_count: 0,
+                review_issue_count: 0,
+                needs_review: false,
+            },
+            blocking_flags: Vec::new(),
+            review_flags: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PipelineConfig {
     pub source_path: String,
     pub obra: String,
+    #[serde(default)]
+    pub work_title_user_provided: bool,
     pub capitulo: u32,
     pub idioma_origem: String,
     pub idioma_destino: String,
@@ -320,7 +356,7 @@ impl FastPageWorker {
             };
             let is_terminal = matches!(
                 event.get("type").and_then(|value| value.as_str()),
-                Some("complete" | "error" | "ready" | "bye")
+                Some("complete" | "error" | "ready" | "accepted" | "bye")
             );
             events.push(event);
             if is_terminal {
@@ -487,7 +523,8 @@ pub async fn start_pipeline(
 
     let config_json = serde_json::to_string(&serde_json::json!({
         "job_id": job_id, "source_path": config.source_path, "work_dir": work_dir.to_string_lossy(),
-        "obra": config.obra, "capitulo": config.capitulo, "idioma_origem": config.idioma_origem,
+        "obra": config.obra, "work_title_user_provided": config.work_title_user_provided,
+        "capitulo": config.capitulo, "idioma_origem": config.idioma_origem,
         "idioma_destino": config.idioma_destino, "qualidade": config.qualidade, "glossario": config.glossario,
         "engine_preset_id": config.engine_preset_id,
         "mode": config.mode,
@@ -511,16 +548,28 @@ pub async fn start_pipeline(
     let app_c = app.clone();
     let job_c = job_id.clone();
     let pause_c = pause_path.clone();
+    let work_dir_c = work_dir.clone();
+    let use_fast_worker = persistent_pipeline_worker_enabled();
 
     tokio::spawn(async move {
-        let res = run_sidecar(&app_c, &sidecar, &config_file).await;
+        let res = if use_fast_worker {
+            run_pipeline_with_fast_worker(&app_c, &config_file).await
+        } else {
+            run_sidecar(&app_c, &sidecar, &config_file).await
+        };
         clear_current_pause_marker(&pause_c).await;
         match res {
             Ok(out) => {
+                let summary_dir = if out.trim().is_empty() {
+                    work_dir_c.clone()
+                } else {
+                    PathBuf::from(&out)
+                };
+                let summary = read_export_gate_summary(&summary_dir);
                 app_c
                     .emit(
                         "pipeline-complete",
-                        serde_json::json!({"success": true, "output_path": out, "job_id": job_c}),
+                        pipeline_complete_payload(&job_c, &out, summary),
                     )
                     .ok();
             }
@@ -528,7 +577,12 @@ pub async fn start_pipeline(
                 app_c
                     .emit(
                         "pipeline-complete",
-                        serde_json::json!({"success": false, "error": err, "job_id": job_c}),
+                        serde_json::json!({
+                            "success": false,
+                            "error": err,
+                            "job_id": job_c,
+                            "completion_status": "error"
+                        }),
                     )
                     .ok();
             }
@@ -536,6 +590,190 @@ pub async fn start_pipeline(
     });
 
     Ok(serde_json::json!({ "job_id": job_id }))
+}
+
+fn persistent_pipeline_worker_enabled() -> bool {
+    std::env::var("TRADUZAI_PIPELINE_FAST_WORKER")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn pipeline_complete_payload(
+    job_id: &str,
+    output_path: &str,
+    summary: ExportGateSummary,
+) -> serde_json::Value {
+    serde_json::json!({
+        "success": true,
+        "job_id": job_id,
+        "output_path": output_path,
+        "completion_status": summary.completion_status,
+        "export_gate": summary.export_gate,
+        "blocking_flags": summary.blocking_flags,
+        "review_flags": summary.review_flags,
+    })
+}
+
+fn read_export_gate_summary(work_dir: &Path) -> ExportGateSummary {
+    let root = if work_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("project.json"))
+        .unwrap_or(false)
+    {
+        work_dir.parent().unwrap_or(work_dir)
+    } else {
+        work_dir
+    };
+
+    if let Some(project) = read_json_file(&root.join("project.json")) {
+        let summary = export_gate_summary_from_project(&project);
+        if project.pointer("/qa/export_gate/status").is_some()
+            || summary.export_gate.status != "PASS"
+            || summary.export_gate.critical_issue_count > 0
+            || summary.export_gate.review_issue_count > 0
+        {
+            return summary;
+        }
+    }
+
+    if let Some(report) = read_json_file(&root.join("qa_report.json")) {
+        return export_gate_summary_from_report(&report);
+    }
+
+    ExportGateSummary::default()
+}
+
+fn read_json_file(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn export_gate_summary_from_project(project: &serde_json::Value) -> ExportGateSummary {
+    let qa = project.get("qa").unwrap_or(&serde_json::Value::Null);
+    let gate = qa.get("export_gate").unwrap_or(&serde_json::Value::Null);
+    let summary = qa.get("summary").unwrap_or(&serde_json::Value::Null);
+    export_gate_summary_from_parts(gate, summary, gate.get("issues"))
+}
+
+fn export_gate_summary_from_report(report: &serde_json::Value) -> ExportGateSummary {
+    let gate = report.get("export_gate").unwrap_or(&serde_json::Value::Null);
+    let summary = report.get("summary").unwrap_or(&serde_json::Value::Null);
+    let issues = gate.get("issues").or_else(|| report.get("issues"));
+    export_gate_summary_from_parts(gate, summary, issues)
+}
+
+fn export_gate_summary_from_parts(
+    gate: &serde_json::Value,
+    summary: &serde_json::Value,
+    issues: Option<&serde_json::Value>,
+) -> ExportGateSummary {
+    let mut status = gate
+        .get("status")
+        .or_else(|| summary.get("export_gate_status"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("PASS")
+        .to_ascii_uppercase();
+    let critical_issue_count = number_field(gate, &["critical_issue_count"])
+        .or_else(|| number_field(summary, &["critical_issue_count", "critical", "critical_count"]))
+        .unwrap_or(0);
+    let critical_flag_count = number_field(gate, &["critical_flag_count"])
+        .or_else(|| number_field(summary, &["critical_flag_count", "critical", "critical_count"]))
+        .unwrap_or(critical_issue_count);
+    let review_issue_count = number_field(gate, &["review_issue_count"])
+        .or_else(|| number_field(summary, &["review_issue_count", "high", "warning_count"]))
+        .unwrap_or(0);
+    if status == "PASS" && critical_issue_count > 0 {
+        status = "BLOCK".to_string();
+    }
+    let needs_review = gate
+        .get("needs_review")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(status == "BLOCK" || review_issue_count > 0);
+    let completion_status = match status.as_str() {
+        "BLOCK" => "blocked",
+        "OVERRIDDEN" => "overridden",
+        _ => "approved",
+    }
+    .to_string();
+
+    ExportGateSummary {
+        completion_status,
+        export_gate: ExportGateEventSummary {
+            status,
+            critical_issue_count,
+            critical_flag_count,
+            review_issue_count,
+            needs_review,
+        },
+        blocking_flags: collect_issue_flags(issues, IssueBucket::Critical),
+        review_flags: collect_issue_flags(issues, IssueBucket::Review),
+    }
+}
+
+fn number_field(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|field| field.as_u64()))
+}
+
+#[derive(Clone, Copy)]
+enum IssueBucket {
+    Critical,
+    Review,
+}
+
+fn collect_issue_flags(issues: Option<&serde_json::Value>, bucket: IssueBucket) -> Vec<String> {
+    let mut flags = Vec::new();
+    let Some(items) = issues.and_then(|value| value.as_array()) else {
+        return flags;
+    };
+    for issue in items {
+        let severity = issue
+            .get("severity")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let issue_type = issue
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let matches = match bucket {
+            IssueBucket::Critical => severity == "critical" || issue_type.starts_with("p0"),
+            IssueBucket::Review => severity == "high" || issue_type == "needs_review",
+        };
+        if !matches {
+            continue;
+        }
+        if let Some(issue_flags) = issue.get("flags").and_then(|value| value.as_array()) {
+            for flag in issue_flags.iter().filter_map(|flag| flag.as_str()) {
+                push_unique_flag(&mut flags, flag);
+            }
+        }
+        for key in ["flag", "flag_id", "type"] {
+            if let Some(flag) = issue.get(key).and_then(|value| value.as_str()) {
+                push_unique_flag(&mut flags, flag);
+            }
+        }
+        if flags.len() >= 8 {
+            break;
+        }
+    }
+    flags
+}
+
+fn push_unique_flag(flags: &mut Vec<String>, flag: &str) {
+    if flags.len() >= 8 || flag.trim().is_empty() {
+        return;
+    }
+    if !flags.iter().any(|existing| existing == flag) {
+        flags.push(flag.to_string());
+    }
 }
 
 async fn run_sidecar(
@@ -604,6 +842,46 @@ async fn run_sidecar(
         return Err(format!("Pipeline falhou ({}): {}", status, detail));
     }
     Ok(output_path)
+}
+
+async fn run_pipeline_with_fast_worker(
+    app: &AppHandle,
+    config_path: &std::path::Path,
+) -> Result<String, String> {
+    let config_text = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Erro ao ler config do pipeline: {e}"))?;
+    let mut request: serde_json::Value = serde_json::from_str(&config_text)
+        .map_err(|e| format!("Config do pipeline invalido: {e}"))?;
+    let request_object = request
+        .as_object_mut()
+        .ok_or_else(|| "Config do pipeline deve ser objeto JSON".to_string())?;
+    request_object.insert(
+        "type".to_string(),
+        serde_json::Value::String("process_page".to_string()),
+    );
+
+    let events = run_fast_page_worker_request(app, request).await?;
+    let mut output_path = String::new();
+    for event in events {
+        match event.get("type").and_then(|value| value.as_str()) {
+            Some("progress") => emit_progress_from_fast_worker_event(app, &event, "pipeline"),
+            Some("complete") => {
+                output_path = event["output_path"].as_str().unwrap_or("").to_string();
+            }
+            Some("error") => {
+                return Err(event["message"]
+                    .as_str()
+                    .unwrap_or("Erro desconhecido no fast worker")
+                    .to_string());
+            }
+            _ => {}
+        }
+    }
+    if output_path.is_empty() {
+        Err("fast worker nao retornou output_path para o pipeline".to_string())
+    } else {
+        Ok(output_path)
+    }
 }
 
 #[tauri::command]
@@ -727,6 +1005,40 @@ fn page_region_to_json(region: Option<&PageRegionConfig>) -> serde_json::Value {
         }),
         None => serde_json::Value::Null,
     }
+}
+
+fn editor_preload_request_json(
+    request_type: &str,
+    project_file: &Path,
+    page_index: u32,
+    idioma_origem: Option<&str>,
+    engine_preset_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": request_type,
+        "project_path": project_file.to_string_lossy().to_string(),
+        "page_index": page_index,
+        "idioma_origem": clean_language(idioma_origem).unwrap_or_else(|| "en".to_string()),
+        "engine_preset_id": clean_language(engine_preset_id).unwrap_or_default(),
+    })
+}
+
+fn editor_page_action_request_json(
+    request_type: &str,
+    project_file: &Path,
+    page_index: u32,
+    region: Option<&PageRegionConfig>,
+    engine_preset_id: Option<&str>,
+    idioma_origem: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": request_type,
+        "project_path": project_file.to_string_lossy().to_string(),
+        "page_index": page_index,
+        "region": page_region_to_json(region),
+        "engine_preset_id": clean_language(engine_preset_id).unwrap_or_default(),
+        "idioma_origem": clean_language(idioma_origem).unwrap_or_else(|| "en".to_string()),
+    })
 }
 
 fn safe_render_preview_key(raw: &str) -> String {
@@ -981,7 +1293,6 @@ async fn run_editor_page_action_with_fast_worker(
     engine_preset_id: Option<&str>,
     idioma_origem: Option<&str>,
 ) -> Result<String, FastPageRunError> {
-    let engine_preset = clean_language(engine_preset_id);
     let source_language = clean_language(idioma_origem)
         .or_else(|| {
             crate::commands::project_schema::load_project_value(project_file)
@@ -995,14 +1306,14 @@ async fn run_editor_page_action_with_fast_worker(
                 })
         })
         .unwrap_or_else(|| "en".to_string());
-    let request = serde_json::json!({
-        "type": request_type,
-        "project_path": project_file.to_string_lossy().to_string(),
-        "page_index": page_index,
-        "region": page_region_to_json(region),
-        "engine_preset_id": engine_preset,
-        "idioma_origem": source_language,
-    });
+    let request = editor_page_action_request_json(
+        request_type,
+        project_file,
+        page_index,
+        region,
+        engine_preset_id,
+        Some(&source_language),
+    );
     let events = run_fast_page_worker_request(app, request)
         .await
         .map_err(FastPageRunError::Worker)?;
@@ -1523,8 +1834,181 @@ pub async fn detect_page(
     project_path: String,
     page_index: u32,
     #[allow(non_snake_case)] idioma_origem: Option<String>,
+    engine_preset_id: Option<String>,
 ) -> Result<String, String> {
-    detect_page_with_region(app, project_path, page_index, None, None, idioma_origem).await
+    detect_page_with_region(
+        app,
+        project_path,
+        page_index,
+        None,
+        engine_preset_id,
+        idioma_origem,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn detect_boxes_page(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    #[allow(non_snake_case)] idioma_origem: Option<String>,
+    engine_preset_id: Option<String>,
+) -> Result<String, String> {
+    detect_boxes_page_with_region(
+        app,
+        project_path,
+        page_index,
+        None,
+        engine_preset_id,
+        idioma_origem,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preload_editor_vision_page(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    #[allow(non_snake_case)] idioma_origem: Option<String>,
+    engine_preset_id: Option<String>,
+    target: Option<String>,
+) -> Result<String, String> {
+    let pf = resolve_project_json_path(&project_path)?;
+    let target = target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("detect_ocr");
+    let request_type = match target {
+        "ocr_layers" => "editor_preload_ocr_layers",
+        _ => "editor_preload_detect_ocr",
+    };
+    let detect_request = editor_preload_request_json(
+        request_type,
+        &pf,
+        page_index,
+        idioma_origem.as_deref(),
+        engine_preset_id.as_deref(),
+    );
+    let events = run_fast_page_worker_request(&app, detect_request).await?;
+
+    for event in &events {
+        if event.get("type").and_then(|value| value.as_str()) == Some("error") {
+            let message = event["message"].as_str().unwrap_or("Erro Python");
+            return Err(format_pipeline_error("preload", message, ""));
+        }
+    }
+
+    if events
+        .iter()
+        .any(|event| event.get("type").and_then(|value| value.as_str()) == Some("ready"))
+    {
+        Ok("ready".to_string())
+    } else {
+        Ok("queued".to_string())
+    }
+}
+
+pub async fn detect_boxes_page_with_region(
+    app: AppHandle,
+    project_path: String,
+    page_index: u32,
+    region: Option<PageRegionConfig>,
+    engine_preset_id: Option<String>,
+    idioma_origem: Option<String>,
+) -> Result<String, String> {
+    let pf = resolve_project_json_path(&project_path)?;
+    match run_editor_page_action_with_fast_worker(
+        &app,
+        "editor_detect_boxes_page",
+        "detect_boxes",
+        "detect",
+        &pf,
+        page_index,
+        region.as_ref(),
+        engine_preset_id.as_deref(),
+        idioma_origem.as_deref(),
+    )
+    .await
+    {
+        Ok(out) => {
+            eprintln!(
+                "[EditorAction] success detect_boxes page={} out={} worker=fast",
+                page_index, out
+            );
+            return Ok(out);
+        }
+        Err(FastPageRunError::Action(error)) => return Err(error),
+        Err(FastPageRunError::Worker(error)) => {
+            eprintln!(
+                "[EditorAction] warn   fast detect_boxes worker indisponivel; usando sidecar unico: {error}"
+            );
+        }
+    }
+
+    let sidecar = get_sidecar_info(&app)?;
+    let mut cmd = Command::new(&sidecar.program);
+    if let Some(s) = &sidecar.script {
+        cmd.arg(s);
+    }
+    cmd.arg("--detect-boxes-page")
+        .arg(pf.to_string_lossy().to_string())
+        .arg(page_index.to_string());
+    append_page_region_args(&mut cmd, region.as_ref());
+    append_page_engine_args(&mut cmd, engine_preset_id.as_deref());
+    append_page_language_args(&mut cmd, idioma_origem.as_deref(), None);
+    apply_sidecar_env(&mut cmd, &sidecar.program)?;
+    eprintln!("[EditorAction] start  detect_boxes page={page_index}");
+    let (mut child, stderr_handle) = spawn_with_stderr_capture(cmd, "detect_boxes")?;
+    let stdout = child.stdout.take().expect("stdout not captured");
+    let mut reader = BufReader::new(stdout).lines();
+    let mut out = String::new();
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(t) = msg.get("type").and_then(|t| t.as_str()) {
+                match t {
+                    "progress" => {
+                        let prog = PipelineProgress {
+                            step: msg["step"].as_str().unwrap_or("detect").to_string(),
+                            step_progress: msg["step_progress"].as_f64().unwrap_or(0.0),
+                            overall_progress: msg["overall_progress"].as_f64().unwrap_or(0.0),
+                            current_page: msg["current_page"].as_u64().unwrap_or(0) as u32,
+                            total_pages: msg["total_pages"].as_u64().unwrap_or(0) as u32,
+                            message: msg["message"].as_str().unwrap_or("").to_string(),
+                            eta_seconds: msg["eta_seconds"].as_f64().unwrap_or(0.0),
+                        };
+                        app.emit("pipeline-progress", prog).ok();
+                    }
+                    "complete" => {
+                        out = msg["output_path"].as_str().unwrap_or("").to_string();
+                    }
+                    "error" => {
+                        let stderr_text = collect_stderr(stderr_handle).await;
+                        let base = msg["message"].as_str().unwrap_or("Erro Python");
+                        let err = format_pipeline_error("detect_boxes", base, &stderr_text);
+                        eprintln!("[EditorAction] error  detect_boxes: {base}");
+                        return Err(err);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        let stderr_text = collect_stderr(stderr_handle).await;
+        let err = format_pipeline_error(
+            "detect_boxes",
+            &format!("processo encerrou com status {status}"),
+            &stderr_text,
+        );
+        eprintln!("[EditorAction] error  detect_boxes status={status}");
+        return Err(err);
+    }
+    eprintln!("[EditorAction] success detect_boxes page={page_index} out={out}");
+    Ok(out)
 }
 
 pub async fn detect_page_with_region(
@@ -2891,6 +3375,122 @@ mod tests {
         assert!(!is_project_summary_mismatch(
             "Falha no reinpaint: modelo indisponivel"
         ));
+    }
+
+    #[test]
+    fn pipeline_complete_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = serde_json::json!({
+            "qa": {
+                "summary": {
+                    "critical_issue_count": 1,
+                    "review_issue_count": 2
+                },
+                "export_gate": {
+                    "status": "BLOCK",
+                    "critical_issue_count": 1,
+                    "critical_flag_count": 1,
+                    "review_issue_count": 2,
+                    "needs_review": true,
+                    "issues": [
+                        {
+                            "type": "p0_render_blocker",
+                            "severity": "critical",
+                            "flags": ["visual_text_leak"]
+                        },
+                        {
+                            "type": "needs_review",
+                            "severity": "high",
+                            "flags": ["ocr_suspect"]
+                        }
+                    ]
+                }
+            }
+        });
+        std::fs::write(
+            temp.path().join("project.json"),
+            serde_json::to_vec(&project).expect("project json"),
+        )
+        .expect("write project");
+
+        let summary = super::read_export_gate_summary(temp.path());
+        let payload = super::pipeline_complete_payload("job-1", "N:/out", summary);
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["job_id"], "job-1");
+        assert_eq!(payload["output_path"], "N:/out");
+        assert_eq!(payload["completion_status"], "blocked");
+        assert_eq!(payload["export_gate"]["status"], "BLOCK");
+        assert_eq!(payload["export_gate"]["critical_issue_count"], 1);
+        assert_eq!(payload["export_gate"]["critical_flag_count"], 1);
+        assert_eq!(payload["export_gate"]["review_issue_count"], 2);
+        assert_eq!(payload["export_gate"]["needs_review"], true);
+        assert_eq!(payload["blocking_flags"][0], "visual_text_leak");
+        assert_eq!(payload["review_flags"][0], "ocr_suspect");
+    }
+
+    #[test]
+    fn editor_preload_request_json_uses_project_file_language_and_engine() {
+        let project_file = std::path::Path::new("N:/work/project.json");
+        let request = super::editor_preload_request_json(
+            "editor_preload_detect_ocr",
+            project_file,
+            7,
+            Some("ja"),
+            Some("manga"),
+        );
+
+        assert_eq!(request["type"], "editor_preload_detect_ocr");
+        assert_eq!(request["page_index"], 7);
+        assert_eq!(request["idioma_origem"], "ja");
+        assert_eq!(request["engine_preset_id"], "manga");
+        assert!(request["project_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("project.json"));
+    }
+
+    #[test]
+    fn editor_page_action_request_json_supports_detect_boxes() {
+        let project_file = std::path::Path::new("N:/work/project.json");
+        let region = super::PageRegionConfig {
+            bbox: Some([10, 20, 30, 40]),
+            mask_path: Some("mask.png".to_string()),
+        };
+        let request = super::editor_page_action_request_json(
+            "editor_detect_boxes_page",
+            project_file,
+            2,
+            Some(&region),
+            Some("manhwa_manhua"),
+            Some("ko"),
+        );
+
+        assert_eq!(request["type"], "editor_detect_boxes_page");
+        assert_eq!(request["page_index"], 2);
+        assert_eq!(request["region"]["bbox"][0], 10);
+        assert_eq!(request["region"]["mask_path"], "mask.png");
+        assert_eq!(request["engine_preset_id"], "manhwa_manhua");
+        assert_eq!(request["idioma_origem"], "ko");
+    }
+
+    #[test]
+    fn editor_page_action_request_json_keeps_default_engine_for_detect() {
+        let project_file = std::path::Path::new("N:/work/project.json");
+        let request = super::editor_page_action_request_json(
+            "editor_detect_page",
+            project_file,
+            4,
+            None,
+            Some("default"),
+            Some("ja"),
+        );
+
+        assert_eq!(request["type"], "editor_detect_page");
+        assert_eq!(request["page_index"], 4);
+        assert!(request["region"].is_null());
+        assert_eq!(request["engine_preset_id"], "default");
+        assert_eq!(request["idioma_origem"], "ja");
     }
 
     #[test]

@@ -1,0 +1,50 @@
+{
+  "manifest_version": 1,
+  "run_id": "chapter_1",
+  "run_path": "N:/TraduzAI/DEBUGM/runs/2026-05-25_chapter1_global_text_ocr_fixes_v4i/chapter1_full",
+  "ci_fixture": false,
+  "schema_version": 12,
+  "current_issue_classes": [
+    "compact_small_text_capacity",
+    "cover_logo_or_art_ocr",
+    "decorative_noise",
+    "edge_clipped_short_text_anchor_position",
+    "mask_density_high",
+    "mask_outside_balloon",
+    "ocr_needs_review",
+    "ocr_run_on_suspect",
+    "suspicious_art_ocr",
+    "tiny_bubble_inner_bbox_rejected",
+    "weak_text_residual_after_inpaint"
+  ],
+  "target_issue_classes_after_fix": [
+    "PASS_or_REVIEW_without_BLOCK",
+    "waive_known_review_flags_explicitly"
+  ],
+  "pages_of_interest": [
+    1,
+    2,
+    6
+  ],
+  "sample_artifacts": [
+    {
+      "page": 1,
+      "issue_class": "compact_small_text_capacity",
+      "crop_path": "debug/e2e/08_inpaint/page_001_band_000/00_band_original.jpg"
+    }
+  ],
+  "baseline_total_sec": 86.5092,
+  "qa_report_sha256_at_record_time": "926a1a11878705a045b0347db815527e3ccb9ea64cefe93f7e7ac0dcf1b467ed",
+  "waivers": [
+    {
+      "waiver_id": "debug_2026_05_26_chapter_1_review_flags",
+      "flag": "known_review_flags",
+      "scope": "debug_only",
+      "reason": "fixture records known visual review classes while the target is PASS or REVIEW after fixes",
+      "expires": "2026-06-15",
+      "approved_by": "codex-r4.3"
+    }
+  ],
+  "recorded_at": "2026-05-26",
+  "recorded_by": "codex-r4.3"
+}

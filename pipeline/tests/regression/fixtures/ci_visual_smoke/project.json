@@ -1,0 +1,34 @@
+{
+  "schema_version": 12,
+  "qa": {
+    "export_gate": {
+      "status": "PASS",
+      "issues": [
+        {
+          "page": 1,
+          "flag": "TEXT_CLIPPED",
+          "severity": "warning",
+          "artifact_links": [
+            "debug/e2e/09_typeset/page_001_text_clipped.png"
+          ]
+        }
+      ]
+    },
+    "issues": [],
+    "summary": {}
+  },
+  "paginas": [
+    {
+      "numero": 1,
+      "page_id": "page_001",
+      "text_layers": [
+        {
+          "id": "fixture_001",
+          "qa_flags": [
+            "TEXT_CLIPPED"
+          ]
+        }
+      ]
+    }
+  ]
+}

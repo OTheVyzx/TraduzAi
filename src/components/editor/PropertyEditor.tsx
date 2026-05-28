@@ -1,5 +1,7 @@
 import { useEditorStore } from "../../lib/stores/editorStore";
 import { buildEditorScene } from "../../lib/editorScene";
+import { ensureEditorFontOptionReady, type EditorFontOption } from "../../lib/fontCatalog";
+import { EditorFontPicker } from "./EditorFontPicker";
 import {
   AlignLeft,
   AlignCenter,
@@ -13,13 +15,6 @@ import {
   Link2Off,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-
-const AVAILABLE_FONTS = [
-  "ComicNeue-Bold.ttf",
-  "Newrotic.ttf",
-  "CCDaveGibbonsLower W00 Regular.ttf",
-  "KOMIKAX_.ttf",
-];
 
 function Section({
   title,
@@ -86,6 +81,7 @@ export function PropertyEditor() {
 
   const updateEdit = useEditorStore((s) => s.updatePendingEdit);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
+  const [loadingFont, setLoadingFont] = useState<string | null>(null);
 
   const selectedLayer = useMemo(
     () => buildEditorScene({ page: currentPage, pendingEdits, selectedLayerId }).selectedTextLayer,
@@ -102,6 +98,7 @@ export function PropertyEditor() {
       </div>
     );
   }
+  const activeLayerId = selectedLayerId;
 
   const traduzido = entry.displayText;
   const original = entry.displayOriginal;
@@ -115,6 +112,18 @@ export function PropertyEditor() {
       : confidencePercent >= 50
         ? "text-status-warning"
         : "text-status-error";
+
+  async function handleFontChange(value: string, option?: EditorFontOption) {
+    setLoadingFont(value);
+    try {
+      await ensureEditorFontOptionReady(option ?? value);
+      updateEstilo(activeLayerId, { fonte: value });
+    } catch (error) {
+      console.warn("[fonts] falha ao preparar fonte do editor:", error);
+    } finally {
+      setLoadingFont(null);
+    }
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -224,19 +233,12 @@ export function PropertyEditor() {
       <Section title="Estilo" defaultOpen={false}>
         <div>
           <Label>Fonte</Label>
-          <select
+          <EditorFontPicker
             value={estilo.fonte}
-            title="Selecionar fonte"
-            onChange={(e) => updateEstilo(selectedLayerId, { fonte: e.target.value })}
-            className="w-full px-2 py-1.5 bg-bg-tertiary/60 border border-border rounded-md text-[11px]
-              text-text-primary focus:border-brand/40 focus:outline-none transition-smooth"
-          >
-            {AVAILABLE_FONTS.map((f) => (
-              <option key={f} value={f}>
-                {f.replace(/\.(ttf|otf)$/i, "")}
-              </option>
-            ))}
-          </select>
+            loadingFont={loadingFont}
+            onChange={handleFontChange}
+            variant="panel"
+          />
         </div>
 
         <div className="grid grid-cols-2 gap-1.5">

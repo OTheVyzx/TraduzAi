@@ -15,6 +15,13 @@ import type {
 import type { InternetContextCandidate, InternetContextSourceResult } from "./internetContext";
 import { canonicalizeTextStyle } from "./editorTextStylePolicy";
 import type { EditorTextStylePreset } from "./editorTextStylePresets";
+import type {
+  OutputReviewState,
+  PipelineCompleteEvent,
+  PipelineExportGateSummary,
+} from "./pipelineCompletion";
+
+export type { PipelineCompleteEvent, PipelineExportGateSummary } from "./pipelineCompletion";
 
 export function isE2E() {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
@@ -32,6 +39,13 @@ export interface ProjectJson {
   source_path?: string;
   output_path?: string;
   _work_dir?: string;
+  output_review_state?: OutputReviewState;
+  completion_status?: PipelineCompleteEvent["completion_status"];
+  export_gate?: PipelineExportGateSummary;
+  blocking_flags?: string[];
+  review_flags?: string[];
+  needs_review?: boolean;
+  qa?: unknown;
   contexto?: Partial<ProjectContext>;
   work_context?: Partial<WorkContextSummary>;
   preset?: unknown;
@@ -64,6 +78,31 @@ export interface StoragePaths {
   models: string;
   projects: string;
   settings: string;
+}
+
+export interface CacheGoogleFontInput {
+  family: string;
+  css_family: string;
+  variant: string;
+  url: string;
+  filename: string;
+}
+
+export interface CachedGoogleFont {
+  family: string;
+  css_family: string;
+  variant: string;
+  filename: string;
+  path: string;
+}
+
+export interface GoogleFontSearchResult {
+  family: string;
+  css_family: string;
+  variant: string;
+  filename: string;
+  download_url: string;
+  category?: string | null;
 }
 
 export type WorkContextQuality = "empty" | "partial" | "reviewed";
@@ -158,12 +197,14 @@ export function buildPlainPageCommandArgs(args: {
   page_index: number;
   idioma_origem?: string;
   idioma_destino?: string;
+  engine_preset_id?: string;
 }) {
   return {
     projectPath: args.project_path,
     pageIndex: args.page_index,
     idiomaOrigem: args.idioma_origem,
     idiomaDestino: args.idioma_destino,
+    enginePresetId: args.engine_preset_id,
   };
 }
 
@@ -601,6 +642,22 @@ export async function downloadModels(): Promise<void> {
   return invoke("download_models");
 }
 
+export async function cacheGoogleFont(input: CacheGoogleFontInput): Promise<CachedGoogleFont> {
+  if (isE2E()) return tauriMock.cacheGoogleFont(input);
+  return invoke<CachedGoogleFont>("cache_google_font", {
+    family: input.family,
+    cssFamily: input.css_family,
+    variant: input.variant,
+    url: input.url,
+    filename: input.filename,
+  });
+}
+
+export async function searchGoogleFonts(query: string): Promise<GoogleFontSearchResult[]> {
+  if (isE2E()) return tauriMock.searchGoogleFonts(query);
+  return invoke<GoogleFontSearchResult[]>("search_google_fonts", { query });
+}
+
 export async function onModelsProgress(
   callback: (data: { step: string; message: string }) => void
 ) {
@@ -976,6 +1033,7 @@ export async function startPipeline(config: {
   source_path: string;
   mode: "auto" | "manual";
   obra: string;
+  work_title_user_provided?: boolean;
   capitulo: number;
   idioma_origem: string;
   idioma_destino: string;
@@ -1015,8 +1073,36 @@ export async function renderPreviewPage(args: {
   return await invoke("render_preview_page", { config: args });
 }
 
-export async function detectPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string> {
+export async function detectPage(args: {
+  project_path: string;
+  page_index: number;
+  idioma_origem?: string;
+  engine_preset_id?: string;
+}): Promise<string> {
   return await invoke("detect_page", buildPlainPageCommandArgs(args));
+}
+
+export async function detectBoxesPage(args: {
+  project_path: string;
+  page_index: number;
+  idioma_origem?: string;
+  engine_preset_id?: string;
+}): Promise<string> {
+  return await invoke("detect_boxes_page", buildPlainPageCommandArgs(args));
+}
+
+export async function preloadEditorVisionPage(args: {
+  project_path: string;
+  page_index: number;
+  idioma_origem?: string;
+  engine_preset_id?: string;
+  target?: "detect_ocr" | "ocr_layers";
+}): Promise<string> {
+  return await invoke("preload_editor_vision_page", {
+    ...buildPlainPageCommandArgs(args),
+    enginePresetId: args.engine_preset_id,
+    target: args.target,
+  });
 }
 
 export async function ocrPage(args: { project_path: string; page_index: number; idioma_origem?: string }): Promise<string> {
@@ -1075,10 +1161,10 @@ export async function onPipelineProgress(
 }
 
 export async function onPipelineComplete(
-  callback: (result: { success: boolean; output_path: string; error?: string }) => void
+  callback: (result: PipelineCompleteEvent) => void
 ) {
   if (isE2E()) return tauriMock.onPipelineComplete(callback);
-  return listen<{ success: boolean; output_path: string; error?: string }>("pipeline-complete", (event) => {
+  return listen<PipelineCompleteEvent>("pipeline-complete", (event) => {
     callback(event.payload);
   });
 }
@@ -1414,7 +1500,7 @@ export type PageActionMode = "global" | "regional";
 export type ChangedAsset = "brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json";
 
 export type PageActionResult = {
-  action: "detect" | "ocr" | "translate" | "inpaint";
+  action: "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
   mode: PageActionMode;
   bbox?: [number, number, number, number] | null;
   changed_assets: ChangedAsset[];
@@ -1433,7 +1519,7 @@ export type ProcessRegionResult = {
 export async function runPageActionWithOptionalMask(config: {
   project_path: string;
   page_index: number;
-  action: "detect" | "ocr" | "translate" | "inpaint";
+  action: "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
   bbox?: [number, number, number, number] | null;
   mask_path?: string | null;
   engine_preset_id?: "manga" | "manhwa_manhua" | "default" | string;

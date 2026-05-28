@@ -1,21 +1,32 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Home } from "./pages/Home";
-import { Setup } from "./pages/Setup";
-import { Processing } from "./pages/Processing";
-import { Preview } from "./pages/Preview";
-import { Settings } from "./pages/Settings";
-import { Editor } from "./pages/Editor";
-import { Lab } from "./pages/Lab";
 import { Layout } from "./components/ui/Layout";
 import { BootSplash } from "./components/ui/BootSplash";
 import { useAppStore } from "./lib/stores/appStore";
-import { checkModels, getCredits, getSystemProfile, onPipelineProgress } from "./lib/tauri";
+import { checkModels, getCredits, getSystemProfile, onPipelineProgress, warmupVisualStack } from "./lib/tauri";
 import { installE2EFixtureProject } from "./lib/e2e/fixtureProject";
 import { FEATURES } from "./lib/features";
 import { applyAppPreferences, getAppPreferences, watchSystemTheme } from "./lib/appPreferences";
 
 const LAB_WINDOW_MODE_KEY = "traduzai-window-mode";
+const Setup = lazy(() => import("./pages/Setup").then((module) => ({ default: module.Setup })));
+const Processing = lazy(() => import("./pages/Processing").then((module) => ({ default: module.Processing })));
+const Preview = lazy(() => import("./pages/Preview").then((module) => ({ default: module.Preview })));
+const Settings = lazy(() => import("./pages/Settings").then((module) => ({ default: module.Settings })));
+const Editor = lazy(() => import("./pages/Editor").then((module) => ({ default: module.Editor })));
+const Lab = lazy(() => import("./pages/Lab").then((module) => ({ default: module.Lab })));
+
+function RouteFallback() {
+  return <BootSplash progress={0.32} message="Carregando tela..." />;
+}
+
+function isTauriRuntime() {
+  return (
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+  );
+}
 
 function AppRoutes() {
   const location = useLocation();
@@ -44,51 +55,55 @@ function AppRoutes() {
 
   if (standaloneLab) {
     return (
-      <Routes>
-        <Route
-          path="/lab/*"
-          element={
-            <div className="h-screen overflow-y-auto overflow-x-hidden bg-bg-primary bg-noise">
-              <Lab />
-            </div>
-          }
-        />
-        <Route
-          path="*"
-          element={
-            <Navigate
-              to={{ pathname: "/lab/home", search: "?window=lab" }}
-              replace
-            />
-          }
-        />
-      </Routes>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route
+            path="/lab/*"
+            element={
+              <div className="h-screen overflow-y-auto overflow-x-hidden bg-bg-primary bg-noise">
+                <Lab />
+              </div>
+            }
+          />
+          <Route
+            path="*"
+            element={
+              <Navigate
+                to={{ pathname: "/lab/home", search: "?window=lab" }}
+                replace
+              />
+            }
+          />
+        </Routes>
+      </Suspense>
     );
   }
 
   return (
-    <Routes>
-      <Route path="/editor" element={<Editor />} />
-      <Route
-        path="/*"
-        element={
-          <Layout>
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/setup" element={<Setup />} />
-              <Route path="/processing" element={<Processing />} />
-              <Route path="/preview" element={<Preview />} />
-              {FEATURES.lab ? (
-                <Route path="/lab/*" element={<Lab />} />
-              ) : (
-                <Route path="/lab/*" element={<Navigate to="/" replace />} />
-              )}
-              <Route path="/settings" element={<Settings />} />
-            </Routes>
-          </Layout>
-        }
-      />
-    </Routes>
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
+        <Route path="/editor" element={<Editor />} />
+        <Route
+          path="/*"
+          element={
+            <Layout>
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/setup" element={<Setup />} />
+                <Route path="/processing" element={<Processing />} />
+                <Route path="/preview" element={<Preview />} />
+                {FEATURES.lab ? (
+                  <Route path="/lab/*" element={<Lab />} />
+                ) : (
+                  <Route path="/lab/*" element={<Navigate to="/" replace />} />
+                )}
+                <Route path="/settings" element={<Settings />} />
+              </Routes>
+            </Layout>
+          }
+        />
+      </Routes>
+    </Suspense>
   );
 }
 
@@ -97,11 +112,6 @@ export default function App() {
   const setSystemProfile = useAppStore((s) => s.setSystemProfile);
   const setModelsReady = useAppStore((s) => s.setModelsReady);
   const setCredits = useAppStore((s) => s.setCredits);
-  const [bootState, setBootState] = useState({
-    ready: e2eMode,
-    progress: e2eMode ? 1 : 0.08,
-    message: e2eMode ? "Pronto" : "Preparando ambiente...",
-  });
 
   const setPipeline = useAppStore((s) => s.setPipeline);
   const appendPipelineLog = useAppStore((s) => s.appendPipelineLog);
@@ -142,110 +152,48 @@ export default function App() {
 
   useEffect(() => {
     if (e2eMode) return;
+    if (!isTauriRuntime()) return;
     let cancelled = false;
-    let revealTimer: number | null = null;
-    let completedSteps = 0;
-    const totalSteps = 3;
+    const initTimer = window.setTimeout(() => {
+      const tasks = [
+        getSystemProfile()
+          .then((systemProfile) => {
+            if (!cancelled) setSystemProfile(systemProfile);
+          })
+          .catch((error) => {
+            console.error("[TraduzAi] System profile init error:", error);
+          }),
+        checkModels()
+          .then((models) => {
+            if (!cancelled) setModelsReady(models.ready);
+          })
+          .catch((error) => {
+            console.error("[TraduzAi] Models init error:", error);
+          }),
+        getCredits()
+          .then((credits) => {
+            if (!cancelled) setCredits(credits.credits, credits.weekly_used);
+          })
+          .catch((error) => {
+            console.error("[TraduzAi] Credits init error:", error);
+          }),
+      ];
 
-    const markStep = (message: string) => {
-      completedSteps += 1;
+      void Promise.allSettled(tasks);
+    }, 250);
+    const warmupTimer = window.setTimeout(() => {
       if (cancelled) return;
-      setBootState({
-        ready: false,
-        progress: Math.min(0.94, 0.12 + (completedSteps / totalSteps) * 0.78),
-        message,
+      warmupVisualStack().catch((error) => {
+        console.error("[TraduzAi] Warmup visual em segundo plano falhou:", error);
       });
-    };
+    }, 2000);
 
-    async function init() {
-      setBootState({
-        ready: false,
-        progress: 0.12,
-        message: "Carregando servicos locais...",
-      });
-
-      try {
-        const tasks = [
-          getSystemProfile()
-            .then((systemProfile) => {
-              if (cancelled) return;
-              setSystemProfile(systemProfile);
-              markStep("Hardware carregado");
-            })
-            .catch((error) => {
-              console.error("[TraduzAi] System profile init error:", error);
-              markStep("Hardware indisponivel");
-            }),
-          checkModels()
-            .then((models) => {
-              if (cancelled) return;
-              setModelsReady(models.ready);
-              markStep(models.ready ? "Modelos locais prontos" : "Modelos locais verificados");
-            })
-            .catch((error) => {
-              console.error("[TraduzAi] Models init error:", error);
-              markStep("Modelos locais verificados");
-            }),
-          getCredits()
-            .then((credits) => {
-              if (cancelled) return;
-              setCredits(credits.credits, credits.weekly_used);
-              markStep("Creditos sincronizados");
-            })
-            .catch((error) => {
-              console.error("[TraduzAi] Credits init error:", error);
-              markStep("Creditos indisponiveis");
-            }),
-        ];
-
-        await Promise.allSettled(tasks);
-
-        if (cancelled) return;
-        setBootState({
-          ready: false,
-          progress: 1,
-          message: "Entrando no app...",
-        });
-        revealTimer = window.setTimeout(() => {
-          if (cancelled) return;
-          setBootState({
-            ready: true,
-            progress: 1,
-            message: "Pronto",
-          });
-        }, 180);
-      } catch (err) {
-        console.error("[TraduzAi] Init error:", err);
-        if (!cancelled) {
-          setBootState({
-            ready: false,
-            progress: 1,
-            message: "Entrando no app...",
-          });
-          revealTimer = window.setTimeout(() => {
-            if (cancelled) return;
-            setBootState({
-              ready: true,
-              progress: 1,
-              message: "Pronto",
-            });
-          }, 180);
-        }
-      }
-    }
-
-    init();
     return () => {
       cancelled = true;
-      if (revealTimer !== null) {
-        window.clearTimeout(revealTimer);
-      }
+      window.clearTimeout(initTimer);
+      window.clearTimeout(warmupTimer);
     };
   }, [e2eMode, setCredits, setModelsReady, setSystemProfile]);
-
-  if (!bootState.ready) {
-    return <BootSplash progress={bootState.progress} message={bootState.message} />;
-  }
 
   return (
     <BrowserRouter>

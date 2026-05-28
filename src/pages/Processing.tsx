@@ -39,6 +39,7 @@ function AnimContainer({ name, dur, delay, ease, fill, children, className }: { 
 }
 import {
   CheckCircle2,
+  AlertTriangle,
   Loader2,
   Circle,
   XCircle,
@@ -83,6 +84,12 @@ import {
   shouldLeaveProcessingForCompletedProject,
 } from "../lib/projectSourceGuards";
 import { resolveEnginePresetId } from "../lib/projectPresets";
+import {
+  deriveCompletionProjectStatus,
+  outputReviewStateForCompletion,
+  type OutputReviewState,
+  type PipelineCompleteEvent,
+} from "../lib/pipelineCompletion";
 
 interface CompletionData {
   obra: string;
@@ -93,6 +100,11 @@ interface CompletionData {
   firstPagePath: string | null;
   paginas: PageData[];
   qaSummary: ProcessingQaSummary | null;
+  projectStatus: "done" | "done_blocked" | "needs_review";
+  outputReviewState: OutputReviewState;
+  exportGate: PipelineCompleteEvent["export_gate"] | null;
+  blockingFlags: string[];
+  reviewFlags: string[];
 }
 
 async function getTauriProcessingApi() {
@@ -323,6 +335,7 @@ export function Processing() {
           source_path: currentPath,
           mode: project.mode,
           obra: project.obra,
+          work_title_user_provided: project.obra.trim().length > 0,
           capitulo: currentChapter,
           idioma_origem: project.idioma_origem,
           idioma_destino: project.idioma_destino,
@@ -393,10 +406,13 @@ export function Processing() {
 
       unlistenComplete = (await onPipelineComplete(async (result) => {
         if (disposed) return;
+        const blockedByEvent = result.completion_status === "blocked" || result.export_gate?.status === "BLOCK";
         appendPipelineLog({
-          level: result.success ? "success" : "error",
+          level: result.success ? (blockedByEvent ? "error" : "success") : "error",
           message: result.success
-            ? `Capítulo concluído — saída em ${result.output_path}`
+            ? blockedByEvent
+              ? `Preview bloqueado pelo QA visual — saída em ${result.output_path}`
+              : `Capítulo concluído — saída em ${result.output_path}`
             : `Pipeline falhou: ${result.error ?? "erro desconhecido"}`,
         });
         if (result.success) {
@@ -407,6 +423,17 @@ export function Processing() {
             const qaSummary = await loadProcessingQaSummary(outputDir);
             const paginas: PageData[] = raw.paginas ?? [];
             const firstPagePath = firstTranslatedPagePath(paginas[0], outputDir);
+            const derivedProjectStatus = deriveCompletionProjectStatus(result, raw);
+            const projectStatus =
+              derivedProjectStatus === "done_blocked" || derivedProjectStatus === "needs_review"
+                ? derivedProjectStatus
+                : "done";
+            const completionStatus = result.completion_status ?? (projectStatus === "done_blocked" ? "blocked" : "approved");
+            const outputReviewState =
+              raw.output_review_state ?? outputReviewStateForCompletion(completionStatus);
+            const exportGate = result.export_gate ?? raw.export_gate ?? null;
+            const blockingFlags = result.blocking_flags ?? raw.blocking_flags ?? [];
+            const reviewFlags = result.review_flags ?? raw.review_flags ?? [];
 
             const chapterNum = raw.capitulo || project?.capitulo || 1;
             const obra = raw.obra || project?.obra || "Projeto";
@@ -421,6 +448,9 @@ export function Processing() {
               first_page_path: firstPagePath,
               cover_url: coverUrl,
               paginas,
+              status: projectStatus,
+              critical_issue_count: exportGate?.critical_issue_count ?? blockingFlags.length,
+              review_issue_count: exportGate?.review_issue_count ?? reviewFlags.length,
             };
 
             addRecentProject({
@@ -429,9 +459,12 @@ export function Processing() {
               capitulo: chapterNum,
               pages: paginas.length,
               date: new Date().toISOString(),
-              status: "done",
+              status: projectStatus,
               project_path: outputDir,
               output_path: outputDir,
+              output_review_state: outputReviewState,
+              critical_issue_count: exportGate?.critical_issue_count ?? blockingFlags.length,
+              review_issue_count: exportGate?.review_issue_count ?? reviewFlags.length,
             });
 
             const isBatch = batchSources.length > 0;
@@ -459,9 +492,17 @@ export function Processing() {
                 ? Math.max(1, Math.floor((Date.now() - startedAt - pausedMs) / 1000))
                 : 0;
               updateProject({
-                status: "done",
+                status: projectStatus,
                 paginas,
                 output_path: outputDir,
+                qa: raw.qa,
+                output_review_state: outputReviewState,
+                completion_status: completionStatus,
+                export_gate: exportGate ?? undefined,
+                blocking_flags: blockingFlags,
+                review_flags: reviewFlags,
+                critical_issue_count: exportGate?.critical_issue_count ?? blockingFlags.length,
+                review_issue_count: exportGate?.review_issue_count ?? reviewFlags.length,
                 obra,
                 capitulo: chapterNum,
               });
@@ -509,6 +550,11 @@ export function Processing() {
                 firstPagePath,
                 paginas,
                 qaSummary,
+                projectStatus,
+                outputReviewState,
+                exportGate,
+                blockingFlags,
+                reviewFlags,
               });
             }
           } catch (e) {
@@ -1149,6 +1195,8 @@ function ChapterCompletionScreen({
 }) {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const loadedImageRevokeRef = useRef<(() => void) | null>(null);
+  const isBlocked = data.projectStatus === "done_blocked";
+  const criticalCount = data.exportGate?.critical_issue_count ?? data.blockingFlags.length;
 
   useEffect(() => {
     let cancelled = false;
@@ -1230,19 +1278,33 @@ function ChapterCompletionScreen({
       `}</style>
 
       {/* Ambient glow */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(ellipse_at_top,_rgba(72,225,120,0.10),_transparent_55%)]" />
+      <div
+        className={`pointer-events-none absolute inset-x-0 top-0 h-72 ${
+          isBlocked
+            ? "bg-[radial-gradient(ellipse_at_top,_rgba(255,78,78,0.12),_transparent_55%)]"
+            : "bg-[radial-gradient(ellipse_at_top,_rgba(72,225,120,0.10),_transparent_55%)]"
+        }`}
+      />
 
       <div className="relative w-full max-w-md">
-        {/* Success icon */}
+        {/* Status icon */}
         <div className="mb-6 flex justify-center">
           <AnimContainer
             name="successPop"
             dur="0.55s"
             ease="cubic-bezier(0.34,1.56,0.64,1)"
             fill="forwards"
-            className="flex h-16 w-16 items-center justify-center rounded-pill bg-status-success/15 shadow-[0_0_32px_rgba(72,225,120,0.18)] dynamic-animation"
+            className={`flex h-16 w-16 items-center justify-center rounded-pill dynamic-animation ${
+              isBlocked
+                ? "bg-status-error/15 shadow-[0_0_32px_rgba(255,78,78,0.18)]"
+                : "bg-status-success/15 shadow-[0_0_32px_rgba(72,225,120,0.18)]"
+            }`}
           >
-            <CheckCircle2 size={32} className="text-status-success" />
+            {isBlocked ? (
+              <AlertTriangle size={32} className="text-status-error" />
+            ) : (
+              <CheckCircle2 size={32} className="text-status-success" />
+            )}
           </AnimContainer>
         </div>
 
@@ -1255,11 +1317,26 @@ function ChapterCompletionScreen({
           fill="both"
           className="mb-6 text-center dynamic-animation"
         >
-          <h2 className="text-2xl font-semibold text-text-primary">Capítulo concluído!</h2>
+          <h2 className="text-2xl font-semibold text-text-primary">
+            {isBlocked ? "Preview bloqueado" : "Capítulo concluído!"}
+          </h2>
           <p className="mt-1 text-text-secondary">
             {data.obra} · Capítulo {data.capitulo}
           </p>
         </AnimContainer>
+
+        {isBlocked && (
+          <AnimContainer
+            name="fadeSlideUp"
+            dur="0.4s"
+            delay="0.18s"
+            ease="ease-out"
+            fill="both"
+            className="mb-5 rounded-xl border border-status-error/25 bg-status-error/10 px-4 py-3 text-sm text-status-error dynamic-animation"
+          >
+            QA visual bloqueou a aprovação deste preview com {criticalCount} issue(s) crítica(s).
+          </AnimContainer>
+        )}
 
         {/* Stats */}
         <AnimContainer
@@ -1272,7 +1349,9 @@ function ChapterCompletionScreen({
         >
           <div data-testid="page-status-grid" className="rounded-xl border border-border bg-bg-secondary px-4 py-3 text-center">
             <p className="text-2xl font-semibold tabular text-text-primary">{data.pages}</p>
-            <p className="mt-1 text-xs text-text-secondary">páginas traduzidas</p>
+            <p className="mt-1 text-xs text-text-secondary">
+              {isBlocked ? "páginas em preview" : "páginas traduzidas"}
+            </p>
           </div>
           <div className="rounded-xl border border-border bg-bg-secondary px-4 py-3 text-center">
             <p data-testid="completion-total-time" className="text-2xl font-semibold tabular text-text-primary">{formatDuration(data.elapsedSeconds)}</p>
@@ -1313,7 +1392,7 @@ function ChapterCompletionScreen({
             className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-brand py-3 text-sm font-medium text-white transition-smooth hover:bg-brand/90"
           >
             <Eye size={16} />
-            Ver Preview
+            {isBlocked ? "Ver Preview bloqueado" : "Ver Preview"}
           </button>
           <button
             onClick={onEditor}

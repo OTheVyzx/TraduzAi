@@ -5,6 +5,13 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+COMIC_TEXT_DETECTOR_SEGMENTER = "comic-text-detector-seg"
+SPEECH_BUBBLE_SEGMENTER = "speech-bubble-segmentation"
+DEFAULT_INPAINTER = "aot-inpainting"
+COMIC_TEXT_DETECTOR_HF_REPO = "mayocream/comic-text-detector"
+COMIC_TEXT_BUBBLE_DETECTOR = "comic-text-bubble-detector"
+
+
 @dataclass(frozen=True)
 class EnginePreset:
     id: str
@@ -25,24 +32,24 @@ class EnginePreset:
 _MANGA_PRESET = EnginePreset(
     id="manga",
     content_family="manga",
-    detector="anime-text-yolo-n",
+    detector=COMIC_TEXT_BUBBLE_DETECTOR,
     font_detector="yuzumarker-font-detection",
-    segmenter="manga-text-segmentation-2025",
-    bubble_segmenter="speech-bubble-segmentation",
+    segmenter=COMIC_TEXT_DETECTOR_SEGMENTER,
+    bubble_segmenter=SPEECH_BUBBLE_SEGMENTER,
     ocr="paddle-ocr-vl-1.5",
-    inpainter="aot-inpainting",
+    inpainter=DEFAULT_INPAINTER,
     mask_strategy="segmentation_assisted",
 )
 
 _MANGA_OCR_GUIDED_PRESET = EnginePreset(
     id="manga_ocr_guided",
     content_family="manga",
-    detector="anime-text-yolo-n",
+    detector=COMIC_TEXT_BUBBLE_DETECTOR,
     font_detector="yuzumarker-font-detection",
-    segmenter="manga-text-segmentation-2025",
-    bubble_segmenter="speech-bubble-segmentation",
+    segmenter=COMIC_TEXT_DETECTOR_SEGMENTER,
+    bubble_segmenter=SPEECH_BUBBLE_SEGMENTER,
     ocr="paddle-ocr-vl-1.5",
-    inpainter="aot-inpainting",
+    inpainter=DEFAULT_INPAINTER,
     mask_strategy="ocr_guided_segmentation",
     preserve_sfx=False,
 )
@@ -50,24 +57,24 @@ _MANGA_OCR_GUIDED_PRESET = EnginePreset(
 _MANHWA_MANHUA_PRESET = EnginePreset(
     id="manhwa_manhua",
     content_family="manhwa_manhua",
-    detector="comic-text-bubble-detector",
+    detector=COMIC_TEXT_BUBBLE_DETECTOR,
     font_detector="default",
-    segmenter="manga-text-segmentation-2025",
-    bubble_segmenter="speech-bubble-segmentation",
+    segmenter=COMIC_TEXT_DETECTOR_SEGMENTER,
+    bubble_segmenter=SPEECH_BUBBLE_SEGMENTER,
     ocr="paddle-ocr-vl-1.5",
-    inpainter="aot-inpainting",
+    inpainter=DEFAULT_INPAINTER,
     mask_strategy="roi_segmentation_assisted",
 )
 
 _MANHWA_MANHUA_OCR_GUIDED_PRESET = EnginePreset(
     id="manhwa_manhua_ocr_guided",
     content_family="manhwa_manhua",
-    detector="comic-text-bubble-detector",
+    detector=COMIC_TEXT_BUBBLE_DETECTOR,
     font_detector="default",
-    segmenter="manga-text-segmentation-2025",
-    bubble_segmenter="speech-bubble-segmentation",
+    segmenter=COMIC_TEXT_DETECTOR_SEGMENTER,
+    bubble_segmenter=SPEECH_BUBBLE_SEGMENTER,
     ocr="paddle-ocr-vl-1.5",
-    inpainter="aot-inpainting",
+    inpainter=DEFAULT_INPAINTER,
     mask_strategy="ocr_guided_roi_segmentation",
     preserve_sfx=False,
 )
@@ -77,10 +84,10 @@ _DEFAULT_PRESET = EnginePreset(
     content_family="default",
     detector="default",
     font_detector="default",
-    segmenter="disabled",
-    bubble_segmenter="disabled",
+    segmenter=COMIC_TEXT_DETECTOR_SEGMENTER,
+    bubble_segmenter=SPEECH_BUBBLE_SEGMENTER,
     ocr="default",
-    inpainter="default",
+    inpainter=DEFAULT_INPAINTER,
     mask_strategy="default",
 )
 
@@ -167,6 +174,10 @@ def resolve_engine_preset(config: dict | None = None, *, idioma_origem: str = ""
         elif preset_id == "manhwa_manhua_ocr_guided":
             preset_id = "manhwa_manhua"
     return _PRESETS.get(preset_id, _DEFAULT_PRESET)
+
+
+def list_engine_presets() -> list[EnginePreset]:
+    return list(_PRESETS.values())
 
 
 def engine_steps_for_preset(preset: EnginePreset) -> list[str]:

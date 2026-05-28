@@ -21,12 +21,6 @@ pub fn run() {
             println!("[TraduzAi] App data: {:?}", storage_paths.root);
             println!("[TraduzAi] Models dir: {:?}", storage_paths.models);
 
-            tauri::async_runtime::spawn(async move {
-                if let Err(err) = crate::commands::pipeline::warmup_visual_stack(app_handle).await {
-                    eprintln!("[TraduzAi] Warmup de boot falhou: {err}");
-                }
-            });
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -36,6 +30,8 @@ pub fn run() {
             commands::project::open_project_dialog,
             commands::project::save_file_dialog,
             commands::project::export_text_file,
+            commands::project::cache_google_font,
+            commands::project::search_google_fonts,
             commands::project::validate_import,
             commands::project::load_project_json,
             commands::project::save_project_json,
@@ -80,7 +76,9 @@ pub fn run() {
             commands::pipeline::get_system_profile,
             commands::pipeline::check_models,
             commands::pipeline::download_models,
+            commands::pipeline::preload_editor_vision_page,
             commands::pipeline::detect_page,
+            commands::pipeline::detect_boxes_page,
             commands::pipeline::ocr_page,
             commands::pipeline::translate_page,
             commands::pipeline::search_anilist,

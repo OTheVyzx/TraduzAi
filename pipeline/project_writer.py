@@ -9,6 +9,27 @@ from pathlib import Path
 from typing import Any
 
 
+def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
+    layer["tipo"] = "text"
+    layer["content_class"] = "text"
+    layer["balloon_type"] = ""
+    layer["skip_processing"] = False
+    layer["preserve_original"] = False
+    layer["route_action"] = layer.get("route_action") or "translate_inpaint_render"
+    layer.pop("skip_reason", None)
+
+
+def neutralize_project_compatibility_metadata(project: dict[str, Any]) -> dict[str, Any]:
+    for page in project.get("paginas") or []:
+        if not isinstance(page, dict):
+            continue
+        for key in ("text_layers", "textos", "texts"):
+            for layer in page.get(key) or []:
+                if isinstance(layer, dict):
+                    _neutralize_removed_decision_fields(layer)
+    return project
+
+
 def validate_project_consistency(project: dict[str, Any]) -> None:
     pages = project.get("paginas")
     if not isinstance(pages, list):
@@ -22,7 +43,8 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
         flags = []
         for page in pages:
             for layer in page.get("text_layers", []) or []:
-                flags.extend(layer.get("qa_flags") or [])
+                if isinstance(layer, dict):
+                    flags.extend(layer.get("qa_flags") or [])
         if int(summary.get("total", 0) or 0) != len(flags):
             raise ValueError("qa.summary nao bate com qa.flags")
     log_summary = (project.get("log") or {}).get("summary")
@@ -37,6 +59,7 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
 
 def write_project_json_atomic(project_json_path: Path, project: dict[str, Any]) -> None:
     project_json_path = Path(project_json_path)
+    neutralize_project_compatibility_metadata(project)
     validate_project_consistency(project)
     if project_json_path.exists():
         backup = project_json_path.with_name(f"project.backup.{int(time.time())}.json")

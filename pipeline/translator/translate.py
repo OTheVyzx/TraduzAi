@@ -13,8 +13,9 @@ import re
 import time
 import urllib.request
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,11 @@ try:
     from utils.decision_log import record_decision
 except ImportError:
     from ..utils.decision_log import record_decision
+
+try:
+    from ocr.text_router import ROUTE_ACTIONS, route_action_requires_translation
+except ImportError:
+    from ..ocr.text_router import ROUTE_ACTIONS, route_action_requires_translation
 
 OLLAMA_HOST = "http://localhost:11434"
 
@@ -341,6 +347,83 @@ def list_supported_google_languages() -> list[dict[str, str]]:
     return items
 
 
+def _env_flag_enabled(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _chunk_texts_by_budget(
+    texts: list[str],
+    *,
+    max_texts_per_chunk: int,
+    max_chars_per_chunk: int,
+) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_chars = 0
+    for text in texts:
+        text_len = len(text)
+        if current and (len(current) >= max_texts_per_chunk or current_chars + text_len > max_chars_per_chunk):
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(text)
+        current_chars += text_len
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _translate_google_parallel_chunks(
+    texts: list[str],
+    translate_batch: Callable[[list[str]], list[str]],
+    *,
+    min_unique_texts: int = 8,
+    max_texts_per_chunk: int = 16,
+    max_chars_per_chunk: int = 3500,
+) -> list[str]:
+    if not texts:
+        return []
+    workers = _env_positive_int("TRADUZAI_GOOGLE_TRANSLATE_WORKERS", 1)
+    if not _env_flag_enabled("TRADUZAI_GOOGLE_PARALLEL_CHUNKS") or workers <= 1:
+        return translate_batch(texts)
+
+    unique_texts = list(dict.fromkeys(texts))
+    if len(unique_texts) < min_unique_texts:
+        return translate_batch(texts)
+
+    chunks = _chunk_texts_by_budget(
+        unique_texts,
+        max_texts_per_chunk=max(1, max_texts_per_chunk),
+        max_chars_per_chunk=max(1, max_chars_per_chunk),
+    )
+    if len(chunks) < 2:
+        return translate_batch(texts)
+
+    with ThreadPoolExecutor(
+        max_workers=min(workers, len(chunks)),
+        thread_name_prefix="traduzai-google",
+    ) as executor:
+        chunk_results = list(executor.map(translate_batch, chunks))
+
+    translated_by_source: dict[str, str] = {}
+    for chunk, translated_chunk in zip(chunks, chunk_results):
+        if len(translated_chunk) != len(chunk):
+            raise ValueError(
+                f"Google parallel chunk size mismatch: {len(translated_chunk)} translated for {len(chunk)} sources"
+            )
+        translated_by_source.update(zip(chunk, translated_chunk))
+
+    return [translated_by_source.get(text, text) for text in texts]
+
+
 class _GoogleTranslator:
     def __init__(self, source="en", target="pt"):
         from deep_translator import GoogleTranslator
@@ -399,13 +482,48 @@ class _GoogleTranslator:
                     time.sleep(0.5 * (2 ** attempt))
         return None
 
+    def _translate_uncached_batch(self, uncached_texts: list[str]) -> list[str]:
+        results: list[Optional[str]] = [None] * len(uncached_texts)
+
+        separator = "\n===\n"
+        joined = separator.join(uncached_texts)
+        batch_result = self.translate(joined)
+
+        if batch_result:
+            parts = [p.strip() for p in batch_result.split("===") if p.strip()]
+            if len(parts) == len(uncached_texts):
+                for idx, part in enumerate(parts):
+                    cleaned = part.strip()
+                    results[idx] = cleaned
+                    src_key = uncached_texts[idx].strip()
+                    self._cache[src_key] = cleaned
+                    if cleaned:
+                        self._persistent_store(src_key, cleaned)
+                return [r if r is not None else uncached_texts[i] for i, r in enumerate(results)]
+            logger.warning(f"Batch split mismatch: {len(parts)} vs {len(uncached_texts)}. Tentando individualmente.")
+
+        for i in range(len(uncached_texts)):
+            if results[i] is None:
+                trans = self.translate(uncached_texts[i])
+                if trans == uncached_texts[i] and len(uncached_texts[i]) > 8:
+                    logger.info(
+                        f"Traducao redundante detectada em {uncached_texts[i][:20]}... Tentando 'auto' detection."
+                    )
+                    try:
+                        from deep_translator import GoogleTranslator
+                        trans = GoogleTranslator(source="auto", target=self._translator.target).translate(uncached_texts[i])
+                    except Exception:
+                        pass
+                results[i] = trans or uncached_texts[i]
+
+        return [r if r is not None else uncached_texts[i] for i, r in enumerate(results)]
+
     def translate_batch(self, texts: list[str]) -> list[str]:
         if not texts:
             return []
 
         logger.info(f"Traduzindo lote de {len(texts)} textos (Google)")
 
-        # Segregar textos em cache dos novos (memoria -> disco -> rede)
         results: list[Optional[str]] = [None] * len(texts)
         uncached_indices: list[int] = []
         for i, text in enumerate(texts):
@@ -424,44 +542,23 @@ class _GoogleTranslator:
         if not uncached_indices:
             return [r or "" for r in results]
 
-        # Tentativa de tradução em lote com separador robusto
         uncached_texts = [texts[i] for i in uncached_indices]
-        separator = "\n===\n"
-        joined = separator.join(uncached_texts)
-        batch_result = self.translate(joined)
+        try:
+            uncached_translations = _translate_google_parallel_chunks(
+                uncached_texts,
+                self._translate_uncached_batch,
+            )
+        except Exception as exc:
+            logger.warning("Traducao paralela Google falhou; tentando caminho sequencial: %s", exc)
+            uncached_translations = self._translate_uncached_batch(uncached_texts)
 
-        if batch_result:
-            # Dividir resultados (Google às vezes remove espaços ao redor do separador)
-            parts = [p.strip() for p in batch_result.split("===") if p.strip()]
-            
-            if len(parts) == len(uncached_texts):
-                for idx, part in zip(uncached_indices, parts):
-                    cleaned = part.strip()
-                    results[idx] = cleaned
-                    src_key = texts[idx].strip()
-                    self._cache[src_key] = cleaned
-                    if cleaned:
-                        self._persistent_store(src_key, cleaned)
-                return [r if r is not None else texts[i] for i, r in enumerate(results)]
-            else:
-                logger.warning(f"Batch split mismatch: {len(parts)} vs {len(uncached_texts)}. Tentando individualmente.")
-
-        # Fallback: tradução individual para os pendentes
-        for i in uncached_indices:
-            if results[i] is None:
-                trans = self.translate(texts[i])
-                
-                # Heurística: se a tradução for idêntica ao original em texto longo, 
-                # pode indicar idioma de origem incorreto. Tenta 'auto'.
-                if trans == texts[i] and len(texts[i]) > 8:
-                    logger.info(f"Tradução redundante detectada em {texts[i][:20]}... Tentando 'auto' detection.")
-                    try:
-                        from deep_translator import GoogleTranslator
-                        trans = GoogleTranslator(source='auto', target=self._translator.target).translate(texts[i])
-                    except:
-                        pass
-                
-                results[i] = trans or texts[i]
+        for idx, translated in zip(uncached_indices, uncached_translations):
+            cleaned = translated or texts[idx]
+            results[idx] = cleaned
+            src_key = texts[idx].strip()
+            self._cache[src_key] = cleaned
+            if cleaned:
+                self._persistent_store(src_key, cleaned)
 
         return [r if r is not None else texts[i] for i, r in enumerate(results)]
 
@@ -609,7 +706,13 @@ def _postprocess(
     return result
 
 
-def _prepare_source_text_for_translation(text: str, tipo: str = "fala", lang: str = "en") -> str:
+def _prepare_source_text_for_translation(
+    text: str,
+    tipo: str = "fala",
+    lang: str = "en",
+    *,
+    preserve_case: bool = False,
+) -> str:
     result = text.strip()
     if not result:
         return result
@@ -624,7 +727,7 @@ def _prepare_source_text_for_translation(text: str, tipo: str = "fala", lang: st
     
     # Nao forca capitalizacao para idiomas CJK
     is_cjk = lang in ("ja", "ko", "zh", "zh-CN", "zh-TW")
-    if not is_cjk and result and len(result) > 2:
+    if not preserve_case and not is_cjk and result and len(result) > 2:
         result = result[0].upper() + result[1:].lower()
     return result
 
@@ -687,14 +790,20 @@ def _review_translation_grammar_semantics(
     return result
 
 
-def _preprocess_text(text: str, tipo: str = "fala", lang: str = "en") -> str:
+def _preprocess_text(
+    text: str,
+    tipo: str = "fala",
+    lang: str = "en",
+    *,
+    preserve_case: bool = False,
+) -> str:
     result = text.strip()
     if tipo == "sfx":
         return re.sub(r"\s+", " ", result)
 
     # Nao forca capitalizacao para idiomas CJK
     is_cjk = lang in ("ja", "ko", "zh", "zh-CN", "zh-TW")
-    if not is_cjk and result and len(result) > 2:
+    if not preserve_case and not is_cjk and result and len(result) > 2:
         result = result[0].upper() + result[1:].lower()
     
     # Pré-tradução: substitui expressões para o Google traduzir corretamente
@@ -722,6 +831,78 @@ def _merge_qa_flags(*flag_lists: list[str] | tuple[str, ...] | None) -> list[str
     return merged
 
 
+def _apply_mojibake_audit(
+    translated_text: str,
+    *,
+    text_id: str | None = None,
+    stage: str = "translation_output",
+) -> tuple[str, list[str], dict | None]:
+    try:
+        from debug_tools.detectors import audit_mojibake
+    except Exception:
+        return translated_text, [], None
+    audit = audit_mojibake(translated_text, text_id=text_id, stage=stage)
+    flags = list(audit.get("flags") or [])
+    fixed = str(audit.get("suggested_fix") or translated_text)
+    if flags:
+        try:
+            from debug_tools import get_recorder
+
+            recorder = get_recorder()
+            if recorder and recorder.enabled:
+                recorder.write_jsonl("04_text_normalization_router/mojibake_audit.jsonl", audit)
+                recorder.write_jsonl("11_qa_export_gate/visual_blockers.jsonl", audit)
+        except Exception:
+            pass
+    return fixed, flags, audit if flags else None
+
+
+def _append_protection_entry(entries: list[dict], source: Any, *, entry_type: str, target: Any | None = None) -> None:
+    clean_source = " ".join(str(source or "").split()).strip()
+    if not clean_source:
+        return
+    key = (entry_type, clean_source.casefold())
+    if key in {(str(entry.get("type", "")), str(entry.get("source", "")).casefold()) for entry in entries}:
+        return
+    entries.append(
+        {
+            "id": clean_source.casefold(),
+            "source": clean_source,
+            "target": " ".join(str(target or clean_source).split()).strip(),
+            "type": entry_type,
+            "protect": True,
+            "locked": entry_type == "character",
+            "aliases": [],
+            "forbidden": [],
+        }
+    )
+
+
+def _extend_protection_entries_from_context(entries: list[dict], context: dict) -> None:
+    for character in (context or {}).get("characters") or []:
+        if isinstance(character, dict):
+            name = character.get("name") or character.get("source") or character.get("title")
+            target = character.get("preferredPortugueseName") or name
+            _append_protection_entry(entries, name, entry_type="character", target=target)
+            for alias in character.get("aliases") or []:
+                _append_protection_entry(entries, alias, entry_type="alias", target=alias)
+        else:
+            _append_protection_entry(entries, character, entry_type="character")
+
+    aliases = (context or {}).get("aliases") or []
+    if isinstance(aliases, dict):
+        alias_iterable = []
+        for value in aliases.values():
+            if isinstance(value, (list, tuple, set)):
+                alias_iterable.extend(value)
+            else:
+                alias_iterable.append(value)
+    else:
+        alias_iterable = aliases
+    for alias in alias_iterable:
+        _append_protection_entry(entries, alias, entry_type="alias")
+
+
 def _build_protection_glossary_entries(context: dict, glossario: dict) -> list[dict]:
     try:
         from glossary.builder import build_glossary_entries
@@ -729,6 +910,7 @@ def _build_protection_glossary_entries(context: dict, glossario: dict) -> list[d
         return []
     try:
         entries = build_glossary_entries(context or {}, glossario or {})
+        _extend_protection_entries_from_context(entries, context or {})
     except Exception as exc:
         logger.debug("Falha ao montar entradas de glossario para protecao: %s", exc)
         return []
@@ -739,6 +921,8 @@ def _build_protection_glossary_entries(context: dict, glossario: dict) -> list[d
         "corpus_memory",
         "term",
         "faction",
+        "character",
+        "alias",
     }
     return [entry for entry in entries if entry.get("type") in protected_types]
 
@@ -764,8 +948,6 @@ def _protect_source_for_translation(text: str, tipo: str, context: dict, glossar
 def _restore_protected_translation(translated: str, terms: list[dict]) -> tuple[str, list[str], list[dict]]:
     if not terms:
         return translated, [], []
-    if not any(str(term.get("placeholder", "")) in str(translated or "") for term in terms):
-        return translated, [], []
     try:
         from translator.term_protection import restore_terms
     except Exception:
@@ -774,8 +956,8 @@ def _restore_protected_translation(translated: str, terms: list[dict]) -> tuple[
     flags = []
     for flag in restored.get("flags", []) or []:
         reason = str(flag.get("reason", ""))
-        if reason in {"placeholder_missing", "placeholder_leftover", "placeholder_corrupted"}:
-            flags.append("placeholder_lost")
+        if reason in {"placeholder_missing", "placeholder_leftover", "placeholder_corrupted", "unrestored_placeholder"}:
+            flags.append("unrestored_placeholder")
         elif reason == "forbidden_translation":
             flags.append("forbidden_translation")
         else:
@@ -825,6 +1007,44 @@ def _translation_quality_flags(source_text: str, translated_text: str, source_la
     return flags
 
 
+def _fix_source_mojibake_if_useful(text: str) -> str:
+    source = str(text or "")
+    if not source:
+        return source
+    try:
+        from debug_tools.detectors import fix_mojibake
+    except Exception:
+        return source
+    fixed = fix_mojibake(source)
+    if fixed == source:
+        return source
+    if SOURCE_SCRIPT_PATTERN.search(fixed):
+        return fixed
+    return source
+
+
+def _looks_like_kana_sfx_source(text: str) -> bool:
+    source = str(text or "").strip()
+    if not source:
+        return False
+    kana_count = len(re.findall(r"[\u3040-\u30ff]", source))
+    if kana_count <= 0:
+        return False
+    if re.search(r"[\u4e00-\u9fff\uac00-\ud7afA-Za-z0-9]", source):
+        return False
+    meaningful = re.sub(r"[\s\u3000\u30fc\uff70\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65!?.…。・~ー]+", "", source)
+    return bool(meaningful) and kana_count / max(1, len(meaningful)) >= 0.75
+
+
+def _should_preserve_untranslated_kana_sfx(source_text: str, translated_text: str, source_lang: str) -> bool:
+    normalized_source_lang = normalize_google_language_code(source_lang)
+    if normalized_source_lang not in {"zh-CN", "zh-TW"}:
+        return False
+    if not _looks_like_kana_sfx_source(source_text):
+        return False
+    return bool(SOURCE_SCRIPT_PATTERN.search(translated_text or ""))
+
+
 def is_translation_fallback_phrase(text: str) -> bool:
     return bool(TRANSLATION_FALLBACK_PHRASE_PATTERN.search(_fold_for_quality_match(text or "")))
 
@@ -838,17 +1058,469 @@ def _should_block_translation_render(
 ) -> bool:
     del source_text
     normalized_source_lang = normalize_google_language_code(source_lang)
+    critical_lock_flags = {"placeholder_lost", "unrestored_placeholder", "glossary_violation", "forbidden_translation"}
     if normalized_source_lang not in {"ja", "ko", "zh-CN", "zh-TW"}:
-        return bool({"placeholder_lost", "glossary_violation", "forbidden_translation"} & set(qa_flags))
+        return bool(critical_lock_flags & set(qa_flags))
     if tipo == "sfx":
         return False
-    if {"placeholder_lost", "glossary_violation", "forbidden_translation"} & set(qa_flags):
+    if critical_lock_flags & set(qa_flags):
         return True
     if "translation_fallback_phrase" in qa_flags:
         return True
     if "source_script_leak" in qa_flags and SOURCE_SCRIPT_PATTERN.search(translated_text or ""):
         return True
     return False
+
+
+SKIP_TRANSLATION_CONTENT_CLASSES = {
+    "tn_note",
+    "url_watermark",
+    "scanlator_credit",
+    "noise",
+}
+
+
+def _should_skip_translation_item(text: dict) -> bool:
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if route_action in ROUTE_ACTIONS:
+        return not route_action_requires_translation(route_action)
+    if text.get("skip_processing"):
+        return True
+    if str(text.get("translate_policy") or "").strip().lower() == "skip_translation":
+        return True
+    content_class = str(text.get("content_class") or "").strip().lower()
+    return content_class in SKIP_TRANSLATION_CONTENT_CLASSES
+
+
+def _source_text_before_normalization(text: dict) -> str:
+    return str(text.get("raw_ocr") or text.get("original") or text.get("text") or "")
+
+
+def _normalization_confidence_after(text: dict) -> float:
+    normalization = text.get("normalization")
+    if isinstance(normalization, dict):
+        try:
+            return float(normalization.get("confidence_after_estimate"))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(text.get("confidence") or text.get("ocr_confidence") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _source_text_for_translation(text: dict) -> str:
+    raw = _source_text_before_normalization(text)
+    normalized = str(text.get("normalized_text_final") or "").strip()
+    normalization = text.get("normalization")
+    changed = bool(isinstance(normalization, dict) and normalization.get("changed"))
+    if normalized and normalized != raw:
+        changed = True
+    if changed and normalized and _normalization_confidence_after(text) >= 0.7:
+        return normalized
+    return str(text.get("text") or raw)
+
+
+def _uses_confident_normalized_text_final(text: dict) -> bool:
+    raw = _source_text_before_normalization(text)
+    normalized = str(text.get("normalized_text_final") or "").strip()
+    if not normalized or normalized == raw:
+        return False
+    normalization = text.get("normalization")
+    changed = bool(isinstance(normalization, dict) and normalization.get("changed"))
+    if normalized != raw:
+        changed = True
+    return changed and _normalization_confidence_after(text) >= 0.7
+
+
+def _debug_str_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _debug_page_id_from_band_id(band_id: str | None) -> str | None:
+    if not band_id:
+        return None
+    match = re.match(r"^(page_\d{3})_band_\d{3}$", str(band_id))
+    return match.group(1) if match else None
+
+
+def _debug_source_page_number(page_id: str | None, fallback: int) -> int:
+    if page_id:
+        match = re.match(r"^page_(\d{3})$", str(page_id))
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+    return fallback
+
+
+def _build_translation_debug_identity(page_idx: int, index: int, text: dict) -> dict[str, Any]:
+    text_id = _debug_str_or_none(text.get("text_id") or text.get("id") or f"t{index + 1}")
+    band_id = _debug_str_or_none(text.get("band_id") or text.get("_band_id"))
+    page_id = (
+        _debug_str_or_none(text.get("page_id"))
+        or _debug_page_id_from_band_id(band_id)
+        or f"page_{page_idx + 1:03d}"
+    )
+    trace_id = _debug_str_or_none(text.get("trace_id"))
+    if not trace_id and text_id and band_id:
+        trace_id = f"{text_id}@{band_id}"
+    text_instance_id = _debug_str_or_none(text.get("text_instance_id") or text.get("instance_id"))
+    if not text_instance_id and text_id and band_id:
+        text_instance_id = f"{band_id}_{text_id}"
+    source_page_number = text.get("source_page_number") or text.get("_source_page_number")
+    try:
+        source_page_number = int(source_page_number)
+    except (TypeError, ValueError):
+        source_page_number = _debug_source_page_number(page_id, page_idx + 1)
+
+    identity: dict[str, Any] = {
+        "page_id": page_id,
+        "source_page_number": source_page_number,
+        "text_id": text_id,
+    }
+    if band_id:
+        identity["band_id"] = band_id
+    if trace_id:
+        identity["trace_id"] = trace_id
+    if text_instance_id:
+        identity["text_instance_id"] = text_instance_id
+    if trace_id:
+        identity["audit_key"] = trace_id
+    elif text_id and band_id:
+        identity["audit_key"] = f"{text_id}@{band_id}"
+    elif text_id:
+        identity["audit_key"] = text_id
+    return identity
+
+
+def _translation_debug_identity_collection(page_idx: int | None, texts: list[dict] | None) -> dict[str, Any]:
+    if not texts:
+        return {}
+    identities = [
+        _build_translation_debug_identity(page_idx or 0, index, text)
+        for index, text in enumerate(texts)
+        if isinstance(text, dict)
+    ]
+    if not identities:
+        return {}
+
+    def unique(key: str) -> list[Any]:
+        values: list[Any] = []
+        for identity in identities:
+            value = identity.get(key)
+            if value in (None, "", []):
+                continue
+            if value not in values:
+                values.append(value)
+        return values
+
+    payload: dict[str, Any] = {
+        "text_ids": unique("text_id"),
+        "trace_ids": unique("trace_id"),
+        "band_ids": unique("band_id"),
+        "page_ids": unique("page_id"),
+    }
+    if len(payload["page_ids"]) == 1:
+        payload["page_id"] = payload["page_ids"][0]
+    if len(payload["band_ids"]) == 1:
+        payload["band_id"] = payload["band_ids"][0]
+    return {key: value for key, value in payload.items() if value not in (None, [], "")}
+
+
+class _TranslationDebugSession:
+    def __init__(self, backend: str, model: str) -> None:
+        self.backend = backend
+        self.model = model
+        self.inputs_count = 0
+        self.outputs_count = 0
+        self.fallback_count = 0
+        self.mojibake_count = 0
+        self.glossary_application_count = 0
+        self.backend_distribution: dict[str, int] = {}
+        self._recorder = None
+        try:
+            from debug_tools import get_recorder
+
+            recorder = get_recorder()
+            if recorder and recorder.enabled:
+                self._recorder = recorder
+                self._touch_jsonl("07_translation/translation_inputs.jsonl")
+                self._touch_jsonl("07_translation/translation_outputs.jsonl")
+                self._touch_jsonl("07_translation/glossary_application.jsonl")
+                self._touch_jsonl("07_translation/translation_fallbacks.jsonl")
+                self.write_summary()
+        except Exception:
+            self._recorder = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._recorder and getattr(self._recorder, "enabled", False))
+
+    def record_input(
+        self,
+        *,
+        page_idx: int,
+        index: int,
+        text: dict,
+        source_text_before_normalization: str,
+        source_text_sent_to_translator: str,
+        backend: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        self.inputs_count += 1
+        identity = _build_translation_debug_identity(page_idx, index, text)
+        self._write_jsonl(
+            "07_translation/translation_inputs.jsonl",
+            {
+                **identity,
+                "tipo": text.get("tipo", "fala"),
+                "content_class": text.get("content_class"),
+                "translate_policy": text.get("translate_policy"),
+                "backend": backend or self.backend,
+                "model": model or self.model,
+                "source_text_before_normalization": source_text_before_normalization,
+                "source_text_sent_to_translator": source_text_sent_to_translator,
+                "prompt_hash": self._hash(source_text_sent_to_translator),
+            },
+        )
+        self.write_summary()
+
+    def record_output(
+        self,
+        *,
+        page_idx: int,
+        index: int,
+        text: dict,
+        source_text_sent_to_translator: str,
+        raw_response: Any,
+        final_translation_after_postprocess: str,
+        duration_ms: int,
+        backend: str | None = None,
+        model: str | None = None,
+        fallback_used: bool = False,
+        glossary_hits: list[dict] | None = None,
+        qa_flags: list[str] | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        resolved_backend = backend or self.backend
+        resolved_model = model or self.model
+        self.outputs_count += 1
+        self.backend_distribution[resolved_backend] = self.backend_distribution.get(resolved_backend, 0) + 1
+        if fallback_used:
+            self.fallback_count += 1
+        if "mojibake_in_translation" in set(qa_flags or []):
+            self.mojibake_count += 1
+        hits = list(glossary_hits or [])
+        if hits:
+            self.glossary_application_count += len(hits)
+        identity = _build_translation_debug_identity(page_idx, index, text)
+        base = {
+            **identity,
+            "tipo": text.get("tipo", "fala"),
+            "backend": resolved_backend,
+            "model": resolved_model,
+            "fallback_used": bool(fallback_used),
+            "duration_ms": max(0, int(duration_ms)),
+            "prompt_hash": self._hash(source_text_sent_to_translator),
+            "raw_response_preview": self._preview(raw_response),
+            "final_translation_after_postprocess": final_translation_after_postprocess,
+            "qa_flags": list(qa_flags or []),
+        }
+        self._write_jsonl("07_translation/translation_outputs.jsonl", base)
+        for hit in hits:
+            self._write_jsonl(
+                "07_translation/glossary_application.jsonl",
+                {
+                    **base,
+                    "glossary_hit": hit,
+                },
+            )
+        self.write_summary()
+
+    def record_fallback(
+        self,
+        *,
+        page_idx: int | None,
+        backend: str,
+        model: str,
+        reason: str,
+        error: Any = None,
+        texts: list[dict] | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        identity = _translation_debug_identity_collection(page_idx, texts)
+        page_id = identity.get("page_id") or (f"page_{page_idx + 1:03d}" if page_idx is not None else None)
+        self._write_jsonl(
+            "07_translation/translation_fallbacks.jsonl",
+            {
+                **identity,
+                "page_id": page_id,
+                "source_page_number": page_idx + 1 if page_idx is not None else None,
+                "backend": backend,
+                "model": model,
+                "fallback_used": True,
+                "reason": reason,
+                "error_preview": self._preview(error),
+            },
+        )
+        self.write_summary()
+
+    def write_summary(self) -> None:
+        if not self.enabled:
+            return
+        metrics = self._translation_debug_file_metrics()
+        outputs_count = metrics["translation_outputs_count"]
+        fallback_count = metrics["fallback_count"]
+        self._write_json(
+            "07_translation/translation_debug_summary.json",
+            {
+                "total_inputs": metrics["translation_inputs_count"],
+                "total_outputs": outputs_count,
+                "translation_inputs_count": metrics["translation_inputs_count"],
+                "translation_outputs_count": outputs_count,
+                "outputs_count": outputs_count,
+                "fallback_count": fallback_count,
+                "fallback_event_count": metrics["translation_fallback_events_count"],
+                "fallback_rate": round(fallback_count / outputs_count, 4) if outputs_count else 0.0,
+                "backend_distribution": metrics["backend_distribution"],
+                "mojibake_count": metrics["mojibake_count"],
+                "glossary_application_count": metrics["glossary_application_count"],
+                "translation_debug_entry_count": metrics["translation_debug_entry_count"],
+                "jsonl_counts": metrics["jsonl_counts"],
+                "identity_coverage": metrics["identity_coverage"],
+            },
+        )
+
+    def _translation_debug_file_metrics(self) -> dict[str, Any]:
+        input_count, inputs = self._read_jsonl("07_translation/translation_inputs.jsonl")
+        output_count, outputs = self._read_jsonl("07_translation/translation_outputs.jsonl")
+        glossary_count, _glossary = self._read_jsonl("07_translation/glossary_application.jsonl")
+        fallback_event_count, _fallbacks = self._read_jsonl("07_translation/translation_fallbacks.jsonl")
+
+        backend_distribution: dict[str, int] = {}
+        fallback_count = 0
+        mojibake_count = 0
+        for row in outputs:
+            backend = _debug_str_or_none(row.get("backend")) or "unknown"
+            backend_distribution[backend] = backend_distribution.get(backend, 0) + 1
+            if bool(row.get("fallback_used")):
+                fallback_count += 1
+            if "mojibake_in_translation" in set(row.get("qa_flags") or []):
+                mojibake_count += 1
+
+        jsonl_counts = {
+            "translation_inputs.jsonl": input_count,
+            "translation_outputs.jsonl": output_count,
+            "glossary_application.jsonl": glossary_count,
+            "translation_fallbacks.jsonl": fallback_event_count,
+        }
+        return {
+            "translation_inputs_count": input_count,
+            "translation_outputs_count": output_count,
+            "fallback_count": fallback_count,
+            "translation_fallback_events_count": fallback_event_count,
+            "backend_distribution": dict(sorted(backend_distribution.items())),
+            "mojibake_count": mojibake_count,
+            "glossary_application_count": glossary_count,
+            "translation_debug_entry_count": sum(jsonl_counts.values()),
+            "jsonl_counts": jsonl_counts,
+            "identity_coverage": self._identity_coverage(inputs, outputs),
+        }
+
+    def _read_jsonl(self, rel_path: str) -> tuple[int, list[dict[str, Any]]]:
+        try:
+            path = self._recorder._root / rel_path
+            if not path.exists():
+                return 0, []
+            line_count = 0
+            rows: list[dict[str, Any]] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                line_count += 1
+                try:
+                    payload = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    rows.append(payload)
+            return line_count, rows
+        except Exception:
+            return 0, []
+
+    def _identity_coverage(self, inputs: list[dict[str, Any]], outputs: list[dict[str, Any]]) -> dict[str, Any]:
+        def field_summary(field: str) -> dict[str, Any]:
+            input_values = [_debug_str_or_none(row.get(field)) for row in inputs]
+            output_values = [_debug_str_or_none(row.get(field)) for row in outputs]
+            values = sorted({value for value in [*input_values, *output_values] if value})
+            return {
+                "input_count": sum(1 for value in input_values if value),
+                "output_count": sum(1 for value in output_values if value),
+                "values": values,
+            }
+
+        return {
+            "page_id": field_summary("page_id"),
+            "band_id": field_summary("band_id"),
+            "trace_id": field_summary("trace_id"),
+            "text_instance_id": field_summary("text_instance_id"),
+        }
+
+    def _write_jsonl(self, rel_path: str, payload: dict[str, Any]) -> None:
+        try:
+            from debug_tools.text_diff import redact_debug_payload
+
+            self._recorder.write_jsonl(rel_path, redact_debug_payload(payload))
+        except Exception:
+            pass
+
+    def _write_json(self, rel_path: str, payload: dict[str, Any]) -> None:
+        try:
+            from debug_tools.text_diff import redact_debug_payload
+
+            self._recorder.write_json(rel_path, redact_debug_payload(payload))
+        except Exception:
+            pass
+
+    def _touch_jsonl(self, rel_path: str) -> None:
+        try:
+            target = self._recorder._root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch(exist_ok=True)
+            self._recorder.register_artifact(
+                stage=self._recorder._stage_from_rel(rel_path),
+                rel_path=rel_path,
+                kind="jsonl",
+            )
+        except Exception:
+            pass
+
+    def _hash(self, value: Any) -> str:
+        try:
+            from debug_tools.text_diff import sha1_truncated
+
+            return sha1_truncated(value)
+        except Exception:
+            return ""
+
+    def _preview(self, value: Any) -> str:
+        try:
+            from debug_tools.text_diff import preview_text
+
+            return preview_text(value, limit=256)
+        except Exception:
+            text = "" if value is None else str(value)
+            return text[:256]
 
 
 def _apply_translation_render_blocks(
@@ -1392,7 +2064,7 @@ def _build_translation_context_groups(texts: list[dict], source_parts: list[str]
         while cursor < len(texts) and len(current) < 4:
             prev = texts[current[-1]]
             nxt = texts[cursor]
-            if prev.get("skip_processing") or nxt.get("skip_processing"):
+            if _should_skip_translation_item(prev) or _should_skip_translation_item(nxt):
                 break
             if str(prev.get("tipo", "fala")) not in {"fala", "pensamento", "narracao"}:
                 break
@@ -1744,6 +2416,8 @@ def translate_pages(
     semantic_review_requested = False
     ollama = {"running": False, "models": [], "has_translator": False, "skipped": True}
     backend = _resolve_translation_backend(google_ok=google_ok, ollama_status=ollama)
+    selected_model = "google" if backend == "google" else (ollama_model if backend == "ollama" else "passthrough")
+    debug_session = _TranslationDebugSession(backend=backend, model=selected_model)
 
     logger.info(f"--- TRADUCAO INICIADA ---")
     logger.info(f"Backend selecionado: {backend}")
@@ -1784,6 +2458,7 @@ def translate_pages(
                 semantic_reviewer_model=semantic_model,
                 semantic_reviewer_host=ollama_host,
                 translation_context=translation_context,
+                debug_session=debug_session,
             )
 
         if backend == "ollama":
@@ -1806,11 +2481,13 @@ def translate_pages(
                 _google if google_ok else None,
                 progress_callback,
                 translation_context=translation_context,
+                debug_session=debug_session,
             )
 
         logger.warning("Nenhum backend de traducao disponivel. Retornando texto original.")
-        return _passthrough(ocr_results, progress_callback)
+        return _passthrough(ocr_results, progress_callback, debug_session=debug_session)
     finally:
+        debug_session.write_summary()
         if persistent_cache is not None:
             try:
                 persistent_cache.flush()
@@ -1847,6 +2524,7 @@ def _translate_with_google(
     semantic_reviewer_model: str | None = None,
     semantic_reviewer_host: str = OLLAMA_HOST,
     translation_context: dict | None = None,
+    debug_session: _TranslationDebugSession | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     translated_pages = []
@@ -1867,6 +2545,7 @@ def _translate_with_google(
             progress_callback=progress_callback,
             semantic_reviewer_model=semantic_reviewer_model,
             semantic_reviewer_host=semantic_reviewer_host,
+            debug_session=debug_session,
         )
         translated_pages.append(translated)
 
@@ -1899,6 +2578,7 @@ def _translate_google_single_page(
     progress_callback: Callable | None,
     semantic_reviewer_model: str | None,
     semantic_reviewer_host: str,
+    debug_session: _TranslationDebugSession | None = None,
 ) -> tuple[dict, list[dict]]:
     """Translate a single page using Google backend with shared history state.
 
@@ -1915,13 +2595,21 @@ def _translate_google_single_page(
             progress_callback(page_idx + 1, total, f"Pagina {page_idx + 1}: sem texto")
         return {"texts": []}, history_tail
 
-    raw_texts = [text.get("text", "") for text in texts]
+    raw_texts = [_source_text_before_normalization(text) for text in texts]
+    translation_sources = [_source_text_for_translation(text) for text in texts]
+    for index, source in enumerate(translation_sources):
+        repaired_mojibake = _fix_source_mojibake_if_useful(source)
+        if repaired_mojibake != source:
+            texts[index]["source_mojibake_repaired_from"] = source
+            texts[index]["source_mojibake_repaired"] = repaired_mojibake
+            translation_sources[index] = repaired_mojibake
+            raw_texts[index] = repaired_mojibake
     tipos = [text.get("tipo", "fala") for text in texts]
     repaired_sources: list[str] = []
     source_repairs: list[list[dict]] = []
     source_entity_flags: list[list[str]] = []
 
-    for source in raw_texts:
+    for source in translation_sources:
         repaired_source, repairs, flags = _repair_source_entities(source, context, glossario)
         repaired_sources.append(repaired_source)
         source_repairs.append(repairs)
@@ -1931,17 +2619,27 @@ def _translate_google_single_page(
     if is_cjk:
         was_uppers = [False] * len(raw_texts)
     else:
-        was_uppers = [text == text.upper() and any(c.isalpha() for c in text) for text in raw_texts]
+        was_uppers = [
+            source == source.upper() and any(c.isalpha() for c in source)
+            for source in translation_sources
+        ]
 
     preprocessed: list[str] = []
     protected_terms_by_index: list[list[dict]] = []
-    for repaired_text, tipo in zip(repaired_sources, tipos):
-        prepared_text = _prepare_source_text_for_translation(repaired_text, tipo, lang=idioma_origem)
+    for index, (repaired_text, tipo) in enumerate(zip(repaired_sources, tipos)):
+        prepared_text = _prepare_source_text_for_translation(
+            repaired_text,
+            tipo,
+            lang=idioma_origem,
+            preserve_case=_uses_confident_normalized_text_final(texts[index]),
+        )
         prepared_text, _, _ = _repair_source_entities(prepared_text, context, glossario)
+        preserve_normalized_case = _uses_confident_normalized_text_final(texts[index])
         normalized_text = _preprocess_text(
             prepared_text,
             tipo,
             lang=idioma_origem,
+            preserve_case=preserve_normalized_case,
         )
         normalized_text, _, _ = _repair_source_entities(normalized_text, context, glossario)
         protected = _protect_source_for_translation(normalized_text, tipo, context, glossario)
@@ -1949,12 +2647,26 @@ def _translate_google_single_page(
         protected_terms_by_index.append(list(protected.get("terms") or []))
 
     translations = [""] * len(texts)
+    translation_debug_meta: list[dict[str, Any]] = [
+        {"duration_ms": 0, "fallback_used": False, "raw_response": "", "backend": "google", "model": "google"}
+        for _ in texts
+    ]
     pending_indices = []
     pending_texts = []
     for index, (source, tipo, prepared) in enumerate(zip(raw_texts, tipos, preprocessed)):
-        if texts[index].get("skip_processing"):
+        if _should_skip_translation_item(texts[index]):
             translations[index] = source
             continue
+        if debug_session:
+            debug_session.record_input(
+                page_idx=page_idx,
+                index=index,
+                text=texts[index],
+                source_text_before_normalization=source,
+                source_text_sent_to_translator=prepared,
+                backend="google",
+                model="google",
+            )
         # Legacy proper-name preservation is opt-in. By default every CAPS
         # token goes through translation so dialogue is not left in English.
         proper_noun_token = source.strip().rstrip(".,!?;:'\"")
@@ -1970,10 +2682,12 @@ def _translate_google_single_page(
         special_literal = _lookup_special_literal_translation(source, tipo)
         if special_literal:
             translations[index] = special_literal
+            translation_debug_meta[index]["raw_response"] = special_literal
             continue
         memory_translation = _lookup_memory_translation(source, tipo, context, glossario)
         if memory_translation:
             translations[index] = memory_translation
+            translation_debug_meta[index]["raw_response"] = memory_translation
             continue
         memory_key = _normalize_memory_key(source, tipo)
         if memory_key in history_memory:
@@ -2005,10 +2719,22 @@ def _translate_google_single_page(
         handled_context_indices.update(group)
 
     if context_requests:
+        started = time.perf_counter()
         try:
             context_translations = _google.translate_batch([request[2] for request in context_requests])
+            duration_ms = int((time.perf_counter() - started) * 1000)
         except Exception as exc:
             logger.warning(f"Batch contextual falhou na pagina {page_idx + 1}: {exc}")
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            if debug_session:
+                debug_session.record_fallback(
+                    page_idx=page_idx,
+                    backend="google",
+                    model="google",
+                    reason="context_batch_failed",
+                    error=exc,
+                    texts=[texts[index] for group, _parts, _source in context_requests for index in group],
+                )
             context_translations = [request[2] for request in context_requests]
         for (group, source_parts, _context_source), translated_group in zip(context_requests, context_translations):
             split_parts = _split_contextual_translation(translated_group, source_parts)
@@ -2016,6 +2742,13 @@ def _translate_google_single_page(
                 split_parts = _split_by_source_lengths(translated_group, source_parts)
             for index, translated_part in zip(group, split_parts):
                 translations[index] = translated_part
+                translation_debug_meta[index] = {
+                    "duration_ms": duration_ms,
+                    "fallback_used": translated_group == _context_source,
+                    "raw_response": translated_group,
+                    "backend": "google",
+                    "model": "google",
+                }
 
     remaining_pending = [
         (index, text)
@@ -2026,23 +2759,64 @@ def _translate_google_single_page(
     if remaining_pending:
         remaining_indices = [index for index, _text in remaining_pending]
         remaining_texts = [text for _index, text in remaining_pending]
+        started = time.perf_counter()
         try:
             pending_translations = _google.translate_batch(remaining_texts)
+            duration_ms = int((time.perf_counter() - started) * 1000)
         except Exception as exc:
             logger.warning(f"Batch falhou na pagina {page_idx + 1}: {exc}")
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            if debug_session:
+                debug_session.record_fallback(
+                    page_idx=page_idx,
+                    backend="google",
+                    model="google",
+                    reason="batch_failed",
+                    error=exc,
+                    texts=[texts[index] for index in remaining_indices],
+                )
             pending_translations = remaining_texts
 
         for index, translated in zip(remaining_indices, pending_translations):
             translations[index] = translated
+            translation_debug_meta[index] = {
+                "duration_ms": duration_ms,
+                "fallback_used": translated == preprocessed[index],
+                "raw_response": translated,
+                "backend": "google",
+                "model": "google",
+            }
 
     page_texts = []
     for index, (original, translated, was_upper, tipo) in enumerate(
         zip(raw_texts, translations, was_uppers, tipos)
     ):
+        if _should_skip_translation_item(texts[index]):
+            qa_flags = _merge_qa_flags(texts[index].get("qa_flags"))
+            texts[index]["qa_flags"] = qa_flags
+            payload = _build_text_payload(texts, index, history_tail)
+            page_texts.append(
+                {
+                    **texts[index],
+                    "original": original,
+                    "translated": translated or original,
+                    "source_text_sent_to_translator": preprocessed[index],
+                    "tipo": tipo,
+                    "context_before": payload["context_before"],
+                    "context_after": payload["context_after"],
+                }
+            )
+            history_tail.append({"source": original, "translated": translated or original, "tipo": tipo})
+            history_tail = history_tail[-8:]
+            continue
         protected_terms = protected_terms_by_index[index] if index < len(protected_terms_by_index) else []
         restored_translation, protection_flags, protection_hits = _restore_protected_translation(
             translated or original,
             protected_terms,
+        )
+        restored_translation, mojibake_flags, mojibake_audit = _apply_mojibake_audit(
+            restored_translation or original,
+            text_id=texts[index].get("id") or f"t{index + 1}",
         )
         final = _postprocess(
             restored_translation or original,
@@ -2064,7 +2838,7 @@ def _translate_google_single_page(
         )
         missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
         if missing_protected_terms:
-            protection_flags = _merge_qa_flags(protection_flags, ["placeholder_lost"])
+            protection_flags = _merge_qa_flags(protection_flags, ["unrestored_placeholder"])
         name_flags = ["target_proper_name_repaired"] if target_name_repairs else []
         entity_flags = list(dict.fromkeys([*source_entity_flags[index], *target_flags, *name_flags]))
         entity_repairs = list(source_repairs[index])
@@ -2077,8 +2851,24 @@ def _translate_google_single_page(
             texts[index].get("qa_flags"),
             ["entity_suspect"] if source_repairs[index] else [],
             protection_flags,
+            mojibake_flags,
             _translation_quality_flags(repaired_sources[index] or original, locked_final, idioma_origem),
         )
+        if _should_preserve_untranslated_kana_sfx(repaired_sources[index] or original, locked_final, idioma_origem):
+            locked_final = repaired_sources[index] or original
+            qa_flags = [flag for flag in qa_flags if flag != "source_script_leak"]
+            if "untranslated_kana_sfx_preserved" not in qa_flags:
+                qa_flags.append("untranslated_kana_sfx_preserved")
+            texts[index]["content_class"] = "sfx"
+            texts[index]["tipo"] = "sfx"
+            texts[index]["skip_reason"] = "untranslated_kana_sfx_preserved"
+            texts[index]["preserve_original"] = True
+            texts[index]["route_action"] = "preserve"
+            texts[index]["route_reason"] = "untranslated_kana_sfx_preserved"
+            texts[index]["translate_policy"] = "skip_translation"
+            texts[index]["render_policy"] = "preserve_original"
+            texts[index]["skip_processing"] = False
+            tipo = texts[index].get("tipo", tipo)
         blocked_translation = ""
         if _should_block_translation_render(
             repaired_sources[index] or original,
@@ -2087,7 +2877,7 @@ def _translate_google_single_page(
             tipo,
             qa_flags,
         ) and not semantic_reviewer_model:
-            blocked_translation = locked_final
+            blocked_translation = str((mojibake_audit or {}).get("translated") or locked_final)
             locked_final = ""
             qa_flags = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
             record_decision(
@@ -2103,6 +2893,8 @@ def _translate_google_single_page(
         texts[index]["entity_repairs"] = entity_repairs
         texts[index]["glossary_hits"] = glossary_hits
         texts[index]["qa_flags"] = qa_flags
+        if mojibake_audit:
+            texts[index]["mojibake_audit"] = mojibake_audit
         if entity_repairs:
             for repair in entity_repairs:
                 repair_phase = repair.get("phase") if isinstance(repair, dict) else ""
@@ -2125,6 +2917,29 @@ def _translate_google_single_page(
                 text=original,
                 details={"hits": glossary_hits},
             )
+        should_record_debug_output = bool(
+            debug_session
+            and (
+                not _should_skip_translation_item(texts[index])
+                or texts[index].get("skip_reason") == "untranslated_kana_sfx_preserved"
+            )
+        )
+        if should_record_debug_output:
+            meta = translation_debug_meta[index]
+            debug_session.record_output(
+                page_idx=page_idx,
+                index=index,
+                text=texts[index],
+                source_text_sent_to_translator=preprocessed[index],
+                raw_response=meta.get("raw_response") or translated,
+                final_translation_after_postprocess=locked_final,
+                duration_ms=int(meta.get("duration_ms") or 0),
+                backend=str(meta.get("backend") or "google"),
+                model=str(meta.get("model") or "google"),
+                fallback_used=bool(meta.get("fallback_used")),
+                glossary_hits=glossary_hits,
+                qa_flags=qa_flags,
+            )
         memory_key = _normalize_memory_key(original, tipo)
         if locked_final:
             history_memory[memory_key] = locked_final
@@ -2133,6 +2948,7 @@ def _translate_google_single_page(
             **texts[index],
             "original": original,
             "translated": locked_final,
+            "source_text_sent_to_translator": preprocessed[index],
             "tipo": tipo,
             "context_before": payload["context_before"],
             "context_after": payload["context_after"],
@@ -2168,6 +2984,7 @@ def _translate_with_ollama(
     repair_translator: Optional[_GoogleTranslator],
     progress_callback: Callable | None,
     translation_context: dict | None = None,
+    debug_session: _TranslationDebugSession | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     tc_header = build_translation_context_header(translation_context)
@@ -2195,9 +3012,12 @@ def _translate_with_ollama(
 
         text_list = []
         for i, t in enumerate(texts):
-            if t.get("skip_processing"):
+            if _should_skip_translation_item(t):
                 continue
             payload = _build_text_payload(texts, i, history_tail)
+            source_before_normalization = _source_text_before_normalization(t)
+            source_for_translation = _source_text_for_translation(t)
+            payload["text"] = source_for_translation
             protected = _protect_source_for_translation(
                 payload.get("text", ""),
                 payload.get("tipo", "fala"),
@@ -2205,10 +3025,21 @@ def _translate_with_ollama(
                 glossario,
             )
             t["_protected_terms"] = list(protected.get("terms") or [])
+            protected_source = protected.get("protected_source") or payload.get("text", "")
+            if debug_session:
+                debug_session.record_input(
+                    page_idx=page_idx,
+                    index=i,
+                    text=t,
+                    source_text_before_normalization=source_before_normalization,
+                    source_text_sent_to_translator=protected_source,
+                    backend="ollama",
+                    model=model,
+                )
             text_list.append(
                 {
                     "id": payload["id"],
-                    "source": protected.get("protected_source") or payload.get("text", ""),
+                    "source": protected_source,
                     "tipo": payload.get("tipo", "fala"),
                     "context_before": payload.get("context_before", ""),
                     "context_after": payload.get("context_after", ""),
@@ -2216,29 +3047,58 @@ def _translate_with_ollama(
             )
         user_msg = f"Traduza:\n{json.dumps(text_list, ensure_ascii=False)}"
 
+        started = time.perf_counter()
         try:
             translations = _call_ollama(model, system, user_msg, host)
             translated_map = {item["id"]: item.get("translated", "") for item in translations}
+            ollama_duration_ms = int((time.perf_counter() - started) * 1000)
         except Exception:
+            ollama_duration_ms = int((time.perf_counter() - started) * 1000)
+            if debug_session:
+                debug_session.record_fallback(
+                    page_idx=page_idx,
+                    backend="ollama",
+                    model=model,
+                    reason="ollama_call_failed",
+                    error="ollama_call_failed",
+                    texts=texts,
+                )
             translated_map = {}
 
         repair_indices: list[int] = []
         repair_texts: list[str] = []
         if repair_translator is not None:
             for index, text_data in enumerate(texts):
-                if text_data.get("skip_processing"):
+                if _should_skip_translation_item(text_data):
                     continue
-                original = text_data.get("text", "")
+                original = _source_text_before_normalization(text_data)
                 candidate = translated_map.get(f"t{index + 1}", original)
                 if _should_repair_local_translation(original, candidate):
                     tipo = text_data.get("tipo", "fala")
                     repair_indices.append(index)
                     repair_source, _, _ = _repair_source_entities(original, context, glossario)
-                    prepared_repair = _prepare_source_text_for_translation(repair_source or original, tipo)
+                    prepared_repair = _prepare_source_text_for_translation(
+                        repair_source or original,
+                        tipo,
+                        preserve_case=_uses_confident_normalized_text_final(text_data),
+                    )
                     prepared_repair, _, _ = _repair_source_entities(prepared_repair, context, glossario)
-                    normalized_repair = _preprocess_text(prepared_repair, tipo)
+                    normalized_repair = _preprocess_text(
+                        prepared_repair,
+                        tipo,
+                        preserve_case=_uses_confident_normalized_text_final(text_data),
+                    )
                     normalized_repair, _, _ = _repair_source_entities(normalized_repair, context, glossario)
-                    repair_texts.append(normalized_repair)
+                    protected_repair = _protect_source_for_translation(
+                        normalized_repair,
+                        tipo,
+                        context,
+                        glossario,
+                    )
+                    repair_terms = list(protected_repair.get("terms") or [])
+                    if repair_terms:
+                        text_data["_protected_terms"] = repair_terms
+                    repair_texts.append(protected_repair.get("protected_source") or normalized_repair)
 
         repaired_map: dict[int, str] = {}
         if repair_indices and repair_translator is not None:
@@ -2253,10 +3113,11 @@ def _translate_with_ollama(
 
         page_texts = []
         for index, text_data in enumerate(texts):
-            original = text_data.get("text", "")
+            original = _source_text_before_normalization(text_data)
+            source_for_translation = _source_text_for_translation(text_data)
             tipo = text_data.get("tipo", "fala")
-            repaired_source, entity_repairs, source_entity_flags = _repair_source_entities(original, context, glossario)
-            if text_data.get("skip_processing"):
+            repaired_source, entity_repairs, source_entity_flags = _repair_source_entities(source_for_translation, context, glossario)
+            if _should_skip_translation_item(text_data):
                 qa_flags = _merge_qa_flags(
                     text_data.get("qa_flags"),
                     ["entity_suspect"] if entity_repairs else [],
@@ -2277,18 +3138,25 @@ def _translate_with_ollama(
                 history_tail.append({"source": original, "translated": original, "tipo": tipo})
                 continue
             translated = repaired_map.get(index) or translated_map.get(f"t{index + 1}", original)
+            fallback_used = f"t{index + 1}" not in translated_map and index not in repaired_map
             memory_translation = _lookup_memory_translation(original, tipo, context, glossario)
             if memory_translation:
                 translated = memory_translation
+                fallback_used = False
             special_literal = _lookup_special_literal_translation(original, tipo)
             if special_literal:
                 translated = special_literal
+                fallback_used = False
             is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
             was_upper = False if is_cjk else (original == original.upper() and any(c.isalpha() for c in original))
             protected_terms = list(text_data.get("_protected_terms") or [])
             restored_translation, protection_flags, protection_hits = _restore_protected_translation(
                 translated,
                 protected_terms,
+            )
+            restored_translation, mojibake_flags, mojibake_audit = _apply_mojibake_audit(
+                restored_translation,
+                text_id=text_data.get("id") or f"t{index + 1}",
             )
 
             final = _postprocess(
@@ -2311,13 +3179,14 @@ def _translate_with_ollama(
             )
             missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
             if missing_protected_terms:
-                protection_flags = _merge_qa_flags(protection_flags, ["placeholder_lost"])
+                protection_flags = _merge_qa_flags(protection_flags, ["unrestored_placeholder"])
             name_flags = ["target_proper_name_repaired"] if target_name_repairs else []
             entity_flags = list(dict.fromkeys([*source_entity_flags, *target_flags, *name_flags]))
             qa_flags = _merge_qa_flags(
                 text_data.get("qa_flags"),
                 ["entity_suspect"] if entity_repairs else [],
                 protection_flags,
+                mojibake_flags,
                 _translation_quality_flags(repaired_source or original, locked_final, idioma_origem),
             )
             glossary_hits = list(glossary_hits)
@@ -2332,7 +3201,7 @@ def _translate_with_ollama(
                 tipo,
                 qa_flags,
             ):
-                blocked_translation = locked_final
+                blocked_translation = str((mojibake_audit or {}).get("translated") or locked_final)
                 locked_final = ""
                 qa_flags = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
                 record_decision(
@@ -2350,6 +3219,8 @@ def _translate_with_ollama(
             text_data["entity_repairs"] = entity_repairs
             text_data["glossary_hits"] = glossary_hits
             text_data["qa_flags"] = qa_flags
+            if mojibake_audit:
+                text_data["mojibake_audit"] = mojibake_audit
             if blocked_translation:
                 text_data["translation_blocked_text"] = blocked_translation
             if entity_repairs:
@@ -2374,11 +3245,31 @@ def _translate_with_ollama(
                     text=original,
                     details={"hits": glossary_hits},
                 )
+            if debug_session:
+                payload_for_hash = next(
+                    (item.get("source", "") for item in text_list if item.get("id") == f"t{index + 1}"),
+                    original,
+                )
+                debug_session.record_output(
+                    page_idx=page_idx,
+                    index=index,
+                    text=text_data,
+                    source_text_sent_to_translator=payload_for_hash,
+                    raw_response=translated,
+                    final_translation_after_postprocess=locked_final,
+                    duration_ms=ollama_duration_ms,
+                    backend="ollama",
+                    model=model,
+                    fallback_used=fallback_used,
+                    glossary_hits=glossary_hits,
+                    qa_flags=qa_flags,
+                )
             page_texts.append(
                 {
                     **text_data,
                     "original": original,
                     "translated": locked_final,
+                    "source_text_sent_to_translator": payload_for_hash,
                     "tipo": tipo,
                 }
             )
@@ -2392,21 +3283,52 @@ def _translate_with_ollama(
     return translated_pages
 
 
-def _passthrough(ocr_results: list[dict], progress_callback: Callable | None) -> list[dict]:
+def _passthrough(
+    ocr_results: list[dict],
+    progress_callback: Callable | None,
+    debug_session: _TranslationDebugSession | None = None,
+) -> list[dict]:
     total = len(ocr_results)
     result = []
     for index, page in enumerate(ocr_results):
+        page_texts = []
+        for text_idx, text in enumerate(page.get("texts", [])):
+            source = text.get("text", "")
+            if debug_session and not _should_skip_translation_item(text):
+                debug_session.record_input(
+                    page_idx=index,
+                    index=text_idx,
+                    text=text,
+                    source_text_before_normalization=source,
+                    source_text_sent_to_translator=source,
+                    backend="passthrough",
+                    model="passthrough",
+                )
+                debug_session.record_output(
+                    page_idx=index,
+                    index=text_idx,
+                    text=text,
+                    source_text_sent_to_translator=source,
+                    raw_response=source,
+                    final_translation_after_postprocess=source,
+                    duration_ms=0,
+                    backend="passthrough",
+                    model="passthrough",
+                    fallback_used=True,
+                    glossary_hits=[],
+                    qa_flags=text.get("qa_flags") or [],
+                )
+            page_texts.append(
+                {
+                    **text,
+                    "original": source,
+                    "translated": source,
+                    "tipo": text.get("tipo", "fala"),
+                }
+            )
         result.append(
             {
-                "texts": [
-                    {
-                        **text,
-                        "original": text.get("text", ""),
-                        "translated": text.get("text", ""),
-                        "tipo": text.get("tipo", "fala"),
-                    }
-                    for text in page.get("texts", [])
-                ]
+                "texts": page_texts
             }
         )
         if progress_callback:
