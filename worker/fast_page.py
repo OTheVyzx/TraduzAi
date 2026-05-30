@@ -103,8 +103,8 @@ class FastPageProcessClient:
                 raise FastPageTransportError("processo fast-page encerrou sem resposta completa")
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise FastPageTransportError(f"resposta fast-page invalida: {line.strip()}") from exc
+            except json.JSONDecodeError:
+                continue
             if not isinstance(event, dict):
                 raise FastPageTransportError("resposta fast-page nao e objeto JSON")
             events.append(event)

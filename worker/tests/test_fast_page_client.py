@@ -20,15 +20,18 @@ class FakeStdin:
 
 
 class FakeStdout:
-    def __init__(self, lines: list[dict]) -> None:
-        self.lines = deque(json.dumps(line) + "\n" for line in lines)
+    def __init__(self, lines: list[dict | str]) -> None:
+        self.lines = deque(
+            (json.dumps(line) + "\n") if isinstance(line, dict) else line
+            for line in lines
+        )
 
     def readline(self) -> str:
         return self.lines.popleft()
 
 
 class FakeProcess:
-    def __init__(self, lines: list[dict], poll_result=None) -> None:
+    def __init__(self, lines: list[dict | str], poll_result=None) -> None:
         self.stdin = FakeStdin()
         self.stdout = FakeStdout(lines)
         self.terminated = False
@@ -152,3 +155,32 @@ def test_fast_page_client_writes_ascii_json_for_unicode_paths(tmp_path: Path) ->
     written = process.stdin.writes[0]
     written.encode("ascii")
     assert "\\ud658\\uc0dd\\ucc9c\\ub9c8" in written
+
+
+def test_fast_page_client_ignores_dependency_stdout_noise(tmp_path: Path) -> None:
+    settings = WorkerSettings(
+        api_url="http://127.0.0.1:8787",
+        worker_token="token",
+        project_root=tmp_path,
+        pipeline_main=tmp_path / "pipeline" / "main.py",
+        pipeline_python="python",
+        worker_name="worker",
+        worker_work_dir=tmp_path / "worker",
+    )
+    popen_calls = []
+
+    def fake_popen(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+        return FakeProcess(
+            [
+                'Downloading: "https://github.com/ultralytics/yolov5/zipball/master" to /root/.cache/torch/hub/master.zip\n',
+                {"type": "ready"},
+            ]
+        )
+
+    client = FastPageProcessClient(settings, popen_factory=fake_popen)
+
+    events = client.warmup({"models_dir": str(tmp_path / "models")})
+
+    assert len(popen_calls) == 1
+    assert events == [{"type": "ready"}]
