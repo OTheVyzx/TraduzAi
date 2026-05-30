@@ -18,6 +18,7 @@ MODELS_DIR = Path(
         ),
     )
 )
+AOT_REPO_ID = "mayocream/aot-inpainting"
 
 
 def main():
@@ -28,6 +29,7 @@ def main():
 
     prepare_detector()
     prepare_ocr()
+    prepare_aot_inpainting()
     prepare_inpainting()
     write_compat_markers()
 
@@ -102,6 +104,35 @@ def prepare_inpainting():
         print("[Inpainting] OK!")
     except Exception as exc:
         print(f"[Inpainting] ERRO: {exc}")
+        sys.exit(1)
+
+
+def prepare_aot_inpainting():
+    aot_dir = MODELS_DIR / "aot-inpainting"
+    aot_dir.mkdir(parents=True, exist_ok=True)
+    ready_file = aot_dir / ".ready"
+    config_path = aot_dir / "config.json"
+    weights_path = aot_dir / "model.safetensors"
+
+    if ready_file.exists() and config_path.exists() and weights_path.exists():
+        print("[AOT Inpainting] Modelo ja esta pronto. Pulando.")
+        return
+
+    print("[AOT Inpainting] Baixando mayocream/aot-inpainting...")
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=AOT_REPO_ID,
+            local_dir=aot_dir,
+            allow_patterns=["config.json", "model.safetensors"],
+        )
+        if not config_path.exists() or not weights_path.exists():
+            raise RuntimeError("download concluiu sem config.json/model.safetensors")
+        ready_file.write_text("ok", encoding="utf-8")
+        print("[AOT Inpainting] OK!")
+    except Exception as exc:
+        print(f"[AOT Inpainting] ERRO: {exc}")
         sys.exit(1)
 
 
