@@ -1,6 +1,6 @@
 # Vast.ai worker pronto para TraduzAI
 
-Este fluxo reduz o tempo sem manter GPU ligada o dia todo: a instancia nasce com dependencias e modelos prontos, roda o worker, processa o capitulo e depois voce destrói a instancia.
+Este fluxo reduz o tempo sem manter GPU ligada o dia todo: a instancia nasce com dependencias e modelos prontos, roda o worker, processa o capitulo e depois voce para ou destroi a instancia.
 
 ## Objetivo
 
@@ -27,7 +27,7 @@ Depois desse bootstrap, salve a instancia como template/snapshot no Vast. Esse t
 
 Para repo privado, defina `TRADUZAI_REPO_URL` com a URL que a instancia consegue acessar antes de rodar o bootstrap.
 
-## Arquivo de ambiente
+## Arquivo de ambiente da instancia
 
 Crie `/workspace/traduzai-worker.env` na instancia/template:
 
@@ -39,6 +39,8 @@ TRADUZAI_WORKER_WARMUP_ON_START=1
 TRADUZAI_WARMUP_PROFILE=quality
 TRADUZAI_WARMUP_LANG=en
 ```
+
+Use o mesmo valor de `TRADUZAI_WORKER_TOKEN` no backend local. Se o token for diferente, a instancia sobe mas nao consegue pegar jobs.
 
 Se o fast-page falhar em uma GPU/template especifico, troque para:
 
@@ -72,12 +74,33 @@ bash scripts/vast/warmup.sh
 
 Esse comando testa o worker e o servidor fast-page. O `start-worker.sh` tambem faz warmup real no mesmo processo quando `TRADUZAI_WORKER_WARMUP_ON_START=1`.
 
+## Automacao pelo backend
+
+No backend local, configure:
+
+```env
+VAST_AUTOSTART=1
+VAST_API_KEY=sua-chave-da-vast
+VAST_INSTANCE_ID=38646242
+VAST_IDLE_STOP_MINUTES=10
+TRADUZAI_WORKER_TOKEN=troque-por-um-token-forte
+```
+
+Com `VAST_INSTANCE_ID`, o servidor tenta religar a instancia pausada quando um job real entra na fila. Se preferir criar uma nova instancia quando nao houver uma fixa, configure tambem:
+
+```env
+VAST_OFFER_ID=12345
+VAST_TEMPLATE_HASH=hash-do-template
+```
+
+A API key da Vast fica somente no servidor. Nunca coloque `VAST_API_KEY` no frontend.
+
 ## Fluxo barato por capitulo
 
-1. Suba uma instancia a partir do template pronto.
-2. Mantenha sua API local e o Cloudflare Tunnel ativos.
-3. Crie o job no site.
-4. Rode `bash scripts/vast/start-worker.sh`.
-5. Quando o job terminar e os artifacts aparecerem, destrua a instancia no Vast.
+1. Mantenha sua API local e o Cloudflare Tunnel ativos.
+2. Crie o job no site.
+3. O backend chama a API da Vast e inicia a instancia pausada.
+4. O worker roda `bash scripts/vast/start-worker.sh` e pega o job da fila.
+5. Quando a fila ficar vazia, o backend pode parar a instancia se `VAST_IDLE_STOP_MINUTES` estiver ativo.
 
 Com template pronto, o tempo perdido fica concentrado em boot + warmup, nao em instalacao. Para custo baixo, compare sempre por custo por capitulo, nao apenas por preco/hora.

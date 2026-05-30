@@ -16,6 +16,7 @@ from server.queue import enqueue
 from server.storage import delete as storage_delete
 from server.storage import put_file
 from server.usage import record_usage_event
+from server.vast.orchestrator import ensure_worker_available
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -134,6 +135,7 @@ async def create_job(
     upload.path.unlink(missing_ok=True)
     if not is_manual_project:
         enqueue(settings, job_id)
+        _ensure_worker_available_safely(settings, job_id)
     return {"job": {"id": job_id, "status": "completed" if is_manual_project else "queued"}}
 
 
@@ -227,7 +229,9 @@ def retry_job(job_id: str, user: User = Depends(current_user), settings: Setting
         job.finished_at = None
         db.add(JobEvent(job_id=job.id, organization_id=job.organization_id, stage="queue", kind="status", message="Job reenfileirado"))
         log_event(db, action="job.retry", entity_type="job", entity_id=job.id, organization_id=job.organization_id, user_id=user.id)
-        return {"job": _job_payload(job)}
+        payload = _job_payload(job)
+    _ensure_worker_available_safely(settings, job_id)
+    return {"job": payload}
 
 
 @router.delete("/{job_id}")
@@ -244,3 +248,20 @@ def delete_job(job_id: str, user: User = Depends(current_user), settings: Settin
         db.add(JobEvent(job_id=job.id, organization_id=job.organization_id, stage="storage", kind="status", message="Job excluido"))
         log_event(db, action="job.deleted", entity_type="job", entity_id=job.id, organization_id=job.organization_id, user_id=user.id)
         return {"ok": True}
+
+
+def _ensure_worker_available_safely(settings: Settings, job_id: str) -> None:
+    if not settings.vast_autostart:
+        return
+    try:
+        result = ensure_worker_available(settings)
+        message = f"Vast auto-start: {result.get('action')}"
+        kind = "status" if result.get("ok") else "warning"
+    except Exception as exc:
+        message = f"Vast auto-start falhou: {exc}"
+        kind = "warning"
+    with session_scope(settings) as db:
+        job = db.get(Job, job_id)
+        if job is None:
+            return
+        db.add(JobEvent(job_id=job.id, organization_id=job.organization_id, stage="queue", kind=kind, message=message))

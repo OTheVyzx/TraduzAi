@@ -12,6 +12,13 @@ def _split_origins(value: str) -> list[str]:
     return [origin.strip() for origin in value.split(",") if origin.strip()]
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
 @dataclass(slots=True)
 class Settings:
     env: str = field(default_factory=lambda: os.environ.get("TRADUZAI_ENV", "dev"))
@@ -48,6 +55,13 @@ class Settings:
     max_zip_expanded_mb: int = field(
         default_factory=lambda: int(os.environ.get("TRADUZAI_MAX_ZIP_EXPANDED_MB", "1500"))
     )
+    vast_api_key: str | None = field(default_factory=lambda: os.environ.get("VAST_API_KEY"))
+    vast_instance_id: str | None = field(default_factory=lambda: os.environ.get("VAST_INSTANCE_ID"))
+    vast_offer_id: str | None = field(default_factory=lambda: os.environ.get("VAST_OFFER_ID"))
+    vast_template_hash: str | None = field(default_factory=lambda: os.environ.get("VAST_TEMPLATE_HASH"))
+    vast_autostart: bool = field(default_factory=lambda: _env_flag("VAST_AUTOSTART", False))
+    vast_idle_stop_minutes: int = field(default_factory=lambda: int(os.environ.get("VAST_IDLE_STOP_MINUTES", "0")))
+    vast_label: str = field(default_factory=lambda: os.environ.get("VAST_LABEL", "traduzai-worker"))
 
     @property
     def host(self) -> str:
