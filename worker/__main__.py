@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
@@ -132,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = WorkerSettings.from_env()
     if args.command == "doctor":
         return doctor(settings)
+    if not args.mock and settings.fast_page_server_enabled and _warmup_on_start_enabled():
+        warmup_fast_page_client(settings)
     try:
         while True:
             code = run_once(settings, args.mock)
@@ -174,6 +177,32 @@ def close_fast_page_client() -> None:
         _FAST_PAGE_CLIENT.close()
     finally:
         _FAST_PAGE_CLIENT = None
+
+
+def _warmup_on_start_enabled() -> bool:
+    value = os.environ.get("TRADUZAI_WORKER_WARMUP_ON_START")
+    if value is None:
+        return False
+    return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def warmup_fast_page_client(settings: WorkerSettings) -> None:
+    models_dir = os.environ.get("TRADUZAI_MODELS_DIR") or str(settings.project_root / "pipeline" / "models")
+    profile = os.environ.get("TRADUZAI_WARMUP_PROFILE", "quality")
+    lang = os.environ.get("TRADUZAI_WARMUP_LANG", "en")
+    require_warmup = os.environ.get("TRADUZAI_REQUIRE_WARMUP", "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        events = get_fast_page_client(settings).warmup(
+            {"models_dir": models_dir, "profile": profile, "lang": lang, "idioma_origem": lang}
+        )
+        last_event = events[-1] if events else {}
+        session_id = last_event.get("session_id") or "unknown"
+        print(f"Fast-page warmup pronto: profile={profile} lang={lang} session={session_id}")
+    except Exception as exc:
+        close_fast_page_client()
+        print(f"AVISO: warmup fast-page falhou: {exc}")
+        if require_warmup:
+            raise
 
 
 if __name__ == "__main__":
