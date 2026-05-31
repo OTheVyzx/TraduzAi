@@ -234,6 +234,8 @@ def _build_onstart_script(settings: Settings, worker_env: dict[str, str]) -> str
     env_file = _format_worker_env_file(worker_env)
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
+exec > >(tee -a /tmp/traduzai-onstart.log) 2>&1
+echo "[traduzai] onstart iniciado em $(date -Is)"
 
 export TRADUZAI_REPO_URL={repo_url}
 export TRADUZAI_REPO_BRANCH={repo_branch}
