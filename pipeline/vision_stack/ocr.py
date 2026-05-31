@@ -652,6 +652,7 @@ class OCREngine:
             if sys.version_info >= (3, 12) and self.device.type != "cuda":
                 raise ImportError("PaddleOCR incompatível com Python 3.12 via CPU (C++ Segfault). Forçando EasyOCR.")
             from paddleocr import PaddleOCR
+            from vision_stack.paddle_compat import create_paddle_ocr
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
                 libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
@@ -667,7 +668,8 @@ class OCREngine:
         show_log = _env_bool("TRADUZAI_PADDLE_SHOW_LOG", False)
         use_angle_cls = False
         self._paddle_use_angle_cls = use_angle_cls
-        self._model = PaddleOCR(
+        self._model = create_paddle_ocr(
+            PaddleOCR,
             use_angle_cls=use_angle_cls,
             lang=mapped_lang,
             use_gpu=use_gpu,

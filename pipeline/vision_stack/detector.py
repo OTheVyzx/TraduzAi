@@ -423,6 +423,7 @@ class TextDetector:
         os.environ["MKL_NUM_THREADS"] = "1"
         try:
             from paddleocr import PaddleOCR
+            from vision_stack.paddle_compat import create_paddle_ocr
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
                 libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
@@ -431,7 +432,8 @@ class TextDetector:
             return False
 
         use_gpu = self.device.type == "cuda"
-        self._model = PaddleOCR(
+        self._model = create_paddle_ocr(
+            PaddleOCR,
             use_angle_cls=False,
             lang="en",
             use_gpu=use_gpu,
