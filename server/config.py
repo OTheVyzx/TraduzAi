@@ -64,6 +64,7 @@ class Settings:
     vast_offer_id: str | None = field(default_factory=lambda: os.environ.get("VAST_OFFER_ID"))
     vast_offer_auto: bool = field(default_factory=lambda: _env_flag("VAST_OFFER_AUTO", False))
     vast_offer_limit: int = field(default_factory=lambda: int(os.environ.get("VAST_OFFER_LIMIT", "50")))
+    vast_disk_gb: int = field(default_factory=lambda: int(os.environ.get("VAST_DISK_GB", "80")))
     vast_offer_max_dph: float = field(default_factory=lambda: float(os.environ.get("VAST_OFFER_MAX_DPH", "0.20")))
     vast_offer_min_gpu_ram_gb: int = field(default_factory=lambda: int(os.environ.get("VAST_OFFER_MIN_GPU_RAM_GB", "16")))
     vast_offer_min_reliability: float = field(

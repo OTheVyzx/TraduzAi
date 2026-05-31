@@ -93,6 +93,7 @@ VAST_OFFER_ID=12345
 VAST_TEMPLATE_HASH=hash-do-template
 VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
 VAST_REPO_BRANCH=Troca_de_motores
+VAST_DISK_GB=80
 ```
 
 Para deixar o backend escolher a oferta automaticamente, nao defina `VAST_OFFER_ID` e use filtros:
@@ -102,6 +103,7 @@ VAST_OFFER_AUTO=1
 VAST_TEMPLATE_HASH=hash-do-template
 VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
 VAST_REPO_BRANCH=Troca_de_motores
+VAST_DISK_GB=80
 VAST_OFFER_MAX_DPH=0.20
 VAST_OFFER_MIN_GPU_RAM_GB=16
 VAST_OFFER_MIN_RELIABILITY=0.98

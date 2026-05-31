@@ -24,6 +24,7 @@ class VastClientProtocol(Protocol):
         *,
         template_hash_id: str | None = None,
         env: dict[str, str] | None = None,
+        disk: int | None = None,
         label: str | None = None,
         onstart: str | None = None,
     ) -> dict[str, Any]: ...
@@ -101,6 +102,7 @@ def _create_instance(settings: Settings, client: VastClientProtocol) -> dict[str
         offer["id"],
         template_hash_id=settings.vast_template_hash,
         env=worker_env,
+        disk=settings.vast_disk_gb,
         label=settings.vast_label,
         onstart=_build_onstart_script(settings, worker_env),
     )
@@ -156,6 +158,7 @@ def _build_offer_query(settings: Settings) -> dict[str, Any]:
         "gpu_arch": {"eq": "nvidia"},
         "num_gpus": {"eq": 1},
         "gpu_ram": {"gte": settings.vast_offer_min_gpu_ram_gb * 1024},
+        "disk_space": {"gte": settings.vast_disk_gb},
         "reliability": {"gte": settings.vast_offer_min_reliability},
         "dlperf": {"gte": settings.vast_offer_min_dlperf},
         "dph_total": {"lte": settings.vast_offer_max_dph},

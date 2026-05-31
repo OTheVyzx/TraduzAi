@@ -45,6 +45,7 @@ class VastClient:
         *,
         template_hash_id: str | None = None,
         env: dict[str, str] | None = None,
+        disk: int | None = None,
         label: str | None = None,
         onstart: str | None = None,
     ) -> dict[str, Any]:
@@ -53,6 +54,8 @@ class VastClient:
             body["template_hash_id"] = template_hash_id
         if env:
             body["env"] = env
+        if disk:
+            body["disk"] = disk
         if label:
             body["label"] = label
         if onstart:

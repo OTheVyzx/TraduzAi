@@ -30,12 +30,13 @@ class FakeVastClient:
         self.offer_queries.append(query)
         return self.offers
 
-    def create_instance(self, offer_id, *, template_hash_id=None, env=None, label=None, onstart=None):
+    def create_instance(self, offer_id, *, template_hash_id=None, env=None, disk=None, label=None, onstart=None):
         self.created.append(
             {
                 "offer_id": offer_id,
                 "template_hash_id": template_hash_id,
                 "env": env,
+                "disk": disk,
                 "label": label,
                 "onstart": onstart,
             }
@@ -91,6 +92,7 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
     created = client.created[0]
     assert created["offer_id"] == "12345"
     assert created["template_hash_id"] == "template-hash"
+    assert created["disk"] == 80
     assert created["label"] == "traduzai-worker"
     assert created["env"]["TRADUZAI_API_URL"] == "https://api.example.test"
     assert created["env"]["TRADUZAI_WORKER_TOKEN"] == "worker-token"
@@ -143,6 +145,7 @@ def test_ensure_worker_available_auto_selects_cheapest_matching_offer():
             "gpu_arch": {"eq": "nvidia"},
             "num_gpus": {"eq": 1},
             "gpu_ram": {"gte": 16384},
+            "disk_space": {"gte": 80},
             "reliability": {"gte": 0.98},
             "dlperf": {"gte": 5.0},
             "dph_total": {"lte": 0.20},
