@@ -92,11 +92,12 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
     assert created["offer_id"] == "12345"
     assert created["template_hash_id"] == "template-hash"
     assert created["label"] == "traduzai-worker"
-    assert "TRADUZAI_API_URL=https://api.example.test" in created["env"]
-    assert "TRADUZAI_WORKER_TOKEN=worker-token" in created["env"]
-    assert "TRADUZAI_REPO_BRANCH=Troca_de_motores" in created["env"]
-    assert "TRADUZAI_REQUIRE_GPU=1" in created["env"]
+    assert created["env"]["TRADUZAI_API_URL"] == "https://api.example.test"
+    assert created["env"]["TRADUZAI_WORKER_TOKEN"] == "worker-token"
+    assert created["env"]["TRADUZAI_REPO_BRANCH"] == "Troca_de_motores"
+    assert created["env"]["TRADUZAI_REQUIRE_GPU"] == "1"
     assert "cat > /workspace/traduzai-worker.env" in created["onstart"]
+    assert "TRADUZAI_API_URL=https://api.example.test" in created["onstart"]
     assert "bash \"$TRADUZAI_PROJECT_ROOT/scripts/vast/bootstrap.sh\"" in created["onstart"]
     assert "exec bash \"$TRADUZAI_PROJECT_ROOT/scripts/vast/start-worker.sh\"" in created["onstart"]
 

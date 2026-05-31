@@ -44,7 +44,7 @@ class VastClient:
         offer_id: str,
         *,
         template_hash_id: str | None = None,
-        env: str | None = None,
+        env: dict[str, str] | None = None,
         label: str | None = None,
         onstart: str | None = None,
     ) -> dict[str, Any]:

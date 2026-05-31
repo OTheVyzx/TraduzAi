@@ -23,7 +23,7 @@ class VastClientProtocol(Protocol):
         offer_id: str,
         *,
         template_hash_id: str | None = None,
-        env: str | None = None,
+        env: dict[str, str] | None = None,
         label: str | None = None,
         onstart: str | None = None,
     ) -> dict[str, Any]: ...
@@ -211,9 +211,9 @@ def _missing_worker_bootstrap_config(settings: Settings) -> list[str]:
     return missing
 
 
-def _build_worker_env(settings: Settings) -> str:
+def _build_worker_env(settings: Settings) -> dict[str, str]:
     worker_name = settings.vast_worker_name or settings.vast_label
-    values = {
+    return {
         "TRADUZAI_API_URL": settings.vast_worker_api_url or "",
         "TRADUZAI_WORKER_TOKEN": settings.worker_token or "",
         "TRADUZAI_WORKER_NAME": worker_name,
@@ -225,13 +225,13 @@ def _build_worker_env(settings: Settings) -> str:
         "TRADUZAI_WARMUP_LANG": "en",
         "TRADUZAI_REQUIRE_GPU": "1" if settings.vast_require_gpu else "0",
     }
-    return "\n".join(f"{key}={_env_value(value)}" for key, value in values.items()) + "\n"
 
 
-def _build_onstart_script(settings: Settings, worker_env: str) -> str:
+def _build_onstart_script(settings: Settings, worker_env: dict[str, str]) -> str:
     repo_url = _shell_quote(settings.vast_repo_url)
     repo_branch = _shell_quote(settings.vast_repo_branch)
     project_root = "/workspace/TraduzAI"
+    env_file = _format_worker_env_file(worker_env)
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -240,7 +240,7 @@ export TRADUZAI_REPO_BRANCH={repo_branch}
 export TRADUZAI_PROJECT_ROOT={project_root}
 
 cat > /workspace/traduzai-worker.env <<'TRADUZAI_WORKER_ENV'
-{worker_env}TRADUZAI_WORKER_ENV
+{env_file}TRADUZAI_WORKER_ENV
 
 if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
@@ -262,6 +262,10 @@ fi
 bash "$TRADUZAI_PROJECT_ROOT/scripts/vast/bootstrap.sh"
 exec bash "$TRADUZAI_PROJECT_ROOT/scripts/vast/start-worker.sh"
 """
+
+
+def _format_worker_env_file(values: dict[str, str]) -> str:
+    return "\n".join(f"{key}={_env_value(value)}" for key, value in values.items()) + "\n"
 
 
 def _env_value(value: str) -> str:
