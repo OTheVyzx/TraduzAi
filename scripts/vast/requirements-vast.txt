@@ -1,11 +1,11 @@
---extra-index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://download.pytorch.org/whl/cu126
 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
 
-# GPU stack pinned for Vast instances with NVIDIA driver 535.x / CUDA 12.6.
-# Do not leave torch unconstrained here: newer CUDA 13 wheels fail on this driver.
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
-torchaudio==2.5.1+cu121
+# GPU stack pinned to CUDA 12.6 so PyTorch and Paddle share the same NVIDIA wheels.
+# Do not leave torch unconstrained here: CUDA 13 wheels fail on this driver family.
+torch==2.7.1+cu126
+torchvision==0.22.1+cu126
+torchaudio==2.7.1+cu126
 paddlepaddle-gpu==3.2.2
 
 -r ../../requirements-worker.txt
