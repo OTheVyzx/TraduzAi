@@ -10,6 +10,8 @@ class FakeVastClient:
         self.started = []
         self.stopped = []
         self.created = []
+        self.offers = []
+        self.offer_queries = []
 
     def show_instance(self, instance_id):
         if self.instance is None:
@@ -23,6 +25,10 @@ class FakeVastClient:
     def stop_instance(self, instance_id):
         self.stopped.append(instance_id)
         return {"success": True}
+
+    def search_offers(self, query):
+        self.offer_queries.append(query)
+        return self.offers
 
     def create_instance(self, offer_id, *, template_hash_id=None, env=None, label=None, onstart=None):
         self.created.append(
@@ -80,7 +86,7 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
 
     result = ensure_worker_available(settings, client=client)
 
-    assert result == {"ok": True, "action": "created", "instance_id": "987"}
+    assert result == {"ok": True, "action": "created", "instance_id": "987", "offer_id": "12345", "offer": None}
     assert len(client.created) == 1
     created = client.created[0]
     assert created["offer_id"] == "12345"
@@ -103,6 +109,48 @@ def test_ensure_worker_available_does_not_create_unconfigured_instance():
 
     assert result == {"ok": False, "action": "missing_worker_bootstrap_config", "missing": ["VAST_WORKER_API_URL"]}
     assert client.created == []
+
+
+def test_ensure_worker_available_auto_selects_cheapest_matching_offer():
+    settings = make_vast_settings(
+        vast_instance_id=None,
+        vast_offer_id=None,
+        vast_offer_auto=True,
+        vast_offer_max_dph=0.20,
+        vast_offer_min_gpu_ram_gb=16,
+        vast_offer_gpu_names=["Tesla P100", "RTX 3090"],
+    )
+    client = FakeVastClient(None)
+    client.offers = [
+        {"id": 111, "gpu_name": "RTX 3090", "gpu_ram": 24576, "dph_total": 0.19, "reliability": 0.99, "dlperf": 20},
+        {"id": 222, "gpu_name": "Tesla P100", "gpu_ram": 16384, "dph_total": 0.10, "reliability": 0.98, "dlperf": 8},
+    ]
+
+    result = ensure_worker_available(settings, client=client)
+
+    assert result["ok"] is True
+    assert result["action"] == "created"
+    assert result["offer_id"] == "222"
+    assert client.created[0]["offer_id"] == "222"
+    assert client.offer_queries == [
+        {
+            "limit": 50,
+            "type": "ondemand",
+            "verified": {"eq": True},
+            "rentable": {"eq": True},
+            "rented": {"eq": False},
+            "gpu_arch": {"eq": "nvidia"},
+            "num_gpus": {"eq": 1},
+            "gpu_ram": {"gte": 16384},
+            "reliability": {"gte": 0.98},
+            "dlperf": {"gte": 5.0},
+            "dph_total": {"lte": 0.20},
+            "direct_port_count": {"gte": 1},
+            "cuda_max_good": {"gte": 12.1},
+            "order": [["dph_total", "asc"], ["reliability", "desc"], ["dlperf", "desc"]],
+            "gpu_name": {"in": ["Tesla P100", "RTX 3090"]},
+        }
+    ]
 
 
 def test_ensure_worker_available_is_disabled_without_autostart():

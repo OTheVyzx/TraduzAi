@@ -10,6 +10,8 @@ from server.vast.client import VastClient
 
 
 class VastClientProtocol(Protocol):
+    def search_offers(self, query: dict[str, Any]) -> list[dict[str, Any]]: ...
+
     def show_instance(self, instance_id: str) -> dict[str, Any] | None: ...
 
     def start_instance(self, instance_id: str) -> dict[str, Any]: ...
@@ -43,7 +45,7 @@ def ensure_worker_available(settings: Settings, *, client: VastClientProtocol | 
     if instance_id:
         instance = client.show_instance(instance_id)
         if instance is None:
-            if not settings.vast_offer_id:
+            if not settings.vast_offer_id and not settings.vast_offer_auto:
                 return {"ok": False, "action": "instance_not_found", "instance_id": instance_id}
             return _create_instance(settings, client)
         status = _instance_status(instance)
@@ -52,7 +54,7 @@ def ensure_worker_available(settings: Settings, *, client: VastClientProtocol | 
         client.start_instance(str(instance_id))
         return {"ok": True, "action": "started", "instance_id": str(instance_id), "status": status}
 
-    if settings.vast_offer_id:
+    if settings.vast_offer_id or settings.vast_offer_auto:
         return _create_instance(settings, client)
     return {"ok": False, "action": "missing_instance_or_offer"}
 
@@ -88,21 +90,28 @@ def stop_idle_worker_if_needed(
 
 
 def _create_instance(settings: Settings, client: VastClientProtocol) -> dict[str, Any]:
-    if not settings.vast_offer_id:
+    offer = _resolve_offer(settings, client)
+    if offer is None:
         return {"ok": False, "action": "missing_offer"}
     missing_bootstrap = _missing_worker_bootstrap_config(settings)
     if missing_bootstrap:
         return {"ok": False, "action": "missing_worker_bootstrap_config", "missing": missing_bootstrap}
     worker_env = _build_worker_env(settings)
     created = client.create_instance(
-        settings.vast_offer_id,
+        offer["id"],
         template_hash_id=settings.vast_template_hash,
         env=worker_env,
         label=settings.vast_label,
         onstart=_build_onstart_script(settings, worker_env),
     )
     new_id = created.get("new_contract") or created.get("id")
-    return {"ok": bool(created.get("success", True)), "action": "created", "instance_id": str(new_id)}
+    return {
+        "ok": bool(created.get("success", True)),
+        "action": "created",
+        "instance_id": str(new_id),
+        "offer_id": offer["id"],
+        "offer": offer.get("summary"),
+    }
 
 
 def _instance_status(instance: dict[str, Any]) -> str:
@@ -120,6 +129,77 @@ def _instance_status(instance: dict[str, Any]) -> str:
 def _has_pending_work(settings: Settings) -> bool:
     with session_scope(settings) as db:
         return db.query(Job).filter(Job.status.in_(["queued", *BUSY_STATUSES])).count() > 0
+
+
+def _resolve_offer(settings: Settings, client: VastClientProtocol) -> dict[str, Any] | None:
+    if settings.vast_offer_id:
+        return {"id": settings.vast_offer_id}
+    if not settings.vast_offer_auto:
+        return None
+    offers = client.search_offers(_build_offer_query(settings))
+    if not offers:
+        return None
+    offer = _sort_offers(offers)[0]
+    offer_id = offer.get("id") or offer.get("ask_contract_id")
+    if offer_id is None:
+        return None
+    return {"id": str(offer_id), "summary": _offer_summary(offer)}
+
+
+def _build_offer_query(settings: Settings) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "limit": settings.vast_offer_limit,
+        "type": "ondemand",
+        "verified": {"eq": True},
+        "rentable": {"eq": True},
+        "rented": {"eq": False},
+        "gpu_arch": {"eq": "nvidia"},
+        "num_gpus": {"eq": 1},
+        "gpu_ram": {"gte": settings.vast_offer_min_gpu_ram_gb * 1024},
+        "reliability": {"gte": settings.vast_offer_min_reliability},
+        "dlperf": {"gte": settings.vast_offer_min_dlperf},
+        "dph_total": {"lte": settings.vast_offer_max_dph},
+        "direct_port_count": {"gte": settings.vast_offer_min_direct_ports},
+        "cuda_max_good": {"gte": settings.vast_offer_min_cuda},
+        "order": [["dph_total", "asc"], ["reliability", "desc"], ["dlperf", "desc"]],
+    }
+    if settings.vast_offer_gpu_names:
+        query["gpu_name"] = {"in": settings.vast_offer_gpu_names}
+    return query
+
+
+def _sort_offers(offers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        offers,
+        key=lambda offer: (
+            _number(offer.get("dph_total"), 999.0),
+            -_number(offer.get("reliability"), 0.0),
+            -_number(offer.get("dlperf"), 0.0),
+        ),
+    )
+
+
+def _offer_summary(offer: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "id",
+        "gpu_name",
+        "gpu_ram",
+        "dph_total",
+        "reliability",
+        "dlperf",
+        "cuda_max_good",
+        "direct_port_count",
+        "geolocation",
+        "machine_id",
+    ]
+    return {key: offer.get(key) for key in keys if key in offer}
+
+
+def _number(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _missing_worker_bootstrap_config(settings: Settings) -> list[str]:

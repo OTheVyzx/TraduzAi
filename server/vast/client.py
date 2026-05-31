@@ -30,6 +30,15 @@ class VastClient:
     def stop_instance(self, instance_id: str) -> dict[str, Any]:
         return self._request("PUT", f"/instances/{instance_id}/", {"state": "stopped"})
 
+    def search_offers(self, query: dict[str, Any]) -> list[dict[str, Any]]:
+        response = self._request("POST", "/bundles/", query)
+        offers = response.get("offers", [])
+        if isinstance(offers, list):
+            return [offer for offer in offers if isinstance(offer, dict)]
+        if isinstance(offers, dict):
+            return [offers]
+        return []
+
     def create_instance(
         self,
         offer_id: str,

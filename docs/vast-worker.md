@@ -95,7 +95,25 @@ VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
 VAST_REPO_BRANCH=Troca_de_motores
 ```
 
-Quando o backend cria uma instancia nova via `VAST_OFFER_ID`, ele envia um `onstart` para a Vast que:
+Para deixar o backend escolher a oferta automaticamente, nao defina `VAST_OFFER_ID` e use filtros:
+
+```env
+VAST_OFFER_AUTO=1
+VAST_TEMPLATE_HASH=hash-do-template
+VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
+VAST_REPO_BRANCH=Troca_de_motores
+VAST_OFFER_MAX_DPH=0.20
+VAST_OFFER_MIN_GPU_RAM_GB=16
+VAST_OFFER_MIN_RELIABILITY=0.98
+VAST_OFFER_MIN_DLPERF=5.0
+VAST_OFFER_MIN_DIRECT_PORTS=1
+VAST_OFFER_MIN_CUDA=12.1
+VAST_OFFER_GPU_NAMES=Tesla P100,RTX 3090,RTX 4090
+```
+
+O orquestrador busca ofertas verificadas, disponiveis, NVIDIA, 1 GPU, dentro do preco e com VRAM suficiente. Depois escolhe a mais barata; em empate, prefere maior confiabilidade e maior DLPerf.
+
+Quando o backend cria uma instancia nova via `VAST_OFFER_ID` ou `VAST_OFFER_AUTO`, ele envia um `onstart` para a Vast que:
 
 1. cria `/workspace/traduzai-worker.env` com `TRADUZAI_API_URL`, `TRADUZAI_WORKER_TOKEN`, warmup e GPU;
 2. clona ou atualiza `/workspace/TraduzAI`;
