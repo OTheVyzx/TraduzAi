@@ -43,15 +43,24 @@ class VastClient:
         self,
         offer_id: str,
         *,
+        image: str | None = None,
         template_hash_id: str | None = None,
+        runtype: str | None = None,
         env: dict[str, str] | None = None,
         disk: int | None = None,
         label: str | None = None,
         onstart: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"cancel_unavail": True, "target_state": "running"}
+        if image:
+            body["image"] = image
         if template_hash_id:
             body["template_hash_id"] = template_hash_id
+        if runtype:
+            body["runtype"] = runtype
+            if runtype.startswith("jupyter"):
+                body["use_jupyter_lab"] = True
+                body["jupyter_dir"] = "/workspace"
         if env:
             body["env"] = env
         if disk:

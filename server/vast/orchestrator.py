@@ -23,7 +23,9 @@ class VastClientProtocol(Protocol):
         self,
         offer_id: str,
         *,
+        image: str | None = None,
         template_hash_id: str | None = None,
+        runtype: str | None = None,
         env: dict[str, str] | None = None,
         disk: int | None = None,
         label: str | None = None,
@@ -170,7 +172,9 @@ def _create_instance(settings: Settings, client: VastClientProtocol) -> dict[str
     worker_env = _build_worker_env(settings)
     created = client.create_instance(
         offer["id"],
-        template_hash_id=settings.vast_template_hash,
+        image=settings.vast_image,
+        template_hash_id=None if settings.vast_image else settings.vast_template_hash,
+        runtype=settings.vast_runtype,
         env=worker_env,
         disk=settings.vast_disk_gb,
         label=settings.vast_label,

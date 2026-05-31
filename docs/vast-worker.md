@@ -100,7 +100,7 @@ Com `VAST_INSTANCE_ID`, o servidor tenta religar a instancia pausada quando um j
 
 ```env
 VAST_OFFER_ID=12345
-VAST_TEMPLATE_HASH=hash-do-template
+VAST_IMAGE=vastai/pytorch:cuda-12.1.1-auto
 VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
 VAST_REPO_BRANCH=Troca_de_motores
 VAST_DISK_GB=80
@@ -110,7 +110,8 @@ Para deixar o backend escolher a oferta automaticamente, nao defina `VAST_OFFER_
 
 ```env
 VAST_OFFER_AUTO=1
-VAST_TEMPLATE_HASH=hash-do-template
+VAST_IMAGE=vastai/pytorch:cuda-12.1.1-auto
+VAST_RUNTYPE=jupyter_direct
 VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
 VAST_REPO_BRANCH=Troca_de_motores
 VAST_DISK_GB=80
@@ -124,6 +125,8 @@ VAST_OFFER_GPU_NAMES=Tesla P100,RTX 3090,RTX 4090
 ```
 
 O orquestrador busca ofertas verificadas, disponiveis, NVIDIA, 1 GPU, dentro do preco e com VRAM suficiente. Depois escolhe a mais barata; em empate, prefere maior confiabilidade e maior DLPerf.
+
+Por padrao, o backend cria a instancia diretamente com `VAST_IMAGE=vastai/pytorch:cuda-12.1.1-auto` e `VAST_RUNTYPE=jupyter_direct`, sem depender de um template customizado. Isso evita falhas da Vast como `docker_build() error writing dockerfile` quando o template salvo esta invalido. Se quiser forcar template, deixe `VAST_IMAGE` vazio e configure `VAST_TEMPLATE_HASH`.
 
 Quando o backend cria uma instancia nova via `VAST_OFFER_ID` ou `VAST_OFFER_AUTO`, ele envia um `onstart` para a Vast que:
 

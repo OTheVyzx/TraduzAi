@@ -36,11 +36,24 @@ class FakeVastClient:
         self.offer_queries.append(query)
         return self.offers
 
-    def create_instance(self, offer_id, *, template_hash_id=None, env=None, disk=None, label=None, onstart=None):
+    def create_instance(
+        self,
+        offer_id,
+        *,
+        image=None,
+        template_hash_id=None,
+        runtype=None,
+        env=None,
+        disk=None,
+        label=None,
+        onstart=None,
+    ):
         self.created.append(
             {
                 "offer_id": offer_id,
+                "image": image,
                 "template_hash_id": template_hash_id,
+                "runtype": runtype,
                 "env": env,
                 "disk": disk,
                 "label": label,
@@ -103,7 +116,9 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
     assert len(client.created) == 1
     created = client.created[0]
     assert created["offer_id"] == "12345"
-    assert created["template_hash_id"] == "template-hash"
+    assert created["image"] == "vastai/pytorch:cuda-12.1.1-auto"
+    assert created["runtype"] == "jupyter_direct"
+    assert created["template_hash_id"] is None
     assert created["disk"] == 80
     assert created["label"] == "traduzai-worker"
     assert created["env"]["TRADUZAI_API_URL"] == "https://api.example.test"
@@ -114,6 +129,22 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
     assert "TRADUZAI_API_URL=https://api.example.test" in created["onstart"]
     assert "bash \"$TRADUZAI_PROJECT_ROOT/scripts/vast/bootstrap.sh\"" in created["onstart"]
     assert "exec bash \"$TRADUZAI_PROJECT_ROOT/scripts/vast/start-worker.sh\"" in created["onstart"]
+
+
+def test_ensure_worker_available_can_create_from_template_when_direct_image_is_disabled():
+    settings = make_vast_settings(
+        vast_instance_id=None,
+        vast_offer_id="12345",
+        vast_image=None,
+        vast_template_hash="template-hash",
+    )
+    client = FakeVastClient(None)
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result["ok"] is True
+    assert client.created[0]["image"] is None
+    assert client.created[0]["template_hash_id"] == "template-hash"
 
 
 def test_ensure_worker_available_does_not_create_unconfigured_instance():

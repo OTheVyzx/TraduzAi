@@ -78,6 +78,10 @@ class Settings:
     vast_offer_gpu_names: list[str] = field(
         default_factory=lambda: _split_csv(os.environ.get("VAST_OFFER_GPU_NAMES", ""))
     )
+    vast_image: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_IMAGE", "vastai/pytorch:cuda-12.1.1-auto") or None
+    )
+    vast_runtype: str = field(default_factory=lambda: os.environ.get("VAST_RUNTYPE", "jupyter_direct"))
     vast_template_hash: str | None = field(default_factory=lambda: os.environ.get("VAST_TEMPLATE_HASH"))
     vast_autostart: bool = field(default_factory=lambda: _env_flag("VAST_AUTOSTART", False))
     vast_idle_stop_minutes: int = field(default_factory=lambda: int(os.environ.get("VAST_IDLE_STOP_MINUTES", "0")))
