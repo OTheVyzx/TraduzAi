@@ -74,6 +74,16 @@ bash scripts/vast/warmup.sh
 
 Esse comando testa o worker e o servidor fast-page. O `start-worker.sh` tambem faz warmup real no mesmo processo quando `TRADUZAI_WORKER_WARMUP_ON_START=1`.
 
+Para validar a stack de GPU do template, use:
+
+```bash
+cd /workspace/TraduzAI
+source .venv/bin/activate
+python scripts/vast/verify-gpu-stack.py
+```
+
+No Vast, o bootstrap instala PaddleOCR GPU primeiro e depois instala PyTorch CUDA sem resolver dependencias novamente. Isso evita o conflito conhecido entre os pins de `nvidia-nccl-cu12` do Paddle e do PyTorch. Para esse template, prefira `verify-gpu-stack.py` em vez de `pip check`.
+
 ## Automacao pelo backend
 
 No backend local, configure:

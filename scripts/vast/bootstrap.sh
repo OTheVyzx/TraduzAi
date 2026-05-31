@@ -39,6 +39,18 @@ cd "$PROJECT_ROOT"
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
+
+# PaddleOCR is the primary OCR engine. The current Paddle CUDA 12.6 wheels pin
+# nvidia-nccl-cu12==2.25.1, while matching PyTorch CUDA 12.6 wheels pin 2.26.2.
+# Install Paddle's stack first, then install Torch without dependency resolution
+# so both frameworks can be imported in the same single-GPU worker process.
+PADDLE_INDEX_URL="${TRADUZAI_PADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
+TORCH_INDEX_URL="${TRADUZAI_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
+python -m pip install --extra-index-url "$PADDLE_INDEX_URL" paddlepaddle-gpu==3.2.2
+python -m pip install --index-url "$TORCH_INDEX_URL" --no-deps \
+  torch==2.7.1+cu126 \
+  torchvision==0.22.1+cu126 \
+  torchaudio==2.7.1+cu126
 python -m pip install -r "$PROJECT_ROOT/scripts/vast/requirements-vast.txt"
 python "$PROJECT_ROOT/scripts/vast/verify-gpu-stack.py"
 

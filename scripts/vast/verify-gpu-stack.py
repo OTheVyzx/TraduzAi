@@ -43,6 +43,14 @@ def main() -> int:
         result["paddle"] = {"error": str(exc)}
         ok = False
 
+    try:
+        import paddleocr
+
+        result["paddleocr"] = {"version": getattr(paddleocr, "__version__", "unknown")}
+    except Exception as exc:
+        result["paddleocr"] = {"error": str(exc)}
+        ok = False
+
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if require_gpu and not ok:
         return 1
