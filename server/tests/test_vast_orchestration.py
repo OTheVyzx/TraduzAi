@@ -16,6 +16,10 @@ def test_settings_loads_vast_automation_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("VAST_IDLE_STOP_MINUTES", "7")
     monkeypatch.setenv("VAST_TEMPLATE_HASH", "template-hash")
     monkeypatch.setenv("VAST_OFFER_ID", "12345")
+    monkeypatch.setenv("VAST_WORKER_API_URL", "https://api.example.test")
+    monkeypatch.setenv("VAST_REPO_BRANCH", "Troca_de_motores")
+    monkeypatch.setenv("VAST_WORKER_NAME", "worker-auto")
+    monkeypatch.setenv("VAST_REQUIRE_GPU", "1")
 
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'app.db'}", storage_dir=tmp_path / "storage")
 
@@ -25,6 +29,10 @@ def test_settings_loads_vast_automation_from_env(monkeypatch, tmp_path):
     assert settings.vast_idle_stop_minutes == 7
     assert settings.vast_template_hash == "template-hash"
     assert settings.vast_offer_id == "12345"
+    assert settings.vast_worker_api_url == "https://api.example.test"
+    assert settings.vast_repo_branch == "Troca_de_motores"
+    assert settings.vast_worker_name == "worker-auto"
+    assert settings.vast_require_gpu is True
 
 
 def test_create_job_triggers_vast_orchestrator_when_autostart_is_enabled(monkeypatch, tmp_path):

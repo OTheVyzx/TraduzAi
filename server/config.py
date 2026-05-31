@@ -62,6 +62,25 @@ class Settings:
     vast_autostart: bool = field(default_factory=lambda: _env_flag("VAST_AUTOSTART", False))
     vast_idle_stop_minutes: int = field(default_factory=lambda: int(os.environ.get("VAST_IDLE_STOP_MINUTES", "0")))
     vast_label: str = field(default_factory=lambda: os.environ.get("VAST_LABEL", "traduzai-worker"))
+    vast_worker_api_url: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_WORKER_API_URL") or os.environ.get("TRADUZAI_PUBLIC_API_URL")
+    )
+    vast_repo_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "VAST_REPO_URL",
+            os.environ.get("TRADUZAI_REPO_URL", "https://github.com/OTheVyzx/TraduzAi.git"),
+        )
+    )
+    vast_repo_branch: str = field(
+        default_factory=lambda: os.environ.get(
+            "VAST_REPO_BRANCH",
+            os.environ.get("TRADUZAI_REPO_BRANCH", "Troca_de_motores"),
+        )
+    )
+    vast_worker_name: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_WORKER_NAME") or os.environ.get("TRADUZAI_WORKER_NAME")
+    )
+    vast_require_gpu: bool = field(default_factory=lambda: _env_flag("VAST_REQUIRE_GPU", True))
 
     @property
     def host(self) -> str:

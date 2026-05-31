@@ -90,10 +90,16 @@ def stop_idle_worker_if_needed(
 def _create_instance(settings: Settings, client: VastClientProtocol) -> dict[str, Any]:
     if not settings.vast_offer_id:
         return {"ok": False, "action": "missing_offer"}
+    missing_bootstrap = _missing_worker_bootstrap_config(settings)
+    if missing_bootstrap:
+        return {"ok": False, "action": "missing_worker_bootstrap_config", "missing": missing_bootstrap}
+    worker_env = _build_worker_env(settings)
     created = client.create_instance(
         settings.vast_offer_id,
         template_hash_id=settings.vast_template_hash,
+        env=worker_env,
         label=settings.vast_label,
+        onstart=_build_onstart_script(settings, worker_env),
     )
     new_id = created.get("new_contract") or created.get("id")
     return {"ok": bool(created.get("success", True)), "action": "created", "instance_id": str(new_id)}
@@ -114,3 +120,76 @@ def _instance_status(instance: dict[str, Any]) -> str:
 def _has_pending_work(settings: Settings) -> bool:
     with session_scope(settings) as db:
         return db.query(Job).filter(Job.status.in_(["queued", *BUSY_STATUSES])).count() > 0
+
+
+def _missing_worker_bootstrap_config(settings: Settings) -> list[str]:
+    missing = []
+    if not settings.vast_worker_api_url:
+        missing.append("VAST_WORKER_API_URL")
+    if not settings.worker_token:
+        missing.append("TRADUZAI_WORKER_TOKEN")
+    return missing
+
+
+def _build_worker_env(settings: Settings) -> str:
+    worker_name = settings.vast_worker_name or settings.vast_label
+    values = {
+        "TRADUZAI_API_URL": settings.vast_worker_api_url or "",
+        "TRADUZAI_WORKER_TOKEN": settings.worker_token or "",
+        "TRADUZAI_WORKER_NAME": worker_name,
+        "TRADUZAI_REPO_URL": settings.vast_repo_url,
+        "TRADUZAI_REPO_BRANCH": settings.vast_repo_branch,
+        "TRADUZAI_FAST_PAGE_SERVER": "1",
+        "TRADUZAI_WORKER_WARMUP_ON_START": "1",
+        "TRADUZAI_WARMUP_PROFILE": "quality",
+        "TRADUZAI_WARMUP_LANG": "en",
+        "TRADUZAI_REQUIRE_GPU": "1" if settings.vast_require_gpu else "0",
+    }
+    return "\n".join(f"{key}={_env_value(value)}" for key, value in values.items()) + "\n"
+
+
+def _build_onstart_script(settings: Settings, worker_env: str) -> str:
+    repo_url = _shell_quote(settings.vast_repo_url)
+    repo_branch = _shell_quote(settings.vast_repo_branch)
+    project_root = "/workspace/TraduzAI"
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export TRADUZAI_REPO_URL={repo_url}
+export TRADUZAI_REPO_BRANCH={repo_branch}
+export TRADUZAI_PROJECT_ROOT={project_root}
+
+cat > /workspace/traduzai-worker.env <<'TRADUZAI_WORKER_ENV'
+{worker_env}TRADUZAI_WORKER_ENV
+
+if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends git curl ca-certificates
+  fi
+fi
+
+if [ ! -d "$TRADUZAI_PROJECT_ROOT/.git" ]; then
+  mkdir -p "$(dirname "$TRADUZAI_PROJECT_ROOT")"
+  git clone --depth 1 --branch "$TRADUZAI_REPO_BRANCH" "$TRADUZAI_REPO_URL" "$TRADUZAI_PROJECT_ROOT"
+else
+  git -C "$TRADUZAI_PROJECT_ROOT" fetch --depth 1 origin "$TRADUZAI_REPO_BRANCH"
+  git -C "$TRADUZAI_PROJECT_ROOT" checkout "$TRADUZAI_REPO_BRANCH"
+  git -C "$TRADUZAI_PROJECT_ROOT" reset --hard "origin/$TRADUZAI_REPO_BRANCH"
+fi
+
+bash "$TRADUZAI_PROJECT_ROOT/scripts/vast/bootstrap.sh"
+exec bash "$TRADUZAI_PROJECT_ROOT/scripts/vast/start-worker.sh"
+"""
+
+
+def _env_value(value: str) -> str:
+    cleaned = str(value).replace("\r", "").replace("\n", "")
+    if not cleaned or any(char.isspace() or char in {'"', "'", "\\", "$", "#"} for char in cleaned):
+        return _shell_quote(cleaned)
+    return cleaned
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"

@@ -47,6 +47,7 @@ def make_vast_settings(**overrides):
         "vast_autostart": True,
         "vast_api_key": "vast-key",
         "vast_instance_id": "38646242",
+        "vast_worker_api_url": "https://api.example.test",
     }
     values.update(overrides)
     return Settings(**values)
@@ -80,15 +81,28 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
     result = ensure_worker_available(settings, client=client)
 
     assert result == {"ok": True, "action": "created", "instance_id": "987"}
-    assert client.created == [
-        {
-            "offer_id": "12345",
-            "template_hash_id": "template-hash",
-            "env": None,
-            "label": "traduzai-worker",
-            "onstart": None,
-        }
-    ]
+    assert len(client.created) == 1
+    created = client.created[0]
+    assert created["offer_id"] == "12345"
+    assert created["template_hash_id"] == "template-hash"
+    assert created["label"] == "traduzai-worker"
+    assert "TRADUZAI_API_URL=https://api.example.test" in created["env"]
+    assert "TRADUZAI_WORKER_TOKEN=worker-token" in created["env"]
+    assert "TRADUZAI_REPO_BRANCH=Troca_de_motores" in created["env"]
+    assert "TRADUZAI_REQUIRE_GPU=1" in created["env"]
+    assert "cat > /workspace/traduzai-worker.env" in created["onstart"]
+    assert "bash \"$TRADUZAI_PROJECT_ROOT/scripts/vast/bootstrap.sh\"" in created["onstart"]
+    assert "exec bash \"$TRADUZAI_PROJECT_ROOT/scripts/vast/start-worker.sh\"" in created["onstart"]
+
+
+def test_ensure_worker_available_does_not_create_unconfigured_instance():
+    settings = make_vast_settings(vast_instance_id=None, vast_offer_id="12345", vast_worker_api_url=None)
+    client = FakeVastClient(None)
+
+    result = ensure_worker_available(settings, client=client)
+
+    assert result == {"ok": False, "action": "missing_worker_bootstrap_config", "missing": ["VAST_WORKER_API_URL"]}
+    assert client.created == []
 
 
 def test_ensure_worker_available_is_disabled_without_autostart():

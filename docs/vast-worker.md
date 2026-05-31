@@ -91,7 +91,18 @@ Com `VAST_INSTANCE_ID`, o servidor tenta religar a instancia pausada quando um j
 ```env
 VAST_OFFER_ID=12345
 VAST_TEMPLATE_HASH=hash-do-template
+VAST_WORKER_API_URL=https://SUA-API.trycloudflare.com
+VAST_REPO_BRANCH=Troca_de_motores
 ```
+
+Quando o backend cria uma instancia nova via `VAST_OFFER_ID`, ele envia um `onstart` para a Vast que:
+
+1. cria `/workspace/traduzai-worker.env` com `TRADUZAI_API_URL`, `TRADUZAI_WORKER_TOKEN`, warmup e GPU;
+2. clona ou atualiza `/workspace/TraduzAI`;
+3. roda `scripts/vast/bootstrap.sh`;
+4. inicia `scripts/vast/start-worker.sh`.
+
+Ou seja: em instancias criadas pelo orquestrador, voce nao precisa criar `traduzai-worker.env` manualmente. Para instancias pausadas ja existentes em `VAST_INSTANCE_ID`, o arquivo ainda precisa existir na propria instancia/template, porque o start de uma instancia existente apenas religa a maquina.
 
 A API key da Vast fica somente no servidor. Nunca coloque `VAST_API_KEY` no frontend.
 
