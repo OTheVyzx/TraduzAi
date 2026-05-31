@@ -649,14 +649,24 @@ class OCREngine:
         os.environ["MKL_NUM_THREADS"] = "1"
         try:
             import sys
+            import paddle
+
+            require_gpu = _env_bool("TRADUZAI_REQUIRE_GPU", False)
+            paddle_has_cuda = bool(getattr(getattr(paddle, "device", None), "is_compiled_with_cuda", lambda: False)())
+            if require_gpu and self.device.type != "cuda" and paddle_has_cuda:
+                logger.warning("PaddleOCR recebeu device CPU em ambiente GPU; forcando gpu:0")
+                self.device = torch.device("cuda")
+                self.half = True
             if sys.version_info >= (3, 12) and self.device.type != "cuda":
-                raise ImportError("PaddleOCR incompatível com Python 3.12 via CPU (C++ Segfault). Forçando EasyOCR.")
+                raise ImportError("PaddleOCR incompativel com Python 3.12 via CPU (C++ Segfault). Forcando EasyOCR.")
             from paddleocr import PaddleOCR
             from vision_stack.paddle_compat import create_paddle_ocr
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
                 libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
         except Exception as exc:
+            if _env_bool("TRADUZAI_REQUIRE_GPU", False):
+                raise RuntimeError(f"PaddleOCR obrigatorio em ambiente GPU nao carregou: {exc}") from exc
             logger.warning("PaddleOCR nÃ£o carregou (%s); usando EasyOCR como fallback", exc)
             self.model_name = "easyocr"
             self._load_easyocr()
@@ -1591,6 +1601,7 @@ class OCREngine:
             rotation_deg = infer_rotation_deg_from_line_polygons(combined_polygons)
             record = {
                 "text": joined,
+                "line_texts": [entry["text"] for entry in lines if str(entry.get("text", "")).strip()],
                 "source_bbox": source_bbox,
                 "line_polygons": combined_polygons,
                 "text_pixel_bbox": _derive_text_pixel_bbox(page_rgb, source_bbox, combined_polygons) or source_bbox,
