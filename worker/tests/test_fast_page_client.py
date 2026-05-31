@@ -184,3 +184,28 @@ def test_fast_page_client_ignores_dependency_stdout_noise(tmp_path: Path) -> Non
 
     assert len(popen_calls) == 1
     assert events == [{"type": "ready"}]
+
+
+def test_fast_page_client_streams_json_events_as_they_arrive(tmp_path: Path) -> None:
+    settings = WorkerSettings(
+        api_url="http://127.0.0.1:8787",
+        worker_token="token",
+        project_root=tmp_path,
+        pipeline_main=tmp_path / "pipeline" / "main.py",
+        pipeline_python="python",
+        worker_name="worker",
+        worker_work_dir=tmp_path / "worker",
+    )
+    process = FakeProcess(
+        [
+            {"type": "progress", "step": "ocr", "message": "OCR iniciado"},
+            {"type": "complete", "page_count": 1},
+        ]
+    )
+    streamed = []
+    client = FastPageProcessClient(settings, popen_factory=lambda *args, **kwargs: process)
+
+    events = client.process_page({"source_path": "001.png"}, event_callback=streamed.append)
+
+    assert streamed == events
+    assert [event["type"] for event in streamed] == ["progress", "complete"]

@@ -109,9 +109,10 @@ def run_fast_page_job(
     runner_log.write_text("fast-page server job\n", encoding="utf-8")
     started = time.monotonic()
     request = {"type": "process_page", **build_pipeline_request(settings, job, work_dir, job_dir)}
-    events = fast_page_client.process_page(request)
     page_count = 1
-    for event in events:
+
+    def handle_event(event: dict) -> None:
+        nonlocal page_count
         if event_callback is not None:
             event_callback(event)
         if event.get("type") == "complete":
@@ -120,6 +121,8 @@ def run_fast_page_job(
             artifact = _artifact_from_page_event(event, work_dir)
             if artifact is not None:
                 page_artifact_callback(artifact, event)
+
+    fast_page_client.process_page(request, event_callback=handle_event)
     artifacts = collect_output_artifacts(runner_log, work_dir)
     return {"page_count": page_count, "processing_seconds": time.monotonic() - started, "artifacts": artifacts}
 

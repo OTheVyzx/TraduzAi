@@ -127,14 +127,14 @@ def test_run_fast_page_job_uses_hot_client_and_streams_artifact(tmp_path: Path):
         def __init__(self):
             self.requests = []
 
-        def process_page(self, request):
+        def process_page(self, request, event_callback=None):
             self.requests.append(request)
             work_dir = Path(request["work_dir"])
             translated_dir = work_dir / "translated"
             translated_dir.mkdir(parents=True)
             (work_dir / "project.json").write_text('{"paginas":[{}]}', encoding="utf-8")
             (translated_dir / "001.png").write_bytes(b"translated")
-            return [
+            events = [
                 {
                     "type": "page_completed",
                     "step": "page",
@@ -144,6 +144,9 @@ def test_run_fast_page_job_uses_hot_client_and_streams_artifact(tmp_path: Path):
                 },
                 {"type": "complete", "page_count": 1},
             ]
+            for event in events:
+                event_callback(event)
+            return events
 
     fast_client = FakeFastPageClient()
 
@@ -191,12 +194,16 @@ def test_run_fast_page_job_merges_project_config_into_request(tmp_path: Path):
         def __init__(self):
             self.requests = []
 
-        def process_page(self, request):
+        def process_page(self, request, event_callback=None):
             self.requests.append(request)
             work_dir = Path(request["work_dir"])
             (work_dir / "translated").mkdir(parents=True)
             (work_dir / "translated" / "001.png").write_bytes(b"translated")
-            return [{"type": "complete", "page_count": 1}]
+            events = [{"type": "complete", "page_count": 1}]
+            if event_callback is not None:
+                for event in events:
+                    event_callback(event)
+            return events
 
     fast_client = FakeFastPageClient()
 
