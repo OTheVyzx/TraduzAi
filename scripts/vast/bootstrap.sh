@@ -40,6 +40,7 @@ python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$PROJECT_ROOT/scripts/vast/requirements-vast.txt"
+python "$PROJECT_ROOT/scripts/vast/verify-gpu-stack.py"
 
 mkdir -p "$MODELS_DIR" "$PROJECT_ROOT/data/worker"
 export TRADUZAI_MODELS_DIR="$MODELS_DIR"

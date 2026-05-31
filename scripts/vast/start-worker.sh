@@ -29,12 +29,14 @@ export TRADUZAI_FAST_PAGE_SERVER="${TRADUZAI_FAST_PAGE_SERVER:-1}"
 export TRADUZAI_WORKER_WARMUP_ON_START="${TRADUZAI_WORKER_WARMUP_ON_START:-1}"
 export TRADUZAI_WARMUP_PROFILE="${TRADUZAI_WARMUP_PROFILE:-quality}"
 export TRADUZAI_WARMUP_LANG="${TRADUZAI_WARMUP_LANG:-en}"
+export TRADUZAI_REQUIRE_GPU="${TRADUZAI_REQUIRE_GPU:-1}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$PROJECT_ROOT/pipeline:${PYTHONPATH:-}"
 
 mkdir -p "$TRADUZAI_WORKER_WORK_DIR"
 
 python -m worker doctor
+python "$PROJECT_ROOT/scripts/vast/verify-gpu-stack.py"
 
 if [ "${TRADUZAI_WORKER_ONCE:-0}" = "1" ]; then
   exec python -m worker --once
