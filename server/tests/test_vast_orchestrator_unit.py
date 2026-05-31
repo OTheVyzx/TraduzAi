@@ -290,6 +290,105 @@ def test_ensure_worker_available_reports_scheduling_without_replacement_offer():
     assert client.created == []
 
 
+def test_ensure_worker_available_replaces_template_error_instance():
+    settings = make_vast_settings(
+        vast_offer_id=None,
+        vast_offer_auto=True,
+        vast_offer_gpu_names=["RTX 3060"],
+    )
+    client = FakeVastClient(
+        {
+            "id": 38646242,
+            "actual_status": "loading",
+            "status_msg": "Template not found",
+        }
+    )
+    client.offers = [
+        {
+            "id": 999,
+            "gpu_name": "RTX 3060",
+            "gpu_ram": 12288,
+            "dph_total": 0.15,
+            "reliability": 0.99,
+            "dlperf": 12,
+        }
+    ]
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result["ok"] is True
+    assert result["action"] == "created_after_unusable_instance"
+    assert result["previous_instance_id"] == "38646242"
+    assert result["previous_status"] == "loading"
+    assert result["previous_error"] == "Template not found"
+    assert result["reason"] == "instance_error"
+    assert result["offer_id"] == "999"
+    assert client.started == []
+    assert client.created[0]["offer_id"] == "999"
+
+
+def test_ensure_worker_available_replaces_template_error_after_start():
+    settings = make_vast_settings(
+        vast_offer_id=None,
+        vast_offer_auto=True,
+        vast_offer_gpu_names=["RTX 3060"],
+    )
+    client = FakeVastClient(
+        [
+            {"id": 38646242, "actual_status": "stopped"},
+            {
+                "id": 38646242,
+                "actual_status": "loading",
+                "status_msg": "Template not found",
+            },
+        ]
+    )
+    client.offers = [
+        {
+            "id": 1000,
+            "gpu_name": "RTX 3060",
+            "gpu_ram": 12288,
+            "dph_total": 0.15,
+            "reliability": 0.99,
+            "dlperf": 12,
+        }
+    ]
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result["ok"] is True
+    assert result["action"] == "created_after_unusable_instance"
+    assert result["previous_status"] == "loading"
+    assert result["previous_error"] == "Template not found"
+    assert result["reason"] == "instance_error_after_start"
+    assert result["offer_id"] == "1000"
+    assert client.started == ["38646242"]
+    assert client.created[0]["offer_id"] == "1000"
+
+
+def test_ensure_worker_available_reports_unusable_instance_without_replacement_offer():
+    settings = make_vast_settings(vast_offer_id=None, vast_offer_auto=False)
+    client = FakeVastClient(
+        {
+            "id": 38646242,
+            "actual_status": "loading",
+            "status_msg": "Template not found",
+        }
+    )
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result == {
+        "ok": False,
+        "action": "unusable_instance_no_replacement_offer",
+        "instance_id": "38646242",
+        "status": "loading",
+        "current_error": "Template not found",
+        "reason": "instance_error",
+    }
+    assert client.created == []
+
+
 def test_ensure_worker_available_is_disabled_without_autostart():
     settings = make_vast_settings(vast_autostart=False)
     client = FakeVastClient({"id": 38646242, "actual_status": "stopped"})

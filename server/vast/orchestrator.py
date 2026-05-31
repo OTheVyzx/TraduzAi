@@ -36,6 +36,12 @@ class VastClientProtocol(Protocol):
 RUNNING_STATES = {"running", "connected", "loaded", "success"}
 STOPPED_STATES = {"stopped", "inactive"}
 SCHEDULING_STATES = {"scheduling"}
+ERROR_STATES = {"error", "failed", "failure", "exited"}
+UNUSABLE_ERROR_MARKERS = (
+    "template not found",
+    "docker_build",
+    "error writing dockerfile",
+)
 
 
 def ensure_worker_available(
@@ -61,11 +67,22 @@ def ensure_worker_available(
         status = _instance_status(instance)
         if status in RUNNING_STATES:
             return {"ok": True, "action": "already_running", "instance_id": str(instance_id), "status": status}
+        error_message = _instance_error_message(instance)
+        if status in ERROR_STATES or error_message:
+            return _replace_unusable_instance(
+                settings,
+                client,
+                str(instance_id),
+                status,
+                "instance_error",
+                current_error=error_message,
+            )
         if status in SCHEDULING_STATES:
             return _replace_scheduling_instance(settings, client, str(instance_id), status, scheduling_wait_seconds)
         client.start_instance(str(instance_id))
         refreshed = _wait_for_instance_status(client, str(instance_id), scheduling_wait_seconds)
         refreshed_status = _instance_status(refreshed) if refreshed is not None else status
+        refreshed_error = _instance_error_message(refreshed) if refreshed is not None else ""
         if refreshed_status in RUNNING_STATES:
             return {
                 "ok": True,
@@ -76,6 +93,15 @@ def ensure_worker_available(
             }
         if refreshed_status in SCHEDULING_STATES:
             return _replace_scheduling_instance(settings, client, str(instance_id), refreshed_status, 0)
+        if refreshed_status in ERROR_STATES or refreshed_error:
+            return _replace_unusable_instance(
+                settings,
+                client,
+                str(instance_id),
+                refreshed_status,
+                "instance_error_after_start",
+                current_error=refreshed_error,
+            )
         return {
             "ok": True,
             "action": "started",
@@ -87,6 +113,34 @@ def ensure_worker_available(
     if settings.vast_offer_id or settings.vast_offer_auto:
         return _create_instance(settings, client)
     return {"ok": False, "action": "missing_instance_or_offer"}
+
+
+def _replace_unusable_instance(
+    settings: Settings,
+    client: VastClientProtocol,
+    instance_id: str,
+    status: str,
+    reason: str,
+    *,
+    current_error: str = "",
+) -> dict[str, Any]:
+    if not settings.vast_offer_id and not settings.vast_offer_auto:
+        return {
+            "ok": False,
+            "action": "unusable_instance_no_replacement_offer",
+            "instance_id": instance_id,
+            "status": status,
+            "current_error": current_error,
+            "reason": reason,
+        }
+    created = _create_instance(settings, client)
+    if created.get("ok"):
+        created["action"] = "created_after_unusable_instance"
+        created["previous_instance_id"] = instance_id
+        created["previous_status"] = status
+        created["previous_error"] = current_error
+        created["reason"] = reason
+    return created
 
 
 def _replace_scheduling_instance(
@@ -200,6 +254,21 @@ def _instance_status(instance: dict[str, Any]) -> str:
     if instance.get("is_started") is False:
         return "stopped"
     return "unknown"
+
+
+def _instance_error_message(instance: dict[str, Any] | None) -> str:
+    if not instance:
+        return ""
+    text_values = []
+    for key in ("error", "message", "status_msg", "status_message", "status_text", "note", "reason"):
+        value = instance.get(key)
+        if isinstance(value, str):
+            text_values.append(value)
+    combined = "\n".join(text_values).strip()
+    haystack = combined.lower()
+    if any(marker in haystack for marker in UNUSABLE_ERROR_MARKERS):
+        return combined
+    return ""
 
 
 def _has_pending_work(settings: Settings) -> bool:
