@@ -14,6 +14,12 @@ class FakeVastClient:
         self.offer_queries = []
 
     def show_instance(self, instance_id):
+        if isinstance(self.instance, list):
+            if not self.instance:
+                return None
+            if len(self.instance) == 1:
+                return self.instance[0]
+            return self.instance.pop(0)
         if self.instance is None:
             return None
         return self.instance
@@ -64,9 +70,15 @@ def test_ensure_worker_available_starts_stopped_instance():
     settings = make_vast_settings()
     client = FakeVastClient({"id": 38646242, "actual_status": "stopped"})
 
-    result = ensure_worker_available(settings, client=client)
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
 
-    assert result == {"ok": True, "action": "started", "instance_id": "38646242", "status": "stopped"}
+    assert result == {
+        "ok": True,
+        "action": "started",
+        "instance_id": "38646242",
+        "status": "stopped",
+        "current_status": "stopped",
+    }
     assert client.started == ["38646242"]
     assert client.created == []
 
@@ -75,7 +87,7 @@ def test_ensure_worker_available_does_not_restart_running_instance():
     settings = make_vast_settings()
     client = FakeVastClient({"id": 38646242, "actual_status": "running"})
 
-    result = ensure_worker_available(settings, client=client)
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
 
     assert result == {"ok": True, "action": "already_running", "instance_id": "38646242", "status": "running"}
     assert client.started == []
@@ -85,7 +97,7 @@ def test_ensure_worker_available_creates_instance_when_no_existing_instance_is_c
     settings = make_vast_settings(vast_instance_id=None, vast_offer_id="12345", vast_template_hash="template-hash")
     client = FakeVastClient(None)
 
-    result = ensure_worker_available(settings, client=client)
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
 
     assert result == {"ok": True, "action": "created", "instance_id": "987", "offer_id": "12345", "offer": None}
     assert len(client.created) == 1
@@ -108,7 +120,7 @@ def test_ensure_worker_available_does_not_create_unconfigured_instance():
     settings = make_vast_settings(vast_instance_id=None, vast_offer_id="12345", vast_worker_api_url=None)
     client = FakeVastClient(None)
 
-    result = ensure_worker_available(settings, client=client)
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
 
     assert result == {"ok": False, "action": "missing_worker_bootstrap_config", "missing": ["VAST_WORKER_API_URL"]}
     assert client.created == []
@@ -129,7 +141,7 @@ def test_ensure_worker_available_auto_selects_cheapest_matching_offer():
         {"id": 222, "gpu_name": "Tesla P100", "gpu_ram": 16384, "dph_total": 0.10, "reliability": 0.98, "dlperf": 8},
     ]
 
-    result = ensure_worker_available(settings, client=client)
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
 
     assert result["ok"] is True
     assert result["action"] == "created"
@@ -157,11 +169,101 @@ def test_ensure_worker_available_auto_selects_cheapest_matching_offer():
     ]
 
 
+def test_ensure_worker_available_replaces_existing_scheduling_instance():
+    settings = make_vast_settings(
+        vast_offer_id=None,
+        vast_offer_auto=True,
+        vast_offer_gpu_names=["RTX 3090"],
+    )
+    client = FakeVastClient(
+        [
+            {"id": 38646242, "actual_status": "scheduling"},
+            {"id": 38646242, "actual_status": "scheduling"},
+        ]
+    )
+    client.offers = [
+        {
+            "id": 777,
+            "gpu_name": "RTX 3090",
+            "gpu_ram": 24576,
+            "dph_total": 0.15,
+            "reliability": 0.99,
+            "dlperf": 20,
+        }
+    ]
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result["ok"] is True
+    assert result["action"] == "created_after_scheduling"
+    assert result["previous_instance_id"] == "38646242"
+    assert result["previous_status"] == "scheduling"
+    assert result["offer_id"] == "777"
+    assert client.created[0]["offer_id"] == "777"
+    assert client.started == []
+
+
+def test_ensure_worker_available_replaces_instance_that_becomes_scheduling_after_start():
+    settings = make_vast_settings(
+        vast_offer_id=None,
+        vast_offer_auto=True,
+        vast_offer_gpu_names=["RTX 4090"],
+    )
+    client = FakeVastClient(
+        [
+            {"id": 38646242, "actual_status": "stopped"},
+            {"id": 38646242, "actual_status": "scheduling"},
+            {"id": 38646242, "actual_status": "scheduling"},
+        ]
+    )
+    client.offers = [
+        {
+            "id": 888,
+            "gpu_name": "RTX 4090",
+            "gpu_ram": 24576,
+            "dph_total": 0.16,
+            "reliability": 0.99,
+            "dlperf": 30,
+        }
+    ]
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result["ok"] is True
+    assert result["action"] == "created_after_scheduling"
+    assert result["previous_instance_id"] == "38646242"
+    assert result["previous_status"] == "scheduling"
+    assert result["offer_id"] == "888"
+    assert client.started == ["38646242"]
+    assert client.created[0]["offer_id"] == "888"
+
+
+def test_ensure_worker_available_reports_scheduling_without_replacement_offer():
+    settings = make_vast_settings(vast_offer_id=None, vast_offer_auto=False)
+    client = FakeVastClient(
+        [
+            {"id": 38646242, "actual_status": "scheduling"},
+            {"id": 38646242, "actual_status": "scheduling"},
+        ]
+    )
+
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
+
+    assert result == {
+        "ok": False,
+        "action": "scheduling_no_replacement_offer",
+        "instance_id": "38646242",
+        "status": "scheduling",
+        "current_status": "scheduling",
+    }
+    assert client.created == []
+
+
 def test_ensure_worker_available_is_disabled_without_autostart():
     settings = make_vast_settings(vast_autostart=False)
     client = FakeVastClient({"id": 38646242, "actual_status": "stopped"})
 
-    result = ensure_worker_available(settings, client=client)
+    result = ensure_worker_available(settings, client=client, scheduling_wait_seconds=0)
 
     assert result == {"ok": False, "action": "disabled"}
     assert client.started == []

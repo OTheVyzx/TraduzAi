@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Protocol
 
 from server.config import Settings
@@ -32,9 +33,15 @@ class VastClientProtocol(Protocol):
 
 RUNNING_STATES = {"running", "connected", "loaded", "success"}
 STOPPED_STATES = {"stopped", "inactive"}
+SCHEDULING_STATES = {"scheduling"}
 
 
-def ensure_worker_available(settings: Settings, *, client: VastClientProtocol | None = None) -> dict[str, Any]:
+def ensure_worker_available(
+    settings: Settings,
+    *,
+    client: VastClientProtocol | None = None,
+    scheduling_wait_seconds: float = 10.0,
+) -> dict[str, Any]:
     if not settings.vast_autostart:
         return {"ok": False, "action": "disabled"}
     if client is None:
@@ -52,12 +59,75 @@ def ensure_worker_available(settings: Settings, *, client: VastClientProtocol | 
         status = _instance_status(instance)
         if status in RUNNING_STATES:
             return {"ok": True, "action": "already_running", "instance_id": str(instance_id), "status": status}
+        if status in SCHEDULING_STATES:
+            return _replace_scheduling_instance(settings, client, str(instance_id), status, scheduling_wait_seconds)
         client.start_instance(str(instance_id))
-        return {"ok": True, "action": "started", "instance_id": str(instance_id), "status": status}
+        refreshed = _wait_for_instance_status(client, str(instance_id), scheduling_wait_seconds)
+        refreshed_status = _instance_status(refreshed) if refreshed is not None else status
+        if refreshed_status in RUNNING_STATES:
+            return {
+                "ok": True,
+                "action": "started",
+                "instance_id": str(instance_id),
+                "status": status,
+                "current_status": refreshed_status,
+            }
+        if refreshed_status in SCHEDULING_STATES:
+            return _replace_scheduling_instance(settings, client, str(instance_id), refreshed_status, 0)
+        return {
+            "ok": True,
+            "action": "started",
+            "instance_id": str(instance_id),
+            "status": status,
+            "current_status": refreshed_status,
+        }
 
     if settings.vast_offer_id or settings.vast_offer_auto:
         return _create_instance(settings, client)
     return {"ok": False, "action": "missing_instance_or_offer"}
+
+
+def _replace_scheduling_instance(
+    settings: Settings,
+    client: VastClientProtocol,
+    instance_id: str,
+    status: str,
+    wait_seconds: float,
+) -> dict[str, Any]:
+    refreshed = _wait_for_instance_status(client, instance_id, wait_seconds)
+    refreshed_status = _instance_status(refreshed) if refreshed is not None else status
+    if refreshed_status in RUNNING_STATES:
+        return {
+            "ok": True,
+            "action": "already_running",
+            "instance_id": instance_id,
+            "status": status,
+            "current_status": refreshed_status,
+        }
+    if not settings.vast_offer_id and not settings.vast_offer_auto:
+        return {
+            "ok": False,
+            "action": "scheduling_no_replacement_offer",
+            "instance_id": instance_id,
+            "status": status,
+            "current_status": refreshed_status,
+        }
+    created = _create_instance(settings, client)
+    if created.get("ok"):
+        created["action"] = "created_after_scheduling"
+        created["previous_instance_id"] = instance_id
+        created["previous_status"] = refreshed_status
+    return created
+
+
+def _wait_for_instance_status(
+    client: VastClientProtocol,
+    instance_id: str,
+    wait_seconds: float,
+) -> dict[str, Any] | None:
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+    return client.show_instance(instance_id)
 
 
 def stop_idle_worker_if_needed(
