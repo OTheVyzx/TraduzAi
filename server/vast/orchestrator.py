@@ -239,6 +239,7 @@ export TRADUZAI_REPO_URL={repo_url}
 export TRADUZAI_REPO_BRANCH={repo_branch}
 export TRADUZAI_PROJECT_ROOT={project_root}
 
+mkdir -p /workspace
 cat > /workspace/traduzai-worker.env <<'TRADUZAI_WORKER_ENV'
 {env_file}TRADUZAI_WORKER_ENV
 
