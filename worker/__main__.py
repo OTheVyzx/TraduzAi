@@ -5,6 +5,8 @@ import os
 import sys
 import time
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from worker.client import WorkerClient
 from worker.config import WorkerSettings
 from worker.fast_page import FastPageProcessClient
@@ -62,6 +64,33 @@ def run_once(settings: WorkerSettings, mock: bool) -> int:
         uploaded_artifacts.add(key)
         return True
 
+    def reserve_artifacts_once(artifacts: list[OutputArtifact]) -> list[OutputArtifact]:
+        pending: list[OutputArtifact] = []
+        for artifact in artifacts:
+            key = artifact_key(artifact)
+            if key in uploaded_artifacts:
+                continue
+            uploaded_artifacts.add(key)
+            pending.append(artifact)
+        return pending
+
+    def upload_final_artifacts(artifacts: list[OutputArtifact]) -> None:
+        pending = reserve_artifacts_once([_normalize_artifact(artifact) for artifact in artifacts])
+        if not pending:
+            return
+        if settings.artifact_upload_workers <= 1 or len(pending) == 1:
+            for artifact in pending:
+                client.upload_artifact(worker_id, job["id"], artifact.kind, artifact.path)
+            return
+
+        def upload_with_fresh_client(artifact: OutputArtifact) -> None:
+            WorkerClient(settings).upload_artifact(worker_id, job["id"], artifact.kind, artifact.path)
+
+        with ThreadPoolExecutor(max_workers=settings.artifact_upload_workers) as executor:
+            futures = [executor.submit(upload_with_fresh_client, artifact) for artifact in pending]
+            for future in as_completed(futures):
+                future.result()
+
     def safe_stream_page_artifact(artifact: OutputArtifact, event: dict) -> None:
         output_artifact = _normalize_artifact(artifact)
         try:
@@ -103,9 +132,7 @@ def run_once(settings: WorkerSettings, mock: bool) -> int:
                     event_callback,
                     page_artifact_callback=safe_stream_page_artifact,
                 )
-        for artifact in result["artifacts"]:
-            output_artifact = _normalize_artifact(artifact)
-            upload_artifact_once(output_artifact)
+        upload_final_artifacts(result["artifacts"])
         client.complete(worker_id, job["id"], result["page_count"], result["processing_seconds"])
         return 0
     except Exception as exc:

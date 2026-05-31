@@ -82,7 +82,7 @@ def run_pipeline_job(
         raise RuntimeError(f"pipeline saiu com codigo {code}")
     if pipeline_error:
         raise RuntimeError(str(pipeline_error))
-    artifacts = collect_output_artifacts(runner_log, work_dir)
+    artifacts = collect_output_artifacts(runner_log, work_dir, profile=settings.artifact_profile)
     page_count = 1
     project_path = work_dir / "project.json"
     if project_path.exists():
@@ -123,7 +123,7 @@ def run_fast_page_job(
                 page_artifact_callback(artifact, event)
 
     fast_page_client.process_page(request, event_callback=handle_event)
-    artifacts = collect_output_artifacts(runner_log, work_dir)
+    artifacts = collect_output_artifacts(runner_log, work_dir, profile=settings.artifact_profile)
     return {"page_count": page_count, "processing_seconds": time.monotonic() - started, "artifacts": artifacts}
 
 
@@ -254,11 +254,11 @@ def project_config_for_job(job: dict) -> dict:
     return {}
 
 
-def collect_output_artifacts(runner_log: Path, work_dir: Path) -> list[OutputArtifact]:
+def collect_output_artifacts(runner_log: Path, work_dir: Path, profile: str = "full") -> list[OutputArtifact]:
+    profile = (profile or "full").strip().lower()
+    if profile not in {"fast", "full"}:
+        profile = "full"
     artifacts = [OutputArtifact("runner_log", runner_log)]
-    pipeline_log = work_dir / "pipeline.log"
-    if pipeline_log.exists():
-        artifacts.append(OutputArtifact("pipeline_log", pipeline_log))
     project_json = work_dir / "project.json"
     if project_json.exists():
         artifacts.append(OutputArtifact("project_json", project_json))
@@ -267,6 +267,11 @@ def collect_output_artifacts(runner_log: Path, work_dir: Path) -> list[OutputArt
         for image_path in sorted(translated_dir.iterdir()):
             if image_path.is_file() and image_path.suffix.lower() in IMAGE_EXTENSIONS:
                 artifacts.append(OutputArtifact("translated_image", image_path))
+    if profile == "fast":
+        return artifacts
+    pipeline_log = work_dir / "pipeline.log"
+    if pipeline_log.exists():
+        artifacts.insert(1, OutputArtifact("pipeline_log", pipeline_log))
     originals_dir = work_dir / "originals"
     if originals_dir.exists():
         for image_path in sorted(originals_dir.iterdir()):

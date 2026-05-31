@@ -131,7 +131,12 @@ def test_failed_job_can_be_retried_with_same_input(tmp_path):
 
     headers = {"Authorization": "Bearer dev-token"}
     worker_id = client.post("/api/workers/register", headers=headers, json={"name": "admin-pc"}).json()["worker_id"]
-    assert client.post("/api/workers/claim-job", headers=headers, json={"worker_id": worker_id, "capabilities": {"mode": ["real"]}}).status_code == 200
+    claim = client.post(
+        "/api/workers/claim-job",
+        headers=headers,
+        json={"worker_id": worker_id, "capabilities": {"mode": ["real"]}},
+    )
+    assert claim.status_code == 200
     artifact = client.post(
         f"/api/workers/jobs/{job_id}/artifact",
         headers=headers,
@@ -157,3 +162,71 @@ def test_failed_job_can_be_retried_with_same_input(tmp_path):
     assert detail.status_code == 200
     artifacts = detail.json()["job"]["artifacts"]
     assert [item["kind"] for item in artifacts] == ["input_original"]
+
+
+def test_minimal_worker_artifacts_materialize_and_export_cbz(tmp_path):
+    settings = make_settings(tmp_path)
+    client = TestClient(create_app(settings))
+    login = client.post("/api/auth/login", json={"email": "admin@local", "password": "secret123"})
+    assert login.status_code == 200
+
+    image = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    upload = client.post(
+        "/api/jobs",
+        data={"obra": "Obra", "capitulo": "1", "mode": "real"},
+        files={"file": ("page.png", image, "image/png")},
+    )
+    assert upload.status_code == 200
+    job_id = upload.json()["job"]["id"]
+
+    headers = {"Authorization": "Bearer dev-token"}
+    worker_id = client.post("/api/workers/register", headers=headers, json={"name": "admin-pc"}).json()["worker_id"]
+    assert client.post("/api/workers/claim-job", headers=headers, json={"worker_id": worker_id, "capabilities": {"mode": ["real"]}}).status_code == 200
+
+    project_json = {
+        "obra": "Obra",
+        "capitulo": "1",
+        "idioma_origem": "en",
+        "idioma_destino": "pt-BR",
+        "paginas": [
+            {
+                "index": 0,
+                "original_path": "originals/001.png",
+                "translated_path": "translated/001.png",
+                "rendered_path": "translated/001.png",
+                "text_layers": [],
+            }
+        ],
+    }
+    project_artifact = client.post(
+        f"/api/workers/jobs/{job_id}/artifact",
+        headers=headers,
+        data={"worker_id": worker_id, "kind": "project_json"},
+        files={"file": ("project.json", json.dumps(project_json).encode("utf-8"), "application/json")},
+    )
+    assert project_artifact.status_code == 200
+    translated_artifact = client.post(
+        f"/api/workers/jobs/{job_id}/artifact",
+        headers=headers,
+        data={"worker_id": worker_id, "kind": "translated_image"},
+        files={"file": ("001.png", image, "image/png")},
+    )
+    assert translated_artifact.status_code == 200
+    complete = client.post(
+        f"/api/workers/jobs/{job_id}/complete",
+        headers=headers,
+        json={"worker_id": worker_id, "page_count": 1, "processing_seconds": 1.2},
+    )
+    assert complete.status_code == 200
+
+    materialized = client.post(f"/api/jobs/{job_id}/materialize-project")
+    assert materialized.status_code == 200
+    project = client.get(f"/api/projects/{job_id}")
+    assert project.status_code == 200
+    assert project.json()["project"]["paginas"][0]["translated_path"] == "translated/001.png"
+    asset = client.get(f"/api/projects/{job_id}/assets/translated/001.png")
+    assert asset.status_code == 200
+
+    cbz = client.post(f"/api/projects/{job_id}/exports/cbz")
+    assert cbz.status_code == 200
+    assert cbz.json()["artifact"]["filename"].endswith(".cbz")
