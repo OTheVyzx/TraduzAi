@@ -7,6 +7,7 @@ instead of removing each OCR box in isolation.
 from __future__ import annotations
 
 from collections import Counter
+import os
 import re
 
 import cv2
@@ -73,6 +74,24 @@ AUTOMATIC_MASK_EVIDENCE_REJECT_REASONS = {
     "coverage_too_low",
     "mask_kind_not_fast_fill_allowed",
 }
+TEXT_MASK_ENGINE_ENV = "TRADUZAI_TEXT_MASK_ENGINE"
+LEGACY_BUBBLE_PRIMARY_ENGINE_ENV = "TRADUZAI_BUBBLE_PRIMARY_ENGINE"
+COMPONENT_BUBBLE_CLEANER_MODES = {
+    "component_bubble_cleaner",
+    "notanother",
+    "notanotherbubblecleaner",
+    "notanother_bubble_cleaner",
+}
+
+
+def _selected_text_mask_engine() -> str:
+    value = os.getenv(TEXT_MASK_ENGINE_ENV, "").strip().lower()
+    if value in COMPONENT_BUBBLE_CLEANER_MODES:
+        return "component_bubble_cleaner"
+    legacy = os.getenv(LEGACY_BUBBLE_PRIMARY_ENGINE_ENV, "").strip().lower()
+    if legacy in COMPONENT_BUBBLE_CLEANER_MODES:
+        return "component_bubble_cleaner"
+    return value
 
 
 def _image_hw(image_shape: tuple[int, ...]) -> tuple[int, int]:
@@ -1664,6 +1683,24 @@ def build_inpaint_mask(
     image_shape: tuple[int, ...],
     image_rgb: np.ndarray | None = None,
 ) -> np.ndarray | None:
+    if _selected_text_mask_engine() == "component_bubble_cleaner":
+        bubble_mask = None
+        for key in ("bubble_mask", "bubbleMask", "balloon_mask", "balloonMask", "segmentation_mask", "mask"):
+            candidate = block.get(key)
+            if isinstance(candidate, np.ndarray) and candidate.size and np.any(candidate):
+                bubble_mask = candidate
+                break
+        if bubble_mask is None:
+            consolidate_mask_evidence(
+                block,
+                kind="none",
+                raw_mask_pixels=0,
+                expanded_mask_pixels=0,
+                evidence_score=0.0,
+                fast_fill_reject_reasons=["component_bubble_cleaner_missing_bubble_mask"],
+            )
+            return None
+
     text_mask = None
     raw_text_mask = None
     geometry_mask = build_glyph_text_mask(block, image_shape)

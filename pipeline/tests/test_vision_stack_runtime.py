@@ -19,6 +19,7 @@ from vision_stack.runtime import (
     _apply_textured_balloon_band_artifact_cleanup,
     _apply_textured_light_text_residual_cleanup,
     _apply_textured_balloon_seam_cleanup,
+    _selected_inpaint_engine,
     _apply_geometry_white_balloon_cleanup,
     _apply_glyph_residual_cleanup_for_texts,
     _apply_white_balloon_artifact_cleanup,
@@ -85,6 +86,10 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_selected_inpaint_engine_reads_primary_env(self):
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "lama_onnx"}, clear=False):
+            self.assertEqual(_selected_inpaint_engine(), "lama_onnx")
+
     def test_pre_translation_skip_preserves_textured_logo_or_emblem(self):
         result = _ocr_pre_translation_skip_policy(
             "FIRE",

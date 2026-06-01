@@ -249,6 +249,13 @@ def _inpaint_clustered_crop_windows_enabled() -> bool:
     return _env_flag("TRADUZAI_INPAINT_CLUSTERED_CROP_WINDOWS", False)
 
 
+INPAINT_PRIMARY_ENGINE_ENV = "TRADUZAI_INPAINT_PRIMARY_ENGINE"
+
+
+def _selected_inpaint_engine() -> str:
+    return os.getenv(INPAINT_PRIMARY_ENGINE_ENV, "").strip().lower()
+
+
 def _koharu_blockwise_inpaint_enabled() -> bool:
     return _env_flag("TRADUZAI_KOHARU_BLOCKWISE_INPAINT", False)
 

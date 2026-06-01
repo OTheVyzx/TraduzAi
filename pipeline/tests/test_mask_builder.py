@@ -9,6 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from inpainter.mask_builder import (
+    _selected_text_mask_engine,
     balloon_mask_from_block,
     bbox_overreach_ratio,
     build_inpaint_mask,
@@ -18,6 +19,36 @@ from inpainter.mask_builder import (
 
 
 class MaskBuilderTests(unittest.TestCase):
+    def test_component_bubble_cleaner_requires_real_bubble_mask(self):
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        block = {
+            "bbox": [20, 20, 60, 40],
+            "text": "HELLO",
+            "balloon_bbox": [10, 10, 90, 50],
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsNone(mask)
+        evidence = block["mask_evidence"]
+        self.assertEqual(evidence["kind"], "none")
+        self.assertIn(
+            "component_bubble_cleaner_missing_bubble_mask",
+            evidence["fast_fill_reject_reasons"],
+        )
+
+    def test_legacy_notanother_flag_maps_to_component_bubble_cleaner(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_TEXT_MASK_ENGINE": "",
+                "TRADUZAI_BUBBLE_PRIMARY_ENGINE": "notanother",
+            },
+            clear=False,
+        ):
+            self.assertEqual(_selected_text_mask_engine(), "component_bubble_cleaner")
+
     def test_merges_nearby_text_boxes_from_same_balloon(self):
         texts = [
             {"bbox": [100, 100, 180, 140], "tipo": "fala", "confidence": 0.91},
