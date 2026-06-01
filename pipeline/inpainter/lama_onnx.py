@@ -169,7 +169,14 @@ def get_lama_session(models_dir: str | Path = "", providers: list[str] | None = 
     import onnxruntime as ort
 
     model_path = str(ensure_lama_manga_model(models_dir))
-    normalized_providers = list(providers) if providers is not None else select_lama_onnx_providers()
+    if providers is None:
+        provider_mode = os.getenv("TRADUZAI_LAMA_ONNX_PROVIDERS", "").strip()
+        if provider_mode:
+            normalized_providers = select_lama_onnx_providers(provider_mode)
+        else:
+            normalized_providers = ["CPUExecutionProvider"]
+    else:
+        normalized_providers = list(providers)
     if _session is None or _session_path != model_path or _session_providers != normalized_providers:
         try:
             ort.preload_dlls()
