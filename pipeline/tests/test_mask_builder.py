@@ -147,6 +147,28 @@ class MaskBuilderTests(unittest.TestCase):
             block["mask_evidence"]["fast_fill_reject_reasons"],
         )
 
+    def test_component_bubble_cleaner_preserves_large_numeric_label_ids(self):
+        image = np.full((100, 180, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (35, 35), (50, 48), (0, 0, 0), -1)
+        cv2.rectangle(image, (120, 35), (140, 50), (0, 0, 0), -1)
+        bubble_mask = np.zeros((100, 180), dtype=np.uint16)
+        bubble_mask[20:70, 20:80] = 300
+        bubble_mask[20:70, 105:160] = 44
+        block = {
+            "bbox": [25, 25, 155, 65],
+            "text": "A B",
+            "bubble_mask": bubble_mask,
+            "bubble_id": 300,
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsInstance(mask, np.ndarray)
+        self.assertGreater(int(mask[40, 42]), 0)
+        self.assertEqual(int(mask[42, 130]), 0)
+        self.assertEqual(block["mask_evidence"]["kind"], "component_bubble_cleaner")
+
     def test_component_bubble_cleaner_records_component_debug(self):
         image = np.full((80, 120, 3), 255, dtype=np.uint8)
         cv2.rectangle(image, (30, 30), (45, 40), (0, 0, 0), -1)

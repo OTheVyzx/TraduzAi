@@ -1702,7 +1702,6 @@ def _real_bubble_mask_from_block(block: dict, image_shape: tuple[int, ...]) -> n
     if not isinstance(source, np.ndarray):
         return None
 
-    source = source.astype(np.uint8, copy=False)
     numeric_id = _numeric_bubble_id(block.get("bubble_id") or block.get("bubbleId"))
     bubble_bbox = (
         _normalize_bbox(block.get("bubble_mask_bbox"), width, height)
