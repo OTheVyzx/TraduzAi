@@ -1,4 +1,5 @@
 import json
+import numpy as np
 
 import pytest
 
@@ -96,3 +97,56 @@ def test_editor_save_refreshes_stale_log_summary(tmp_path):
 
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["log"]["summary"]["translated_regions"] == 1
+
+
+def test_write_project_json_atomic_removes_raster_mask_keys(tmp_path):
+    path = tmp_path / "project.json"
+    page = {
+        "text_layers": [
+            {
+                "id": "layer-a",
+                "text": "ola",
+                "mask": np.array([[1, 0], [0, 1]], dtype=np.uint8),
+                "bubbleMask": np.array([[1]], dtype=np.uint8),
+                "metadata": {
+                    "bubble_mask": np.array([[1]], dtype=np.uint8),
+                    "other": 1,
+                },
+            }
+        ],
+        "textos": [
+            {"id": "texto-a", "balloon_mask": np.array([[1]], dtype=np.uint8)}
+        ],
+        "texts": [
+            {"id": "text-a", "segmentation_mask": np.array([[1]], dtype=np.uint8)}
+        ],
+        "_vision_blocks": [
+            {"id": "block-a", "mask": np.array([[1]], dtype=np.uint8)}
+        ],
+        "_bubble_regions": [
+            {"id": "region-a", "balloonMask": np.array([[1]], dtype=np.uint8)}
+        ],
+        "bubble_regions": [
+            {"id": "region-b", "bubble_mask": np.array([[1]], dtype=np.uint8)}
+        ],
+        "metadata": {
+            "segmentation_mask": np.array([[1]], dtype=np.uint8),
+        },
+    }
+
+    write_project_json_atomic(path, {"paginas": [page], "estatisticas": {"total_paginas": 1}})
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    saved_page = saved["paginas"][0]
+    mask_keys = {"bubble_mask", "bubbleMask", "balloon_mask", "balloonMask", "segmentation_mask", "mask"}
+    assert isinstance(saved_page.get("metadata"), dict)
+    for raster_key in mask_keys:
+        assert raster_key not in saved_page["metadata"]
+
+    for key in ("text_layers", "textos", "texts", "_vision_blocks", "_bubble_regions", "bubble_regions"):
+        for item in saved_page.get(key, []):
+            for raster_key in mask_keys:
+                assert raster_key not in item
+            if isinstance(item.get("metadata"), dict):
+                for raster_key in mask_keys:
+                    assert raster_key not in item["metadata"]

@@ -514,6 +514,47 @@ class BandImageStageOutput:
         return np.array(self._image, copy=True)
 
 
+def _derive_white_balloon_mask_from_band_slice(image: np.ndarray, bbox_local: list[int]) -> np.ndarray | None:
+    if not isinstance(image, np.ndarray) or image.size == 0:
+        return None
+    height, width = image.shape[:2]
+    if len(bbox_local) != 4:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox_local]
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2GRAY) if crop.ndim == 3 else crop.astype(np.uint8)
+    if float(np.median(gray)) < 190.0:
+        return None
+    light = (gray >= 218).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    light = cv2.morphologyEx(light, cv2.MORPH_CLOSE, kernel, iterations=1)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats((light > 0).astype(np.uint8), 8)
+    if count <= 1:
+        return None
+    best_label = 0
+    best_area = 0
+    min_area = max(64, int((x2 - x1) * (y2 - y1) * 0.20))
+    for label in range(1, int(count)):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area > best_area:
+            best_area = area
+            best_label = label
+    if best_label <= 0 or best_area < min_area:
+        return None
+    page_mask = np.zeros((height, width), dtype=np.uint8)
+    component = np.where(labels == best_label, 255, 0).astype(np.uint8)
+    page_mask[y1:y2, x1:x2] = component
+    return page_mask if np.any(page_mask) else None
+
+
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
     """Converte uma Band para o formato dict que vision_stack.runtime aceita."""
     if band.strip_slice is None:
@@ -539,6 +580,29 @@ def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None
             "bubble_id": bubble_id,
             "bubble_mask_bbox": list(bbox_local),
         }
+        if balloon.mask is not None and isinstance(balloon.mask, np.ndarray) and balloon.mask.ndim == 2:
+            block["bubble_mask_source"] = "detector"
+            if balloon.mask.shape == (height, width):
+                block["mask"] = balloon.mask
+                block["bubble_mask"] = balloon.mask
+            elif (
+                balloon.mask.shape[1] == width
+                and band.y_top >= 0
+                and band.y_top + height <= balloon.mask.shape[0]
+            ):
+                block_mask = np.zeros((height, width), dtype=np.uint8)
+                local_start = band.y_top
+                local_end = band.y_top + height
+                if local_end > local_start:
+                    block_mask[:, :] = balloon.mask[local_start:local_end, :width]
+                    block["mask"] = block_mask
+                    block["bubble_mask"] = block_mask
+        if "bubble_mask" not in block:
+            derived_mask = _derive_white_balloon_mask_from_band_slice(band.strip_slice, bbox_local)
+            if derived_mask is not None:
+                block["bubble_mask_source"] = "derived_white_balloon"
+                block["bubble_mask"] = derived_mask
+                block["mask"] = derived_mask
         if bubble_inner_bbox is not None:
             block["bubble_inner_bbox"] = bubble_inner_bbox
         blocks.append(block)

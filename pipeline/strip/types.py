@@ -54,6 +54,7 @@ class Balloon:
     strip_bbox: BBox
     confidence: float
     lobe_count: int = 1
+    mask: np.ndarray | None = None
 
 
 @dataclass

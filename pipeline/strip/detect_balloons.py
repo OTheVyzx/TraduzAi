@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import cv2
 import numpy as np
@@ -425,6 +426,50 @@ def _source_page_height_for_bbox(strip: VerticalStrip, bbox: BBox) -> int:
     return max(1, int(strip.height))
 
 
+def _extract_balloon_mask(block: Any) -> Any | None:
+    keys = ("mask", "bubble_mask", "balloon_mask", "segmentation_mask")
+    if isinstance(block, dict):
+        for key in keys:
+            if block.get(key) is not None:
+                return block[key]
+    for key in keys:
+        if hasattr(block, key):
+            value = getattr(block, key)
+            if value is not None:
+                return value
+    return None
+
+
+def _coerce_mask_to_binary_uint8(raw_mask: Any) -> np.ndarray | None:
+    if raw_mask is None:
+        return None
+    if hasattr(raw_mask, "cpu") and hasattr(raw_mask, "numpy"):
+        try:
+            raw_mask = raw_mask.cpu().numpy()
+        except Exception:
+            pass
+    try:
+        array_mask = np.asarray(raw_mask)
+    except Exception:
+        return None
+    if not isinstance(array_mask, np.ndarray) or array_mask.size == 0:
+        return None
+
+    if array_mask.ndim == 3:
+        if array_mask.shape[-1] == 1:
+            array_mask = array_mask[:, :, 0]
+        elif array_mask.shape[0] == 1:
+            array_mask = array_mask[0]
+        else:
+            return None
+    if array_mask.ndim != 2:
+        return None
+
+    if array_mask.dtype == np.bool_:
+        return array_mask.astype(np.uint8) * 255
+    return (array_mask.astype(np.uint8) > 0).astype(np.uint8) * 255
+
+
 def detect_strip_balloons(
     strip,
     detector,
@@ -454,8 +499,9 @@ def detect_strip_balloons(
                 x2=int(b.x2),
                 y2=int(b.y2) + y0,
             )
+            mask = _coerce_mask_to_binary_uint8(_extract_balloon_mask(b))
             all_balloons.append(
-                Balloon(strip_bbox=bbox, confidence=float(b.confidence))
+                Balloon(strip_bbox=bbox, confidence=float(b.confidence), mask=mask)
             )
         if _white_balloon_band_scan_enabled():
             all_balloons.extend(

@@ -10,6 +10,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class BandToPageDictTests(unittest.TestCase):
+    def test_detect_strip_balloons_preserves_mask_payload(self):
+        from unittest.mock import MagicMock, patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        raw_mask = np.zeros((120, 300), dtype=np.uint8)
+        raw_mask[15:45, 40:120] = 1
+
+        fake_block = type("FakeBlock", (), {})()
+        fake_block.x1, fake_block.y1, fake_block.x2, fake_block.y2 = 20, 12, 170, 32
+        fake_block.confidence = 0.93
+        fake_block.mask = raw_mask
+
+        fake_detector = MagicMock()
+        fake_detector.detect.return_value = [fake_block]
+        strip = VerticalStrip(
+            image=np.zeros((120, 300, 3), dtype=np.uint8),
+            width=300,
+            height=120,
+            source_page_breaks=[0, 120],
+        )
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0"}):
+            balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertIsNotNone(balloons[0].mask)
+        self.assertIsInstance(balloons[0].mask, np.ndarray)
+        self.assertEqual(balloons[0].mask.dtype, np.uint8)
+        self.assertEqual(int(balloons[0].mask.max()), 255)
+        self.assertEqual(int((balloons[0].mask == 255).sum()), int((raw_mask > 0).sum()))
+
+    def test_detect_strip_balloons_reads_bubble_mask_key(self):
+        from unittest.mock import MagicMock, patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        raw_mask = np.zeros((120, 300), dtype=np.bool_)
+        raw_mask[10:20, 50:100] = True
+
+        fake_block = type("FakeBlock", (), {})()
+        fake_block.x1, fake_block.y1, fake_block.x2, fake_block.y2 = 20, 10, 170, 30
+        fake_block.confidence = 0.92
+        fake_block.bubble_mask = raw_mask
+
+        fake_detector = MagicMock()
+        fake_detector.detect.return_value = [fake_block]
+        strip = VerticalStrip(
+            image=np.zeros((120, 300, 3), dtype=np.uint8),
+            width=300,
+            height=120,
+            source_page_breaks=[0, 120],
+        )
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0"}):
+            balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual(int((balloons[0].mask == 255).sum()), int(raw_mask.sum()))
+
     def test_attach_ocr_trace_metadata_expands_merged_source_text_ids(self):
         from strip.process_bands import _attach_ocr_trace_metadata
 
@@ -83,6 +145,64 @@ class BandToPageDictTests(unittest.TestCase):
         self.assertEqual(page_dict["numero"], 2)
         self.assertEqual(page_dict["_source_page_number"], 2)
         self.assertEqual(page_dict["_band_index"], 13)
+
+    def test_band_to_page_dict_includes_balloon_mask_and_source(self):
+        from strip.process_bands import _band_to_page_dict
+        from strip.types import Band, Balloon, BBox
+        import numpy as np
+
+        strip_mask = np.zeros((600, 300), dtype=np.uint8)
+        strip_mask[510:590, 0:300] = 0
+        strip_mask[520:540, 50:150] = 255
+
+        band = Band(
+            y_top=500,
+            y_bottom=600,
+            balloons=[
+                Balloon(
+                    strip_bbox=BBox(50, 510, 150, 590),
+                    confidence=0.9,
+                    mask=strip_mask,
+                )
+            ],
+            strip_slice=np.zeros((100, 300, 3), dtype=np.uint8),
+            original_slice=np.zeros((100, 300, 3), dtype=np.uint8),
+        )
+
+        page_dict = _band_to_page_dict(band, page_idx=0)
+        block = page_dict["_vision_blocks"][0]
+
+        self.assertIn("mask", block)
+        self.assertIn("bubble_mask", block)
+        self.assertIn("bubble_mask_source", block)
+        self.assertEqual(block["bubble_mask_source"], "detector")
+        self.assertEqual(block["mask"].shape, (100, 300))
+        self.assertEqual(block["bubble_mask"].shape, (100, 300))
+        self.assertEqual(int((block["mask"] == 255).sum()), 2000)
+
+    def test_band_to_page_dict_derives_white_balloon_mask_when_detector_has_no_mask(self):
+        from strip.process_bands import _band_to_page_dict
+        from strip.types import Band, Balloon, BBox
+        import cv2
+        import numpy as np
+
+        slice_img = np.full((100, 220, 3), 120, dtype=np.uint8)
+        cv2.ellipse(slice_img, (90, 45), (55, 30), 0, 0, 360, (250, 250, 250), -1)
+        cv2.ellipse(slice_img, (90, 45), (55, 30), 0, 0, 360, (0, 0, 0), 1)
+        band = Band(
+            y_top=300,
+            y_bottom=400,
+            balloons=[Balloon(strip_bbox=BBox(30, 315, 150, 375), confidence=0.91)],
+            strip_slice=slice_img,
+            original_slice=slice_img.copy(),
+        )
+
+        page_dict = _band_to_page_dict(band, page_idx=0)
+
+        block = page_dict["_vision_blocks"][0]
+        self.assertEqual(block["bubble_mask_source"], "derived_white_balloon")
+        self.assertIsInstance(block["bubble_mask"], np.ndarray)
+        self.assertGreater(int(np.count_nonzero(block["bubble_mask"])), 1000)
 
 
 class CopyBackOutsideBalloonsTests(unittest.TestCase):
