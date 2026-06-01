@@ -1,12 +1,16 @@
 import unittest
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from inpainter.lama_onnx import (
     build_lama_region_jobs,
     merge_inpainted_crop,
+    select_lama_onnx_providers,
     pad_to_modulo,
     prepare_lama_dynamic_inputs,
     prepare_lama_inputs,
@@ -88,6 +92,18 @@ class LamaOnnxTests(unittest.TestCase):
                 [path.resolve() for path in resolved],
                 [path.resolve() for path in expected_dirs],
             )
+
+    def test_select_lama_onnx_providers_prefers_cuda_when_available(self):
+        fake_ort = SimpleNamespace(
+            get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
+        with patch.dict("sys.modules", {"onnxruntime": fake_ort}):
+            providers = select_lama_onnx_providers("auto")
+            self.assertEqual(providers, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+
+    def test_select_lama_onnx_providers_cpu_mode(self):
+        providers = select_lama_onnx_providers("cpu")
+        self.assertEqual(providers, ["CPUExecutionProvider"])
 
 
 if __name__ == "__main__":

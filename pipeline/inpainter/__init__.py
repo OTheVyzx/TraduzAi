@@ -37,6 +37,17 @@ try:
 except ImportError:  # pragma: no cover - supports package imports
     from ..ocr.text_router import ROUTE_ACTIONS, route_action_requires_inpaint
 
+try:
+    from .lama_onnx import (
+        get_lama_session,
+        inpaint_region_with_lama,
+        select_lama_onnx_providers,
+    )
+except Exception:  # pragma: no cover - optional import for tests/diagnostic paths
+    select_lama_onnx_providers = None
+    get_lama_session = None
+    inpaint_region_with_lama = None
+
 FAST_FILL_BLOCKING_QA_FLAGS = {
     "bbox_overreach",
     "bbox_overreach_critical",

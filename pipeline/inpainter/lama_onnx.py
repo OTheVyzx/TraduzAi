@@ -118,6 +118,23 @@ def is_lama_manga_available() -> bool:
         return False
 
 
+def select_lama_onnx_providers(mode: str = "auto") -> list[str]:
+    mode = (mode or "auto").strip().lower()
+    if mode == "cpu":
+        return ["CPUExecutionProvider"]
+    prepare_windows_onnxruntime_gpu_runtime()
+    try:
+        import onnxruntime as ort
+        available = set(ort.get_available_providers())
+    except Exception:
+        return ["CPUExecutionProvider"]
+    providers: list[str] = []
+    if mode in {"auto", "cuda"} and "CUDAExecutionProvider" in available:
+        providers.append("CUDAExecutionProvider")
+    providers.append("CPUExecutionProvider")
+    return providers
+
+
 def ensure_lama_manga_model(models_dir: str | Path = "") -> Path:
     target_dir = Path(models_dir) if models_dir else Path(__file__).resolve().parent.parent / "models" / "lama_manga_onnx_dynamic"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +169,7 @@ def get_lama_session(models_dir: str | Path = "", providers: list[str] | None = 
     import onnxruntime as ort
 
     model_path = str(ensure_lama_manga_model(models_dir))
-    normalized_providers = list(providers) if providers else ["CPUExecutionProvider"]
+    normalized_providers = list(providers) if providers is not None else select_lama_onnx_providers()
     if _session is None or _session_path != model_path or _session_providers != normalized_providers:
         try:
             ort.preload_dlls()
