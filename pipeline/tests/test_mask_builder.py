@@ -49,6 +49,119 @@ class MaskBuilderTests(unittest.TestCase):
         ):
             self.assertEqual(_selected_text_mask_engine(), "component_bubble_cleaner")
 
+    def test_component_bubble_cleaner_keeps_only_glyph_components_inside_real_bubble(self):
+        image = np.full((120, 180, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (55, 45), (70, 55), (0, 0, 0), -1)
+        cv2.rectangle(image, (130, 90), (150, 105), (0, 0, 0), -1)
+        bubble_mask = np.zeros((120, 180), dtype=np.uint8)
+        cv2.ellipse(bubble_mask, (70, 55), (45, 25), 0, 0, 360, 255, -1)
+        block = {
+            "bbox": [45, 35, 105, 75],
+            "text": "HELLO",
+            "bubble_mask": bubble_mask,
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsInstance(mask, np.ndarray)
+        self.assertGreater(int(mask[50, 60]), 0)
+        self.assertEqual(int(mask[98, 140]), 0)
+        self.assertEqual(block["mask_evidence"]["kind"], "component_bubble_cleaner")
+        self.assertTrue(block["mask_evidence"]["fast_fill_allowed"])
+
+    def test_component_bubble_cleaner_does_not_touch_bubble_outline(self):
+        image = np.full((90, 140, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (35, 42), (100, 45), (0, 0, 0), -1)
+        bubble_mask = np.zeros((90, 140), dtype=np.uint8)
+        cv2.ellipse(bubble_mask, (70, 45), (55, 30), 0, 0, 360, 255, -1)
+        block = {"bbox": [25, 28, 115, 62], "text": "LONG", "bubble_mask": bubble_mask}
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsInstance(mask, np.ndarray)
+        outline = cv2.Canny(bubble_mask, 50, 150)
+        self.assertEqual(int(np.count_nonzero((mask > 0) & (outline > 0))), 0)
+
+    def test_component_bubble_cleaner_accepts_crop_bubble_mask_with_bbox(self):
+        image = np.full((100, 140, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (50, 42), (70, 54), (0, 0, 0), -1)
+        crop_mask = np.zeros((40, 60), dtype=np.uint8)
+        cv2.ellipse(crop_mask, (30, 20), (28, 18), 0, 0, 360, 255, -1)
+        block = {
+            "bbox": [42, 36, 86, 62],
+            "text": "OK",
+            "bubble_mask": crop_mask,
+            "bubble_mask_bbox": [30, 25, 90, 65],
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsInstance(mask, np.ndarray)
+        self.assertGreater(int(mask[48, 60]), 0)
+        self.assertEqual(block["mask_evidence"]["kind"], "component_bubble_cleaner")
+
+    def test_component_bubble_cleaner_rejects_ambiguous_string_id_multi_bubble_mask(self):
+        image = np.full((100, 160, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (30, 30), (45, 42), (0, 0, 0), -1)
+        bubble_mask = np.zeros((100, 160), dtype=np.uint8)
+        cv2.rectangle(bubble_mask, (10, 10), (60, 60), 255, -1)
+        cv2.rectangle(bubble_mask, (90, 20), (145, 70), 255, -1)
+        block = {
+            "bbox": [20, 20, 55, 55],
+            "text": "A",
+            "bubble_mask": bubble_mask,
+            "bubble_id": "left",
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsNone(mask)
+        self.assertIn(
+            "component_bubble_cleaner_missing_bubble_mask",
+            block["mask_evidence"]["fast_fill_reject_reasons"],
+        )
+
+    def test_component_bubble_cleaner_records_component_debug(self):
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (30, 30), (45, 40), (0, 0, 0), -1)
+        bubble_mask = np.zeros((80, 120), dtype=np.uint8)
+        cv2.rectangle(bubble_mask, (20, 20), (70, 55), 255, -1)
+        block = {"bbox": [20, 20, 70, 55], "text": "OK", "bubble_mask": bubble_mask}
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsInstance(mask, np.ndarray)
+        debug = block["mask_evidence"]["debug"]
+        self.assertGreaterEqual(debug["component_total"], 1)
+        self.assertGreaterEqual(debug["component_accepted"], 1)
+        self.assertIn("component_rejected_small", debug)
+        self.assertIn("component_rejected_outside_bubble", debug)
+        self.assertIn("component_rejected_low_overlap", debug)
+
+    def test_component_bubble_cleaner_does_not_mask_cjk_sfx_outside_bubble(self):
+        image = np.full((90, 140, 3), 245, dtype=np.uint8)
+        cv2.putText(image, "XX", (70, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+        block = {
+            "bbox": [60, 10, 115, 45],
+            "text": "끼익",
+            "script": "ko",
+            "language": "ko",
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_TEXT_MASK_ENGINE": "component_bubble_cleaner"}, clear=False):
+            mask = build_inpaint_mask(block, image.shape, image)
+
+        self.assertIsNone(mask)
+        self.assertIn(
+            "component_bubble_cleaner_missing_bubble_mask",
+            block["mask_evidence"]["fast_fill_reject_reasons"],
+        )
+
     def test_merges_nearby_text_boxes_from_same_balloon(self):
         texts = [
             {"bbox": [100, 100, 180, 140], "tipo": "fala", "confidence": 0.91},

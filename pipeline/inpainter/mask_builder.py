@@ -56,6 +56,7 @@ FAST_FILL_MASK_EVIDENCE_KINDS = {
     "glyph_segmentation",
     "cjk_segmentation",
     "verified_rect_sign",
+    "component_bubble_cleaner",
 }
 DIALOGUE_MASK_CONTENT_CLASSES = {
     "dialogue",
@@ -1678,28 +1679,222 @@ def _koharu_glyph_dilate_radius(block: dict) -> int:
     return int(max(2, min(8, round(numeric * 0.16))))
 
 
+def _binary_mask(value: np.ndarray) -> np.ndarray:
+    return np.where(value > 0, 255, 0).astype(np.uint8)
+
+
+def _mask_component_count(mask: np.ndarray) -> int:
+    count, _labels, _stats, _centroids = cv2.connectedComponentsWithStats(
+        (mask > 0).astype(np.uint8),
+        connectivity=8,
+    )
+    return max(0, int(count) - 1)
+
+
+def _real_bubble_mask_from_block(block: dict, image_shape: tuple[int, ...]) -> np.ndarray | None:
+    height, width = _image_hw(image_shape)
+    source = None
+    for key in ("bubble_mask", "bubbleMask", "balloon_mask", "balloonMask", "segmentation_mask", "mask"):
+        candidate = block.get(key)
+        if isinstance(candidate, np.ndarray) and candidate.size and np.any(candidate):
+            source = candidate
+            break
+    if not isinstance(source, np.ndarray):
+        return None
+
+    source = source.astype(np.uint8, copy=False)
+    numeric_id = _numeric_bubble_id(block.get("bubble_id") or block.get("bubbleId"))
+    bubble_bbox = (
+        _normalize_bbox(block.get("bubble_mask_bbox"), width, height)
+        or _normalize_bbox(block.get("bubbleMaskBbox"), width, height)
+    )
+
+    if source.shape[:2] != (height, width):
+        if bubble_bbox is None:
+            return None
+        x1, y1, x2, y2 = bubble_bbox
+        expected_w = x2 - x1
+        expected_h = y2 - y1
+        if source.shape[0] != expected_h or source.shape[1] != expected_w:
+            return None
+        page_mask = np.zeros((height, width), dtype=np.uint8)
+        crop = np.where(source == numeric_id, 255, 0).astype(np.uint8) if numeric_id is not None else _binary_mask(source)
+        page_mask[y1:y2, x1:x2] = crop[:expected_h, :expected_w]
+        return page_mask if np.any(page_mask) else None
+
+    if numeric_id is not None and np.any(source == numeric_id):
+        mask = np.where(source == numeric_id, 255, 0).astype(np.uint8)
+        return mask if np.any(mask) else None
+
+    bubble_id = block.get("bubble_id") or block.get("bubbleId")
+    if bubble_id not in (None, "", 0) and numeric_id is None and _mask_component_count(_binary_mask(source)) > 1:
+        return None
+
+    mask = _binary_mask(source)
+    if bubble_bbox is not None:
+        clipped = np.zeros((height, width), dtype=np.uint8)
+        x1, y1, x2, y2 = bubble_bbox
+        clipped[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
+        mask = clipped
+    return mask if np.any(mask) else None
+
+
+def _component_bubble_support_mask(block: dict, image_shape: tuple[int, ...]) -> np.ndarray | None:
+    height, width = _image_hw(image_shape)
+    support = np.zeros((height, width), dtype=np.uint8)
+    used_geometry = False
+    for polygon in _text_geometry_polygons(block, width, height):
+        points = np.asarray(polygon, dtype=np.int32)
+        if points.shape[0] >= 3:
+            cv2.fillPoly(support, [points], 255)
+            used_geometry = True
+    if not used_geometry:
+        bbox = (
+            _normalize_bbox(block.get("text_pixel_bbox"), width, height)
+            or _normalize_bbox(block.get("bbox"), width, height)
+        )
+        if not bbox:
+            return None
+        x1, y1, x2, y2 = bbox
+        support[y1:y2, x1:x2] = 255
+    if not np.any(support):
+        return None
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 7))
+    support = cv2.dilate(support, kernel, iterations=1)
+    return support.astype(np.uint8)
+
+
+def _threshold_glyphs_inside_bubble(
+    image_rgb: np.ndarray,
+    bubble_mask: np.ndarray,
+    support_mask: np.ndarray,
+) -> np.ndarray:
+    gray = cv2.cvtColor(image_rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY) if image_rgb.ndim == 3 else image_rgb.astype(np.uint8)
+    allowed = (bubble_mask > 0) & (support_mask > 0)
+    inside = gray[allowed]
+    if inside.size == 0:
+        return np.zeros_like(bubble_mask, dtype=np.uint8)
+    cutoff = min(210, max(85, int(np.percentile(inside, 35)) - 8))
+    dark = (gray <= cutoff) & allowed
+    return np.where(dark, 255, 0).astype(np.uint8)
+
+
+def _component_mask_inside_bubble(
+    glyphs: np.ndarray,
+    safe_bubble: np.ndarray,
+    support_mask: np.ndarray,
+) -> tuple[np.ndarray, dict]:
+    labels_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        (glyphs > 0).astype(np.uint8),
+        connectivity=8,
+    )
+    accepted = np.zeros_like(glyphs, dtype=np.uint8)
+    debug = {
+        "component_total": max(0, int(labels_count) - 1),
+        "component_accepted": 0,
+        "component_rejected_small": 0,
+        "component_rejected_outside_bubble": 0,
+        "component_rejected_low_overlap": 0,
+    }
+    safe_bool = safe_bubble > 0
+    support_bool = support_mask > 0
+    for label in range(1, int(labels_count)):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 4:
+            debug["component_rejected_small"] += 1
+            continue
+        cx, cy = centroids[label]
+        ix, iy = int(round(cx)), int(round(cy))
+        if iy < 0 or iy >= safe_bubble.shape[0] or ix < 0 or ix >= safe_bubble.shape[1] or not safe_bool[iy, ix]:
+            debug["component_rejected_outside_bubble"] += 1
+            continue
+        component = labels == label
+        bubble_overlap = np.count_nonzero(component & safe_bool) / float(max(1, area))
+        support_overlap = np.count_nonzero(component & support_bool) / float(max(1, area))
+        if bubble_overlap < 0.80 or support_overlap < 0.45:
+            debug["component_rejected_low_overlap"] += 1
+            continue
+        accepted[component] = 255
+        debug["component_accepted"] += 1
+    if np.any(accepted):
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        accepted = cv2.morphologyEx(accepted, cv2.MORPH_CLOSE, kernel, iterations=1)
+        accepted[(safe_bubble == 0) | (support_mask == 0)] = 0
+    return accepted.astype(np.uint8), debug
+
+
+def _record_component_bubble_failure(block: dict, reason: str, debug: dict | None = None) -> None:
+    consolidate_mask_evidence(
+        block,
+        kind="none",
+        raw_mask_pixels=0,
+        expanded_mask_pixels=0,
+        evidence_score=0.0,
+        fast_fill_reject_reasons=[reason],
+    )
+    if debug:
+        block["mask_evidence"]["debug"] = debug
+
+
+def _build_component_bubble_cleaner_mask(
+    block: dict,
+    image_shape: tuple[int, ...],
+    image_rgb: np.ndarray | None,
+) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0:
+        _record_component_bubble_failure(block, "component_bubble_cleaner_missing_image")
+        return None
+    if image_rgb.shape[:2] != _image_hw(image_shape):
+        _record_component_bubble_failure(block, "component_bubble_cleaner_image_shape_mismatch")
+        return None
+    bubble_mask = _real_bubble_mask_from_block(block, image_shape)
+    if bubble_mask is None:
+        _record_component_bubble_failure(block, "component_bubble_cleaner_missing_bubble_mask")
+        return None
+    support_mask = _component_bubble_support_mask(block, image_shape)
+    if support_mask is None:
+        _record_component_bubble_failure(block, "component_bubble_cleaner_no_components")
+        return None
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    safe_bubble = cv2.erode(bubble_mask.astype(np.uint8), kernel, iterations=1)
+    if not np.any(safe_bubble):
+        safe_bubble = bubble_mask.astype(np.uint8)
+    glyphs = _threshold_glyphs_inside_bubble(image_rgb, safe_bubble, support_mask)
+    mask, debug = _component_mask_inside_bubble(glyphs, safe_bubble, support_mask)
+    debug.update(
+        {
+            "safe_bubble_pixels": int(np.count_nonzero(safe_bubble)),
+            "support_mask_pixels": int(np.count_nonzero(support_mask)),
+            "raw_glyph_pixels": int(np.count_nonzero(glyphs)),
+            "final_mask_pixels": int(np.count_nonzero(mask)),
+        }
+    )
+    if not np.any(mask):
+        _record_component_bubble_failure(block, "component_bubble_cleaner_no_components", debug)
+        return None
+    final_pixels = int(np.count_nonzero(mask))
+    consolidate_mask_evidence(
+        block,
+        kind="component_bubble_cleaner",
+        raw_mask_pixels=int(np.count_nonzero(glyphs)),
+        expanded_mask_pixels=final_pixels,
+        evidence_score=1.0,
+    )
+    block["mask_evidence"]["debug"] = debug
+    _remove_qa_flag(block, "mask_density_high")
+    if str(block.get("bubble_mask_source") or "").strip() == "derived_white_balloon":
+        _remove_qa_flag(block, "mask_outside_balloon")
+        _remove_qa_flag(block, "mask_outside_balloon_critical")
+    return mask.astype(np.uint8)
+
+
 def build_inpaint_mask(
     block: dict,
     image_shape: tuple[int, ...],
     image_rgb: np.ndarray | None = None,
 ) -> np.ndarray | None:
     if _selected_text_mask_engine() == "component_bubble_cleaner":
-        bubble_mask = None
-        for key in ("bubble_mask", "bubbleMask", "balloon_mask", "balloonMask", "segmentation_mask", "mask"):
-            candidate = block.get(key)
-            if isinstance(candidate, np.ndarray) and candidate.size and np.any(candidate):
-                bubble_mask = candidate
-                break
-        if bubble_mask is None:
-            consolidate_mask_evidence(
-                block,
-                kind="none",
-                raw_mask_pixels=0,
-                expanded_mask_pixels=0,
-                evidence_score=0.0,
-                fast_fill_reject_reasons=["component_bubble_cleaner_missing_bubble_mask"],
-            )
-            return None
+        return _build_component_bubble_cleaner_mask(block, image_shape, image_rgb)
 
     text_mask = None
     raw_text_mask = None
