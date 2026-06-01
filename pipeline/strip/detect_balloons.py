@@ -440,6 +440,46 @@ def _extract_balloon_mask(block: Any) -> Any | None:
     return None
 
 
+def _detector_block_value(block: Any, key: str, default: Any = None) -> Any:
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _detector_block_bbox(block: Any, y_offset: int = 0) -> BBox | None:
+    raw_bbox = None
+    if isinstance(block, dict):
+        raw_bbox = block.get("xyxy") or block.get("bbox") or block.get("box")
+    if raw_bbox is not None:
+        try:
+            x1, y1, x2, y2 = [int(round(float(v))) for v in list(raw_bbox)[:4]]
+        except Exception:
+            return None
+        return BBox(x1=x1, y1=y1 + int(y_offset), x2=x2, y2=y2 + int(y_offset))
+
+    try:
+        return BBox(
+            x1=int(round(float(_detector_block_value(block, "x1")))),
+            y1=int(round(float(_detector_block_value(block, "y1")))) + int(y_offset),
+            x2=int(round(float(_detector_block_value(block, "x2")))),
+            y2=int(round(float(_detector_block_value(block, "y2")))) + int(y_offset),
+        )
+    except Exception:
+        return None
+
+
+def _detector_block_confidence(block: Any) -> float:
+    for key in ("confidence", "conf", "score"):
+        value = _detector_block_value(block, key, None)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return 0.0
+
+
 def _coerce_mask_to_binary_uint8(raw_mask: Any) -> np.ndarray | None:
     if raw_mask is None:
         return None
@@ -491,17 +531,20 @@ def detect_strip_balloons(
 
     for y0, y1 in chunks:
         chunk_img = strip.image[y0:y1, :, :]
-        blocks = detector.detect(chunk_img, conf_threshold=confidence_threshold)
+        try:
+            blocks = detector.detect(chunk_img, conf_threshold=confidence_threshold)
+        except TypeError as exc:
+            message = str(exc)
+            if "conf_threshold" not in message and "unexpected keyword" not in message:
+                raise
+            blocks = detector.detect(chunk_img)
         for b in blocks:
-            bbox = BBox(
-                x1=int(b.x1),
-                y1=int(b.y1) + y0,
-                x2=int(b.x2),
-                y2=int(b.y2) + y0,
-            )
+            bbox = _detector_block_bbox(b, y_offset=y0)
+            if bbox is None:
+                continue
             mask = _coerce_mask_to_binary_uint8(_extract_balloon_mask(b))
             all_balloons.append(
-                Balloon(strip_bbox=bbox, confidence=float(b.confidence), mask=mask)
+                Balloon(strip_bbox=bbox, confidence=_detector_block_confidence(b), mask=mask)
             )
         if _white_balloon_band_scan_enabled():
             all_balloons.extend(

@@ -29,6 +29,74 @@ _LEGACY_DECISION_FIELDS = frozenset(
 )
 
 
+_RUNTIME_BUBBLE_FIELDS = (
+    "bubble_id",
+    "bubble_mask",
+    "mask",
+    "bubble_mask_source",
+    "bubble_mask_bbox",
+    "bubble_inner_bbox",
+)
+
+
+def _copy_runtime_bubble_fields(target: dict, source: dict | None) -> None:
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for key in _RUNTIME_BUBBLE_FIELDS:
+        value = source.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and value == "":
+            continue
+        if isinstance(value, (list, tuple, dict, set)) and not value:
+            continue
+        target[key] = value if isinstance(value, np.ndarray) else copy.deepcopy(value)
+
+
+def _record_identity_values(record: dict) -> list[str]:
+    values: list[str] = []
+    for key in ("trace_id", "text_id", "id"):
+        value = record.get(key) if isinstance(record, dict) else None
+        if value not in (None, ""):
+            values.append(str(value))
+    return values
+
+
+def _merge_runtime_bubble_fields_into_blocks(target_blocks: list[dict], source_blocks: list[dict]) -> None:
+    if not target_blocks or not source_blocks:
+        return
+    source_by_identity: dict[str, dict] = {}
+    for source in source_blocks:
+        if not isinstance(source, dict):
+            continue
+        for identity in _record_identity_values(source):
+            source_by_identity.setdefault(identity, source)
+
+    for index, target in enumerate(target_blocks):
+        if not isinstance(target, dict):
+            continue
+        source = None
+        for identity in _record_identity_values(target):
+            source = source_by_identity.get(identity)
+            if source is not None:
+                break
+        if source is None and index < len(source_blocks) and isinstance(source_blocks[index], dict):
+            source = source_blocks[index]
+        if source is None:
+            target_bbox = _coerce_bbox(target.get("bbox"))
+            best_score = 0.0
+            for candidate in source_blocks:
+                if not isinstance(candidate, dict):
+                    continue
+                score = _bbox_overlap_ratio(target_bbox, _coerce_bbox(candidate.get("bbox")))
+                if score > best_score:
+                    best_score = score
+                    source = candidate
+            if best_score < 0.35:
+                source = None
+        _copy_runtime_bubble_fields(target, source)
+
+
 def _legacy_record_key(record: dict, index: int) -> tuple[str, str | int]:
     for key in ("trace_id", "text_id", "id"):
         value = record.get(key)
@@ -760,6 +828,11 @@ def _merge_translated_page_metadata(ocr_page: dict, translated_page: dict) -> di
 
     if not merged_page.get("_vision_blocks"):
         merged_page["_vision_blocks"] = list((ocr_page or {}).get("_vision_blocks") or [])
+    else:
+        target_blocks = [block for block in list(merged_page.get("_vision_blocks") or []) if isinstance(block, dict)]
+        source_blocks = [block for block in list((ocr_page or {}).get("_vision_blocks") or []) if isinstance(block, dict)]
+        _merge_runtime_bubble_fields_into_blocks(target_blocks, source_blocks)
+        merged_page["_vision_blocks"] = target_blocks
 
     for key in (
         "numero",
@@ -1348,6 +1421,7 @@ def _ensure_text_balloon_bboxes(page: dict, band: Band) -> None:
             for key in ("bubble_id", "bubble_mask_bbox", "bubble_inner_bbox"):
                 if best.get(key) not in (None, [], "") and txt.get(key) in (None, [], ""):
                     txt[key] = copy.deepcopy(best[key])
+            _copy_runtime_bubble_fields(txt, best)
         else:
             if txt.get("balloon_bbox"):
                 continue

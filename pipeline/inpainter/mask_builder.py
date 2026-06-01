@@ -1725,6 +1725,8 @@ def _real_bubble_mask_from_block(block: dict, image_shape: tuple[int, ...]) -> n
     if numeric_id is not None and np.any(source == numeric_id):
         mask = np.where(source == numeric_id, 255, 0).astype(np.uint8)
         return mask if np.any(mask) else None
+    if numeric_id is not None:
+        return None
 
     bubble_id = block.get("bubble_id") or block.get("bubbleId")
     if bubble_id not in (None, "", 0) and numeric_id is None and _mask_component_count(_binary_mask(source)) > 1:

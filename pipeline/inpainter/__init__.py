@@ -637,6 +637,18 @@ def _merge_unique_line_polygons(texts: list[dict]) -> list:
     return merged
 
 
+def _has_runtime_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value != ""
+    if isinstance(value, np.ndarray):
+        return value.size > 0
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    return True
+
+
 def _enrich_vision_blocks_from_texts_for_inpaint(
     vision_blocks: list[dict],
     texts: list[dict],
@@ -682,6 +694,12 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 "source_bbox",
                 "balloon_bbox",
                 "layout_bbox",
+                "bubble_id",
+                "bubble_mask",
+                "mask",
+                "bubble_mask_source",
+                "bubble_mask_bbox",
+                "bubble_inner_bbox",
                 "_merged_source_bboxes",
                 "merged_source_bboxes",
                 "content_class",
@@ -690,7 +708,7 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 "render_policy",
             ):
                 value = best_text.get(key)
-                if value not in (None, [], ""):
+                if _has_runtime_value(value):
                     current[key] = copy.deepcopy(value)
             if len(matched_texts) > 1:
                 merged_polygons = _merge_unique_line_polygons(matched_texts)

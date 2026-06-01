@@ -72,6 +72,94 @@ class BandToPageDictTests(unittest.TestCase):
         self.assertEqual(len(balloons), 1)
         self.assertEqual(int((balloons[0].mask == 255).sum()), int(raw_mask.sum()))
 
+    def test_detect_strip_balloons_accepts_dict_xyxy_mask_payload(self):
+        from unittest.mock import patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        raw_mask = np.zeros((40, 60), dtype=np.uint8)
+        raw_mask[8:28, 12:42] = 255
+
+        class FakeDetector:
+            def detect(self, image):
+                return [{"xyxy": [10, 10, 70, 50], "confidence": 0.9, "mask": raw_mask}]
+
+        strip = VerticalStrip(
+            image=np.zeros((100, 120, 3), dtype=np.uint8),
+            width=120,
+            height=100,
+            source_page_breaks=[0, 100],
+        )
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0"}):
+            balloons = detect_strip_balloons(strip, detector=FakeDetector(), max_height_fraction=1.0)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual(balloons[0].strip_bbox.x1, 10)
+        self.assertEqual(balloons[0].strip_bbox.y1, 10)
+        self.assertIsInstance(balloons[0].mask, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(balloons[0].mask)), 0)
+
+    def test_translated_page_merge_preserves_runtime_bubble_masks(self):
+        from strip.process_bands import _merge_translated_page_metadata
+        import numpy as np
+
+        bubble_mask = np.zeros((80, 120), dtype=np.uint8)
+        bubble_mask[10:60, 20:100] = 255
+        ocr_page = {
+            "texts": [{"id": "ocr_001", "bbox": [30, 20, 70, 40], "text": "HELLO"}],
+            "_vision_blocks": [
+                {
+                    "bbox": [20, 10, 100, 60],
+                    "text_id": "ocr_001",
+                    "bubble_id": "bubble_001",
+                    "bubble_mask": bubble_mask,
+                    "bubble_mask_source": "derived_white_balloon",
+                    "bubble_mask_bbox": [20, 10, 100, 60],
+                }
+            ],
+        }
+        translated_page = {
+            "texts": [{"id": "ocr_001", "translated": "OLA"}],
+            "_vision_blocks": [{"bbox": [20, 10, 100, 60], "text_id": "ocr_001"}],
+        }
+
+        merged = _merge_translated_page_metadata(ocr_page, translated_page)
+
+        block = merged["_vision_blocks"][0]
+        self.assertIs(block["bubble_mask"], bubble_mask)
+        self.assertEqual(block["bubble_mask_source"], "derived_white_balloon")
+        self.assertEqual(block["bubble_id"], "bubble_001")
+
+    def test_ensure_text_balloon_bboxes_attaches_runtime_bubble_mask(self):
+        from strip.process_bands import _ensure_text_balloon_bboxes
+        from strip.types import Band
+        import numpy as np
+
+        bubble_mask = np.zeros((80, 120), dtype=np.uint8)
+        bubble_mask[10:60, 20:100] = 255
+        page = {
+            "texts": [{"bbox": [30, 20, 70, 40], "text": "HELLO"}],
+            "_vision_blocks": [
+                {
+                    "bbox": [20, 10, 100, 60],
+                    "bubble_id": "bubble_001",
+                    "bubble_mask": bubble_mask,
+                    "bubble_mask_source": "derived_white_balloon",
+                    "bubble_mask_bbox": [20, 10, 100, 60],
+                }
+            ],
+        }
+        band = Band(y_top=0, y_bottom=80, strip_slice=np.zeros((80, 120, 3), dtype=np.uint8))
+
+        _ensure_text_balloon_bboxes(page, band)
+
+        text = page["texts"][0]
+        self.assertIs(text["bubble_mask"], bubble_mask)
+        self.assertEqual(text["bubble_mask_source"], "derived_white_balloon")
+        self.assertEqual(text["bubble_id"], "bubble_001")
+
     def test_attach_ocr_trace_metadata_expands_merged_source_text_ids(self):
         from strip.process_bands import _attach_ocr_trace_metadata
 
