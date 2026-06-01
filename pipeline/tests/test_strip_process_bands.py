@@ -268,6 +268,38 @@ class BandToPageDictTests(unittest.TestCase):
         self.assertEqual(block["bubble_mask"].shape, (100, 300))
         self.assertEqual(int((block["mask"] == 255).sum()), 2000)
 
+    def test_band_to_page_dict_places_crop_sized_detector_mask(self):
+        from strip.process_bands import _band_to_page_dict
+        from strip.types import Band, Balloon, BBox
+        import numpy as np
+
+        crop_mask = np.zeros((80, 100), dtype=np.uint8)
+        crop_mask[10:30, 15:45] = 255
+
+        band = Band(
+            y_top=500,
+            y_bottom=600,
+            balloons=[
+                Balloon(
+                    strip_bbox=BBox(50, 510, 150, 590),
+                    confidence=0.9,
+                    mask=crop_mask,
+                )
+            ],
+            strip_slice=np.zeros((100, 300, 3), dtype=np.uint8),
+            original_slice=np.zeros((100, 300, 3), dtype=np.uint8),
+        )
+
+        page_dict = _band_to_page_dict(band, page_idx=0)
+        block = page_dict["_vision_blocks"][0]
+
+        self.assertEqual(block["bubble_mask_source"], "detector")
+        self.assertEqual(block["bubble_mask"].shape, (100, 300))
+        self.assertEqual(int(block["bubble_mask"][20, 65]), 255)
+        self.assertEqual(int(block["bubble_mask"][20, 49]), 0)
+        self.assertEqual(int(block["bubble_mask"][9, 65]), 0)
+        self.assertEqual(int(np.count_nonzero(block["bubble_mask"])), 600)
+
     def test_band_to_page_dict_derives_white_balloon_mask_when_detector_has_no_mask(self):
         from strip.process_bands import _band_to_page_dict
         from strip.types import Band, Balloon, BBox

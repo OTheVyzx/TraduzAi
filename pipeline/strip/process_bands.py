@@ -623,6 +623,60 @@ def _derive_white_balloon_mask_from_band_slice(image: np.ndarray, bbox_local: li
     return page_mask if np.any(page_mask) else None
 
 
+def _normalize_detector_mask(mask: np.ndarray) -> np.ndarray | None:
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.size == 0:
+        return None
+    return np.where(mask > 0, 255, 0).astype(np.uint8)
+
+
+def _materialize_detector_mask_for_band(
+    mask: np.ndarray,
+    bbox_local: list[int],
+    *,
+    width: int,
+    height: int,
+    band_y_top: int,
+) -> np.ndarray | None:
+    detector_mask = _normalize_detector_mask(mask)
+    if detector_mask is None:
+        return None
+
+    if detector_mask.shape == (height, width):
+        return detector_mask
+
+    if (
+        detector_mask.shape[1] == width
+        and band_y_top >= 0
+        and band_y_top + height <= detector_mask.shape[0]
+    ):
+        local_start = int(band_y_top)
+        local_end = local_start + int(height)
+        block_mask = detector_mask[local_start:local_end, :width].copy()
+        return block_mask if np.any(block_mask) else None
+
+    x1, y1, x2, y2 = [int(v) for v in bbox_local[:4]]
+    bbox_w = max(0, x2 - x1)
+    bbox_h = max(0, y2 - y1)
+    if detector_mask.shape != (bbox_h, bbox_w):
+        return None
+
+    dst_x1 = max(0, min(width, x1))
+    dst_y1 = max(0, min(height, y1))
+    dst_x2 = max(0, min(width, x2))
+    dst_y2 = max(0, min(height, y2))
+    if dst_x2 <= dst_x1 or dst_y2 <= dst_y1:
+        return None
+
+    src_x1 = dst_x1 - x1
+    src_y1 = dst_y1 - y1
+    src_x2 = src_x1 + (dst_x2 - dst_x1)
+    src_y2 = src_y1 + (dst_y2 - dst_y1)
+
+    block_mask = np.zeros((height, width), dtype=np.uint8)
+    block_mask[dst_y1:dst_y2, dst_x1:dst_x2] = detector_mask[src_y1:src_y2, src_x1:src_x2]
+    return block_mask if np.any(block_mask) else None
+
+
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
     """Converte uma Band para o formato dict que vision_stack.runtime aceita."""
     if band.strip_slice is None:
@@ -649,22 +703,17 @@ def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None
             "bubble_mask_bbox": list(bbox_local),
         }
         if balloon.mask is not None and isinstance(balloon.mask, np.ndarray) and balloon.mask.ndim == 2:
-            block["bubble_mask_source"] = "detector"
-            if balloon.mask.shape == (height, width):
-                block["mask"] = balloon.mask
-                block["bubble_mask"] = balloon.mask
-            elif (
-                balloon.mask.shape[1] == width
-                and band.y_top >= 0
-                and band.y_top + height <= balloon.mask.shape[0]
-            ):
-                block_mask = np.zeros((height, width), dtype=np.uint8)
-                local_start = band.y_top
-                local_end = band.y_top + height
-                if local_end > local_start:
-                    block_mask[:, :] = balloon.mask[local_start:local_end, :width]
-                    block["mask"] = block_mask
-                    block["bubble_mask"] = block_mask
+            block_mask = _materialize_detector_mask_for_band(
+                balloon.mask,
+                bbox_local,
+                width=width,
+                height=height,
+                band_y_top=int(band.y_top),
+            )
+            if block_mask is not None:
+                block["bubble_mask_source"] = "detector"
+                block["mask"] = block_mask
+                block["bubble_mask"] = block_mask
         if "bubble_mask" not in block:
             derived_mask = _derive_white_balloon_mask_from_band_slice(band.strip_slice, bbox_local)
             if derived_mask is not None:
