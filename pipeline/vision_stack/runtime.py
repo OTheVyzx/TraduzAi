@@ -2633,14 +2633,16 @@ def _call_inpainter_in_roi(
 
     if selected_engine in {"aot_manga_roi", "lama_onnx"}:
         from inpainter.region_strategy import (
-            manga_cleaner_roi_from_mask,
             pasteback_masked_pixels,
             reflect_pad_crop_to_multiple,
         )
 
         try:
-            roi = manga_cleaner_roi_from_mask(mask, padding=16, multiple=8)
-            source_slice = (slice(roi.y1, roi.y2), slice(roi.x1, roi.x2))
+            roi = _clip_bbox_to_shape(roi_bbox, image_np.shape)
+            if roi is None:
+                roi = [0, 0, int(image_np.shape[1]), int(image_np.shape[0])]
+            x1, y1, x2, y2 = roi
+            source_slice = (slice(y1, y2), slice(x1, x2))
             crop_image = image_np[source_slice].copy()
             crop_mask = mask[source_slice].copy()
             padded_image, padded_mask, (pad_top, pad_left) = reflect_pad_crop_to_multiple(
@@ -2671,7 +2673,10 @@ def _call_inpainter_in_roi(
                     force_no_tiling=force_no_tiling,
                 )
 
-            crop_output = crop_output[pad_top : pad_top + roi.source_height, pad_left : pad_left + roi.source_width]
+            crop_output = crop_output[
+                pad_top : pad_top + (y2 - y1),
+                pad_left : pad_left + (x2 - x1),
+            ]
             if crop_output.shape[:2] != crop_mask.shape[:2]:
                 raise ValueError(
                     f"roi inpaint retornou shape {crop_output.shape[:2]} esperado {crop_mask.shape[:2]}"
@@ -2680,7 +2685,7 @@ def _call_inpainter_in_roi(
                 image_np,
                 crop_output,
                 crop_mask,
-                [roi.x1, roi.y1, roi.x2, roi.y2],
+                roi,
             )
         except Exception:
             raise

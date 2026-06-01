@@ -5850,6 +5850,64 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertTrue(np.all(result[25, 25] == 200))
         self.assertTrue(np.all(result[0, 0] == 0))
 
+    def test_aot_manga_roi_uses_provided_bbox_not_mask_span(self):
+        calls = []
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, *args, **kwargs):
+                calls.append((image_np.shape, mask.shape))
+                result = image_np.copy()
+                result[mask > 0] = 200
+                return result
+
+        image = np.full((100, 100, 3), 33, dtype=np.uint8)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:30, 20:30] = 255
+        mask[70:90, 70:90] = 255
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "aot_manga_roi"}, clear=False):
+            result = _call_inpainter_in_roi(FakeInpainter(), image, mask, [10, 10, 40, 40], True)
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0][0] % 8, 0)
+        self.assertEqual(calls[0][0][1] % 8, 0)
+        self.assertTrue(np.all(result[20:30, 20:30] == 200))
+        self.assertTrue(np.all(result[70:80, 70:80] == 33))
+
+    def test_lama_onnx_uses_provided_bbox_not_mask_span(self):
+        calls = []
+        fake_session = object()
+
+        def fake_get_session(*_args, **_kwargs):
+            return fake_session
+
+        def fake_inpaint(session, crop_rgb, crop_mask):
+            calls.append((crop_rgb.shape, crop_mask.shape))
+            output = crop_rgb.copy()
+            output[crop_mask > 0] = 220
+            return output
+
+        image = np.full((100, 100, 3), 45, dtype=np.uint8)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:30, 20:30] = 255
+        mask[70:90, 70:90] = 255
+
+        with patch.dict(
+            "os.environ",
+            {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "lama_onnx"},
+            clear=False,
+        ), patch("inpainter.lama_onnx.get_lama_session", side_effect=fake_get_session), patch(
+            "inpainter.lama_onnx.inpaint_region_with_lama",
+            side_effect=fake_inpaint,
+        ), patch("inpainter.lama_onnx.select_lama_onnx_providers", return_value=["CPUExecutionProvider"]):
+            result = _call_inpainter_in_roi(object(), image, mask, [10, 10, 40, 40], True)
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0][0] % 8, 0)
+        self.assertEqual(calls[0][0][1] % 8, 0)
+        self.assertTrue(np.all(result[20:30, 20:30] == 220))
+        self.assertTrue(np.all(result[70:80, 70:80] == 45))
+
     def test_lama_onnx_route_uses_roi_crop_with_masked_pasteback(self):
         calls = []
         fake_session = object()
