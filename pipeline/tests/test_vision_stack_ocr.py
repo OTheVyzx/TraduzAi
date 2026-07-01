@@ -417,7 +417,7 @@ class VisionStackOCRTests(unittest.TestCase):
         self.assertEqual(records[0]["text"], "HELLO")
         self.assertEqual(records[0]["source_bbox"], [10, 10, 70, 34])
 
-    def test_load_paddle_ocr_falls_back_to_easyocr_when_paddle_is_unavailable(self):
+    def test_load_paddle_ocr_fails_closed_when_paddle_is_unavailable(self):
         engine = OCREngine.__new__(OCREngine)
         engine.model_name = "paddleocr"
         engine.lang = "en"
@@ -434,10 +434,11 @@ class VisionStackOCRTests(unittest.TestCase):
             if name == "paddleocr"
             else original_import(name, *args, **kwargs),
         ):
-            OCREngine._load_paddle_ocr(engine)
+            with self.assertRaisesRegex(RuntimeError, "PaddleOCR"):
+                OCREngine._load_paddle_ocr(engine)
 
-        self.assertEqual(engine.model_name, "easyocr")
-        load_easyocr.assert_called_once()
+        self.assertEqual(engine.model_name, "paddleocr")
+        load_easyocr.assert_not_called()
 
     def test_load_paddle_ocr_forces_gpu_when_gpu_is_required(self):
         engine = OCREngine.__new__(OCREngine)

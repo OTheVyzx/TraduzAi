@@ -1,0 +1,233 @@
+{
+  "image": "style_copy_atlas.png",
+  "cases": [
+    {
+      "id": "plain_balloon_black",
+      "bbox": [
+        22,
+        18,
+        838,
+        132
+      ],
+      "expected": {
+        "font_name": "ComicNeue-Bold.ttf",
+        "text_color": "#000000",
+        "stroke": false,
+        "gradient": false,
+        "glow": false,
+        "shadow": false
+      }
+    },
+    {
+      "id": "plain_balloon_white_on_dark",
+      "bbox": [
+        22,
+        168,
+        838,
+        282
+      ],
+      "expected": {
+        "font_name": "ComicNeue-Bold.ttf",
+        "text_color": "#FFFFFF",
+        "stroke": false,
+        "gradient": false,
+        "glow": false,
+        "shadow": false
+      }
+    },
+    {
+      "id": "white_fill_black_outline",
+      "bbox": [
+        22,
+        318,
+        838,
+        432
+      ],
+      "expected": {
+        "font_family": "impact",
+        "text_color": "#FFFFFF",
+        "stroke_color": "#000000",
+        "stroke_width_px_min": 2,
+        "gradient": false,
+        "glow": false
+      }
+    },
+    {
+      "id": "black_fill_white_outline",
+      "bbox": [
+        22,
+        468,
+        838,
+        582
+      ],
+      "expected": {
+        "font_family": "impact",
+        "text_color": "#000000",
+        "stroke_color": "#FFFFFF",
+        "stroke_width_px_min": 2,
+        "gradient": false,
+        "glow": false
+      }
+    },
+    {
+      "id": "dark_blue_vertical_gradient",
+      "bbox": [
+        22,
+        618,
+        838,
+        732
+      ],
+      "expected": {
+        "font_name": "ComicNeue-Bold.ttf",
+        "gradient": true,
+        "glow": false,
+        "stroke": false
+      }
+    },
+    {
+      "id": "impact_gradient_outline",
+      "bbox": [
+        22,
+        768,
+        838,
+        882
+      ],
+      "expected": {
+        "font_family": "impact",
+        "gradient": true,
+        "stroke_color": "#FFFFFF",
+        "stroke_width_px_min": 2,
+        "glow": false
+      }
+    },
+    {
+      "id": "cyan_card_white_glow",
+      "bbox": [
+        22,
+        918,
+        838,
+        1032
+      ],
+      "expected": {
+        "font_family": "impact",
+        "text_color": "#FFFFFF",
+        "glow": true,
+        "stroke": false,
+        "gradient": false
+      }
+    },
+    {
+      "id": "black_text_pink_glow",
+      "bbox": [
+        22,
+        1068,
+        838,
+        1182
+      ],
+      "expected": {
+        "font_family": "impact",
+        "text_color": "#000000",
+        "glow": true,
+        "stroke": false,
+        "gradient": false
+      }
+    },
+    {
+      "id": "gray_shadow_offset",
+      "bbox": [
+        22,
+        1218,
+        838,
+        1332
+      ],
+      "expected": {
+        "font_name": "ComicNeue-Bold.ttf",
+        "text_color": "#000000",
+        "shadow": true,
+        "glow": false,
+        "stroke": false
+      }
+    },
+    {
+      "id": "thick_impact_font",
+      "bbox": [
+        22,
+        1368,
+        838,
+        1482
+      ],
+      "expected": {
+        "font_family": "impact",
+        "text_color": "#000000",
+        "stroke": false,
+        "gradient": false,
+        "glow": false
+      }
+    },
+    {
+      "id": "thin_no_effect_ui_text",
+      "bbox": [
+        22,
+        1518,
+        838,
+        1632
+      ],
+      "expected": {
+        "font_name": "ComicNeue-Bold.ttf",
+        "text_color": "#111111",
+        "stroke": false,
+        "gradient": false,
+        "glow": false,
+        "shadow": false
+      }
+    },
+    {
+      "id": "non_text_lightning_texture",
+      "bbox": [
+        22,
+        1668,
+        838,
+        1782
+      ],
+      "expected": {
+        "no_text": true,
+        "stroke": false,
+        "gradient": false,
+        "glow": false,
+        "shadow": false
+      }
+    },
+    {
+      "id": "non_text_blue_card_texture",
+      "bbox": [
+        22,
+        1818,
+        838,
+        1932
+      ],
+      "expected": {
+        "no_text": true,
+        "stroke": false,
+        "gradient": false,
+        "glow": false,
+        "shadow": false
+      }
+    },
+    {
+      "id": "non_text_vertical_art_sliver",
+      "bbox": [
+        22,
+        1968,
+        838,
+        2082
+      ],
+      "expected": {
+        "no_text": true,
+        "stroke": false,
+        "gradient": false,
+        "glow": false,
+        "shadow": false
+      }
+    }
+  ]
+}

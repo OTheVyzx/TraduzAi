@@ -170,7 +170,10 @@ describe("editor render preview cache", () => {
   });
 
   it("renders a faithful preview without committing pending edits", async () => {
-    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/001-preview.png");
+    invokeMock.mockResolvedValue({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "koharu_rust",
+    });
     const pageKey = useEditorStore.getState().currentPageKey();
 
     useEditorStore.getState().setWorkingTraduzido(pageKey, "layer-a", "Oi");
@@ -202,12 +205,16 @@ describe("editor render preview cache", () => {
     expect(useEditorStore.getState().getRenderPreviewState(pageKey)).toMatchObject({
       status: "fresh",
       previewPath: "D:/tmp/project/render-cache/preview/001-preview.png",
+      rendererBackend: "koharu_rust",
     });
     expect(useEditorStore.getState().getStaleRenderPreviewPages()).toEqual([1]);
   });
 
   it("renders a faithful preview for an explicit page outside the editor current page", async () => {
-    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/002-preview.png");
+    invokeMock.mockResolvedValue({
+      output_path: "D:/tmp/project/render-cache/preview/002-preview.png",
+      renderer_backend: "koharu_rust",
+    });
     const firstPage = makePage(1);
     const secondPage = makePage(2, [makeLayer({ id: "layer-b", translated: "Pagina dois", traduzido: "Pagina dois" })]);
     const project = makeProject([firstPage, secondPage]);
@@ -241,12 +248,16 @@ describe("editor render preview cache", () => {
       status: "fresh",
       path: "translated/002.png",
       previewPath: "D:/tmp/project/render-cache/preview/002-preview.png",
+      rendererBackend: "koharu_rust",
     });
     expect(useEditorStore.getState().currentPageIndex).toBe(0);
   });
 
   it("includes rotation style changes in the faithful preview payload and fingerprint", async () => {
-    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/001-preview.png");
+    invokeMock.mockResolvedValue({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "koharu_rust",
+    });
     const pageKey = useEditorStore.getState().currentPageKey();
     const before = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
 
@@ -275,7 +286,10 @@ describe("editor render preview cache", () => {
   });
 
   it("includes gradient/effect preset style changes in the faithful preview payload and fingerprint", async () => {
-    invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/001-preview.png");
+    invokeMock.mockResolvedValue({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "koharu_rust",
+    });
     const pageKey = useEditorStore.getState().currentPageKey();
     const before = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
 
@@ -319,5 +333,101 @@ describe("editor render preview cache", () => {
         }),
       }),
     );
+  });
+
+  it("includes optional sfx metadata in the faithful preview payload", async () => {
+    invokeMock.mockResolvedValue({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "python",
+    });
+    const sfxLayer = makeLayer({
+      id: "sfx-a",
+      tipo: "sfx",
+      content_class: "sfx",
+      script: "hangul",
+      route_action: "translate_sfx_inpaint_render",
+      original: "\ucff5",
+      traduzido: "TUM",
+      translated: "TUM",
+      qa_flags: ["sfx_translation_unknown"],
+      sfx: {
+        adapted_text: "TUM",
+        inpaint_allowed: false,
+        review_required: true,
+        style_confidence: 0.4,
+        qa_flags: ["sfx_style_low_confidence"],
+      },
+    });
+    const page = makePage(1, [sfxLayer]);
+    useAppStore.setState({ project: makeProject([page]) });
+    useEditorStore.setState({
+      currentPageIndex: 0,
+      currentPage: page,
+      pendingEdits: {},
+      pendingStructuralEdits: { created: [], deleted: {}, order: undefined },
+      renderPreviewCacheByPageKey: {},
+    });
+
+    await useEditorStore.getState().renderPreviewPage(useEditorStore.getState().currentPageKey());
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "render_preview_page",
+      expect.objectContaining({
+        config: expect.objectContaining({
+          page: expect.objectContaining({
+            text_layers: [
+              expect.objectContaining({
+                id: "sfx-a",
+                tipo: "sfx",
+                content_class: "sfx",
+                route_action: "translate_sfx_inpaint_render",
+                sfx: expect.objectContaining({
+                  adapted_text: "TUM",
+                  inpaint_allowed: false,
+                  review_required: true,
+                }),
+              }),
+            ],
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("marks preview stale when sfx metadata changes and handles old layers without sfx", () => {
+    const sfxLayer = makeLayer({
+      id: "sfx-a",
+      tipo: "sfx",
+      content_class: "sfx",
+      route_action: "translate_sfx_inpaint_render",
+      sfx: { adapted_text: "TUM", inpaint_allowed: true },
+    });
+    const legacyLayer = makeLayer({ id: "legacy-a" });
+    const page = makePage(1, [sfxLayer, legacyLayer]);
+    useAppStore.setState({ project: makeProject([page]) });
+    useEditorStore.setState({
+      currentPageIndex: 0,
+      currentPage: page,
+      pendingEdits: {},
+      pendingStructuralEdits: { created: [], deleted: {}, order: undefined },
+      renderPreviewCacheByPageKey: {},
+    });
+    const pageKey = useEditorStore.getState().currentPageKey();
+    const before = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
+    useEditorStore.getState().markRenderPreviewFresh(pageKey, "D:/tmp/project/translated/001.png");
+    useEditorStore.setState({
+      pendingEdits: {
+        "sfx-a": {
+          route_action: "review_required",
+          qa_flags: ["sfx_translation_unknown"],
+          sfx: { adapted_text: "PAM", inpaint_allowed: false, review_required: true },
+        },
+      },
+    });
+    useEditorStore.getState().markRenderPreviewStale(pageKey);
+    const after = useEditorStore.getState().getRenderPreviewState(pageKey).fingerprint;
+
+    expect(after).not.toBe(before);
+    expect(useEditorStore.getState().getRenderPreviewState(pageKey).status).toBe("stale");
   });
 });

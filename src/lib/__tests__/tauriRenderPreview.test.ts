@@ -26,6 +26,43 @@ describe("renderPreviewPage binding", () => {
       text_layers: [],
       textos: [],
     } satisfies PageData;
+    invokeMock.mockResolvedValue({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "koharu_rust",
+    });
+
+    await expect(
+      renderPreviewPage({
+        project_path: "D:/tmp/project",
+        page_index: 0,
+        page,
+        fingerprint: "abc123",
+      }),
+    ).resolves.toEqual({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "koharu_rust",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("render_preview_page", {
+      config: {
+        project_path: "D:/tmp/project",
+        page_index: 0,
+        page,
+        fingerprint: "abc123",
+      },
+    });
+  });
+
+  it("normalizes the legacy string return shape", async () => {
+    const { renderPreviewPage } = await import("../tauri");
+    const page = {
+      numero: 1,
+      arquivo_original: "originals/001.png",
+      arquivo_traduzido: "translated/001.png",
+      image_layers: {},
+      text_layers: [],
+      textos: [],
+    } satisfies PageData;
     invokeMock.mockResolvedValue("D:/tmp/project/render-cache/preview/001-preview.png");
 
     await expect(
@@ -35,15 +72,9 @@ describe("renderPreviewPage binding", () => {
         page,
         fingerprint: "abc123",
       }),
-    ).resolves.toBe("D:/tmp/project/render-cache/preview/001-preview.png");
-
-    expect(invokeMock).toHaveBeenCalledWith("render_preview_page", {
-      config: {
-        project_path: "D:/tmp/project",
-        page_index: 0,
-        page,
-        fingerprint: "abc123",
-      },
+    ).resolves.toEqual({
+      output_path: "D:/tmp/project/render-cache/preview/001-preview.png",
+      renderer_backend: "python",
     });
   });
 });

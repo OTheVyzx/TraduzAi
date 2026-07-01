@@ -26,6 +26,12 @@ def test_settings_loads_vast_automation_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("VAST_REPO_BRANCH", "Troca_de_motores")
     monkeypatch.setenv("VAST_WORKER_NAME", "worker-auto")
     monkeypatch.setenv("VAST_REQUIRE_GPU", "1")
+    monkeypatch.setenv("VAST_PROVIDER", "serverless")
+    monkeypatch.setenv("VAST_SERVERLESS_ENDPOINT_ID", "endpoint-1")
+    monkeypatch.setenv("VAST_SERVERLESS_ENDPOINT_NAME", "traduzai-prod")
+    monkeypatch.setenv("VAST_SERVERLESS_WORKERGROUP_NAME", "traduzai-rtx")
+    monkeypatch.setenv("VAST_SERVERLESS_TEMPLATE_HASH", "serverless-template")
+    monkeypatch.setenv("VAST_SERVERLESS_SEARCH_PARAMS", "gpu_name=RTX_3060 dph_total<=0.16")
 
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'app.db'}", storage_dir=tmp_path / "storage")
 
@@ -45,6 +51,12 @@ def test_settings_loads_vast_automation_from_env(monkeypatch, tmp_path):
     assert settings.vast_repo_branch == "Troca_de_motores"
     assert settings.vast_worker_name == "worker-auto"
     assert settings.vast_require_gpu is True
+    assert settings.vast_provider == "serverless"
+    assert settings.vast_serverless_endpoint_id == "endpoint-1"
+    assert settings.vast_serverless_endpoint_name == "traduzai-prod"
+    assert settings.vast_serverless_workergroup_name == "traduzai-rtx"
+    assert settings.vast_serverless_template_hash == "serverless-template"
+    assert settings.vast_serverless_search_params == "gpu_name=RTX_3060 dph_total<=0.16"
 
 
 def test_create_job_triggers_vast_orchestrator_when_autostart_is_enabled(monkeypatch, tmp_path):
@@ -90,3 +102,31 @@ def test_manual_job_does_not_trigger_vast_orchestrator(monkeypatch, tmp_path):
     assert upload.status_code == 200
     assert upload.json()["job"]["status"] == "completed"
     assert calls == []
+
+
+def test_create_job_triggers_vast_serverless_when_provider_is_serverless(monkeypatch, tmp_path):
+    settings = make_settings(tmp_path)
+    settings.vast_autostart = True
+    settings.vast_provider = "serverless"
+    settings.vast_api_key = "vast-key"
+    calls = []
+
+    def fake_ensure_serverless_job_started(received_settings, job_id):
+        calls.append((received_settings, job_id))
+        return {"ok": True, "action": "serverless_routed", "endpoint_id": "endpoint-1"}
+
+    monkeypatch.setattr("server.jobs.api.ensure_serverless_job_started", fake_ensure_serverless_job_started, raising=False)
+    client = TestClient(create_app(settings))
+    assert client.post("/api/auth/login", json={"email": "admin@local", "password": "secret123"}).status_code == 200
+
+    upload = client.post(
+        "/api/jobs",
+        data={"obra": "Obra", "capitulo": "1", "mode": "real"},
+        files={"file": ("page.png", b"\x89PNG\r\n\x1a\n" + b"0" * 32, "image/png")},
+    )
+
+    assert upload.status_code == 200
+    assert upload.json()["job"]["status"] == "queued"
+    assert len(calls) == 1
+    assert calls[0][0] is settings
+    assert isinstance(calls[0][1], str) and calls[0][1]

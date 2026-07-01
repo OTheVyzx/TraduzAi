@@ -244,6 +244,8 @@ export function resolveLegacyFontFamily(legacyName: string): string {
   }
   const googleFamily = resolveGoogleFontFilename(legacyName);
   if (googleFamily) return googleFamily;
+  const systemMatch = /^SystemFont__(.+)__[^.]+\.(?:ttf|otf)$/i.exec(legacyName);
+  if (systemMatch) return systemMatch[1].replace(/_/g, " ");
   // Heurísticas comuns
   if (/comic\s*neue/i.test(stripped)) return BUNDLE_FONTS.comicNeue.cssFamily;
   if (/newrotic/i.test(stripped)) return BUNDLE_FONTS.newrotic.cssFamily;

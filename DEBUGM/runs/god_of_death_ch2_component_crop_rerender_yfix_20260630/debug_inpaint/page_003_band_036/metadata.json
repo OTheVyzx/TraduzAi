@@ -1,0 +1,100 @@
+{
+  "page_number": 3,
+  "band_index": 37,
+  "band_id": "page_003_band_036",
+  "band_y_top": 25917,
+  "text_count": 1,
+  "text_samples": [
+    {
+      "id": "direct_paddle_reocr_001",
+      "trace_id": "direct_paddle_reocr_001@page_003_band_036",
+      "band_id": "page_003_band_036",
+      "bbox": [
+        108,
+        184,
+        392,
+        295
+      ],
+      "text_pixel_bbox": [
+        108,
+        184,
+        392,
+        295
+      ],
+      "balloon_bbox": [
+        55,
+        71,
+        446,
+        441
+      ],
+      "bubble_mask_bbox": [
+        55,
+        71,
+        446,
+        441
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "candidate_crop_direct_paddle_reocr",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "visual_text_only_inpaint_contract",
+        "text_contract_direct_fill"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "ocr_pixels",
+        "raw_mask_pixels": 6086,
+        "expanded_mask_pixels": 15843,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    }
+  ],
+  "vision_block_samples": [],
+  "pre_recovery_text_samples": [],
+  "initial_empty_recovery_attempts": [],
+  "recovered_initial_empty_vision_blocks_from_texts": false,
+  "remaining_inpaint_blocks": 0,
+  "engine_preset_id": "",
+  "mask_strategy": "",
+  "detector_engine_id": "",
+  "validated_text_source_bboxes": [],
+  "rejected_text_source_bboxes": [],
+  "fast_fill_mask_pixels": 24170,
+  "raw_mask_pixels": 24450,
+  "expanded_mask_pixels": 24450,
+  "used_real_inpaint": false,
+  "fast_fill_without_raw_mask": false,
+  "used_fast_solid_fill": false,
+  "fast_solid_balloon_count": 0,
+  "fast_solid_white_count": 0,
+  "fast_solid_black_count": 0,
+  "fast_solid_colored_count": 0,
+  "used_fast_white_fill": false,
+  "fast_solid_fill_samples": [],
+  "fast_solid_rejection_reasons": {},
+  "fast_solid_fill_reject_reasons": {},
+  "unsafe_inpaint_block_count": 0,
+  "unsafe_inpaint_block_reasons": {},
+  "unsafe_inpaint_block_samples": [],
+  "connected_white_geometry_fill_count": 0,
+  "connected_white_geometry_fill_mask_pixels": 0,
+  "used_fast_local_fill": false,
+  "used_fast_dark_fill": false,
+  "used_dark_panel_fill": true,
+  "dark_panel_fill_count": 1,
+  "changed_pixels_after_inpaint": 24170,
+  "post_cleanup_skipped_reason": "",
+  "changed_pixels_outside_expanded_mask": 0,
+  "changed_pixels_outside_effective_limit_mask": 0,
+  "raw_changed_outside_limit_mask": 0,
+  "cleanup_changed_outside_limit_mask": 0,
+  "final_clamped_outside_expanded_mask_pixels": 0,
+  "final_action_mask_white_cleanup_added_pixels": 0,
+  "flags": []
+}

@@ -78,15 +78,21 @@ export function FloatingTextEditor({
   useEffect(() => {
     if (!selectedLayerId) return;
     function onMouseDown(e: MouseEvent) {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        // Não fechar — clique no canvas fica com EditorStage. O ESC fecha.
-        // Mantemos o painel aberto para o usuário continuar editando após clicar
-        // fora sem intenção de fechar (ex: clicar num botão da toolbar).
+      const target = e.target as Node;
+      if (
+        panelRef.current?.contains(target) ||
+        (target instanceof Element && target.closest("[data-editor-preserve-text-selection='true']"))
+      ) {
+        return;
+      }
+      if (panelRef.current) {
+        textSession.onBlur();
+        selectLayer(null);
       }
     }
     document.addEventListener("mousedown", onMouseDown);
     return () => document.removeEventListener("mousedown", onMouseDown);
-  }, [selectedLayerId]);
+  }, [selectedLayerId, selectLayer, textSession]);
 
   // ESC fecha (deselect layer)
   useEffect(() => {

@@ -77,6 +77,7 @@ def run_page_action(root: Path, page_index: int, action: str, region: dict[str, 
         return ["rendered", "project_json"]
     command_by_action = {
         "detect": "--detect-page",
+        "detect_boxes": "--detect-boxes-page",
         "ocr": "--ocr-page",
         "translate": "--translate-page",
         "inpaint": "--reinpaint-page",
@@ -87,7 +88,7 @@ def run_page_action(root: Path, page_index: int, action: str, region: dict[str, 
     _run([command, str(project_json), str(page_index), *_region_args(region)])
     if action == "inpaint":
         return ["inpaint", "rendered", "project_json"]
-    if action in {"detect", "ocr", "translate"}:
+    if action in {"detect", "detect_boxes", "ocr", "translate"}:
         return ["project_json", "rendered"]
     return ["project_json"]
 

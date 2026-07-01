@@ -1,0 +1,115 @@
+{
+  "backend": "anime-text-yolo",
+  "device": "cuda",
+  "model_path": "N:\\TraduzAI\\models\\huggingface\\models--mayocream--anime-text-yolo\\yolo12n_animetext.safetensors",
+  "conf": 0.5,
+  "note": "direct ultralytics call bypassing TextDetector.detect anime cap at 0.30",
+  "items": [
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221235.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            64,
+            165,
+            132,
+            262
+          ],
+          "confidence": 0.6495651602745056
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221235_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221245.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221245_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221309.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221309_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221315.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221315_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221319.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221319_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221322.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221322_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221325.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221325_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221336.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            193,
+            33,
+            261,
+            101
+          ],
+          "confidence": 0.5485204458236694
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221336_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221342.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221342_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221350.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221350_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221354.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            18,
+            30,
+            88,
+            177
+          ],
+          "confidence": 0.5445611476898193
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221354_anime_text_yolo_n_conf050_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221401.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_conf050_visual\\Captura de tela 2026-06-05 221401_anime_text_yolo_n_conf050_overlay.png"
+    }
+  ],
+  "total_detected": 3
+}

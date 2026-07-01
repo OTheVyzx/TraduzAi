@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_gapclose_fillmask",
+  "stage": "run",
+  "config_path": ".codex-tmp\\config_god_of_death_ch2_gapclose_fillmask_20260630.json",
+  "argv": [
+    "N:\\TraduzAI\\pipeline\\main.py",
+    ".codex-tmp\\config_god_of_death_ch2_gapclose_fillmask_20260630.json"
+  ]
+}

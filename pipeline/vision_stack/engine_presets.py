@@ -88,7 +88,7 @@ _DEFAULT_PRESET = EnginePreset(
     bubble_segmenter=SPEECH_BUBBLE_SEGMENTER,
     ocr="default",
     inpainter=DEFAULT_INPAINTER,
-    mask_strategy="default",
+    mask_strategy="roi_segmentation_assisted",
 )
 
 _PRESETS = {

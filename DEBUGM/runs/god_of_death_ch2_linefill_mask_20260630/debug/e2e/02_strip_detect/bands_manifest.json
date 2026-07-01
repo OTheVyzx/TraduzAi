@@ -1,0 +1,1369 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_linefill_mask",
+  "stage": "strip_detect",
+  "band_count": 105,
+  "strip_width": 800,
+  "strip_height": 78406,
+  "source_page_breaks": [
+    0,
+    1079,
+    18856,
+    36633,
+    54410,
+    77206,
+    78406
+  ],
+  "page_x_offsets": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    10
+  ],
+  "band_margin_px": 160,
+  "bands": [
+    {
+      "band_id": "page_001_band_000",
+      "source_page_number": 1,
+      "band_index": 0,
+      "y_top": 0,
+      "y_bottom": 1835,
+      "height": 1835,
+      "balloon_count": 16,
+      "balloon_ids": [
+        "page_001_band_000_balloon_00",
+        "page_001_band_000_balloon_01",
+        "page_001_band_000_balloon_02",
+        "page_001_band_000_balloon_03",
+        "page_001_band_000_balloon_04",
+        "page_001_band_000_balloon_05",
+        "page_001_band_000_balloon_06",
+        "page_001_band_000_balloon_07",
+        "page_001_band_000_balloon_08",
+        "page_001_band_000_balloon_09",
+        "page_001_band_000_balloon_10",
+        "page_001_band_000_balloon_11",
+        "page_001_band_000_balloon_12",
+        "page_001_band_000_balloon_13",
+        "page_001_band_000_balloon_14",
+        "page_001_band_000_balloon_15"
+      ]
+    },
+    {
+      "band_id": "page_002_band_001",
+      "source_page_number": 2,
+      "band_index": 1,
+      "y_top": 1627,
+      "y_bottom": 2308,
+      "height": 681,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_001_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_002",
+      "source_page_number": 2,
+      "band_index": 2,
+      "y_top": 2123,
+      "y_bottom": 2512,
+      "height": 389,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_002_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_003",
+      "source_page_number": 2,
+      "band_index": 3,
+      "y_top": 2668,
+      "y_bottom": 3128,
+      "height": 460,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_003_balloon_00",
+        "page_002_band_003_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_004",
+      "source_page_number": 2,
+      "band_index": 4,
+      "y_top": 2986,
+      "y_bottom": 3849,
+      "height": 863,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_002_band_004_balloon_00",
+        "page_002_band_004_balloon_01",
+        "page_002_band_004_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_002_band_005",
+      "source_page_number": 2,
+      "band_index": 5,
+      "y_top": 3888,
+      "y_bottom": 4479,
+      "height": 591,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_002_band_005_balloon_00",
+        "page_002_band_005_balloon_01",
+        "page_002_band_005_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_002_band_006",
+      "source_page_number": 2,
+      "band_index": 6,
+      "y_top": 4605,
+      "y_bottom": 5131,
+      "height": 526,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_006_balloon_00",
+        "page_002_band_006_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_007",
+      "source_page_number": 2,
+      "band_index": 7,
+      "y_top": 5212,
+      "y_bottom": 5665,
+      "height": 453,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_007_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_008",
+      "source_page_number": 2,
+      "band_index": 8,
+      "y_top": 5422,
+      "y_bottom": 6123,
+      "height": 701,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_008_balloon_00",
+        "page_002_band_008_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_009",
+      "source_page_number": 2,
+      "band_index": 9,
+      "y_top": 5938,
+      "y_bottom": 6757,
+      "height": 819,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_009_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_010",
+      "source_page_number": 2,
+      "band_index": 10,
+      "y_top": 6823,
+      "y_bottom": 7286,
+      "height": 463,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_010_balloon_00",
+        "page_002_band_010_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_011",
+      "source_page_number": 2,
+      "band_index": 11,
+      "y_top": 7552,
+      "y_bottom": 8122,
+      "height": 570,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_011_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_012",
+      "source_page_number": 2,
+      "band_index": 12,
+      "y_top": 8713,
+      "y_bottom": 10314,
+      "height": 1601,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_012_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_013",
+      "source_page_number": 2,
+      "band_index": 13,
+      "y_top": 10218,
+      "y_bottom": 10764,
+      "height": 546,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_013_balloon_00",
+        "page_002_band_013_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_014",
+      "source_page_number": 2,
+      "band_index": 14,
+      "y_top": 10545,
+      "y_bottom": 10895,
+      "height": 350,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_014_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_015",
+      "source_page_number": 2,
+      "band_index": 15,
+      "y_top": 11306,
+      "y_bottom": 11707,
+      "height": 401,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_015_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_016",
+      "source_page_number": 2,
+      "band_index": 16,
+      "y_top": 11515,
+      "y_bottom": 12262,
+      "height": 747,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_016_balloon_00",
+        "page_002_band_016_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_017",
+      "source_page_number": 2,
+      "band_index": 17,
+      "y_top": 12475,
+      "y_bottom": 12928,
+      "height": 453,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_017_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_018",
+      "source_page_number": 2,
+      "band_index": 18,
+      "y_top": 13035,
+      "y_bottom": 13715,
+      "height": 680,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_018_balloon_00",
+        "page_002_band_018_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_019",
+      "source_page_number": 2,
+      "band_index": 19,
+      "y_top": 13916,
+      "y_bottom": 14651,
+      "height": 735,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_002_band_019_balloon_00",
+        "page_002_band_019_balloon_01",
+        "page_002_band_019_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_002_band_020",
+      "source_page_number": 2,
+      "band_index": 20,
+      "y_top": 14409,
+      "y_bottom": 15102,
+      "height": 693,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_020_balloon_00",
+        "page_002_band_020_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_021",
+      "source_page_number": 2,
+      "band_index": 21,
+      "y_top": 14860,
+      "y_bottom": 15599,
+      "height": 739,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_021_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_022",
+      "source_page_number": 2,
+      "band_index": 22,
+      "y_top": 15513,
+      "y_bottom": 16180,
+      "height": 667,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_022_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_023",
+      "source_page_number": 2,
+      "band_index": 23,
+      "y_top": 16404,
+      "y_bottom": 16955,
+      "height": 551,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_023_balloon_00",
+        "page_002_band_023_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_024",
+      "source_page_number": 2,
+      "band_index": 24,
+      "y_top": 16902,
+      "y_bottom": 17418,
+      "height": 516,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_002_band_024_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_002_band_025",
+      "source_page_number": 2,
+      "band_index": 25,
+      "y_top": 17226,
+      "y_bottom": 17754,
+      "height": 528,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_025_balloon_00",
+        "page_002_band_025_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_002_band_026",
+      "source_page_number": 2,
+      "band_index": 26,
+      "y_top": 17966,
+      "y_bottom": 18553,
+      "height": 587,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_002_band_026_balloon_00",
+        "page_002_band_026_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_027",
+      "source_page_number": 3,
+      "band_index": 27,
+      "y_top": 18763,
+      "y_bottom": 19345,
+      "height": 582,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_027_balloon_00",
+        "page_003_band_027_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_028",
+      "source_page_number": 3,
+      "band_index": 28,
+      "y_top": 19673,
+      "y_bottom": 20272,
+      "height": 599,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_028_balloon_00",
+        "page_003_band_028_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_029",
+      "source_page_number": 3,
+      "band_index": 29,
+      "y_top": 20449,
+      "y_bottom": 20928,
+      "height": 479,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_029_balloon_00",
+        "page_003_band_029_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_030",
+      "source_page_number": 3,
+      "band_index": 30,
+      "y_top": 21765,
+      "y_bottom": 22195,
+      "height": 430,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_030_balloon_00",
+        "page_003_band_030_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_031",
+      "source_page_number": 3,
+      "band_index": 31,
+      "y_top": 22072,
+      "y_bottom": 22596,
+      "height": 524,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_031_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_032",
+      "source_page_number": 3,
+      "band_index": 32,
+      "y_top": 22926,
+      "y_bottom": 23448,
+      "height": 522,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_032_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_033",
+      "source_page_number": 3,
+      "band_index": 33,
+      "y_top": 23718,
+      "y_bottom": 24154,
+      "height": 436,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_033_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_034",
+      "source_page_number": 3,
+      "band_index": 34,
+      "y_top": 24352,
+      "y_bottom": 24799,
+      "height": 447,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_034_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_035",
+      "source_page_number": 3,
+      "band_index": 35,
+      "y_top": 24576,
+      "y_bottom": 25315,
+      "height": 739,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_035_balloon_00",
+        "page_003_band_035_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_036",
+      "source_page_number": 3,
+      "band_index": 36,
+      "y_top": 25917,
+      "y_bottom": 26376,
+      "height": 459,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_036_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_037",
+      "source_page_number": 3,
+      "band_index": 37,
+      "y_top": 26809,
+      "y_bottom": 27314,
+      "height": 505,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_037_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_038",
+      "source_page_number": 3,
+      "band_index": 38,
+      "y_top": 27607,
+      "y_bottom": 28226,
+      "height": 619,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_038_balloon_00",
+        "page_003_band_038_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_039",
+      "source_page_number": 3,
+      "band_index": 39,
+      "y_top": 27973,
+      "y_bottom": 28585,
+      "height": 612,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_039_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_040",
+      "source_page_number": 3,
+      "band_index": 40,
+      "y_top": 28861,
+      "y_bottom": 29250,
+      "height": 389,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_040_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_041",
+      "source_page_number": 3,
+      "band_index": 41,
+      "y_top": 29550,
+      "y_bottom": 30218,
+      "height": 668,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_041_balloon_00",
+        "page_003_band_041_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_042",
+      "source_page_number": 3,
+      "band_index": 42,
+      "y_top": 30480,
+      "y_bottom": 31735,
+      "height": 1255,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_042_balloon_00",
+        "page_003_band_042_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_043",
+      "source_page_number": 3,
+      "band_index": 43,
+      "y_top": 31514,
+      "y_bottom": 32545,
+      "height": 1031,
+      "balloon_count": 4,
+      "balloon_ids": [
+        "page_003_band_043_balloon_00",
+        "page_003_band_043_balloon_01",
+        "page_003_band_043_balloon_02",
+        "page_003_band_043_balloon_03"
+      ]
+    },
+    {
+      "band_id": "page_003_band_044",
+      "source_page_number": 3,
+      "band_index": 44,
+      "y_top": 32850,
+      "y_bottom": 33471,
+      "height": 621,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_044_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_045",
+      "source_page_number": 3,
+      "band_index": 45,
+      "y_top": 34507,
+      "y_bottom": 34841,
+      "height": 334,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_045_balloon_00",
+        "page_003_band_045_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_046",
+      "source_page_number": 3,
+      "band_index": 46,
+      "y_top": 34586,
+      "y_bottom": 34975,
+      "height": 389,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_046_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_003_band_047",
+      "source_page_number": 3,
+      "band_index": 47,
+      "y_top": 34739,
+      "y_bottom": 35598,
+      "height": 859,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_003_band_047_balloon_00",
+        "page_003_band_047_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_003_band_048",
+      "source_page_number": 3,
+      "band_index": 48,
+      "y_top": 35829,
+      "y_bottom": 36206,
+      "height": 377,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_003_band_048_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_049",
+      "source_page_number": 4,
+      "band_index": 49,
+      "y_top": 36787,
+      "y_bottom": 37202,
+      "height": 415,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_049_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_050",
+      "source_page_number": 4,
+      "band_index": 50,
+      "y_top": 38132,
+      "y_bottom": 38596,
+      "height": 464,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_050_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_051",
+      "source_page_number": 4,
+      "band_index": 51,
+      "y_top": 38722,
+      "y_bottom": 39158,
+      "height": 436,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_051_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_052",
+      "source_page_number": 4,
+      "band_index": 52,
+      "y_top": 39140,
+      "y_bottom": 39511,
+      "height": 371,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_052_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_053",
+      "source_page_number": 4,
+      "band_index": 53,
+      "y_top": 39505,
+      "y_bottom": 39906,
+      "height": 401,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_053_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_054",
+      "source_page_number": 4,
+      "band_index": 54,
+      "y_top": 40107,
+      "y_bottom": 40519,
+      "height": 412,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_054_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_055",
+      "source_page_number": 4,
+      "band_index": 55,
+      "y_top": 40627,
+      "y_bottom": 41329,
+      "height": 702,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_004_band_055_balloon_00",
+        "page_004_band_055_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_004_band_056",
+      "source_page_number": 4,
+      "band_index": 56,
+      "y_top": 41116,
+      "y_bottom": 41596,
+      "height": 480,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_056_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_057",
+      "source_page_number": 4,
+      "band_index": 57,
+      "y_top": 41779,
+      "y_bottom": 42261,
+      "height": 482,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_057_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_058",
+      "source_page_number": 4,
+      "band_index": 58,
+      "y_top": 42020,
+      "y_bottom": 42502,
+      "height": 482,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_058_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_059",
+      "source_page_number": 4,
+      "band_index": 59,
+      "y_top": 42387,
+      "y_bottom": 42851,
+      "height": 464,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_059_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_060",
+      "source_page_number": 4,
+      "band_index": 60,
+      "y_top": 42942,
+      "y_bottom": 43994,
+      "height": 1052,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_004_band_060_balloon_00",
+        "page_004_band_060_balloon_01",
+        "page_004_band_060_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_004_band_061",
+      "source_page_number": 4,
+      "band_index": 61,
+      "y_top": 44014,
+      "y_bottom": 44437,
+      "height": 423,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_061_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_062",
+      "source_page_number": 4,
+      "band_index": 62,
+      "y_top": 45277,
+      "y_bottom": 45821,
+      "height": 544,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_062_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_063",
+      "source_page_number": 4,
+      "band_index": 63,
+      "y_top": 46629,
+      "y_bottom": 47090,
+      "height": 461,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_063_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_064",
+      "source_page_number": 4,
+      "band_index": 64,
+      "y_top": 48453,
+      "y_bottom": 48972,
+      "height": 519,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_064_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_065",
+      "source_page_number": 4,
+      "band_index": 65,
+      "y_top": 49354,
+      "y_bottom": 49720,
+      "height": 366,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_065_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_066",
+      "source_page_number": 4,
+      "band_index": 66,
+      "y_top": 49595,
+      "y_bottom": 50224,
+      "height": 629,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_066_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_067",
+      "source_page_number": 4,
+      "band_index": 67,
+      "y_top": 50208,
+      "y_bottom": 50762,
+      "height": 554,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_067_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_068",
+      "source_page_number": 4,
+      "band_index": 68,
+      "y_top": 52074,
+      "y_bottom": 52454,
+      "height": 380,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_004_band_068_balloon_00",
+        "page_004_band_068_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_004_band_069",
+      "source_page_number": 4,
+      "band_index": 69,
+      "y_top": 52759,
+      "y_bottom": 53098,
+      "height": 339,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_004_band_069_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_004_band_070",
+      "source_page_number": 4,
+      "band_index": 70,
+      "y_top": 53869,
+      "y_bottom": 54384,
+      "height": 515,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_004_band_070_balloon_00",
+        "page_004_band_070_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_071",
+      "source_page_number": 5,
+      "band_index": 71,
+      "y_top": 54560,
+      "y_bottom": 55544,
+      "height": 984,
+      "balloon_count": 4,
+      "balloon_ids": [
+        "page_005_band_071_balloon_00",
+        "page_005_band_071_balloon_01",
+        "page_005_band_071_balloon_02",
+        "page_005_band_071_balloon_03"
+      ]
+    },
+    {
+      "band_id": "page_005_band_072",
+      "source_page_number": 5,
+      "band_index": 72,
+      "y_top": 55619,
+      "y_bottom": 56532,
+      "height": 913,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_005_band_072_balloon_00",
+        "page_005_band_072_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_073",
+      "source_page_number": 5,
+      "band_index": 73,
+      "y_top": 56523,
+      "y_bottom": 57001,
+      "height": 478,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_073_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_074",
+      "source_page_number": 5,
+      "band_index": 74,
+      "y_top": 56810,
+      "y_bottom": 57466,
+      "height": 656,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_005_band_074_balloon_00",
+        "page_005_band_074_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_075",
+      "source_page_number": 5,
+      "band_index": 75,
+      "y_top": 57570,
+      "y_bottom": 57998,
+      "height": 428,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_075_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_076",
+      "source_page_number": 5,
+      "band_index": 76,
+      "y_top": 59270,
+      "y_bottom": 59672,
+      "height": 402,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_076_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_077",
+      "source_page_number": 5,
+      "band_index": 77,
+      "y_top": 59495,
+      "y_bottom": 60298,
+      "height": 803,
+      "balloon_count": 4,
+      "balloon_ids": [
+        "page_005_band_077_balloon_00",
+        "page_005_band_077_balloon_01",
+        "page_005_band_077_balloon_02",
+        "page_005_band_077_balloon_03"
+      ]
+    },
+    {
+      "band_id": "page_005_band_078",
+      "source_page_number": 5,
+      "band_index": 78,
+      "y_top": 60458,
+      "y_bottom": 61567,
+      "height": 1109,
+      "balloon_count": 5,
+      "balloon_ids": [
+        "page_005_band_078_balloon_00",
+        "page_005_band_078_balloon_01",
+        "page_005_band_078_balloon_02",
+        "page_005_band_078_balloon_03",
+        "page_005_band_078_balloon_04"
+      ]
+    },
+    {
+      "band_id": "page_005_band_079",
+      "source_page_number": 5,
+      "band_index": 79,
+      "y_top": 61696,
+      "y_bottom": 62128,
+      "height": 432,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_079_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_080",
+      "source_page_number": 5,
+      "band_index": 80,
+      "y_top": 62093,
+      "y_bottom": 62533,
+      "height": 440,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_080_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_081",
+      "source_page_number": 5,
+      "band_index": 81,
+      "y_top": 62476,
+      "y_bottom": 63336,
+      "height": 860,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_005_band_081_balloon_00",
+        "page_005_band_081_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_082",
+      "source_page_number": 5,
+      "band_index": 82,
+      "y_top": 64035,
+      "y_bottom": 64513,
+      "height": 478,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_082_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_083",
+      "source_page_number": 5,
+      "band_index": 83,
+      "y_top": 64279,
+      "y_bottom": 64777,
+      "height": 498,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_083_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_084",
+      "source_page_number": 5,
+      "band_index": 84,
+      "y_top": 64568,
+      "y_bottom": 64993,
+      "height": 425,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_084_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_085",
+      "source_page_number": 5,
+      "band_index": 85,
+      "y_top": 65168,
+      "y_bottom": 65593,
+      "height": 425,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_085_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_086",
+      "source_page_number": 5,
+      "band_index": 86,
+      "y_top": 65387,
+      "y_bottom": 65893,
+      "height": 506,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_086_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_087",
+      "source_page_number": 5,
+      "band_index": 87,
+      "y_top": 66120,
+      "y_bottom": 66560,
+      "height": 440,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_087_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_088",
+      "source_page_number": 5,
+      "band_index": 88,
+      "y_top": 66351,
+      "y_bottom": 66777,
+      "height": 426,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_088_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_089",
+      "source_page_number": 5,
+      "band_index": 89,
+      "y_top": 66645,
+      "y_bottom": 67115,
+      "height": 470,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_089_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_090",
+      "source_page_number": 5,
+      "band_index": 90,
+      "y_top": 67312,
+      "y_bottom": 68217,
+      "height": 905,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_005_band_090_balloon_00",
+        "page_005_band_090_balloon_01",
+        "page_005_band_090_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_005_band_091",
+      "source_page_number": 5,
+      "band_index": 91,
+      "y_top": 68376,
+      "y_bottom": 69496,
+      "height": 1120,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_005_band_091_balloon_00",
+        "page_005_band_091_balloon_01",
+        "page_005_band_091_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_005_band_092",
+      "source_page_number": 5,
+      "band_index": 92,
+      "y_top": 69561,
+      "y_bottom": 70017,
+      "height": 456,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_005_band_092_balloon_00",
+        "page_005_band_092_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_093",
+      "source_page_number": 5,
+      "band_index": 93,
+      "y_top": 70981,
+      "y_bottom": 71672,
+      "height": 691,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_005_band_093_balloon_00",
+        "page_005_band_093_balloon_01",
+        "page_005_band_093_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_005_band_094",
+      "source_page_number": 5,
+      "band_index": 94,
+      "y_top": 71429,
+      "y_bottom": 71931,
+      "height": 502,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_094_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_095",
+      "source_page_number": 5,
+      "band_index": 95,
+      "y_top": 71706,
+      "y_bottom": 72542,
+      "height": 836,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_005_band_095_balloon_00",
+        "page_005_band_095_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_096",
+      "source_page_number": 5,
+      "band_index": 96,
+      "y_top": 72576,
+      "y_bottom": 73262,
+      "height": 686,
+      "balloon_count": 3,
+      "balloon_ids": [
+        "page_005_band_096_balloon_00",
+        "page_005_band_096_balloon_01",
+        "page_005_band_096_balloon_02"
+      ]
+    },
+    {
+      "band_id": "page_005_band_097",
+      "source_page_number": 5,
+      "band_index": 97,
+      "y_top": 73675,
+      "y_bottom": 74047,
+      "height": 372,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_097_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_098",
+      "source_page_number": 5,
+      "band_index": 98,
+      "y_top": 74631,
+      "y_bottom": 75011,
+      "height": 380,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_098_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_099",
+      "source_page_number": 5,
+      "band_index": 99,
+      "y_top": 74759,
+      "y_bottom": 75262,
+      "height": 503,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_099_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_100",
+      "source_page_number": 5,
+      "band_index": 100,
+      "y_top": 75683,
+      "y_bottom": 76021,
+      "height": 338,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_100_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_101",
+      "source_page_number": 5,
+      "band_index": 101,
+      "y_top": 76086,
+      "y_bottom": 76496,
+      "height": 410,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_101_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_005_band_102",
+      "source_page_number": 5,
+      "band_index": 102,
+      "y_top": 76251,
+      "y_bottom": 76781,
+      "height": 530,
+      "balloon_count": 2,
+      "balloon_ids": [
+        "page_005_band_102_balloon_00",
+        "page_005_band_102_balloon_01"
+      ]
+    },
+    {
+      "band_id": "page_005_band_103",
+      "source_page_number": 5,
+      "band_index": 103,
+      "y_top": 76671,
+      "y_bottom": 77111,
+      "height": 440,
+      "balloon_count": 1,
+      "balloon_ids": [
+        "page_005_band_103_balloon_00"
+      ]
+    },
+    {
+      "band_id": "page_006_band_104",
+      "source_page_number": 6,
+      "band_index": 104,
+      "y_top": 77046,
+      "y_bottom": 78435,
+      "height": 1389,
+      "balloon_count": 8,
+      "balloon_ids": [
+        "page_006_band_104_balloon_00",
+        "page_006_band_104_balloon_01",
+        "page_006_band_104_balloon_02",
+        "page_006_band_104_balloon_03",
+        "page_006_band_104_balloon_04",
+        "page_006_band_104_balloon_05",
+        "page_006_band_104_balloon_06",
+        "page_006_band_104_balloon_07"
+      ]
+    }
+  ]
+}

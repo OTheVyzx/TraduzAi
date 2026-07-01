@@ -7,6 +7,7 @@ import copy
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,8 @@ try:
         build_raw_text_mask_from_image,
         consolidate_mask_evidence,
         expand_text_mask,
+        _close_visual_text_source_mask_gaps,
+        _filter_dark_bubble_connected_lobe_line_polygons,
         mask_from_text_geometry,
     )
 except ImportError:  # pragma: no cover - supports direct pipeline path imports
@@ -29,6 +32,8 @@ except ImportError:  # pragma: no cover - supports direct pipeline path imports
         build_raw_text_mask_from_image,
         consolidate_mask_evidence,
         expand_text_mask,
+        _close_visual_text_source_mask_gaps,
+        _filter_dark_bubble_connected_lobe_line_polygons,
         mask_from_text_geometry,
     )
 
@@ -43,10 +48,175 @@ FAST_FILL_BLOCKING_QA_FLAGS = {
     "mask_outside_balloon_critical",
 }
 FAST_FILL_EVIDENCE_DERIVED_QA_FLAGS: set[str] = set()
+OUTSIDE_BALLOON_CRITICAL_PIXELS = 50
+OUTSIDE_BALLOON_CRITICAL_RATIO = 0.18
+OUTSIDE_BALLOON_WARN_RATIO = 0.08
+SUPPRESSED_OCR_ROUTE_REASONS = {
+    "english_ocr_gibberish_suppressed",
+    "scanlator_text_caption_suppressed",
+    "source_language_cjk_text_suppressed",
+    "suppressed_duplicate_phrase_fragment",
+    "visual_cjk_suppressed",
+    "visual_sfx_overlap_suppressed",
+}
+SUPPRESSED_OCR_QA_FLAGS = set(SUPPRESSED_OCR_ROUTE_REASONS)
+
+
+def _item_has_current_inpaint_mask_evidence(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    error = str(item.get("bubble_mask_error") or item.get("bubbleMaskError") or "").strip().lower()
+    flags = {str(flag).strip() for flag in item.get("qa_flags") or [] if str(flag).strip()}
+    source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+    evidence = item.get("mask_evidence") if isinstance(item.get("mask_evidence"), dict) else {}
+    kind = str(evidence.get("kind") or "").strip().lower()
+    try:
+        score = float(evidence.get("evidence_score") or 0.0)
+    except Exception:
+        score = 0.0
+    raw_pixels = int(evidence.get("raw_mask_pixels") or 0)
+    expanded_pixels = int(evidence.get("expanded_mask_pixels") or 0)
+    if (
+        source in _REJECTED_BUBBLE_MASK_SOURCES
+        and error == "derived_mask_not_anchored_to_text"
+        and kind in {"component_bubble_cleaner", "glyph_segmentation", "ocr_pixels"}
+        and score >= 0.75
+        and raw_pixels > 0
+        and expanded_pixels >= raw_pixels
+    ):
+        return True
+    if error or flags & {
+        "debug_derived_bubble_mask_rejected",
+        "derived_bubble_mask_rejected",
+        "rejected_derived_bubble_mask",
+    }:
+        return False
+    if source not in {
+        "image_contour_bubble_mask",
+        "image_rect_bubble_mask",
+        "image_white_bubble_mask",
+        "image_dark_panel_mask",
+        "image_dark_bubble_mask",
+        "derived_card_panel_mask",
+    }:
+        return False
+    if kind not in {"component_bubble_cleaner", "glyph_segmentation", "ocr_pixels"}:
+        return False
+    return bool(score >= 0.75 and raw_pixels > 0 and expanded_pixels >= raw_pixels)
+
+
+def _current_contour_mask_evidence_clears_outside_critical(item: dict | None) -> bool:
+    if not _item_has_current_inpaint_mask_evidence(item):
+        return False
+    if not isinstance(item, dict):
+        return False
+    source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+    if source != "image_contour_bubble_mask":
+        return False
+    evidence = item.get("mask_evidence") if isinstance(item.get("mask_evidence"), dict) else {}
+    kind = str(evidence.get("kind") or "").strip().lower()
+    if kind != "component_bubble_cleaner":
+        return False
+    reject_reasons = evidence.get("fast_fill_reject_reasons")
+    if isinstance(reject_reasons, list) and any(str(reason).strip() for reason in reject_reasons):
+        return False
+    return True
+
+
+def _current_dark_panel_mask_evidence_clears_outside_critical(item: dict | None) -> bool:
+    if not _item_has_current_inpaint_mask_evidence(item):
+        return False
+    if not isinstance(item, dict):
+        return False
+    source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+        return False
+    if not (bool(item.get("card_panel_text_context")) or _is_dark_panel_text_candidate(item)):
+        return False
+    mask_bbox = _normalize_bbox(item.get("bubble_mask_bbox") or item.get("bubbleMaskBbox"), 10**9, 10**9)
+    text_bbox = _normalize_bbox(item.get("text_pixel_bbox") or item.get("bbox"), 10**9, 10**9)
+    if mask_bbox is None or text_bbox is None:
+        return False
+    return bool(_bbox_center_inside(text_bbox, mask_bbox) or _bbox_overlap_ratio(text_bbox, mask_bbox) >= 0.35)
+
+
+def _is_translator_note_item(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    text = str(
+        item.get("translated")
+        or item.get("text")
+        or item.get("original")
+        or ""
+    ).strip().lower()
+    return text.startswith("t/n:") or text.startswith("tn:") or text.startswith("n/t:")
+
+
+def _translator_note_has_current_text_mask_evidence(item: dict | None) -> bool:
+    return bool(_is_translator_note_item(item) and _item_has_current_inpaint_mask_evidence(item))
+
+
+def _translator_note_has_text_geometry(item: dict | None) -> bool:
+    if not _is_translator_note_item(item):
+        return False
+    if _item_has_current_inpaint_mask_evidence(item):
+        return True
+    if _normalize_bbox(item.get("text_pixel_bbox") or item.get("bbox") or item.get("source_bbox"), 10**9, 10**9):
+        return True
+    polygons = item.get("line_polygons")
+    return bool(isinstance(polygons, list) and polygons)
 
 
 def _route_action_blocks_inpaint(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return True
+    if _text_suppressed_for_inpaint(text):
+        return True
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if route_action in ROUTE_ACTIONS:
+        if route_action == "review_required" and _item_has_current_inpaint_mask_evidence(text):
+            return False
+        return not route_action_requires_inpaint(route_action)
     return False
+
+
+def _text_suppressed_for_inpaint(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return True
+    if text.get("_fast_fill_inpaint_resolved"):
+        return True
+    route = str(text.get("route") or "").strip().lower()
+    route_reason = str(text.get("route_reason") or "").strip().lower()
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if route == "suppress":
+        return True
+    if route_reason in SUPPRESSED_OCR_ROUTE_REASONS:
+        return True
+    if flags & SUPPRESSED_OCR_QA_FLAGS:
+        return True
+    content_class = str(text.get("content_class") or "").strip().lower()
+    tipo = str(text.get("tipo") or "").strip().lower()
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if content_class == "sfx" or tipo == "sfx":
+        sfx = text.get("sfx") if isinstance(text.get("sfx"), dict) else {}
+        if route_action != "translate_sfx_inpaint_render" or sfx.get("inpaint_allowed") is not True:
+            return True
+    return False
+
+
+def _route_action_allows_local_dark_panel_fill(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if _text_suppressed_for_inpaint(text):
+        return False
+    if not _route_action_blocks_inpaint(text):
+        return True
+    route_reason = str(text.get("route_reason") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    return bool(
+        route_reason in {"mask_outside_balloon_critical", "missing_real_bubble_mask"}
+        or flags & {"mask_outside_balloon_critical", "missing_real_bubble_mask"}
+    )
 
 
 def apply_koharu_bubble_fast_fill(
@@ -63,11 +233,26 @@ def apply_koharu_bubble_fast_fill(
     reject_reason = ""
     overlap = (remaining > 0) & (bubble_mask > 0)
     bubble_ids = sorted(int(value) for value in np.unique(bubble_mask[overlap]))
+    safe_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
     for bubble_id in bubble_ids:
         inside = bubble_mask == bubble_id
-        target = (remaining > 0) & inside
-        background = inside & (remaining == 0)
+        safe_inside = cv2.erode(inside.astype(np.uint8), safe_kernel, iterations=1) > 0
+        if not np.any(safe_inside):
+            reject_reason = reject_reason or "bubble_mask_too_small"
+            continue
+        bubble_remaining = (remaining > 0) & inside
+        outline_touching = bubble_remaining & ~safe_inside
+        target = bubble_remaining & safe_inside
+        if np.any(outline_touching):
+            labels_count, labels = cv2.connectedComponents(bubble_remaining.astype(np.uint8), connectivity=8)
+            for label in range(1, int(labels_count)):
+                component = labels == label
+                if np.any(component & outline_touching):
+                    target[component] = False
+        background = safe_inside & (remaining == 0)
+        if np.any(outline_touching):
+            reject_reason = reject_reason or "mask_touches_bubble_outline"
         if not np.any(target):
             continue
         if not np.any(background):
@@ -91,6 +276,490 @@ def apply_koharu_bubble_fast_fill(
     return result, remaining, metadata
 
 
+def _original_text_scale_experiment_enabled() -> bool:
+    return str(os.getenv("TRADUZAI_EXPERIMENT_ORIGINAL_TEXT_SCALE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _fallback_dark_bubble_mask_from_block_bbox(block: dict, width: int, height: int) -> np.ndarray | None:
+    source = str(block.get("bubble_mask_source") or block.get("bubbleMaskSource") or "").strip().lower()
+    flags = {str(flag).strip() for flag in block.get("qa_flags") or [] if str(flag).strip()}
+    if source != "image_dark_bubble_mask" and "visual_text_only_inpaint_contract" not in flags:
+        return None
+    bbox = _normalize_bbox(block.get("balloon_bbox") or block.get("balloonBbox"), width, height)
+    if bbox is None:
+        bbox = _normalize_bbox(block.get("bubble_mask_bbox") or block.get("bubbleMaskBbox"), width, height)
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    mask[y1:y2, x1:x2] = 1
+    return mask
+
+
+def _dark_text_contract_fill_rgb(block: dict) -> np.ndarray | None:
+    source = str(block.get("bubble_mask_source") or block.get("bubbleMaskSource") or "").strip().lower()
+    flags = {str(flag).strip() for flag in block.get("qa_flags") or [] if str(flag).strip()}
+    if source not in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"} and not (
+        "visual_text_only_inpaint_contract" in flags
+        or "dark_panel_style_grouped" in flags
+        or "weak_text_residual_after_inpaint" in flags
+    ):
+        return None
+    metrics = block.get("qa_metrics") if isinstance(block.get("qa_metrics"), dict) else {}
+    for metric_key in ("image_dark_bubble_mask", "dark_bubble_visual_glyph_mask"):
+        metric = metrics.get(metric_key) if isinstance(metrics, dict) else None
+        if isinstance(metric, dict):
+            raw = metric.get("panel_fill_rgb") or metric.get("fill_rgb")
+            if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                try:
+                    return np.asarray([int(max(0, min(255, round(float(v))))) for v in raw[:3]], dtype=np.uint8)
+                except Exception:
+                    pass
+    raw_background = block.get("background_rgb")
+    if isinstance(raw_background, (list, tuple)) and len(raw_background) >= 3:
+        try:
+            rgb = np.asarray([int(max(0, min(255, round(float(v))))) for v in raw_background[:3]], dtype=np.uint8)
+            if int(np.max(rgb)) <= 64:
+                return rgb
+        except Exception:
+            pass
+    return np.asarray([0, 0, 0], dtype=np.uint8)
+
+
+def _text_is_preserved_or_sfx(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return True
+    content_class = str(text.get("content_class") or "").strip().lower()
+    tipo = str(text.get("tipo") or "").strip().lower()
+    route_action = str(text.get("route_action") or "").strip().lower()
+    render_policy = str(text.get("render_policy") or "").strip().lower()
+    if content_class == "sfx" or tipo == "sfx":
+        sfx = text.get("sfx") if isinstance(text.get("sfx"), dict) else {}
+        return route_action != "translate_sfx_inpaint_render" or sfx.get("inpaint_allowed") is not True
+    return bool(
+        text.get("skip_processing")
+        or text.get("preserve_original")
+        or route_action in {"skip", "preserve_original"}
+        or render_policy in {"preserve_original", "merged_into_primary"}
+    )
+
+
+def _trusted_text_bbox_for_contract(text: dict, width: int, height: int) -> list[int] | None:
+    candidates = []
+    for key in (
+        "source_text_anchor_bbox",
+        "_source_text_anchor_bbox",
+        "source_text_mask_bbox",
+        "_source_text_mask_bbox",
+        "text_pixel_bbox",
+        "ocr_text_bbox",
+        "bbox",
+    ):
+        bbox = _normalize_bbox(text.get(key), width, height)
+        if bbox is not None:
+            area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+            candidates.append((area, key, bbox))
+    if not candidates:
+        return None
+    _area, _key, bbox = min(candidates, key=lambda item: item[0])
+    return bbox
+
+
+def _text_mask_evidence_pixel_bounds(text: dict) -> tuple[int, int]:
+    evidence = text.get("mask_evidence") if isinstance(text.get("mask_evidence"), dict) else {}
+    raw = 0
+    expanded = 0
+    for key in ("raw_mask_pixels", "source_pixels"):
+        try:
+            raw = max(raw, int(evidence.get(key) or 0))
+        except Exception:
+            pass
+    for key in ("expanded_mask_pixels", "expanded_pixels"):
+        try:
+            expanded = max(expanded, int(evidence.get(key) or 0))
+        except Exception:
+            pass
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    for metric_key in (
+        "inpaint_mask_contract",
+        "dark_bubble_visual_glyph_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "colored_card_visual_glyph_mask",
+    ):
+        metric = metrics.get(metric_key) if isinstance(metrics, dict) else None
+        if not isinstance(metric, dict):
+            continue
+        for key in ("source_pixels", "raw_mask_pixels", "visual_pixels", "mask_pixels"):
+            try:
+                raw = max(raw, int(metric.get(key) or 0))
+            except Exception:
+                pass
+        for key in ("expanded_pixels", "expanded_mask_pixels", "final_mask_pixels"):
+            try:
+                expanded = max(expanded, int(metric.get(key) or 0))
+            except Exception:
+                pass
+    if expanded <= 0:
+        expanded = raw
+    return raw, expanded
+
+
+def _text_contract_mask_is_plausible(text: dict, mask: np.ndarray, width: int, height: int) -> bool:
+    if not isinstance(mask, np.ndarray) or not np.any(mask):
+        return False
+    pixels = int(np.count_nonzero(mask))
+    if pixels < 24:
+        return False
+    bbox = _bbox_from_binary_mask(mask)
+    trusted_bbox = _trusted_text_bbox_for_contract(text, width, height)
+    if bbox is None or trusted_bbox is None:
+        return False
+    mask_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+    trusted_area = max(1, (trusted_bbox[2] - trusted_bbox[0]) * (trusted_bbox[3] - trusted_bbox[1]))
+    raw_evidence, expanded_evidence = _text_mask_evidence_pixel_bounds(text)
+    if expanded_evidence > 0 and pixels > max(expanded_evidence + 2048, int(round(expanded_evidence * 2.20))):
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_text_contract_fill_mask_rejected"] = {
+                "reason": "mask_exceeds_text_evidence",
+                "mask_pixels": int(pixels),
+                "expanded_evidence_pixels": int(expanded_evidence),
+            }
+        _append_text_flag(text, "dark_text_contract_mask_rejected_overbroad")
+        return False
+    if mask_area > max(trusted_area + 12000, int(round(trusted_area * 2.60))):
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_text_contract_fill_mask_rejected"] = {
+                "reason": "mask_bbox_exceeds_text_bbox",
+                "mask_bbox": list(bbox),
+                "trusted_bbox": list(trusted_bbox),
+                "mask_bbox_area": int(mask_area),
+                "trusted_bbox_area": int(trusted_area),
+                "raw_evidence_pixels": int(raw_evidence),
+            }
+        _append_text_flag(text, "dark_text_contract_mask_rejected_overbroad")
+        return False
+    return True
+
+
+def _dark_fill_mask_is_overbroad_for_text(text: dict, mask: np.ndarray | None) -> bool:
+    if not isinstance(text, dict) or not isinstance(mask, np.ndarray) or not np.any(mask):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    pixels = int(np.count_nonzero(mask))
+    _raw_evidence, expanded_evidence = _text_mask_evidence_pixel_bounds(text)
+    if expanded_evidence > 0 and pixels > max(expanded_evidence + 4096, int(round(expanded_evidence * 2.50))):
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_fill_mask_rejected_overbroad"] = {
+                "mask_pixels": int(pixels),
+                "expanded_evidence_pixels": int(expanded_evidence),
+            }
+        _append_text_flag(text, "dark_fill_mask_rejected_overbroad")
+        return True
+    bbox = _bbox_from_binary_mask(mask)
+    if bbox is None:
+        return False
+    trusted = _trusted_text_bbox_for_contract(text, mask.shape[1], mask.shape[0])
+    if trusted is None:
+        return False
+    mask_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+    trusted_area = max(1, (trusted[2] - trusted[0]) * (trusted[3] - trusted[1]))
+    if mask_area > max(trusted_area + 24000, int(round(trusted_area * 3.25))):
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_fill_mask_rejected_overbroad"] = {
+                "reason": "mask_bbox_exceeds_text_bbox",
+                "mask_bbox": list(bbox),
+                "trusted_bbox": list(trusted),
+                "mask_bbox_area": int(mask_area),
+                "trusted_bbox_area": int(trusted_area),
+            }
+        _append_text_flag(text, "dark_fill_mask_rejected_overbroad")
+        return True
+    return False
+
+
+def _dark_text_contract_fill_mask(
+    text: dict,
+    width: int,
+    height: int,
+    image_rgb: np.ndarray | None = None,
+) -> np.ndarray | None:
+    if not isinstance(text, dict):
+        return None
+    if _text_is_preserved_or_sfx(text):
+        return None
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    eligible = bool(
+        source in {
+            "image_dark_bubble_mask",
+            "image_dark_panel_mask",
+            "derived_card_panel_mask",
+            "translator_note_text_mask",
+            "text_rect_fallback",
+        }
+        or "visual_text_only_inpaint_contract" in flags
+        or "weak_text_residual_after_inpaint" in flags
+        or "dark_panel_style_grouped" in flags
+    )
+    if not eligible:
+        return None
+    mask = None
+    used_raw_glyph_mask = False
+    contract_source = ""
+    if isinstance(image_rgb, np.ndarray) and image_rgb.shape[:2] == (height, width):
+        try:
+            raw_text_mask = build_raw_text_mask_from_image(text, image_rgb, image_rgb.shape)
+        except Exception:
+            raw_text_mask = None
+        if isinstance(raw_text_mask, np.ndarray) and np.any(raw_text_mask):
+            raw_pixels_before_close = int(np.count_nonzero(raw_text_mask))
+            raw_text_mask = _close_visual_text_source_mask_gaps(raw_text_mask).astype(np.uint8)
+            raw_pixels_after_close = int(np.count_nonzero(raw_text_mask))
+            mask = expand_text_mask(raw_text_mask, expand_px=4)
+            used_raw_glyph_mask = True
+            contract_source = "raw_glyph_mask"
+            metrics = text.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                raw_bbox = _bbox_from_binary_mask(raw_text_mask)
+                mask_bbox = _bbox_from_binary_mask(mask)
+                metrics["dark_text_contract_raw_glyph_mask"] = {
+                    "raw_bbox": [int(v) for v in raw_bbox] if raw_bbox is not None else None,
+                    "mask_bbox": [int(v) for v in mask_bbox] if mask_bbox is not None else None,
+                    "raw_mask_pixels": raw_pixels_after_close,
+                    "expanded_mask_pixels": int(np.count_nonzero(mask)),
+                    "source": "build_raw_text_mask_from_image",
+                    "raw_mask_pixels_before_gap_close": raw_pixels_before_close,
+                }
+        try:
+            contract_candidate = build_inpaint_mask(dict(text), image_rgb.shape, image_rgb=image_rgb)
+        except Exception:
+            contract_candidate = None
+        if isinstance(contract_candidate, np.ndarray) and np.any(contract_candidate):
+            contract_candidate = _coerce_mask_for_shape(contract_candidate, image_rgb.shape[:2])
+            if isinstance(contract_candidate, np.ndarray) and np.any(contract_candidate):
+                current_pixels = int(np.count_nonzero(mask)) if isinstance(mask, np.ndarray) else 0
+                candidate_pixels = int(np.count_nonzero(contract_candidate))
+                added_pixels = (
+                    int(np.count_nonzero((contract_candidate > 0) & (mask == 0)))
+                    if isinstance(mask, np.ndarray) and mask.shape[:2] == contract_candidate.shape[:2]
+                    else candidate_pixels
+                )
+                if (
+                    candidate_pixels > max(current_pixels + 512, int(round(current_pixels * 1.18)))
+                    or added_pixels > max(256, int(round(max(1, current_pixels) * 0.05)))
+                ):
+                    mask = contract_candidate.astype(np.uint8)
+                    used_raw_glyph_mask = True
+                    contract_source = "build_inpaint_mask_contract"
+                    metrics = text.setdefault("qa_metrics", {})
+                    if isinstance(metrics, dict):
+                        metrics["dark_text_contract_fill_uses_inpaint_contract_mask"] = {
+                            "previous_pixels": int(current_pixels),
+                            "contract_pixels": int(candidate_pixels),
+                            "added_pixels": int(added_pixels),
+                            "contract_bbox": [int(v) for v in (_bbox_from_binary_mask(contract_candidate) or [])],
+                        }
+    if mask is None or not np.any(mask):
+        mask = _strict_text_geometry_mask(width, height, text)
+    if mask is None or not np.any(mask):
+        return None
+    if not used_raw_glyph_mask:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=1)
+    if not _text_contract_mask_is_plausible(text, mask, width, height):
+        return None
+    bbox = _bbox_from_binary_mask(mask)
+    text["_force_solid_dark_text_fill"] = True
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_text_contract_fill_mask"] = {
+            "bbox": [int(v) for v in bbox] if bbox is not None else None,
+            "mask_pixels": int(np.count_nonzero(mask)),
+            "source": contract_source or ("raw_glyph_mask" if used_raw_glyph_mask else "strict_text_geometry_mask"),
+        }
+    return mask.astype(np.uint8)
+
+
+def _dark_panel_visual_contract_fill_mask(
+    image_rgb: np.ndarray,
+    text: dict,
+    contract_mask: np.ndarray,
+    width: int,
+    height: int,
+) -> np.ndarray | None:
+    if (
+        not isinstance(image_rgb, np.ndarray)
+        or image_rgb.ndim != 3
+        or not isinstance(text, dict)
+        or not isinstance(contract_mask, np.ndarray)
+        or not np.any(contract_mask)
+    ):
+        return None
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return None
+    if _text_is_preserved_or_sfx(text):
+        return None
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    text_only_contract_flags = {
+        "visual_text_only_inpaint_contract",
+        "translator_note_text_only_mask",
+        "text_contract_direct_fill",
+    }
+    if flags & text_only_contract_flags:
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_panel_visual_contract_fill_mask_rejected"] = {
+                "reason": "text_only_contract_requires_strict_text_mask",
+                "contract_mask_pixels": int(np.count_nonzero(contract_mask)),
+            }
+        return None
+    if not (
+        source == "image_dark_panel_mask"
+        or "dark_panel_full_bbox_selected" in flags
+        or "dark_panel_rect_from_border_lines" in flags
+        or str(text.get("layout_profile") or "").strip().lower() == "dark_panel"
+    ):
+        return None
+    bbox = (
+        _normalize_bbox(text.get("source_text_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("_source_text_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+    )
+    if bbox is None:
+        return None
+    bbox_w = bbox[2] - bbox[0]
+    bbox_h = bbox[3] - bbox[1]
+    pad = max(6, min(18, int(round(max(bbox_w, bbox_h) * 0.045))))
+    limit_bbox = _expanded_bbox(width, height, bbox, padding=pad)
+    if limit_bbox is None:
+        return None
+    limit_mask = _mask_from_bbox(width, height, limit_bbox, padding=0)
+    region = limit_mask > 0
+    if int(np.count_nonzero(region)) < 48:
+        return None
+    rgb_i = image_rgb.astype(np.int16)
+    rgb_f = image_rgb.astype(np.float32)
+    luma = (rgb_f[:, :, 0] * 0.299) + (rgb_f[:, :, 1] * 0.587) + (rgb_f[:, :, 2] * 0.114)
+    chroma = np.max(rgb_i, axis=2) - np.min(rgb_i, axis=2)
+    bg_region = region & (contract_mask == 0)
+    bg_luma = float(np.percentile(luma[bg_region], 35)) if int(np.count_nonzero(bg_region)) >= 64 else 24.0
+    threshold = max(72.0, min(190.0, bg_luma + 26.0))
+    candidate = region & (
+        (luma >= threshold)
+        | ((luma >= max(58.0, bg_luma + 14.0)) & (chroma >= 28))
+    )
+    candidate_pixels = int(np.count_nonzero(candidate))
+    if candidate_pixels < 24:
+        return None
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    visual_mask = cv2.dilate(candidate.astype(np.uint8) * 255, kernel, iterations=1)
+    visual_mask = np.where(limit_mask > 0, visual_mask, 0).astype(np.uint8)
+    combined = np.maximum(contract_mask.astype(np.uint8), visual_mask).astype(np.uint8)
+    combined_pixels = int(np.count_nonzero(combined))
+    contract_pixels = int(np.count_nonzero(contract_mask))
+    if combined_pixels <= contract_pixels:
+        return None
+    limit_pixels = int(np.count_nonzero(limit_mask))
+    max_pixels = max(contract_pixels + 4096, int(round(contract_pixels * 1.85)))
+    max_pixels = min(max_pixels, limit_pixels)
+    if combined_pixels > max_pixels:
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_panel_visual_contract_fill_mask_rejected"] = {
+                "reason": "visual_mask_too_large",
+                "combined_pixels": int(combined_pixels),
+                "contract_pixels": int(contract_pixels),
+                "limit_pixels": int(limit_pixels),
+                "max_pixels": int(max_pixels),
+            }
+        return None
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_panel_visual_contract_fill_mask"] = {
+            "bbox": list(_bbox_from_binary_mask(combined) or limit_bbox),
+            "mask_pixels": int(combined_pixels),
+            "contract_mask_pixels": int(contract_pixels),
+            "candidate_pixels": int(candidate_pixels),
+            "source": "visual_glyph_union",
+        }
+    return combined
+
+
+def _sample_dark_panel_contract_fill_rgb(
+    image_rgb: np.ndarray,
+    fill_mask: np.ndarray,
+    text: dict,
+    width: int,
+    height: int,
+) -> np.ndarray | None:
+    if (
+        not isinstance(image_rgb, np.ndarray)
+        or image_rgb.ndim != 3
+        or not isinstance(fill_mask, np.ndarray)
+        or not np.any(fill_mask)
+        or not isinstance(text, dict)
+    ):
+        return None
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return None
+    bbox = (
+        _normalize_bbox(text.get("source_text_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("_source_text_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+    )
+    if bbox is None:
+        return None
+    search_bbox = _expanded_bbox(width, height, bbox, padding=24)
+    if search_bbox is None:
+        return None
+    search_mask = _mask_from_bbox(width, height, search_bbox, padding=0) > 0
+    mask = _coerce_mask_for_shape(fill_mask, (height, width)) > 0
+    rgb = image_rgb.astype(np.float32)
+    luma = (rgb[:, :, 0] * 0.299) + (rgb[:, :, 1] * 0.587) + (rgb[:, :, 2] * 0.114)
+    candidates = search_mask & ~mask & (luma <= 80.0)
+    if int(np.count_nonzero(candidates)) < 32:
+        bubble_bbox = (
+            _normalize_bbox(text.get("bubble_mask_bbox") or text.get("bubbleMaskBbox"), width, height)
+            or _normalize_bbox(text.get("balloon_bbox") or text.get("balloonBbox"), width, height)
+        )
+        if bubble_bbox is not None:
+            bubble_mask = _mask_from_bbox(width, height, bubble_bbox, padding=-6) > 0
+            candidates = bubble_mask & ~mask & (luma <= 80.0)
+    if int(np.count_nonzero(candidates)) < 32:
+        return None
+    sample = image_rgb[candidates]
+    rgb_med = np.median(sample.astype(np.float32), axis=0)
+    if float(np.max(rgb_med)) > 96.0:
+        return None
+    fill_rgb = np.asarray(
+        [int(max(0, min(255, round(float(v))))) for v in rgb_med[:3]],
+        dtype=np.uint8,
+    )
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_panel_sampled_contract_fill_rgb"] = {
+            "rgb": [int(v) for v in fill_rgb.tolist()],
+            "sample_pixels": int(np.count_nonzero(candidates)),
+            "source": "local_dark_panel_context",
+        }
+    return fill_rgb
+
+
 def _normalize_bbox(raw_bbox, width: int, height: int) -> list[int] | None:
     if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
         return None
@@ -105,6 +774,167 @@ def _normalize_bbox(raw_bbox, width: int, height: int) -> list[int] | None:
     if x2 <= x1 or y2 <= y1:
         return None
     return [x1, y1, x2, y2]
+
+
+def _append_text_flag(text: dict, flag: str) -> None:
+    if not isinstance(text, dict) or not flag:
+        return
+    flags = [str(value) for value in text.get("qa_flags") or [] if str(value).strip()]
+    if flag not in flags:
+        flags.append(flag)
+    text["qa_flags"] = flags
+
+
+def _text_uses_direct_text_contract_fill(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "text_contract_direct_fill" in flags:
+        return True
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    return isinstance(metrics.get("text_contract_direct_fill"), dict)
+
+
+def _image_dark_bubble_is_visually_light(image_rgb: np.ndarray | None, text: dict) -> bool:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(text, dict):
+        return False
+    if str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower() != "image_dark_bubble_mask":
+        return False
+    height, width = image_rgb.shape[:2]
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    dark_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    bbox = (
+        _normalize_bbox(dark_metrics.get("mask_bbox"), width, height)
+        or _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("balloon_bbox"), width, height)
+        or _normalize_bbox(text.get("target_bbox"), width, height)
+    )
+    if bbox is None:
+        return False
+    x1, y1, x2, y2 = bbox
+    bw = x2 - x1
+    bh = y2 - y1
+    if bw < 32 or bh < 32:
+        return False
+    ix = max(2, int(round(bw * 0.12)))
+    iy = max(2, int(round(bh * 0.12)))
+    sx1, sy1, sx2, sy2 = x1 + ix, y1 + iy, x2 - ix, y2 - iy
+    if sx2 <= sx1 or sy2 <= sy1:
+        return False
+    crop = image_rgb[sy1:sy2, sx1:sx2].astype(np.float32)
+    if crop.size == 0:
+        return False
+    luma = (crop[:, :, 0] * 0.299) + (crop[:, :, 1] * 0.587) + (crop[:, :, 2] * 0.114)
+    median_luma = float(np.median(luma))
+    bright_ratio = float(np.count_nonzero(luma >= 210.0)) / float(max(1, luma.size))
+    dark_ratio = float(np.count_nonzero(luma <= 80.0)) / float(max(1, luma.size))
+    if median_luma >= 205.0 and bright_ratio >= 0.55 and dark_ratio <= 0.22:
+        _append_text_flag(text, "false_light_bubble_dark_fill_blocked")
+        return True
+    return False
+
+
+def _promote_visually_light_dark_bubbles_to_white(
+    image_rgb: np.ndarray | None,
+    ocr_page: dict | None,
+    vision_blocks: list[dict] | None = None,
+) -> int:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(ocr_page, dict):
+        return 0
+    height, width = image_rgb.shape[:2]
+
+    def _promote_item(item: dict) -> bool:
+        if not isinstance(item, dict):
+            return False
+        source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+        if source != "image_dark_bubble_mask":
+            return False
+        if not _image_dark_bubble_is_visually_light(image_rgb, item):
+            return False
+
+        metrics = item.get("qa_metrics") if isinstance(item.get("qa_metrics"), dict) else {}
+        dark_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+        metric_bbox = _normalize_bbox(dark_metrics.get("mask_bbox"), width, height)
+        current_bbox = _normalize_bbox(item.get("bubble_mask_bbox") or item.get("bubbleMaskBbox"), width, height)
+        should_replace_bbox = False
+        if metric_bbox is not None:
+            if current_bbox is None:
+                should_replace_bbox = True
+            else:
+                current_area = max(1, (current_bbox[2] - current_bbox[0]) * (current_bbox[3] - current_bbox[1]))
+                metric_area = max(1, (metric_bbox[2] - metric_bbox[0]) * (metric_bbox[3] - metric_bbox[1]))
+                image_area = max(1, width * height)
+                should_replace_bbox = bool(
+                    current_area >= int(image_area * 0.48)
+                    or (metric_area <= int(current_area * 0.62) and metric_area >= 64)
+                )
+
+        item["bubble_mask_source"] = "image_white_bubble_mask"
+        item["bubbleMaskSource"] = "image_white_bubble_mask"
+        if should_replace_bbox and metric_bbox is not None:
+            item["bubble_mask_bbox"] = list(metric_bbox)
+            item["bubbleMaskBbox"] = list(metric_bbox)
+            item["balloon_bbox"] = list(metric_bbox)
+        item["layout_profile"] = "white_balloon"
+        item["block_profile"] = "white_balloon"
+        item["background_rgb"] = [245, 245, 245]
+        item.pop("_dark_bubble_sibling_texts", None)
+        for key in (
+            "card_panel_text_context",
+            "dark_panel_text_context",
+            "original_dark_panel_effect_colors",
+        ):
+            item.pop(key, None)
+        style = item.get("style") if isinstance(item.get("style"), dict) else item.get("estilo")
+        if isinstance(style, dict):
+            style = dict(style)
+            for key in ("glow", "glow_cor", "glow_px"):
+                style.pop(key, None)
+            style["cor"] = "#000000"
+            style["contorno_px"] = 0
+            style["style_origin"] = "false_light_dark_bubble_promoted_to_white"
+            item["style"] = style
+            item["estilo"] = style
+        flags = [
+            str(flag)
+            for flag in item.get("qa_flags") or []
+            if str(flag).strip()
+            and str(flag).strip()
+            not in {
+                "auto_dark_panel_glow_fallback",
+                "original_dark_panel_effect_colors",
+                "dark_panel_style_grouped",
+            }
+        ]
+        for flag in (
+            "false_light_bubble_dark_fill_blocked",
+            "false_light_dark_bubble_promoted_to_white",
+            "false_dark_white_style_neutralized",
+        ):
+            if flag not in flags:
+                flags.append(flag)
+        item["qa_flags"] = flags
+        return True
+
+    promoted = 0
+    seen: set[int] = set()
+    for collection in (ocr_page.get("texts"), ocr_page.get("_vision_blocks"), vision_blocks):
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            obj_id = id(item)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            if _promote_item(item):
+                promoted += 1
+    if promoted:
+        ocr_page["_strip_false_light_dark_bubble_promoted_count"] = int(
+            ocr_page.get("_strip_false_light_dark_bubble_promoted_count") or 0
+        ) + promoted
+    return promoted
 
 
 def _bbox_looks_page_relative(raw_bbox, *, width: int, height: int, band_y_top: int) -> bool:
@@ -190,6 +1020,69 @@ def _shift_line_polygons_to_band_local(raw_polygons, *, width: int, height: int,
     return shifted or None
 
 
+def _polygon_bbox(polygon) -> list[int] | None:
+    if not isinstance(polygon, (list, tuple)):
+        return None
+    xs: list[int] = []
+    ys: list[int] = []
+    for point in polygon:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            xs.append(int(round(float(point[0]))))
+            ys.append(int(round(float(point[1]))))
+        except Exception:
+            continue
+    if not xs or not ys:
+        return None
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _drop_isolated_side_note_line_polygons(text: dict) -> dict:
+    """Remove OCR note/SFX polygons that were merged into a dialogue block."""
+
+    if not isinstance(text, dict):
+        return text
+    polygons = text.get("line_polygons")
+    if not isinstance(polygons, list) or len(polygons) < 3:
+        return text
+    boxes: list[tuple[int, list[int], float, int]] = []
+    for index, polygon in enumerate(polygons):
+        bbox = _polygon_bbox(polygon)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        boxes.append((index, bbox, (x1 + x2) / 2.0, x2 - x1))
+    if len(boxes) < 3:
+        return text
+    centers = np.asarray([entry[2] for entry in boxes], dtype=np.float32)
+    widths = np.asarray([max(1, entry[3]) for entry in boxes], dtype=np.float32)
+    median_center = float(np.median(centers))
+    main_width = float(np.median(widths))
+    kept_indices: set[int] = set()
+    removed = []
+    for index, bbox, center, poly_width in boxes:
+        center_gap = abs(center - median_center)
+        short_line = poly_width <= max(92.0, main_width * 0.62)
+        far_side = center_gap >= max(120.0, main_width * 0.82)
+        if short_line and far_side:
+            removed.append({"index": index, "bbox": bbox, "center_gap": round(center_gap, 3)})
+            continue
+        kept_indices.add(index)
+    if not removed or len(kept_indices) < 2:
+        return text
+    item = dict(text)
+    item["line_polygons"] = [polygon for idx, polygon in enumerate(polygons) if idx in kept_indices]
+    metrics = item.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["isolated_side_note_line_polygons_removed"] = removed
+    return item
+
+
 def _shift_bbox_list_to_band_local(raw_bboxes, *, width: int, height: int, band_y_top: int) -> list[list[int]] | None:
     shifted: list[list[int]] = []
     for raw_bbox in raw_bboxes or []:
@@ -203,7 +1096,16 @@ def _texts_with_band_local_bboxes(texts: list[dict], *, width: int, height: int,
     if band_y_top <= 0:
         return texts
     normalized: list[dict] = []
-    bbox_fields = ("bbox", "source_bbox", "text_pixel_bbox", "balloon_bbox", "layout_bbox", "target_bbox")
+    bbox_fields = (
+        "bbox",
+        "source_bbox",
+        "text_pixel_bbox",
+        "balloon_bbox",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
+        "layout_bbox",
+        "target_bbox",
+    )
     for text in texts:
         if not isinstance(text, dict):
             continue
@@ -243,7 +1145,12 @@ def _build_fallback_vision_blocks(ocr_page: dict, width: int, height: int) -> li
     blocks: list[dict] = []
     seen: set[tuple[int, int, int, int]] = set()
     for txt in ocr_page.get("texts", []):
-        if not isinstance(txt, dict) or _route_action_blocks_inpaint(txt):
+        if (
+            not isinstance(txt, dict)
+            or _text_suppressed_for_inpaint(txt)
+            or _route_action_blocks_inpaint(txt)
+            or _text_has_rejected_bubble_without_glyph_evidence(txt)
+        ):
             continue
         bbox = (
             _normalize_bbox(txt.get("text_pixel_bbox"), width, height)
@@ -273,8 +1180,22 @@ def _build_fallback_vision_blocks(ocr_page: dict, width: int, height: int) -> li
                 "line_polygons": txt.get("line_polygons"),
                 "bubble_id": txt.get("bubble_id") or txt.get("bubbleId"),
                 "bubble_mask": txt.get("bubble_mask") if txt.get("bubble_mask") is not None else txt.get("bubbleMask"),
+                "bubble_mask_source": txt.get("bubble_mask_source") or txt.get("bubbleMaskSource"),
+                "bubbleMaskSource": txt.get("bubbleMaskSource") or txt.get("bubble_mask_source"),
+                "bubble_mask_bbox": txt.get("bubble_mask_bbox") or txt.get("bubbleMaskBbox"),
+                "bubbleMaskBbox": txt.get("bubbleMaskBbox") or txt.get("bubble_mask_bbox"),
+                "bubble_inner_bbox": txt.get("bubble_inner_bbox") or txt.get("bubbleInnerBbox"),
+                "bubbleInnerBbox": txt.get("bubbleInnerBbox") or txt.get("bubble_inner_bbox"),
+                "bubble_mask_error": txt.get("bubble_mask_error") or txt.get("bubbleMaskError"),
+                "bubbleMaskError": txt.get("bubbleMaskError") or txt.get("bubble_mask_error"),
                 "balloon_type": txt.get("balloon_type"),
                 "block_profile": txt.get("block_profile"),
+                "background_rgb": txt.get("background_rgb"),
+                "card_panel_text_context": txt.get("card_panel_text_context"),
+                "route_action": txt.get("route_action"),
+                "route_reason": txt.get("route_reason"),
+                "qa_flags": list(txt.get("qa_flags") or []),
+                "mask_evidence": copy.deepcopy(txt.get("mask_evidence")) if isinstance(txt.get("mask_evidence"), dict) else txt.get("mask_evidence"),
             }
         )
     return blocks
@@ -286,15 +1207,22 @@ def _cjk_mask_kwargs_for_strip_page(ocr_page: dict) -> dict:
     if isinstance(engine_meta, dict):
         mask_strategy = str(engine_meta.get("mask_strategy") or "").strip().lower()
     try:
-        from vision_stack.runtime import _get_text_segmenter_for_page
+        from vision_stack.runtime import _get_bubble_segmenter_for_page, _get_text_segmenter_for_page
 
         text_segmenter = _get_text_segmenter_for_page(ocr_page)
+        bubble_segmenter = _get_bubble_segmenter_for_page(ocr_page)
     except Exception:
         text_segmenter = None
+        bubble_segmenter = None
     return {
         "mask_strategy": mask_strategy,
-        "ocr_texts": list(ocr_page.get("texts", [])) + list(ocr_page.get("_oar_ocr_regions", [])),
+        "ocr_texts": [
+            text
+            for text in list(ocr_page.get("texts", [])) + list(ocr_page.get("_oar_ocr_regions", []))
+            if isinstance(text, dict) and not _text_suppressed_for_inpaint(text)
+        ],
         "text_segmenter": text_segmenter,
+        "bubble_segmenter": bubble_segmenter,
     }
 
 
@@ -338,6 +1266,144 @@ def _fast_dark_panel_fill_enabled() -> bool:
     return True
 
 
+def _auto_fast_dark_card_fill_allowed(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if _text_suppressed_for_inpaint(text) or not _route_action_allows_local_dark_panel_fill(text):
+        return False
+    bubble_mask_source = str(text.get("bubble_mask_source") or "").strip().lower()
+    qa_flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    evidence = text.get("mask_evidence")
+    has_fast_ocr_evidence = bool(
+        isinstance(evidence, dict)
+        and evidence.get("fast_fill_allowed") is True
+        and str(evidence.get("kind") or "").strip().lower() == "ocr_pixels"
+        and int(evidence.get("raw_mask_pixels") or 0) > 0
+    )
+    false_white_dark_hint = bool(
+        bubble_mask_source == "image_white_bubble_mask"
+        and (text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
+        and (
+            qa_flags
+            & {
+                "mask_outside_balloon",
+                "mask_outside_balloon_critical",
+                "bubble_clip_preserved_raw_text",
+                "balloon_outline_components_removed",
+            }
+            or has_fast_ocr_evidence
+        )
+    )
+    bbox_fallback_dark_hint = bool(
+        bubble_mask_source == "bbox_fallback"
+        and str(text.get("bubble_mask_error") or "").strip().lower() == "missing_real_bubble_mask"
+        and has_fast_ocr_evidence
+        and (text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
+        and (text.get("line_polygons") or text.get("text_pixel_bbox"))
+    )
+    dark_bubble_mask_hint = bool(
+        bubble_mask_source == "image_dark_bubble_mask"
+        and (text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
+        and (text.get("line_polygons") or text.get("text_pixel_bbox"))
+    )
+    if _text_is_white_balloon_context(text) and not false_white_dark_hint:
+        return False
+    if _text_has_rejected_bubble_without_glyph_evidence(text):
+        return False
+    if _text_has_no_glyph_evidence(text) and not _has_fast_fillable_text_mask_evidence(text):
+        return False
+    translator_note_text_mask = bubble_mask_source == "translator_note_text_mask"
+    if translator_note_text_mask:
+        return bool(text.get("line_polygons") or text.get("text_pixel_bbox"))
+    mask_evidence_reason = _fast_fill_mask_evidence_rejection_reason(text)
+    if mask_evidence_reason and not (false_white_dark_hint or dark_bubble_mask_hint):
+        return False
+    derived_card_panel = bubble_mask_source in {"derived_card_panel_mask", "image_dark_panel_mask", "image_dark_bubble_mask"}
+    rejected_visual_card_panel = bubble_mask_source in _REJECTED_BUBBLE_MASK_SOURCES and bool(
+        text.get("bubble_mask_bbox") or text.get("balloon_bbox")
+    )
+    if derived_card_panel and not rejected_visual_card_panel and not dark_bubble_mask_hint:
+        return False
+    if not (
+        translator_note_text_mask
+        or _is_dark_or_colored_card_text(text)
+        or derived_card_panel
+        or rejected_visual_card_panel
+        or false_white_dark_hint
+        or dark_bubble_mask_hint
+        or bbox_fallback_dark_hint
+    ):
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox")):
+        return False
+    background = text.get("background_rgb")
+    if isinstance(background, (list, tuple)) and len(background) >= 3:
+        return True
+    if false_white_dark_hint or dark_bubble_mask_hint or bbox_fallback_dark_hint:
+        return True
+    if derived_card_panel or rejected_visual_card_panel:
+        evidence = text.get("mask_evidence")
+        has_mask_pixels = bool(
+            isinstance(evidence, dict)
+            and (
+                int(evidence.get("raw_mask_pixels") or 0) > 0
+                or int(evidence.get("expanded_mask_pixels") or 0) > 0
+            )
+        )
+        return bool(has_mask_pixels and (text.get("bubble_mask_bbox") or text.get("balloon_bbox")))
+    return False
+
+
+def _rejected_visual_card_requires_real_inpaint(image_rgb: np.ndarray, text: dict) -> bool:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in _REJECTED_BUBBLE_MASK_SOURCES:
+        return False
+    error = str(text.get("bubble_mask_error") or text.get("bubbleMaskError") or "").strip().lower()
+    if error == "derived_mask_not_anchored_to_text" and _has_fast_fillable_text_mask_evidence(text):
+        return True
+    card_context = bool(text.get("card_panel_text_context")) or _is_dark_or_colored_card_text(text)
+    if not card_context:
+        return False
+    height, width = image_rgb.shape[:2]
+    bbox = (
+        _normalize_bbox(text.get("balloon_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+        or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+    )
+    if bbox is None:
+        return False
+    x1, y1, x2, y2 = bbox
+    crop = image_rgb[y1:y2, x1:x2]
+    if crop.size < 64:
+        return False
+    pixels = crop.reshape(-1, crop.shape[-1]).astype(np.float32)
+    channel_std = float(np.mean(np.std(pixels[:, :3], axis=0)))
+    luma = pixels[:, 0] * 0.299 + pixels[:, 1] * 0.587 + pixels[:, 2] * 0.114
+    chroma = np.max(pixels[:, :3], axis=1) - np.min(pixels[:, :3], axis=1)
+    luma_spread = float(np.percentile(luma, 95) - np.percentile(luma, 5))
+    chroma_spread = float(np.percentile(chroma, 95) - np.percentile(chroma, 5))
+    colorful = float(np.percentile(chroma, 75)) >= 32.0
+    textured = channel_std >= 24.0 or luma_spread >= 48.0 or chroma_spread >= 36.0
+    return bool(colorful and textured)
+
+
+def _rejected_visual_card_allows_local_text_fill(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in _REJECTED_BUBBLE_MASK_SOURCES:
+        return False
+    error = str(text.get("bubble_mask_error") or text.get("bubbleMaskError") or "").strip().lower()
+    if error != "derived_mask_not_anchored_to_text":
+        return False
+    evidence = text.get("mask_evidence")
+    if not isinstance(evidence, dict) or int(evidence.get("raw_mask_pixels") or 0) <= 0:
+        return False
+    return bool(text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("bbox"))
+
+
 def _experimental_gpu_image_ops_enabled() -> bool:
     flag = os.getenv("TRADUZAI_EXPERIMENTAL_GPU_IMAGE_OPS", "0").strip().lower()
     return flag in {"1", "true", "yes", "on"}
@@ -378,6 +1444,23 @@ def _fast_fill_blocking_qa_reason(text: dict, *, include_evidence_derived: bool 
     if not include_evidence_derived:
         blocked = [flag for flag in blocked if flag not in FAST_FILL_EVIDENCE_DERIVED_QA_FLAGS]
     return f"qa_flag:{blocked[0]}" if blocked else ""
+
+
+def _can_use_local_card_fill_despite_blocking_qa(text: dict, qa_reason: str) -> bool:
+    if not isinstance(text, dict) or not qa_reason:
+        return False
+    blocked_flag = qa_reason.removeprefix("qa_flag:").strip()
+    if blocked_flag not in {"mask_outside_balloon_critical", "mask_outside_balloon"}:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in {"derived_card_panel_mask", "image_dark_panel_mask", "image_dark_bubble_mask"} and source not in _REJECTED_BUBBLE_MASK_SOURCES:
+        return False
+    if not (text.get("text_pixel_bbox") or text.get("line_polygons")):
+        return False
+    evidence = text.get("mask_evidence")
+    if not isinstance(evidence, dict) or evidence.get("fast_fill_allowed") is not True:
+        return False
+    return bool(int(evidence.get("raw_mask_pixels") or 0) > 0)
 
 
 def _fast_fill_mask_evidence_rejection_reason(text: dict) -> str:
@@ -425,6 +1508,108 @@ def _mask_to_canvas_for_bbox(mask_value, bbox: list[int] | None, width: int, hei
     return binary if np.any(binary) else None
 
 
+def _weak_image_bubble_mask_error(
+    item: dict,
+    mask: np.ndarray,
+    *,
+    width: int,
+    height: int,
+) -> str:
+    source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+    if source not in {"image_white_bubble_mask", "image_rect_bubble_mask", "image_contour_bubble_mask"}:
+        return ""
+    if not isinstance(mask, np.ndarray) or mask.shape[:2] != (height, width) or not np.any(mask):
+        return ""
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return ""
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+    mask_w = max(1, x2 - x1)
+    mask_h = max(1, y2 - y1)
+    mask_area = int(np.count_nonzero(mask > 0))
+    bbox_area = max(1, mask_w * mask_h)
+    bbox_fill = mask_area / float(bbox_area)
+    edge_hits = 0
+    roi = mask[y1:y2, x1:x2] > 0
+    if np.count_nonzero(roi[0, :]) / float(max(1, mask_w)) >= 0.92:
+        edge_hits += 1
+    if np.count_nonzero(roi[-1, :]) / float(max(1, mask_w)) >= 0.92:
+        edge_hits += 1
+    if np.count_nonzero(roi[:, 0]) / float(max(1, mask_h)) >= 0.92:
+        edge_hits += 1
+    if np.count_nonzero(roi[:, -1]) / float(max(1, mask_h)) >= 0.92:
+        edge_hits += 1
+    if source in {"image_white_bubble_mask", "image_rect_bubble_mask"} and mask_area >= 12_000 and bbox_fill >= 0.94 and edge_hits >= 3:
+        return "suspicious_rectangular_image_bubble_mask"
+
+    text_bbox = _normalize_bbox(
+        item.get("text_pixel_bbox") or item.get("layout_bbox") or item.get("bbox"),
+        width,
+        height,
+    )
+    if text_bbox is None:
+        return ""
+    text_area = max(1, (int(text_bbox[2]) - int(text_bbox[0])) * (int(text_bbox[3]) - int(text_bbox[1])))
+    area_ratio = mask_area / float(text_area)
+    text_cx = (text_bbox[0] + text_bbox[2]) / 2.0
+    text_cy = (text_bbox[1] + text_bbox[3]) / 2.0
+    mask_cx = (x1 + x2) / 2.0
+    mask_cy = (y1 + y2) / 2.0
+    offset_x = abs(text_cx - mask_cx) / float(mask_w)
+    offset_y = abs(text_cy - mask_cy) / float(mask_h)
+    min_margin_x = min(max(0.0, text_cx - x1), max(0.0, x2 - text_cx)) / float(mask_w)
+    min_margin_y = min(max(0.0, text_cy - y1), max(0.0, y2 - text_cy)) / float(mask_h)
+    if area_ratio >= 18.0 and (max(offset_x, offset_y) >= 0.28 or min(min_margin_x, min_margin_y) <= 0.08):
+        return "derived_mask_not_anchored_to_text"
+    return ""
+
+
+def _weak_image_bubble_mask_error_for_item(item: dict | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for mask_key in ("bubble_mask", "bubbleMask", "balloon_mask", "balloonMask", "segmentation_mask", "mask"):
+        if mask_key not in item:
+            continue
+        mask_value = item.get(mask_key)
+        try:
+            arr = np.asarray(mask_value)
+        except Exception:
+            continue
+        if arr.size == 0:
+            continue
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]
+        if arr.ndim != 2:
+            continue
+        bbox = (
+            item.get("bubble_mask_bbox")
+            or item.get("bubbleMaskBbox")
+            or item.get("balloon_bbox")
+            or item.get("bbox")
+        )
+        normalized = None
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            try:
+                x1, y1, x2, y2 = [int(round(float(v))) for v in bbox[:4]]
+                normalized = [max(0, x1), max(0, y1), max(1, x2), max(1, y2)]
+            except Exception:
+                normalized = None
+        if normalized is not None:
+            width = max(int(normalized[2]), 1)
+            height = max(int(normalized[3]), 1)
+            canvas = _mask_to_canvas_for_bbox(arr, normalized, width, height)
+        else:
+            height, width = arr.shape[:2]
+            canvas = np.where(arr > 0, 255, 0).astype(np.uint8)
+        if canvas is None or not np.any(canvas):
+            continue
+        reason = _weak_image_bubble_mask_error(item, canvas, width=width, height=height)
+        if reason:
+            return reason
+    return ""
+
+
 def _real_bubble_mask_for_text(ocr_page: dict, text: dict, width: int, height: int) -> tuple[np.ndarray | None, str]:
     if not isinstance(text, dict):
         return None, "invalid_text"
@@ -454,6 +1639,9 @@ def _real_bubble_mask_for_text(ocr_page: dict, text: dict, width: int, height: i
             )
             mask = _mask_to_canvas_for_bbox(candidate.get(mask_key), bbox, width, height)
             if mask is not None and np.any(mask):
+                reason = _weak_image_bubble_mask_error({**text, **candidate}, mask, width=width, height=height)
+                if reason:
+                    return None, reason
                 return mask, ""
     return None, "missing_real_bubble_mask"
 
@@ -626,6 +1814,25 @@ def _merge_unique_line_polygons(texts: list[dict]) -> list:
     return merged
 
 
+def _text_bbox_for_inpaint_geometry(item: dict, width: int, height: int) -> list[int] | None:
+    text_bbox = _normalize_bbox(item.get("text_pixel_bbox"), width, height)
+    layout_bbox = _normalize_bbox(item.get("layout_bbox"), width, height)
+    bbox = _normalize_bbox(item.get("bbox"), width, height)
+    peer = layout_bbox or bbox
+    if text_bbox is not None and peer is not None:
+        text_area = max(1, (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]))
+        peer_area = max(1, (peer[2] - peer[0]) * (peer[3] - peer[1]))
+        inter_x1 = max(text_bbox[0], peer[0])
+        inter_y1 = max(text_bbox[1], peer[1])
+        inter_x2 = min(text_bbox[2], peer[2])
+        inter_y2 = min(text_bbox[3], peer[3])
+        inter = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+        if inter / float(min(text_area, peer_area)) >= 0.20 or _bbox_overlap_ratio(text_bbox, peer) >= 0.20:
+            return text_bbox
+        return peer
+    return text_bbox or peer
+
+
 def _enrich_vision_blocks_from_texts_for_inpaint(
     vision_blocks: list[dict],
     texts: list[dict],
@@ -634,6 +1841,15 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
 ) -> list[dict]:
     if not vision_blocks or not texts:
         return vision_blocks
+
+    def _identity_values(item: dict) -> set[str]:
+        values: set[str] = set()
+        for key in ("trace_id", "text_instance_id", "id", "text_id"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                values.add(f"{key}:{value}")
+        return values
+
     enriched_blocks: list[dict] = []
     for block in vision_blocks:
         current = dict(block)
@@ -645,11 +1861,7 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
             for text in texts:
                 if not isinstance(text, dict):
                     continue
-                text_bbox = _normalize_bbox(
-                    text.get("text_pixel_bbox") or text.get("bbox"),
-                    width,
-                    height,
-                )
+                text_bbox = _text_bbox_for_inpaint_geometry(text, width, height)
                 if text_bbox is None:
                     continue
                 score = _bbox_overlap_ratio(block_bbox, text_bbox)
@@ -658,8 +1870,20 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 if score > best_score:
                     best_score = score
                     best_text = text
+        if best_text is None:
+            block_identities = _identity_values(current)
+            if block_identities:
+                for text in texts:
+                    if not isinstance(text, dict):
+                        continue
+                    if block_identities & _identity_values(text):
+                        best_text = text
+                        best_score = 1.0
+                        break
         if best_text is not None and best_score >= 0.35:
+            preserve_current_mask_evidence = _item_has_current_inpaint_mask_evidence(current)
             for key in (
+                "bbox",
                 "rotation_deg",
                 "rotation_source",
                 "qa_flags",
@@ -670,6 +1894,7 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 "text_pixel_bbox",
                 "source_bbox",
                 "balloon_bbox",
+                "background_rgb",
                 "layout_bbox",
                 "_merged_source_bboxes",
                 "merged_source_bboxes",
@@ -677,22 +1902,134 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 "skip_processing",
                 "preserve_original",
                 "render_policy",
+                "route_action",
+                "route_reason",
+                "bubble_mask_source",
+                "bubbleMaskSource",
+                "bubble_mask_bbox",
+                "bubbleMaskBbox",
+                "bubble_inner_bbox",
+                "bubbleInnerBbox",
+                "bubble_id",
+                "bubbleId",
+                "bubble_mask_error",
+                "bubbleMaskError",
+                "card_panel_text_context",
+                "mask_evidence",
             ):
+                if preserve_current_mask_evidence and key in {
+                    "qa_flags",
+                    "route_action",
+                    "route_reason",
+                    "bubble_mask_source",
+                    "bubbleMaskSource",
+                    "bubble_mask_error",
+                    "bubbleMaskError",
+                    "mask_evidence",
+                }:
+                    continue
+                if key == "bbox" and block_bbox is not None:
+                    continue
                 value = best_text.get(key)
                 if value not in (None, [], ""):
                     current[key] = copy.deepcopy(value)
+            coherent_text_bbox = _text_bbox_for_inpaint_geometry(current, width, height)
+            if coherent_text_bbox is not None:
+                current["text_pixel_bbox"] = coherent_text_bbox
             if len(matched_texts) > 1:
                 merged_polygons = _merge_unique_line_polygons(matched_texts)
                 if merged_polygons:
                     current["line_polygons"] = merged_polygons
                 merged_text_bbox: list[int] | None = None
                 for text in matched_texts:
-                    text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+                    text_bbox = _text_bbox_for_inpaint_geometry(text, width, height)
                     merged_text_bbox = _bbox_union_values(merged_text_bbox, text_bbox)
                 if merged_text_bbox is not None:
                     current["text_pixel_bbox"] = merged_text_bbox
         enriched_blocks.append(current)
     return enriched_blocks
+
+
+def _append_missing_text_inpaint_blocks(
+    vision_blocks: list[dict],
+    texts: list[dict],
+    width: int,
+    height: int,
+    image_rgb: np.ndarray,
+) -> list[dict]:
+    if not texts:
+        return vision_blocks
+
+    def _identity_values(item: dict) -> set[str]:
+        values: set[str] = set()
+        for key in ("trace_id", "text_instance_id", "id", "text_id"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                values.add(f"{key}:{value}")
+        return values
+
+    existing = [dict(block) for block in vision_blocks if isinstance(block, dict)]
+    existing_ids: set[str] = set()
+    existing_bboxes: list[list[int]] = []
+    for block in existing:
+        existing_ids.update(_identity_values(block))
+        bbox = _text_bbox_for_inpaint_geometry(block, width, height)
+        if bbox is not None:
+            existing_bboxes.append(bbox)
+
+    added = 0
+    samples: list[dict] = []
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        text_ids = _identity_values(text)
+        if text_ids and text_ids & existing_ids:
+            continue
+        if (
+            _text_suppressed_for_inpaint(text)
+            or _route_action_blocks_inpaint(text)
+            or _text_has_rejected_bubble_without_glyph_evidence(text)
+        ):
+            continue
+        if _translator_note_text_only_mask(text) and not _translator_note_has_text_geometry(text):
+            continue
+        text_bbox = _text_bbox_for_inpaint_geometry(text, width, height)
+        if text_bbox is None:
+            continue
+        if any(_bbox_overlap_ratio(text_bbox, bbox) >= 0.72 for bbox in existing_bboxes):
+            continue
+        candidate = dict(text)
+        try:
+            candidate_mask = build_inpaint_mask(candidate, image_rgb.shape, image_rgb)
+        except Exception:
+            candidate_mask = None
+        if not isinstance(candidate_mask, np.ndarray) or not np.any(candidate_mask):
+            continue
+        fallback = _build_fallback_vision_blocks({"texts": [candidate]}, width, height)
+        if not fallback:
+            continue
+        block = dict(fallback[0])
+        block["_promoted_missing_text_inpaint_block"] = True
+        existing.append(block)
+        existing_ids.update(_identity_values(block))
+        existing_bboxes.append(text_bbox)
+        added += 1
+        if len(samples) < 8:
+            samples.append(
+                {
+                    "id": block.get("id") or block.get("text_id"),
+                    "trace_id": block.get("trace_id"),
+                    "bbox": block.get("bbox"),
+                    "bubble_mask_source": block.get("bubble_mask_source"),
+                    "mask_pixels": int(np.count_nonzero(candidate_mask)),
+                }
+            )
+    if added:
+        # The caller stores this on the page for debug metadata; keep the helper
+        # pure with respect to ocr_page so unit tests can exercise it directly.
+        for block in existing[-added:]:
+            _append_qa_flag_to_item(block, "missing_text_promoted_to_inpaint_block")
+    return existing
 
 
 def _is_rotated_recovery_text(text: dict) -> bool:
@@ -984,6 +2321,107 @@ def _merge_qa_flags_from_mask_evidence_block(text: dict, block: dict) -> None:
         text["qa_flags"] = merged
 
 
+def _append_qa_flag_to_item(item: dict, flag: str) -> None:
+    flags = item.setdefault("qa_flags", [])
+    if not isinstance(flags, list):
+        flags = [str(flags)]
+        item["qa_flags"] = flags
+    if flag not in flags:
+        flags.append(flag)
+
+
+def _remove_qa_flags_from_item(item: dict, flags_to_remove: set[str]) -> None:
+    if not isinstance(item, dict):
+        return
+    flags = [str(flag) for flag in item.get("qa_flags") or [] if str(flag).strip()]
+    kept = [flag for flag in flags if flag not in flags_to_remove]
+    if kept:
+        item["qa_flags"] = kept
+    else:
+        item.pop("qa_flags", None)
+    route_reason = str(item.get("route_reason") or "").strip()
+    if route_reason in flags_to_remove:
+        item.pop("route_reason", None)
+
+
+def _clear_resolved_current_inpaint_flags(
+    ocr_page: dict,
+    *,
+    final_residual_check: dict | None,
+    final_clamped_outside: int,
+) -> None:
+    if not isinstance(ocr_page, dict):
+        return
+    if int(final_clamped_outside or 0) > 0:
+        return
+    flags_to_remove = {"mask_outside_balloon", "mask_outside_balloon_critical"}
+    if not (isinstance(final_residual_check, dict) and final_residual_check.get("has_residual")):
+        flags_to_remove.add("weak_text_residual_after_inpaint")
+    changed = False
+    for collection_key in ("texts", "_vision_blocks"):
+        for item in ocr_page.get(collection_key) or []:
+            if not isinstance(item, dict) or not _item_has_current_inpaint_mask_evidence(item):
+                continue
+            before = list(item.get("qa_flags") or [])
+            _remove_qa_flags_from_item(item, flags_to_remove)
+            changed = changed or before != list(item.get("qa_flags") or [])
+    if not changed:
+        return
+    decision_flags = [
+        str(flag)
+        for flag in ocr_page.get("_strip_inpaint_decision_flags") or []
+        if str(flag).strip() and str(flag).strip() not in flags_to_remove
+    ]
+    if not _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page):
+        decision_flags = [flag for flag in decision_flags if flag != "real_inpaint_skipped_unsafe_mask"]
+    if decision_flags:
+        ocr_page["_strip_inpaint_decision_flags"] = decision_flags
+    else:
+        ocr_page.pop("_strip_inpaint_decision_flags", None)
+
+
+def _mark_mask_outside_balloon_before_inpaint(
+    ocr_page: dict,
+    text: dict,
+    block: dict,
+    band_rgb: np.ndarray,
+) -> None:
+    height, width = band_rgb.shape[:2]
+    action_mask = _coerce_mask_for_shape(block.get("_precomputed_inpaint_mask"), (height, width))
+    if not np.any(action_mask):
+        action_mask = _coerce_mask_for_shape(text.get("_precomputed_inpaint_mask"), (height, width))
+    if not np.any(action_mask):
+        try:
+            action_mask = build_inpaint_mask(block, band_rgb.shape, band_rgb)
+        except Exception:
+            action_mask = None
+    if action_mask is None or not np.any(action_mask):
+        return
+    bubble_mask, _reason = _real_bubble_mask_for_text(ocr_page, block, width, height)
+    if bubble_mask is None or not np.any(bubble_mask):
+        bubble_mask, _reason = _real_bubble_mask_for_text(ocr_page, text, width, height)
+    if bubble_mask is None or not np.any(bubble_mask):
+        return
+    action = _coerce_mask_for_shape(action_mask, (height, width))
+    bubble = _coerce_mask_for_shape(bubble_mask, (height, width))
+    action_pixels = int(np.count_nonzero(action))
+    if action_pixels <= 0:
+        return
+    outside_pixels = int(np.count_nonzero((action > 0) & (bubble == 0)))
+    outside_ratio = outside_pixels / float(max(1, action_pixels))
+    if outside_pixels > 0 and outside_ratio >= OUTSIDE_BALLOON_WARN_RATIO:
+        for item in (text, block):
+            _append_qa_flag_to_item(item, "mask_outside_balloon")
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["pre_inpaint_outside_balloon_ratio"] = round(float(outside_ratio), 6)
+            metrics["pre_inpaint_outside_balloon_pixels"] = int(outside_pixels)
+    if outside_pixels > OUTSIDE_BALLOON_CRITICAL_PIXELS and outside_ratio >= OUTSIDE_BALLOON_CRITICAL_RATIO:
+        for item in (text, block):
+            _append_qa_flag_to_item(item, "mask_outside_balloon_critical")
+        _append_inpaint_decision_flag(ocr_page, "mask_outside_balloon_critical")
+
+
 def _prime_mask_evidence_for_fast_fill(
     ocr_page: dict,
     vision_blocks: list[dict],
@@ -999,6 +2437,26 @@ def _prime_mask_evidence_for_fast_fill(
         if not isinstance(block, dict):
             continue
         target_text = _find_mask_evidence_text_for_block(block, texts, width, height)
+        if _item_has_current_inpaint_mask_evidence(block):
+            if target_text is not None:
+                for key in (
+                    "mask_evidence",
+                    "bubble_mask_source",
+                    "bubbleMaskSource",
+                    "bubble_mask_error",
+                    "bubbleMaskError",
+                    "bubble_mask_bbox",
+                    "bubbleMaskBbox",
+                    "bubble_inner_bbox",
+                    "bubbleInnerBbox",
+                    "card_panel_text_context",
+                ):
+                    value = block.get(key)
+                    if value not in (None, [], ""):
+                        target_text[key] = copy.deepcopy(value)
+                _merge_qa_flags_from_mask_evidence_block(target_text, block)
+                _propagate_mask_evidence_decision_flags(ocr_page, target_text, target_text.get("mask_evidence") or {})
+            continue
         if target_text is None:
             continue
         if not isinstance(block.get("mask_evidence"), dict):
@@ -1010,6 +2468,8 @@ def _prime_mask_evidence_for_fast_fill(
         if not isinstance(evidence, dict):
             continue
         target_text["mask_evidence"] = dict(evidence)
+        _merge_qa_flags_from_mask_evidence_block(target_text, block)
+        _mark_mask_outside_balloon_before_inpaint(ocr_page, target_text, block, band_rgb)
         _merge_qa_flags_from_mask_evidence_block(target_text, block)
         _propagate_mask_evidence_decision_flags(ocr_page, target_text, evidence)
 
@@ -1427,6 +2887,44 @@ def _text_source_limit_bbox(text: dict, width: int, height: int, *, include_line
     return _normalize_bbox(limit_bbox, width, height) if limit_bbox is not None else None
 
 
+def _text_cleanup_limit_bbox(text: dict, width: int, height: int) -> list[int] | None:
+    """Limit strip-real inpaint to glyph evidence, with bounded OCR line recovery."""
+
+    try:
+        rotation_abs = abs(float(text.get("rotation_deg") or text.get("rotation") or 0.0))
+    except Exception:
+        rotation_abs = 0.0
+    if rotation_abs >= 8.0:
+        rotated_source = _text_source_limit_bbox(text, width, height)
+        if rotated_source is not None:
+            return rotated_source
+
+    pixel_bbox = _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+    line_bbox = _line_polygons_bbox(text, width, height, padding=1)
+    if pixel_bbox is None:
+        return line_bbox or _text_source_limit_bbox(text, width, height)
+    if line_bbox is None:
+        return pixel_bbox
+
+    px1, py1, px2, py2 = pixel_bbox
+    lx1, ly1, lx2, ly2 = line_bbox
+    pixel_w = max(1, px2 - px1)
+    pixel_h = max(1, py2 - py1)
+    extra_x = max(14, min(28, int(round(pixel_w * 0.14))))
+    extra_y = max(8, min(24, int(round(pixel_h * 0.25))))
+    expanded = _normalize_bbox(
+        [
+            max(lx1, px1 - extra_x),
+            max(ly1, py1 - extra_y),
+            min(lx2, px2 + extra_x),
+            min(ly2, py2 + extra_y),
+        ],
+        width,
+        height,
+    )
+    return expanded or pixel_bbox
+
+
 def _text_source_limit_mask(width: int, height: int, text: dict, *, padding: int = 1) -> np.ndarray | None:
     bbox = _text_source_limit_bbox(text, width, height)
     if bbox is None:
@@ -1776,6 +3274,7 @@ def _apply_fast_solid_balloon_fill(
 
     result = band_rgb.copy()
     filled_bboxes: list[list[int]] = []
+    filled_text_keys: set[str] = set()
     filled_mask = np.zeros((height, width), dtype=np.uint8)
 
     for text in ocr_page.get("texts", []) or []:
@@ -2060,6 +3559,9 @@ def _apply_fast_white_balloon_fill(
 
     for text in ocr_page.get("texts", []):
         rejection_reason = _fast_white_rejection_reason(text)
+        if _is_false_white_card_candidate(band_rgb, text):
+            _reject("false_white_card_panel")
+            continue
         component_fill_allowed_rejection = rejection_reason in {
             "narration_disabled",
         }
@@ -2249,6 +3751,10 @@ def _apply_fast_white_balloon_fill(
         result[changed_mask] = filled_from_original[changed_mask]
         filled_mask[changed_mask] = 255
         filled_bboxes.append(_bbox_union_values(resolved, text_bbox) or resolved)
+        for key_name in ("id", "text_id", "trace_id", "text_instance_id"):
+            value = text.get(key_name)
+            if value is not None:
+                filled_text_keys.add(str(value))
 
     if not filled_bboxes:
         return band_rgb, vision_blocks, _record({"white_balloon_count": 0, "remaining_blocks": len(vision_blocks)})
@@ -2262,6 +3768,48 @@ def _apply_fast_white_balloon_fill(
         "white_balloon_count": len(filled_bboxes),
         "remaining_blocks": len(remaining_blocks),
     }
+    if filled_text_keys:
+        flags_to_remove = {"mask_outside_balloon", "mask_outside_balloon_critical", "real_inpaint_skipped_unsafe_mask"}
+        for collection_key in ("texts", "_vision_blocks"):
+            for item in ocr_page.get(collection_key) or []:
+                if not isinstance(item, dict):
+                    continue
+                if any(str(item.get(key_name) or "") in filled_text_keys for key_name in ("id", "text_id", "trace_id", "text_instance_id")):
+                    _remove_qa_flags_from_item(item, flags_to_remove)
+        unsafe_samples = [
+            sample
+            for sample in ocr_page.get("_strip_unsafe_inpaint_block_samples") or []
+            if not isinstance(sample, dict)
+            or not any(str(sample.get(key_name) or "") in filled_text_keys for key_name in ("id", "text_id", "trace_id", "text_instance_id"))
+        ]
+        if unsafe_samples:
+            ocr_page["_strip_unsafe_inpaint_block_samples"] = unsafe_samples
+            reasons: dict[str, int] = {}
+            for sample in unsafe_samples:
+                if not isinstance(sample, dict):
+                    continue
+                reason = str(sample.get("reason") or "").strip()
+                if reason:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            if reasons:
+                ocr_page["_strip_unsafe_inpaint_block_reasons"] = reasons
+                ocr_page["_strip_unsafe_inpaint_block_count"] = sum(reasons.values())
+            else:
+                ocr_page.pop("_strip_unsafe_inpaint_block_reasons", None)
+                ocr_page.pop("_strip_unsafe_inpaint_block_count", None)
+        else:
+            ocr_page.pop("_strip_unsafe_inpaint_block_samples", None)
+            ocr_page.pop("_strip_unsafe_inpaint_block_reasons", None)
+            ocr_page.pop("_strip_unsafe_inpaint_block_count", None)
+        decision_flags = [
+            str(flag)
+            for flag in ocr_page.get("_strip_inpaint_decision_flags") or []
+            if str(flag).strip() not in flags_to_remove
+        ]
+        if decision_flags:
+            ocr_page["_strip_inpaint_decision_flags"] = decision_flags
+        else:
+            ocr_page.pop("_strip_inpaint_decision_flags", None)
     return result, remaining_blocks, _record(stats)
 
 
@@ -2484,7 +4032,7 @@ def _try_solid_background_text_fill(
 
 
 def _is_dark_panel_text_candidate(text: dict) -> bool:
-    if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+    if not isinstance(text, dict) or not _route_action_allows_local_dark_panel_fill(text):
         return False
     profiles = {
         str(text.get("layout_profile") or "").strip().lower(),
@@ -2500,24 +4048,319 @@ def _is_dark_panel_text_candidate(text: dict) -> bool:
     return True
 
 
+def _text_has_dark_visual_context(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("render_profile") or "").strip().lower(),
+        str(text.get("background_type") or "").strip().lower(),
+        str(text.get("balloon_type") or "").strip().lower(),
+    }
+    if profiles & {"dark", "dark_panel", "solid_dark", "dark_bubble", "connected_dark_bubble"}:
+        return True
+    source = str(text.get("bubble_mask_source") or "").strip().lower()
+    if source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+        return True
+    style_origin = str(text.get("style_origin") or "").strip().lower()
+    if style_origin in {"auto_dark_panel_glow", "source_dark_panel_glow"}:
+        return True
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if flags & {"auto_dark_panel_glow_fallback", "original_dark_panel_effect_colors"}:
+        return True
+    background = _rgb_luma_chroma(text.get("background_rgb"))
+    return bool(background is not None and background[0] <= 160.0)
+
+
+def _text_is_white_balloon_context(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if _text_has_dark_visual_context(text):
+        background = _rgb_luma_chroma(text.get("background_rgb"))
+        if background is None or background[0] < 214.0:
+            return False
+    values = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("balloon_type") or "").strip().lower(),
+        str(text.get("bubble_mask_source") or "").strip().lower(),
+    }
+    if values & {
+        "white",
+        "white_balloon",
+        "image_contour_bubble_mask",
+        "image_rect_bubble_mask",
+        "image_white_bubble_mask",
+        "derived_white_bubble_mask",
+        "derived_white_crop",
+    }:
+        return True
+    background = _rgb_luma_chroma(text.get("background_rgb"))
+    return bool(background is not None and background[0] >= 228.0 and background[1] <= 18.0)
+
+
+def _unsafe_white_balloon_requires_real_inpaint(text: dict) -> bool:
+    if not isinstance(text, dict) or not _text_is_white_balloon_context(text):
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    unsafe = bool(
+        str(text.get("route_reason") or "").strip().lower()
+        in {"mask_outside_balloon_critical", "missing_real_bubble_mask"}
+        or flags
+        & {
+            "mask_outside_balloon",
+            "mask_outside_balloon_critical",
+            "missing_real_bubble_mask",
+            "rejected_derived_bubble_mask",
+            "debug_derived_bubble_mask_rejected",
+        }
+    )
+    if not unsafe:
+        return False
+    source = str(text.get("bubble_mask_source") or "").strip().lower()
+    if source in {
+        "image_contour_bubble_mask",
+        "image_rect_bubble_mask",
+        "image_white_bubble_mask",
+        "derived_white_bubble_mask",
+        "derived_white_crop",
+    }:
+        return True
+    return bool(str(text.get("balloon_type") or "").strip().lower() in {"white", "white_balloon", "speech_balloon"})
+
+
+def _is_false_white_card_candidate(image_rgb: np.ndarray, text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source != "image_white_bubble_mask":
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    evidence = text.get("mask_evidence")
+    has_fast_ocr_evidence = bool(
+        isinstance(evidence, dict)
+        and evidence.get("fast_fill_allowed") is True
+        and str(evidence.get("kind") or "").strip().lower() == "ocr_pixels"
+        and int(evidence.get("raw_mask_pixels") or 0) > 0
+        and (text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
+    )
+    if not (
+        flags
+        & {
+            "mask_outside_balloon",
+            "mask_outside_balloon_critical",
+            "bubble_clip_preserved_raw_text",
+            "balloon_outline_components_removed",
+        }
+        or has_fast_ocr_evidence
+    ):
+        return False
+    return not _text_region_looks_plain_white(image_rgb, text)
+
+
+def _is_dark_or_colored_card_text(text: dict) -> bool:
+    if not isinstance(text, dict) or not _route_action_allows_local_dark_panel_fill(text):
+        return False
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("render_profile") or "").strip().lower(),
+        str(text.get("background_type") or "").strip().lower(),
+    }
+    if profiles & {"card", "title_card", "status_panel", "colored_status_panel", "dark_panel", "solid_dark", "dark"}:
+        return True
+    background = _rgb_luma_chroma(text.get("background_rgb"))
+    if background is None:
+        return False
+    luma, chroma = background
+    return bool(luma < 135.0 or chroma > 45.0)
+
+
+def _strip_texts_need_raw_floor(texts: list[dict]) -> bool:
+    for text in texts or []:
+        if _is_dark_or_colored_card_text(text):
+            return True
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()} if isinstance(text, dict) else set()
+        if "bubble_clip_preserved_raw_text" in flags:
+            return True
+    return False
+
+
+_REJECTED_BUBBLE_MASK_SOURCES = {
+    "derived_white_crop_rejected",
+    "rejected_derived_bubble_mask",
+}
+
+def _is_rejected_dark_card_fill_candidate(image_rgb: np.ndarray, text: dict) -> bool:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in _REJECTED_BUBBLE_MASK_SOURCES:
+        return False
+    if not (text.get("balloon_bbox") or text.get("bubble_mask_bbox")):
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("bbox")):
+        return False
+    if _text_has_dark_visual_context(text):
+        return True
+    height, width = image_rgb.shape[:2]
+    bbox = (
+        _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+        or _normalize_bbox(text.get("balloon_bbox") or text.get("bubble_mask_bbox"), width, height)
+    )
+    if bbox is None:
+        return False
+    fill_bbox = _expanded_bbox(width, height, bbox, padding=20) or bbox
+    x1, y1, x2, y2 = fill_bbox
+    crop = image_rgb[y1:y2, x1:x2]
+    if crop.size < 64:
+        return False
+    pixels = crop.reshape(-1, crop.shape[-1]).astype(np.float32)
+    luma = pixels[:, 0] * 0.299 + pixels[:, 1] * 0.587 + pixels[:, 2] * 0.114
+    dark_ratio = float(np.count_nonzero(luma <= 96.0)) / float(max(1, luma.size))
+    p25 = float(np.percentile(luma, 25))
+    median = float(np.median(luma))
+    p90 = float(np.percentile(luma, 90))
+    return bool(dark_ratio >= 0.30 and p25 <= 88.0 and median <= 130.0 and p90 <= 252.0)
+
+
+_UNSAFE_AUTO_INPAINT_QA_FLAGS = {
+    "bbox_overreach_critical",
+    "mask_outside_balloon_critical",
+}
+
+
+def _text_has_rejected_bubble_mask_source(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    error = str(text.get("bubble_mask_error") or text.get("bubbleMaskError") or "").strip()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    return bool(
+        source in _REJECTED_BUBBLE_MASK_SOURCES
+        or bool(error)
+        or "debug_derived_bubble_mask_rejected" in flags
+        or "derived_bubble_mask_rejected" in flags
+        or "rejected_derived_bubble_mask" in flags
+    )
+
+
+def _text_has_rejected_bubble_without_glyph_evidence(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    error = str(text.get("bubble_mask_error") or text.get("bubbleMaskError") or "").strip()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    rejected = (
+        source in _REJECTED_BUBBLE_MASK_SOURCES
+        or bool(error)
+        or "debug_derived_bubble_mask_rejected" in flags
+        or "derived_bubble_mask_rejected" in flags
+        or "rejected_derived_bubble_mask" in flags
+    )
+    if not rejected:
+        return False
+    has_line_geometry = bool(text.get("line_polygons") or text.get("text_pixel_bbox"))
+    missing_glyph_evidence = (
+        "raw_text_evidence_missing" in flags
+        or "fast_fill_no_glyph_evidence" in flags
+        or bool(text.get("raw_text_evidence_missing"))
+        or not has_line_geometry
+    )
+    merged_fragment = "same_balloon_fragment_merged" in flags or bool(text.get("merged_into_trace_id"))
+    return bool(missing_glyph_evidence and (merged_fragment or not has_line_geometry))
+
+
+def _text_has_no_glyph_evidence(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    return bool("fast_fill_no_glyph_evidence" in flags or "raw_text_evidence_missing" in flags or text.get("raw_text_evidence_missing"))
+
+
+def _has_fast_fillable_text_mask_evidence(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    evidence = text.get("mask_evidence")
+    if not isinstance(evidence, dict) or evidence.get("fast_fill_allowed") is not True:
+        return False
+    kind = str(evidence.get("kind") or "").strip().lower()
+    if kind not in {"ocr_pixels", "glyph_segmentation", "component_bubble_cleaner"}:
+        return False
+    try:
+        raw_pixels = int(evidence.get("raw_mask_pixels") or 0)
+        expanded_pixels = int(evidence.get("expanded_mask_pixels") or 0)
+    except Exception:
+        return False
+    return bool(raw_pixels > 0 or expanded_pixels > 0)
+
+
+def _dark_bubble_no_glyph_fast_fillable(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    return bool(
+        str(text.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask"
+        and _text_has_no_glyph_evidence(text)
+        and _has_fast_fillable_text_mask_evidence(text)
+    )
+
+
+def _has_trustworthy_glyph_action_mask(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox")):
+        return False
+    return _has_fast_fillable_text_mask_evidence(text)
+
+
 _COLORED_STATUS_PANEL_TERMS = {
+    "APROVADO",
+    "APROVADA",
+    "BEM",
+    "BOMBEIROS",
+    "CANDIDATE",
+    "CANDIDATO",
+    "CANDIDATA",
     "BEAST",
     "COLLECTION",
     "CONFIRM",
+    "CONSULTA",
     "ERROR",
+    "FIREMAN",
+    "GO",
+    "INQUIRY",
     "LEVEL",
     "MISSION",
+    "NAME",
+    "NOME",
     "NEWS",
+    "NUMBER",
+    "NUMERO",
     "POWER",
     "PROMOTION",
+    "PROCURAR",
     "RECORD",
     "RECORDS",
+    "RECRUITMENT",
+    "RECRUTAMENTO",
     "REQUIRED",
+    "REGIONAL",
+    "REGISTRO",
+    "REGISTRATION",
+    "RESIDENT",
+    "RESIDENTE",
+    "SEARCH",
     "SOURCE",
     "STATUS",
+    "SUCCESSFUL",
+    "SUCEDIDA",
+    "SUCEDIDO",
     "SYSTEM",
     "TAMED",
     "TAMEABLE",
+    "TESTE",
     "TRIAL",
 }
 
@@ -2543,7 +4386,8 @@ def _source_text_has_words(text: dict) -> bool:
 
 
 def _source_text_has_colored_status_terms(text: dict) -> bool:
-    source = " ".join(str(text.get(key) or "") for key in ("text", "original", "translated", "traduzido")).upper()
+    source_raw = " ".join(str(text.get(key) or "") for key in ("text", "original", "translated", "traduzido"))
+    source = unicodedata.normalize("NFKD", source_raw).encode("ascii", "ignore").decode("ascii").upper()
     terms = set(re.findall(r"[A-Z]+", source))
     if terms & _COLORED_STATUS_PANEL_TERMS:
         return True
@@ -2552,6 +4396,49 @@ def _source_text_has_colored_status_terms(text: dict) -> bool:
     if (terms & _PHONE_UI_MONTH_TERMS) and re.search(r"\d", source):
         return True
     return False
+
+
+def _source_text_has_strict_ui_form_signal(text: dict) -> bool:
+    source_raw = " ".join(
+        str(text.get(key) or "")
+        for key in ("text", "original", "translated", "traduzido", "raw_ocr", "normalized_ocr")
+    )
+    source = unicodedata.normalize("NFKD", source_raw).encode("ascii", "ignore").decode("ascii").upper()
+    terms = set(re.findall(r"[A-Z]+", source))
+    if re.search(r"\b20\s*\*+", source):
+        return True
+    if {"SUCCESSFUL", "CANDIDATE"}.issubset(terms) or {"CANDIDATE", "INQUIRY"}.issubset(terms):
+        return True
+    if {"CONSULTA", "CANDIDATO"}.issubset(terms) or {"CANDIDATO", "SUCEDIDA"}.issubset(terms):
+        return True
+    if {"FIREMAN", "RECRUITMENT"}.issubset(terms) or {"BOMBEIROS", "RECRUTAMENTO"}.issubset(terms):
+        return True
+    if "NAME" in terms and terms & {"RESIDENT", "REGISTRATION", "NUMBER"}:
+        return True
+    if "NOME" in terms and terms & {"RESIDENTE", "REGISTRO", "NUMERO"}:
+        return True
+    if terms & {"SEARCH", "PROCURAR"}:
+        return True
+    strong_terms = terms & {
+        "CANDIDATE",
+        "CANDIDATO",
+        "FIREMAN",
+        "BOMBEIROS",
+        "INQUIRY",
+        "CONSULTA",
+        "NAME",
+        "NOME",
+        "RECRUITMENT",
+        "RECRUTAMENTO",
+        "REGIONAL",
+        "REGISTRATION",
+        "REGISTRO",
+        "SUCCESSFUL",
+        "SUCEDIDA",
+        "TEST",
+        "TESTE",
+    }
+    return len(strong_terms) >= 3
 
 
 def _rgb_luma_chroma(rgb: object) -> tuple[float, int] | None:
@@ -2563,6 +4450,47 @@ def _rgb_luma_chroma(rgb: object) -> tuple[float, int] | None:
         return None
     luma = (channels[0] * 0.299) + (channels[1] * 0.587) + (channels[2] * 0.114)
     return float(luma), int(max(channels) - min(channels))
+
+
+def _sample_ui_panel_background_from_mask(
+    image_rgb: np.ndarray,
+    panel_mask: np.ndarray,
+    text_mask: np.ndarray,
+) -> np.ndarray | None:
+    sample_region = (panel_mask > 0) & (text_mask == 0)
+    if int(np.count_nonzero(sample_region)) < 64:
+        sample_region = panel_mask > 0
+    if int(np.count_nonzero(sample_region)) < 64:
+        return None
+    pixels = image_rgb[sample_region].astype(np.float32)
+    luma = (pixels[:, 0] * 0.299) + (pixels[:, 1] * 0.587) + (pixels[:, 2] * 0.114)
+    chroma = np.max(pixels, axis=1) - np.min(pixels, axis=1)
+    non_page = (luma <= 242.0) & ((chroma >= 5.0) | (luma <= 170.0))
+    non_page_count = int(np.count_nonzero(non_page))
+    if non_page_count < 64:
+        return None
+    non_page_ratio = non_page_count / float(max(1, int(pixels.shape[0])))
+    if non_page_ratio < 0.16:
+        return None
+    fill = np.median(pixels[non_page], axis=0)
+    fill_color = np.asarray([int(max(0, min(255, round(float(v))))) for v in fill], dtype=np.uint8)
+    background = _rgb_luma_chroma(fill_color.tolist())
+    if background is None:
+        return None
+    bg_luma, bg_chroma = background
+    if bg_luma > 238.0:
+        return None
+    if bg_chroma < 5 and bg_luma > 170.0:
+        return None
+    text_region = text_mask > 0
+    text_region_count = int(np.count_nonzero(text_region))
+    if text_region_count > 0:
+        text_pixels = image_rgb[text_region].astype(np.int16)
+        delta_to_fill = np.mean(np.abs(text_pixels - fill_color.astype(np.int16)[None, :]), axis=1)
+        in_text_panel_ratio = int(np.count_nonzero(delta_to_fill <= 22.0)) / float(text_region_count)
+        if in_text_panel_ratio < 0.18:
+            return None
+    return fill_color
 
 
 def _sample_colored_panel_background(
@@ -2577,7 +4505,15 @@ def _sample_colored_panel_background(
     if text_bbox is None:
         return None
     line_polygons = text.get("line_polygons") or []
-    if line_polygons and not _source_text_has_colored_status_terms(text):
+    bubble_mask_source = str(text.get("bubble_mask_source") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()} if isinstance(text, dict) else set()
+    visual_card_candidate = (
+        bubble_mask_source in {"derived_card_panel_mask", "image_dark_panel_mask", "image_dark_bubble_mask"}
+        or bubble_mask_source in _REJECTED_BUBBLE_MASK_SOURCES
+        or (bubble_mask_source == "image_white_bubble_mask" and "mask_outside_balloon_critical" in flags)
+        or _is_dark_or_colored_card_text(text)
+    )
+    if line_polygons and not _source_text_has_colored_status_terms(text) and not visual_card_candidate:
         return None
     fill_bbox = _expanded_bbox(width, height, text_bbox, padding=24) or text_bbox
     text_area = max(1, (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]))
@@ -2592,6 +4528,11 @@ def _sample_colored_panel_background(
         return None
 
     panel_mask = _mask_from_bbox(width, height, fill_bbox, padding=0) > 0
+    ui_panel_fallback = (
+        _sample_ui_panel_background_from_mask(image_rgb, panel_mask.astype(np.uint8), text_mask.astype(np.uint8))
+        if _source_text_has_colored_status_terms(text)
+        else None
+    )
     inner = cv2.dilate(
         (text_mask > 0).astype(np.uint8),
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
@@ -2613,10 +4554,10 @@ def _sample_colored_panel_background(
     fill_color = np.asarray([int(max(0, min(255, round(float(v))))) for v in fill], dtype=np.uint8)
     background = _rgb_luma_chroma(fill_color.tolist())
     if background is None:
-        return None
+        return ui_panel_fallback
     bg_luma, bg_chroma = background
     if not (36.0 <= bg_luma <= 238.0 and bg_chroma >= 8):
-        return None
+        return ui_panel_fallback
 
     rgb_i = image_rgb.astype(np.int16)
     delta = np.mean(np.abs(rgb_i - fill_color.astype(np.int16)[None, None, :]), axis=2)
@@ -2634,11 +4575,11 @@ def _sample_colored_panel_background(
     glyph_pixels = int(np.count_nonzero(source_glyph_like))
     mask_pixels = int(np.count_nonzero(text_mask > 0))
     if glyph_pixels < max(24, min(180, int(round(mask_pixels * 0.006)))):
-        return None
+        return ui_panel_fallback
     if glyph_pixels > int(mask_pixels * 0.72) and text.get("line_polygons"):
-        return None
+        return ui_panel_fallback
     if glyph_pixels > int(mask_pixels * 0.92):
-        return None
+        return ui_panel_fallback
     return fill_color
 
 
@@ -2664,7 +4605,9 @@ def _is_colored_status_panel_text_candidate(text: dict) -> bool:
             bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
         except Exception:
             bbox_area = 0
-    return line_count >= 3 or bbox_area >= 16_000
+    if line_count >= 3 or bbox_area >= 16_000:
+        return True
+    return line_count >= 1 and bbox_area >= 1_000
 
 
 def _colored_status_panel_glyph_mask(
@@ -2672,6 +4615,8 @@ def _colored_status_panel_glyph_mask(
     text: dict,
     text_mask: np.ndarray,
     background_rgb: np.ndarray | None = None,
+    *,
+    dilation_size: int = 13,
 ) -> np.ndarray | None:
     if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
         return None
@@ -2689,14 +4634,23 @@ def _colored_status_panel_glyph_mask(
     rgb_f = image_rgb.astype(np.float32)
     luma = (rgb_f[:, :, 0] * 0.299) + (rgb_f[:, :, 1] * 0.587) + (rgb_f[:, :, 2] * 0.114)
     chroma = np.max(rgb_i, axis=2) - np.min(rgb_i, axis=2)
-    candidate = (text_mask > 0) & (delta >= 24.0) & (
-        ((luma >= float(bg_luma) + 18.0) & (luma >= 145.0))
-        | ((luma <= float(bg_luma) - 20.0) & (float(bg_luma) >= 88.0))
-        | ((np.abs(luma - float(bg_luma)) >= 4.0) & (chroma >= 38) & (delta >= 28.0))
-    )
+    derived_card_panel = str(text.get("bubble_mask_source") or "").strip().lower() in {"derived_card_panel_mask", "image_dark_panel_mask", "image_dark_bubble_mask"}
+    rejected_visual_card_panel = str(text.get("bubble_mask_source") or "").strip().lower() in _REJECTED_BUBBLE_MASK_SOURCES
+    if derived_card_panel:
+        candidate = (text_mask > 0) & (delta >= 18.0) & (
+            ((luma >= float(bg_luma) + 18.0) & (luma >= 145.0))
+            | ((luma >= 218.0) & (delta >= 10.0))
+            | ((luma >= 198.0) & (chroma <= 58) & (delta >= 14.0))
+        )
+    else:
+        candidate = (text_mask > 0) & (delta >= 24.0) & (
+            ((luma >= float(bg_luma) + 18.0) & (luma >= 145.0))
+            | ((luma <= float(bg_luma) - 20.0) & (float(bg_luma) >= 88.0))
+            | ((np.abs(luma - float(bg_luma)) >= 4.0) & (chroma >= 38) & (delta >= 28.0))
+        )
     if int(np.count_nonzero(candidate)) < 24:
         return None
-    if not text.get("line_polygons"):
+    if not text.get("line_polygons") and not derived_card_panel and not rejected_visual_card_panel:
         height, width = image_rgb.shape[:2]
         text_bbox = _normalize_bbox(text.get("text_pixel_bbox"), width, height) or _normalize_bbox(
             text.get("bbox"),
@@ -2705,24 +4659,778 @@ def _colored_status_panel_glyph_mask(
         )
         if text_bbox is not None:
             return _mask_from_bbox(width, height, text_bbox, padding=8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    kernel_side = max(3, int(dilation_size))
+    if kernel_side % 2 == 0:
+        kernel_side += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_side, kernel_side))
     glyph_mask = cv2.dilate(candidate.astype(np.uint8) * 255, kernel, iterations=1)
     return glyph_mask if np.any(glyph_mask) else None
+
+
+def _unsafe_card_visual_glyph_mask(
+    image_rgb: np.ndarray,
+    text_mask: np.ndarray,
+    *,
+    strict_text_rect: bool = False,
+) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return None
+    region = text_mask > 0
+    region_pixels = int(np.count_nonzero(region))
+    if region_pixels < 16:
+        return None
+    rgb_f = image_rgb.astype(np.float32)
+    luma = (rgb_f[:, :, 0] * 0.299) + (rgb_f[:, :, 1] * 0.587) + (rgb_f[:, :, 2] * 0.114)
+    local_luma = luma[region]
+    if local_luma.size < 16:
+        return None
+    p50 = float(np.percentile(local_luma, 50))
+    p75 = float(np.percentile(local_luma, 75))
+    p85 = float(np.percentile(local_luma, 85))
+    local_chroma = None
+    if image_rgb.ndim == 3:
+        rgb_i = image_rgb.astype(np.int16)
+        chroma = np.max(rgb_i, axis=2) - np.min(rgb_i, axis=2)
+        local_chroma = chroma[region]
+    dense_light_glyph = p75 >= 220.0 and p50 <= 180.0
+    tight_glow_glyph = p85 >= 245.0 and p50 <= 105.0
+    light_on_colored_card = bool(
+        p75 >= 230.0
+        and p50 >= 145.0
+        and local_chroma is not None
+        and local_chroma.size >= 16
+        and float(np.percentile(local_chroma, 50)) >= 28.0
+    )
+    if light_on_colored_card:
+        chroma_cutoff = max(55.0, min(105.0, float(np.percentile(local_chroma, 45))))
+        threshold = max(212.0, min(242.0, p75 - 8.0))
+        candidate = region & (luma >= threshold) & (chroma <= chroma_cutoff)
+    else:
+        threshold = max(128.0, p50 + 22.0) if dense_light_glyph else max(178.0, p75 + 18.0)
+        candidate = region & (luma >= threshold)
+    candidate_pixels = int(np.count_nonzero(candidate))
+    if candidate_pixels < max(18, min(160, int(round(region_pixels * 0.003)))):
+        return None
+    max_candidate_ratio = 0.58 if strict_text_rect else (0.88 if (dense_light_glyph or light_on_colored_card) else 0.38)
+    if candidate_pixels > int(region_pixels * max_candidate_ratio):
+        return None
+    kernel_side = 3 if strict_text_rect else 7
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_side, kernel_side))
+    glyph_mask = cv2.dilate(candidate.astype(np.uint8) * 255, kernel, iterations=1)
+    glyph_pixels = int(np.count_nonzero(glyph_mask))
+    max_glyph_ratio = 0.62 if strict_text_rect else (0.96 if (dense_light_glyph or light_on_colored_card) else (0.72 if tight_glow_glyph else 0.55))
+    if glyph_pixels > int(region_pixels * max_glyph_ratio):
+        return None
+    return glyph_mask if glyph_pixels else None
+
+
+def _remember_text_fill_mask(text: dict, key: str, mask: np.ndarray | None) -> None:
+    if not isinstance(text, dict) or not isinstance(mask, np.ndarray) or not np.any(mask):
+        return
+    text[key] = np.where(mask > 0, 255, 0).astype(np.uint8)
+
+
+def _pop_text_fill_mask(text: dict, key: str, shape: tuple[int, int]) -> np.ndarray:
+    if not isinstance(text, dict):
+        return np.zeros(shape, dtype=np.uint8)
+    mask = text.pop(key, None)
+    if not isinstance(mask, np.ndarray):
+        return np.zeros(shape, dtype=np.uint8)
+    return _coerce_mask_for_shape(mask, shape)
+
+
+def _accumulate_page_fill_mask(ocr_page: dict, key: str, mask: np.ndarray | None, shape: tuple[int, int]) -> None:
+    if not isinstance(ocr_page, dict) or not isinstance(mask, np.ndarray) or not np.any(mask):
+        return
+    current = _coerce_mask_for_shape(ocr_page.get(key), shape)
+    ocr_page[key] = np.maximum(current, _coerce_mask_for_shape(mask, shape)).astype(np.uint8)
+
+
+def _page_fill_mask(ocr_page: dict | None, key: str, shape: tuple[int, int]) -> np.ndarray:
+    if not isinstance(ocr_page, dict):
+        return np.zeros(shape, dtype=np.uint8)
+    return _coerce_mask_for_shape(ocr_page.get(key), shape)
+
+
+def _clip_dark_bubble_fill_mask_to_lobe(
+    text: dict,
+    mask: np.ndarray,
+    shape: tuple[int, int],
+    *,
+    padding: int = 4,
+) -> np.ndarray:
+    if not isinstance(text, dict) or not isinstance(mask, np.ndarray) or not np.any(mask):
+        return mask
+    if str(text.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+        return mask
+    height, width = shape[:2]
+    sibling_clip = _dark_bubble_sibling_lobe_clip_mask(text, width, height, padding=max(0, int(padding)))
+    if isinstance(sibling_clip, np.ndarray) and np.any(sibling_clip):
+        sibling_clipped = np.where((mask > 0) & (sibling_clip > 0), 255, 0).astype(np.uint8)
+        sibling_pixels = int(np.count_nonzero(sibling_clipped))
+        original_pixels_for_sibling = int(np.count_nonzero(mask))
+        if sibling_pixels >= max(48, int(round(original_pixels_for_sibling * 0.18))):
+            if sibling_pixels < original_pixels_for_sibling:
+                metrics = text.setdefault("qa_metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["dark_bubble_sibling_lobe_fill_mask_clipped"] = {
+                        "source_pixels": int(original_pixels_for_sibling),
+                        "clipped_pixels": int(sibling_pixels),
+                    }
+            mask = sibling_clipped
+    lobe_bbox = _normalize_bbox(text.get("bubble_mask_bbox") or text.get("bubbleMaskBbox"), width, height)
+    if lobe_bbox is None:
+        return mask
+    text_bbox = _normalize_bbox(text.get("text_pixel_bbox"), width, height) or _normalize_bbox(text.get("bbox"), width, height)
+    if text_bbox is not None:
+        tx1, ty1, tx2, ty2 = text_bbox
+        lx1, ly1, lx2, ly2 = lobe_bbox
+        text_area = max(1, (tx2 - tx1) * (ty2 - ty1))
+        inter_w = max(0, min(tx2, lx2) - max(tx1, lx1))
+        inter_h = max(0, min(ty2, ly2) - max(ty1, ly1))
+        lobe_text_overlap = inter_w * inter_h
+        lobe_text_width = max(0, min(tx2, lx2) - max(tx1, lx1))
+        text_w = max(1, tx2 - tx1)
+        if lobe_text_overlap < int(text_area * 0.42) or lobe_text_width < int(text_w * 0.50):
+            metrics = text.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["dark_bubble_lobe_clip_rejected_undercovered_text"] = {
+                    "text_bbox": list(text_bbox),
+                    "lobe_bbox": list(lobe_bbox),
+                    "overlap_pixels": int(lobe_text_overlap),
+                    "text_area": int(text_area),
+                }
+            _append_qa_flag_to_item(text, "dark_bubble_lobe_clip_rejected_undercovered_text")
+            return mask
+    balloon_bbox = _normalize_bbox(text.get("balloon_bbox"), width, height)
+    connected_hint = bool(
+        "dark_bubble_connected_lobes_promoted" in {str(flag).strip() for flag in text.get("qa_flags") or []}
+        or "dark_bubble_lobe_mask_bbox_preferred" in {str(flag).strip() for flag in text.get("qa_flags") or []}
+    )
+    if balloon_bbox is not None:
+        lobe_area = (lobe_bbox[2] - lobe_bbox[0]) * (lobe_bbox[3] - lobe_bbox[1])
+        balloon_area = (balloon_bbox[2] - balloon_bbox[0]) * (balloon_bbox[3] - balloon_bbox[1])
+        connected_hint = connected_hint or lobe_area <= int(balloon_area * 0.82)
+    if not connected_hint:
+        return mask
+
+    clip_bbox = _expanded_bbox(width, height, lobe_bbox, padding=max(0, int(padding))) or lobe_bbox
+    x1, y1, x2, y2 = clip_bbox
+    clip = np.zeros((height, width), dtype=np.uint8)
+    clip[y1:y2, x1:x2] = 255
+    clipped = np.where((mask > 0) & (clip > 0), 255, 0).astype(np.uint8)
+    clipped_pixels = int(np.count_nonzero(clipped))
+    original_pixels = int(np.count_nonzero(mask))
+    if clipped_pixels < max(48, int(round(original_pixels * 0.20))):
+        return mask
+    if clipped_pixels < original_pixels:
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_bubble_lobe_fill_mask_clipped"] = {
+                "source_pixels": int(original_pixels),
+                "clipped_pixels": int(clipped_pixels),
+                "clip_bbox": list(clip_bbox),
+            }
+    return clipped
+
+
+def _dark_bubble_sibling_lobe_clip_mask(text: dict, width: int, height: int, *, padding: int = 4) -> np.ndarray | None:
+    siblings = text.get("_dark_bubble_sibling_texts")
+    if not isinstance(siblings, list) or not siblings:
+        return None
+    own_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    has_explicit_connected_lobe = bool(
+        "dark_bubble_connected_lobes_promoted" in own_flags
+        or "dark_bubble_lobe_mask_bbox_preferred" in own_flags
+        or any(
+            isinstance(sibling, dict)
+            and {
+                str(flag).strip()
+                for flag in sibling.get("qa_flags") or []
+                if str(flag).strip()
+            }
+            & {"dark_bubble_connected_lobes_promoted", "dark_bubble_lobe_mask_bbox_preferred"}
+            for sibling in siblings
+        )
+    )
+    if not has_explicit_connected_lobe:
+        return None
+    text_bbox = (
+        _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+    )
+    base_bbox = (
+        _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("balloon_bbox"), width, height)
+        or text_bbox
+    )
+    if text_bbox is None or base_bbox is None:
+        return None
+    tx1, ty1, tx2, ty2 = text_bbox
+    tcx = (tx1 + tx2) / 2.0
+    tcy = (ty1 + ty2) / 2.0
+    clip = np.zeros((height, width), dtype=np.uint8)
+    bx1, by1, bx2, by2 = base_bbox
+    clip[by1:by2, bx1:bx2] = 255
+    changed = False
+    own_id = str(text.get("id") or text.get("text_id") or text.get("trace_id") or "").strip()
+    for sibling in siblings:
+        if not isinstance(sibling, dict):
+            continue
+        if str(sibling.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+            continue
+        sibling_id = str(sibling.get("id") or sibling.get("text_id") or sibling.get("trace_id") or "").strip()
+        if own_id and sibling_id and sibling_id == own_id:
+            continue
+        sibling_flags = {str(flag).strip() for flag in sibling.get("qa_flags") or [] if str(flag).strip()}
+        sibling_lobe_bbox = _normalize_bbox(sibling.get("bubble_mask_bbox"), width, height)
+        sibling_text_bbox = (
+            _normalize_bbox(sibling.get("text_pixel_bbox"), width, height)
+            or _normalize_bbox(sibling.get("bbox"), width, height)
+        )
+        sibling_connected_lobe = bool(
+            "dark_bubble_connected_lobes_promoted" in sibling_flags
+            or "dark_bubble_lobe_mask_bbox_preferred" in sibling_flags
+        )
+        sibling_bbox = sibling_lobe_bbox if sibling_connected_lobe and sibling_lobe_bbox is not None else sibling_text_bbox
+        if sibling_bbox is None:
+            continue
+        sx1, sy1, sx2, sy2 = sibling_bbox
+        scx = (sx1 + sx2) / 2.0
+        scy = (sy1 + sy2) / 2.0
+        overlap_x = max(0, min(tx2, sx2) - max(tx1, sx1))
+        overlap_y = max(0, min(ty2, sy2) - max(ty1, sy1))
+        same_connected_area = bool(
+            _bbox_overlap_ratio(base_bbox, _normalize_bbox(sibling.get("balloon_bbox"), width, height) or sibling_bbox) >= 0.18
+            or _bbox_overlap_ratio(base_bbox, _normalize_bbox(sibling.get("bubble_mask_bbox"), width, height) or sibling_bbox) >= 0.18
+            or overlap_x > 0
+            or overlap_y > 0
+        )
+        if not same_connected_area:
+            continue
+        if abs(tcx - scx) >= max(24.0, abs(tcy - scy) * 0.72):
+            mid = int(round((tcx + scx) / 2.0))
+            if tcx < scx:
+                boundary = min(mid, sx1 - padding)
+                clip[:, max(0, boundary):] = 0
+            else:
+                boundary = max(mid, sx2 + padding)
+                clip[:, :min(width, boundary)] = 0
+            changed = True
+        elif abs(tcy - scy) >= 24.0:
+            mid = int(round((tcy + scy) / 2.0))
+            if tcy < scy:
+                clip[max(0, mid + padding):, :] = 0
+            else:
+                clip[:min(height, mid - padding), :] = 0
+            changed = True
+    if not changed or not np.any(clip):
+        return None
+    return clip
+
+
+def _filter_dark_bubble_line_polygons_against_siblings(text: dict, width: int, height: int) -> dict:
+    if not isinstance(text, dict):
+        return text
+    if str(text.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+        return text
+    polygons = text.get("line_polygons")
+    siblings = text.get("_dark_bubble_sibling_texts")
+    if not isinstance(polygons, list) or len(polygons) <= 1 or not isinstance(siblings, list):
+        return text
+    own_id = str(text.get("id") or text.get("text_id") or text.get("trace_id") or "").strip()
+    sibling_boxes: list[list[int]] = []
+    for sibling in siblings:
+        if not isinstance(sibling, dict):
+            continue
+        if str(sibling.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+            continue
+        sibling_id = str(sibling.get("id") or sibling.get("text_id") or sibling.get("trace_id") or "").strip()
+        if own_id and sibling_id and sibling_id == own_id:
+            continue
+        sibling_bbox = (
+            _normalize_bbox(sibling.get("text_pixel_bbox"), width, height)
+            or _normalize_bbox(sibling.get("bbox"), width, height)
+        )
+        if sibling_bbox is not None:
+            sibling_boxes.append(sibling_bbox)
+    if not sibling_boxes:
+        return text
+
+    kept = []
+    removed = []
+    for index, polygon in enumerate(polygons):
+        poly_bbox = _polygon_bbox(polygon)
+        if poly_bbox is None:
+            kept.append(polygon)
+            continue
+        px1, py1, px2, py2 = poly_bbox
+        pcx = (px1 + px2) / 2.0
+        pcy = (py1 + py2) / 2.0
+        belongs_to_sibling = False
+        for sx1, sy1, sx2, sy2 in sibling_boxes:
+            if sx1 <= pcx <= sx2 and sy1 <= pcy <= sy2:
+                belongs_to_sibling = True
+                break
+        if belongs_to_sibling:
+            removed.append({"index": int(index), "bbox": list(poly_bbox)})
+        else:
+            kept.append(polygon)
+    if not removed or not kept:
+        return text
+    updated = dict(text)
+    updated["line_polygons"] = kept
+    metrics = updated.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_bubble_sibling_line_polygons_removed"] = {
+            "removed": removed,
+            "kept": int(len(kept)),
+        }
+    flags = updated.setdefault("qa_flags", [])
+    if isinstance(flags, list) and "dark_bubble_sibling_line_polygons_removed" not in flags:
+        flags.append("dark_bubble_sibling_line_polygons_removed")
+    return updated
+
+
+def _dark_bubble_light_text_visual_mask(
+    image_rgb: np.ndarray,
+    text: dict,
+    *,
+    padding: int = 22,
+) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(text, dict):
+        return None
+    if str(text.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+        return None
+    height, width = image_rgb.shape[:2]
+    text_bbox = _trusted_text_bbox_for_contract(text, width, height) or _normalize_bbox(
+        text.get("text_pixel_bbox"), width, height
+    ) or _normalize_bbox(text.get("bbox"), width, height)
+    clip_bbox = _normalize_bbox(text.get("balloon_bbox") or text.get("bubble_mask_bbox"), width, height)
+    if clip_bbox is None:
+        clip_bbox = text_bbox
+    if clip_bbox is None:
+        return None
+    if text_bbox is not None:
+        clip_bbox = [
+            min(clip_bbox[0], text_bbox[0]),
+            min(clip_bbox[1], text_bbox[1]),
+            max(clip_bbox[2], text_bbox[2]),
+            max(clip_bbox[3], text_bbox[3]),
+        ]
+    clip_bbox = _expanded_bbox(width, height, clip_bbox, padding=max(0, int(padding))) or clip_bbox
+    x1, y1, x2, y2 = clip_bbox
+    crop = image_rgb[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    crop_f = crop.astype(np.float32)
+    luma = crop_f[:, :, 0] * 0.299 + crop_f[:, :, 1] * 0.587 + crop_f[:, :, 2] * 0.114
+    bg_luma = float(np.percentile(luma, 20)) if luma.size else 0.0
+    threshold = max(174.0, bg_luma + 108.0)
+    bright = np.where(luma >= threshold, 255, 0).astype(np.uint8)
+    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(bright, 8)
+    local = np.zeros_like(bright)
+    text_area = 0
+    if text_bbox is not None:
+        text_area = max(1, (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]))
+    max_area = max(2400, int(round(text_area * 0.90))) if text_area else 2400
+    for label in range(1, component_count):
+        lx, ly, lw, lh, area = [int(v) for v in stats[label]]
+        if area < 10 or area > max_area:
+            continue
+        component_bbox = [x1 + lx, y1 + ly, x1 + lx + lw, y1 + ly + lh]
+        if text_bbox is not None:
+            overlap = _bbox_overlap_ratio(component_bbox, text_bbox)
+            near_text = bool(
+                component_bbox[2] >= text_bbox[0] - 24
+                and component_bbox[0] <= text_bbox[2] + 24
+                and component_bbox[3] >= text_bbox[1] - 56
+                and component_bbox[1] <= text_bbox[3] + 56
+            )
+            if overlap <= 0.01 and not near_text:
+                continue
+        if lw > max(320, (x2 - x1) * 0.92) or lh > max(110, (y2 - y1) * 0.80):
+            continue
+        local[labels == label] = 255
+    if not np.any(local):
+        return None
+    local = cv2.dilate(local, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    mask[y1:y2, x1:x2] = local
+    mask = _clip_dark_bubble_fill_mask_to_lobe(text, mask, image_rgb.shape[:2])
+    if int(np.count_nonzero(mask)) < 48:
+        return None
+    return mask
+
+
+def _dark_connected_compact_contract_fill_mask(
+    image_rgb: np.ndarray,
+    text: dict,
+) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(text, dict):
+        return None
+    if str(text.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+        return None
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "dark_connected_bubble_compact_bbox_replaced_aggregate_source" not in flags:
+        return None
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    replacement = metrics.get("inpaint_mask_contract_text_bbox_replaced_aggregate_source")
+    if not isinstance(replacement, dict):
+        return None
+    height, width = image_rgb.shape[:2]
+    bbox = _normalize_bbox(replacement.get("bbox"), width, height)
+    if bbox is None:
+        return None
+    mask = _mask_from_bbox(width, height, bbox, padding=7)
+    source_pixels = int(np.count_nonzero(mask))
+    clipped = _clip_dark_bubble_fill_mask_to_lobe(text, mask, image_rgb.shape[:2], padding=7)
+    clipped_pixels = int(np.count_nonzero(clipped)) if isinstance(clipped, np.ndarray) else 0
+    if clipped_pixels >= max(64, int(round(source_pixels * 0.65))):
+        mask = clipped
+    else:
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["dark_connected_compact_bbox_lobe_clip_rejected"] = {
+                "source_pixels": int(source_pixels),
+                "clipped_pixels": int(clipped_pixels),
+            }
+    if int(np.count_nonzero(mask)) < 64:
+        return None
+    return mask.astype(np.uint8)
+
+
+def _dark_bubble_visual_fill_override(image_rgb: np.ndarray, text: dict, current_mask: np.ndarray) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(text, dict):
+        return None
+    if str(text.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+        return None
+    if not isinstance(current_mask, np.ndarray) or not np.any(current_mask):
+        return None
+    candidate = dict(text)
+    visual_mask = build_inpaint_mask(candidate, image_rgb.shape, image_rgb=image_rgb)
+    used_direct_visual_mask = False
+    compact_contract_mask = _dark_connected_compact_contract_fill_mask(image_rgb, text)
+    if isinstance(visual_mask, np.ndarray) and np.any(visual_mask):
+        visual_mask = _coerce_mask_for_shape(visual_mask, image_rgb.shape[:2])
+        visual_mask = _clip_dark_bubble_fill_mask_to_lobe(text, visual_mask, image_rgb.shape[:2])
+    else:
+        visual_mask = _dark_bubble_light_text_visual_mask(image_rgb, text)
+        used_direct_visual_mask = isinstance(visual_mask, np.ndarray) and np.any(visual_mask)
+    if not isinstance(visual_mask, np.ndarray) or not np.any(visual_mask):
+        if isinstance(compact_contract_mask, np.ndarray) and np.any(compact_contract_mask):
+            text_metrics = text.setdefault("qa_metrics", {})
+            if isinstance(text_metrics, dict):
+                text_metrics["dark_bubble_visual_fill_override"] = {
+                    "visual_pixels": int(np.count_nonzero(compact_contract_mask)),
+                    "current_pixels": int(np.count_nonzero(current_mask)),
+                    "reason": "dark_connected_compact_bbox_contract",
+                    "source": "compact_text_bbox_contract",
+                }
+            text["_force_solid_dark_text_fill"] = True
+            return compact_contract_mask.astype(np.uint8)
+        return None
+    visual_pixels = int(np.count_nonzero(visual_mask))
+    current_pixels = int(np.count_nonzero(current_mask))
+    no_glyph_evidence = _text_has_no_glyph_evidence(text)
+    overbroad_current_mask = bool(current_pixels >= max(192, int(round(visual_pixels * 1.35))))
+    if visual_pixels < 96 or visual_pixels >= int(current_pixels * 0.88):
+        return None
+    metrics = candidate.get("qa_metrics") if isinstance(candidate.get("qa_metrics"), dict) else {}
+    flags = {str(flag).strip() for flag in candidate.get("qa_flags") or [] if str(flag).strip()}
+    visual_evidence = bool(
+        isinstance(metrics.get("dark_bubble_visual_glyph_mask"), dict)
+        or isinstance(metrics.get("dark_bubble_visual_glyph_mask_replaced_geometry"), dict)
+        or "bubble_clip_preserved_raw_text" in flags
+        or used_direct_visual_mask
+    )
+    if not visual_evidence or (not no_glyph_evidence and not overbroad_current_mask):
+        return None
+    if isinstance(compact_contract_mask, np.ndarray) and np.any(compact_contract_mask):
+        compact_pixels = int(np.count_nonzero(compact_contract_mask))
+        if (
+            compact_pixels >= max(96, int(round(visual_pixels * 1.20)))
+            and compact_pixels <= max(visual_pixels + 32000, int(round(current_pixels * 0.75)))
+        ):
+            text_metrics = text.setdefault("qa_metrics", {})
+            if isinstance(text_metrics, dict):
+                text_metrics["dark_bubble_visual_fill_override"] = {
+                    "visual_pixels": int(compact_pixels),
+                    "current_pixels": int(current_pixels),
+                    "reason": "dark_connected_compact_bbox_contract",
+                    "source": "compact_text_bbox_contract",
+                    "raw_visual_pixels": int(visual_pixels),
+                }
+            text["_force_solid_dark_text_fill"] = True
+            return compact_contract_mask.astype(np.uint8)
+    text_metrics = text.setdefault("qa_metrics", {})
+    if isinstance(text_metrics, dict):
+        text_metrics["dark_bubble_visual_fill_override"] = {
+            "visual_pixels": int(visual_pixels),
+            "current_pixels": int(current_pixels),
+            "reason": "no_glyph_evidence" if no_glyph_evidence else "overbroad_dark_fill_mask",
+            "source": "direct_light_text" if used_direct_visual_mask else "build_inpaint_mask",
+        }
+    visual_mask = _expand_dark_bubble_visual_text_fill_mask(
+        image_rgb,
+        text,
+        visual_mask.astype(np.uint8),
+        source_pixels=visual_pixels,
+    )
+    text["_force_solid_dark_text_fill"] = True
+    return visual_mask.astype(np.uint8)
+
+
+def _expand_dark_bubble_visual_text_fill_mask(
+    image_rgb: np.ndarray,
+    text: dict,
+    visual_mask: np.ndarray,
+    *,
+    source_pixels: int,
+) -> np.ndarray:
+    if not isinstance(image_rgb, np.ndarray) or not isinstance(text, dict):
+        return visual_mask
+    if str(text.get("bubble_mask_source") or "").strip().lower() != "image_dark_bubble_mask":
+        return visual_mask
+    if not isinstance(visual_mask, np.ndarray) or not np.any(visual_mask):
+        return visual_mask
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    has_visual_glyph = bool(
+        isinstance(metrics.get("dark_bubble_visual_glyph_mask"), dict)
+        or isinstance(metrics.get("dark_bubble_visual_glyph_mask_replaced_geometry"), dict)
+        or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+        or "fast_fill_no_glyph_evidence" in flags
+    )
+    if not has_visual_glyph:
+        return visual_mask
+    glow_px = 0
+    estilo = text.get("estilo") if isinstance(text.get("estilo"), dict) else {}
+    try:
+        glow_px = int(estilo.get("glow_px", 0) or 0) if bool(estilo.get("glow")) else 0
+    except Exception:
+        glow_px = 0
+    no_glyph_evidence = bool("fast_fill_no_glyph_evidence" in flags or _text_has_no_glyph_evidence(text))
+    pad = max(3, min(10 if no_glyph_evidence else 8, glow_px + (7 if no_glyph_evidence else 4)))
+    kernel_size = max(3, pad * 2 + 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    expanded = cv2.dilate(visual_mask.astype(np.uint8), kernel, iterations=1)
+    expanded = _clip_dark_bubble_fill_mask_to_lobe(text, expanded, image_rgb.shape[:2], padding=max(2, pad))
+    expanded_pixels = int(np.count_nonzero(expanded))
+    original_pixels = max(1, int(source_pixels))
+    if expanded_pixels < max(48, int(round(original_pixels * 1.05))):
+        return visual_mask
+    if expanded_pixels > int(original_pixels * (3.4 if no_glyph_evidence else 2.8)):
+        # This is a text-halo expansion, not permission to flood-fill the lobe.
+        limit_kernel_size = 13 if no_glyph_evidence else 9
+        limit_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (limit_kernel_size, limit_kernel_size))
+        expanded = cv2.dilate(visual_mask.astype(np.uint8), limit_kernel, iterations=1)
+        expanded = _clip_dark_bubble_fill_mask_to_lobe(text, expanded, image_rgb.shape[:2], padding=4)
+        expanded_pixels = int(np.count_nonzero(expanded))
+    text_metrics = text.setdefault("qa_metrics", {})
+    if isinstance(text_metrics, dict):
+        text_metrics["dark_bubble_visual_fill_expanded"] = {
+            "source_pixels": int(source_pixels),
+            "expanded_pixels": int(expanded_pixels),
+            "pad_px": int(pad),
+        }
+    return expanded.astype(np.uint8)
+
+
+def _authorized_dark_panel_padding(
+    text: dict,
+    *,
+    has_line_geometry: bool,
+    detected_dark_panel: bool,
+    colored_status_panel: bool,
+    base_padding: int,
+) -> int:
+    if not has_line_geometry:
+        return base_padding if detected_dark_panel else 1
+    if not isinstance(text, dict):
+        return 1
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("background_type") or "").strip().lower(),
+    }
+    background = _rgb_luma_chroma(text.get("background_rgb"))
+    panel_hint = bool(
+        detected_dark_panel
+        or colored_status_panel
+        or (background is not None and background[0] <= 130.0)
+        or (background is not None and background[1] > 45.0)
+        or (profiles & {"ui_form", "dark_panel", "solid_dark", "dark"})
+    )
+    if not panel_hint:
+        return 1
+    padding = max(5, min(8, int(round(max(1, base_padding) * 0.75))))
+    return padding
+
+
+def _sample_dark_bubble_inner_fill_color(
+    image_rgb: np.ndarray,
+    text: dict,
+    text_mask: np.ndarray,
+) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or not isinstance(text_mask, np.ndarray):
+        return None
+    height, width = image_rgb.shape[:2]
+    if height <= 0 or width <= 0 or text_mask.shape[:2] != (height, width):
+        return None
+    local_bbox = (
+        _line_polygons_bbox(text, width, height)
+        or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+    )
+    if local_bbox is not None:
+        lx1, ly1, lx2, ly2 = local_bbox
+        local_side = max(lx2 - lx1, ly2 - ly1)
+        local_sample_bbox = _expanded_bbox(
+            width,
+            height,
+            local_bbox,
+            padding=max(18, min(72, int(round(local_side * 0.18)))),
+        )
+        if local_sample_bbox is not None:
+            sx1, sy1, sx2, sy2 = local_sample_bbox
+            local_mask = np.zeros((height, width), dtype=np.uint8)
+            local_mask[sy1:sy2, sx1:sx2] = 255
+            exclusion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (27, 27))
+            text_exclusion = cv2.dilate(text_mask.astype(np.uint8), exclusion_kernel, iterations=1)
+            local_region = (local_mask > 0) & (text_exclusion == 0)
+            if int(np.count_nonzero(local_region)) >= 80:
+                local_pixels = image_rgb[local_region].astype(np.float32)
+                local_luma = (
+                    local_pixels[:, 0] * 0.299
+                    + local_pixels[:, 1] * 0.587
+                    + local_pixels[:, 2] * 0.114
+                )
+                local_chroma = np.max(local_pixels, axis=1) - np.min(local_pixels, axis=1)
+                dark_cutoff = min(34.0, max(10.0, float(np.percentile(local_luma, 25)) + 5.0))
+                dark_neutral = (local_luma <= dark_cutoff) & (local_chroma <= 32.0)
+                if int(np.count_nonzero(dark_neutral)) < 48:
+                    dark_neutral = (local_luma <= min(44.0, dark_cutoff + 10.0)) & (local_chroma <= 36.0)
+                if int(np.count_nonzero(dark_neutral)) >= 48:
+                    fill = np.median(local_pixels[dark_neutral], axis=0)
+                    fill_color = np.asarray(
+                        [int(max(0, min(255, round(float(v))))) for v in fill],
+                        dtype=np.uint8,
+                    )
+                    fill_luma = float(
+                        (fill_color[0] * 0.299)
+                        + (fill_color[1] * 0.587)
+                        + (fill_color[2] * 0.114)
+                    )
+                    if fill_luma <= 46.0:
+                        return fill_color
+    bbox = _normalize_bbox(text.get("balloon_bbox"), width, height)
+    if bbox is None:
+        candidate = _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+        if candidate is not None:
+            x1, y1, x2, y2 = candidate
+            area_ratio = ((x2 - x1) * (y2 - y1)) / float(max(1, width * height))
+            if area_ratio <= 0.58:
+                bbox = candidate
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    if bw < 24 or bh < 24:
+        return None
+
+    mask = np.zeros((height, width), dtype=np.uint8)
+    inset_x = max(3, int(round(bw * 0.045)))
+    inset_y = max(3, int(round(bh * 0.045)))
+    center = ((x1 + x2) // 2, (y1 + y2) // 2)
+    axes = (max(1, bw // 2 - inset_x), max(1, bh // 2 - inset_y))
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+
+    exclusion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))
+    text_exclusion = cv2.dilate(text_mask.astype(np.uint8), exclusion_kernel, iterations=1)
+    region = (mask > 0) & (text_exclusion == 0)
+    if int(np.count_nonzero(region)) < 80:
+        region = mask > 0
+    if int(np.count_nonzero(region)) < 80:
+        return None
+
+    pixels = image_rgb[region].astype(np.float32)
+    luma = (pixels[:, 0] * 0.299) + (pixels[:, 1] * 0.587) + (pixels[:, 2] * 0.114)
+    cutoff = max(24.0, min(72.0, float(np.percentile(luma, 35)) + 6.0))
+    dark_pixels = pixels[luma <= cutoff]
+    if dark_pixels.shape[0] < 48:
+        dark_pixels = pixels[luma <= max(82.0, cutoff + 18.0)]
+    if dark_pixels.shape[0] < 48:
+        return None
+    fill = np.median(dark_pixels, axis=0)
+    fill_color = np.asarray([int(max(0, min(255, round(float(v))))) for v in fill], dtype=np.uint8)
+    fill_luma = float((fill_color[0] * 0.299) + (fill_color[1] * 0.587) + (fill_color[2] * 0.114))
+    if fill_luma > 88.0:
+        return None
+    return fill_color
 
 
 def _try_dark_panel_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray | None:
     if not isinstance(image_rgb, np.ndarray):
         return None
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()} if isinstance(text, dict) else set()
+    if "short_dark_text_full_panel_bbox_rejected" in qa_flags:
+        return None
+    if _rejected_visual_card_requires_real_inpaint(image_rgb, text) and not _rejected_visual_card_allows_local_text_fill(text):
+        return None
+    false_white_card_candidate = _is_false_white_card_candidate(image_rgb, text)
+    if _unsafe_white_balloon_requires_real_inpaint(text) and not false_white_card_candidate:
+        return None
+    white_balloon_context = _text_is_white_balloon_context(text)
+    unsafe_mask_fallback = bool(
+        qa_flags
+        & {
+            "mask_outside_balloon_critical",
+            "missing_real_bubble_mask",
+            "rejected_derived_bubble_mask",
+            "debug_derived_bubble_mask_rejected",
+        }
+    )
+    if (
+        white_balloon_context
+        and not false_white_card_candidate
+        and (not unsafe_mask_fallback or _text_region_looks_plain_white(image_rgb, text))
+    ):
+        return None
+    bubble_mask_source = str(text.get("bubble_mask_source") or "").strip().lower()
+    if _image_dark_bubble_is_visually_light(image_rgb, text):
+        return None
+    translator_note_text_mask = bubble_mask_source == "translator_note_text_mask"
+    derived_card_panel = bubble_mask_source in {"derived_card_panel_mask", "image_dark_panel_mask", "image_dark_bubble_mask"}
+    rejected_visual_card_panel = bubble_mask_source in _REJECTED_BUBBLE_MASK_SOURCES and bool(
+        text.get("bubble_mask_bbox") or text.get("balloon_bbox")
+    )
     colored_status_panel = _is_colored_status_panel_text_candidate(text)
-    metadata_candidate = _is_dark_panel_text_candidate(text) or colored_status_panel
+    ui_panel_text = _source_text_has_colored_status_terms(text)
+    colored_card_text = (
+        _is_dark_or_colored_card_text(text)
+        or derived_card_panel
+        or rejected_visual_card_panel
+        or false_white_card_candidate
+    )
+    metadata_candidate = _is_dark_panel_text_candidate(text) or colored_status_panel or colored_card_text or translator_note_text_mask
+    unsafe_card_glyph_only = bool(unsafe_mask_fallback and colored_card_text and not (colored_status_panel or ui_panel_text))
     if not metadata_candidate:
-        if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+        if not isinstance(text, dict) or not _route_action_allows_local_dark_panel_fill(text):
             return None
     if not metadata_candidate and not text.get("text_pixel_bbox") and not text.get("line_polygons"):
         return None
     height, width = image_rgb.shape[:2]
     if height <= 0 or width <= 0:
         return None
+    if bubble_mask_source == "image_dark_bubble_mask":
+        sibling_filtered_text = _filter_dark_bubble_line_polygons_against_siblings(text, width, height)
+        if isinstance(sibling_filtered_text, dict) and sibling_filtered_text is not text:
+            text.update(sibling_filtered_text)
+        filtered_text = _filter_dark_bubble_connected_lobe_line_polygons(text, width, height)
+        if isinstance(filtered_text, dict) and filtered_text is not text:
+            text.update(filtered_text)
     text_mask = _text_geometry_mask(width, height, text)
     if text_mask is None or not np.any(text_mask):
         return None
@@ -2747,12 +5455,38 @@ def _try_dark_panel_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray |
     sample = image_rgb[sample_region].astype(np.float32)
     sample_luma = np.mean(sample, axis=1)
     median_luma = float(np.median(sample_luma))
+    p25_luma = float(np.percentile(sample_luma, 25))
     p80_luma = float(np.percentile(sample_luma, 80))
     p90_luma = float(np.percentile(sample_luma, 90))
     sample_fill_color = np.asarray(
         [int(max(0, min(255, round(float(v))))) for v in np.median(sample, axis=0)],
         dtype=np.uint8,
     )
+    metadata_fill_color = None
+    background_hint = None
+    raw_background_rgb = text.get("background_rgb")
+    if isinstance(raw_background_rgb, (list, tuple)) and len(raw_background_rgb) >= 3:
+        try:
+            background_hint = _rgb_luma_chroma(raw_background_rgb)
+            if (
+                translator_note_text_mask
+                or colored_status_panel
+                or colored_card_text
+                or (ui_panel_text and background_hint is not None and background_hint[0] <= 130.0)
+            ):
+                metadata_fill_color = np.asarray(
+                    [int(max(0, min(255, round(float(v))))) for v in raw_background_rgb[:3]],
+                    dtype=np.uint8,
+                )
+        except Exception:
+            metadata_fill_color = None
+    dark_bubble_inner_fill_color = (
+        _sample_dark_bubble_inner_fill_color(image_rgb, text, text_mask)
+        if bubble_mask_source == "image_dark_bubble_mask"
+        else None
+    )
+    if bubble_mask_source == "image_dark_bubble_mask" and dark_bubble_inner_fill_color is None:
+        return None
     rgb_i = image_rgb.astype(np.int16)
     rgb_f = image_rgb.astype(np.float32)
     luma = (rgb_f[:, :, 0] * 0.299) + (rgb_f[:, :, 1] * 0.587) + (rgb_f[:, :, 2] * 0.114)
@@ -2778,53 +5512,1115 @@ def _try_dark_panel_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray |
     if mask_area > int(width * height * max_geometry_ratio):
         return None
     if colored_status_panel:
-        if p90_luma > 245.0 and sampled_colored_background is None:
+        if p90_luma > 245.0 and sampled_colored_background is None and metadata_fill_color is None:
             return None
     else:
-        if median_luma > 150.0:
-            return None
-        if p90_luma > 210.0:
-            return None
+        if median_luma > 150.0 and metadata_fill_color is None:
+            if not (derived_card_panel or rejected_visual_card_panel or false_white_card_candidate):
+                return None
+        if p90_luma > 210.0 and metadata_fill_color is None:
+            if not (derived_card_panel or rejected_visual_card_panel or false_white_card_candidate):
+                return None
 
-    fill = sampled_colored_background.astype(np.float32) if sampled_colored_background is not None else sample_fill_color.astype(np.float32)
+    if translator_note_text_mask:
+        dark_cutoff = max(36.0, min(96.0, p25_luma + 10.0))
+        dark_sample = sample[sample_luma <= dark_cutoff]
+        if metadata_fill_color is not None:
+            fill = metadata_fill_color.astype(np.float32)
+        elif dark_sample.shape[0] >= 24:
+            fill = np.median(dark_sample, axis=0)
+        else:
+            return None
+    elif sampled_colored_background is not None:
+        fill = sampled_colored_background.astype(np.float32)
+    elif dark_bubble_inner_fill_color is not None:
+        fill = dark_bubble_inner_fill_color.astype(np.float32)
+    elif false_white_card_candidate:
+        dark_cutoff = max(28.0, min(86.0, p25_luma + 8.0))
+        dark_sample = sample[sample_luma <= dark_cutoff]
+        if dark_sample.shape[0] >= 24:
+            fill = np.median(dark_sample, axis=0)
+        else:
+            fill = sample_fill_color.astype(np.float32)
+    elif (
+        metadata_fill_color is not None
+        and background_hint is not None
+        and background_hint[0] <= 100.0
+        and not colored_status_panel
+        and p25_luma <= max(46.0, background_hint[0] - 12.0)
+    ):
+        dark_cutoff = max(34.0, min(82.0, p25_luma + 8.0))
+        dark_sample = sample[sample_luma <= dark_cutoff]
+        if dark_sample.shape[0] >= 32:
+            fill = np.median(dark_sample, axis=0)
+        else:
+            fill = metadata_fill_color.astype(np.float32)
+    elif metadata_fill_color is not None:
+        fill = metadata_fill_color.astype(np.float32)
+    else:
+        fill = sample_fill_color.astype(np.float32)
     fill_color = np.asarray([int(max(0, min(255, round(float(v))))) for v in fill], dtype=np.uint8)
+    fill_luma = float(np.mean(fill_color.astype(np.float32)))
+    rejected_dark_local_context = bool(
+        rejected_visual_card_panel
+        and (
+            _text_has_dark_visual_context(text)
+            or detected_dark_panel
+            or (fill_luma <= 90.0 and p25_luma <= 110.0)
+            or (median_luma <= 82.0 and p90_luma <= 145.0)
+        )
+    )
+    broken_image_white_dark_context = bool(
+        bubble_mask_source == "image_white_bubble_mask"
+        and (
+            false_white_card_candidate
+            or "mask_outside_balloon_critical" in qa_flags
+            or "mask_outside_balloon" in qa_flags
+            or "dark_bubble_visual_glyph_mask_replaced_geometry" in qa_flags
+        )
+        and (
+            _text_has_dark_visual_context(text)
+            or detected_dark_panel
+            or (fill_luma <= 96.0 and p25_luma <= 112.0)
+            or (median_luma <= 88.0 and p90_luma <= 150.0)
+        )
+    )
     text_bbox = _normalize_bbox(text.get("text_pixel_bbox"), width, height) or _normalize_bbox(
         text.get("bbox"),
         width,
         height,
     )
+
+    def _visual_light_text_mask_within_balloon() -> np.ndarray | None:
+        clip_bbox = _normalize_bbox(text.get("balloon_bbox") or text.get("bubble_mask_bbox"), width, height)
+        if clip_bbox is None:
+            return None
+        loose_dark_visual_source = (
+            rejected_visual_card_panel
+            or bubble_mask_source == "bbox_fallback"
+            or broken_image_white_dark_context
+        )
+        if loose_dark_visual_source and text_bbox is not None:
+            clip_bbox = [
+                min(clip_bbox[0], text_bbox[0]),
+                min(clip_bbox[1], text_bbox[1]),
+                max(clip_bbox[2], text_bbox[2]),
+                max(clip_bbox[3], text_bbox[3]),
+            ]
+        clip_padding = 42 if broken_image_white_dark_context else (64 if loose_dark_visual_source else 18)
+        clip_bbox = _expanded_bbox(width, height, clip_bbox, padding=clip_padding) or clip_bbox
+        bx1, by1, bx2, by2 = clip_bbox
+        crop = image_rgb[by1:by2, bx1:bx2]
+        if crop.size == 0:
+            return None
+        crop_luma = (
+            crop[:, :, 0].astype(np.float32) * 0.299
+            + crop[:, :, 1].astype(np.float32) * 0.587
+            + crop[:, :, 2].astype(np.float32) * 0.114
+        )
+        if bubble_mask_source == "image_dark_bubble_mask":
+            bg_luma = float(np.percentile(crop_luma, 20)) if crop_luma.size else 0.0
+            bright_threshold = max(174.0, bg_luma + 110.0)
+        else:
+            bright_threshold = 95.0
+        bright = np.where(crop_luma >= bright_threshold, 255, 0).astype(np.uint8)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(bright, 8)
+        local = np.zeros_like(bright)
+        for label in range(1, component_count):
+            x, y, w, h, area = [int(v) for v in stats[label]]
+            if area < 10:
+                continue
+            component_bbox = [bx1 + x, by1 + y, bx1 + x + w, by1 + y + h]
+            if text_bbox is not None:
+                overlap = _bbox_overlap_ratio(component_bbox, text_bbox)
+                near_text_column = bool(
+                    component_bbox[2] >= text_bbox[0] - 24
+                    and component_bbox[0] <= text_bbox[2] + 24
+                    and component_bbox[3] >= text_bbox[1] - 48
+                    and component_bbox[1] <= text_bbox[3] + 48
+                )
+                nearby_small_text_component = bool(area <= 720 and w <= 44 and h <= 44 and near_text_column)
+                same_dark_bubble_component = False
+                if overlap <= 0.01 and not nearby_small_text_component and not same_dark_bubble_component:
+                    continue
+            max_area = 2400
+            if text_bbox is not None:
+                text_area = max(1, (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]))
+                max_area = max(max_area, int(round(text_area * 0.90)))
+            if area > max_area:
+                continue
+            if w > max(260, (bx2 - bx1) * 0.92) or h > max(90, (by2 - by1) * 0.80):
+                continue
+            local[labels == label] = 255
+        if not np.any(local):
+            return None
+        kernel_size = 5 if bubble_mask_source == "image_dark_bubble_mask" else 19
+        local = cv2.dilate(local, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)), iterations=1)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[by1:by2, bx1:bx2] = local
+        return mask
+
+    dark_panel_padding = 1
     fill_mask: np.ndarray
-    if detected_dark_panel and text_bbox is not None:
+    has_line_geometry = bool(text.get("line_polygons"))
+
+    def _refined_dark_bubble_visual_fill_mask() -> np.ndarray | None:
+        if bubble_mask_source != "image_dark_bubble_mask":
+            return None
+        candidate = dict(text)
+        mask = build_inpaint_mask(candidate, image_rgb.shape, image_rgb=image_rgb)
+        if not isinstance(mask, np.ndarray) or not np.any(mask):
+            return None
+        flags = {str(flag).strip() for flag in candidate.get("qa_flags") or [] if str(flag).strip()}
+        metrics = candidate.get("qa_metrics") if isinstance(candidate.get("qa_metrics"), dict) else {}
+        replaced_geometry = bool(
+            "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+            or isinstance(metrics.get("dark_bubble_visual_glyph_mask_replaced_geometry"), dict)
+        )
+        mask = _coerce_mask_for_shape(mask, image_rgb.shape[:2])
+        if not np.any(mask):
+            return None
+        geometry_pixels = int(np.count_nonzero(text_mask))
+        mask_pixels = int(np.count_nonzero(mask))
+        relaxed_bbox_only_visual = bool(
+            not has_line_geometry
+            and _text_has_no_glyph_evidence(text)
+            and (
+                isinstance(metrics.get("dark_bubble_visual_glyph_mask"), dict)
+                or "bubble_clip_preserved_raw_text" in flags
+            )
+            and mask_pixels >= max(96, int(round(max(1, geometry_pixels) * 0.08)))
+            and mask_pixels <= int(max(geometry_pixels * 0.86, geometry_pixels - 96))
+        )
+        if not (replaced_geometry or relaxed_bbox_only_visual):
+            return None
+        if geometry_pixels > 0 and mask_pixels > int(geometry_pixels * 0.92):
+            return None
+        mask = _clip_dark_bubble_fill_mask_to_lobe(text, mask, image_rgb.shape[:2])
+        mask_pixels = int(np.count_nonzero(mask))
+        if mask_pixels < 48:
+            return None
+        text_flags = text.setdefault("qa_flags", [])
+        if not isinstance(text_flags, list):
+            text_flags = []
+            text["qa_flags"] = text_flags
+        existing_flags = {str(flag).strip() for flag in text_flags if str(flag).strip()}
+        for flag in flags:
+            if flag and flag not in existing_flags:
+                text_flags.append(flag)
+                existing_flags.add(flag)
+        candidate_metrics = candidate.get("qa_metrics")
+        if isinstance(candidate_metrics, dict):
+            text_metrics = text.setdefault("qa_metrics", {})
+            if isinstance(text_metrics, dict):
+                text_metrics.update(candidate_metrics)
+        candidate_evidence = candidate.get("mask_evidence")
+        if isinstance(candidate_evidence, dict):
+            text["mask_evidence"] = dict(candidate_evidence)
+        if relaxed_bbox_only_visual:
+            text_metrics = text.setdefault("qa_metrics", {})
+            if isinstance(text_metrics, dict):
+                text_metrics["dark_bubble_visual_glyph_mask_replaced_bbox_geometry"] = {
+                    "visual_pixels": int(mask_pixels),
+                    "geometry_pixels": int(geometry_pixels),
+                }
+        text["_authorize_fast_fill_by_balloon_bbox"] = True
+        text["_force_solid_dark_text_fill"] = True
+        return mask.astype(np.uint8)
+
+    if translator_note_text_mask:
+        glyph_mask = _colored_status_panel_glyph_mask(
+            image_rgb,
+            text,
+            text_mask,
+            np.asarray([int(max(0, min(255, round(float(v))))) for v in fill], dtype=np.uint8),
+            dilation_size=7,
+        )
+        fill_mask = glyph_mask if glyph_mask is not None else cv2.dilate(
+            text_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            iterations=1,
+        )
+    elif broken_image_white_dark_context and text_bbox is not None:
+        visual_mask = _visual_light_text_mask_within_balloon()
+        text["_authorize_fast_fill_by_text_bbox"] = True
+        text["_authorize_fast_fill_padding"] = 18
+        text["_force_solid_dark_text_fill"] = True
+        if visual_mask is not None:
+            ys, xs = np.where(visual_mask > 0)
+            if xs.size and ys.size:
+                visual_bbox = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+                text_area = max(1, (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]))
+                visual_area = max(1, (visual_bbox[2] - visual_bbox[0]) * (visual_bbox[3] - visual_bbox[1]))
+                visual_overlap = _bbox_overlap_ratio(visual_bbox, text_bbox)
+                if visual_area > int(text_area * 2.4) or visual_overlap <= 0.08:
+                    fill_mask = _mask_from_bbox(width, height, text_bbox, padding=18)
+                    qa_metrics = text.setdefault("qa_metrics", {})
+                    if isinstance(qa_metrics, dict):
+                        qa_metrics["broken_white_dark_visual_mask_rejected"] = {
+                            "visual_bbox": list(visual_bbox),
+                            "text_bbox": list(text_bbox),
+                            "visual_area": int(visual_area),
+                            "text_area": int(text_area),
+                            "overlap": round(float(visual_overlap), 6),
+                        }
+                else:
+                    fill_mask = _mask_from_bbox(width, height, visual_bbox, padding=10)
+            else:
+                fill_mask = visual_mask
+        else:
+            fill_mask = _mask_from_bbox(width, height, text_bbox, padding=18)
+    elif false_white_card_candidate:
+        if text_bbox is None:
+            return None
+        text["_authorize_fast_fill_by_balloon_bbox"] = True
+        text["_authorize_fast_fill_padding"] = 58
+        fill_mask = _mask_from_bbox(width, height, text_bbox, padding=58)
+    elif rejected_dark_local_context and text_bbox is not None:
+        visual_mask = _visual_light_text_mask_within_balloon()
+        if visual_mask is not None:
+            text["_authorize_fast_fill_by_text_bbox"] = True
+            text["_authorize_fast_fill_padding"] = 64
+            text["_force_solid_dark_text_fill"] = True
+            ys, xs = np.where(visual_mask > 0)
+            if xs.size and ys.size:
+                visual_bbox = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+                fill_mask = _mask_from_bbox(width, height, visual_bbox, padding=16)
+            else:
+                fill_mask = visual_mask
+        else:
+            text["_authorize_fast_fill_by_text_bbox"] = True
+            text["_authorize_fast_fill_padding"] = 58
+            fill_mask = _mask_from_bbox(width, height, text_bbox, padding=58)
+    elif rejected_visual_card_panel and _text_has_no_glyph_evidence(text) and text_bbox is not None:
+        text["_authorize_fast_fill_by_text_bbox"] = True
+        text["_authorize_fast_fill_padding"] = 38
+        fill_mask = _mask_from_bbox(width, height, text_bbox, padding=38)
+    elif (
+        bubble_mask_source == "bbox_fallback"
+        and str(text.get("bubble_mask_error") or "").strip().lower() == "missing_real_bubble_mask"
+        and text_bbox is not None
+        and (detected_dark_panel or fill_luma <= 90.0 or p25_luma <= 110.0)
+    ):
+        text["_authorize_fast_fill_by_text_bbox"] = True
+        text["_authorize_fast_fill_padding"] = 8
+        text["_force_local_inpaint_dark_panel_fill"] = True
+        fill_mask = _mask_from_bbox(width, height, text_bbox, padding=8)
+    elif bubble_mask_source == "image_dark_bubble_mask" and text_bbox is not None and _has_trustworthy_glyph_action_mask(text):
+        raw_action_mask = build_raw_text_mask_from_image(dict(text), image_rgb, image_rgb.shape)
+        geometry_action_mask = cv2.dilate(
+            text_mask.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            iterations=1,
+        )
+        refined_visual_fill = _refined_dark_bubble_visual_fill_mask() if _text_has_no_glyph_evidence(text) else None
+        if refined_visual_fill is not None:
+            fill_mask = refined_visual_fill
+        elif isinstance(raw_action_mask, np.ndarray) and np.any(raw_action_mask):
+            fill_mask = raw_action_mask.astype(np.uint8)
+            no_glyph_visual_only = _text_has_no_glyph_evidence(text)
+            glyph_kernel_size = 7 if no_glyph_visual_only else 9
+            glyph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (glyph_kernel_size, glyph_kernel_size))
+            fill_mask = cv2.dilate(fill_mask, glyph_kernel, iterations=1)
+            if no_glyph_visual_only:
+                fill_mask = _clip_dark_bubble_fill_mask_to_lobe(text, fill_mask, image_rgb.shape[:2])
+                text["_force_solid_dark_text_fill"] = True
+                qa_metrics = text.setdefault("qa_metrics", {})
+                if isinstance(qa_metrics, dict):
+                    qa_metrics["dark_bubble_raw_visual_mask_replaced_geometry"] = {
+                        "raw_pixels": int(np.count_nonzero(raw_action_mask)),
+                        "visual_pixels": int(np.count_nonzero(fill_mask)),
+                        "geometry_pixels": int(np.count_nonzero(geometry_action_mask)),
+                    }
+            else:
+                fill_mask = np.maximum(fill_mask, geometry_action_mask).astype(np.uint8)
+        else:
+            fill_mask = geometry_action_mask
+        text["_authorize_fast_fill_by_balloon_bbox"] = True
+    elif bubble_mask_source == "image_dark_bubble_mask" and text_bbox is not None and not _has_trustworthy_glyph_action_mask(text):
+        refined_visual_fill = _refined_dark_bubble_visual_fill_mask()
+        if refined_visual_fill is not None:
+            fill_mask = refined_visual_fill
+        else:
+            visual_mask = _visual_light_text_mask_within_balloon()
+            if visual_mask is not None:
+                text["_authorize_fast_fill_by_balloon_bbox"] = True
+                text["_force_solid_dark_text_fill"] = True
+                fill_mask = _clip_dark_bubble_fill_mask_to_lobe(text, visual_mask.astype(np.uint8), image_rgb.shape[:2])
+                qa_metrics = text.setdefault("qa_metrics", {})
+                if isinstance(qa_metrics, dict):
+                    qa_metrics["dark_bubble_visual_glyph_fill_mask"] = {
+                        "mask_pixels": int(np.count_nonzero(fill_mask)),
+                    }
+            else:
+                text["_authorize_fast_fill_by_balloon_bbox"] = True
+                text["_authorize_fast_fill_padding"] = 58
+                fill_mask = _mask_from_bbox(width, height, text_bbox, padding=58)
+    elif unsafe_card_glyph_only:
+        glyph_mask = _unsafe_card_visual_glyph_mask(image_rgb, text_mask)
+        if glyph_mask is None:
+            return None
+        fill_mask = glyph_mask
+        if rejected_visual_card_panel and float(np.mean(fill_color.astype(np.float32))) <= 90.0 and text_bbox is not None:
+            text["_authorize_fast_fill_by_text_bbox"] = True
+            bbox_mask = _mask_from_bbox(width, height, text_bbox, padding=6)
+            fill_mask = np.maximum(fill_mask, bbox_mask).astype(np.uint8)
+            visual_mask = _visual_light_text_mask_within_balloon()
+            if visual_mask is not None:
+                text["_authorize_fast_fill_by_balloon_bbox"] = True
+                fill_mask = np.maximum(fill_mask, visual_mask).astype(np.uint8)
+            visual_mask = _visual_light_text_mask_within_balloon()
+            if visual_mask is not None:
+                text["_authorize_fast_fill_by_balloon_bbox"] = True
+                fill_mask = np.maximum(fill_mask, visual_mask).astype(np.uint8)
+    elif detected_dark_panel and text_bbox is not None and not has_line_geometry:
         max_side = max(text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1])
         pad = max(8, min(22, int(round(max_side * 0.06))))
+        dark_panel_padding = pad
         fill_bbox = _expanded_bbox(width, height, text_bbox, padding=pad) or text_bbox
         fx1, fy1, fx2, fy2 = fill_bbox
         fill_mask = np.zeros((height, width), dtype=np.uint8)
         fill_mask[fy1:fy2, fx1:fx2] = 255
-    elif colored_status_panel:
+    elif colored_status_panel and not (derived_card_panel or rejected_visual_card_panel):
         glyph_mask = _colored_status_panel_glyph_mask(image_rgb, text, text_mask, fill_color)
         if glyph_mask is None:
             return None
         fill_mask = glyph_mask
+    elif rejected_visual_card_panel and text_bbox is not None and _text_has_dark_visual_context(text):
+        text["_authorize_fast_fill_by_text_bbox"] = True
+        text["_authorize_fast_fill_padding"] = 38
+        fill_mask = _mask_from_bbox(width, height, text_bbox, padding=38)
+    elif derived_card_panel and has_line_geometry:
+        kernel_size = 15 if bubble_mask_source == "image_dark_bubble_mask" else 11
+        fill_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        fill_mask = cv2.dilate(text_mask, fill_kernel, iterations=1)
+        clip_bbox = _normalize_bbox(text.get("bubble_mask_bbox") or text.get("balloon_bbox"), width, height)
+        if clip_bbox is not None:
+            clip = np.zeros((height, width), dtype=np.uint8)
+            cx1, cy1, cx2, cy2 = clip_bbox
+            clip[cy1:cy2, cx1:cx2] = 255
+            fill_mask = np.where(clip > 0, fill_mask, 0).astype(np.uint8)
+    elif colored_card_text and (not ui_panel_text or derived_card_panel or rejected_visual_card_panel):
+        sampled_bg = (
+            sample_fill_color
+            if (derived_card_panel or rejected_visual_card_panel) and metadata_fill_color is None
+            else None
+        )
+        glyph_mask = _colored_status_panel_glyph_mask(
+            image_rgb,
+            text,
+            text_mask,
+            sampled_bg,
+            dilation_size=7 if derived_card_panel else 11,
+        )
+        if (
+            glyph_mask is not None
+            and (derived_card_panel or rejected_visual_card_panel)
+            and int(np.count_nonzero(glyph_mask)) > int(mask_area * 0.62)
+        ):
+            glyph_mask = None
+        if glyph_mask is None:
+            glyph_mask = _unsafe_card_visual_glyph_mask(
+                image_rgb,
+                text_mask,
+                strict_text_rect=bool(derived_card_panel or rejected_visual_card_panel),
+            )
+        if glyph_mask is None:
+            return None
+        fill_mask = glyph_mask
+        if rejected_visual_card_panel and float(np.mean(fill_color.astype(np.float32))) <= 90.0 and text_bbox is not None:
+            text["_authorize_fast_fill_by_text_bbox"] = True
+            bbox_mask = _mask_from_bbox(width, height, text_bbox, padding=6)
+            fill_mask = np.maximum(fill_mask, bbox_mask).astype(np.uint8)
     else:
         kernel_size = 25 if colored_status_panel else 15
         fill_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         fill_mask = cv2.dilate(text_mask, fill_kernel, iterations=1)
-    has_line_geometry = bool(text.get("line_polygons"))
-    authorized_padding = 1 if has_line_geometry else (pad if detected_dark_panel and text_bbox is not None else 1)
+    contract_fill_mask = _dark_text_contract_fill_mask(text, width, height, image_rgb)
+    if contract_fill_mask is not None:
+        visual_contract_fill_mask = _dark_panel_visual_contract_fill_mask(
+            image_rgb,
+            text,
+            contract_fill_mask,
+            width,
+            height,
+        )
+        fill_mask = (
+            visual_contract_fill_mask.astype(np.uint8)
+            if visual_contract_fill_mask is not None
+            else contract_fill_mask.astype(np.uint8)
+        )
+    authorized_padding = _authorized_dark_panel_padding(
+        text,
+        has_line_geometry=has_line_geometry,
+        detected_dark_panel=detected_dark_panel,
+        colored_status_panel=colored_status_panel,
+        base_padding=dark_panel_padding,
+    )
     authorized_mask = _authorized_fast_fill_mask(width, height, text, padding=authorized_padding)
     if authorized_mask is None:
         return None
+    if contract_fill_mask is not None:
+        authorized_mask = np.maximum(authorized_mask.astype(np.uint8), contract_fill_mask.astype(np.uint8))
     fill_mask = cv2.bitwise_and(fill_mask.astype(np.uint8), authorized_mask.astype(np.uint8))
+    if bubble_mask_source == "image_dark_bubble_mask" and contract_fill_mask is None:
+        fill_mask = _clip_dark_bubble_fill_mask_to_lobe(text, fill_mask, image_rgb.shape[:2])
     if not np.any(fill_mask):
         return None
+    if contract_fill_mask is not None:
+        result = image_rgb.copy()
+        solid_fill = (
+            dark_bubble_inner_fill_color.astype(np.uint8)
+            if dark_bubble_inner_fill_color is not None
+            else fill_color.astype(np.uint8)
+        )
+        result[fill_mask > 0] = solid_fill
+        _remember_text_fill_mask(text, "_dark_panel_fill_mask", fill_mask)
+        qa_metrics = text.setdefault("qa_metrics", {})
+        if isinstance(qa_metrics, dict):
+            qa_metrics["text_contract_direct_fill"] = {
+                "mask_pixels": int(np.count_nonzero(fill_mask)),
+                "contract_mask_pixels": int(np.count_nonzero(contract_fill_mask)),
+                "fill_rgb": [int(v) for v in solid_fill.tolist()],
+                "reason": "expanded_text_contract_mask",
+            }
+        _append_text_flag(text, "text_contract_direct_fill")
+        return result
+    sample_std = float(np.mean(np.std(sample, axis=0))) if sample.size else 0.0
+    textured_panel = bool(
+        not translator_note_text_mask
+        and
+        (unsafe_card_glyph_only or colored_card_text or colored_status_panel or detected_dark_panel)
+        and (
+            derived_card_panel
+            or
+            sample_std >= 18.0
+            or (p90_luma - p25_luma) >= 42.0
+            or (background_hint is not None and background_hint[0] <= 110.0 and p90_luma >= 80.0)
+        )
+    )
+    solid_dark_glyph_fill = bool(
+        translator_note_text_mask
+        or (
+            false_white_card_candidate
+            and float(np.mean(fill_color.astype(np.float32))) <= 90.0
+            and p25_luma <= 95.0
+        )
+        or (
+            bubble_mask_source == "image_dark_bubble_mask"
+            and float(np.mean(fill_color.astype(np.float32))) <= 90.0
+            and p25_luma <= 95.0
+            and not _has_trustworthy_glyph_action_mask(text)
+        )
+        or
+        (
+            unsafe_card_glyph_only
+            and background_hint is not None
+            and background_hint[0] <= 110.0
+            and p25_luma <= 75.0
+        )
+        or (
+            rejected_visual_card_panel
+            and float(np.mean(fill_color.astype(np.float32))) <= 90.0
+            and p25_luma <= 95.0
+        )
+    )
+    dark_bubble_untrusted_local_inpaint = bool(
+        bubble_mask_source == "image_dark_bubble_mask"
+        and not translator_note_text_mask
+        and (
+            _text_has_no_glyph_evidence(text)
+            or not _has_trustworthy_glyph_action_mask(text)
+        )
+        and int(np.count_nonzero(fill_mask)) >= 8
+    )
+    if dark_bubble_untrusted_local_inpaint:
+        inpaint_mask = fill_mask.astype(np.uint8)
+        if dark_bubble_inner_fill_color is not None and fill_luma <= 36.0 and p25_luma <= 42.0:
+            try:
+                solid_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+                inpaint_mask = cv2.dilate(inpaint_mask, solid_kernel, iterations=1).astype(np.uint8)
+                inpaint_mask = cv2.bitwise_and(inpaint_mask, authorized_mask.astype(np.uint8))
+                inpaint_mask = _clip_dark_bubble_fill_mask_to_lobe(text, inpaint_mask, image_rgb.shape[:2])
+                if not np.any(inpaint_mask):
+                    inpaint_mask = fill_mask.astype(np.uint8)
+                filled = image_rgb.copy()
+                _remember_text_fill_mask(text, "_dark_panel_fill_mask", inpaint_mask)
+                qa_metrics = text.setdefault("qa_metrics", {})
+                if isinstance(qa_metrics, dict):
+                    qa_metrics["dark_bubble_local_solid_fill"] = {
+                        "mask_pixels": int(np.count_nonzero(inpaint_mask)),
+                        "reason": "flat_dark_bubble_untrusted_glyph_mask",
+                        "fill_rgb": [int(v) for v in dark_bubble_inner_fill_color.tolist()],
+                    }
+                filled[inpaint_mask > 0] = dark_bubble_inner_fill_color.astype(np.uint8)
+                return filled
+            except Exception:
+                pass
+        try:
+            _remember_text_fill_mask(text, "_dark_panel_fill_mask", inpaint_mask)
+            qa_metrics = text.setdefault("qa_metrics", {})
+            if isinstance(qa_metrics, dict):
+                qa_metrics["dark_bubble_local_inpaint_fill"] = {
+                    "mask_pixels": int(np.count_nonzero(inpaint_mask)),
+                    "reason": "untrusted_dark_bubble_glyph_mask",
+                }
+            return cv2.inpaint(image_rgb, inpaint_mask, 3, cv2.INPAINT_TELEA)
+        except Exception:
+            pass
+    if (
+        bubble_mask_source == "image_dark_bubble_mask"
+        and dark_bubble_inner_fill_color is not None
+        and fill_luma <= 36.0
+        and p25_luma <= 42.0
+        and int(np.count_nonzero(fill_mask)) >= 8
+    ):
+        try:
+            solid_mask = fill_mask.astype(np.uint8)
+            solid_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            solid_mask = cv2.dilate(solid_mask, solid_kernel, iterations=1).astype(np.uint8)
+            solid_mask = cv2.bitwise_and(solid_mask, authorized_mask.astype(np.uint8))
+            solid_mask = _clip_dark_bubble_fill_mask_to_lobe(text, solid_mask, image_rgb.shape[:2])
+            if np.any(solid_mask):
+                result = image_rgb.copy()
+                _remember_text_fill_mask(text, "_dark_panel_fill_mask", solid_mask)
+                qa_metrics = text.setdefault("qa_metrics", {})
+                if isinstance(qa_metrics, dict):
+                    qa_metrics["dark_bubble_local_solid_fill"] = {
+                        "mask_pixels": int(np.count_nonzero(solid_mask)),
+                        "reason": "flat_dark_bubble_glyph_mask",
+                        "fill_rgb": [int(v) for v in dark_bubble_inner_fill_color.tolist()],
+                    }
+                result[solid_mask > 0] = dark_bubble_inner_fill_color.astype(np.uint8)
+                return result
+        except Exception:
+            pass
+    if bool(text.get("_force_local_inpaint_dark_panel_fill")):
+        inpaint_mask = fill_mask.astype(np.uint8)
+        if int(np.count_nonzero(inpaint_mask)) >= 8:
+            try:
+                _remember_text_fill_mask(text, "_dark_panel_fill_mask", inpaint_mask)
+                qa_metrics = text.setdefault("qa_metrics", {})
+                if isinstance(qa_metrics, dict):
+                    metric_key = "dark_panel_bbox_fallback_local_inpaint"
+                    metric_payload = {
+                        "mask_pixels": int(np.count_nonzero(inpaint_mask)),
+                        "reason": "missing_real_bubble_mask_text_bbox_limited",
+                    }
+                flat_dark_panel = bool(
+                    fill_luma <= 42.0
+                    and p25_luma <= 50.0
+                    and sample_std <= 12.0
+                    and not textured_panel
+                )
+                if flat_dark_panel:
+                    result = image_rgb.copy()
+                    solid_fill = (
+                        dark_bubble_inner_fill_color.astype(np.uint8)
+                        if dark_bubble_inner_fill_color is not None
+                        else fill_color.astype(np.uint8)
+                    )
+                    result[inpaint_mask > 0] = solid_fill
+                    if isinstance(qa_metrics, dict):
+                        qa_metrics["dark_panel_bbox_fallback_solid_fill"] = {
+                            **metric_payload,
+                            "reason": "missing_real_bubble_mask_flat_dark_text_bbox_limited",
+                            "fill_rgb": [int(v) for v in solid_fill.tolist()],
+                            "sample_std": round(float(sample_std), 4),
+                        }
+                    return result
+                if isinstance(qa_metrics, dict):
+                    qa_metrics[metric_key] = metric_payload
+                return cv2.inpaint(image_rgb, inpaint_mask, 3, cv2.INPAINT_TELEA)
+            except Exception:
+                pass
+    if textured_panel and not solid_dark_glyph_fill:
+        inpaint_mask = fill_mask.astype(np.uint8)
+        if int(np.count_nonzero(inpaint_mask)) >= 8:
+            try:
+                _remember_text_fill_mask(text, "_dark_panel_fill_mask", inpaint_mask)
+                return cv2.inpaint(image_rgb, inpaint_mask, 3, cv2.INPAINT_TELEA)
+            except Exception:
+                pass
+
     result = image_rgb.copy()
-    result[fill_mask > 0] = fill_color
+    if (
+        not translator_note_text_mask
+        and not bool(text.get("_force_solid_dark_text_fill"))
+        and float(np.mean(fill_color.astype(np.float32))) <= 90.0
+        and int(np.count_nonzero(fill_mask)) >= 64
+    ):
+        soft_mask = cv2.GaussianBlur(fill_mask.astype(np.float32) / 255.0, (21, 21), 0)
+        core = cv2.erode(fill_mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=1)
+        alpha = np.maximum(soft_mask, (core.astype(np.float32) / 255.0))[:, :, None]
+        result = np.clip(
+            result.astype(np.float32) * (1.0 - alpha) + fill_color.astype(np.float32)[None, None, :] * alpha,
+            0,
+            255,
+        ).astype(np.uint8)
+    else:
+        result[fill_mask > 0] = fill_color
+    _remember_text_fill_mask(text, "_dark_panel_fill_mask", fill_mask)
     return result
 
 
+def _unsafe_white_balloon_limit_mask(
+    ocr_page: dict,
+    text: dict,
+    width: int,
+    height: int,
+) -> np.ndarray | None:
+    real_bubble_mask, _reason = _real_bubble_mask_for_text(ocr_page, text, width, height)
+    if isinstance(real_bubble_mask, np.ndarray) and np.any(real_bubble_mask):
+        return _safe_real_bubble_interior_mask(real_bubble_mask, width, height, erode_px=2)
+    bbox = _normalize_bbox(
+        text.get("bubble_mask_bbox")
+        or text.get("bubbleMaskBbox")
+        or text.get("balloon_bbox")
+        or text.get("bbox"),
+        width,
+        height,
+    )
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = bbox
+    mask = np.zeros((height, width), dtype=np.uint8)
+    source = str(text.get("bubble_mask_source") or "").strip().lower()
+    if source in {"image_contour_bubble_mask", "image_white_bubble_mask", "derived_white_bubble_mask"}:
+        center = ((x1 + x2) // 2, (y1 + y2) // 2)
+        axes = (max(1, (x2 - x1) // 2), max(1, (y2 - y1) // 2))
+        cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+    else:
+        mask[y1:y2, x1:x2] = 255
+    return _safe_real_bubble_interior_mask(mask, width, height, erode_px=3)
+
+
+def _apply_unsafe_white_balloon_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple[np.ndarray, int]:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(ocr_page, dict):
+        return image_rgb, 0
+    height, width = image_rgb.shape[:2]
+    result = image_rgb.copy()
+    fill_count = 0
+    seen_bboxes: set[tuple[int, int, int, int]] = set()
+    filled_bboxes: list[list[int]] = []
+    filled_text_keys: set[str] = set()
+    candidates = [
+        item
+        for item in list(ocr_page.get("texts") or [])
+        + list(ocr_page.get("_strip_unsafe_inpaint_block_samples") or [])
+        + list(ocr_page.get("_vision_blocks") or [])
+        if isinstance(item, dict)
+        and _unsafe_white_balloon_requires_real_inpaint(item)
+        and not _is_false_white_card_candidate(image_rgb, item)
+    ]
+    for text in candidates:
+        text_mask = _text_geometry_mask(width, height, text)
+        if text_mask is None or not np.any(text_mask):
+            text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+            if text_bbox is None:
+                continue
+            text_mask = _mask_from_bbox(width, height, text_bbox, padding=1)
+        bbox = _bbox_from_binary_mask(text_mask)
+        if bbox is None:
+            continue
+        bbox_key = tuple(int(v) for v in bbox)
+        if bbox_key in seen_bboxes:
+            continue
+        seen_bboxes.add(bbox_key)
+        limit_mask = _unsafe_white_balloon_limit_mask(ocr_page, text, width, height)
+        if limit_mask is None or not np.any(limit_mask):
+            continue
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        expanded = cv2.dilate(np.where(text_mask > 0, 255, 0).astype(np.uint8), kernel, iterations=1)
+        fill_mask = cv2.bitwise_and(expanded, np.where(limit_mask > 0, 255, 0).astype(np.uint8))
+        if not np.any(fill_mask):
+            continue
+        before = result.copy()
+        result[fill_mask > 0] = np.asarray([255, 255, 255], dtype=np.uint8)
+        if not np.any(np.any(result != before, axis=2)):
+            continue
+        fill_count += 1
+        filled_bboxes.append(bbox)
+        for key_name in ("id", "text_id", "trace_id", "text_instance_id"):
+            value = text.get(key_name)
+            if value is not None:
+                filled_text_keys.add(str(value))
+    if fill_count:
+        ocr_page["_strip_unsafe_white_balloon_fill_count"] = int(fill_count)
+        ocr_page["_strip_used_fast_white_fill"] = True
+        flags_to_remove = {"mask_outside_balloon", "mask_outside_balloon_critical", "real_inpaint_skipped_unsafe_mask"}
+
+        def _item_was_filled(item: dict) -> bool:
+            if any(str(item.get(key_name) or "") in filled_text_keys for key_name in ("id", "text_id", "trace_id", "text_instance_id")):
+                return True
+            item_bbox = _normalize_bbox(item.get("text_pixel_bbox") or item.get("bbox"), width, height)
+            if item_bbox is None:
+                return False
+            return any(
+                _bbox_overlap_ratio(item_bbox, filled_bbox) >= 0.35
+                or _bbox_center_inside(item_bbox, filled_bbox)
+                or _bbox_center_inside(filled_bbox, item_bbox)
+                for filled_bbox in filled_bboxes
+            )
+
+        for collection_key in ("texts", "_vision_blocks"):
+            for item in ocr_page.get(collection_key) or []:
+                if isinstance(item, dict) and _item_was_filled(item):
+                    _remove_qa_flags_from_item(item, flags_to_remove)
+        unsafe_samples = [
+            sample
+            for sample in ocr_page.get("_strip_unsafe_inpaint_block_samples") or []
+            if not isinstance(sample, dict) or not _item_was_filled(sample)
+        ]
+        if unsafe_samples:
+            ocr_page["_strip_unsafe_inpaint_block_samples"] = unsafe_samples
+            reasons: dict[str, int] = {}
+            for sample in unsafe_samples:
+                if not isinstance(sample, dict):
+                    continue
+                reason = str(sample.get("reason") or "").strip()
+                if reason:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            if reasons:
+                ocr_page["_strip_unsafe_inpaint_block_reasons"] = reasons
+                ocr_page["_strip_unsafe_inpaint_block_count"] = sum(reasons.values())
+            else:
+                ocr_page.pop("_strip_unsafe_inpaint_block_reasons", None)
+                ocr_page.pop("_strip_unsafe_inpaint_block_count", None)
+        else:
+            ocr_page.pop("_strip_unsafe_inpaint_block_samples", None)
+            ocr_page.pop("_strip_unsafe_inpaint_block_reasons", None)
+            ocr_page.pop("_strip_unsafe_inpaint_block_count", None)
+        decision_flags = [
+            str(flag)
+            for flag in ocr_page.get("_strip_inpaint_decision_flags") or []
+            if str(flag).strip() not in flags_to_remove
+        ]
+        if decision_flags:
+            ocr_page["_strip_inpaint_decision_flags"] = decision_flags
+        else:
+            ocr_page.pop("_strip_inpaint_decision_flags", None)
+    return result, fill_count
+
+
+def _is_ui_form_metadata_background_text_candidate(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if _route_action_blocks_inpaint(text):
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox")):
+        return False
+    if _metadata_background_color(text) is None:
+        return False
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+    }
+    if "ui_form" in profiles:
+        return True
+    evidence = text.get("ui_layout_evidence")
+    if isinstance(evidence, dict) and str(evidence.get("source") or "").strip().lower() in {
+        "uied_cv",
+        "ui_layout",
+        "layout_cv",
+    }:
+        return True
+    return _source_text_has_colored_status_terms(text)
+
+
+def _try_ui_white_source_bbox_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return None
+    if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+        return None
+    if not _source_text_has_strict_ui_form_signal(text):
+        return None
+    color = _metadata_background_color(text)
+    if color is None:
+        return None
+    color_i = color.astype(np.int16)
+    if int(color.min()) < 252 or int(color.max()) - int(color.min()) > 8:
+        return None
+    height, width = image_rgb.shape[:2]
+    source_bbox = (
+        _normalize_bbox(text.get("source_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+    )
+    if source_bbox is None:
+        return None
+    geometry_bbox = (
+        _line_polygons_bbox(text, width, height)
+        or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+    )
+    source_area = max(1, (source_bbox[2] - source_bbox[0]) * (source_bbox[3] - source_bbox[1]))
+    geometry_area = (
+        max(1, (geometry_bbox[2] - geometry_bbox[0]) * (geometry_bbox[3] - geometry_bbox[1]))
+        if geometry_bbox is not None
+        else 0
+    )
+    if geometry_area and source_area < max(96, int(geometry_area * 1.35)):
+        return None
+    sx1, sy1, sx2, sy2 = source_bbox
+    crop = image_rgb[sy1:sy2, sx1:sx2]
+    if crop.size == 0:
+        return None
+    geometry_mask = _text_geometry_mask(width, height, text)
+    sample_mask = np.ones(crop.shape[:2], dtype=bool)
+    if isinstance(geometry_mask, np.ndarray) and geometry_mask.shape[:2] == (height, width):
+        exclusion = cv2.dilate(
+            (geometry_mask > 0).astype(np.uint8) * 255,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            iterations=1,
+        )
+        sample_mask = exclusion[sy1:sy2, sx1:sx2] == 0
+    sample_pixels = crop[sample_mask].astype(np.float32)
+    if sample_pixels.shape[0] >= 64:
+        bg_luma = float(np.mean(color_i.astype(np.float32)))
+        luma = (
+            sample_pixels[:, 0] * 0.299
+            + sample_pixels[:, 1] * 0.587
+            + sample_pixels[:, 2] * 0.114
+        )
+        chroma = np.max(sample_pixels, axis=1) - np.min(sample_pixels, axis=1)
+        panel_like = (
+            (luma >= 80.0)
+            & (luma <= 245.0)
+            & (
+                (chroma >= 8.0)
+                | (np.abs(luma - bg_luma) >= 28.0)
+            )
+        )
+        if float(np.mean(panel_like)) >= 0.12:
+            return None
+    delta = np.mean(np.abs(crop.astype(np.int16) - color_i[None, None, :]), axis=2)
+    close_ratio = float(np.mean(delta <= 18.0))
+    if close_ratio < 0.42:
+        return None
+    result = image_rgb.copy()
+    fill_mask = _mask_from_bbox(width, height, source_bbox, padding=3)
+    result[fill_mask > 0] = color.astype(np.uint8)
+    return result
+
+
+def _try_ui_metadata_geometry_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray | None:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return None
+    if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+        return None
+    if not _source_text_has_strict_ui_form_signal(text):
+        return None
+    color = _metadata_background_color(text)
+    if color is None:
+        return None
+    height, width = image_rgb.shape[:2]
+    mask = _text_geometry_mask(width, height, text)
+    if mask is None or not np.any(mask):
+        return None
+    mask_area = int(np.count_nonzero(mask > 0))
+    if mask_area > int(width * height * 0.35):
+        return None
+    pixels = image_rgb[mask > 0].astype(np.int16)
+    if pixels.size == 0:
+        return None
+    bg_i = color.astype(np.int16)
+    delta = np.mean(np.abs(pixels - bg_i[None, :]), axis=1)
+    close_ratio = float(np.mean(delta <= 28.0))
+    if close_ratio < 0.30:
+        return None
+    if float(np.percentile(delta, 90)) < 24.0:
+        return None
+    result = image_rgb.copy()
+    result[mask > 0] = color.astype(np.uint8)
+    return result
+
+
+def _apply_flat_ui_text_prefill_to_blocks(
+    band_rgb: np.ndarray,
+    ocr_page: dict,
+    vision_blocks: list[dict],
+) -> tuple[np.ndarray, list[dict], dict]:
+    if not isinstance(band_rgb, np.ndarray) or band_rgb.ndim != 3 or not vision_blocks:
+        return band_rgb, vision_blocks, {"flat_ui_prefill_count": 0, "remaining_blocks": len(vision_blocks)}
+    height, width = band_rgb.shape[:2]
+    result = band_rgb.copy()
+    filled_bboxes: list[list[int]] = []
+    filled_mask = np.zeros((height, width), dtype=np.uint8)
+    fill_count = 0
+    for text in _processable_texts_for_inpaint(ocr_page):
+        if not _source_text_has_strict_ui_form_signal(text):
+            continue
+        before = result
+        filled = (
+            _try_metadata_background_text_fill(result, text)
+            if _is_ui_form_metadata_background_text_candidate(text)
+            else None
+        )
+        if filled is None:
+            filled = _try_ui_metadata_geometry_text_fill(result, text)
+        if filled is None:
+            filled = _try_dark_panel_text_fill(result, text)
+        if filled is None:
+            filled = _try_ui_white_source_bbox_text_fill(result, text)
+        if filled is None:
+            continue
+        changed_mask = np.any(filled != before, axis=2).astype(np.uint8) * 255
+        if not np.any(changed_mask):
+            continue
+        dark_fill_mask = _pop_text_fill_mask(text, "_dark_panel_fill_mask", changed_mask.shape[:2])
+        if np.any(dark_fill_mask):
+            changed_mask = np.maximum(changed_mask, dark_fill_mask).astype(np.uint8)
+        fill_bbox = (
+            _bbox_from_binary_mask(changed_mask)
+            or _normalize_bbox(text.get("source_bbox"), width, height)
+            or _normalize_bbox(text.get("bbox"), width, height)
+            or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        )
+        if fill_bbox is None:
+            continue
+        result = filled
+        filled_bboxes.append(fill_bbox)
+        filled_mask = np.maximum(filled_mask, changed_mask)
+        _accumulate_page_fill_mask(ocr_page, "_strip_dark_panel_fill_mask", changed_mask, changed_mask.shape[:2])
+        fill_count += 1
+    if not fill_count:
+        return band_rgb, vision_blocks, {"flat_ui_prefill_count": 0, "remaining_blocks": len(vision_blocks)}
+    remaining_blocks = [
+        block
+        for block in vision_blocks
+        if not _block_is_covered_by_fast_fill(block, filled_bboxes, width, height, filled_mask)
+    ]
+    ocr_page["_strip_used_flat_ui_prefill"] = True
+    ocr_page["_strip_flat_ui_prefill_count"] = int(fill_count)
+    ocr_page["_strip_used_dark_panel_fill"] = True
+    previous = int(ocr_page.get("_strip_dark_panel_fill_count") or 0)
+    ocr_page["_strip_dark_panel_fill_count"] = previous + int(fill_count)
+    ocr_page["_strip_remaining_inpaint_blocks"] = len(remaining_blocks)
+    return result, remaining_blocks, {
+        "flat_ui_prefill_count": int(fill_count),
+        "remaining_blocks": len(remaining_blocks),
+    }
+
+
 def _apply_dark_panel_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple[np.ndarray, int]:
-    return image_rgb, 0
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return image_rgb, 0
+    result = image_rgb.copy()
+    fill_count = 0
+    filled_text_keys: set[str] = set()
+    candidate_texts = [
+        item
+        for item in ocr_page.get("texts", [])
+        if isinstance(item, dict)
+        and not _text_suppressed_for_inpaint(item)
+        and _route_action_allows_local_dark_panel_fill(item)
+        and not _text_has_rejected_bubble_without_glyph_evidence(item)
+        and (not _text_has_no_glyph_evidence(item) or _dark_bubble_no_glyph_fast_fillable(item))
+        and (
+            not _unsafe_white_balloon_requires_real_inpaint(item)
+            or _is_false_white_card_candidate(image_rgb, item)
+        )
+    ]
+    dark_bubble_siblings = [
+        item
+        for item in candidate_texts
+        if str(item.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask"
+    ]
+    for text in candidate_texts:
+        if str(text.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask":
+            text["_dark_bubble_sibling_texts"] = dark_bubble_siblings
+        ui_metadata_candidate = _is_ui_form_metadata_background_text_candidate(text)
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        false_white_card_candidate = (
+            str(text.get("bubble_mask_source") or "").strip().lower() == "image_white_bubble_mask"
+            and "mask_outside_balloon_critical" in flags
+            and not _text_region_looks_plain_white(image_rgb, text)
+        )
+        translator_note_text_mask = str(text.get("bubble_mask_source") or "").strip().lower() == "translator_note_text_mask"
+        dark_panel_candidate = (
+            translator_note_text_mask
+            or
+            _is_colored_status_panel_text_candidate(text)
+            or _is_dark_or_colored_card_text(text)
+            or false_white_card_candidate
+            or (
+                _source_text_has_colored_status_terms(text)
+                and bool(text.get("line_polygons") or text.get("text_pixel_bbox"))
+            )
+            or _is_dark_panel_text_candidate(text)
+        )
+        if not (ui_metadata_candidate or dark_panel_candidate):
+            text.pop("_dark_bubble_sibling_texts", None)
+            continue
+        filled = _try_metadata_background_text_fill(result, text) if ui_metadata_candidate else None
+        if filled is None and dark_panel_candidate:
+            filled = _try_dark_panel_text_fill(result, text)
+        text.pop("_dark_bubble_sibling_texts", None)
+        if filled is None:
+            continue
+        changed = np.any(filled != result, axis=2)
+        if not np.any(changed):
+            continue
+        dark_fill_mask = _pop_text_fill_mask(text, "_dark_panel_fill_mask", changed.shape[:2])
+        if not np.any(dark_fill_mask):
+            dark_fill_mask = changed.astype(np.uint8) * 255
+        visual_override = _dark_bubble_visual_fill_override(result, text, dark_fill_mask)
+        if isinstance(visual_override, np.ndarray) and np.any(visual_override):
+            filled = np.where(visual_override[:, :, None] > 0, filled, result)
+            changed = np.any(filled != result, axis=2)
+            dark_fill_mask = visual_override
+        elif _dark_fill_mask_is_overbroad_for_text(text, dark_fill_mask):
+            continue
+        _accumulate_page_fill_mask(ocr_page, "_strip_dark_panel_fill_mask", dark_fill_mask, changed.shape[:2])
+        result = filled
+        fill_count += 1
+        text["_fast_fill_inpaint_resolved"] = True
+        for key_name in ("id", "text_id", "trace_id", "text_instance_id"):
+            value = text.get(key_name)
+            if value is not None:
+                filled_text_keys.add(str(value))
+    if fill_count:
+        for collection_key in ("texts", "_vision_blocks"):
+            for item in ocr_page.get(collection_key) or []:
+                if not isinstance(item, dict):
+                    continue
+                if any(str(item.get(key_name) or "") in filled_text_keys for key_name in ("id", "text_id", "trace_id", "text_instance_id")):
+                    item["_fast_fill_inpaint_resolved"] = True
+        unsafe_samples = [
+            sample
+            for sample in ocr_page.get("_strip_unsafe_inpaint_block_samples") or []
+            if not isinstance(sample, dict)
+            or not any(str(sample.get(key_name) or "") in filled_text_keys for key_name in ("id", "text_id", "trace_id", "text_instance_id"))
+        ]
+        if unsafe_samples:
+            ocr_page["_strip_unsafe_inpaint_block_samples"] = unsafe_samples
+            reasons: dict[str, int] = {}
+            for sample in unsafe_samples:
+                if not isinstance(sample, dict):
+                    continue
+                reason = str(sample.get("reason") or "").strip()
+                if reason:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            if reasons:
+                ocr_page["_strip_unsafe_inpaint_block_reasons"] = reasons
+                ocr_page["_strip_unsafe_inpaint_block_count"] = sum(reasons.values())
+            else:
+                ocr_page.pop("_strip_unsafe_inpaint_block_reasons", None)
+                ocr_page.pop("_strip_unsafe_inpaint_block_count", None)
+        else:
+            ocr_page.pop("_strip_unsafe_inpaint_block_samples", None)
+            ocr_page.pop("_strip_unsafe_inpaint_block_reasons", None)
+            ocr_page.pop("_strip_unsafe_inpaint_block_count", None)
+            ocr_page["_strip_inpaint_decision_flags"] = [
+                str(flag)
+                for flag in ocr_page.get("_strip_inpaint_decision_flags") or []
+                if str(flag).strip() not in {"mask_outside_balloon", "mask_outside_balloon_critical", "real_inpaint_skipped_unsafe_mask"}
+            ]
+            if not ocr_page["_strip_inpaint_decision_flags"]:
+                ocr_page.pop("_strip_inpaint_decision_flags", None)
+        ocr_page["_strip_used_dark_panel_fill"] = True
+        previous = int(ocr_page.get("_strip_dark_panel_fill_count") or 0)
+        ocr_page["_strip_dark_panel_fill_count"] = previous + fill_count
+    return result, fill_count
 
 
 def _apply_fast_dark_panel_text_fill(
@@ -2842,10 +6638,93 @@ def _apply_fast_dark_panel_text_fill(
         ocr_page["_strip_fast_dark_rejection_reasons"] = dict(rejection_reasons)
         return stats
 
-    if not _fast_dark_panel_fill_enabled():
+    candidate_texts: list[dict] = []
+    seen_candidate_keys: set[str] = set()
+    candidate_by_key: dict[str, dict] = {}
+
+    def _mask_evidence_quality(value) -> tuple[float, int, int]:
+        if not isinstance(value, dict):
+            return (0.0, 0, 0)
+        try:
+            score = float(value.get("evidence_score") or 0.0)
+        except Exception:
+            score = 0.0
+        return (
+            score,
+            int(value.get("raw_mask_pixels") or 0),
+            int(value.get("expanded_mask_pixels") or 0),
+        )
+
+    for source_text in list(ocr_page.get("texts", []) or []) + list(vision_blocks or []):
+        if not isinstance(source_text, dict):
+            continue
+        key = None
+        for key_name in ("trace_id", "text_instance_id", "id", "text_id"):
+            value = source_text.get(key_name)
+            if value is not None:
+                key = f"{key_name}:{value}"
+                break
+        if key is None:
+            key = f"bbox:{source_text.get('bbox')}:{source_text.get('text_pixel_bbox')}"
+        if key in seen_candidate_keys:
+            existing = candidate_by_key.get(key)
+            if isinstance(existing, dict):
+                existing_quality = _mask_evidence_quality(existing.get("mask_evidence"))
+                source_quality = _mask_evidence_quality(source_text.get("mask_evidence"))
+                source_has_better_mask = source_quality > existing_quality
+                if source_has_better_mask:
+                    for field in (
+                        "mask_evidence",
+                        "bubble_mask_source",
+                        "bubbleMaskSource",
+                        "bubble_mask_error",
+                        "bubbleMaskError",
+                        "bubble_mask_bbox",
+                        "bubble_inner_bbox",
+                        "bbox",
+                        "source_bbox",
+                        "text_pixel_bbox",
+                        "line_polygons",
+                        "balloon_bbox",
+                        "background_rgb",
+                        "route_action",
+                        "route_reason",
+                    ):
+                        value = source_text.get(field)
+                        if value not in (None, [], ""):
+                            existing[field] = value
+                for field in (
+                    "text",
+                    "translated",
+                    "original",
+                    "source_text",
+                    "balloon_bbox",
+                    "background_rgb",
+                    "route_action",
+                    "route_reason",
+                    "layout_profile",
+                    "block_profile",
+                ):
+                    value = source_text.get(field)
+                    if value not in (None, [], "") and existing.get(field) in (None, [], ""):
+                        existing[field] = value
+                source_flags = [str(flag) for flag in source_text.get("qa_flags") or [] if str(flag).strip()]
+                if source_flags:
+                    merged_flags = list(existing.get("qa_flags") or [])
+                    for flag in source_flags:
+                        if flag not in merged_flags:
+                            merged_flags.append(flag)
+                    existing["qa_flags"] = merged_flags
+            continue
+        seen_candidate_keys.add(key)
+        candidate_texts.append(source_text)
+        candidate_by_key[key] = source_text
+
+    auto_dark_card_fill = any(_auto_fast_dark_card_fill_allowed(text) for text in candidate_texts)
+    if not _fast_dark_panel_fill_enabled() and not auto_dark_card_fill:
         rejection_reasons["disabled"] = max(
             1,
-            len([text for text in ocr_page.get("texts", []) if isinstance(text, dict)]),
+            len(candidate_texts),
         )
         return band_rgb, vision_blocks, _record(
             {"dark_panel_fill_count": 0, "remaining_blocks": len(vision_blocks)}
@@ -2860,23 +6739,72 @@ def _apply_fast_dark_panel_text_fill(
     result = band_rgb.copy()
     filled_bboxes: list[list[int]] = []
     filled_keys: set[tuple[int, int, int, int]] = set()
+    filled_text_keys: set[str] = set()
     filled_mask = np.zeros((height, width), dtype=np.uint8)
+    global_fast_dark_enabled = _fast_dark_panel_fill_enabled()
+    dark_bubble_siblings = [
+        item
+        for item in candidate_texts
+        if isinstance(item, dict)
+        and str(item.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask"
+    ]
 
-    for text in ocr_page.get("texts", []) or []:
+    for text in candidate_texts:
         if not isinstance(text, dict):
             _reject("invalid_text")
             continue
+        if not global_fast_dark_enabled and not _auto_fast_dark_card_fill_allowed(text):
+            _reject("disabled")
+            continue
+        false_white_card_candidate = _is_false_white_card_candidate(band_rgb, text)
+        visually_light_dark_bubble = _image_dark_bubble_is_visually_light(band_rgb, text)
+        local_dark_bubble_candidate = bool(
+            not visually_light_dark_bubble
+            and
+            str(text.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask"
+            and (text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
+            and (text.get("line_polygons") or text.get("text_pixel_bbox"))
+        )
+        if visually_light_dark_bubble:
+            _reject("false_light_bubble_dark_fill")
+            continue
+        local_rejected_dark_card_candidate = _is_rejected_dark_card_fill_candidate(band_rgb, text)
+        if _unsafe_white_balloon_requires_real_inpaint(text) and not false_white_card_candidate:
+            _reject("unsafe_white_balloon_context")
+            continue
+        if _text_is_white_balloon_context(text) and not false_white_card_candidate:
+            _reject("white_balloon_context")
+            continue
+        if (
+            _text_has_no_glyph_evidence(text)
+            and not _has_fast_fillable_text_mask_evidence(text)
+            and not local_rejected_dark_card_candidate
+        ):
+            _reject("missing_glyph_evidence")
+            continue
         mask_evidence_reason = _fast_fill_mask_evidence_rejection_reason(text)
-        if mask_evidence_reason:
+        if mask_evidence_reason and not (
+            false_white_card_candidate
+            or local_dark_bubble_candidate
+            or local_rejected_dark_card_candidate
+        ):
             _propagate_existing_mask_evidence_decision_flags(ocr_page, text)
             _reject(mask_evidence_reason)
             continue
         qa_reason = _fast_fill_blocking_qa_reason(text)
         if qa_reason:
-            _reject(qa_reason)
-            continue
+            if not false_white_card_candidate and not _can_use_local_card_fill_despite_blocking_qa(text, qa_reason):
+                _reject(qa_reason)
+                continue
         if _is_rotated_recovery_text(text):
             _reject("rotated_recovery_real_inpaint_required")
+            continue
+        if (
+            _rejected_visual_card_requires_real_inpaint(band_rgb, text)
+            and not _rejected_visual_card_allows_local_text_fill(text)
+            and not local_rejected_dark_card_candidate
+        ):
+            _reject("rejected_visual_card_requires_real_inpaint")
             continue
         text_bbox = (
             _normalize_bbox(text.get("text_pixel_bbox"), width, height)
@@ -2891,13 +6819,26 @@ def _apply_fast_dark_panel_text_fill(
         fill_key = tuple(fill_bbox)
         if fill_key in filled_keys:
             continue
+        if str(text.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask":
+            text["_dark_bubble_sibling_texts"] = dark_bubble_siblings
         filled = _try_dark_panel_text_fill(result, text)
+        text.pop("_dark_bubble_sibling_texts", None)
         if filled is None:
             _reject("not_solid_dark_panel")
             continue
         changed_mask = np.any(filled != result, axis=2).astype(np.uint8) * 255
         if not np.any(changed_mask):
             _reject("no_fast_fill_change")
+            continue
+        dark_fill_mask = _pop_text_fill_mask(text, "_dark_panel_fill_mask", changed_mask.shape[:2])
+        if np.any(dark_fill_mask):
+            changed_mask = np.maximum(changed_mask, dark_fill_mask).astype(np.uint8)
+        visual_override = _dark_bubble_visual_fill_override(result, text, changed_mask)
+        if isinstance(visual_override, np.ndarray) and np.any(visual_override):
+            filled = np.where(visual_override[:, :, None] > 0, filled, result)
+            changed_mask = visual_override
+        elif _dark_fill_mask_is_overbroad_for_text(text, changed_mask):
+            _reject("overbroad_dark_fill_mask")
             continue
         if not any(
             _block_is_covered_by_fast_fill(block, [fill_bbox], width, height, changed_mask)
@@ -2907,19 +6848,58 @@ def _apply_fast_dark_panel_text_fill(
             continue
         result = filled
         filled_mask = np.maximum(filled_mask, changed_mask)
+        _accumulate_page_fill_mask(ocr_page, "_strip_dark_panel_fill_mask", changed_mask, changed_mask.shape[:2])
         filled_bboxes.append(fill_bbox)
         filled_keys.add(fill_key)
+        for key_name in ("id", "text_id", "trace_id", "text_instance_id"):
+            value = text.get(key_name)
+            if value is not None:
+                filled_text_keys.add(str(value))
+        text["_fast_fill_inpaint_resolved"] = True
 
     if not filled_bboxes:
         return band_rgb, vision_blocks, _record(
             {"dark_panel_fill_count": 0, "remaining_blocks": len(vision_blocks)}
         )
 
+    def _block_matches_filled_text(block: dict) -> bool:
+        if not filled_text_keys or not isinstance(block, dict):
+            return False
+        for key_name in ("id", "text_id", "trace_id", "text_instance_id"):
+            value = block.get(key_name)
+            if value is not None and str(value) in filled_text_keys:
+                return True
+        return False
+
+    def _block_allows_fast_fill_coverage_resolution(block: dict) -> bool:
+        if not isinstance(block, dict):
+            return False
+        source = str(block.get("bubble_mask_source") or block.get("bubbleMaskSource") or "").strip().lower()
+        if source == "image_dark_bubble_mask":
+            return False
+        flags = {str(flag).strip().lower() for flag in block.get("qa_flags") or [] if str(flag).strip()}
+        if any(flag.startswith("dark_bubble") for flag in flags):
+            return False
+        return True
+
     remaining_blocks = [
         block
         for block in vision_blocks
-        if not _block_is_covered_by_fast_fill(block, filled_bboxes, width, height, filled_mask)
+        if not _block_matches_filled_text(block)
+        and not (
+            _block_allows_fast_fill_coverage_resolution(block)
+            and _block_is_covered_by_fast_fill(block, filled_bboxes, width, height, filled_mask)
+        )
     ]
+    for collection in (ocr_page.get("texts") or [], vision_blocks):
+        for item in collection or []:
+            if not isinstance(item, dict):
+                continue
+            if _block_matches_filled_text(item) or (
+                _block_allows_fast_fill_coverage_resolution(item)
+                and _block_is_covered_by_fast_fill(item, filled_bboxes, width, height, filled_mask)
+            ):
+                item["_fast_fill_inpaint_resolved"] = True
     ocr_page["_strip_used_dark_panel_fill"] = True
     previous_count = int(ocr_page.get("_strip_dark_panel_fill_count") or 0)
     ocr_page["_strip_dark_panel_fill_count"] = previous_count + len(filled_bboxes)
@@ -2943,6 +6923,29 @@ def _metadata_background_color(text: dict) -> np.ndarray | None:
     if chroma <= 4 and (luma >= 220.0 or luma <= 52.0):
         return color
     return None
+
+
+def _metadata_background_is_stale_for_current_region(
+    image_rgb: np.ndarray,
+    text_mask: np.ndarray,
+    color: np.ndarray,
+) -> bool:
+    metadata = _rgb_luma_chroma(color.tolist())
+    if metadata is None:
+        return False
+    metadata_luma, metadata_chroma = metadata
+    if metadata_luma < 235.0 or metadata_chroma > 10:
+        return False
+    if not isinstance(text_mask, np.ndarray) or text_mask.shape[:2] != image_rgb.shape[:2]:
+        return False
+    region = text_mask > 0
+    if int(np.count_nonzero(region)) < 48:
+        return False
+    pixels = image_rgb[region].astype(np.float32)
+    luma = (pixels[:, 0] * 0.299) + (pixels[:, 1] * 0.587) + (pixels[:, 2] * 0.114)
+    median_luma = float(np.median(luma))
+    dark_ratio = float(np.mean(luma <= 170.0))
+    return median_luma <= 170.0 and dark_ratio >= 0.55
 
 
 def _text_geometry_mask(width: int, height: int, text: dict) -> np.ndarray | None:
@@ -3002,8 +7005,40 @@ def _strict_text_geometry_mask(width: int, height: int, text: dict) -> np.ndarra
             if len(points) >= 3:
                 cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 255)
                 has_polygon = True
+    bbox = (
+        _normalize_bbox(text.get("source_text_anchor_bbox"), width, height)
+        or _normalize_bbox(text.get("_source_text_anchor_bbox"), width, height)
+        or _normalize_bbox(text.get("source_text_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("_source_text_mask_bbox"), width, height)
+        or _trusted_text_bbox_for_contract(text, width, height)
+        or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+    )
+    if has_polygon and bbox is not None and isinstance(text, dict):
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        no_glyph_or_fragmented = bool(
+            "fast_fill_no_glyph_evidence" in flags
+            or "dark_connected_lobe_mask_rebuilt_from_glyphs" in flags
+            or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+        )
+        polygon_bbox = _bbox_from_binary_mask(mask)
+        if no_glyph_or_fragmented and polygon_bbox is not None:
+            trusted_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+            polygon_area = max(1, (polygon_bbox[2] - polygon_bbox[0]) * (polygon_bbox[3] - polygon_bbox[1]))
+            overlap = _bbox_overlap_ratio(polygon_bbox, bbox)
+            if polygon_area < int(trusted_area * 0.72) or overlap < 0.55:
+                replacement = _mask_from_bbox(width, height, bbox, padding=1)
+                if isinstance(replacement, np.ndarray) and np.any(replacement):
+                    metrics = text.setdefault("qa_metrics", {})
+                    if isinstance(metrics, dict):
+                        metrics["strict_text_geometry_polygon_replaced_by_text_bbox"] = {
+                            "polygon_bbox": list(polygon_bbox),
+                            "trusted_bbox": list(bbox),
+                            "polygon_area": int(polygon_area),
+                            "trusted_area": int(trusted_area),
+                            "overlap": round(float(overlap), 6),
+                        }
+                    mask = replacement
     if not has_polygon:
-        bbox = _normalize_bbox(text.get("text_pixel_bbox"), width, height)
         if bbox is None:
             return None
         mask = _mask_from_bbox(width, height, bbox, padding=1)
@@ -3013,6 +7048,28 @@ def _strict_text_geometry_mask(width: int, height: int, text: dict) -> np.ndarra
 
 
 def _authorized_fast_fill_mask(width: int, height: int, text: dict, padding: int = 1) -> np.ndarray | None:
+    extra_padding = 0
+    if isinstance(text, dict):
+        try:
+            extra_padding = int(text.get("_authorize_fast_fill_padding") or 0)
+        except Exception:
+            extra_padding = 0
+    if isinstance(text, dict) and text.get("_authorize_fast_fill_by_balloon_bbox"):
+        bbox = _normalize_bbox(text.get("balloon_bbox") or text.get("bubble_mask_bbox"), width, height)
+        if bbox is None:
+            return None
+        mask = _mask_from_bbox(width, height, bbox, padding=max(18, int(padding), extra_padding))
+        return mask if np.any(mask) else None
+    if isinstance(text, dict) and text.get("_authorize_fast_fill_by_text_bbox"):
+        bbox = _normalize_bbox(text.get("text_pixel_bbox"), width, height) or _normalize_bbox(
+            text.get("bbox"),
+            width,
+            height,
+        )
+        if bbox is None:
+            return None
+        mask = _mask_from_bbox(width, height, bbox, padding=max(1, int(padding), extra_padding))
+        return mask if np.any(mask) else None
     mask = _strict_text_geometry_mask(width, height, text)
     if mask is None or not np.any(mask):
         return None
@@ -3152,21 +7209,549 @@ def _processable_texts_for_inpaint(ocr_page: dict) -> list[dict]:
         text
         for text in ocr_page.get("texts", [])
         if isinstance(text, dict)
+        and not _text_suppressed_for_inpaint(text)
         and not _route_action_blocks_inpaint(text)
+        and (not _translator_note_text_only_mask(text) or _translator_note_has_text_geometry(text))
+        and not _text_has_rejected_bubble_without_glyph_evidence(text)
     ]
+
+
+def _translator_note_text_only_mask(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+    flags = {str(flag).strip() for flag in item.get("qa_flags") or [] if str(flag).strip()}
+    return bool(source == "translator_note_text_mask" or "translator_note_text_only_mask" in flags)
 
 
 def _vision_block_requires_inpaint(block: dict) -> bool:
     if not isinstance(block, dict):
         return False
+    if _text_suppressed_for_inpaint(block):
+        return False
+    if _translator_note_text_only_mask(block) and not _translator_note_has_text_geometry(block):
+        return False
+    if _text_has_rejected_bubble_without_glyph_evidence(block):
+        return False
     route_action = str(block.get("route_action") or "").strip().lower()
     if route_action in ROUTE_ACTIONS:
+        if route_action == "review_required" and _item_has_current_inpaint_mask_evidence(block):
+            return True
         return route_action_requires_inpaint(route_action)
     return True
 
 
 def _processable_vision_blocks_for_inpaint(blocks: list[dict]) -> list[dict]:
     return [block for block in blocks if _vision_block_requires_inpaint(block)]
+
+
+def _qa_flags_for_auto_inpaint(item: dict | None) -> set[str]:
+    if not isinstance(item, dict):
+        return set()
+    return {str(flag).strip() for flag in item.get("qa_flags") or [] if str(flag).strip()}
+
+
+def _has_current_image_bubble_mask_evidence(item: dict | None) -> bool:
+    return _item_has_current_inpaint_mask_evidence(item)
+
+
+def _unsafe_source_is_covered_by_clean_current_block(source: dict, blocks: list[dict] | None) -> bool:
+    if not isinstance(source, dict) or not blocks:
+        return False
+    source_bbox = _normalize_bbox(source.get("bbox"), 10**9, 10**9)
+    if source_bbox is None:
+        return False
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if not _item_has_current_inpaint_mask_evidence(block):
+            continue
+        if _auto_inpaint_unsafe_reason(block):
+            continue
+        block_bbox = _normalize_bbox(block.get("bbox"), 10**9, 10**9)
+        if block_bbox is None:
+            continue
+        if (
+            _bbox_overlap_ratio(source_bbox, block_bbox) >= 0.20
+            or _bbox_center_inside(source_bbox, block_bbox)
+            or _bbox_center_inside(block_bbox, source_bbox)
+        ):
+            return True
+    return False
+
+
+def _source_matches_active_inpaint_block(source: dict, blocks: list[dict] | None) -> bool:
+    if not isinstance(source, dict) or blocks is None:
+        return True
+    source_keys = {
+        str(source.get(key) or "").strip()
+        for key in ("trace_id", "text_id", "id", "text_instance_id")
+        if str(source.get(key) or "").strip()
+    }
+    source_bbox = _normalize_bbox(
+        source.get("text_pixel_bbox") or source.get("bbox"),
+        10**9,
+        10**9,
+    )
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_keys = {
+            str(block.get(key) or "").strip()
+            for key in ("trace_id", "text_id", "id", "text_instance_id")
+            if str(block.get(key) or "").strip()
+        }
+        if source_keys and block_keys and source_keys & block_keys:
+            return True
+        block_bbox = _normalize_bbox(
+            block.get("text_pixel_bbox") or block.get("bbox"),
+            10**9,
+            10**9,
+        )
+        if source_bbox is not None and block_bbox is not None:
+            if _bbox_overlap_ratio(source_bbox, block_bbox) >= 0.20:
+                return True
+            if _bbox_center_inside(source_bbox, block_bbox) or _bbox_center_inside(block_bbox, source_bbox):
+                return True
+    return False
+
+
+def _auto_inpaint_unsafe_reason(item: dict | None) -> str:
+    flags = _qa_flags_for_auto_inpaint(item)
+    has_current_mask_evidence = _has_current_image_bubble_mask_evidence(item)
+    if has_current_mask_evidence:
+        flags = {flag for flag in flags if flag != "mask_outside_balloon"}
+    if _current_contour_mask_evidence_clears_outside_critical(item):
+        flags = {flag for flag in flags if flag != "mask_outside_balloon_critical"}
+    if _current_dark_panel_mask_evidence_clears_outside_critical(item):
+        flags = {
+            flag
+            for flag in flags
+            if flag not in {"mask_outside_balloon", "mask_outside_balloon_critical"}
+        }
+    if _translator_note_has_current_text_mask_evidence(item):
+        flags = {
+            flag
+            for flag in flags
+            if flag not in {"mask_outside_balloon", "mask_outside_balloon_critical"}
+        }
+    blocked = sorted(flags & _UNSAFE_AUTO_INPAINT_QA_FLAGS)
+    if blocked:
+        return blocked[0]
+    if not isinstance(item, dict):
+        return ""
+    source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
+    error = str(item.get("bubble_mask_error") or item.get("bubbleMaskError") or "").strip().lower()
+    card_panel_text_context = bool(item.get("card_panel_text_context")) or _is_dark_or_colored_card_text(item)
+    if (
+        source in _REJECTED_BUBBLE_MASK_SOURCES
+        and _has_fast_fillable_text_mask_evidence(item)
+        and error == "derived_mask_not_anchored_to_text"
+    ):
+        return ""
+    if source in _REJECTED_BUBBLE_MASK_SOURCES and not has_current_mask_evidence:
+        return source
+    if error in {"derived_mask_not_anchored_to_text", "rejected_rectangular_crop"} and not has_current_mask_evidence:
+        return error
+    weak_mask_error = _weak_image_bubble_mask_error_for_item(item)
+    if weak_mask_error:
+        return weak_mask_error
+    return ""
+
+
+def _text_lookup_key(item: dict) -> str:
+    for key in ("trace_id", "text_id", "id", "_id"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    bbox = _normalize_bbox(item.get("bbox"), 10**9, 10**9)
+    return ",".join(str(v) for v in bbox) if bbox is not None else ""
+
+
+def _unsafe_text_reason_for_block_by_geometry(block: dict, texts: list[dict]) -> str:
+    block_bbox = _normalize_bbox(block.get("bbox"), 10**9, 10**9)
+    if block_bbox is None:
+        return ""
+    best_reason = ""
+    best_score = 0.0
+    center_reason = ""
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        reason = _auto_inpaint_unsafe_reason(text)
+        if not reason:
+            continue
+        text_bbox = _normalize_bbox(text.get("bbox"), 10**9, 10**9)
+        if text_bbox is None:
+            continue
+        score = _bbox_overlap_ratio(block_bbox, text_bbox)
+        if score > best_score:
+            best_score = score
+            best_reason = reason
+        if not center_reason and (
+            _bbox_center_inside(block_bbox, text_bbox) or _bbox_center_inside(text_bbox, block_bbox)
+        ):
+            center_reason = reason
+    if best_score >= 0.20:
+        return best_reason
+    if center_reason:
+        return center_reason
+    return ""
+
+
+def _filter_unsafe_auto_inpaint_blocks(
+    ocr_page: dict,
+    blocks: list[dict],
+    band_rgb: np.ndarray | None = None,
+) -> list[dict]:
+    if not blocks:
+        return []
+    text_reasons: dict[str, str] = {}
+    unsafe_texts: list[dict] = []
+    for text in ocr_page.get("texts", []) if isinstance(ocr_page, dict) else []:
+        if not isinstance(text, dict):
+            continue
+        reason = _auto_inpaint_unsafe_reason(text)
+        key = _text_lookup_key(text)
+        if reason and key:
+            text_reasons[key] = reason
+        if reason:
+            unsafe_texts.append(text)
+
+    safe_blocks: list[dict] = []
+    skipped = 0
+    reasons: dict[str, int] = {}
+    samples: list[dict] = []
+
+    def _sample_block(block: dict, *, reason: str, rebuilt_pixels: int | None = None) -> dict:
+        return {
+            "id": block.get("id") or block.get("text_id"),
+            "trace_id": block.get("trace_id"),
+            "band_id": block.get("band_id"),
+            "reason": reason,
+            "rebuilt_mask_pixels": rebuilt_pixels,
+            "bbox": block.get("bbox"),
+            "text_pixel_bbox": block.get("text_pixel_bbox"),
+            "balloon_bbox": block.get("balloon_bbox"),
+            "bubble_mask_bbox": block.get("bubble_mask_bbox"),
+            "bubble_mask_source": block.get("bubble_mask_source"),
+            "qa_flags": list(block.get("qa_flags") or []),
+            "route_action": block.get("route_action"),
+            "mask_evidence": block.get("mask_evidence"),
+            "_band_local_bbox_normalized": block.get("_band_local_bbox_normalized"),
+        }
+
+    def _copy_fast_fillable_text_evidence(block: dict) -> bool:
+        block_key = _text_lookup_key(block)
+        block_bbox = _normalize_bbox(block.get("text_pixel_bbox") or block.get("bbox"), 10**9, 10**9)
+        for text in ocr_page.get("texts", []) if isinstance(ocr_page, dict) else []:
+            if not isinstance(text, dict):
+                continue
+            text_key = _text_lookup_key(text)
+            text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), 10**9, 10**9)
+            same_identity = bool(block_key and text_key and block_key == text_key)
+            same_geometry = bool(
+                block_bbox is not None
+                and text_bbox is not None
+                and (
+                    _bbox_overlap_ratio(block_bbox, text_bbox) >= 0.35
+                    or _bbox_center_inside(block_bbox, text_bbox)
+                    or _bbox_center_inside(text_bbox, block_bbox)
+                )
+            )
+            if not (same_identity or same_geometry):
+                continue
+            if not (_has_fast_fillable_text_mask_evidence(text) and _auto_fast_dark_card_fill_allowed(text)):
+                continue
+            for key in (
+                "mask_evidence",
+                "background_rgb",
+                "line_polygons",
+                "text_pixel_bbox",
+                "balloon_bbox",
+                "bubble_mask_source",
+                "bubbleMaskSource",
+                "bubble_mask_error",
+                "bubbleMaskError",
+                "bubble_mask_bbox",
+                "bubbleMaskBbox",
+                "bubble_inner_bbox",
+                "bubbleInnerBbox",
+                "card_panel_text_context",
+                "route_action",
+                "route_reason",
+                "qa_flags",
+            ):
+                value = text.get(key)
+                if value not in (None, [], ""):
+                    block[key] = copy.deepcopy(value)
+            return True
+        return False
+
+    def _copy_matching_dark_panel_context(block: dict) -> bool:
+        block_key = _text_lookup_key(block)
+        block_bbox = _normalize_bbox(block.get("text_pixel_bbox") or block.get("bbox"), 10**9, 10**9)
+        for text in ocr_page.get("texts", []) if isinstance(ocr_page, dict) else []:
+            if not isinstance(text, dict):
+                continue
+            source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+            if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+                continue
+            if not _current_dark_panel_mask_evidence_clears_outside_critical(text):
+                continue
+            text_key = _text_lookup_key(text)
+            text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), 10**9, 10**9)
+            same_identity = bool(block_key and text_key and block_key == text_key)
+            same_geometry = bool(
+                block_bbox is not None
+                and text_bbox is not None
+                and (
+                    _bbox_overlap_ratio(block_bbox, text_bbox) >= 0.35
+                    or _bbox_center_inside(block_bbox, text_bbox)
+                    or _bbox_center_inside(text_bbox, block_bbox)
+                )
+            )
+            if not (same_identity or same_geometry):
+                continue
+            for key in (
+                "mask_evidence",
+                "background_rgb",
+                "line_polygons",
+                "text_pixel_bbox",
+                "balloon_bbox",
+                "bubble_mask_source",
+                "bubbleMaskSource",
+                "bubble_mask_error",
+                "bubbleMaskError",
+                "bubble_mask_bbox",
+                "bubbleMaskBbox",
+                "bubble_inner_bbox",
+                "bubbleInnerBbox",
+                "card_panel_text_context",
+                "block_profile",
+                "layout_profile",
+                "background_type",
+                "route_action",
+                "route_reason",
+                "qa_flags",
+            ):
+                value = text.get(key)
+                if value not in (None, [], ""):
+                    block[key] = copy.deepcopy(value)
+            return True
+        return False
+
+    def _try_rebuild_mask_evidence(block: dict, reason: str) -> tuple[str, int | None]:
+        rebuilt_pixels: int | None = None
+        if not reason:
+            return reason, rebuilt_pixels
+        if _copy_matching_dark_panel_context(block):
+            reason = _auto_inpaint_unsafe_reason(block)
+            if not reason:
+                return "", rebuilt_pixels
+        if _copy_fast_fillable_text_evidence(block):
+            return "", rebuilt_pixels
+        if _auto_fast_dark_card_fill_allowed(block) and _has_fast_fillable_text_mask_evidence(block):
+            return "", rebuilt_pixels
+        if _item_has_current_inpaint_mask_evidence(block):
+            return _auto_inpaint_unsafe_reason(block), rebuilt_pixels
+        if not isinstance(band_rgb, np.ndarray):
+            return reason, rebuilt_pixels
+        try:
+            rebuilt_mask = build_inpaint_mask(block, band_rgb.shape, band_rgb)
+        except Exception:
+            rebuilt_mask = None
+        if isinstance(rebuilt_mask, np.ndarray):
+            rebuilt_pixels = int(np.count_nonzero(rebuilt_mask))
+            if rebuilt_pixels > 0:
+                reason = _auto_inpaint_unsafe_reason(block)
+                if reason and _item_has_current_inpaint_mask_evidence(block):
+                    reason = ""
+        return reason, rebuilt_pixels
+
+    def _stale_anchor_reason_cleared_by_current_card_mask(block: dict, reason: str) -> bool:
+        if reason != "derived_mask_not_anchored_to_text":
+            return False
+        source = str(block.get("bubble_mask_source") or "").strip().lower()
+        if source not in {"derived_card_panel_mask", "image_dark_panel_mask", "image_dark_bubble_mask"}:
+            return False
+        mask_bbox = _normalize_bbox(block.get("bubble_mask_bbox"), 10**9, 10**9)
+        text_bbox = _normalize_bbox(block.get("text_pixel_bbox") or block.get("bbox"), 10**9, 10**9)
+        if mask_bbox is None or text_bbox is None:
+            return False
+        return _bbox_overlap_ratio(text_bbox, mask_bbox) >= 0.72 or _bbox_center_inside(text_bbox, mask_bbox)
+
+    for block in blocks:
+        _copy_matching_dark_panel_context(block)
+        reason = _auto_inpaint_unsafe_reason(block)
+        rebuilt_pixels: int | None = None
+        reason, rebuilt_pixels = _try_rebuild_mask_evidence(block, reason)
+        if _stale_anchor_reason_cleared_by_current_card_mask(block, reason):
+            reason = ""
+        if not reason:
+            key = _text_lookup_key(block)
+            reason = text_reasons.get(key, "")
+            if reason:
+                reason, rebuilt_pixels = _try_rebuild_mask_evidence(block, reason)
+                if _stale_anchor_reason_cleared_by_current_card_mask(block, reason):
+                    reason = ""
+                if reason and _item_has_current_inpaint_mask_evidence(block):
+                    reason = ""
+        if not reason and unsafe_texts:
+            reason = _unsafe_text_reason_for_block_by_geometry(block, unsafe_texts)
+            if reason:
+                reason, rebuilt_pixels = _try_rebuild_mask_evidence(block, reason)
+                if _stale_anchor_reason_cleared_by_current_card_mask(block, reason):
+                    reason = ""
+                if reason and _item_has_current_inpaint_mask_evidence(block):
+                    reason = ""
+        if reason:
+            skipped += 1
+            reasons[reason] = reasons.get(reason, 0) + 1
+            if len(samples) < 8:
+                samples.append(_sample_block(block, reason=reason, rebuilt_pixels=rebuilt_pixels))
+            continue
+        safe_blocks.append(block)
+    if skipped:
+        ocr_page["_strip_unsafe_inpaint_block_count"] = int(skipped)
+        ocr_page["_strip_unsafe_inpaint_block_reasons"] = reasons
+        ocr_page["_strip_unsafe_inpaint_block_samples"] = samples
+        if not safe_blocks:
+            _append_inpaint_decision_flag(ocr_page, "real_inpaint_skipped_unsafe_mask")
+    return safe_blocks
+
+
+def _ocr_page_has_unsafe_auto_inpaint_evidence(
+    ocr_page: dict | None,
+    active_blocks: list[dict] | None = None,
+) -> bool:
+    if not isinstance(ocr_page, dict):
+        return False
+    sources = [
+        source
+        for source in list(ocr_page.get("texts") or []) + list(ocr_page.get("_vision_blocks") or [])
+        if isinstance(source, dict)
+    ]
+    source_has_current_evidence = any(_item_has_current_inpaint_mask_evidence(source) for source in sources)
+    for source in sources:
+        if _auto_inpaint_unsafe_reason(source):
+            if active_blocks is not None and not _source_matches_active_inpaint_block(source, active_blocks):
+                continue
+            if _unsafe_source_is_covered_by_clean_current_block(source, active_blocks):
+                continue
+            return True
+    decision_flags = {
+        str(flag).strip()
+        for flag in ocr_page.get("_strip_inpaint_decision_flags", [])
+        if str(flag).strip()
+    }
+    if decision_flags & _UNSAFE_AUTO_INPAINT_QA_FLAGS and not source_has_current_evidence:
+        return True
+    return False
+
+
+def _mask_exceeds_bubble_limit(
+    ocr_page: dict,
+    mask: np.ndarray | None,
+    shape: tuple[int, int],
+) -> tuple[bool, int, float]:
+    action = _coerce_mask_for_shape(mask, shape)
+    action_pixels = int(np.count_nonzero(action))
+    if action_pixels <= 0:
+        return False, 0, 0.0
+    height, width = shape
+    bubble_union = np.zeros(shape, dtype=np.uint8)
+    for text in _processable_texts_for_inpaint(ocr_page):
+        bubble_mask, _reason = _real_bubble_mask_for_text(ocr_page, text, width, height)
+        if bubble_mask is None or not np.any(bubble_mask):
+            continue
+        bubble_union = np.maximum(bubble_union, _coerce_mask_for_shape(bubble_mask, shape))
+    if not np.any(bubble_union):
+        return False, 0, 0.0
+    outside_pixels = int(np.count_nonzero((action > 0) & (bubble_union == 0)))
+    outside_ratio = outside_pixels / float(max(1, action_pixels))
+    critical = outside_pixels > OUTSIDE_BALLOON_CRITICAL_PIXELS and outside_ratio >= OUTSIDE_BALLOON_CRITICAL_RATIO
+    return critical, outside_pixels, outside_ratio
+
+
+def _rejected_card_action_mask_allows_real_inpaint(
+    ocr_page: dict,
+    active_blocks: list[dict] | None,
+    action_mask: np.ndarray | None,
+    shape: tuple[int, int],
+) -> bool:
+    action = _coerce_mask_for_shape(action_mask, shape)
+    action_pixels = int(np.count_nonzero(action))
+    if action_pixels <= 0:
+        return False
+    if action_pixels / float(max(1, int(shape[0]) * int(shape[1]))) > 0.12:
+        return False
+    blocks = [block for block in (active_blocks or []) if isinstance(block, dict)]
+    height, width = shape
+    texts = [text for text in list(ocr_page.get("texts") or []) if isinstance(text, dict)]
+    candidates = blocks or texts
+    if not candidates:
+        return False
+    matched = 0
+    for block in candidates:
+        text = _find_mask_evidence_text_for_block(block, texts, width, height)
+        merged = dict(text or {})
+        merged.update(block)
+        source = str(
+            merged.get("bubble_mask_source")
+            or merged.get("bubbleMaskSource")
+            or ""
+        ).strip().lower()
+        error = str(
+            merged.get("bubble_mask_error")
+            or merged.get("bubbleMaskError")
+            or ""
+        ).strip().lower()
+        if source not in _REJECTED_BUBBLE_MASK_SOURCES or error != "derived_mask_not_anchored_to_text":
+            return False
+        has_text_mask_evidence = bool(
+            isinstance(merged.get("mask_evidence"), dict)
+            and int((merged.get("mask_evidence") or {}).get("raw_mask_pixels") or 0) > 0
+        )
+        if not (
+            merged.get("card_panel_text_context")
+            or _is_dark_or_colored_card_text(merged)
+            or has_text_mask_evidence
+        ):
+            return False
+        if _text_suppressed_for_inpaint(merged) or _route_action_blocks_inpaint(merged):
+            return False
+        geometry = _text_geometry_mask(width, height, merged)
+        if geometry is None or not np.any(geometry):
+            bbox = _normalize_bbox(merged.get("text_pixel_bbox") or merged.get("bbox"), width, height)
+            if bbox is None:
+                return False
+            geometry = _mask_from_bbox(width, height, bbox, padding=2)
+        geometry_pixels = int(np.count_nonzero(geometry))
+        if geometry_pixels <= 0:
+            return False
+        overlap_pixels = int(np.count_nonzero((geometry > 0) & (action > 0)))
+        if overlap_pixels < max(24, int(round(geometry_pixels * 0.25))):
+            return False
+        matched += 1
+    return matched > 0
+
+
+def _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page: dict, active_blocks: list[dict] | None) -> None:
+    flags_to_remove = {"mask_outside_balloon", "mask_outside_balloon_critical", "real_inpaint_skipped_unsafe_mask"}
+    for collection in (ocr_page.get("texts") or [], ocr_page.get("_vision_blocks") or [], active_blocks or []):
+        for item in collection if isinstance(collection, list) else []:
+            if isinstance(item, dict):
+                _remove_qa_flags_from_item(item, flags_to_remove)
+    decision_flags = [
+        str(flag)
+        for flag in ocr_page.get("_strip_inpaint_decision_flags") or []
+        if str(flag).strip() not in flags_to_remove
+    ]
+    if decision_flags:
+        ocr_page["_strip_inpaint_decision_flags"] = decision_flags
+    else:
+        ocr_page.pop("_strip_inpaint_decision_flags", None)
 
 
 def _vision_block_for_real_inpaint_payload(block: dict) -> dict:
@@ -3280,6 +7865,336 @@ def _density_guarded_inpaint_mask(
     return expanded, "expanded_mask"
 
 
+def _dilate_mask_asymmetric(
+    mask: np.ndarray,
+    *,
+    left_px: int = 4,
+    right_px: int = 4,
+    up_px: int = 2,
+    down_px: int = 8,
+) -> np.ndarray:
+    if not isinstance(mask, np.ndarray) or not np.any(mask):
+        if isinstance(mask, np.ndarray):
+            return np.zeros(mask.shape[:2], dtype=np.uint8)
+        return np.zeros((0, 0), dtype=np.uint8)
+    left_px = max(0, int(left_px))
+    right_px = max(0, int(right_px))
+    up_px = max(0, int(up_px))
+    down_px = max(0, int(down_px))
+    if left_px == right_px == up_px == down_px == 0:
+        return np.where(mask > 0, 255, 0).astype(np.uint8)
+    kernel = np.ones((up_px + down_px + 1, left_px + right_px + 1), dtype=np.uint8)
+    return cv2.dilate(
+        np.where(mask > 0, 255, 0).astype(np.uint8),
+        kernel,
+        anchor=(right_px, down_px),
+        iterations=1,
+    ).astype(np.uint8)
+
+
+def _strip_real_inpaint_expansion_limit_mask(
+    ocr_page: dict,
+    texts: list[dict],
+    shape: tuple[int, int],
+) -> np.ndarray:
+    height, width = shape
+    limit = np.zeros((height, width), dtype=np.uint8)
+    if height <= 0 or width <= 0:
+        return limit
+    for text in texts:
+        if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+            continue
+        if _text_has_rejected_bubble_mask_source(text):
+            continue
+        bbox = _text_cleanup_limit_bbox(text, width, height)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        box_h = max(1, int(y2) - int(y1))
+        pad_x = max(4, min(14, int(round((int(x2) - int(x1)) * 0.08))))
+        pad_top = max(2, min(6, int(round(box_h * 0.16))))
+        pad_bottom = max(8, min(20, int(round(box_h * 0.55))))
+        text_limit = _mask_from_bbox(
+            width,
+            height,
+            [
+                max(0, int(x1) - pad_x),
+                max(0, int(y1) - pad_top),
+                min(width, int(x2) + pad_x),
+                min(height, int(y2) + pad_bottom),
+            ],
+            padding=0,
+        )
+        real_bubble_mask, _ = _real_bubble_mask_for_text(ocr_page, text, width, height)
+        if isinstance(real_bubble_mask, np.ndarray) and np.any(real_bubble_mask):
+            safe_bubble = _safe_real_bubble_interior_mask(real_bubble_mask, width, height, erode_px=2)
+            if np.any(safe_bubble):
+                text_limit = cv2.bitwise_and(text_limit.astype(np.uint8), safe_bubble.astype(np.uint8))
+        limit = np.maximum(limit, text_limit.astype(np.uint8))
+    return limit.astype(np.uint8)
+
+
+def _strip_real_inpaint_raw_component_recovery_mask(
+    raw_mask: np.ndarray,
+    ocr_page: dict,
+    texts: list[dict],
+    shape: tuple[int, int],
+) -> np.ndarray:
+    """Recover glyph-like raw components that tight text_pixel_bbox limits miss."""
+
+    height, width = shape
+    raw = _coerce_mask_for_shape(raw_mask, shape)
+    recovered = np.zeros((height, width), dtype=np.uint8)
+    if height <= 0 or width <= 0 or not np.any(raw):
+        return recovered
+
+    for text in texts:
+        if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+            continue
+        if _text_has_rejected_bubble_mask_source(text):
+            continue
+        support_bbox = _text_source_limit_bbox(text, width, height, include_line_bbox=True)
+        if support_bbox is None:
+            continue
+        sx1, sy1, sx2, sy2 = support_bbox
+        support_w = max(1, int(sx2) - int(sx1))
+        support_h = max(1, int(sy2) - int(sy1))
+        pad_x = max(6, min(14, int(round(support_w * 0.06))))
+        pad_y = max(3, min(8, int(round(support_h * 0.12))))
+        support_bbox = _normalize_bbox(
+            [
+                int(sx1) - pad_x,
+                int(sy1) - pad_y,
+                int(sx2) + pad_x,
+                int(sy2) + pad_y,
+            ],
+            width,
+            height,
+        )
+        if support_bbox is None:
+            continue
+        support = _mask_from_bbox(width, height, support_bbox, padding=0)
+        bubble_bbox = None
+        real_bubble_mask, _ = _real_bubble_mask_for_text(ocr_page, text, width, height)
+        if isinstance(real_bubble_mask, np.ndarray) and np.any(real_bubble_mask):
+            bubble_bbox = (
+                _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+                or _normalize_bbox(text.get("balloon_bbox"), width, height)
+                or _bbox_from_binary_mask(real_bubble_mask)
+            )
+            safe_bubble = _safe_real_bubble_interior_mask(real_bubble_mask, width, height, erode_px=4)
+            if np.any(safe_bubble):
+                raw_in_support = cv2.bitwise_and(raw.astype(np.uint8), support.astype(np.uint8))
+                raw_pixels = int(np.count_nonzero(raw_in_support))
+                safe_support = cv2.bitwise_and(support.astype(np.uint8), safe_bubble.astype(np.uint8))
+                safe_raw_pixels = int(np.count_nonzero(cv2.bitwise_and(raw_in_support, safe_bubble.astype(np.uint8))))
+                if raw_pixels <= 0 or safe_raw_pixels / float(max(1, raw_pixels)) >= 0.85:
+                    support = safe_support
+                elif bubble_bbox is not None:
+                    bubble_box_mask = _mask_from_bbox(width, height, bubble_bbox, padding=0)
+                    support = cv2.bitwise_and(support.astype(np.uint8), bubble_box_mask.astype(np.uint8))
+                else:
+                    support = safe_support
+        if not np.any(support):
+            continue
+
+        candidate = cv2.bitwise_and(raw.astype(np.uint8), support.astype(np.uint8))
+        if not np.any(candidate):
+            continue
+        support_pixels = int(np.count_nonzero(support))
+        max_component_area = max(96, min(3500, int(round(support_pixels * 0.35))))
+        labels_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            (candidate > 0).astype(np.uint8),
+            connectivity=8,
+        )
+        for label in range(1, int(labels_count)):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area <= 0 or area > max_component_area:
+                continue
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if bubble_bbox is not None:
+                bx1, by1, bx2, by2 = [int(v) for v in bubble_bbox]
+                min_edge_gap = max(6, min(12, int(round(min(max(1, bx2 - bx1), max(1, by2 - by1)) * 0.08))))
+                near_bubble_edge = (
+                    x - bx1 < min_edge_gap
+                    or y - by1 < min_edge_gap
+                    or bx2 - (x + w) < min_edge_gap
+                    or by2 - (y + h) < min_edge_gap
+                )
+                component_aspect = float(w) / float(max(1, h))
+                if near_bubble_edge and component_aspect < 0.90:
+                    continue
+            cx, cy = centroids[label]
+            ix, iy = int(round(cx)), int(round(cy))
+            if iy < 0 or iy >= height or ix < 0 or ix >= width or support[iy, ix] == 0:
+                continue
+            component = labels == label
+            recovered[component] = 255
+    return recovered.astype(np.uint8)
+
+
+def _strip_real_inpaint_expanded_evidence_floor_mask(
+    raw_mask: np.ndarray,
+    expanded_mask: np.ndarray,
+    ocr_page: dict,
+    texts: list[dict],
+    shape: tuple[int, int],
+) -> np.ndarray:
+    """Keep debug-approved expansion pixels near glyphs after geometry clipping."""
+
+    height, width = shape
+    raw = _coerce_mask_for_shape(raw_mask, shape)
+    expanded = _coerce_mask_for_shape(expanded_mask, shape)
+    floor = np.zeros((height, width), dtype=np.uint8)
+    if height <= 0 or width <= 0 or not np.any(raw) or not np.any(expanded):
+        return floor
+
+    expanded_only = cv2.bitwise_and(expanded, cv2.bitwise_not(np.where(raw > 0, 255, 0).astype(np.uint8)))
+    if not np.any(expanded_only):
+        return floor
+
+    near_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 33))
+    near_raw = cv2.dilate(np.where(raw > 0, 255, 0).astype(np.uint8), near_kernel, iterations=1)
+    candidate = cv2.bitwise_and(expanded_only.astype(np.uint8), near_raw.astype(np.uint8))
+    if not np.any(candidate):
+        return floor
+
+    bubble_union = np.zeros((height, width), dtype=np.uint8)
+    support_union = np.zeros((height, width), dtype=np.uint8)
+    for text in texts:
+        if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
+            continue
+        if _text_has_rejected_bubble_mask_source(text):
+            continue
+        real_bubble_mask, _ = _real_bubble_mask_for_text(ocr_page, text, width, height)
+        if isinstance(real_bubble_mask, np.ndarray) and np.any(real_bubble_mask):
+            safe_bubble = _safe_real_bubble_interior_mask(real_bubble_mask, width, height, erode_px=1)
+            bubble_union = np.maximum(bubble_union, safe_bubble.astype(np.uint8))
+        support_bbox = _text_source_limit_bbox(text, width, height, include_line_bbox=True)
+        if support_bbox is not None:
+            sx1, sy1, sx2, sy2 = support_bbox
+            support_w = max(1, int(sx2) - int(sx1))
+            support_h = max(1, int(sy2) - int(sy1))
+            support = _mask_from_bbox(
+                width,
+                height,
+                [
+                    int(sx1) - max(10, min(22, int(round(support_w * 0.12)))),
+                    int(sy1) - max(8, min(18, int(round(support_h * 0.70)))),
+                    int(sx2) + max(10, min(22, int(round(support_w * 0.12)))),
+                    int(sy2) + max(8, min(18, int(round(support_h * 0.70)))),
+                ],
+                padding=0,
+            )
+            support_union = np.maximum(support_union, support.astype(np.uint8))
+
+    if np.any(bubble_union):
+        candidate = cv2.bitwise_and(candidate, bubble_union)
+    if np.any(support_union):
+        candidate = cv2.bitwise_and(candidate, support_union)
+    return candidate.astype(np.uint8)
+
+
+def _expand_strip_real_inpaint_mask(
+    raw_mask: np.ndarray | None,
+    expanded_mask: np.ndarray | None,
+    ocr_page: dict,
+    texts: list[dict],
+    image_rgb: np.ndarray,
+) -> np.ndarray:
+    shape = image_rgb.shape[:2]
+    raw = _coerce_mask_for_shape(raw_mask, shape)
+    base = np.maximum(raw, _coerce_mask_for_shape(expanded_mask, shape))
+    if not np.any(base):
+        return raw
+
+    candidate = _dilate_mask_asymmetric(base)
+    limit = _strip_real_inpaint_expansion_limit_mask(ocr_page, texts, shape)
+    raw_recovery = _strip_real_inpaint_raw_component_recovery_mask(raw, ocr_page, texts, shape)
+    expanded_floor = _strip_real_inpaint_expanded_evidence_floor_mask(raw, base, ocr_page, texts, shape)
+    if np.any(limit):
+        clipped_base = cv2.bitwise_and(base.astype(np.uint8), limit.astype(np.uint8))
+        clipped_candidate = cv2.bitwise_and(candidate.astype(np.uint8), limit.astype(np.uint8))
+        raw_pixels = int(np.count_nonzero(raw))
+        raw_kept = int(np.count_nonzero(cv2.bitwise_and(raw.astype(np.uint8), limit.astype(np.uint8))))
+        if raw_pixels > 0 and _strip_texts_need_raw_floor(texts) and raw_kept < raw_pixels:
+            base = np.maximum(clipped_base, raw)
+            candidate = np.maximum(clipped_candidate, raw)
+            ocr_page["_strip_raw_floor_preserved_after_limit"] = {
+                "raw_pixels": raw_pixels,
+                "raw_kept_pixels": raw_kept,
+            }
+        else:
+            base = clipped_base
+            candidate = clipped_candidate
+        if np.any(expanded_floor):
+            lost_pixels = int(np.count_nonzero(cv2.bitwise_and(expanded_floor, cv2.bitwise_not(candidate.astype(np.uint8)))))
+            if lost_pixels > 0:
+                ocr_page["_strip_expanded_floor_preserved_after_limit"] = {
+                    "preserved_pixels": lost_pixels,
+                }
+            candidate = np.maximum(candidate, expanded_floor)
+    else:
+        candidate = base
+    if np.any(raw_recovery):
+        candidate = np.maximum(candidate, raw_recovery)
+    return np.maximum(base, candidate).astype(np.uint8)
+
+
+def _sanitize_precomputed_remaining_mask(
+    precomputed_mask: np.ndarray | None,
+    rebuilt_mask: np.ndarray | None,
+    *,
+    original_text_count: int,
+    filtered_text_count: int,
+) -> np.ndarray:
+    precomputed = np.where(np.asarray(precomputed_mask) > 0, 255, 0).astype(np.uint8) if precomputed_mask is not None else None
+    rebuilt = np.where(np.asarray(rebuilt_mask) > 0, 255, 0).astype(np.uint8) if rebuilt_mask is not None else None
+    if precomputed is None:
+        return rebuilt if rebuilt is not None else np.zeros((0, 0), dtype=np.uint8)
+    if rebuilt is None or rebuilt.shape[:2] != precomputed.shape[:2] or not np.any(rebuilt):
+        return precomputed
+    if int(filtered_text_count) < int(original_text_count):
+        return rebuilt
+    return precomputed
+
+
+def _sanitize_rebuilt_expanded_mask(
+    expanded_mask: np.ndarray | None,
+    rebuilt_expanded_mask: np.ndarray | None,
+    raw_mask: np.ndarray | None,
+) -> np.ndarray:
+    raw = np.where(np.asarray(raw_mask) > 0, 255, 0).astype(np.uint8) if raw_mask is not None else None
+    expanded = (
+        np.where(np.asarray(expanded_mask) > 0, 255, 0).astype(np.uint8)
+        if expanded_mask is not None
+        else None
+    )
+    rebuilt = (
+        np.where(np.asarray(rebuilt_expanded_mask) > 0, 255, 0).astype(np.uint8)
+        if rebuilt_expanded_mask is not None
+        else None
+    )
+    if raw is None:
+        return rebuilt if rebuilt is not None else (expanded if expanded is not None else np.zeros((0, 0), dtype=np.uint8))
+    base = np.maximum(raw, expanded) if expanded is not None and expanded.shape[:2] == raw.shape[:2] else raw.copy()
+    if rebuilt is None or rebuilt.shape[:2] != raw.shape[:2] or not np.any(rebuilt):
+        return base.astype(np.uint8)
+
+    raw_pixels = int(np.count_nonzero(raw))
+    rebuilt_pixels = int(np.count_nonzero(rebuilt))
+    if raw_pixels <= 0:
+        return np.maximum(base, rebuilt).astype(np.uint8)
+    if rebuilt_pixels < int(raw_pixels * 0.92):
+        return base.astype(np.uint8)
+    if rebuilt_pixels > max(raw_pixels + 4096, int(raw_pixels * 3.5)):
+        return base.astype(np.uint8)
+    return np.maximum(base, rebuilt).astype(np.uint8)
+
+
 def _augment_inpaint_masks_from_texts(
     raw_mask: np.ndarray | None,
     expanded_mask: np.ndarray | None,
@@ -3295,10 +8210,65 @@ def _augment_inpaint_masks_from_texts(
     for text in texts:
         if not isinstance(text, dict) or _route_action_blocks_inpaint(text):
             continue
+        bubble_source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+        qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        mask_evidence = text.get("mask_evidence") if isinstance(text.get("mask_evidence"), dict) else {}
+        has_mask_evidence = int(mask_evidence.get("raw_mask_pixels") or 0) > 0
+        rejected_source = _text_has_rejected_bubble_mask_source(text)
+        dark_visual_text = bubble_source == "image_dark_bubble_mask" or "dark_bubble_oval_reocr" in qa_flags
+        if rejected_source and not has_mask_evidence:
+            continue
         if not (text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("source_bbox")):
             continue
+        if rejected_source or dark_visual_text:
+            bbox = _text_bbox_for_inpaint_geometry(text, shape[1], shape[0])
+            if bbox is not None:
+                bbox_floor = _mask_from_bbox(shape[1], shape[0], bbox, padding=8)
+                if dark_visual_text:
+                    clip_bbox = _normalize_bbox(text.get("balloon_bbox"), shape[1], shape[0]) or _normalize_bbox(
+                        text.get("bubble_mask_bbox"),
+                        shape[1],
+                        shape[0],
+                    )
+                else:
+                    clip_bbox = _normalize_bbox(text.get("balloon_bbox") or text.get("bubble_mask_bbox"), shape[1], shape[0])
+                if clip_bbox is not None:
+                    clip_bbox = _expanded_bbox(shape[1], shape[0], clip_bbox, padding=18) or clip_bbox
+                    clip = _mask_from_bbox(shape[1], shape[0], clip_bbox, padding=3)
+                    bbox_floor = cv2.bitwise_and(bbox_floor, clip)
+                    bx1, by1, bx2, by2 = clip_bbox
+                    crop = image_rgb[by1:by2, bx1:bx2]
+                    if crop.size:
+                        crop_luma = (
+                            crop[:, :, 0].astype(np.float32) * 0.299
+                            + crop[:, :, 1].astype(np.float32) * 0.587
+                            + crop[:, :, 2].astype(np.float32) * 0.114
+                        )
+                        bright = np.where(crop_luma >= 95.0, 255, 0).astype(np.uint8)
+                        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(bright, 8)
+                        visual_text = np.zeros_like(bright)
+                        for label in range(1, component_count):
+                            x, y, w, h, area = [int(v) for v in stats[label]]
+                            if area < 10 or area > 2400:
+                                continue
+                            if w > max(260, (bx2 - bx1) * 0.92) or h > max(90, (by2 - by1) * 0.80):
+                                continue
+                            visual_text[labels == label] = 255
+                        if np.any(visual_text):
+                            visual_text = cv2.dilate(
+                                visual_text,
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
+                                iterations=1,
+                            )
+                            visual_mask = np.zeros(shape, dtype=np.uint8)
+                            visual_mask[by1:by2, bx1:bx2] = visual_text
+                            bbox_floor = np.maximum(bbox_floor, visual_mask)
+                if np.any(bbox_floor):
+                    raw = np.maximum(raw, bbox_floor)
+                    expanded = np.maximum(expanded, bbox_floor)
+        evidence_block = _drop_isolated_side_note_line_polygons(dict(text))
         try:
-            evidence_mask = build_inpaint_mask(dict(text), image_rgb.shape, image_rgb=image_rgb)
+            evidence_mask = build_inpaint_mask(evidence_block, image_rgb.shape, image_rgb=image_rgb)
         except Exception:
             evidence_mask = None
         if evidence_mask is None or not np.any(evidence_mask):
@@ -3308,21 +8278,110 @@ def _augment_inpaint_masks_from_texts(
             continue
 
         expanded_pixels = int(np.count_nonzero(expanded))
+        raw_pixels = int(np.count_nonzero(raw))
         evidence_pixels = int(np.count_nonzero(evidence))
         extra_pixels = int(np.count_nonzero((evidence > 0) & (expanded == 0)))
         if extra_pixels <= 0:
             continue
-        if expanded_pixels > 0:
-            if evidence_pixels > max(expanded_pixels + 4096, int(expanded_pixels * 1.45)):
+        evidence_metrics = evidence_block.get("qa_metrics") if isinstance(evidence_block.get("qa_metrics"), dict) else {}
+        has_geometry_floor_evidence = any(
+            key in evidence_metrics
+            for key in (
+                "white_balloon_geometry_floor",
+                "white_balloon_geometry_floor_after_image_derivation",
+                "white_balloon_geometry_floor_after_component_cleaner",
+            )
+        )
+        allow_raw_floor_repair = has_geometry_floor_evidence or _is_dark_or_colored_card_text(text) or (
+            raw_pixels > 0 and expanded_pixels > 0 and expanded_pixels < int(raw_pixels * 0.92)
+        )
+        if has_geometry_floor_evidence:
+            evidence = np.maximum(
+                evidence,
+                _dilate_mask_asymmetric(evidence, left_px=3, right_px=3, up_px=2, down_px=10),
+            )
+            evidence_pixels = int(np.count_nonzero(evidence))
+            extra_pixels = int(np.count_nonzero((evidence > 0) & (expanded == 0)))
+            if extra_pixels <= 0:
                 continue
-            if extra_pixels > max(4096, int(expanded_pixels * 0.45)):
+        if expanded_pixels > 0:
+            if not allow_raw_floor_repair and evidence_pixels > max(expanded_pixels + 4096, int(expanded_pixels * 1.45)):
+                continue
+            if not allow_raw_floor_repair and extra_pixels > max(4096, int(expanded_pixels * 0.45)):
                 continue
         qa_metrics = text.setdefault("qa_metrics", {})
         if isinstance(qa_metrics, dict):
             qa_metrics["text_evidence_mask_extra_pixels"] = int(extra_pixels)
+            if has_geometry_floor_evidence:
+                qa_metrics["text_evidence_mask_geometry_floor_accepted"] = dict(evidence_metrics)
         raw = np.maximum(raw, evidence)
         expanded = np.maximum(expanded, evidence)
+    raw = _drop_unprotected_dark_outline_slivers(raw, texts, image_rgb)
+    expanded = _drop_unprotected_dark_outline_slivers(expanded, texts, image_rgb)
     return raw.astype(np.uint8), expanded.astype(np.uint8)
+
+
+def _drop_unprotected_dark_outline_slivers(
+    mask: np.ndarray,
+    texts: list[dict],
+    image_rgb: np.ndarray,
+) -> np.ndarray:
+    if not isinstance(mask, np.ndarray) or not np.any(mask):
+        return mask
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0 or image_rgb.shape[:2] != mask.shape[:2]:
+        return mask
+    height, width = mask.shape[:2]
+    protected = np.zeros((height, width), dtype=np.uint8)
+    has_white_context = False
+    for text in texts or []:
+        if not isinstance(text, dict) or _is_dark_or_colored_card_text(text):
+            continue
+        profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+        balloon_type = str(text.get("balloon_type") or "").strip().lower()
+        bubble_source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+        if not (
+            profile == "white_balloon"
+            or balloon_type == "white"
+            or bubble_source in {"image_contour_bubble_mask", "image_white_bubble_mask", "image_rect_bubble_mask", "text_rect_fallback"}
+        ):
+            continue
+        text_geometry = _text_geometry_mask(width, height, text)
+        if isinstance(text_geometry, np.ndarray) and np.any(text_geometry):
+            protected = cv2.bitwise_or(protected, text_geometry.astype(np.uint8))
+            has_white_context = True
+        source_bbox = _normalize_bbox(text.get("source_bbox"), width, height)
+        text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+        if source_bbox is not None and text_bbox is not None:
+            sx1, sy1, sx2, sy2 = source_bbox
+            tx1, ty1, tx2, ty2 = text_bbox
+            iy1 = max(sy1, ty1)
+            iy2 = min(sy2, ty2)
+            if sx2 > sx1 and iy2 > iy1:
+                source_anchor = np.zeros((height, width), dtype=np.uint8)
+                source_anchor[iy1:iy2, sx1:sx2] = 255
+                protected = cv2.bitwise_or(protected, source_anchor)
+                has_white_context = True
+    if not has_white_context or not np.any(protected):
+        return mask
+    gray = cv2.cvtColor(image_rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    dark_pixels = gray < 96
+    source = np.where(mask > 0, 255, 0).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(source, connectivity=8)
+    kept = np.zeros_like(source, dtype=np.uint8)
+    removed = 0
+    for label in range(1, count):
+        component = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        protected_overlap = int(np.count_nonzero(component & (protected > 0)))
+        dark_overlap = int(np.count_nonzero(component & dark_pixels))
+        dark_ratio = dark_overlap / float(max(1, area))
+        if area <= 768 and protected_overlap == 0 and dark_overlap >= 8 and dark_ratio >= 0.18:
+            removed += area
+            continue
+        kept[component] = 255
+    return kept if removed else source
 
 
 def _select_residual_check_mask(
@@ -3682,6 +8741,94 @@ def _build_dark_residual_retry_mask(
     return retry
 
 
+def _apply_white_residual_expanded_mask_force_fill(
+    cleaned_rgb: np.ndarray,
+    mask: np.ndarray | None,
+) -> np.ndarray:
+    if cleaned_rgb is None or cleaned_rgb.size == 0:
+        return cleaned_rgb
+    fill_mask = _coerce_mask_for_shape(mask, cleaned_rgb.shape[:2]) > 0
+    if not np.any(fill_mask):
+        return cleaned_rgb
+
+    gray = cv2.cvtColor(cleaned_rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(cleaned_rgb, cv2.COLOR_RGB2HSV)
+    sample_mask = cv2.dilate(
+        fill_mask.astype(np.uint8) * 255,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (23, 23)),
+        iterations=1,
+    ) > 0
+    sample_mask &= ~fill_mask
+    sample_mask &= gray >= 220
+    sample_mask &= hsv[:, :, 1] <= 80
+    local_ring = cv2.dilate(
+        fill_mask.astype(np.uint8) * 255,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)),
+        iterations=1,
+    ) > 0
+    local_ring &= ~fill_mask
+    local_luma = gray[local_ring] if np.any(local_ring) else np.asarray([], dtype=gray.dtype)
+    if int(np.count_nonzero(sample_mask)) < 24:
+        sample_mask = (~fill_mask) & (gray >= 235) & (hsv[:, :, 1] <= 64)
+    if int(np.count_nonzero(sample_mask)) < 24:
+        if local_luma.size >= 24 and float(np.percentile(local_luma, 75)) < 150.0:
+            local_rgb = cleaned_rgb[local_ring].astype(np.float32)
+            fill = np.median(local_rgb, axis=0).clip(0, 255)
+            fill_color = np.asarray([int(round(float(v))) for v in fill], dtype=np.uint8)
+        else:
+            fill_color = np.asarray([255, 255, 255], dtype=np.uint8)
+    else:
+        fill = np.median(cleaned_rgb[sample_mask].astype(np.float32), axis=0).clip(0, 255)
+        fill_color = np.asarray([int(round(float(v))) for v in fill], dtype=np.uint8)
+
+    result = cleaned_rgb.copy()
+    result[fill_mask] = fill_color
+    return result
+
+
+def _apply_translator_note_dark_text_contract_fill(
+    cleaned_rgb: np.ndarray,
+    ocr_page: dict,
+) -> tuple[np.ndarray, int]:
+    if not isinstance(cleaned_rgb, np.ndarray) or cleaned_rgb.ndim != 3 or not isinstance(ocr_page, dict):
+        return cleaned_rgb, 0
+    height, width = cleaned_rgb.shape[:2]
+    result = cleaned_rgb.copy()
+    changed_pixels = 0
+    for raw_text in ocr_page.get("texts") or []:
+        if not isinstance(raw_text, dict):
+            continue
+        source = str(raw_text.get("bubble_mask_source") or raw_text.get("bubbleMaskSource") or "").strip().lower()
+        if source != "translator_note_text_mask":
+            continue
+        if _text_suppressed_for_inpaint(raw_text) or _route_action_blocks_inpaint(raw_text):
+            continue
+        background = raw_text.get("background_rgb")
+        fill_color = np.asarray([0, 0, 0], dtype=np.uint8)
+        if isinstance(background, (list, tuple)) and len(background) >= 3:
+            try:
+                candidate = np.asarray(
+                    [int(max(0, min(255, round(float(v))))) for v in background[:3]],
+                    dtype=np.uint8,
+                )
+                if int(np.max(candidate)) <= 96:
+                    fill_color = candidate
+            except Exception:
+                fill_color = np.asarray([0, 0, 0], dtype=np.uint8)
+        mask = _dark_text_contract_fill_mask(raw_text, width, height, cleaned_rgb)
+        if not isinstance(mask, np.ndarray) or not np.any(mask):
+            continue
+        before = result.copy()
+        result[mask > 0] = fill_color
+        delta = np.any(result != before, axis=2)
+        changed_pixels += int(np.count_nonzero(delta & (mask > 0)))
+        raw_text["_fast_fill_inpaint_resolved"] = True
+        _append_text_flag(raw_text, "translator_note_dark_contract_final_fill")
+    if changed_pixels:
+        ocr_page["_strip_translator_note_dark_contract_final_fill_pixels"] = int(changed_pixels)
+    return result, changed_pixels
+
+
 def _record_inpaint_decision(
     ocr_page: dict,
     *,
@@ -3800,6 +8947,8 @@ def _record_inpaint_decision(
         ),
         "used_fast_local_fill": bool(ocr_page.get("_strip_used_fast_local_fill")),
         "used_fast_dark_fill": bool(ocr_page.get("_strip_used_fast_dark_fill")),
+        "used_flat_ui_prefill": bool(ocr_page.get("_strip_used_flat_ui_prefill")),
+        "flat_ui_prefill_count": int(ocr_page.get("_strip_flat_ui_prefill_count") or 0),
         "used_dark_panel_fill": bool(ocr_page.get("_strip_used_dark_panel_fill")),
         "dark_panel_fill_count": int(ocr_page.get("_strip_dark_panel_fill_count") or 0),
         "used_real_inpaint": bool(used_real_inpaint or ocr_page.get("_strip_used_real_inpaint")),
@@ -3827,6 +8976,21 @@ def _record_inpaint_decision(
         "light_residual_retry_mask_pixels": int(ocr_page.get("_strip_light_residual_retry_mask_pixels") or 0),
         "dark_residual_retry": bool(ocr_page.get("_strip_dark_residual_retry")),
         "dark_residual_retry_mask_pixels": int(ocr_page.get("_strip_dark_residual_retry_mask_pixels") or 0),
+        "white_residual_expanded_mask_force_fill": bool(
+            ocr_page.get("_strip_white_residual_expanded_mask_force_fill")
+        ),
+        "white_residual_expanded_mask_force_fill_pixels": int(
+            ocr_page.get("_strip_white_residual_expanded_mask_force_fill_pixels") or 0
+        ),
+        "white_residual_expanded_mask_force_fill_mask_pixels": int(
+            ocr_page.get("_strip_white_residual_expanded_mask_force_fill_mask_pixels") or 0
+        ),
+        "white_residual_expanded_mask_force_fill_source": str(
+            ocr_page.get("_strip_white_residual_expanded_mask_force_fill_source") or ""
+        ),
+        "final_action_mask_white_cleanup_added_pixels": int(
+            ocr_page.get("_strip_final_action_mask_white_cleanup_added_pixels") or 0
+        ),
     }
     if bool(payload["used_real_inpaint"]) and not residual.get("has_residual"):
         preliminary_fast_fill_flags = {
@@ -4027,6 +9191,10 @@ def _write_strip_inpaint_debug(
         )
     if fast_fill_mask is None:
         fast_fill_mask = np.zeros(raw_mask.shape, dtype=np.uint8)
+    dark_panel_fill_mask = _page_fill_mask(ocr_page, "_strip_dark_panel_fill_mask", raw_mask.shape[:2])
+    if np.any(dark_panel_fill_mask):
+        raw_mask = np.maximum(raw_mask, dark_panel_fill_mask).astype(np.uint8)
+        expanded_mask = np.maximum(expanded_mask, dark_panel_fill_mask).astype(np.uint8)
     _mark_suspicious_fast_fill_without_raw_mask(ocr_page, fast_fill_mask, raw_mask)
     effective_limit_mask = _build_post_cleanup_limit_mask(
         expanded_mask,
@@ -4083,10 +9251,45 @@ def _write_strip_inpaint_debug(
     _save_mask(debug_dir / "02_inpaint_mask_expanded.png", expanded_mask)
     _save_rgb(debug_dir / "03_inpaint_mask_overlay.jpg", _mask_overlay(working_rgb, expanded_mask, vision_blocks))
     engine_preset = ocr_page.get("_engine_preset") if isinstance(ocr_page.get("_engine_preset"), dict) else {}
+    def _debug_text_samples(collection):
+        samples = []
+        for item in collection or []:
+            if not isinstance(item, dict):
+                continue
+            samples.append(
+                {
+                    "id": item.get("id") or item.get("text_id"),
+                    "trace_id": item.get("trace_id"),
+                    "band_id": item.get("band_id"),
+                    "bbox": item.get("bbox"),
+                    "text_pixel_bbox": item.get("text_pixel_bbox"),
+                    "balloon_bbox": item.get("balloon_bbox"),
+                    "bubble_mask_bbox": item.get("bubble_mask_bbox"),
+                    "bubble_mask_source": item.get("bubble_mask_source"),
+                    "bubble_mask_error": item.get("bubble_mask_error"),
+                    "qa_flags": list(item.get("qa_flags") or []),
+                    "route_action": item.get("route_action"),
+                    "mask_evidence": item.get("mask_evidence"),
+                    "_band_local_bbox_normalized": item.get("_band_local_bbox_normalized"),
+                }
+            )
+            if len(samples) >= 4:
+                break
+        return samples
+
     metadata = {
         "page_number": int(ocr_page.get("_source_page_number") or ocr_page.get("numero") or 0),
         "band_index": int(ocr_page.get("_band_index") or 0),
+        "band_id": _strip_band_id(ocr_page),
+        "band_y_top": int(ocr_page.get("_band_y_top") or 0),
         "text_count": len([t for t in ocr_page.get("texts", []) if isinstance(t, dict)]),
+        "text_samples": _debug_text_samples(ocr_page.get("texts")),
+        "vision_block_samples": _debug_text_samples(vision_blocks),
+        "pre_recovery_text_samples": ocr_page.get("_strip_pre_recovery_text_samples") or [],
+        "initial_empty_recovery_attempts": ocr_page.get("_strip_initial_empty_recovery_attempts") or [],
+        "recovered_initial_empty_vision_blocks_from_texts": bool(
+            ocr_page.get("_strip_recovered_initial_empty_vision_blocks_from_texts")
+        ),
         "remaining_inpaint_blocks": len(vision_blocks),
         "engine_preset_id": str(engine_preset.get("engine_preset_id") or ocr_page.get("engine_preset_id") or ""),
         "mask_strategy": str(engine_preset.get("mask_strategy") or ""),
@@ -4115,6 +9318,9 @@ def _write_strip_inpaint_debug(
         "fast_solid_fill_samples": ocr_page.get("_strip_fast_solid_fill_samples") or [],
         "fast_solid_rejection_reasons": ocr_page.get("_strip_fast_solid_rejection_reasons") or {},
         "fast_solid_fill_reject_reasons": ocr_page.get("_strip_fast_solid_fill_reject_reasons") or {},
+        "unsafe_inpaint_block_count": int(ocr_page.get("_strip_unsafe_inpaint_block_count") or 0),
+        "unsafe_inpaint_block_reasons": ocr_page.get("_strip_unsafe_inpaint_block_reasons") or {},
+        "unsafe_inpaint_block_samples": ocr_page.get("_strip_unsafe_inpaint_block_samples") or [],
         "connected_white_geometry_fill_count": int(ocr_page.get("_strip_connected_white_geometry_fill_count") or 0),
         "connected_white_geometry_fill_mask_pixels": int(
             ocr_page.get("_strip_connected_white_geometry_fill_mask_pixels") or 0
@@ -4137,10 +9343,104 @@ def _write_strip_inpaint_debug(
         else 0,
         "raw_changed_outside_limit_mask": int(ocr_page.get("_strip_raw_changed_outside_limit_mask") or 0),
         "cleanup_changed_outside_limit_mask": int(ocr_page.get("cleanup_changed_outside_limit_mask") or 0),
+        "final_clamped_outside_expanded_mask_pixels": int(
+            ocr_page.get("_strip_final_clamped_outside_expanded_mask_pixels") or 0
+        ),
+        "final_action_mask_white_cleanup_added_pixels": int(
+            ocr_page.get("_strip_final_action_mask_white_cleanup_added_pixels") or 0
+        ),
         "flags": list(dict.fromkeys(str(flag) for flag in ocr_page.get("_strip_inpaint_decision_flags", []) if flag)),
     }
     (debug_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     ocr_page["_strip_inpaint_debug_dir"] = str(debug_dir)
+
+
+def _clamp_final_inpaint_to_expanded_mask(
+    working_rgb: np.ndarray,
+    cleaned_rgb: np.ndarray,
+    expanded_mask: np.ndarray | None,
+) -> tuple[np.ndarray, int]:
+    if not isinstance(working_rgb, np.ndarray) or not isinstance(cleaned_rgb, np.ndarray):
+        return cleaned_rgb, 0
+    if working_rgb.shape != cleaned_rgb.shape:
+        return cleaned_rgb, 0
+    if not isinstance(expanded_mask, np.ndarray) or expanded_mask.shape[:2] != cleaned_rgb.shape[:2]:
+        return cleaned_rgb, 0
+    allowed = expanded_mask > 0
+    changed_outside = np.any(cleaned_rgb != working_rgb, axis=2) & ~allowed
+    outside_count = int(np.count_nonzero(changed_outside))
+    if outside_count <= 0:
+        return cleaned_rgb, 0
+    result = cleaned_rgb.copy()
+    result[changed_outside] = working_rgb[changed_outside]
+    return result, outside_count
+
+
+def _extend_final_action_mask_for_white_balloon_cleanup(
+    final_action_mask: np.ndarray | None,
+    residual_ocr_page: dict | None,
+    texts: list[dict],
+    image_rgb: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    shape = image_rgb.shape[:2] if isinstance(image_rgb, np.ndarray) and image_rgb.ndim >= 2 else (0, 0)
+    action = _coerce_mask_for_shape(final_action_mask, shape)
+    if not shape[0] or not shape[1]:
+        return action, 0
+    cleanup_texts = [
+        text
+        for text in texts
+        if _text_allows_final_white_cleanup_extension(text, image_rgb)
+        and not _translator_note_text_only_mask(text)
+    ]
+    if not cleanup_texts:
+        return action, 0
+    has_white_balloon_metadata = _has_white_balloon_cleanup_metadata(cleanup_texts)
+    if not has_white_balloon_metadata and not _all_processable_texts_are_white_balloon(cleanup_texts, image_rgb):
+        return action, 0
+    residual_region = _build_residual_text_region_mask({"texts": cleanup_texts}, shape)
+    if not np.any(residual_region):
+        return action, 0
+    extended = np.maximum(action, residual_region.astype(np.uint8)).astype(np.uint8)
+    added = int(np.count_nonzero((extended > 0) & (action == 0)))
+    return extended, added
+
+
+def _text_allows_final_white_cleanup_extension(text: dict, image_rgb: np.ndarray | None = None) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "short_dark_text_full_panel_bbox_rejected" in flags:
+        return False
+    if any(flag.startswith("dark_bubble") for flag in flags):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask", "translator_note_text_mask"}:
+        return False
+    profile = str(text.get("block_profile") or text.get("layout_profile") or text.get("render_profile") or "").strip().lower()
+    if profile in {"dark_panel", "dark_bubble", "black_bubble", "colored_status_panel", "status_panel", "card", "title_card"}:
+        return False
+    if (
+        profile == "white_balloon"
+        or str(text.get("balloon_type") or "").strip().lower() == "white"
+        or source in {"image_white_bubble_mask", "derived_white_bubble_mask", "derived_white_crop"}
+    ):
+        return True
+    if image_rgb is not None:
+        return _text_region_looks_plain_white(image_rgb, text)
+    return False
+
+
+def _has_white_balloon_cleanup_metadata(texts: list[dict]) -> bool:
+    return any(
+        isinstance(text, dict)
+        and (
+            str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower() == "white_balloon"
+            or str(text.get("balloon_type") or "").strip().lower() == "white"
+            or str(text.get("bubble_mask_source") or "").strip().lower()
+            in {"image_white_bubble_mask", "derived_white_bubble_mask", "derived_white_crop"}
+        )
+        for text in texts
+    )
 
 
 def _apply_real_inpaint_for_fast_fill_residual(
@@ -4163,6 +9463,9 @@ def _apply_real_inpaint_for_fast_fill_residual(
     )
     ocr_page["_strip_fast_fill_residual_check"] = residual
     if not residual.get("has_residual"):
+        return cleaned_rgb, False, None
+    if _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page):
+        _append_inpaint_decision_flag(ocr_page, "real_inpaint_skipped_unsafe_mask")
         return cleaned_rgb, False, None
 
     residual_mask, source, _ = _select_residual_check_mask(
@@ -4192,6 +9495,17 @@ def _apply_real_inpaint_for_fast_fill_residual(
         _append_inpaint_decision_flag(ocr_page, "text_residual_after_fast_fill")
         _append_inpaint_decision_flag(ocr_page, "fast_fill_residual_mask_missing")
         return cleaned_rgb, False, None
+    critical_outside, outside_pixels, outside_ratio = _mask_exceeds_bubble_limit(
+        ocr_page,
+        residual_mask,
+        original_rgb.shape[:2],
+    )
+    if critical_outside:
+        ocr_page["_strip_fast_fill_residual_outside_balloon_pixels"] = int(outside_pixels)
+        ocr_page["_strip_fast_fill_residual_outside_balloon_ratio"] = round(float(outside_ratio), 6)
+        _append_inpaint_decision_flag(ocr_page, "mask_outside_balloon_critical")
+        _append_inpaint_decision_flag(ocr_page, "real_inpaint_skipped_unsafe_mask")
+        return cleaned_rgb, False, residual_mask
 
     try:
         from vision_stack.runtime import (
@@ -4242,6 +9556,10 @@ def _apply_real_inpaint_for_fast_fill_residual(
         ocr_page["_strip_used_post_cleanup"] = True
         ocr_page["_strip_fast_fill_residual_real_inpaint"] = True
         ocr_page["_strip_fast_fill_residual_mask_source"] = source
+        if "dark_residual_pixels" in {str(flag) for flag in residual.get("flags") or []}:
+            ocr_page["_strip_dark_residual_retry"] = True
+            ocr_page["_strip_dark_residual_retry_from_fast_fill_residual"] = True
+            ocr_page["_strip_dark_residual_retry_mask_pixels"] = int(mask_pixels)
         return repaired, True, residual_mask
     except Exception as exc:
         _append_inpaint_decision_flag(ocr_page, "text_residual_after_fast_fill")
@@ -4261,6 +9579,8 @@ def _try_metadata_background_text_fill(image_rgb: np.ndarray, text: dict) -> np.
         return None
     mask = _text_geometry_mask(width, height, text)
     if mask is None:
+        return None
+    if _metadata_background_is_stale_for_current_region(image_rgb, mask, color):
         return None
     sample_bbox = (
         _local_context_bbox_for_text(text, width, height)
@@ -4448,7 +9768,25 @@ def _apply_koharu_bubble_fast_fill_to_blocks(
     filled_total = 0
 
     for block in vision_blocks:
-        if not isinstance(block, dict) or _route_action_blocks_inpaint(block):
+        if not isinstance(block, dict) or _text_suppressed_for_inpaint(block) or _route_action_blocks_inpaint(block):
+            continue
+        if (
+            str(block.get("route_action") or "").strip().lower() == "review_required"
+            and _item_has_current_inpaint_mask_evidence(block)
+        ):
+            remaining_blocks.append(dict(block))
+            reason = "review_required_real_inpaint"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            samples.append(
+                {
+                    "text": block.get("text") or block.get("original"),
+                    "bbox": block.get("bbox"),
+                    "bubble_id": block.get("bubble_id") or block.get("bubbleId"),
+                    "filled_pixels": 0,
+                    "remaining_pixels": 0,
+                    "reason": reason,
+                }
+            )
             continue
         text_mask = build_inpaint_mask(block, band_rgb.shape, image_rgb=working_rgb)
         if not isinstance(text_mask, np.ndarray) or not np.any(text_mask):
@@ -4457,17 +9795,130 @@ def _apply_koharu_bubble_fast_fill_to_blocks(
             continue
 
         bubble_mask, bubble_reason = _real_bubble_mask_for_koharu_fill(ocr_page, block, width, height)
+        if isinstance(bubble_mask, np.ndarray) and np.any(bubble_mask):
+            bubble_mask = _coerce_mask_for_shape(bubble_mask, (height, width))
+            text_for_overlap = _coerce_mask_for_shape(text_mask, (height, width))
+            overlap_pixels = int(np.count_nonzero((text_for_overlap > 0) & (bubble_mask > 0)))
+            text_pixels_for_overlap = int(np.count_nonzero(text_for_overlap))
+            if text_pixels_for_overlap > 0 and overlap_pixels < int(text_pixels_for_overlap * 0.72):
+                fallback_bubble = _fallback_dark_bubble_mask_from_block_bbox(block, width, height)
+                if isinstance(fallback_bubble, np.ndarray) and np.any(fallback_bubble):
+                    bubble_mask = fallback_bubble.astype(np.uint8)
+                    metrics = block.setdefault("qa_metrics", {})
+                    if isinstance(metrics, dict):
+                        metrics["koharu_fast_fill_bubble_mask_replaced_for_text_contract"] = {
+                            "text_pixels": int(text_pixels_for_overlap),
+                            "overlap_pixels": int(overlap_pixels),
+                        }
+                    _append_qa_flag_to_item(block, "koharu_fast_fill_bubble_mask_replaced_for_text_contract")
+            text_mask_for_gate = _coerce_mask_for_shape(text_mask, (height, width))
+            text_pixels = int(np.count_nonzero(text_mask_for_gate))
+            outside_pixels = int(np.count_nonzero((text_mask_for_gate > 0) & (bubble_mask == 0)))
+            outside_ratio = outside_pixels / float(max(1, text_pixels))
+            if outside_pixels > OUTSIDE_BALLOON_CRITICAL_PIXELS and outside_ratio >= OUTSIDE_BALLOON_CRITICAL_RATIO:
+                _append_qa_flag_to_item(block, "mask_outside_balloon")
+                _append_qa_flag_to_item(block, "mask_outside_balloon_critical")
+                _append_inpaint_decision_flag(ocr_page, "mask_outside_balloon_critical")
+                _append_inpaint_decision_flag(ocr_page, "real_inpaint_skipped_unsafe_mask")
+                reason = "mask_outside_balloon_critical"
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                samples.append(
+                    {
+                        "text": block.get("text") or block.get("original"),
+                        "bbox": block.get("bbox"),
+                        "bubble_id": block.get("bubble_id") or block.get("bubbleId"),
+                        "filled_pixels": 0,
+                        "remaining_pixels": 0,
+                        "reason": reason,
+                    }
+                )
+                continue
         fast_image, block_remaining, metadata = apply_koharu_bubble_fast_fill(
             working_rgb,
             text_mask,
             bubble_mask,
         )
+        metadata_reason = str(metadata.get("reason") or bubble_reason or "").strip().lower()
+        block_source = str(block.get("bubble_mask_source") or block.get("bubbleMaskSource") or "").strip().lower()
+        if metadata_reason == "missing_bubble_mask" and block_source in {
+            "image_dark_panel_mask",
+            "derived_card_panel_mask",
+        }:
+            contract_mask = _dark_text_contract_fill_mask(block, width, height, working_rgb)
+            if not (isinstance(contract_mask, np.ndarray) and np.any(contract_mask)):
+                contract_bbox = (
+                    _normalize_bbox(block.get("source_text_mask_bbox"), width, height)
+                    or _normalize_bbox(block.get("_source_text_mask_bbox"), width, height)
+                    or _normalize_bbox(block.get("text_pixel_bbox"), width, height)
+                    or _normalize_bbox(block.get("bbox"), width, height)
+                )
+                if contract_bbox is not None:
+                    contract_mask = _mask_from_bbox(width, height, contract_bbox, padding=6)
+                    metrics = block.setdefault("qa_metrics", {})
+                    if isinstance(metrics, dict):
+                        metrics["koharu_missing_bubble_bbox_contract_fill_mask"] = {
+                            "bbox": [int(v) for v in contract_bbox],
+                            "mask_pixels": int(np.count_nonzero(contract_mask)),
+                            "source": "text_bbox_fallback",
+                        }
+            if isinstance(contract_mask, np.ndarray) and np.any(contract_mask):
+                visual_contract = _dark_panel_visual_contract_fill_mask(
+                    working_rgb,
+                    block,
+                    contract_mask,
+                    width,
+                    height,
+                )
+                block_remaining = (
+                    visual_contract.astype(np.uint8)
+                    if isinstance(visual_contract, np.ndarray) and np.any(visual_contract)
+                    else contract_mask.astype(np.uint8)
+                )
+                metadata = dict(metadata)
+                metadata["reason"] = "visual_contract_missing_bubble_mask"
+                metrics = block.setdefault("qa_metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["koharu_missing_bubble_visual_contract_fill_mask"] = {
+                        "mask_pixels": int(np.count_nonzero(block_remaining)),
+                        "source": "dark_panel_text_contract",
+                    }
+        fill_rgb = None
+        fill_reason = str(metadata.get("reason") or metadata_reason or "").strip().lower()
+        if fill_reason == "visual_contract_missing_bubble_mask" and block_source in {
+            "image_dark_panel_mask",
+            "derived_card_panel_mask",
+        }:
+            fill_rgb = _sample_dark_panel_contract_fill_rgb(
+                working_rgb,
+                block_remaining,
+                block,
+                width,
+                height,
+            )
+        if fill_rgb is None:
+            fill_rgb = _dark_text_contract_fill_rgb(block)
+        if fill_rgb is not None:
+            unresolved = _coerce_mask_for_shape(block_remaining, (height, width)) > 0
+            if np.any(unresolved):
+                fast_image = fast_image.copy()
+                fast_image[unresolved] = fill_rgb
+                metadata = dict(metadata)
+                metadata["text_contract_direct_dark_fill_pixels"] = int(np.count_nonzero(unresolved))
+                metadata["text_contract_direct_dark_fill_rgb"] = [int(v) for v in fill_rgb.tolist()]
+                block_remaining = np.zeros((height, width), dtype=np.uint8)
+                _append_qa_flag_to_item(block, "text_contract_direct_dark_fill")
         filled_pixels = int(metadata.get("filled_pixels") or 0)
+        direct_contract_pixels = int(metadata.get("text_contract_direct_dark_fill_pixels") or 0)
         if filled_pixels:
             changed = np.any(fast_image != working_rgb, axis=2)
             fast_fill_mask[changed] = 255
             working_rgb = fast_image
             filled_total += filled_pixels
+        elif direct_contract_pixels:
+            changed = np.any(fast_image != working_rgb, axis=2)
+            fast_fill_mask[changed] = 255
+            working_rgb = fast_image
+            filled_total += direct_contract_pixels
         else:
             reason = str(metadata.get("reason") or bubble_reason or "fast_fill_not_applicable")
             rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
@@ -4484,7 +9935,7 @@ def _apply_koharu_bubble_fast_fill_to_blocks(
                 "text": block.get("text") or block.get("original"),
                 "bbox": block.get("bbox"),
                 "bubble_id": block.get("bubble_id") or block.get("bubbleId"),
-                "filled_pixels": filled_pixels,
+                "filled_pixels": filled_pixels + direct_contract_pixels,
                 "remaining_pixels": int(np.count_nonzero(block_remaining)),
                 "reason": metadata.get("reason") or bubble_reason or "",
             }
@@ -4542,6 +9993,9 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         height=height,
         band_y_top=band_y_top,
     )
+    texts_for_inpaint = [
+        text for text in texts_for_inpaint if not _text_has_rejected_bubble_without_glyph_evidence(text)
+    ]
     if texts_for_inpaint:
         ocr_page["texts"] = texts_for_inpaint
     vision_blocks = _texts_with_band_local_bboxes(
@@ -4558,8 +10012,105 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         width,
         height,
     )
+    promoted_before = len(vision_blocks)
+    vision_blocks = _append_missing_text_inpaint_blocks(
+        vision_blocks,
+        texts_for_inpaint,
+        width,
+        height,
+        band_rgb,
+    )
+    promoted_count = max(0, len(vision_blocks) - promoted_before)
+    if promoted_count:
+        ocr_page["_strip_promoted_missing_text_inpaint_blocks"] = int(promoted_count)
+    if vision_blocks:
+        processable_vision_blocks = _processable_vision_blocks_for_inpaint(vision_blocks)
+        ignored_count = len(vision_blocks) - len(processable_vision_blocks)
+        if ignored_count:
+            ocr_page["_strip_nonprocessable_remaining_block_count"] = int(ignored_count)
+            _append_inpaint_decision_flag(ocr_page, "nonprocessable_remaining_blocks_ignored")
+        vision_blocks = processable_vision_blocks
     if not vision_blocks:
-        return band_rgb.copy()
+        recovered_blocks: list[dict] = []
+        recovery_candidates = _texts_with_band_local_bboxes(
+            [dict(text) for text in list(ocr_page.get("texts") or []) if isinstance(text, dict)],
+            width=width,
+            height=height,
+            band_y_top=band_y_top,
+        )
+        pre_recovery_samples: list[dict] = []
+        recovery_attempts: list[dict] = []
+        for text in recovery_candidates:
+            if len(pre_recovery_samples) < 8:
+                pre_recovery_samples.append(
+                    {
+                        "id": text.get("id") or text.get("text_id"),
+                        "trace_id": text.get("trace_id"),
+                        "band_id": text.get("band_id"),
+                        "bbox": text.get("bbox"),
+                        "text_pixel_bbox": text.get("text_pixel_bbox"),
+                        "balloon_bbox": text.get("balloon_bbox"),
+                        "bubble_mask_bbox": text.get("bubble_mask_bbox"),
+                        "bubble_mask_source": text.get("bubble_mask_source"),
+                        "bubble_mask_error": text.get("bubble_mask_error"),
+                        "qa_flags": list(text.get("qa_flags") or []),
+                        "route_action": text.get("route_action"),
+                        "mask_evidence": text.get("mask_evidence"),
+                        "_band_local_bbox_normalized": text.get("_band_local_bbox_normalized"),
+                    }
+                )
+            attempt = {
+                "id": text.get("id") or text.get("text_id"),
+                "trace_id": text.get("trace_id"),
+                "bbox": text.get("bbox"),
+                "text_pixel_bbox": text.get("text_pixel_bbox"),
+                "bubble_mask_source": text.get("bubble_mask_source"),
+                "qa_flags": list(text.get("qa_flags") or []),
+                "route_action": text.get("route_action"),
+            }
+            if _text_suppressed_for_inpaint(text) or _route_action_blocks_inpaint(text):
+                attempt["result"] = "skipped_route_or_suppressed"
+                if len(recovery_attempts) < 8:
+                    recovery_attempts.append(attempt)
+                continue
+            if _translator_note_text_only_mask(text) and not _translator_note_has_text_geometry(text):
+                attempt["result"] = "skipped_translator_note_text_only_without_geometry"
+                if len(recovery_attempts) < 8:
+                    recovery_attempts.append(attempt)
+                continue
+            try:
+                recovered_mask = build_inpaint_mask(text, band_rgb.shape, band_rgb)
+            except Exception as exc:
+                recovered_mask = None
+                attempt["result"] = "exception"
+                attempt["error"] = str(exc)
+            if isinstance(recovered_mask, np.ndarray) and np.any(recovered_mask):
+                attempt["result"] = "recovered"
+                attempt["mask_pixels"] = int(np.count_nonzero(recovered_mask))
+                recovered_blocks.append(text)
+            elif isinstance(recovered_mask, np.ndarray):
+                attempt["result"] = "zero_mask"
+                attempt["mask_pixels"] = 0
+            else:
+                attempt.setdefault("result", "no_mask")
+            if len(recovery_attempts) < 8:
+                recovery_attempts.append(attempt)
+        if pre_recovery_samples:
+            ocr_page["_strip_pre_recovery_text_samples"] = pre_recovery_samples
+        if recovery_attempts:
+            ocr_page["_strip_initial_empty_recovery_attempts"] = recovery_attempts
+        if recovered_blocks:
+            vision_blocks = recovered_blocks
+            ocr_page["_strip_recovered_initial_empty_vision_blocks_from_texts"] = True
+            ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+        else:
+            if _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page):
+                _append_inpaint_decision_flag(ocr_page, "real_inpaint_skipped_unsafe_mask")
+            ocr_page["_strip_remaining_inpaint_blocks"] = 0
+            ocr_page["_strip_used_real_inpaint"] = False
+            cleaned_rgb, _white_fill_count = _apply_unsafe_white_balloon_text_fills(band_rgb, ocr_page)
+            cleaned_rgb, _dark_fill_count = _apply_dark_panel_text_fills(cleaned_rgb, ocr_page)
+            return cleaned_rgb.copy()
 
     ocr_page["_strip_used_fast_solid_fill"] = False
     ocr_page["_strip_used_fast_white_fill"] = False
@@ -4573,12 +10124,100 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     ocr_page.setdefault("_strip_fast_solid_colored_count", 0)
     ocr_page.setdefault("_strip_fast_white_balloon_count", 0)
     ocr_page.setdefault("_strip_fast_local_balloon_count", 0)
+    ocr_page.setdefault("_strip_flat_ui_prefill_count", 0)
     ocr_page.setdefault("_strip_remaining_inpaint_blocks", len(vision_blocks))
 
     _prime_mask_evidence_for_fast_fill(ocr_page, vision_blocks, band_rgb)
+    _promote_visually_light_dark_bubbles_to_white(band_rgb, ocr_page, vision_blocks)
+    vision_blocks = _filter_unsafe_auto_inpaint_blocks(ocr_page, vision_blocks, band_rgb)
+    ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+    unresolved_dark_bubble_text_after_prefill = any(
+        isinstance(text, dict)
+        and not text.get("_fast_fill_inpaint_resolved")
+        and not _text_suppressed_for_inpaint(text)
+        and not _route_action_blocks_inpaint(text)
+        and str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower() == "image_dark_bubble_mask"
+        and bool(text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("bbox"))
+        for text in ocr_page.get("texts", []) if isinstance(ocr_page, dict)
+    )
+    skip_empty_rebuild_after_prefill = (
+        int(ocr_page.get("_strip_flat_ui_prefill_count") or 0) > 0
+        or (
+            int(ocr_page.get("_strip_fast_dark_panel_fill_count") or 0) > 0
+            and not unresolved_dark_bubble_text_after_prefill
+        )
+        or bool(ocr_page.get("_strip_used_koharu_fast_fill"))
+    )
+    if not vision_blocks and not skip_empty_rebuild_after_prefill:
+        try:
+            band_y_top = int(ocr_page.get("_band_y_top") or 0)
+        except Exception:
+            band_y_top = 0
+        rebuilt_local_texts = _texts_with_band_local_bboxes(
+            [dict(text) for text in list(ocr_page.get("texts", [])) if isinstance(text, dict)],
+            width=width,
+            height=height,
+            band_y_top=band_y_top,
+        )
+        rebuilt_local_texts = [
+            text
+            for text in rebuilt_local_texts
+            if not _text_suppressed_for_inpaint(text)
+            and not _route_action_blocks_inpaint(text)
+            and not text.get("_fast_fill_inpaint_resolved")
+            and (not _translator_note_text_only_mask(text) or _translator_note_has_text_geometry(text))
+            and not _text_has_rejected_bubble_without_glyph_evidence(text)
+        ]
+        if rebuilt_local_texts:
+            from vision_stack.runtime import vision_blocks_to_mask
+
+            rebuilt_remaining = vision_blocks_to_mask(
+                band_rgb.shape,
+                rebuilt_local_texts,
+                image_rgb=band_rgb,
+                expand_mask=False,
+                **_cjk_mask_kwargs_for_strip_page(ocr_page),
+            )
+            if np.any(rebuilt_remaining):
+                vision_blocks = rebuilt_local_texts
+                ocr_page["_strip_rebuilt_empty_remaining_blocks_from_local_texts"] = True
+                ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+                ocr_page["_strip_koharu_remaining_mask_pixels"] = int(np.count_nonzero(rebuilt_remaining))
+    if not vision_blocks and not skip_empty_rebuild_after_prefill:
+        ocr_page["_strip_used_real_inpaint"] = False
+        cleaned_rgb, _white_fill_count = _apply_unsafe_white_balloon_text_fills(band_rgb, ocr_page)
+        cleaned_rgb, _dark_fill_count = _apply_dark_panel_text_fills(cleaned_rgb, ocr_page)
+        _write_strip_inpaint_debug(
+            ocr_page,
+            original_rgb=band_rgb,
+            working_rgb=band_rgb,
+            cleaned_rgb=cleaned_rgb,
+            vision_blocks=[],
+            used_real_inpaint=False,
+            fast_fill_mask=np.zeros((height, width), dtype=np.uint8),
+            raw_mask=np.zeros((height, width), dtype=np.uint8),
+            expanded_mask=np.zeros((height, width), dtype=np.uint8),
+        )
+        return cleaned_rgb.copy()
+
+    working_rgb, vision_blocks, flat_ui_meta = _apply_flat_ui_text_prefill_to_blocks(
+        band_rgb,
+        ocr_page,
+        vision_blocks,
+    )
+    ocr_page["_strip_flat_ui_prefill_count"] = int(flat_ui_meta.get("flat_ui_prefill_count") or 0)
+    ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+
+    working_rgb, vision_blocks, dark_fill_meta = _apply_fast_dark_panel_text_fill(
+        working_rgb,
+        ocr_page,
+        vision_blocks,
+    )
+    ocr_page["_strip_fast_dark_panel_fill_count"] = int(dark_fill_meta.get("dark_panel_fill_count") or 0)
+    ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
 
     working_rgb, vision_blocks, koharu_fast_fill_mask, koharu_remaining_mask, koharu_meta = (
-        _apply_koharu_bubble_fast_fill_to_blocks(band_rgb, ocr_page, vision_blocks)
+        _apply_koharu_bubble_fast_fill_to_blocks(working_rgb, ocr_page, vision_blocks)
     )
     ocr_page["_strip_used_koharu_fast_fill"] = bool(koharu_meta.get("filled_pixels"))
     ocr_page["_strip_koharu_fast_fill_pixels"] = int(koharu_meta.get("filled_pixels") or 0)
@@ -4586,17 +10225,92 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     ocr_page["_strip_koharu_fast_fill_samples"] = list(koharu_meta.get("samples") or [])
     ocr_page["_strip_koharu_fast_fill_reject_reasons"] = dict(koharu_meta.get("rejection_reasons") or {})
     ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+    unresolved_dark_bubble_text_after_prefill = any(
+        isinstance(text, dict)
+        and not text.get("_fast_fill_inpaint_resolved")
+        and not _text_suppressed_for_inpaint(text)
+        and not _route_action_blocks_inpaint(text)
+        and str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower() == "image_dark_bubble_mask"
+        and bool(text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("bbox"))
+        for text in ocr_page.get("texts", []) if isinstance(ocr_page, dict)
+    )
+    skip_empty_rebuild_after_prefill = (
+        int(ocr_page.get("_strip_flat_ui_prefill_count") or 0) > 0
+        or (
+            int(ocr_page.get("_strip_fast_dark_panel_fill_count") or 0) > 0
+            and not unresolved_dark_bubble_text_after_prefill
+        )
+        or bool(ocr_page.get("_strip_used_koharu_fast_fill"))
+    )
+    if not vision_blocks and not skip_empty_rebuild_after_prefill:
+        try:
+            band_y_top = int(ocr_page.get("_band_y_top") or 0)
+        except Exception:
+            band_y_top = 0
+        rebuilt_local_texts = _texts_with_band_local_bboxes(
+            [dict(text) for text in list(ocr_page.get("texts", [])) if isinstance(text, dict)],
+            width=width,
+            height=height,
+            band_y_top=band_y_top,
+        )
+        rebuilt_local_texts = [
+            text
+            for text in rebuilt_local_texts
+            if not _text_suppressed_for_inpaint(text)
+            and not _route_action_blocks_inpaint(text)
+            and not text.get("_fast_fill_inpaint_resolved")
+            and (not _translator_note_text_only_mask(text) or _translator_note_has_text_geometry(text))
+            and not _text_has_rejected_bubble_without_glyph_evidence(text)
+        ]
+        if rebuilt_local_texts:
+            from vision_stack.runtime import vision_blocks_to_mask
 
-    if vision_blocks:
-        processable_vision_blocks = _processable_vision_blocks_for_inpaint(vision_blocks)
-        ignored_count = len(vision_blocks) - len(processable_vision_blocks)
-        if ignored_count:
-            ocr_page["_strip_nonprocessable_remaining_block_count"] = int(ignored_count)
-            _append_inpaint_decision_flag(ocr_page, "nonprocessable_remaining_blocks_ignored")
-        vision_blocks = processable_vision_blocks
+            rebuilt_remaining = vision_blocks_to_mask(
+                working_rgb.shape,
+                rebuilt_local_texts,
+                image_rgb=working_rgb,
+                expand_mask=False,
+                **_cjk_mask_kwargs_for_strip_page(ocr_page),
+            )
+            if np.any(rebuilt_remaining):
+                vision_blocks = rebuilt_local_texts
+                koharu_remaining_mask = rebuilt_remaining
+                ocr_page["_strip_rebuilt_empty_remaining_blocks_from_local_texts"] = True
+                ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+                ocr_page["_strip_koharu_remaining_mask_pixels"] = int(np.count_nonzero(koharu_remaining_mask))
 
     fast_fill_mask = (np.any(working_rgb != band_rgb, axis=2).astype(np.uint8) * 255)
     if not vision_blocks:
+        if int(ocr_page.get("_strip_flat_ui_prefill_count") or 0) > 0:
+            ocr_page["_strip_remaining_inpaint_blocks"] = 0
+            ocr_page["_strip_used_real_inpaint"] = False
+            _write_strip_inpaint_debug(
+                ocr_page,
+                original_rgb=band_rgb,
+                working_rgb=band_rgb,
+                cleaned_rgb=working_rgb,
+                vision_blocks=[],
+                used_real_inpaint=False,
+                fast_fill_mask=fast_fill_mask,
+                raw_mask=fast_fill_mask,
+                expanded_mask=fast_fill_mask,
+            )
+            return working_rgb.copy()
+        if int(ocr_page.get("_strip_fast_dark_panel_fill_count") or 0) > 0:
+            ocr_page["_strip_remaining_inpaint_blocks"] = 0
+            ocr_page["_strip_used_real_inpaint"] = False
+            _write_strip_inpaint_debug(
+                ocr_page,
+                original_rgb=band_rgb,
+                working_rgb=band_rgb,
+                cleaned_rgb=working_rgb,
+                vision_blocks=[],
+                used_real_inpaint=False,
+                fast_fill_mask=fast_fill_mask,
+                raw_mask=fast_fill_mask,
+                expanded_mask=fast_fill_mask,
+            )
+            return working_rgb.copy()
         if bool(ocr_page.get("_strip_used_koharu_fast_fill")):
             ocr_page["_strip_remaining_inpaint_blocks"] = 0
             ocr_page["_strip_used_real_inpaint"] = False
@@ -4676,8 +10390,127 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     inpaint_payload["_skip_internal_post_cleanup"] = True
     from vision_stack.runtime import vision_blocks_to_mask
     mask_kwargs = _cjk_mask_kwargs_for_strip_page(ocr_page)
+    try:
+        band_y_top = int(ocr_page.get("_band_y_top") or 0)
+    except Exception:
+        band_y_top = 0
+    local_texts = _texts_with_band_local_bboxes(
+        [dict(text) for text in list(ocr_page.get("texts", [])) if isinstance(text, dict)],
+        width=width,
+        height=height,
+        band_y_top=band_y_top,
+    )
+    original_local_text_count = len(local_texts)
+    local_texts = [
+        _drop_isolated_side_note_line_polygons(text)
+        for text in local_texts
+        if not _text_suppressed_for_inpaint(text)
+        and not text.get("_fast_fill_inpaint_resolved")
+        and not _translator_note_text_only_mask(text)
+        and not _text_has_rejected_bubble_without_glyph_evidence(text)
+    ]
     raw_mask = _coerce_mask_for_shape(koharu_remaining_mask, working_rgb.shape[:2])
+    rebuilt_raw_mask = vision_blocks_to_mask(
+        working_rgb.shape,
+        vision_blocks,
+        image_rgb=working_rgb,
+        expand_mask=False,
+        **mask_kwargs,
+    )
+    rebuilt_expanded_mask = vision_blocks_to_mask(
+        working_rgb.shape,
+        vision_blocks,
+        image_rgb=working_rgb,
+        expand_mask=True,
+        **mask_kwargs,
+    )
+    if not np.any(rebuilt_raw_mask) and local_texts:
+        rebuilt_from_texts = vision_blocks_to_mask(
+            working_rgb.shape,
+            local_texts,
+            image_rgb=working_rgb,
+            expand_mask=False,
+            **mask_kwargs,
+        )
+        if np.any(rebuilt_from_texts):
+            rebuilt_raw_mask = rebuilt_from_texts
+            rebuilt_expanded_from_texts = vision_blocks_to_mask(
+                working_rgb.shape,
+                local_texts,
+                image_rgb=working_rgb,
+                expand_mask=True,
+                **mask_kwargs,
+            )
+            if np.any(rebuilt_expanded_from_texts):
+                rebuilt_expanded_mask = rebuilt_expanded_from_texts
+            ocr_page["_strip_rebuilt_raw_mask_from_local_texts"] = True
+    raw_mask = _sanitize_precomputed_remaining_mask(
+        raw_mask,
+        rebuilt_raw_mask,
+        original_text_count=original_local_text_count,
+        filtered_text_count=len(local_texts),
+    )
     if not np.any(raw_mask):
+        raw_mask = rebuilt_raw_mask
+    expanded_seed_mask = _sanitize_rebuilt_expanded_mask(raw_mask, rebuilt_expanded_mask, raw_mask)
+    raw_mask, expanded_mask = _augment_inpaint_masks_from_texts(
+        raw_mask,
+        expanded_seed_mask,
+        local_texts,
+        working_rgb,
+    )
+    expanded_mask = _expand_strip_real_inpaint_mask(
+        raw_mask,
+        expanded_mask,
+        ocr_page,
+        local_texts,
+        working_rgb,
+    )
+    late_dark_input = working_rgb
+    working_rgb, vision_blocks, late_dark_fill_meta = _apply_fast_dark_panel_text_fill(
+        working_rgb,
+        ocr_page,
+        vision_blocks,
+    )
+    late_dark_count = int(late_dark_fill_meta.get("dark_panel_fill_count") or 0)
+    if late_dark_count:
+        previous_late_count = int(ocr_page.get("_strip_late_fast_dark_panel_fill_count") or 0)
+        ocr_page["_strip_late_fast_dark_panel_fill_count"] = previous_late_count + late_dark_count
+        ocr_page["_strip_fast_dark_panel_fill_count"] = int(
+            ocr_page.get("_strip_fast_dark_panel_fill_count") or 0
+        )
+        ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+        late_fast_fill_mask = (np.any(working_rgb != late_dark_input, axis=2).astype(np.uint8) * 255)
+        fast_fill_mask = np.maximum(fast_fill_mask, late_fast_fill_mask).astype(np.uint8)
+        if not vision_blocks:
+            ocr_page["_strip_remaining_inpaint_blocks"] = 0
+            ocr_page["_strip_used_real_inpaint"] = False
+            _write_strip_inpaint_debug(
+                ocr_page,
+                original_rgb=band_rgb,
+                working_rgb=late_dark_input,
+                cleaned_rgb=working_rgb,
+                vision_blocks=[],
+                used_real_inpaint=False,
+                fast_fill_mask=fast_fill_mask,
+                raw_mask=fast_fill_mask,
+                expanded_mask=fast_fill_mask,
+            )
+            return working_rgb.copy()
+
+        local_texts = [
+            _drop_isolated_side_note_line_polygons(text)
+            for text in _texts_with_band_local_bboxes(
+                [dict(text) for text in list(ocr_page.get("texts", [])) if isinstance(text, dict)],
+                width=width,
+                height=height,
+                band_y_top=band_y_top,
+            )
+            if not _text_suppressed_for_inpaint(text)
+            and not text.get("_fast_fill_inpaint_resolved")
+            and not _translator_note_text_only_mask(text)
+            and not _text_has_rejected_bubble_without_glyph_evidence(text)
+        ]
         raw_mask = vision_blocks_to_mask(
             working_rgb.shape,
             vision_blocks,
@@ -4685,7 +10518,34 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             expand_mask=False,
             **mask_kwargs,
         )
-    expanded_mask = raw_mask.astype(np.uint8)
+        rebuilt_expanded_mask = vision_blocks_to_mask(
+            working_rgb.shape,
+            vision_blocks,
+            image_rgb=working_rgb,
+            expand_mask=True,
+            **mask_kwargs,
+        )
+        expanded_seed_mask = _sanitize_rebuilt_expanded_mask(raw_mask, rebuilt_expanded_mask, raw_mask)
+        raw_mask, expanded_mask = _augment_inpaint_masks_from_texts(
+            raw_mask,
+            expanded_seed_mask,
+            local_texts,
+            working_rgb,
+        )
+    expanded_mask = _expand_strip_real_inpaint_mask(
+        raw_mask,
+        expanded_mask,
+        ocr_page,
+        local_texts,
+        working_rgb,
+    )
+    if (
+        np.any(expanded_mask)
+        and vision_blocks
+        and not _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page, vision_blocks)
+    ):
+        _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page, vision_blocks)
+    final_action_mask = expanded_mask.copy()
     inpaint_payload["_precomputed_inpaint_mask"] = expanded_mask
     inpainter = _get_inpainter("quality")
     started = time.perf_counter()
@@ -4703,6 +10563,58 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     round_stats = inpaint_payload.get("_inpaint_round_stats")
     if isinstance(round_stats, dict):
         ocr_page.update(round_stats)
+    if (
+        np.any(expanded_mask)
+        and vision_blocks
+        and not _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page, vision_blocks)
+    ):
+        _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page, vision_blocks)
+    if _rejected_card_action_mask_allows_real_inpaint(
+        ocr_page,
+        vision_blocks,
+        expanded_mask,
+        working_rgb.shape[:2],
+    ) or _rejected_card_action_mask_allows_real_inpaint(
+        ocr_page,
+        None,
+        expanded_mask,
+        working_rgb.shape[:2],
+    ):
+        _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page, vision_blocks)
+    unsafe_after_real_inpaint = _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page, vision_blocks)
+    if unsafe_after_real_inpaint and (
+        _rejected_card_action_mask_allows_real_inpaint(
+            ocr_page,
+            vision_blocks,
+            expanded_mask,
+            working_rgb.shape[:2],
+        )
+        or _rejected_card_action_mask_allows_real_inpaint(
+            ocr_page,
+            None,
+            expanded_mask,
+            working_rgb.shape[:2],
+        )
+    ):
+        _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page, vision_blocks)
+        unsafe_after_real_inpaint = False
+    if unsafe_after_real_inpaint:
+        _append_inpaint_decision_flag(ocr_page, "real_inpaint_skipped_unsafe_mask")
+        cleaned, _white_fill_count = _apply_unsafe_white_balloon_text_fills(working_rgb, ocr_page)
+        cleaned, _ = _apply_dark_panel_text_fills(cleaned, ocr_page)
+        ocr_page["_strip_used_real_inpaint"] = False
+        _write_strip_inpaint_debug(
+            ocr_page,
+            original_rgb=band_rgb,
+            working_rgb=working_rgb,
+            cleaned_rgb=cleaned,
+            vision_blocks=[],
+            used_real_inpaint=False,
+            fast_fill_mask=fast_fill_mask,
+            raw_mask=raw_mask,
+            expanded_mask=expanded_mask,
+        )
+        return cleaned.copy()
     ocr_page["_strip_used_real_inpaint"] = True
     cleaned, cleanup_stats = _apply_post_inpaint_cleanup_timed(
         band_rgb,
@@ -4712,16 +10624,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     ocr_page.update(cleanup_stats)
     ocr_page["_strip_used_post_cleanup"] = True
-    try:
-        band_y_top = int(ocr_page.get("_band_y_top") or 0)
-    except Exception:
-        band_y_top = 0
-    texts = _texts_with_band_local_bboxes(
-        [dict(text) for text in list(ocr_page.get("texts", [])) if isinstance(text, dict)],
-        width=width,
-        height=height,
-        band_y_top=band_y_top,
-    )
+    texts = local_texts
     residual_ocr_page = dict(ocr_page)
     residual_ocr_page["texts"] = texts
     ocr_page["_strip_residual_texts"] = texts
@@ -4742,6 +10645,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
         cleaned = forced
     cleaned, _ = _apply_dark_panel_text_fills(cleaned, ocr_page)
+    cleaned, _translator_note_dark_fill_pixels = _apply_translator_note_dark_text_contract_fill(cleaned, ocr_page)
     residual_check = _detect_inpaint_residual_text(
         band_rgb,
         cleaned,
@@ -4750,6 +10654,33 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         fast_fill_mask=fast_fill_mask,
         ocr_page=residual_ocr_page,
     )
+    if (
+        residual_check.get("has_residual")
+        and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
+    ):
+        forced = _apply_white_balloon_residual_force_fill(band_rgb, cleaned, texts)
+        forced, force_limit_pixels, force_changed_outside = _clamp_image_to_limit_mask(
+            cleaned,
+            forced,
+            expanded_mask,
+            texts,
+            include_text_bboxes=False,
+        )
+        force_changed = bool(np.any(forced != cleaned))
+        if force_changed:
+            ocr_page["_strip_white_residual_force_fill"] = True
+            ocr_page["_strip_white_residual_force_fill_from_residual_check"] = True
+            ocr_page["_strip_white_residual_force_fill_limit_pixels"] = int(force_limit_pixels)
+            ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
+            cleaned = forced
+            residual_check = _detect_inpaint_residual_text(
+                band_rgb,
+                cleaned,
+                expanded_mask,
+                raw_mask=raw_mask,
+                fast_fill_mask=fast_fill_mask,
+                ocr_page=residual_ocr_page,
+            )
     if (
         residual_check.get("has_residual")
         and "dark_residual_pixels" in set(residual_check.get("flags") or [])
@@ -4785,6 +10716,8 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             texts,
             cleaned.shape[:2],
         )
+        if not np.any(retry_limit):
+            retry_limit = expanded_mask
         retry_mask = _build_light_residual_retry_mask(
             band_rgb,
             cleaned,
@@ -4807,6 +10740,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
                 limit_mask=retry_mask,
             )
             cleaned = retried
+            final_action_mask = np.maximum(final_action_mask, retry_mask.astype(np.uint8))
             ocr_page.update(retry_cleanup_stats)
             ocr_page["_strip_light_residual_retry"] = True
             ocr_page["_strip_light_residual_retry_mask_pixels"] = int(np.count_nonzero(retry_mask))
@@ -4823,14 +10757,43 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     if (
         residual_check.get("has_residual")
+        and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
+    ):
+        forced = _apply_white_balloon_residual_force_fill(band_rgb, cleaned, texts)
+        forced, force_limit_pixels, force_changed_outside = _clamp_image_to_limit_mask(
+            cleaned,
+            forced,
+            expanded_mask,
+            texts,
+            include_text_bboxes=False,
+        )
+        force_changed = bool(np.any(forced != cleaned))
+        if force_changed:
+            ocr_page["_strip_white_residual_force_fill"] = True
+            ocr_page["_strip_white_residual_force_fill_from_residual_check"] = True
+            ocr_page["_strip_white_residual_force_fill_limit_pixels"] = int(force_limit_pixels)
+            ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
+            cleaned = forced
+            residual_check = _detect_inpaint_residual_text(
+                band_rgb,
+                cleaned,
+                expanded_mask,
+                raw_mask=raw_mask,
+                fast_fill_mask=fast_fill_mask,
+                ocr_page=residual_ocr_page,
+            )
+    if (
+        residual_check.get("has_residual")
         and "dark_residual_pixels" in set(residual_check.get("flags") or [])
-        and _page_has_nonwhite_text_for_light_residual(residual_ocr_page, band_rgb)
+        and str(residual_check.get("region_source") or "") != "expanded_mask"
     ):
         retry_limit = _build_post_cleanup_limit_mask(
             expanded_mask,
             texts,
             cleaned.shape[:2],
         )
+        if not np.any(retry_limit):
+            retry_limit = expanded_mask
         retry_mask = _build_dark_residual_retry_mask(
             expanded_mask,
             retry_limit,
@@ -4852,12 +10815,193 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
                 limit_mask=retry_mask,
             )
             cleaned = retried
+            final_action_mask = np.maximum(final_action_mask, retry_mask.astype(np.uint8))
             ocr_page.update(retry_cleanup_stats)
             ocr_page["_strip_dark_residual_retry"] = True
             ocr_page["_strip_dark_residual_retry_mask_pixels"] = int(np.count_nonzero(retry_mask))
             ocr_page["_strip_dark_residual_retry_limit_pixels"] = int(retry_limit_pixels)
             ocr_page["_strip_dark_residual_retry_changed_outside_limit"] = int(retry_changed_outside)
             ocr_page["_t_dark_residual_retry_ms"] = round((time.perf_counter() - retry_started) * 1000.0, 3)
+    residual_check = _detect_inpaint_residual_text(
+        band_rgb,
+        cleaned,
+        expanded_mask,
+        raw_mask=raw_mask,
+        fast_fill_mask=fast_fill_mask,
+        ocr_page=residual_ocr_page,
+    )
+    if (
+        residual_check.get("has_residual")
+        and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
+    ):
+        residual_mask = _build_residual_text_region_mask(residual_ocr_page, cleaned.shape[:2])
+        residual_source = str(residual_check.get("region_source") or "")
+        if not np.any(residual_mask):
+            residual_mask, residual_source, _ = _select_residual_check_mask(
+                ocr_page=residual_ocr_page,
+                shape=cleaned.shape[:2],
+                expanded_mask=expanded_mask,
+                raw_mask=raw_mask,
+                fast_fill_mask=fast_fill_mask,
+            )
+        fallback_mask = np.maximum(
+            _coerce_mask_for_shape(expanded_mask, cleaned.shape[:2]),
+            _coerce_mask_for_shape(residual_mask, cleaned.shape[:2]),
+        ).astype(np.uint8)
+        forced = _apply_white_residual_expanded_mask_force_fill(cleaned, fallback_mask)
+        forced, force_limit_pixels, force_changed_outside = _clamp_image_to_limit_mask(
+            cleaned,
+            forced,
+            fallback_mask,
+            texts,
+            include_text_bboxes=False,
+        )
+        force_changed = bool(np.any(forced != cleaned))
+        if force_changed:
+            force_changed_pixels = int(np.count_nonzero(np.any(forced != cleaned, axis=2)))
+            cleaned = forced
+            final_action_mask = np.maximum(final_action_mask, fallback_mask.astype(np.uint8))
+            ocr_page["_strip_white_residual_expanded_mask_force_fill"] = True
+            ocr_page["_strip_white_residual_expanded_mask_force_fill_pixels"] = int(force_changed_pixels)
+            ocr_page["_strip_white_residual_expanded_mask_force_fill_mask_pixels"] = int(
+                np.count_nonzero(fallback_mask)
+            )
+            ocr_page["_strip_white_residual_expanded_mask_force_fill_source"] = str(residual_source or "")
+            ocr_page["_strip_white_residual_force_fill_limit_pixels"] = int(force_limit_pixels)
+            ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
+            residual_check = _detect_inpaint_residual_text(
+                band_rgb,
+                cleaned,
+                expanded_mask,
+                raw_mask=raw_mask,
+                fast_fill_mask=fast_fill_mask,
+                ocr_page=residual_ocr_page,
+            )
+    cleaned, _ = _apply_dark_panel_text_fills(cleaned, residual_ocr_page)
+    if residual_ocr_page.get("_strip_used_dark_panel_fill"):
+        ocr_page["_strip_used_dark_panel_fill"] = True
+        ocr_page["_strip_dark_panel_fill_count"] = max(
+            int(ocr_page.get("_strip_dark_panel_fill_count") or 0),
+            int(residual_ocr_page.get("_strip_dark_panel_fill_count") or 0),
+        )
+    final_residual_check = _detect_inpaint_residual_text(
+        band_rgb,
+        cleaned,
+        final_action_mask,
+        raw_mask=raw_mask,
+        fast_fill_mask=fast_fill_mask,
+        ocr_page=residual_ocr_page,
+    )
+    if (
+        final_residual_check.get("has_residual")
+        and str(final_residual_check.get("region_source") or "").startswith("text_region_white_balloon")
+    ):
+        residual_mask = _build_residual_text_region_mask(residual_ocr_page, cleaned.shape[:2])
+        residual_source = str(final_residual_check.get("region_source") or "")
+        if not np.any(residual_mask):
+            residual_mask, residual_source, _ = _select_residual_check_mask(
+                ocr_page=residual_ocr_page,
+                shape=cleaned.shape[:2],
+                expanded_mask=final_action_mask,
+                raw_mask=raw_mask,
+                fast_fill_mask=fast_fill_mask,
+            )
+        fallback_mask = np.maximum(
+            _coerce_mask_for_shape(final_action_mask, cleaned.shape[:2]),
+            _coerce_mask_for_shape(residual_mask, cleaned.shape[:2]),
+        ).astype(np.uint8)
+        forced = _apply_white_residual_expanded_mask_force_fill(cleaned, fallback_mask)
+        forced, force_limit_pixels, force_changed_outside = _clamp_image_to_limit_mask(
+            cleaned,
+            forced,
+            fallback_mask,
+            texts,
+            include_text_bboxes=False,
+        )
+        force_changed = bool(np.any(forced != cleaned))
+        if force_changed:
+            force_changed_pixels = int(np.count_nonzero(np.any(forced != cleaned, axis=2)))
+            cleaned = forced
+            final_action_mask = np.maximum(final_action_mask, fallback_mask.astype(np.uint8))
+            ocr_page["_strip_white_residual_expanded_mask_force_fill"] = True
+            ocr_page["_strip_white_residual_expanded_mask_force_fill_pixels"] = int(force_changed_pixels)
+            ocr_page["_strip_white_residual_expanded_mask_force_fill_mask_pixels"] = int(
+                np.count_nonzero(fallback_mask)
+            )
+            ocr_page["_strip_white_residual_expanded_mask_force_fill_source"] = str(residual_source or "")
+            ocr_page["_strip_white_residual_force_fill_limit_pixels"] = int(force_limit_pixels)
+            ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
+    final_action_mask, white_cleanup_added = _extend_final_action_mask_for_white_balloon_cleanup(
+        final_action_mask,
+        residual_ocr_page,
+        texts,
+        band_rgb,
+    )
+    if white_cleanup_added:
+        ocr_page["_strip_final_action_mask_white_cleanup_added_pixels"] = int(white_cleanup_added)
+        if _has_white_balloon_cleanup_metadata(texts) or _all_processable_texts_are_white_balloon(texts, band_rgb):
+            forced = _apply_white_residual_expanded_mask_force_fill(cleaned, final_action_mask)
+            forced, force_limit_pixels, force_changed_outside = _clamp_image_to_limit_mask(
+                cleaned,
+                forced,
+                final_action_mask,
+                texts,
+                include_text_bboxes=False,
+            )
+            force_changed = bool(np.any(forced != cleaned))
+            if force_changed:
+                force_changed_pixels = int(np.count_nonzero(np.any(forced != cleaned, axis=2)))
+                cleaned = forced
+                ocr_page["_strip_final_action_mask_white_cleanup_force_fill"] = True
+                ocr_page["_strip_final_action_mask_white_cleanup_force_fill_pixels"] = int(force_changed_pixels)
+                ocr_page["_strip_white_residual_force_fill_limit_pixels"] = int(force_limit_pixels)
+                ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
+    cleaned, final_clamped_outside = _clamp_final_inpaint_to_expanded_mask(
+        working_rgb,
+        cleaned,
+        final_action_mask,
+    )
+    if final_clamped_outside:
+        ocr_page["_strip_final_clamped_outside_expanded_mask_pixels"] = int(final_clamped_outside)
+    cleaned, translator_note_final_fill_pixels = _apply_translator_note_dark_text_contract_fill(cleaned, ocr_page)
+    if translator_note_final_fill_pixels:
+        final_note_mask = np.zeros(final_action_mask.shape, dtype=np.uint8)
+        for raw_text in ocr_page.get("texts") or []:
+            if not isinstance(raw_text, dict):
+                continue
+            source = str(raw_text.get("bubble_mask_source") or raw_text.get("bubbleMaskSource") or "").strip().lower()
+            if source != "translator_note_text_mask":
+                continue
+            bbox = (
+                _normalize_bbox(raw_text.get("source_text_anchor_bbox"), width, height)
+                or _normalize_bbox(raw_text.get("_source_text_anchor_bbox"), width, height)
+                or _normalize_bbox(raw_text.get("source_text_mask_bbox"), width, height)
+                or _normalize_bbox(raw_text.get("_source_text_mask_bbox"), width, height)
+                or _normalize_bbox(raw_text.get("text_pixel_bbox"), width, height)
+                or _normalize_bbox(raw_text.get("ocr_text_bbox"), width, height)
+                or _normalize_bbox(raw_text.get("bbox"), width, height)
+            )
+            if bbox is not None:
+                final_note_mask = np.maximum(final_note_mask, _mask_from_bbox(width, height, bbox, padding=10))
+        if np.any(final_note_mask):
+            final_action_mask = np.maximum(final_action_mask, final_note_mask.astype(np.uint8))
+    _clear_resolved_current_inpaint_flags(
+        ocr_page,
+        final_residual_check=final_residual_check,
+        final_clamped_outside=final_clamped_outside,
+    )
+    if _rejected_card_action_mask_allows_real_inpaint(
+        ocr_page,
+        vision_blocks,
+        final_action_mask,
+        working_rgb.shape[:2],
+    ) or _rejected_card_action_mask_allows_real_inpaint(
+        ocr_page,
+        None,
+        final_action_mask,
+        working_rgb.shape[:2],
+    ):
+        _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page, vision_blocks)
     _write_strip_inpaint_debug(
         ocr_page,
         original_rgb=band_rgb,
@@ -4867,6 +11011,6 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         used_real_inpaint=True,
         fast_fill_mask=fast_fill_mask,
         raw_mask=raw_mask,
-        expanded_mask=expanded_mask,
+        expanded_mask=final_action_mask,
     )
     return cleaned.copy() if cleaned is working_rgb else cleaned

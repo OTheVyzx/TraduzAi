@@ -50,11 +50,14 @@ class WorkerClient:
             )
         )
 
-    def claim_job(self, worker_id: str, capabilities: dict | None = None) -> dict | None:
+    def claim_job(self, worker_id: str, capabilities: dict | None = None, job_id: str | None = None) -> dict | None:
+        payload = {"worker_id": worker_id, "capabilities": capabilities or {"mode": ["mock", "real"]}}
+        if job_id:
+            payload["job_id"] = job_id
         response = self._send_with_retries(
             lambda: self.session.post(
                 f"{self.settings.api_url}/api/workers/claim-job",
-                json={"worker_id": worker_id, "capabilities": capabilities or {"mode": ["mock", "real"]}},
+                json=payload,
                 timeout=20,
             )
         )

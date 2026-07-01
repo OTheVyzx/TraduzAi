@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_complete_contract_inpaintfix4",
+  "stage": "copyback_reassemble",
+  "source": "translated_after_final_project_rerender",
+  "after_final_project_image_rerender": false,
+  "after_late_render_contract_repair": true,
+  "seen_count": 0,
+  "refreshed_count": 0,
+  "missing_count": 0,
+  "error_count": 0,
+  "skipped_no_final_rerender": true
+}

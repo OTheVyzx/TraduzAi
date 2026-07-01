@@ -25,62 +25,137 @@
           linear-gradient(180deg, #0b0b10 0%, #0f0f14 54%, #0b0b10 100%);
       }
 
-      .html-boot {
+      .html-boot-shell {
         min-height: 100vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        display: grid;
+        grid-template-columns: 256px minmax(0, 1fr);
         color: #f2f2f7;
         font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
 
-      .html-boot__panel {
-        width: min(420px, calc(100vw - 40px));
-        padding: 34px 32px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 16px;
-        background: rgba(0, 0, 0, 0.36);
-        box-shadow: 0 24px 90px rgba(0, 0, 0, 0.42);
+      .html-boot-shell__sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        padding: 22px 18px;
+        border-right: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(4, 4, 8, 0.56);
       }
 
-      .html-boot__eyebrow {
-        width: fit-content;
-        margin: 0 auto;
-        padding: 5px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        color: rgba(255, 255, 255, 0.48);
+      .html-boot-shell__brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .html-boot-shell__mark {
+        display: grid;
+        width: 36px;
+        height: 36px;
+        place-items: center;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #ff5d80, #7c5cff 58%, #00d4ff);
+        color: white;
+        font-size: 15px;
+        font-weight: 800;
+        box-shadow: 0 10px 34px rgba(124, 92, 255, 0.28);
+      }
+
+      .html-boot-shell__title {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+
+      .html-boot-shell__subtitle {
+        margin: 3px 0 0;
+        color: rgba(255, 255, 255, 0.46);
+        font-size: 11px;
+      }
+
+      .html-boot-shell__nav-label {
+        margin: 12px 10px 2px;
+        color: rgba(255, 255, 255, 0.34);
         font-size: 10px;
         font-weight: 700;
-        letter-spacing: 0.24em;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
       }
 
-      .html-boot__title {
-        margin: 18px 0 8px;
-        color: #ff5d80;
-        font-size: 40px;
+      .html-boot-shell__nav-item {
+        display: flex;
+        align-items: center;
+        height: 36px;
+        padding: 0 12px;
+        border-radius: 10px;
+        color: rgba(255, 255, 255, 0.72);
+        background: rgba(255, 255, 255, 0.04);
+        font-size: 13px;
+      }
+
+      .html-boot-shell__status {
+        margin-top: auto;
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        color: rgba(255, 255, 255, 0.54);
+        font-size: 11px;
+      }
+
+      .html-boot-shell__main {
+        display: flex;
+        align-items: center;
+        padding: 40px;
+      }
+
+      .html-boot-shell__content {
+        width: min(680px, 100%);
+      }
+
+      .html-boot-shell__eyebrow {
+        width: fit-content;
+        margin: 0 0 14px;
+        padding: 5px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: #ff9bad;
+        background: rgba(255, 93, 128, 0.1);
+        font-size: 10px;
         font-weight: 700;
-        line-height: 1;
-        text-align: center;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
       }
 
-      .html-boot__message {
+      .html-boot-shell__headline {
         margin: 0;
-        color: rgba(255, 255, 255, 0.86);
-        font-size: 18px;
-        text-align: center;
+        color: #ffffff;
+        font-size: clamp(32px, 6vw, 54px);
+        font-weight: 700;
+        line-height: 1.04;
       }
 
-      .html-boot__bar {
-        height: 3px;
+      .html-boot-shell__message {
+        max-width: 520px;
+        margin: 14px 0 0;
+        color: rgba(255, 255, 255, 0.64);
+        font-size: 15px;
+        line-height: 1.6;
+      }
+
+      .html-boot-shell__bar {
+        width: min(360px, 100%);
+        height: 4px;
         margin-top: 28px;
         overflow: hidden;
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.08);
       }
 
-      .html-boot__bar::before {
+      .html-boot-shell__bar::before {
         content: "";
         display: block;
         width: 42%;
@@ -88,6 +163,29 @@
         border-radius: inherit;
         background: linear-gradient(90deg, #ff5d80, #7c5cff, #00d4ff);
         animation: html-boot-slide 1.1s ease-in-out infinite alternate;
+      }
+
+      @media (max-width: 760px) {
+        .html-boot-shell {
+          grid-template-columns: 1fr;
+        }
+
+        .html-boot-shell__sidebar {
+          min-height: 96px;
+          border-right: 0;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .html-boot-shell__nav-label,
+        .html-boot-shell__nav-item,
+        .html-boot-shell__status {
+          display: none;
+        }
+
+        .html-boot-shell__main {
+          align-items: flex-start;
+          padding: 32px 24px;
+        }
       }
 
       @keyframes html-boot-slide {
@@ -103,13 +201,33 @@
   </head>
   <body class="bg-bg-primary text-text-primary">
     <div id="root">
-      <div class="html-boot" aria-label="TraduzAi carregando">
-        <div class="html-boot__panel">
-          <div class="html-boot__eyebrow">Boot</div>
-          <h1 class="html-boot__title">TraduzAi</h1>
-          <p class="html-boot__message">Carregando interface...</p>
-          <div class="html-boot__bar"></div>
-        </div>
+      <div class="html-boot-shell" data-html-boot-shell aria-label="TraduzAi iniciando">
+        <aside class="html-boot-shell__sidebar">
+          <div class="html-boot-shell__brand">
+            <div class="html-boot-shell__mark">T</div>
+            <div>
+              <h1 class="html-boot-shell__title">TraduzAi</h1>
+              <p class="html-boot-shell__subtitle">Tradução automática</p>
+            </div>
+          </div>
+          <p class="html-boot-shell__nav-label">Navegação</p>
+          <div class="html-boot-shell__nav-item">Início</div>
+          <div class="html-boot-shell__status">
+            <span>Créditos locais</span>
+            <span>Engine em segundo plano</span>
+          </div>
+        </aside>
+        <main class="html-boot-shell__main">
+          <div class="html-boot-shell__content">
+            <div class="html-boot-shell__eyebrow">Interface pronta</div>
+            <h2 class="html-boot-shell__headline">TraduzAi</h2>
+            <p class="html-boot-shell__message">
+              A janela já está disponível. Recursos pesados como modelos, OCR,
+              fontes e pipeline continuam inicializando sem bloquear a interface.
+            </p>
+            <div class="html-boot-shell__bar"></div>
+          </div>
+        </main>
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

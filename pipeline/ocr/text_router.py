@@ -30,16 +30,18 @@ DIALOGUE_WORD_PATTERN = re.compile(
     r"should|just|not|no|yes|please|here|there|come|came|go|going|think|know|believe)\b",
     re.IGNORECASE,
 )
+HANGUL_RE = re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]")
 
 ROUTE_ACTIONS = {
     "translate_inpaint_render",
+    "translate_sfx_inpaint_render",
     "translate_render_only",
     "inpaint_only",
     "review_required",
 }
-TRANSLATE_ROUTE_ACTIONS = {"translate_inpaint_render", "translate_render_only"}
-RENDER_ROUTE_ACTIONS = {"translate_inpaint_render", "translate_render_only"}
-INPAINT_ROUTE_ACTIONS = {"translate_inpaint_render", "inpaint_only"}
+TRANSLATE_ROUTE_ACTIONS = {"translate_inpaint_render", "translate_sfx_inpaint_render", "translate_render_only"}
+RENDER_ROUTE_ACTIONS = {"translate_inpaint_render", "translate_sfx_inpaint_render", "translate_render_only"}
+INPAINT_ROUTE_ACTIONS = {"translate_inpaint_render", "translate_sfx_inpaint_render", "inpaint_only"}
 
 
 def route_action_requires_translation(route_action: str | None) -> bool:
@@ -69,13 +71,15 @@ def _resolve_route_action(
     route_action: str | None = None,
     route_reason: str | None = None,
 ) -> tuple[str, str]:
-    explicit_action = str(route_action or "").strip().lower()
-    if explicit_action in ROUTE_ACTIONS:
-        return explicit_action, _route_reason(result, route_reason, explicit_action)
-
     render_policy = str(result.get("render_policy") or "").strip().lower()
+    translate_policy = str(result.get("translate_policy") or "").strip().lower()
     needs_review = bool(result.get("needs_review"))
 
+    if translate_policy == "skip_translation" or render_policy in {"preserve", "preserve_original"}:
+        return "review_required", _route_reason(result, route_reason, "review_required")
+    explicit_action = str(route_action or result.get("route_action") or "").strip().lower()
+    if explicit_action in ROUTE_ACTIONS:
+        return explicit_action, _route_reason(result, route_reason, explicit_action)
     if needs_review:
         return "review_required", _route_reason(result, route_reason, "review_required")
     if render_policy == "render_in_sign_bbox":
@@ -142,6 +146,7 @@ def route_text(
             "tipo": "text",
             "render_policy": "normal",
             "translate_policy": "translate",
+            "needs_review": False,
             "reason": "translator_note_marker",
             "rules_applied": ["translator_note_marker"],
         })
@@ -199,7 +204,8 @@ def route_text(
 
     if has_sfx_marker(value):
         speech_text, sfx_text = split_sfx_inline(value)
-        if sfx_text:
+        speech_word_count = len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9']+", str(speech_text or "")))
+        if sfx_text and speech_word_count >= 2:
             return finalize({
                 **base,
                 "route": "speech_with_sfx_split",
@@ -222,6 +228,20 @@ def route_text(
                 "rules_applied": ["split_sfx_marker_inside_dialogue"],
                 "needs_review": False,
             })
+
+    if _looks_like_hangul_sfx(value, tipo):
+        return finalize({
+            **base,
+            "route": "manhwa_sfx",
+            "content_class": "sfx",
+            "tipo": "sfx",
+            "script": "hangul",
+            "route_action": "translate_sfx_inpaint_render",
+            "translate_policy": "adapt_sfx",
+            "render_policy": "sfx_style",
+            "rules_applied": ["hangul_sfx_candidate"],
+            "reason": "hangul_sfx_candidate",
+        })
 
     return finalize({
         **base,
@@ -272,6 +292,14 @@ def _tipo_from_route(route: str) -> str:
 
 def _normalize_spacing(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _looks_like_hangul_sfx(value: str, tipo: str = "") -> bool:
+    if not HANGUL_RE.search(value):
+        return False
+    if str(tipo or "").strip().lower() in {"sfx", "sound_effect", "sound"}:
+        return True
+    return False
 
 
 def _valid_bbox(value: list[int] | tuple[int, int, int, int] | None) -> list[int] | None:

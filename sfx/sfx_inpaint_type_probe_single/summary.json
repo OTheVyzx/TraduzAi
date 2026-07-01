@@ -1,0 +1,142 @@
+{
+  "input": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221350.png",
+  "output": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_single",
+  "anime_conf": 0.0107,
+  "comic_conf": 0.05,
+  "page_count": 1,
+  "total_candidates": 3,
+  "total_forced_layers": 1,
+  "total_mask_pixels": 659,
+  "contact_sheet": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_single\\sfx_inpaint_type_contact_sheet.png",
+  "pages": [
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221350.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_single\\001_Captura_de_tela_2026-06-05_221350",
+      "candidate_count": 3,
+      "forced_layer_count": 1,
+      "mask_pixels": 659,
+      "candidates": [
+        {
+          "bbox": [
+            30,
+            19,
+            84,
+            136
+          ],
+          "confidence": 0.0733,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            222,
+            212,
+            272,
+            311
+          ],
+          "confidence": 0.0727,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            55,
+            327,
+            97,
+            403
+          ],
+          "confidence": 0.0648,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            222,
+            212,
+            272,
+            311
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 163,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#33444B",
+            "stroke_color": "#000205",
+            "stroke_width_px": 1,
+            "glow_color": "#67696B",
+            "glow_width_px": 8,
+            "rotation_deg": -60.006,
+            "scale_x": 0.989,
+            "scale_y": 0.103,
+            "confidence": 0.531,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_single\\001_Captura_de_tela_2026-06-05_221350\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_single\\001_Captura_de_tela_2026-06-05_221350\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            222,
+            212,
+            272,
+            311
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 163,
+          "fit_status": "ok",
+          "render_bbox": [
+            210,
+            220,
+            279,
+            302
+          ],
+          "style": {
+            "fill_color": "#33444B",
+            "stroke_color": "#000205",
+            "stroke_width_px": 1,
+            "glow_color": "#67696B",
+            "glow_width_px": 8,
+            "rotation_deg": -60.006,
+            "scale_x": 0.989,
+            "scale_y": 0.103,
+            "confidence": 0.531,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    }
+  ]
+}

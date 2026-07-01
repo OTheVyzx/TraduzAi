@@ -84,7 +84,18 @@ def _page_issues(page: dict[str, Any], filters: set[str]) -> list[dict[str, Any]
             categories.add("typesetting")
         if flags & {"inpaint_artifact", "outline_damage_high"}:
             categories.add("inpaint")
-        if flags & {"sfx_candidate", "sfx_preserved"} or layer.get("tipo") == "sfx":
+        if flags & {
+            "sfx_candidate",
+            "sfx_preserved",
+            "sfx_render_missing",
+            "sfx_render_outside_source_region",
+            "sfx_inpaint_damaged_art_risk",
+            "sfx_translation_unknown",
+            "sfx_style_low_confidence",
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_mask_density_high",
+        } or layer.get("tipo") == "sfx":
             categories.add("sfx")
         if flags & {"source_script_leak", "vlm_failure_phrase", "speech_cjk_preserved_inside_balloon"}:
             categories.add("P0")

@@ -194,6 +194,8 @@ def stop_idle_worker_if_needed(
 ) -> dict[str, Any]:
     if not settings.vast_autostart:
         return {"ok": False, "action": "disabled"}
+    if settings.vast_provider == "serverless":
+        return {"ok": False, "action": "serverless_idle_managed_by_vast"}
     if settings.vast_idle_stop_minutes <= 0:
         return {"ok": False, "action": "idle_stop_disabled"}
     if has_pending_work is None:

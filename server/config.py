@@ -105,6 +105,38 @@ class Settings:
         default_factory=lambda: os.environ.get("VAST_WORKER_NAME") or os.environ.get("TRADUZAI_WORKER_NAME")
     )
     vast_require_gpu: bool = field(default_factory=lambda: _env_flag("VAST_REQUIRE_GPU", True))
+    vast_provider: str = field(default_factory=lambda: os.environ.get("VAST_PROVIDER", "instance").strip().lower())
+    vast_serverless_endpoint_id: str | None = field(default_factory=lambda: os.environ.get("VAST_SERVERLESS_ENDPOINT_ID"))
+    vast_serverless_endpoint_name: str = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_ENDPOINT_NAME", "traduzai-serverless")
+    )
+    vast_serverless_workergroup_name: str = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_WORKERGROUP_NAME", "traduzai-worker")
+    )
+    vast_serverless_template_id: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_TEMPLATE_ID")
+    )
+    vast_serverless_template_hash: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_TEMPLATE_HASH") or os.environ.get("VAST_TEMPLATE_HASH")
+    )
+    vast_serverless_min_load: int = field(default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_MIN_LOAD", "0")))
+    vast_serverless_target_load: int = field(default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_TARGET_LOAD", "100")))
+    vast_serverless_max_load: int = field(default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_MAX_LOAD", "100")))
+    vast_serverless_cold_mult: float = field(
+        default_factory=lambda: float(os.environ.get("VAST_SERVERLESS_COLD_MULT", "2.5"))
+    )
+    vast_serverless_test_workers: int = field(
+        default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_TEST_WORKERS", "0"))
+    )
+    vast_serverless_search_params: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_SEARCH_PARAMS")
+    )
+    vast_serverless_route_path: str = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_ROUTE_PATH", "/run")
+    )
+    vast_serverless_route_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("VAST_SERVERLESS_ROUTE_TIMEOUT_SECONDS", "20"))
+    )
 
     @property
     def host(self) -> str:

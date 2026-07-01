@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "total_blocks": 88,
+    "blocks_with_available_confidence": 88,
+    "blocks_with_confidence_zero": 0,
+    "blocks_with_confidence_lt_05": 1
+  },
+  "by_band": []
+}

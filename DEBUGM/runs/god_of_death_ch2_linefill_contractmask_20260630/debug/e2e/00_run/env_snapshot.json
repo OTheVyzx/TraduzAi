@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_linefill_contractmask",
+  "stage": "run",
+  "env_vars": {
+    "CUDA_PATH": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.2",
+    "CUDA_PATH_V13_2": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.2",
+    "TRADUZAI_SKIP_LOCAL_VENV_REEXEC": "1"
+  }
+}

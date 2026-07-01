@@ -23,6 +23,11 @@ import type {
 
 export type { PipelineCompleteEvent, PipelineExportGateSummary } from "./pipelineCompletion";
 
+export interface RenderPreviewResult {
+  output_path: string;
+  renderer_backend: string;
+}
+
 export function isE2E() {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
   if ((meta.env?.VITE_E2E ?? "") === "1") return true;
@@ -210,7 +215,10 @@ export function buildPlainPageCommandArgs(args: {
 
 function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry {
   const rawStyle = (layer.style ?? layer.estilo ?? {}) as Partial<TextEntry["estilo"]>;
-  const style: TextEntry["estilo"] = canonicalizeTextStyle(rawStyle, { mode: "hydrate" });
+  const style: TextEntry["estilo"] = canonicalizeTextStyle(rawStyle, {
+    mode: "hydrate",
+    styleOrigin: layer.style_origin,
+  });
   const bbox =
     layer.render_bbox ?? layer.layout_bbox ?? layer.bbox ?? layer.source_bbox ?? layer.balloon_bbox ?? [0, 0, 32, 32];
 
@@ -219,6 +227,9 @@ function hydrateTextLayer(layer: Partial<TextEntry>, baseDir: string): TextEntry
     kind: "text",
     id: layer.id ?? crypto.randomUUID(),
     style_origin: layer.style_origin ?? "legacy",
+    style_confidence: layer.style_confidence ?? null,
+    style_source: layer.style_source ?? null,
+    style_evidence: layer.style_evidence,
     bbox,
     source_bbox: layer.source_bbox ?? layer.bbox ?? bbox,
     layout_bbox: layer.layout_bbox ?? bbox,
@@ -658,6 +669,26 @@ export async function searchGoogleFonts(query: string): Promise<GoogleFontSearch
   return invoke<GoogleFontSearchResult[]>("search_google_fonts", { query });
 }
 
+export interface SystemFontInfo {
+  family: string;
+  full_name: string;
+  filename: string;
+  path: string;
+  weight: "400" | "700" | string;
+  style: "normal" | "italic" | string;
+  monospace: boolean;
+}
+
+export async function listSystemFonts(query?: string): Promise<SystemFontInfo[]> {
+  if (isE2E()) return tauriMock.listSystemFonts(query);
+  return invoke<SystemFontInfo[]>("list_system_fonts", { query: query ?? null });
+}
+
+export async function resolveSystemFont(filename: string): Promise<SystemFontInfo | null> {
+  if (isE2E()) return tauriMock.resolveSystemFont(filename);
+  return invoke<SystemFontInfo | null>("resolve_system_font", { filename });
+}
+
 export async function onModelsProgress(
   callback: (data: { step: string; message: string }) => void
 ) {
@@ -757,6 +788,16 @@ export async function setEditorLayerVisibility(config: {
 }): Promise<void> {
   if (isE2E()) return tauriMock.setEditorLayerVisibility(config);
   return invoke("set_layer_visibility", { config });
+}
+
+export async function snapshotImageLayer(config: {
+  project_path: string;
+  page_index: number;
+  layer_key: string;
+  source_path?: string | null;
+}): Promise<string | null> {
+  if (isE2E()) return config.source_path ?? null;
+  return invoke("snapshot_image_layer", { config });
 }
 
 export async function updateMaskRegion(config: {
@@ -1068,9 +1109,27 @@ export async function renderPreviewPage(args: {
   page_index: number;
   page: PageData;
   fingerprint: string;
-}): Promise<string> {
-  if (isE2E()) return tauriMock.renderPreviewPage();
-  return await invoke("render_preview_page", { config: args });
+}): Promise<RenderPreviewResult> {
+  if (isE2E()) return normalizeRenderPreviewResult(await tauriMock.renderPreviewPage());
+  return normalizeRenderPreviewResult(await invoke("render_preview_page", { config: args }));
+}
+
+function normalizeRenderPreviewResult(value: unknown): RenderPreviewResult {
+  if (typeof value === "string") {
+    return { output_path: value, renderer_backend: "python" };
+  }
+  if (value && typeof value === "object") {
+    const raw = value as { output_path?: unknown; outputPath?: unknown; renderer_backend?: unknown; rendererBackend?: unknown };
+    const outputPath = typeof raw.output_path === "string" ? raw.output_path : raw.outputPath;
+    const rendererBackend = typeof raw.renderer_backend === "string" ? raw.renderer_backend : raw.rendererBackend;
+    if (typeof outputPath === "string" && outputPath.trim()) {
+      return {
+        output_path: outputPath,
+        renderer_backend: typeof rendererBackend === "string" && rendererBackend.trim() ? rendererBackend : "python",
+      };
+    }
+  }
+  throw new Error("Resposta invalida do preview renderizado");
 }
 
 export async function detectPage(args: {
@@ -1487,7 +1546,31 @@ export async function loadSettings(): Promise<AppSettings> {
 
 export async function loadSupportedLanguages(): Promise<SupportedLanguage[]> {
   if (isE2E()) return [];
+  if (!hasTauriRuntime()) {
+    return loadSupportedLanguagesFromWebApi();
+  }
   return invoke("load_supported_languages");
+}
+
+function hasTauriRuntime() {
+  return (
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+  );
+}
+
+async function loadSupportedLanguagesFromWebApi(): Promise<SupportedLanguage[]> {
+  const apiUrl = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8787";
+  const response = await fetch(`${apiUrl}/api/setup/languages`, { credentials: "include" });
+  if (!response.ok) throw new Error(`falha ao carregar idiomas: HTTP ${response.status}`);
+  const payload = (await response.json()) as { languages?: Array<{ id?: string; label?: string }> };
+  return (payload.languages ?? [])
+    .map((language) => ({
+      code: String(language.id ?? "").trim(),
+      label: String(language.label ?? language.id ?? "").trim(),
+      ocr_strategy: "dedicated" as const,
+    }))
+    .filter((language) => language.code && language.label);
 }
 
 export async function restartApp(): Promise<void> {

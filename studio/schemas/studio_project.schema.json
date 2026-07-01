@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TraduzAI Studio Project",
+  "type": "object",
+  "required": ["app", "versao", "studio_schema_version", "paginas"],
+  "properties": {
+    "app": { "const": "traduzai" },
+    "versao": { "const": "2.0" },
+    "studio_schema_version": { "const": "1.0" },
+    "paginas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["numero", "image_layers", "text_layers", "textos"],
+        "properties": {
+          "numero": { "type": "number" },
+          "arquivo_original": { "type": ["string", "null"] },
+          "arquivo_traduzido": { "type": ["string", "null"] },
+          "image_layers": {
+            "type": "object",
+            "properties": {
+              "base": { "$ref": "#/$defs/imageLayer" },
+              "mask": { "$ref": "#/$defs/imageLayer" },
+              "inpaint": { "$ref": "#/$defs/imageLayer" },
+              "brush": { "$ref": "#/$defs/imageLayer" },
+              "recovery": { "$ref": "#/$defs/imageLayer" },
+              "rendered": { "$ref": "#/$defs/imageLayer" }
+            },
+            "additionalProperties": true
+          },
+          "text_layers": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/textLayer" }
+          },
+          "textos": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/textLayer" }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "imageLayer": {
+      "type": "object",
+      "required": ["key", "path", "visible", "locked"],
+      "properties": {
+        "key": {
+          "enum": ["base", "mask", "inpaint", "brush", "recovery", "rendered"]
+        },
+        "path": { "type": ["string", "null"] },
+        "visible": { "type": "boolean" },
+        "locked": { "type": "boolean" },
+        "opacity": { "type": "number" },
+        "order": { "type": "number" },
+        "technical": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "textLayer": {
+      "type": "object",
+      "required": ["id", "kind", "original", "translated", "traduzido", "bbox", "style", "estilo"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "const": "text" },
+        "original": { "type": "string" },
+        "translated": { "type": "string" },
+        "traduzido": { "type": "string" },
+        "bbox": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "style": { "type": "object" },
+        "estilo": { "type": "object" },
+        "visible": { "type": "boolean" },
+        "locked": { "type": "boolean" },
+        "order": { "type": "number" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

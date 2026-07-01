@@ -111,6 +111,7 @@ def build_detect_ocr_payload(
     page_index: int,
     text_layers: list[dict[str, Any]],
     inpaint_blocks: list[dict[str, Any]],
+    ui_layout_components: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": "ready",
@@ -119,6 +120,7 @@ def build_detect_ocr_payload(
         "page_index": int(page_index),
         "text_layers": text_layers,
         "inpaint_blocks": inpaint_blocks,
+        "ui_layout_components": list(ui_layout_components or []),
     }
 
 

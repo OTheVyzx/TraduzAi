@@ -99,6 +99,55 @@ export const tauriMock = {
     return fonts.filter((font) => font.family.toLowerCase().includes(normalized));
   },
 
+  async listSystemFonts(query?: string): Promise<
+    Array<{
+      family: string;
+      full_name: string;
+      filename: string;
+      path: string;
+      weight: string;
+      style: string;
+      monospace: boolean;
+    }>
+  > {
+    const normalized = (query ?? "").trim().toLowerCase();
+    const fonts = [
+      {
+        family: "Arial",
+        full_name: "Arial Regular",
+        filename: "SystemFont__Arial__Regular.ttf",
+        path: "C:/Windows/Fonts/arial.ttf",
+        weight: "400",
+        style: "normal",
+        monospace: false,
+      },
+      {
+        family: "Consolas",
+        full_name: "Consolas Regular",
+        filename: "SystemFont__Consolas__Regular.ttf",
+        path: "C:/Windows/Fonts/consola.ttf",
+        weight: "400",
+        style: "normal",
+        monospace: true,
+      },
+    ];
+    return normalized
+      ? fonts.filter((font) => `${font.family} ${font.full_name}`.toLowerCase().includes(normalized))
+      : fonts;
+  },
+
+  async resolveSystemFont(filename: string): Promise<{
+    family: string;
+    full_name: string;
+    filename: string;
+    path: string;
+    weight: string;
+    style: string;
+    monospace: boolean;
+  } | null> {
+    return (await this.listSystemFonts()).find((font) => font.filename === filename) ?? null;
+  },
+
   async loadEditorPage(config: { page_index: number }): Promise<EditorPagePayload> {
     const project = getE2EFixtureProject();
     const appProject = useAppStore.getState().project;

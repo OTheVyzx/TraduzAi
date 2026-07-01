@@ -1,6 +1,6 @@
 """
 Primary OCR pass using PaddleOCR when available.
-Falls back cleanly to EasyOCR in the caller.
+Fails closed when PaddleOCR is unavailable.
 """
 
 from __future__ import annotations
@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 _paddle_readers: dict[str, object] = {}
 
 
+class OcrBackendUnavailable(RuntimeError):
+    """Raised when PaddleOCR is required but unavailable."""
+
+
 def _prefer_torch_cuda_dlls() -> None:
     try:
         import torch  # noqa: F401
@@ -20,7 +24,9 @@ def _prefer_torch_cuda_dlls() -> None:
 
 
 def choose_primary_ocr_engine(paddle_ready: bool) -> str:
-    return "paddle" if paddle_ready else "easyocr"
+    if paddle_ready:
+        return "paddle"
+    raise OcrBackendUnavailable("PaddleOCR indisponivel; EasyOCR fallback removido.")
 
 
 def is_paddle_available() -> bool:

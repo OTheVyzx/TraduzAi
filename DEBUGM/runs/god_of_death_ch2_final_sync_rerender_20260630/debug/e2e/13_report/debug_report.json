@@ -1,0 +1,626 @@
+{
+  "schema_version": 1,
+  "status": "BLOCK",
+  "issue_count": 93,
+  "top_issue_count": 10,
+  "export_gate": {
+    "status": "BLOCK",
+    "critical_issue_count": 13,
+    "review_issue_count": 80,
+    "issue_count": 93
+  },
+  "qa_export_gate_consistency": {
+    "critical_count_matches": false,
+    "critical_issue_count_matches": false,
+    "highest_severity_matches_block": true
+  },
+  "top_issues": [
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "ocr_001",
+      "flags": [
+        "render_outside_balloon"
+      ],
+      "text": "A missão principal será mostrada em breve",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "translated/001.jpg",
+          "href": "../translated/001.jpg"
+        },
+        {
+          "label": "09_typeset/render_plan_final.jsonl",
+          "href": "../09_typeset/render_plan_final.jsonl"
+        },
+        {
+          "label": "05_layout_geometry/layout_blocks.jsonl",
+          "href": "../05_layout_geometry/layout_blocks.jsonl"
+        },
+        {
+          "label": "12_contact_sheets/page_002_band_003.jpg",
+          "href": "../12_contact_sheets/page_002_band_003.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_003",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_003_ocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_003",
+      "coordinate_space": "page",
+      "bbox": [
+        113,
+        2897,
+        259,
+        2968
+      ],
+      "source_bbox": [
+        84,
+        2820,
+        286,
+        3029
+      ],
+      "balloon_bbox": [
+        37,
+        2854,
+        349,
+        3085
+      ],
+      "safe_text_box": [
+        81,
+        2886,
+        305,
+        3053
+      ],
+      "render_bbox": [
+        87,
+        2832,
+        281,
+        3034
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "ocr_001",
+      "flags": [
+        "missing_render_bbox"
+      ],
+      "text": "O episódio começa!",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_004",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_004_ocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_004",
+      "coordinate_space": "page",
+      "bbox": [
+        587,
+        3564,
+        765,
+        3592
+      ],
+      "source_bbox": [
+        587,
+        3564,
+        765,
+        3592
+      ],
+      "balloon_bbox": [
+        440,
+        3249,
+        800,
+        3689
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "ocr_001",
+      "flags": [
+        "render_outside_balloon"
+      ],
+      "text": "1.000 pontos..",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "translated/001.jpg",
+          "href": "../translated/001.jpg"
+        },
+        {
+          "label": "09_typeset/render_plan_final.jsonl",
+          "href": "../09_typeset/render_plan_final.jsonl"
+        },
+        {
+          "label": "05_layout_geometry/layout_blocks.jsonl",
+          "href": "../05_layout_geometry/layout_blocks.jsonl"
+        },
+        {
+          "label": "12_contact_sheets/page_002_band_009.jpg",
+          "href": "../12_contact_sheets/page_002_band_009.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_009",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_009_ocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_009",
+      "coordinate_space": "page",
+      "bbox": [
+        107,
+        6463,
+        268,
+        6503
+      ],
+      "source_bbox": [
+        0,
+        6098,
+        355,
+        6597
+      ],
+      "balloon_bbox": [
+        0,
+        6098,
+        355,
+        6597
+      ],
+      "safe_text_box": [
+        81,
+        6452,
+        294,
+        6514
+      ],
+      "render_bbox": [
+        130,
+        6435,
+        244,
+        6532
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "ocr_001",
+      "flags": [
+        "missing_render_bbox"
+      ],
+      "text": "Isso mesmo!",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_021",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_021_ocr_001",
+      "page_id": "page_002",
+      "band_id": "page_002_band_021",
+      "coordinate_space": "page",
+      "bbox": [
+        288,
+        15320,
+        403,
+        15351
+      ],
+      "source_bbox": [
+        288,
+        15320,
+        403,
+        15351
+      ],
+      "balloon_bbox": [
+        288,
+        15320,
+        403,
+        15351
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "direct_paddle_reocr_001",
+      "flags": [
+        "missing_render_bbox"
+      ],
+      "text": "Mesmo assim, você ainda está disposto a se arriscar pelos seus amigos. Esse é o seu ponto forte.",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "direct_paddle_reocr_001@page_003_band_028",
+      "text_id": "direct_paddle_reocr_001",
+      "text_instance_id": "page_003_band_028_direct_paddle_reocr_001",
+      "page_id": "page_002",
+      "band_id": "page_003_band_028",
+      "coordinate_space": "page",
+      "bbox": [
+        425,
+        19919,
+        722,
+        20109
+      ],
+      "source_bbox": [
+        425,
+        19919,
+        722,
+        20109
+      ],
+      "balloon_bbox": [
+        425,
+        19919,
+        722,
+        20109
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "ocr_001",
+      "flags": [
+        "mask_outside_balloon_critical"
+      ],
+      "text": "ENTÃO VOCÊ ESTÁ DIZENDO QUE EU SOU O REI YEOMRA? Inothattm ig yeomra? isso mesmo!",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "06_mask_segmentation/mask_chain_summary.json",
+          "href": "../06_mask_segmentation/mask_chain_summary.json"
+        },
+        {
+          "label": "06_mask_segmentation/page_003_band_034/mask_overlay.jpg",
+          "href": "../06_mask_segmentation/page_003_band_034/mask_overlay.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_003_band_034",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_003_band_034_ocr_001",
+      "page_id": "page_002",
+      "band_id": "page_003_band_034",
+      "coordinate_space": "page",
+      "bbox": [
+        399,
+        24530,
+        649,
+        24633
+      ],
+      "source_bbox": [
+        399,
+        24530,
+        649,
+        24633
+      ],
+      "balloon_bbox": [
+        399,
+        24530,
+        649,
+        24633
+      ],
+      "safe_text_box": [
+        421,
+        24501,
+        619,
+        24672
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 3,
+      "layer": "ocr_001",
+      "flags": [
+        "fast_fill_no_glyph_evidence",
+        "missing_render_bbox"
+      ],
+      "text": "O QUE É ISSO?",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_003_band_043",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_003_band_043_ocr_001",
+      "page_id": "page_003",
+      "band_id": "page_003_band_043",
+      "coordinate_space": "page",
+      "bbox": [
+        447,
+        31545,
+        658,
+        31568
+      ],
+      "source_bbox": [
+        447,
+        31545,
+        658,
+        31568
+      ],
+      "balloon_bbox": [
+        447,
+        31545,
+        658,
+        31568
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 4,
+      "layer": "ocr_001",
+      "flags": [
+        "fit_below_minimum_legible",
+        "mask_outside_balloon_critical"
+      ],
+      "text": "Use a habilidade de evasão imediatamente",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "06_mask_segmentation/mask_chain_summary.json",
+          "href": "../06_mask_segmentation/mask_chain_summary.json"
+        },
+        {
+          "label": "06_mask_segmentation/page_004_band_054/mask_overlay.jpg",
+          "href": "../06_mask_segmentation/page_004_band_054/mask_overlay.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_004_band_054",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_004_band_054_ocr_001",
+      "page_id": "page_004",
+      "band_id": "page_004_band_054",
+      "coordinate_space": "page",
+      "bbox": [
+        273,
+        1082,
+        467,
+        1153
+      ],
+      "source_bbox": [
+        269,
+        1087,
+        447,
+        1152
+      ],
+      "balloon_bbox": [
+        230,
+        1068,
+        486,
+        1171
+      ],
+      "safe_text_box": [
+        281,
+        1093,
+        435,
+        1146
+      ],
+      "render_bbox": [
+        301,
+        1071,
+        435,
+        1163
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 5,
+      "layer": "ocr_001",
+      "flags": [
+        "mask_outside_balloon_critical",
+        "text_residual_after_inpaint"
+      ],
+      "text": "ENTENDA ISSO:",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "06_mask_segmentation/mask_chain_summary.json",
+          "href": "../06_mask_segmentation/mask_chain_summary.json"
+        },
+        {
+          "label": "06_mask_segmentation/page_005_band_077/mask_overlay.jpg",
+          "href": "../06_mask_segmentation/page_005_band_077/mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_005_band_077/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_005_band_077/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_005_band_077/inpaint_decision.json",
+          "href": "../08_inpaint/page_005_band_077/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_005_band_077/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_005_band_077/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_005_band_077",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_005_band_077_ocr_001",
+      "page_id": "page_005",
+      "band_id": "page_005_band_077",
+      "coordinate_space": "page",
+      "bbox": [
+        120,
+        7293,
+        297,
+        7302
+      ],
+      "source_bbox": [
+        112,
+        7293,
+        308,
+        7309
+      ],
+      "balloon_bbox": [
+        69,
+        7293,
+        351,
+        7321
+      ],
+      "safe_text_box": [
+        93,
+        7296,
+        327,
+        7318
+      ],
+      "render_bbox": [
+        130,
+        7296,
+        286,
+        7311
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 5,
+      "layer": "negative_dark_003",
+      "flags": [
+        "fast_fill_no_glyph_evidence",
+        "render_on_art_suspected",
+        "text_residual_after_inpaint"
+      ],
+      "text": "Você não pode ficar no subespaço por muito tempo.",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "translated/005.jpg",
+          "href": "../translated/005.jpg"
+        },
+        {
+          "label": "09_typeset/render_plan_final.jsonl",
+          "href": "../09_typeset/render_plan_final.jsonl"
+        },
+        {
+          "label": "05_layout_geometry/layout_blocks.jsonl",
+          "href": "../05_layout_geometry/layout_blocks.jsonl"
+        },
+        {
+          "label": "12_contact_sheets/page_005_band_077.jpg",
+          "href": "../12_contact_sheets/page_005_band_077.jpg"
+        },
+        {
+          "label": "08_inpaint/page_005_band_077/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_005_band_077/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_005_band_077/inpaint_decision.json",
+          "href": "../08_inpaint/page_005_band_077/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_005_band_077/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_005_band_077/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "negative_dark_003@page_005_band_077",
+      "text_id": "negative_dark_003",
+      "text_instance_id": "page_005_band_077_negative_dark_003",
+      "page_id": "page_005",
+      "band_id": "page_005_band_077",
+      "coordinate_space": "page",
+      "bbox": [
+        163,
+        59886,
+        351,
+        60016
+      ],
+      "source_bbox": [
+        163,
+        59886,
+        351,
+        60016
+      ],
+      "balloon_bbox": [
+        163,
+        59886,
+        351,
+        60016
+      ],
+      "safe_text_box": [
+        43,
+        59723,
+        568,
+        59859
+      ],
+      "render_bbox": [
+        163,
+        59750,
+        348,
+        59859
+      ]
+    }
+  ]
+}

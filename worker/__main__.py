@@ -28,13 +28,13 @@ def doctor(settings: WorkerSettings) -> int:
     return 0
 
 
-def run_once(settings: WorkerSettings, mock: bool) -> int:
+def run_once(settings: WorkerSettings, mock: bool, job_id: str | None = None) -> int:
     client = WorkerClient(settings)
     capabilities = build_worker_capabilities(settings, mock)
     registration = client.register(capabilities)
     worker_id = registration["worker_id"]
     client.heartbeat(worker_id)
-    job = client.claim_job(worker_id, capabilities)
+    job = client.claim_job(worker_id, capabilities, job_id=job_id)
     if job is None:
         print("Nenhum job na fila")
         return 0
@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs="?", default="run")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--mock", action="store_true")
+    parser.add_argument("--job-id")
     args = parser.parse_args(argv)
     settings = WorkerSettings.from_env()
     if args.command == "doctor":
@@ -164,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_fast_page_client(settings)
     try:
         while True:
-            code = run_once(settings, args.mock)
+            code = run_once(settings, args.mock, job_id=args.job_id)
             if args.once:
                 return code
             time.sleep(3)

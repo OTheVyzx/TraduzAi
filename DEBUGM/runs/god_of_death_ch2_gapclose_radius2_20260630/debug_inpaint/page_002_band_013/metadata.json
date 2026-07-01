@@ -1,0 +1,159 @@
+{
+  "page_number": 2,
+  "band_index": 14,
+  "band_id": "page_002_band_013",
+  "band_y_top": 10218,
+  "text_count": 2,
+  "text_samples": [
+    {
+      "id": "direct_paddle_reocr_001",
+      "trace_id": "direct_paddle_reocr_001@page_002_band_013",
+      "band_id": "page_002_band_013",
+      "bbox": [
+        157,
+        176,
+        396,
+        321
+      ],
+      "text_pixel_bbox": [
+        157,
+        176,
+        396,
+        321
+      ],
+      "balloon_bbox": [
+        105,
+        133,
+        448,
+        364
+      ],
+      "bubble_mask_bbox": [
+        120,
+        136,
+        423,
+        346
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "candidate_crop_direct_paddle_reocr",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_text_candidate_reocr",
+        "dark_bubble_high_conf_light_text_reocr",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "visual_text_only_inpaint_contract",
+        "text_contract_direct_fill"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "ocr_pixels",
+        "raw_mask_pixels": 6478,
+        "expanded_mask_pixels": 23301,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    },
+    {
+      "id": "direct_paddle_reocr_001_002",
+      "trace_id": "direct_paddle_reocr_001_002@page_002_band_013",
+      "band_id": "page_002_band_013",
+      "bbox": [
+        485,
+        345,
+        717,
+        379
+      ],
+      "text_pixel_bbox": [
+        485,
+        345,
+        717,
+        379
+      ],
+      "balloon_bbox": [
+        476,
+        175,
+        775,
+        459
+      ],
+      "bubble_mask_bbox": [
+        476,
+        175,
+        775,
+        459
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "candidate_crop_direct_paddle_reocr",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_text_candidate_reocr",
+        "dark_bubble_visual_bbox_refined",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "balloon_outline_components_removed",
+        "visual_text_only_inpaint_contract",
+        "mask_outside_balloon",
+        "mask_outside_balloon_critical",
+        "text_contract_direct_fill",
+        "fast_fill_no_glyph_evidence"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "ocr_pixels",
+        "raw_mask_pixels": 1994,
+        "expanded_mask_pixels": 6715,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    }
+  ],
+  "vision_block_samples": [],
+  "pre_recovery_text_samples": [],
+  "initial_empty_recovery_attempts": [],
+  "recovered_initial_empty_vision_blocks_from_texts": false,
+  "remaining_inpaint_blocks": 0,
+  "engine_preset_id": "default",
+  "mask_strategy": "roi_segmentation_assisted",
+  "detector_engine_id": "default",
+  "validated_text_source_bboxes": [],
+  "rejected_text_source_bboxes": [],
+  "fast_fill_mask_pixels": 28635,
+  "raw_mask_pixels": 32514,
+  "expanded_mask_pixels": 32514,
+  "used_real_inpaint": false,
+  "fast_fill_without_raw_mask": false,
+  "used_fast_solid_fill": false,
+  "fast_solid_balloon_count": 0,
+  "fast_solid_white_count": 0,
+  "fast_solid_black_count": 0,
+  "fast_solid_colored_count": 0,
+  "used_fast_white_fill": false,
+  "fast_solid_fill_samples": [],
+  "fast_solid_rejection_reasons": {},
+  "fast_solid_fill_reject_reasons": {},
+  "unsafe_inpaint_block_count": 0,
+  "unsafe_inpaint_block_reasons": {},
+  "unsafe_inpaint_block_samples": [],
+  "connected_white_geometry_fill_count": 0,
+  "connected_white_geometry_fill_mask_pixels": 0,
+  "used_fast_local_fill": false,
+  "used_fast_dark_fill": false,
+  "used_dark_panel_fill": true,
+  "dark_panel_fill_count": 2,
+  "changed_pixels_after_inpaint": 28635,
+  "post_cleanup_skipped_reason": "",
+  "changed_pixels_outside_expanded_mask": 0,
+  "changed_pixels_outside_effective_limit_mask": 0,
+  "raw_changed_outside_limit_mask": 0,
+  "cleanup_changed_outside_limit_mask": 0,
+  "final_clamped_outside_expanded_mask_pixels": 0,
+  "final_action_mask_white_cleanup_added_pixels": 0,
+  "flags": [
+    "mask_outside_balloon_critical"
+  ]
+}

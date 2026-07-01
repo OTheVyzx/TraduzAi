@@ -277,12 +277,15 @@ def _export_text_crops(
                 {
                     "index": index,
                     "bbox": bbox,
+                    "is_sfx": _is_sfx_layer(layer),
                     "baseline_asset": baseline_name,
                     "candidate_asset": candidate_name,
                     "original": str(layer.get("original") or layer.get("text") or ""),
                     "translated": str(
                         layer.get("translated") or layer.get("traduzido") or ""
                     ),
+                    "qa_flags": _layer_flags(layer),
+                    "sfx": _sfx_review_metadata(layer),
                 }
             )
     return crop_pairs
@@ -311,6 +314,49 @@ def _layer_bbox(layer: dict[str, Any]) -> list[int] | None:
     if x2 <= x1 or y2 <= y1:
         return None
     return [x1, y1, x2, y2]
+
+
+def _is_sfx_layer(layer: dict[str, Any]) -> bool:
+    route = str(layer.get("route") or layer.get("translation_route") or "")
+    kind = str(layer.get("content_class") or layer.get("tipo") or layer.get("type") or "").lower()
+    return (
+        kind in {"sfx", "sound_effect", "onomatopoeia"}
+        or route == "translate_sfx_inpaint_render"
+        or isinstance(layer.get("sfx"), dict)
+    )
+
+
+def _layer_flags(layer: dict[str, Any]) -> list[str]:
+    flags = [str(flag) for flag in layer.get("qa_flags") or [] if flag]
+    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
+    for key in ("qa_flags", "style_flags", "inpaint_flags", "gate_flags"):
+        flags.extend(str(flag) for flag in sfx.get(key) or [] if flag)
+    gate = sfx.get("inpaint_gate") if isinstance(sfx.get("inpaint_gate"), dict) else {}
+    flags.extend(str(flag) for flag in gate.get("flags") or [] if flag)
+    seen: set[str] = set()
+    result: list[str] = []
+    for flag in flags:
+        if flag in seen:
+            continue
+        seen.add(flag)
+        result.append(flag)
+    return result
+
+
+def _sfx_review_metadata(layer: dict[str, Any]) -> dict[str, Any]:
+    if not _is_sfx_layer(layer):
+        return {}
+    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
+    style_payload = sfx.get("style") if isinstance(sfx.get("style"), dict) else {}
+    return {
+        "adapted_text": sfx.get("adapted_text") or layer.get("translated") or layer.get("traduzido"),
+        "route": layer.get("route") or layer.get("translation_route"),
+        "inpaint_allowed": sfx.get("inpaint_allowed"),
+        "review_required": sfx.get("review_required"),
+        "style_confidence": sfx.get("style_confidence")
+        or style_payload.get("confidence")
+        or layer.get("style_confidence"),
+    }
 
 
 def _crop_image(image: Any, bbox: list[int], *, padding: int) -> Any:
@@ -384,15 +430,19 @@ def _render_crop_pairs(crop_pairs: list[dict[str, Any]]) -> str:
     if not crop_pairs:
         return '<p class="missing">Crops indisponiveis para esta pagina.</p>'
     rows = []
+    sfx_rows = []
     for crop in crop_pairs:
         original = html.escape(str(crop.get("original") or ""))
         translated = html.escape(str(crop.get("translated") or ""))
         baseline_asset = html.escape(str(crop.get("baseline_asset") or ""))
         candidate_asset = html.escape(str(crop.get("candidate_asset") or ""))
+        flags = ", ".join(str(flag) for flag in crop.get("qa_flags") or [])
+        flags_html = f"<small>Flags: <code>{html.escape(flags)}</code></small>" if flags else ""
         rows.append(
             f"""
             <div class="crop">
               <p><code>{original}</code><br>{translated}</p>
+              {flags_html}
               <div class="pair">
                 <img src="assets/{baseline_asset}" alt="Crop baseline">
                 <img src="assets/{candidate_asset}" alt="Crop candidato">
@@ -400,7 +450,33 @@ def _render_crop_pairs(crop_pairs: list[dict[str, Any]]) -> str:
             </div>
             """
         )
-    return f"<h3>Crops</h3><div class=\"crops\">{''.join(rows)}</div>"
+        if crop.get("is_sfx"):
+            sfx_rows.append(_render_sfx_panel(crop))
+    sfx_html = ""
+    if sfx_rows:
+        sfx_html = f"<h3>SFX</h3><div class=\"crops sfx-crops\">{''.join(sfx_rows)}</div>"
+    return f"<h3>Crops</h3><div class=\"crops\">{''.join(rows)}</div>{sfx_html}"
+
+
+def _render_sfx_panel(crop: dict[str, Any]) -> str:
+    original = html.escape(str(crop.get("original") or ""))
+    translated = html.escape(str(crop.get("translated") or ""))
+    baseline_asset = html.escape(str(crop.get("baseline_asset") or ""))
+    candidate_asset = html.escape(str(crop.get("candidate_asset") or ""))
+    flags = html.escape(", ".join(str(flag) for flag in crop.get("qa_flags") or []))
+    sfx = crop.get("sfx") if isinstance(crop.get("sfx"), dict) else {}
+    metadata = html.escape(json.dumps(sfx, ensure_ascii=False, indent=2))
+    return f"""
+    <div class="crop sfx-panel">
+      <p><strong>SFX</strong> <code>{original}</code><br>{translated}</p>
+      <p><small>QA: <code>{flags or "sem flags"}</code></small></p>
+      <div class="pair">
+        <figure><figcaption>Original crop</figcaption><img src="assets/{baseline_asset}" alt="SFX original"></figure>
+        <figure><figcaption>Final crop</figcaption><img src="assets/{candidate_asset}" alt="SFX final"></figure>
+      </div>
+      <pre>{metadata}</pre>
+    </div>
+    """
 
 
 def _image_tag(asset_name: str, alt: str) -> str:

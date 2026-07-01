@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "band_id": "page_002_band_008",
+  "text_id": null,
+  "text_ids": [
+    "negative_dark_000",
+    "ocr_001"
+  ],
+  "trace_ids": [
+    "negative_dark_000@page_002_band_008",
+    "ocr_001@page_002_band_008"
+  ],
+  "trace_ids_in_band": [
+    "negative_dark_000@page_002_band_008",
+    "ocr_001@page_002_band_008"
+  ],
+  "text_instance_ids": [
+    "page_002_band_008_negative_dark_000",
+    "page_002_band_008_ocr_001"
+  ],
+  "mask_source": "line_polygons",
+  "used_balloon_clip": true,
+  "used_real_bubble_mask": false,
+  "used_image_bubble_mask": true,
+  "used_derived_bubble_mask": false,
+  "used_balloon_polygon": false,
+  "used_balloon_bbox_fallback": false,
+  "bubble_mask_source": "image_dark_bubble_mask",
+  "bubble_mask_rejection_reason": null,
+  "weak_image_bubble_mask_text_ids": [],
+  "synthetic_tight_balloon_reference": false,
+  "edge_clipped_text_bbox_reference": false,
+  "card_panel_text_context": true,
+  "used_protection_mask": false,
+  "raw_mask_pixels": 27822,
+  "expanded_mask_pixels": 27822,
+  "final_mask_pixels": 27822,
+  "balloon_mask_pixels": 48045,
+  "balloon_inner_mask_pixels": 45741,
+  "balloon_outline_mask_pixels": 729,
+  "mask_balloon_ratio": 0.579082,
+  "outside_balloon_pixels": 9206,
+  "outside_balloon_ratio": 0.330889,
+  "outside_balloon_reference": "final_mask",
+  "expanded_raw_ratio": 1.0,
+  "mask_density_in_band": 0.049611,
+  "source_bbox_area": 26196,
+  "glyph_bbox_area": 298920,
+  "source_glyph_area_ratio": 0.087635,
+  "flags": [
+    "mask_outside_balloon"
+  ],
+  "gates": {
+    "mask_density_high": false,
+    "mask_outside_balloon": true,
+    "mask_outside_balloon_critical": false,
+    "bbox_overreach": false,
+    "bbox_overreach_critical": false,
+    "expanded_ratio_review": false,
+    "source_glyph_area_ratio_critical": false,
+    "bbox_fallback_bubble_mask": false,
+    "missing_real_bubble_mask": false,
+    "weak_image_bubble_mask_reference": false
+  },
+  "thresholds": {
+    "mask_density_warn": 0.12,
+    "mask_density_borderline_warn": 0.15,
+    "mask_density_strong_warn": 0.3,
+    "expanded_raw_warn": 2.5,
+    "source_glyph_review": 1.5,
+    "source_glyph_critical": 8.0,
+    "outside_balloon_warn_ratio": 0.08,
+    "clean_outside_balloon_ratio": 0.01,
+    "clean_expanded_raw_ratio": 1.5,
+    "clean_source_glyph_ratio": 1.2,
+    "outside_balloon_critical_pixels": 50,
+    "outside_balloon_critical_ratio": 0.18
+  },
+  "decision_scope": "band_aggregate_debug_only",
+  "actionable": false,
+  "layout_inpaint_decision_source": "per_text",
+  "per_text_decision_paths": [
+    "per_text/negative_dark_000/mask_decision.json",
+    "per_text/ocr_001/mask_decision.json"
+  ]
+}

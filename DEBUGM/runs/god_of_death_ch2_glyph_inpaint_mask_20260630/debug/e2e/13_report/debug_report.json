@@ -1,0 +1,678 @@
+{
+  "schema_version": 1,
+  "status": "BLOCK",
+  "issue_count": 98,
+  "top_issue_count": 10,
+  "export_gate": {
+    "status": "BLOCK",
+    "critical_issue_count": 18,
+    "review_issue_count": 80,
+    "issue_count": 98
+  },
+  "qa_export_gate_consistency": {
+    "critical_count_matches": false,
+    "critical_issue_count_matches": false,
+    "highest_severity_matches_block": true
+  },
+  "top_issues": [
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "ocr_001",
+      "flags": [
+        "render_outside_balloon"
+      ],
+      "text": "A missão principal será mostrada em breve",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "translated/001.jpg",
+          "href": "../translated/001.jpg"
+        },
+        {
+          "label": "09_typeset/render_plan_final.jsonl",
+          "href": "../09_typeset/render_plan_final.jsonl"
+        },
+        {
+          "label": "05_layout_geometry/layout_blocks.jsonl",
+          "href": "../05_layout_geometry/layout_blocks.jsonl"
+        },
+        {
+          "label": "12_contact_sheets/page_002_band_003.jpg",
+          "href": "../12_contact_sheets/page_002_band_003.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_003",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_003_ocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_003",
+      "coordinate_space": "page",
+      "bbox": [
+        113,
+        2897,
+        259,
+        2968
+      ],
+      "source_bbox": [
+        84,
+        2820,
+        286,
+        3029
+      ],
+      "balloon_bbox": [
+        37,
+        2854,
+        349,
+        3085
+      ],
+      "safe_text_box": [
+        81,
+        2886,
+        305,
+        3053
+      ],
+      "render_bbox": [
+        87,
+        2832,
+        281,
+        3034
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "ocr_001",
+      "flags": [
+        "missing_render_bbox"
+      ],
+      "text": "O episódio começa!",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_004",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_004_ocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_004",
+      "coordinate_space": "page",
+      "bbox": [
+        587,
+        3564,
+        765,
+        3592
+      ],
+      "source_bbox": [
+        587,
+        3564,
+        765,
+        3592
+      ],
+      "balloon_bbox": [
+        440,
+        3249,
+        800,
+        3689
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "ocr_001",
+      "flags": [
+        "render_outside_balloon"
+      ],
+      "text": "1.000 pontos..",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "translated/001.jpg",
+          "href": "../translated/001.jpg"
+        },
+        {
+          "label": "09_typeset/render_plan_final.jsonl",
+          "href": "../09_typeset/render_plan_final.jsonl"
+        },
+        {
+          "label": "05_layout_geometry/layout_blocks.jsonl",
+          "href": "../05_layout_geometry/layout_blocks.jsonl"
+        },
+        {
+          "label": "12_contact_sheets/page_002_band_009.jpg",
+          "href": "../12_contact_sheets/page_002_band_009.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_009",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_009_ocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_009",
+      "coordinate_space": "page",
+      "bbox": [
+        107,
+        6463,
+        268,
+        6503
+      ],
+      "source_bbox": [
+        0,
+        6098,
+        355,
+        6597
+      ],
+      "balloon_bbox": [
+        0,
+        6098,
+        355,
+        6597
+      ],
+      "safe_text_box": [
+        81,
+        6452,
+        294,
+        6514
+      ],
+      "render_bbox": [
+        130,
+        6435,
+        244,
+        6532
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "direct_paddle_reocr_001",
+      "flags": [
+        "mask_outside_balloon_critical",
+        "text_residual_after_inpaint"
+      ],
+      "text": "Sou um sistema que orienta o exército do Rei Yeomra no estabelecimento de um submundo.",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "06_mask_segmentation/mask_chain_summary.json",
+          "href": "../06_mask_segmentation/mask_chain_summary.json"
+        },
+        {
+          "label": "06_mask_segmentation/page_002_band_013/mask_overlay.jpg",
+          "href": "../06_mask_segmentation/page_002_band_013/mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_013/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_002_band_013/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_013/inpaint_decision.json",
+          "href": "../08_inpaint/page_002_band_013/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_002_band_013/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_002_band_013/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "direct_paddle_reocr_001@page_002_band_013",
+      "text_id": "direct_paddle_reocr_001",
+      "text_instance_id": "page_002_band_013_direct_paddle_reocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_013",
+      "coordinate_space": "page",
+      "bbox": [
+        157,
+        10394,
+        396,
+        10539
+      ],
+      "source_bbox": [
+        157,
+        10394,
+        396,
+        10539
+      ],
+      "balloon_bbox": [
+        105,
+        10351,
+        448,
+        10582
+      ],
+      "safe_text_box": [
+        174,
+        10404,
+        379,
+        10529
+      ],
+      "render_bbox": [
+        185,
+        10409,
+        368,
+        10524
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "direct_paddle_reocr_001_002",
+      "flags": [
+        "fast_fill_no_glyph_evidence",
+        "mask_outside_balloon_critical",
+        "text_residual_after_inpaint"
+      ],
+      "text": "Eu sou chamado de 'sistema'",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "06_mask_segmentation/mask_chain_summary.json",
+          "href": "../06_mask_segmentation/mask_chain_summary.json"
+        },
+        {
+          "label": "06_mask_segmentation/page_002_band_013/mask_overlay.jpg",
+          "href": "../06_mask_segmentation/page_002_band_013/mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_013/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_002_band_013/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_013/inpaint_decision.json",
+          "href": "../08_inpaint/page_002_band_013/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_002_band_013/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_002_band_013/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "direct_paddle_reocr_001_002@page_002_band_013",
+      "text_id": "direct_paddle_reocr_001_002",
+      "text_instance_id": "page_002_band_013_direct_paddle_reocr_001_002",
+      "page_id": "page_001",
+      "band_id": "page_002_band_013",
+      "coordinate_space": "page",
+      "bbox": [
+        485,
+        10563,
+        717,
+        10597
+      ],
+      "source_bbox": [
+        485,
+        10563,
+        717,
+        10597
+      ],
+      "balloon_bbox": [
+        476,
+        10393,
+        775,
+        10677
+      ],
+      "safe_text_box": [
+        497,
+        10413,
+        754,
+        10657
+      ],
+      "render_bbox": [
+        497,
+        10570,
+        726,
+        10590
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 1,
+      "layer": "direct_paddle_reocr_001",
+      "flags": [
+        "text_residual_after_inpaint"
+      ],
+      "text": "É um sistema que ajuda o hospedeiro a crescer e se tornar o mestre do submundo.",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "08_inpaint/page_002_band_017/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_002_band_017/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_017/inpaint_decision.json",
+          "href": "../08_inpaint/page_002_band_017/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_002_band_017/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_002_band_017/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "direct_paddle_reocr_001@page_002_band_017",
+      "text_id": "direct_paddle_reocr_001",
+      "text_instance_id": "page_002_band_017_direct_paddle_reocr_001",
+      "page_id": "page_001",
+      "band_id": "page_002_band_017",
+      "coordinate_space": "page",
+      "bbox": [
+        81,
+        12653,
+        407,
+        12759
+      ],
+      "source_bbox": [
+        81,
+        12653,
+        407,
+        12759
+      ],
+      "balloon_bbox": [
+        31,
+        12528,
+        470,
+        12928
+      ],
+      "safe_text_box": [
+        62,
+        12556,
+        439,
+        12900
+      ],
+      "render_bbox": [
+        86,
+        12656,
+        402,
+        12755
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "direct_paddle_reocr_001",
+      "flags": [
+        "text_residual_after_inpaint"
+      ],
+      "text": "Entre inúmeras almas você foi escolhido conforme se enquadrava nas condições.",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "08_inpaint/page_002_band_018/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_002_band_018/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_018/inpaint_decision.json",
+          "href": "../08_inpaint/page_002_band_018/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_002_band_018/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_002_band_018/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "direct_paddle_reocr_001@page_002_band_018",
+      "text_id": "direct_paddle_reocr_001",
+      "text_instance_id": "page_002_band_018_direct_paddle_reocr_001",
+      "page_id": "page_002",
+      "band_id": "page_002_band_018",
+      "coordinate_space": "page",
+      "bbox": [
+        391,
+        346,
+        721,
+        480
+      ],
+      "source_bbox": [
+        391,
+        346,
+        721,
+        480
+      ],
+      "balloon_bbox": [
+        319,
+        306,
+        793,
+        520
+      ],
+      "safe_text_box": [
+        414,
+        355,
+        698,
+        471
+      ],
+      "render_bbox": [
+        431,
+        334,
+        682,
+        492
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "ocr_001",
+      "flags": [
+        "missing_render_bbox"
+      ],
+      "text": "Isso mesmo!",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_021",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_021_ocr_001",
+      "page_id": "page_002",
+      "band_id": "page_002_band_021",
+      "coordinate_space": "page",
+      "bbox": [
+        288,
+        15320,
+        403,
+        15351
+      ],
+      "source_bbox": [
+        288,
+        15320,
+        403,
+        15351
+      ],
+      "balloon_bbox": [
+        288,
+        15320,
+        403,
+        15351
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "ocr_001",
+      "flags": [
+        "text_residual_after_inpaint"
+      ],
+      "text": "Você cresceu em um orfanato sem pais e, no início da adolescência, já havia colocado os pés no mundo dos gangsters. apenas",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "08_inpaint/page_002_band_023/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_002_band_023/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_023/inpaint_decision.json",
+          "href": "../08_inpaint/page_002_band_023/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_002_band_023/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_002_band_023/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "ocr_001@page_002_band_023",
+      "text_id": "ocr_001",
+      "text_instance_id": "page_002_band_023_ocr_001",
+      "page_id": "page_002",
+      "band_id": "page_002_band_023",
+      "coordinate_space": "page",
+      "bbox": [
+        68,
+        16575,
+        491,
+        16780
+      ],
+      "source_bbox": [
+        68,
+        16575,
+        491,
+        16780
+      ],
+      "balloon_bbox": [
+        68,
+        16575,
+        491,
+        16780
+      ],
+      "safe_text_box": [
+        55,
+        16509,
+        404,
+        16856
+      ],
+      "render_bbox": [
+        55,
+        16509,
+        404,
+        16856
+      ]
+    },
+    {
+      "severity": "critical",
+      "type": "p0_render_blocker",
+      "page": 2,
+      "layer": "direct_paddle_reocr_001",
+      "flags": [
+        "text_residual_after_inpaint"
+      ],
+      "text": "Você pensou amizade. foi significativo, mas você só foi usado por seus amigos.",
+      "artifact_links": [
+        {
+          "label": "11_qa_export_gate/qa_issues.jsonl",
+          "href": "../11_qa_export_gate/qa_issues.jsonl"
+        },
+        {
+          "label": "08_inpaint/page_002_band_023/03_inpaint_mask_overlay.jpg",
+          "href": "../08_inpaint/page_002_band_023/03_inpaint_mask_overlay.jpg"
+        },
+        {
+          "label": "08_inpaint/page_002_band_023/inpaint_decision.json",
+          "href": "../08_inpaint/page_002_band_023/inpaint_decision.json"
+        },
+        {
+          "label": "08_inpaint/page_002_band_023/06_band_after_inpaint.jpg",
+          "href": "../08_inpaint/page_002_band_023/06_band_after_inpaint.jpg"
+        },
+        {
+          "label": "11_qa_export_gate/export_gate.json",
+          "href": "../11_qa_export_gate/export_gate.json"
+        }
+      ],
+      "trace_id": "direct_paddle_reocr_001@page_002_band_023",
+      "text_id": "direct_paddle_reocr_001",
+      "text_instance_id": "page_002_band_023_direct_paddle_reocr_001",
+      "page_id": "page_002",
+      "band_id": "page_002_band_023",
+      "coordinate_space": "page",
+      "bbox": [
+        426,
+        16672,
+        748,
+        16783
+      ],
+      "source_bbox": [
+        426,
+        16672,
+        748,
+        16783
+      ],
+      "balloon_bbox": [
+        426,
+        16672,
+        748,
+        16783
+      ],
+      "safe_text_box": [
+        404,
+        16546,
+        756,
+        16859
+      ],
+      "render_bbox": [
+        404,
+        16546,
+        756,
+        16859
+      ]
+    }
+  ]
+}

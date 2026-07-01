@@ -9,6 +9,432 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def test_translator_note_text_mask_fills_with_dark_background_near_white_bubble():
+    from inpainter import _try_dark_panel_text_fill
+
+    image = np.full((180, 320, 3), 8, dtype=np.uint8)
+    image[20:145, 170:300] = 255
+    image[70:74, 22:168] = 245
+    image[88:92, 26:168] = 245
+    image[106:110, 16:186] = 245
+    text = {
+        "id": "ocr_tn_dark",
+        "bbox": [16, 66, 186, 116],
+        "text_pixel_bbox": [16, 66, 186, 116],
+        "line_polygons": [
+            [[22, 68], [168, 68], [168, 78], [22, 78]],
+            [[26, 86], [168, 86], [168, 96], [26, 96]],
+            [[16, 104], [186, 104], [186, 114], [16, 114]],
+        ],
+        "bubble_mask_source": "translator_note_text_mask",
+        "background_rgb": [8, 8, 8],
+        "qa_flags": ["translator_note_text_only_mask"],
+        "route_action": "translate_inpaint_render",
+    }
+
+    filled = _try_dark_panel_text_fill(image, text)
+
+    assert filled is not None
+    changed = np.any(filled != image, axis=2)
+    assert int(np.count_nonzero(changed)) > 0
+    assert float(np.mean(filled[changed])) < 40.0
+
+
+def test_fast_fill_resolved_text_is_suppressed_from_real_inpaint_rebuild():
+    from inpainter import _text_suppressed_for_inpaint
+
+    text = {
+        "id": "ocr_tn_dark",
+        "bubble_mask_source": "translator_note_text_mask",
+        "route_action": "translate_inpaint_render",
+        "_fast_fill_inpaint_resolved": True,
+    }
+
+    assert _text_suppressed_for_inpaint(text) is True
+
+
+def test_image_white_bubble_mask_with_dark_background_is_not_white_context():
+    from inpainter import _text_is_white_balloon_context
+
+    text = {
+        "id": "ocr_dark_false_white",
+        "bubble_mask_source": "image_white_bubble_mask",
+        "background_rgb": [12, 12, 12],
+        "style_origin": "auto_dark_panel_glow",
+        "layout_profile": "connected_balloon",
+        "qa_flags": ["auto_dark_panel_glow_fallback", "mask_outside_balloon_critical"],
+    }
+
+    assert _text_is_white_balloon_context(text) is False
+
+
+def test_image_white_bubble_mask_with_plain_white_background_stays_white_context():
+    from inpainter import _text_is_white_balloon_context
+
+    text = {
+        "id": "ocr_white_balloon",
+        "bubble_mask_source": "image_white_bubble_mask",
+        "background_rgb": [248, 248, 248],
+        "layout_profile": "speech_balloon",
+    }
+
+    assert _text_is_white_balloon_context(text) is True
+
+
+def test_false_white_dark_bubble_uses_local_dark_fill_when_global_fast_fill_disabled():
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.full((140, 260, 3), 8, dtype=np.uint8)
+    image[46:56, 92:166] = 236
+    image[66:76, 84:174] = 236
+    text = {
+        "id": "ocr_false_white_dark",
+        "bbox": [80, 42, 178, 80],
+        "text_pixel_bbox": [80, 42, 178, 80],
+        "line_polygons": [
+            [[92, 46], [166, 46], [166, 56], [92, 56]],
+            [[84, 66], [174, 66], [174, 76], [84, 76]],
+        ],
+        "balloon_bbox": [42, 22, 220, 112],
+        "bubble_mask_bbox": [42, 22, 220, 112],
+        "bubble_mask_source": "image_white_bubble_mask",
+        "route_action": "translate_inpaint_render",
+        "qa_flags": ["mask_outside_balloon_critical", "bubble_clip_preserved_raw_text"],
+    }
+    vision_blocks = [dict(text)]
+
+    filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, vision_blocks)
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    changed = np.any(filled != image, axis=2)
+    assert int(np.count_nonzero(changed)) > 0
+    assert float(np.mean(filled[changed])) < 48.0
+
+
+def test_false_white_dark_bubble_with_preserved_clip_uses_local_dark_fill():
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.full((140, 300, 3), 7, dtype=np.uint8)
+    image[58:68, 118:220] = 238
+    image[78:88, 104:238] = 238
+    text = {
+        "id": "ocr_false_white_clip",
+        "bbox": [98, 54, 244, 92],
+        "text_pixel_bbox": [98, 54, 244, 92],
+        "line_polygons": [
+            [[118, 58], [220, 58], [220, 68], [118, 68]],
+            [[104, 78], [238, 78], [238, 88], [104, 88]],
+        ],
+        "balloon_bbox": [76, 34, 270, 122],
+        "bubble_mask_bbox": [76, 34, 270, 122],
+        "bubble_mask_source": "image_white_bubble_mask",
+        "route_action": "translate_inpaint_render",
+        "qa_flags": ["bubble_clip_preserved_raw_text"],
+    }
+
+    filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, [dict(text)])
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    changed = np.any(filled != image, axis=2)
+    assert int(np.count_nonzero(changed)) > 0
+    assert float(np.mean(filled[changed])) < 48.0
+
+
+def test_broken_image_white_dark_bubble_cleans_bright_text_outside_false_bbox():
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.full((330, 820, 3), 5, dtype=np.uint8)
+    image[86:108, 388:692] = 244
+    image[130:152, 382:710] = 244
+    image[176:198, 420:668] = 244
+    image[222:244, 472:626] = 244
+    text = {
+        "id": "ocr_partial_dark_bubble",
+        "bbox": [452, 184, 655, 226],
+        "text_pixel_bbox": [402, 176, 660, 232],
+        "line_polygons": [[[452, 184], [655, 184], [655, 226], [452, 226]]],
+        "balloon_bbox": [451, 170, 655, 260],
+        "bubble_mask_bbox": [451, 170, 655, 260],
+        "bubble_mask_source": "image_white_bubble_mask",
+        "route_action": "translate_inpaint_render",
+        "qa_flags": ["mask_outside_balloon_critical"],
+    }
+
+    filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, [dict(text)])
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    assert float(np.mean(filled[86:108, 388:692])) < 48.0
+    assert float(np.mean(filled[130:152, 382:710])) < 48.0
+    assert float(np.mean(filled[176:198, 420:668])) < 48.0
+    assert float(np.mean(filled[222:244, 472:626])) < 48.0
+
+
+def test_image_dark_bubble_uses_local_dark_fill_when_global_fast_fill_disabled():
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.full((150, 320, 3), 6, dtype=np.uint8)
+    image[54:66, 92:220] = 232
+    image[78:90, 74:236] = 232
+    text = {
+        "id": "ocr_dark_bubble",
+        "bbox": [70, 50, 240, 94],
+        "text_pixel_bbox": [70, 50, 240, 94],
+        "line_polygons": [
+            [[92, 54], [220, 54], [220, 66], [92, 66]],
+            [[74, 78], [236, 78], [236, 90], [74, 90]],
+        ],
+        "balloon_bbox": [42, 20, 278, 126],
+        "bubble_mask_bbox": [42, 20, 278, 126],
+        "bubble_mask_source": "image_dark_bubble_mask",
+        "route_action": "translate_inpaint_render",
+    }
+
+    filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, [dict(text)])
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    changed = np.any(filled != image, axis=2)
+    assert int(np.count_nonzero(changed)) > 0
+    assert float(np.mean(filled[changed])) < 48.0
+
+
+def test_image_dark_bubble_overbroad_fill_uses_visual_glyph_mask_and_preserves_outline():
+    import cv2
+
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.zeros((180, 360, 3), dtype=np.uint8)
+    cv2.ellipse(image, (180, 90), (150, 62), 0, 0, 360, (2, 2, 2), -1)
+    cv2.ellipse(image, (180, 90), (150, 62), 0, 0, 360, (60, 130, 170), 3)
+    cv2.putText(
+        image,
+        "Quest Completion",
+        (90, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        image,
+        "Criteria: Level 1",
+        (92, 112),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    text = {
+        "id": "ocr_dark_overbroad",
+        "trace_id": "ocr_dark_overbroad@band",
+        "text": "Quest Completion Criteria: Level 1",
+        "bbox": [70, 45, 285, 125],
+        "text_pixel_bbox": [70, 45, 285, 125],
+        "line_polygons": [[[70, 45], [285, 45], [285, 125], [70, 125]]],
+        "balloon_bbox": [30, 28, 330, 152],
+        "bubble_mask_bbox": [30, 28, 330, 152],
+        "bubble_mask_source": "image_dark_bubble_mask",
+        "mask_evidence": {
+            "kind": "ocr_pixels",
+            "raw_mask_pixels": 5000,
+            "expanded_mask_pixels": 15000,
+            "evidence_score": 1.0,
+            "fast_fill_allowed": True,
+        },
+        "route_action": "translate_inpaint_render",
+    }
+
+    filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, [dict(text)])
+
+    changed = np.any(filled != image, axis=2)
+    outline = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.ellipse(outline, (180, 90), (150, 62), 0, 0, 360, 255, 3)
+    metrics = text.get("qa_metrics") or {}
+    override = metrics.get("dark_bubble_visual_fill_override") or {}
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    assert override.get("reason") == "overbroad_dark_fill_mask"
+    assert int(np.count_nonzero(changed)) < int(override["current_pixels"])
+    assert int(np.count_nonzero(changed & (outline > 0))) == 0
+
+
+def test_dark_bubble_fast_fill_prefers_local_vision_geometry_for_visual_override():
+    import cv2
+
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.zeros((180, 360, 3), dtype=np.uint8)
+    cv2.ellipse(image, (180, 90), (150, 62), 0, 0, 360, (2, 2, 2), -1)
+    cv2.ellipse(image, (180, 90), (150, 62), 0, 0, 360, (60, 130, 170), 3)
+    cv2.putText(
+        image,
+        "Quest Completion",
+        (90, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        image,
+        "Criteria: Level 1",
+        (92, 112),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    page_text = {
+        "id": "ocr_dark_page_space",
+        "trace_id": "ocr_dark_page_space@band",
+        "text": "Quest Completion Criteria: Level 1",
+        "bbox": [70, 5045, 285, 5125],
+        "text_pixel_bbox": [70, 5045, 285, 5125],
+        "line_polygons": [[[70, 5045], [285, 5045], [285, 5125], [70, 5125]]],
+        "balloon_bbox": [30, 5028, 330, 5152],
+        "bubble_mask_bbox": [30, 5028, 330, 5152],
+        "bubble_mask_source": "image_dark_bubble_mask",
+        "route_action": "translate_inpaint_render",
+    }
+    local_block = dict(page_text)
+    local_block.update(
+        {
+            "bbox": [70, 45, 285, 125],
+            "text_pixel_bbox": [70, 45, 285, 125],
+            "line_polygons": [[[70, 45], [285, 45], [285, 125], [70, 125]]],
+            "balloon_bbox": [30, 28, 330, 152],
+            "bubble_mask_bbox": [30, 28, 330, 152],
+            "mask_evidence": {
+                "kind": "ocr_pixels",
+                "raw_mask_pixels": 5000,
+                "expanded_mask_pixels": 15000,
+                "evidence_score": 1.0,
+                "fast_fill_allowed": True,
+            },
+        }
+    )
+
+    filled, remaining, stats = _apply_fast_dark_panel_text_fill(
+        image,
+        {"texts": [page_text]},
+        [local_block],
+    )
+
+    changed = np.any(filled != image, axis=2)
+    override = (page_text.get("qa_metrics") or {}).get("dark_bubble_visual_fill_override") or {}
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    assert override.get("reason") == "overbroad_dark_fill_mask"
+    assert int(np.count_nonzero(changed)) < 10000
+
+
+def test_dark_connected_bubble_visual_override_uses_compact_contract_bbox():
+    import cv2
+
+    from inpainter import _dark_bubble_visual_fill_override
+
+    image = np.zeros((240, 360, 3), dtype=np.uint8)
+    cv2.ellipse(image, (116, 104), (96, 68), 0, 0, 360, (1, 1, 1), -1)
+    cv2.ellipse(image, (250, 104), (100, 68), 0, 0, 360, (1, 1, 1), -1)
+    cv2.putText(image, "The subspace", (130, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 245, 245), 2, cv2.LINE_AA)
+    cv2.putText(image, "retention is only", (130, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 245, 245), 2, cv2.LINE_AA)
+    cv2.putText(image, "five minutes.", (130, 128), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 245, 245), 2, cv2.LINE_AA)
+    current_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    current_mask[30:190, 40:334] = 255
+    text = {
+        "id": "direct_paddle_reocr_001",
+        "bbox": [129, 64, 312, 156],
+        "text_pixel_bbox": [129, 64, 312, 156],
+        "bubble_mask_bbox": [28, 28, 206, 178],
+        "balloon_bbox": [20, 20, 340, 190],
+        "bubble_mask_source": "image_dark_bubble_mask",
+        "qa_flags": [
+            "visual_text_only_inpaint_contract",
+            "dark_bubble_lobe_mask_bbox_preferred",
+            "dark_connected_bubble_compact_bbox_replaced_aggregate_source",
+            "fast_fill_no_glyph_evidence",
+        ],
+        "qa_metrics": {
+            "inpaint_mask_contract_text_bbox_replaced_aggregate_source": {
+                "bbox": [122, 57, 319, 163],
+                "bbox_pixels": 20882,
+            }
+        },
+    }
+
+    override = _dark_bubble_visual_fill_override(image, text, current_mask)
+
+    assert override is not None
+    assert int(np.count_nonzero(override)) < int(np.count_nonzero(current_mask) * 0.60)
+    assert int(np.count_nonzero(override[57:163, 122:319])) > 18000
+    assert int(np.count_nonzero(override[:, 327:])) == 0
+    metrics = text.get("qa_metrics") or {}
+    assert (metrics.get("dark_bubble_visual_fill_override") or {}).get("source") == "compact_text_bbox_contract"
+
+
+def test_rejected_dark_crop_uses_local_image_context_without_background_hint():
+    from inpainter import _apply_fast_dark_panel_text_fill
+
+    image = np.full((160, 360, 3), 9, dtype=np.uint8)
+    image[46:58, 112:248] = 236
+    image[74:86, 98:260] = 236
+    text = {
+        "id": "ocr_rejected_dark",
+        "bbox": [92, 42, 266, 90],
+        "text_pixel_bbox": [92, 42, 266, 90],
+        "line_polygons": [
+            [[112, 46], [248, 46], [248, 58], [112, 58]],
+            [[98, 74], [260, 74], [260, 86], [98, 86]],
+        ],
+        "balloon_bbox": [52, 18, 320, 134],
+        "bubble_mask_bbox": [52, 18, 320, 134],
+        "bubble_mask_source": "derived_white_crop_rejected",
+        "route_action": "translate_inpaint_render",
+    }
+
+    with patch.dict(os.environ, {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1"}):
+        filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, [dict(text)])
+
+    assert stats["dark_panel_fill_count"] == 1
+    assert remaining == []
+    changed = np.any(filled != image, axis=2)
+    assert int(np.count_nonzero(changed)) > 0
+    assert float(np.mean(filled[changed])) < 48.0
+
+
+def test_rejected_dark_crop_with_no_glyph_flag_gets_enough_padding():
+    from inpainter import _try_dark_panel_text_fill
+
+    image = np.full((160, 360, 3), 7, dtype=np.uint8)
+    image[34:44, 120:234] = 240
+    image[82:92, 108:250] = 240
+    text = {
+        "id": "ocr_rejected_dark_no_glyph",
+        "bbox": [120, 54, 236, 72],
+        "text_pixel_bbox": [120, 54, 236, 72],
+        "balloon_bbox": [54, 18, 318, 132],
+        "bubble_mask_bbox": [54, 18, 318, 132],
+        "bubble_mask_source": "derived_white_crop_rejected",
+        "route_action": "translate_inpaint_render",
+        "qa_flags": ["fast_fill_no_glyph_evidence"],
+    }
+
+    filled = _try_dark_panel_text_fill(image, text)
+
+    assert filled is not None
+    assert float(np.mean(filled[34:44, 120:234])) < 48.0
+    assert float(np.mean(filled[82:92, 108:250])) < 48.0
+
+
 def test_detect_residual_text_flags_dark_remnants_inside_region():
     from qa.inpaint_residual import detect_residual_text
 

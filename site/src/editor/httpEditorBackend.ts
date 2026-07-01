@@ -1,5 +1,5 @@
 import type { EditorBackendApi, PageActionName, PageActionResult } from "../../../src/lib/editorBackend";
-import type { TextEntry } from "../../../src/lib/stores/appStore";
+import type { ProcessRegionOverlay, TextEntry } from "../../../src/lib/stores/appStore";
 import { projectApi } from "../projectApi";
 import { editorApi } from "./editorApi";
 import {
@@ -137,10 +137,45 @@ export const httpEditorBackend: EditorBackendApi = {
     return assetPathToUrl(id, response.asset_path) ?? response.url;
   },
 
+  async writeHealingMask(config) {
+    const id = projectId(config);
+    const response = await editorApi.updateBitmapLayer(id, config.page_index, "recovery", {
+      png_data: config.png_data,
+      dirty_bbox: config.bbox,
+      op: "replace",
+    });
+    return assetPathToUrl(id, response.asset_path) ?? response.url;
+  },
+
+  async healInpaintRegion(config) {
+    const id = projectId(config);
+    const response = await editorApi.runPageAction(id, config.page_index, {
+      action: "inpaint",
+      region: {
+        bbox: config.bbox,
+        mask_path: config.mask_path,
+      },
+    });
+    const inpaintPath =
+      response.page?.image_layers?.inpaint?.path ??
+      response.page?.arquivo_traduzido ??
+      response.page?.rendered_path ??
+      "";
+    return {
+      page_index: config.page_index,
+      inpaint_path: assetPathToUrl(id, inpaintPath) ?? inpaintPath,
+      before_inpaint_path: null,
+      bbox: config.bbox,
+    };
+  },
+
   async renderPreviewPage(args) {
     const id = projectId(args);
     const response = await projectApi.renderPreview(id, args.page_index);
-    return assetPathToUrl(id, response.asset_path) ?? response.preview_url;
+    return {
+      output_path: assetPathToUrl(id, response.asset_path) ?? response.preview_url,
+      renderer_backend: "web",
+    };
   },
 
   async runPageActionWithOptionalMask(config) {
@@ -158,6 +193,39 @@ export const httpEditorBackend: EditorBackendApi = {
       bbox: config.bbox ?? null,
       changed_assets: changedAssets(response.changed_assets),
       changed_layers: [],
+      message: "ok",
+    };
+  },
+
+  async runProcessRegion(config) {
+    const id = projectId(config);
+    const response = await editorApi.runPageAction(id, config.page_index, {
+      action: "inpaint",
+      region: {
+        bbox: config.bbox,
+        mask_path: config.mask_path ?? undefined,
+      },
+    });
+    const textLayers = Array.isArray(response.page?.text_layers) ? response.page.text_layers : [];
+    const overlay: ProcessRegionOverlay = {
+      id: `web-process-${Date.now()}`,
+      page_index: config.page_index,
+      bbox: config.bbox,
+      crop_path:
+        response.page?.image_layers?.inpaint?.path ??
+        response.page?.arquivo_traduzido ??
+        config.mask_path ??
+        "",
+      text_layer_ids: textLayers.map((layer: { id?: unknown }) => layer.id).filter((value: unknown): value is string => typeof value === "string"),
+      visible: true,
+      locked: false,
+      order: Array.isArray(response.page?.process_overlays) ? response.page.process_overlays.length : 0,
+    };
+    return {
+      page_index: config.page_index,
+      overlay,
+      changed_assets: changedAssets(response.changed_assets),
+      changed_layers: overlay.text_layer_ids,
       message: "ok",
     };
   },

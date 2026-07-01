@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_crop_rerender_yfix",
+  "stage": "typeset",
+  "summary": {
+    "source": "project_json_final",
+    "project_page_count": 6,
+    "project_rendered_count": 80,
+    "written_count": 80
+  },
+  "missing_identity": [],
+  "missing_mask_contract": [
+    {
+      "page_id": "page_001",
+      "band_id": "page_002_band_005",
+      "text_id": "direct_paddle_reocr_001",
+      "layer_index": 5
+    },
+    {
+      "page_id": "page_001",
+      "band_id": "page_002_band_005",
+      "text_id": "ocr_002",
+      "layer_index": 6
+    },
+    {
+      "page_id": "page_001",
+      "band_id": "page_002_band_006",
+      "text_id": "direct_paddle_reocr_001",
+      "layer_index": 7
+    },
+    {
+      "page_id": "page_001",
+      "band_id": "page_002_band_010",
+      "text_id": "ocr_001",
+      "layer_index": 12
+    },
+    {
+      "page_id": "page_005",
+      "band_id": "page_004_band_068",
+      "text_id": "ocr_001",
+      "layer_index": 0
+    },
+    {
+      "page_id": "page_006",
+      "band_id": "page_005_band_092",
+      "text_id": "direct_paddle_reocr_001",
+      "layer_index": 6
+    }
+  ]
+}

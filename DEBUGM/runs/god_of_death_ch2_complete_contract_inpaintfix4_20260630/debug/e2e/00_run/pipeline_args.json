@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_complete_contract_inpaintfix4",
+  "stage": "run",
+  "config_path": ".codex-tmp\\runner_config_ch2_complete_contract_inpaintfix4_20260630.json",
+  "argv": [
+    "N:\\TraduzAI\\pipeline\\main.py",
+    ".codex-tmp\\runner_config_ch2_complete_contract_inpaintfix4_20260630.json"
+  ]
+}

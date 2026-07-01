@@ -10,6 +10,18 @@ export type ProjectRegionTypeV12 =
   | "unknown";
 export type ProjectRenderStatusV12 = "pending" | "approved" | "warning" | "blocked" | "ignored";
 
+export interface ProjectSfxMetadataV12 {
+  source_text?: string;
+  adapted_text?: string;
+  confidence?: number | null;
+  translation_mode?: string;
+  style_confidence?: number | null;
+  inpaint_allowed?: boolean;
+  review_required?: boolean;
+  qa_flags?: string[];
+  [key: string]: unknown;
+}
+
 export interface ProjectRegionV12 {
   region_id: string;
   page: number;
@@ -52,6 +64,7 @@ export interface ProjectRegionV12 {
   };
   render_status: ProjectRenderStatusV12;
   qa_flags: string[];
+  sfx?: ProjectSfxMetadataV12;
 }
 
 export interface ProjectPageV12 {

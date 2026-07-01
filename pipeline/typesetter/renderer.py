@@ -64,6 +64,11 @@ except ImportError:
     from ..ocr.text_router import ROUTE_ACTIONS, apply_route_action, route_action_requires_render
 
 try:
+    from ocr.postprocess import split_sfx_inline
+except ImportError:
+    from ..ocr.postprocess import split_sfx_inline
+
+try:
     from runtime_profiles import ROTATED_TEXT_POLICY
 except ImportError:  # pragma: no cover - supports package imports
     from ..runtime_profiles import ROTATED_TEXT_POLICY
@@ -96,7 +101,19 @@ def _layout_profile_value(text_data: dict) -> str:
     return str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
 
 
+def _is_dark_bubble_visual_text(text_data: dict) -> bool:
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if source == "image_dark_bubble_mask":
+        return True
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if profile == "dark_bubble":
+        return True
+    return "dark_bubble_oval_reocr" in _qa_flags_set(text_data)
+
+
 def _is_white_layout_profile(text_data: dict) -> bool:
+    if _is_dark_bubble_visual_text(text_data):
+        return False
     layout_profile = str(text_data.get("layout_profile") or "").strip().lower()
     block_profile = str(text_data.get("block_profile") or "").strip().lower()
     return layout_profile in {"white_balloon", "speech_balloon"} or block_profile in {"white_balloon", "speech_balloon"}
@@ -126,6 +143,9 @@ def _canonical_render_style(estilo: dict | None) -> dict:
     style.setdefault("glow", False)
     style.setdefault("glow_cor", "")
     style.setdefault("glow_px", 0)
+    style.setdefault("curva", False)
+    style.setdefault("curva_direcao", "")
+    style.setdefault("curva_intensidade", 0.0)
     style.setdefault("rotacao", 0)
     return style
 
@@ -226,12 +246,29 @@ def _resolve_render_rotation_deg(text_data: dict, estilo: dict | None) -> tuple[
 
     data_rotation = _normalize_rotation_deg(text_data.get("rotation_deg", 0))
     if data_rotation != 0.0:
-        return data_rotation, str(text_data.get("rotation_source") or "ocr")
+        data_source = str(text_data.get("rotation_source") or "ocr")
+        if _should_suppress_mild_white_balloon_rotation(text_data, data_rotation, data_source):
+            return 0.0, ""
+        return data_rotation, data_source
 
     inferred_rotation = _infer_source_rotation_deg_from_line_polygons(text_data)
     if inferred_rotation != 0.0:
+        if _should_suppress_mild_white_balloon_rotation(text_data, inferred_rotation, "line_polygons"):
+            return 0.0, ""
         return inferred_rotation, "line_polygons"
     return 0.0, ""
+
+
+def _should_suppress_mild_white_balloon_rotation(text_data: dict, rotation_deg: float, rotation_source: str) -> bool:
+    source = str(rotation_source or "").strip().lower()
+    if (
+        _is_dark_bubble_visual_text(text_data)
+        and source in {"ocr", "line_polygons"}
+        and abs(abs(_normalize_rotation_deg(rotation_deg)) - 90.0) <= 8.0
+    ):
+        return True
+    del rotation_deg, rotation_source
+    return False
 
 
 def _rotated_text_kind(text_data: dict) -> str:
@@ -262,6 +299,221 @@ def _should_apply_auto_style_policy(text_data: dict) -> bool:
     return text_data.get("style_origin") in {None, "auto", "legacy_auto"}
 
 
+def _style_text_luminance(style: dict | None) -> float | None:
+    if not isinstance(style, dict):
+        return None
+    value = str(style.get("cor") or style.get("color") or "").strip()
+    if not value.startswith("#") or len(value) < 7:
+        return None
+    try:
+        r = int(value[1:3], 16)
+        g = int(value[3:5], 16)
+        b = int(value[5:7], 16)
+    except ValueError:
+        return None
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _dark_bubble_source_style_needs_auto_glow(text_data: dict, background_rgb: tuple[int, int, int] | None) -> bool:
+    if not _is_dark_bubble_visual_text(text_data):
+        return False
+    if _dark_panel_luminance(background_rgb) > 90.0:
+        return False
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    if style_origin not in {"source_detected", "grouped_dark_panel_visual_style"}:
+        return False
+    style = text_data.get("estilo") if isinstance(text_data.get("estilo"), dict) else text_data.get("style")
+    text_luma = _style_text_luminance(style)
+    if text_luma is None:
+        return False
+    return text_luma < 165.0
+
+
+def _dark_panel_luminance(rgb: tuple[int, int, int] | None) -> float:
+    if rgb is None:
+        return 255.0
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+def _rgb_chroma(rgb: tuple[int, int, int] | None) -> float:
+    if rgb is None:
+        return 0.0
+    return float(max(rgb) - min(rgb))
+
+
+def _qa_flags_set(text_data: dict) -> set[str]:
+    flags = text_data.get("qa_flags") or []
+    if not isinstance(flags, (list, tuple, set)):
+        return set()
+    return {str(flag).strip().lower() for flag in flags if str(flag).strip()}
+
+
+def _has_dark_visual_style_evidence(text_data: dict, background_rgb: tuple[int, int, int] | None = None) -> bool:
+    if not isinstance(text_data, dict):
+        return False
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+        return True
+    if style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}:
+        return True
+    if profile in {"dark_panel", "dark_bubble"} and _dark_panel_luminance(background_rgb) <= 110.0:
+        return True
+    if flags & {
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "dark_panel_full_bbox_selected",
+        "dark_panel_rect_from_dark_bubble_bbox",
+        "dark_bubble_negative_evidence",
+        "trusted_dark_visual_capacity_target",
+    }:
+        return _dark_panel_luminance(background_rgb) <= 140.0
+    return False
+
+
+def _should_apply_dark_panel_glow_fallback(text_data: dict, background_rgb: tuple[int, int, int] | None) -> bool:
+    if _has_grouped_dark_visual_style(text_data):
+        return False
+    if _is_translator_note_layer(text_data):
+        return False
+    if _is_white_layout_profile(text_data):
+        return False
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if profile in {"ui_form", "white_balloon", "speech_balloon"} and not _is_dark_bubble_visual_text(text_data):
+        return False
+    flags = _qa_flags_set(text_data)
+    mask_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    reason = str(text_data.get("layout_safe_reason") or text_data.get("bubble_mask_rejection_reason") or "").strip().lower()
+    rejected_mask = (
+        mask_source in {"derived_white_crop_rejected", "rejected_derived_bubble_mask", "image_dark_panel_mask", "image_dark_bubble_mask"}
+        or "debug_derived_bubble_mask_rejected" in flags
+        or "rejected_derived_bubble_mask" in flags
+        or "missing_real_bubble_mask" in flags
+        or reason in {"debug_derived_bubble_mask_rejected", "derived_mask_not_anchored_to_text"}
+        or _is_dark_bubble_visual_text(text_data)
+    )
+    if not rejected_mask:
+        return False
+    return _dark_panel_luminance(background_rgb) <= 90.0
+
+
+def _apply_dark_panel_glow_fallback(text_data: dict, background_rgb: tuple[int, int, int] | None) -> None:
+    if not _should_apply_dark_panel_glow_fallback(text_data, background_rgb):
+        return
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    style["cor"] = "#FFFFFF"
+    style["contorno"] = "#061D26"
+    style["contorno_px"] = max(1, int(style.get("contorno_px", 0) or 0))
+    style["glow"] = True
+    style["glow_cor"] = "#67D8FF"
+    style["glow_px"] = max(3, int(style.get("glow_px", 0) or 0))
+    style["style_origin"] = "auto_dark_panel_glow"
+    text_data["estilo"] = style
+    text_data["style"] = style
+    text_data["style_origin"] = "auto_dark_panel_glow"
+    flags = list(text_data.get("qa_flags") or [])
+    if "auto_dark_panel_glow_fallback" not in flags:
+        flags.append("auto_dark_panel_glow_fallback")
+    text_data["qa_flags"] = flags
+
+
+def _should_apply_visual_card_glow_fallback(text_data: dict, background_rgb: tuple[int, int, int] | None) -> bool:
+    if _is_translator_note_layer(text_data):
+        return False
+    if _is_white_layout_profile(text_data):
+        return False
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if profile in {"ui_form", "white_balloon", "speech_balloon"}:
+        return False
+    if str(text_data.get("style_origin") or "").strip().lower() == "source_detected":
+        return False
+    mask_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if mask_source not in {
+        "image_white_bubble_mask",
+        "derived_card_panel_mask",
+        "derived_white_crop_rejected",
+        "rejected_derived_bubble_mask",
+    }:
+        return False
+    luma = _dark_panel_luminance(background_rgb)
+    chroma = _rgb_chroma(background_rgb)
+    return 95.0 <= luma <= 235.0 and chroma >= 28.0
+
+
+VISUAL_CARD_FONT = "LeagueGothic-Regular-VariableFont_wdth.ttf"
+
+
+def _has_grouped_dark_visual_style(text_data: dict) -> bool:
+    style = text_data.get("estilo") if isinstance(text_data.get("estilo"), dict) else text_data.get("style")
+    style = style if isinstance(style, dict) else {}
+    source = str(style.get("style_source") or text_data.get("style_source") or "").strip().lower()
+    origin = str(style.get("style_origin") or text_data.get("style_origin") or "").strip().lower()
+    return source == "dark_panel_visual_style_group" or origin == "grouped_dark_panel_visual_style"
+
+
+def _should_apply_visual_card_font_fallback(text_data: dict, background_rgb: tuple[int, int, int] | None) -> bool:
+    if _has_grouped_dark_visual_style(text_data):
+        return False
+    style = text_data.get("estilo") or text_data.get("style") or {}
+    font_name = str(style.get("fonte") or "").strip()
+    if _has_dark_visual_style_evidence(text_data, background_rgb):
+        return font_name in {
+            "ComicNeue-Bold.ttf",
+            "ComicNeue-Regular.ttf",
+            "KOMIKAX_.ttf",
+            "Komika.ttf",
+        }
+    candidate = dict(text_data)
+    candidate["style_origin"] = "auto"
+    if not _should_apply_visual_card_glow_fallback(candidate, background_rgb):
+        return False
+    if str(text_data.get("style_origin") or "").strip().lower() != "source_detected":
+        return False
+    return font_name in {"ComicNeue-Bold.ttf", "ComicNeue-Regular.ttf"}
+
+
+def _apply_visual_card_font_fallback(text_data: dict, background_rgb: tuple[int, int, int] | None) -> None:
+    if not _should_apply_visual_card_font_fallback(text_data, background_rgb):
+        return
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    style["fonte"] = VISUAL_CARD_FONT
+    style["force_upper"] = True
+    text_data["estilo"] = style
+    text_data["style"] = style
+    flags = list(text_data.get("qa_flags") or [])
+    if "visual_card_font_fallback" not in flags:
+        flags.append("visual_card_font_fallback")
+    text_data["qa_flags"] = flags
+
+
+def _apply_visual_card_glow_fallback(text_data: dict, background_rgb: tuple[int, int, int] | None) -> None:
+    if _has_grouped_dark_visual_style(text_data):
+        return
+    if not _should_apply_visual_card_glow_fallback(text_data, background_rgb):
+        return
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    style["fonte"] = VISUAL_CARD_FONT
+    style["cor"] = "#EBFFFF"
+    style["contorno"] = ""
+    style["contorno_px"] = 0
+    style["glow"] = True
+    style["glow_cor"] = "#EBFFFF"
+    style["glow_px"] = max(2, int(style.get("glow_px", 0) or 0))
+    style["style_origin"] = "inferred_visual_card"
+    style["style_confidence"] = max(0.75, float(style.get("style_confidence", 0.0) or 0.0))
+    style["style_source"] = "visual_card_fallback"
+    text_data["estilo"] = style
+    text_data["style"] = style
+    text_data["style_origin"] = "inferred_visual_card"
+    text_data["style_confidence"] = style["style_confidence"]
+    text_data["style_source"] = "visual_card_fallback"
+    flags = list(text_data.get("qa_flags") or [])
+    if "visual_card_style_fallback" not in flags:
+        flags.append("visual_card_style_fallback")
+    text_data["qa_flags"] = flags
+
+
 def _auto_style_sample_bbox(text_data: dict) -> list[int]:
     for key in ("safe_text_box", "balloon_bbox", "layout_bbox", "bbox"):
         value = text_data.get(key)
@@ -270,19 +522,209 @@ def _auto_style_sample_bbox(text_data: dict) -> list[int]:
     return [0, 0, 32, 32]
 
 
-def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
-    if not _should_apply_auto_style_policy(text_data):
+def _coerce_rgb_tuple(value: object) -> tuple[int, int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        rgb = tuple(int(max(0, min(255, round(float(v))))) for v in value[:3])
+    except Exception:
+        return None
+    return rgb  # type: ignore[return-value]
+
+
+def _rgb_tuple_to_hex(rgb: tuple[int, int, int] | None) -> str | None:
+    if rgb is None:
+        return None
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+def _dark_panel_effect_colors(text_data: dict) -> dict:
+    direct = text_data.get("dark_panel_effect_colors")
+    if isinstance(direct, dict):
+        return dict(direct)
+    metrics = text_data.get("qa_metrics")
+    if not isinstance(metrics, dict):
+        return {}
+    for key in ("image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"):
+        value = metrics.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _apply_original_dark_panel_effect_colors(text_data: dict) -> None:
+    if _has_grouped_dark_visual_style(text_data):
         return
+    if _is_translator_note_layer(text_data):
+        return
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+        return
+    colors = _dark_panel_effect_colors(text_data)
+    if str(colors.get("color_sample_space") or "").strip().lower() not in {"original_image", ""}:
+        return
+    text_rgb = _coerce_rgb_tuple(colors.get("text_fill_rgb"))
+    glow_rgb = _coerce_rgb_tuple(colors.get("text_glow_rgb") or colors.get("panel_glow_rgb"))
+    border_rgb = _coerce_rgb_tuple(colors.get("border_rgb"))
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    text_hex = _rgb_tuple_to_hex(text_rgb)
+    glow_hex = _rgb_tuple_to_hex(glow_rgb)
+    border_hex = _rgb_tuple_to_hex(border_rgb)
+    if text_hex:
+        style["cor"] = text_hex
+    if border_hex:
+        style["contorno"] = border_hex
+        style["contorno_px"] = max(1, int(style.get("contorno_px", 0) or 0))
+    if glow_hex:
+        style["glow"] = True
+        style["glow_cor"] = glow_hex
+        style["glow_px"] = max(3, int(style.get("glow_px", 0) or 0))
+    if text_hex or glow_hex or border_hex:
+        style["style_origin"] = "auto_dark_panel_glow"
+        style["style_source"] = "original_dark_panel_effect_colors"
+        text_data["estilo"] = style
+        text_data["style"] = style
+        text_data["style_origin"] = "auto_dark_panel_glow"
+        text_data["style_source"] = "original_dark_panel_effect_colors"
+        flags = list(text_data.get("qa_flags") or [])
+        if "original_dark_panel_effect_colors" not in flags:
+            flags.append("original_dark_panel_effect_colors")
+        text_data["qa_flags"] = flags
+
+
+def _uied_background_rgb(text_data: dict) -> tuple[int, int, int] | None:
+    evidence = text_data.get("ui_layout_evidence")
+    if not isinstance(evidence, dict):
+        return _coerce_rgb_tuple(text_data.get("background_rgb"))
+    if str(evidence.get("source") or "").strip().lower() not in {"uied_cv", "uied"}:
+        return _coerce_rgb_tuple(text_data.get("background_rgb"))
+    return _coerce_rgb_tuple(evidence.get("background_rgb")) or _coerce_rgb_tuple(text_data.get("background_rgb"))
+
+
+def _apply_translator_note_neutral_style(text_data: dict, background_rgb: tuple[int, int, int] | None) -> None:
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    note_color = "#FFFFFF" if _dark_panel_luminance(background_rgb) <= 135.0 else "#000000"
+    style.update(
+        {
+            "fonte": style.get("fonte") or CANONICAL_FONT_FILE,
+            "cor": note_color,
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": False,
+            "glow_cor": "",
+            "glow_px": 0,
+            "force_upper": False,
+            "style_origin": "translator_note_neutral",
+        }
+    )
+    text_data["estilo"] = style
+    text_data["style"] = style
+    text_data["style_origin"] = "translator_note_neutral"
+    text_data.pop("style_source", None)
+    text_data.pop("style_confidence", None)
+    flags = [
+        str(flag)
+        for flag in text_data.get("qa_flags") or []
+        if str(flag).strip()
+        and str(flag).strip()
+        not in {"auto_dark_panel_glow_fallback", "original_dark_panel_effect_colors", "dark_panel_style_grouped"}
+    ]
+    text_data["qa_flags"] = flags
+
+
+def _looks_like_false_dark_on_white_context(text_data: dict, background_rgb: tuple[int, int, int] | None) -> bool:
+    flags = _qa_flags_set(text_data)
+    if flags & {
+        "false_light_bubble_dark_fill_blocked",
+        "false_light_dark_bubble_promoted_to_white",
+        "false_dark_white_style_neutralized",
+    }:
+        return True
+    if background_rgb is None or _dark_panel_luminance(background_rgb) < 205.0:
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+        return False
+    flags = _qa_flags_set(text_data)
+    if not flags & {
+        "dark_bubble_oval_reocr",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "trusted_dark_visual_capacity_target",
+        "dark_panel_style_grouped",
+    }:
+        return False
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    if style_origin in {"translator_note_neutral", "source_detected"}:
+        return False
+    return True
+
+
+def _apply_false_dark_white_neutral_style(text_data: dict) -> None:
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    style.update(
+        {
+            "fonte": style.get("fonte") or CANONICAL_FONT_FILE,
+            "cor": "#000000",
+            "contorno": "",
+            "contorno_px": 0,
+            "glow": False,
+            "glow_cor": "",
+            "glow_px": 0,
+            "force_upper": False,
+            "style_origin": "false_dark_white_neutral",
+        }
+    )
+    text_data["estilo"] = style
+    text_data["style"] = style
+    text_data["style_origin"] = "false_dark_white_neutral"
+    flags = [
+        str(flag)
+        for flag in text_data.get("qa_flags") or []
+        if str(flag).strip()
+        and str(flag).strip()
+        not in {"auto_dark_panel_glow_fallback", "original_dark_panel_effect_colors", "dark_panel_style_grouped"}
+    ]
+    if "false_dark_white_style_neutralized" not in flags:
+        flags.append("false_dark_white_style_neutralized")
+    text_data["qa_flags"] = flags
+
+
+def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
     image_rgb = np.array(img.convert("RGB"))
-    background_rgb = sample_text_background_rgb(image_rgb, _auto_style_sample_bbox(text_data))
     profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
-    force_black_text = profile == "white_balloon"
+    background_rgb = (
+        _uied_background_rgb(text_data)
+        if profile == "ui_form"
+        else None
+    ) or sample_text_background_rgb(image_rgb, _auto_style_sample_bbox(text_data))
+    if _is_translator_note_layer(text_data):
+        _apply_translator_note_neutral_style(text_data, background_rgb)
+        return
+    if _looks_like_false_dark_on_white_context(text_data, background_rgb):
+        _apply_false_dark_white_neutral_style(text_data)
+        return
+    if _dark_bubble_source_style_needs_auto_glow(text_data, background_rgb):
+        style = dict(text_data.get("estilo") or text_data.get("style") or {})
+        style["style_origin"] = "auto"
+        text_data["estilo"] = style
+        text_data["style"] = style
+        text_data["style_origin"] = "auto"
+    if not _should_apply_auto_style_policy(text_data):
+        _apply_visual_card_font_fallback(text_data, background_rgb)
+        _apply_original_dark_panel_effect_colors(text_data)
+        return
+    force_black_text = profile == "white_balloon" and not _is_dark_bubble_visual_text(text_data)
     text_data["estilo"] = normalize_auto_typesetting_style(
         text_data.get("estilo", {}),
         background_rgb,
         force_black_text=force_black_text,
     )
     text_data["style"] = text_data["estilo"]
+    _apply_dark_panel_glow_fallback(text_data, background_rgb)
+    _apply_visual_card_glow_fallback(text_data, background_rgb)
+    _apply_visual_card_font_fallback(text_data, background_rgb)
+    _apply_original_dark_panel_effect_colors(text_data)
 
 SAFE_PATH_FORCE_KEYWORDS = (
     "newrotic",
@@ -295,6 +737,7 @@ _PUNCT_REPLACEMENTS = {"â€¦": "...", "â‹¯": "...", "â€¥": "..", "\u2
 _MIN_FONT_SIZE = 12
 _font_cache: dict[tuple[str, int], object] = {}
 _font_path_cache: dict[str, str] = {}
+_project_font_assets: dict = {}
 _ft2_cache: dict[str, _FT2Font] = {}
 
 def _get_ft2_font(font_path: str) -> _FT2Font:
@@ -559,6 +1002,127 @@ def _render_safe_text_layer(
         _blend_mask_into_image(image_np, mask, lx - max(0, outline_px), ly - max(0, outline_px), fill_color)
 
 
+def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
+    if not bool(plan.get("curva")):
+        return False
+    if len(lines) != 1:
+        return False
+    try:
+        intensity = abs(float(plan.get("curva_intensidade") or 0.0))
+    except (TypeError, ValueError):
+        intensity = 0.0
+    if intensity < 0.10:
+        return False
+    if abs(_normalize_rotation_deg(plan.get("rotation_deg", 0))) > 0.01:
+        return False
+    return True
+
+
+def _render_safe_arc_text_layer(
+    image_np: np.ndarray,
+    line: str,
+    font: SafeTextPathFont,
+    origin: tuple[int, int],
+    plan: dict,
+    *,
+    fill_color: str,
+    outline_color: str = "",
+    outline_px: int = 0,
+) -> list[int] | None:
+    glyphs = [char for char in str(line or "") if char]
+    if not glyphs:
+        return None
+
+    masks: list[np.ndarray] = []
+    widths: list[int] = []
+    max_h = 1
+    for glyph in glyphs:
+        mask = _build_textpath_mask(font, glyph, padding=max(0, outline_px))
+        masks.append(mask)
+        widths.append(max(1, int(mask.shape[1])))
+        max_h = max(max_h, int(mask.shape[0]))
+
+    total_w = max(1, int(sum(widths)))
+    try:
+        intensity = max(0.0, min(1.0, abs(float(plan.get("curva_intensidade") or 0.0))))
+    except (TypeError, ValueError):
+        intensity = 0.0
+    curve_px = max(4.0, intensity * max_h * 2.2)
+    direction = str(plan.get("curva_direcao") or "arc_up")
+    sign = -1.0 if direction == "arc_up" else 1.0
+
+    x0, y0 = [int(v) for v in origin]
+    cursor = 0
+    block_bbox: list[int] | None = None
+    for glyph, mask, width in zip(glyphs, masks, widths):
+        if glyph.isspace():
+            cursor += width
+            continue
+
+        center = cursor + width / 2.0
+        t = ((center / max(1.0, float(total_w))) * 2.0) - 1.0
+        y_offset = int(round(sign * curve_px * (1.0 - t * t)))
+        slope = sign * curve_px * (-2.0 * t) * (2.0 / max(1.0, float(total_w)))
+        angle = float(np.degrees(np.arctan(slope)))
+
+        render_mask = mask
+        if abs(angle) >= 0.5 and mask.shape[0] > 1 and mask.shape[1] > 1:
+            center_pt = (mask.shape[1] / 2.0, mask.shape[0] / 2.0)
+            matrix = cv2.getRotationMatrix2D(center_pt, angle, 1.0)
+            cos_a = abs(matrix[0, 0])
+            sin_a = abs(matrix[0, 1])
+            new_w = int((mask.shape[0] * sin_a) + (mask.shape[1] * cos_a))
+            new_h = int((mask.shape[0] * cos_a) + (mask.shape[1] * sin_a))
+            matrix[0, 2] += (new_w / 2.0) - center_pt[0]
+            matrix[1, 2] += (new_h / 2.0) - center_pt[1]
+            render_mask = cv2.warpAffine(
+                mask,
+                matrix,
+                (max(1, new_w), max(1, new_h)),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+
+        gx = x0 + cursor
+        gy = y0 + y_offset
+        if outline_color and outline_px > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (outline_px * 2 + 1, outline_px * 2 + 1),
+            )
+            outline_mask = cv2.dilate(render_mask, kernel, iterations=1)
+            _blend_mask_into_image(image_np, outline_mask, gx - outline_px, gy - outline_px, outline_color)
+        _blend_mask_into_image(
+            image_np,
+            render_mask,
+            gx - max(0, outline_px),
+            gy - max(0, outline_px),
+            fill_color,
+        )
+
+        ys, xs = np.where(render_mask > 0)
+        if xs.size and ys.size:
+            bbox = [
+                int(gx + xs.min() - max(0, outline_px)),
+                int(gy + ys.min() - max(0, outline_px)),
+                int(gx + xs.max() + 1 + max(0, outline_px)),
+                int(gy + ys.max() + 1 + max(0, outline_px)),
+            ]
+            if block_bbox is None:
+                block_bbox = bbox
+            else:
+                block_bbox = [
+                    min(block_bbox[0], bbox[0]),
+                    min(block_bbox[1], bbox[1]),
+                    max(block_bbox[2], bbox[2]),
+                    max(block_bbox[3], bbox[3]),
+                ]
+        cursor += width
+
+    return block_bbox
+
+
 def _blend_rgb_patch_with_mask(
     image_np: np.ndarray,
     rgb_patch: np.ndarray,
@@ -721,6 +1285,201 @@ def _clamp_safe_text_positions_to_bbox(
     return [(lx + dx, ly + dy) for lx, ly in corrected]
 
 
+def _align_uied_positions_to_source_center(
+    font: SafeTextPathFont,
+    lines: list[str],
+    positions: list[tuple[int, int]],
+    text_data: dict,
+    bounds: list[int] | None,
+) -> list[tuple[int, int]]:
+    if not _should_preserve_source_text_center(text_data):
+        return positions
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if not anchor_bbox:
+        return positions
+    measured_bbox = _measure_safe_text_block_bbox(font, lines, positions)
+    if not measured_bbox:
+        return positions
+
+    glyph_left, glyph_top, glyph_right, glyph_bottom = measured_bbox
+    anchor_center_x, anchor_center_y = _bbox_center(anchor_bbox)
+    glyph_center_x = (float(glyph_left) + float(glyph_right)) / 2.0
+    glyph_center_y = (float(glyph_top) + float(glyph_bottom)) / 2.0
+    dx = int(round(anchor_center_x - glyph_center_x))
+    dy = int(round(anchor_center_y - glyph_center_y))
+    if abs(dx) <= 1 and abs(dy) <= 1:
+        return positions
+
+    clamp_bounds = bounds
+    if _should_enforce_original_text_scale_contract(text_data):
+        clamp_bounds = None
+    clamped_dx, clamped_dy, clamped = _clamp_bbox_shift_to_bounds(
+        measured_bbox,
+        clamp_bounds,
+        dx,
+        dy,
+    )
+    if clamped:
+        dx, dy = clamped_dx, clamped_dy
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["source_center_alignment_clamped_to_safe"] = True
+
+    if dx == 0 and dy == 0:
+        return positions
+    return [(lx + dx, ly + dy) for lx, ly in positions]
+
+
+def _bbox_center(bbox: list[int]) -> tuple[float, float]:
+    return ((float(bbox[0]) + float(bbox[2])) / 2.0, (float(bbox[1]) + float(bbox[3])) / 2.0)
+
+
+def _should_preserve_source_text_center(text_data: dict) -> bool:
+    content_class = str(text_data.get("content_class") or "").strip().lower()
+    if content_class == "sfx":
+        return False
+    render_policy = str(text_data.get("render_policy") or "").strip().lower()
+    route_action = str(text_data.get("route_action") or "").strip().lower()
+    if render_policy in {"merged_into_primary", "preserve_original"} or route_action in {"skip", "preserve_original"}:
+        return False
+    if _should_enforce_original_text_scale_contract(text_data):
+        return True
+    if _resolve_english_anchor_bbox(text_data) is not None:
+        return True
+    if text_data.get("_uied_preserve_anchor_position"):
+        return True
+    flags = {str(flag) for flag in (text_data.get("qa_flags") or [])}
+    return bool(
+        text_data.get("_anchor_center_only_layout")
+        or text_data.get("_single_lobe_follow_anchor")
+        or "short_dark_anchor_center_preserved" in flags
+    )
+
+
+def _align_rgba_layer_to_source_text_center(
+    layer: Image.Image,
+    text_data: dict,
+    bounds: list[int] | None,
+) -> tuple[Image.Image, list[int] | None]:
+    if not _should_preserve_source_text_center(text_data):
+        render_bbox = _alpha_bbox_to_list(layer.getchannel("A").getbbox(), layer.width, layer.height)
+        return layer, render_bbox
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if not anchor_bbox:
+        render_bbox = _alpha_bbox_to_list(layer.getchannel("A").getbbox(), layer.width, layer.height)
+        return layer, render_bbox
+    render_bbox = _alpha_bbox_to_list(layer.getchannel("A").getbbox(), layer.width, layer.height)
+    if not render_bbox:
+        return layer, None
+
+    anchor_center_x, anchor_center_y = _bbox_center(anchor_bbox)
+    render_center_x, render_center_y = _bbox_center(render_bbox)
+    dx = int(round(anchor_center_x - render_center_x))
+    dy = int(round(anchor_center_y - render_center_y))
+    if abs(dx) <= 1 and abs(dy) <= 1:
+        return layer, render_bbox
+
+    clamp_bounds = bounds
+    flags = {str(flag).strip().lower() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    connected_lobe_context = bool(
+        text_data.get("_is_lobe_subregion")
+        or text_data.get("_connected_source_bbox")
+        or "dark_bubble_connected_lobe_passthrough" in flags
+    )
+    if _should_enforce_original_text_scale_contract(text_data):
+        clamp_bounds = [0, 0, int(layer.width), int(layer.height)]
+    clamped_dx, clamped_dy, clamped = _clamp_bbox_shift_to_bounds(
+        render_bbox,
+        clamp_bounds,
+        dx,
+        dy,
+    )
+    if clamped:
+        dx, dy = clamped_dx, clamped_dy
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["source_center_alignment_clamped_to_safe"] = True
+
+    if dx == 0 and dy == 0:
+        return layer, render_bbox
+
+    shifted = _shift_rgba_layer(layer, dx, dy)
+    shifted_bbox = _alpha_bbox_to_list(shifted.getchannel("A").getbbox(), shifted.width, shifted.height)
+    if connected_lobe_context and clamp_bounds and shifted_bbox:
+        before_overlap = _bbox_intersection_area(render_bbox, clamp_bounds) / float(max(1, _bbox_area_px(render_bbox)))
+        after_overlap = _bbox_intersection_area(shifted_bbox, clamp_bounds) / float(max(1, _bbox_area_px(shifted_bbox)))
+        if after_overlap + 0.05 < before_overlap:
+            metrics = text_data.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["source_center_alignment_rejected"] = {
+                    "render_bbox": list(render_bbox),
+                    "shifted_bbox": list(shifted_bbox),
+                    "bounds": list(clamp_bounds),
+                }
+            _merge_qa_flags(text_data, ["source_center_alignment_rejected"])
+            return layer, render_bbox
+    return shifted, shifted_bbox
+
+
+def _clamp_bbox_shift_to_bounds(
+    bbox: list[int] | tuple[int, int, int, int] | None,
+    bounds: list[int] | tuple[int, int, int, int] | None,
+    dx: int,
+    dy: int,
+) -> tuple[int, int, bool]:
+    bbox_norm = _layout_bbox(bbox)
+    bounds_norm = _layout_bbox(bounds)
+    if bbox_norm is None or bounds_norm is None:
+        return int(dx), int(dy), False
+
+    bx1, by1, bx2, by2 = [int(v) for v in bbox_norm]
+    ox1, oy1, ox2, oy2 = [int(v) for v in bounds_norm]
+    if bx2 <= bx1 or by2 <= by1 or ox2 <= ox1 or oy2 <= oy1:
+        return int(dx), int(dy), False
+
+    original_dx = int(dx)
+    original_dy = int(dy)
+    width = bx2 - bx1
+    height = by2 - by1
+    bounds_w = ox2 - ox1
+    bounds_h = oy2 - oy1
+
+    if width <= bounds_w:
+        min_dx = ox1 - bx1
+        max_dx = ox2 - bx2
+        dx = min(max(int(dx), int(min_dx)), int(max_dx))
+    if height <= bounds_h:
+        min_dy = oy1 - by1
+        max_dy = oy2 - by2
+        dy = min(max(int(dy), int(min_dy)), int(max_dy))
+
+    return int(dx), int(dy), bool(int(dx) != original_dx or int(dy) != original_dy)
+
+
+def _shift_rgba_layer(layer: Image.Image, dx: int, dy: int) -> Image.Image:
+    if dx == 0 and dy == 0:
+        return layer
+    shifted = Image.new("RGBA", layer.size, (0, 0, 0, 0))
+    shifted.paste(layer, (int(dx), int(dy)), layer)
+    return shifted
+
+
+def _clear_transparent_rgb(image: Image.Image) -> Image.Image:
+    rgba = image.convert("RGBA")
+    arr = np.array(rgba)
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        arr[arr[:, :, 3] == 0, :3] = 0
+    return Image.fromarray(arr, mode="RGBA")
+
+
+def _align_uied_rotated_layer_to_source_center(
+    layer: Image.Image,
+    text_data: dict,
+    bounds: list[int] | None,
+) -> tuple[Image.Image, list[int] | None]:
+    return _align_rgba_layer_to_source_text_center(layer, text_data, bounds)
+
+
 def _apply_safe_glow(
     image_np: np.ndarray,
     lines: list[str],
@@ -835,10 +1594,39 @@ def _apply_safe_gradient_text(
         _blend_rgb_patch_with_mask(image_np, gradient_patch, mask, origin_x, origin_y)
 
 
-def find_font(font_name: str) -> str | None:
+def set_project_font_assets(font_assets: dict | None) -> None:
+    global _project_font_assets
+    _project_font_assets = font_assets if isinstance(font_assets, dict) else {}
+    _font_path_cache.clear()
+    _font_cache.clear()
+
+
+def _find_project_system_font(font_name: str, font_assets: dict | None = None) -> str | None:
+    assets = font_assets if isinstance(font_assets, dict) else _project_font_assets
+    system_assets = assets.get("system") if isinstance(assets, dict) else None
+    if not isinstance(system_assets, dict):
+        return None
+    entry = system_assets.get(str(font_name or ""))
+    if not isinstance(entry, dict):
+        return None
+    raw_path = str(entry.get("path") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if path.exists() and path.is_file():
+        return str(path)
+    return None
+
+
+def find_font(font_name: str, font_assets: dict | None = None) -> str | None:
     cache_key = str(font_name or "").strip().lower()
-    if cache_key in _font_path_cache:
+    if font_assets is None and cache_key in _font_path_cache:
         return _font_path_cache[cache_key]
+    project_font = _find_project_system_font(font_name, font_assets)
+    if project_font:
+        if font_assets is None:
+            _font_path_cache[cache_key] = project_font
+        return project_font
     for font_dir in FONT_DIRS:
         if not font_dir.exists():
             continue
@@ -861,6 +1649,7 @@ def _should_force_safe_text_path(font_name: str) -> bool:
 
 def _normalize_render_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Cf")
     for source, target in _PUNCT_REPLACEMENTS.items():
         normalized = normalized.replace(source, target)
     normalized = re.sub(r"[ \t]+", " ", normalized)
@@ -928,6 +1717,25 @@ def _rebalance_wrapped_lines(
         if not changed:
             break
     return best
+
+
+def _wrapped_lines_orphan_penalty(lines: list[str]) -> float:
+    cleaned = [str(line).strip() for line in lines or [] if str(line).strip()]
+    if len(cleaned) < 2:
+        return 0.0
+    penalty = 0.0
+    for index, line in enumerate(cleaned):
+        words = line.split()
+        if len(words) != 1:
+            continue
+        word = re.sub(r"[^\wÀ-ÿ]", "", words[0], flags=re.UNICODE)
+        if not word:
+            continue
+        if len(word) <= 2:
+            penalty += 28.0 if index == 0 else 18.0
+        elif len(word) <= 4 and len(cleaned) >= 3:
+            penalty += 8.0
+    return penalty
 
 
 def _render_identity_bbox(block: dict) -> list[int]:
@@ -1040,6 +1848,443 @@ def _find_nested_same_balloon_duplicate_index(candidate: dict, accepted: list[di
     return None
 
 
+def _trace_band_key(text: dict) -> str:
+    band = str(text.get("band_id") or "").strip()
+    if band:
+        return band
+    trace = str(text.get("trace_id") or "").strip()
+    match = re.search(r"@(page_\d{3}_band_\d{3})", trace)
+    return match.group(1) if match else ""
+
+
+def _bbox_area_value(bbox: list[int] | tuple[int, ...] | None) -> int:
+    if not bbox or len(bbox) != 4:
+        return 0
+    return max(0, int(bbox[2]) - int(bbox[0])) * max(0, int(bbox[3]) - int(bbox[1]))
+
+
+def _bbox_union_values(values: list[list[int]]) -> list[int] | None:
+    boxes = [bbox for bbox in values if isinstance(bbox, list) and len(bbox) == 4]
+    if not boxes:
+        return None
+    return [
+        min(int(b[0]) for b in boxes),
+        min(int(b[1]) for b in boxes),
+        max(int(b[2]) for b in boxes),
+        max(int(b[3]) for b in boxes),
+    ]
+
+
+def _fragment_anchor_bbox(text: dict) -> list[int] | None:
+    return (
+        _layout_bbox(text.get("text_pixel_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+    )
+
+
+def _dark_fragment_lobe_anchor_bbox(text: dict) -> list[int] | None:
+    """For recovered dark lobes, source_bbox is the lobe-local OCR anchor.
+
+    text_pixel_bbox can be inherited from a broad full-bubble pass and may cover
+    a sibling lobe, which makes distinct connected lobes look mergeable.
+    """
+    return (
+        _layout_bbox(text.get("source_text_anchor_bbox"))
+        or _layout_bbox(text.get("_source_text_anchor_bbox"))
+        or _dark_connected_text_anchor_bbox_from_metrics(text)
+        or
+        _layout_bbox(text.get("source_text_mask_bbox"))
+        or _layout_bbox(text.get("_source_text_mask_bbox"))
+        or
+        _layout_bbox(text.get("source_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+        or _layout_bbox(text.get("text_pixel_bbox"))
+    )
+
+
+def _dark_connected_text_anchor_bbox_from_metrics(text: dict) -> list[int] | None:
+    """Return a compact per-lobe source text bbox for dark connected bubbles.
+
+    The inpaint/mask path can recover the right mask for each connected lobe,
+    while legacy OCR fields still carry a whole-bubble or sibling-contaminated
+    bbox. Typesetting must anchor to the compact text mask, not to the connected
+    visual area.
+    """
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return None
+    flags = _qa_flags_set(text)
+    connected_context = bool(
+        text.get("_is_lobe_subregion")
+        or text.get("_connected_source_bbox")
+        or text.get("connected_lobe_bboxes")
+        or text.get("connected_position_bboxes")
+        or str(text.get("connected_balloon_orientation") or "").strip()
+        or flags
+        & {
+            "dark_bubble_connected_lobe_passthrough",
+            "partial_dark_bubble_lobe_reocr",
+            "dark_connected_bubble_compact_bbox_replaced_aggregate_source",
+            "dark_connected_lobe_anchor_component_filtered",
+        }
+    )
+    if not connected_context:
+        return None
+
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    target_bbox = _layout_bbox(
+        text.get("target_bbox")
+        or text.get("balloon_bbox")
+        or text.get("bubble_mask_bbox")
+        or text.get("layout_safe_bbox")
+        or text.get("bbox")
+    )
+    broad_ref = _layout_bbox(
+        text.get("target_bbox")
+        or text.get("balloon_bbox")
+        or text.get("bubble_mask_bbox")
+        or text.get("bbox")
+    )
+
+    raw_candidates: list[tuple[str, list[int] | None]] = []
+    replaced = metrics.get("inpaint_mask_contract_text_bbox_replaced_aggregate_source")
+    if isinstance(replaced, dict):
+        raw_candidates.append(("inpaint_mask_contract_text_bbox_replaced_aggregate_source", _layout_bbox(replaced.get("bbox"))))
+    sanitized = metrics.get("layout_text_geometry_sanitized")
+    if isinstance(sanitized, dict):
+        raw_candidates.append(("layout_text_geometry_sanitized", _layout_bbox(sanitized.get("clean_bbox"))))
+    overreach = metrics.get("bbox_overreach")
+    if isinstance(overreach, dict):
+        raw_candidates.append(("bbox_overreach.text_geometry_bbox", _layout_bbox(overreach.get("text_geometry_bbox"))))
+    rejected = metrics.get("dark_connected_bubble_broad_mask_rejected")
+    if isinstance(rejected, dict):
+        raw_candidates.append(("dark_connected_bubble_broad_mask_rejected.anchor_bbox", _layout_bbox(rejected.get("anchor_bbox"))))
+
+    accepted: list[tuple[str, list[int]]] = []
+    for reason, bbox in raw_candidates:
+        if bbox is None or _bbox_area_px(bbox) < 16:
+            continue
+        bbox_area = max(1, _bbox_area_px(bbox))
+        if target_bbox is not None and _bbox_intersection_area(bbox, target_bbox) / float(bbox_area) < 0.35:
+            continue
+        if broad_ref is not None:
+            broad_area = max(1, _bbox_area_px(broad_ref))
+            broad_w = max(1, int(broad_ref[2]) - int(broad_ref[0]))
+            broad_h = max(1, int(broad_ref[3]) - int(broad_ref[1]))
+            cand_w = max(1, int(bbox[2]) - int(bbox[0]))
+            cand_h = max(1, int(bbox[3]) - int(bbox[1]))
+            # Reject whole-lobe/whole-bubble boxes. The desired source text
+            # anchor is glyph-shaped or a compact text mask.
+            if (
+                bbox_area >= int(broad_area * 0.72)
+                or (cand_w >= int(broad_w * 0.92) and cand_h >= int(broad_h * 0.72))
+            ):
+                continue
+        accepted.append((reason, bbox))
+
+    if not accepted:
+        return None
+    reason, bbox = min(accepted, key=lambda item: _bbox_area_px(item[1]))
+    text["_dark_connected_text_anchor_bbox_source"] = reason
+    return list(bbox)
+
+
+def _propagate_dark_connected_text_anchor_to_type(text: dict) -> None:
+    anchor_bbox = _dark_connected_text_anchor_bbox_from_metrics(text)
+    if anchor_bbox is None:
+        return
+    current = _layout_bbox(
+        text.get("source_text_anchor_bbox")
+        or text.get("_source_text_anchor_bbox")
+        or text.get("source_text_mask_bbox")
+        or text.get("_source_text_mask_bbox")
+    )
+    if current is not None:
+        current_area = max(1, _bbox_area_px(current))
+        anchor_area = max(1, _bbox_area_px(anchor_bbox))
+        anchor_overlap = _bbox_intersection_area(current, anchor_bbox) / float(anchor_area)
+        if current_area <= int(anchor_area * 1.45) and anchor_overlap >= 0.60:
+            return
+
+    text["source_text_anchor_bbox"] = list(anchor_bbox)
+    text["_source_text_anchor_bbox"] = list(anchor_bbox)
+    text["_anchor_center_only_layout"] = True
+    _merge_qa_flags(text, ["dark_connected_text_anchor_propagated_to_type", "safe_text_box_recomputed"])
+    for stale_key in (
+        "position_bbox",
+        "render_bbox",
+        "_debug_render_bbox",
+        "fit_status",
+        "layout_fit_result",
+    ):
+        text.pop(stale_key, None)
+
+
+def _target_or_balloon_bbox(text: dict) -> list[int] | None:
+    return (
+        _layout_bbox(text.get("target_bbox"))
+        or _layout_bbox(text.get("balloon_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+    )
+
+
+def _bbox_x_overlap_ratio(a: list[int], b: list[int]) -> float:
+    overlap = max(0, min(int(a[2]), int(b[2])) - max(int(a[0]), int(b[0])))
+    min_w = max(1, min(int(a[2]) - int(a[0]), int(b[2]) - int(b[0])))
+    return overlap / float(min_w)
+
+
+def _bbox_vertical_gap(a: list[int], b: list[int]) -> int:
+    return max(0, max(int(a[1]), int(b[1])) - min(int(a[3]), int(b[3])))
+
+
+def _same_balloon_fragment_merge_score(a: dict, b: dict) -> float:
+    a_target = _target_or_balloon_bbox(a)
+    b_target = _target_or_balloon_bbox(b)
+    if a_target is None or b_target is None:
+        return 0.0
+    return max(
+        _bbox_iou(a_target, b_target),
+        _bbox_containment_ratio(a_target, b_target),
+        _bbox_containment_ratio(b_target, a_target),
+    )
+
+
+def _fragment_visual_target_bbox(text: dict) -> list[int] | None:
+    return (
+        _layout_bbox(text.get("bubble_mask_bbox"))
+        or _layout_bbox(text.get("balloon_bbox"))
+        or _layout_bbox(text.get("target_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+    )
+
+
+def _fragments_have_distinct_visual_targets(a: dict, b: dict) -> bool:
+    a_target = _fragment_visual_target_bbox(a)
+    b_target = _fragment_visual_target_bbox(b)
+    if a_target is None or b_target is None:
+        return False
+    if _bbox_iou(a_target, b_target) >= 0.18:
+        return False
+    if (
+        _bbox_containment_ratio(a_target, b_target) >= 0.78
+        or _bbox_containment_ratio(b_target, a_target) >= 0.78
+    ):
+        return False
+    gap_x = max(0, max(a_target[0], b_target[0]) - min(a_target[2], b_target[2]))
+    gap_y = max(0, max(a_target[1], b_target[1]) - min(a_target[3], b_target[3]))
+    min_w = max(1, min(a_target[2] - a_target[0], b_target[2] - b_target[0]))
+    min_h = max(1, min(a_target[3] - a_target[1], b_target[3] - b_target[1]))
+    center_dx = abs(((a_target[0] + a_target[2]) / 2.0) - ((b_target[0] + b_target[2]) / 2.0))
+    center_dy = abs(((a_target[1] + a_target[3]) / 2.0) - ((b_target[1] + b_target[3]) / 2.0))
+    return (
+        gap_x >= max(18, int(min_w * 0.10))
+        or gap_y >= max(18, int(min_h * 0.10))
+        or center_dx >= max(96, int(min_w * 0.48))
+        or center_dy >= max(96, int(min_h * 0.48))
+    )
+
+
+def _dark_fragments_have_distinct_source_anchors(a: dict, b: dict) -> bool:
+    a_anchor = _dark_fragment_lobe_anchor_bbox(a)
+    b_anchor = _dark_fragment_lobe_anchor_bbox(b)
+    if a_anchor is None or b_anchor is None:
+        return False
+    union = _bbox_union_many_for_layout([a_anchor, b_anchor])
+    if union is None:
+        return False
+    union_w = max(1, int(union[2]) - int(union[0]))
+    union_h = max(1, int(union[3]) - int(union[1]))
+    center_dx = abs(((a_anchor[0] + a_anchor[2]) / 2.0) - ((b_anchor[0] + b_anchor[2]) / 2.0))
+    center_dy = abs(((a_anchor[1] + a_anchor[3]) / 2.0) - ((b_anchor[1] + b_anchor[3]) / 2.0))
+    return bool(
+        center_dx >= max(64, int(union_w * 0.22))
+        or center_dy >= max(48, int(union_h * 0.18))
+    )
+
+
+def _fragment_merge_has_overreach_repair(a: dict, b: dict) -> bool:
+    a_overreach = _overreach_ratio_for_fragment(a)
+    b_overreach = _overreach_ratio_for_fragment(b)
+    if max(a_overreach, b_overreach) < 4.0:
+        return False
+    a_target = _fragment_visual_target_bbox(a)
+    b_target = _fragment_visual_target_bbox(b)
+    a_anchor = _fragment_anchor_bbox(a)
+    b_anchor = _fragment_anchor_bbox(b)
+    if a_target is None or b_target is None or a_anchor is None or b_anchor is None:
+        return False
+    if a_overreach >= b_overreach:
+        broad_target, broad_anchor, reliable_target = a_target, a_anchor, b_target
+    else:
+        broad_target, broad_anchor, reliable_target = b_target, b_anchor, a_target
+    return (
+        _bbox_containment_ratio(reliable_target, broad_target) >= 0.35
+        and _bbox_containment_ratio(broad_anchor, reliable_target) >= 0.20
+    )
+
+
+def _has_degenerate_fragment_render_area(text: dict) -> bool:
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "tiny_bubble_inner_bbox_rejected" in flags:
+        return True
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    try:
+        containment = float(metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        containment = 1.0
+    return containment < 0.20
+
+
+def _should_merge_adjacent_same_balloon_fragment(a: dict, b: dict) -> bool:
+    if int(a.get("layout_group_size", 1) or 1) > 1 or int(b.get("layout_group_size", 1) or 1) > 1:
+        return False
+    a_source = str(a.get("bubble_mask_source") or a.get("balloon_mask_source") or "").strip().lower()
+    b_source = str(b.get("bubble_mask_source") or b.get("balloon_mask_source") or "").strip().lower()
+    if a_source == "image_dark_bubble_mask" and b_source == "image_dark_bubble_mask":
+        a_target = _fragment_visual_target_bbox(a)
+        b_target = _fragment_visual_target_bbox(b)
+        a_anchor = _dark_fragment_lobe_anchor_bbox(a)
+        b_anchor = _dark_fragment_lobe_anchor_bbox(b)
+        if a_target is not None and b_target is not None and a_anchor is not None and b_anchor is not None:
+            target_union = _bbox_union_many_for_layout([a_target, b_target])
+            if target_union is not None:
+                union_w = max(1, target_union[2] - target_union[0])
+                union_h = max(1, target_union[3] - target_union[1])
+                center_dx = abs(((a_anchor[0] + a_anchor[2]) / 2.0) - ((b_anchor[0] + b_anchor[2]) / 2.0))
+                center_dy = abs(((a_anchor[1] + a_anchor[3]) / 2.0) - ((b_anchor[1] + b_anchor[3]) / 2.0))
+                if center_dx >= max(64, int(union_w * 0.24)) or center_dy >= max(48, int(union_h * 0.18)):
+                    return False
+    has_degenerate_area = _has_degenerate_fragment_render_area(a) or _has_degenerate_fragment_render_area(b)
+    has_distinct_targets = _fragments_have_distinct_visual_targets(a, b)
+    if has_distinct_targets and not _fragment_merge_has_overreach_repair(a, b):
+        return False
+    if has_degenerate_area and has_distinct_targets:
+        return False
+    a_band = _trace_band_key(a)
+    b_band = _trace_band_key(b)
+    if a_band and b_band and a_band != b_band:
+        return False
+    a_text = str(a.get("translated") or "").strip()
+    b_text = str(b.get("translated") or "").strip()
+    if not a_text or not b_text:
+        return False
+    normalized_a = _normalize_duplicate_compare_text(a_text)
+    normalized_b = _normalize_duplicate_compare_text(b_text)
+    if normalized_a and normalized_b:
+        shorter, longer = sorted([normalized_a, normalized_b], key=len)
+        if len(shorter) >= 4 and shorter in longer:
+            return False
+    a_anchor = _fragment_anchor_bbox(a)
+    b_anchor = _fragment_anchor_bbox(b)
+    if a_anchor is None or b_anchor is None:
+        return False
+    min_h = max(1, min(int(a_anchor[3]) - int(a_anchor[1]), int(b_anchor[3]) - int(b_anchor[1])))
+    if _bbox_vertical_gap(a_anchor, b_anchor) > max(44, int(min_h * 1.5)):
+        return False
+    if _bbox_x_overlap_ratio(a_anchor, b_anchor) < 0.25:
+        return False
+    return _same_balloon_fragment_merge_score(a, b) >= 0.20
+
+
+def _overreach_ratio_for_fragment(text: dict) -> float:
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    overreach = metrics.get("bbox_overreach") if isinstance(metrics.get("bbox_overreach"), dict) else {}
+    try:
+        return float(overreach.get("ratio") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fragment_target_reliability_key(text: dict) -> tuple[int, int]:
+    target = _target_or_balloon_bbox(text)
+    overreach = _overreach_ratio_for_fragment(text)
+    return (1 if overreach >= 4.0 else 0, _bbox_area_value(target))
+
+
+def _merge_same_balloon_fragment_group(group: list[dict]) -> dict:
+    ordered = sorted(
+        group,
+        key=lambda item: (
+            (_fragment_anchor_bbox(item) or [0, 0, 0, 0])[1],
+            (_fragment_anchor_bbox(item) or [0, 0, 0, 0])[0],
+        ),
+    )
+    base = min(ordered, key=_fragment_target_reliability_key)
+    merged = dict(base)
+    merged["translated"] = " ".join(
+        str(item.get("translated") or "").strip()
+        for item in ordered
+        if str(item.get("translated") or "").strip()
+    )
+    merged["original"] = " ".join(
+        str(item.get("original") or item.get("text") or "").strip()
+        for item in ordered
+        if str(item.get("original") or item.get("text") or "").strip()
+    )
+    anchor_union = _bbox_union_values([_fragment_anchor_bbox(item) for item in ordered if _fragment_anchor_bbox(item) is not None])
+    if anchor_union is not None:
+        merged["bbox"] = list(anchor_union)
+        merged["text_pixel_bbox"] = list(anchor_union)
+        merged["layout_bbox"] = list(anchor_union)
+    flags: list[str] = []
+    for item in ordered:
+        for flag in item.get("qa_flags") or []:
+            if flag and flag not in flags:
+                flags.append(flag)
+    if "same_balloon_fragment_merged" not in flags:
+        flags.append("same_balloon_fragment_merged")
+    merged["qa_flags"] = flags
+    merged["source_text_count"] = len(ordered)
+    merged["layout_group_size"] = len(ordered)
+    merged["source_trace_ids"] = [
+        str(item.get("trace_id"))
+        for item in ordered
+        if str(item.get("trace_id") or "").strip()
+    ]
+    merged["source_text_ids"] = [
+        str(item.get("id") or item.get("text_id"))
+        for item in ordered
+        if str(item.get("id") or item.get("text_id") or "").strip()
+    ]
+    merged["_source_trace_ids"] = list(merged["source_trace_ids"])
+    merged["_source_text_ids"] = list(merged["source_text_ids"])
+    for stale_key in ("safe_text_box", "_debug_safe_text_box", "render_bbox", "_debug_render_bbox", "fit_status"):
+        merged.pop(stale_key, None)
+    return merged
+
+
+def _merge_adjacent_same_balloon_fragments(blocks: list[dict]) -> list[dict]:
+    if len(blocks) < 2:
+        return blocks
+    merged: list[dict] = []
+    consumed: set[int] = set()
+    for index, block in enumerate(blocks):
+        if index in consumed:
+            continue
+        group = [block]
+        consumed.add(index)
+        changed = True
+        while changed:
+            changed = False
+            for other_index, other in enumerate(blocks):
+                if other_index in consumed:
+                    continue
+                if any(_should_merge_adjacent_same_balloon_fragment(member, other) for member in group):
+                    group.append(other)
+                    consumed.add(other_index)
+                    changed = True
+        if len(group) > 1:
+            merged.append(_merge_same_balloon_fragment_group(group))
+        else:
+            merged.append(block)
+    return merged
+
+
 def get_font(font_name: str, size: int):
     key = (font_name, size)
     if key in _font_cache:
@@ -1102,7 +2347,12 @@ def get_font(font_name: str, size: int):
 
 def _typeset_single_page(args: tuple) -> int:
     """Renderiza uma Ãºnica pÃ¡gina â€” projetada para rodar em worker process."""
-    img_path_str, trans_page, output_dir_str = args
+    if len(args) >= 4:
+        img_path_str, trans_page, output_dir_str, font_assets = args
+    else:
+        img_path_str, trans_page, output_dir_str = args
+        font_assets = None
+    set_project_font_assets(font_assets)
     img_path = Path(img_path_str)
     output_path = Path(output_dir_str)
 
@@ -1123,8 +2373,16 @@ def _typeset_single_page(args: tuple) -> int:
             continue
 
     dest = output_path / img_path.name
-    img.save(dest, quality=95)
+    save_typeset_page_image(img, dest, quality=95)
     return 0
+
+
+def save_typeset_page_image(img: Image.Image, dest: Path | str, *, quality: int = 95) -> None:
+    dest_path = Path(dest)
+    if dest_path.suffix.lower() in {".jpg", ".jpeg"}:
+        img.save(dest_path, quality=int(quality), subsampling=0)
+        return
+    img.save(dest_path)
 
 
 def run_typesetting(
@@ -1132,8 +2390,10 @@ def run_typesetting(
     translated_results: list[dict],
     output_dir: str,
     progress_callback: Callable | None = None,
+    font_assets: dict | None = None,
 ):
     """Entry point for batch typesetting process."""
+    set_project_font_assets(font_assets)
     logger.info(f"Iniciando typesetting de {len(inpainted_paths)} pÃ¡ginas.")
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -1150,7 +2410,7 @@ def run_typesetting(
         return Image.open(str(path)).convert("RGB")
 
     def _save_img(img, dest):
-        img.save(dest, quality=95)
+        save_typeset_page_image(img, dest, quality=95)
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="typeset-io") as io_pool:
         load_future = io_pool.submit(_load_img, inpainted_paths[0])
@@ -1735,6 +2995,96 @@ def _build_connected_group_block(
     return parent
 
 
+def _build_connected_passthrough_lobe_blocks(
+    group_texts: list[dict],
+    ordered_subregions: list[list[int]],
+    orientation: str,
+) -> list[dict]:
+    assignments = _assign_texts_to_subregions(group_texts, ordered_subregions)
+    group_style = merge_group_style(group_texts)
+    blocks: list[dict] = []
+    for index, (text, assigned_sub) in enumerate(assignments):
+        source_bbox = _connected_lobe_source_text_bbox(text)
+        own_lobe_bbox = _layout_bbox(text.get("target_bbox"))
+        if source_bbox is not None and own_lobe_bbox is not None:
+            source_cx = (source_bbox[0] + source_bbox[2]) / 2.0
+            source_cy = (source_bbox[1] + source_bbox[3]) / 2.0
+            if own_lobe_bbox[0] <= source_cx <= own_lobe_bbox[2] and own_lobe_bbox[1] <= source_cy <= own_lobe_bbox[3]:
+                assigned_sub = own_lobe_bbox
+        block = dict(text)
+        block["estilo"] = group_style
+        block["target_bbox"] = list(assigned_sub)
+        block["balloon_bbox"] = list(assigned_sub)
+        block["bubble_mask_bbox"] = list(assigned_sub)
+        block["balloon_subregions"] = []
+        block["connected_lobe_bboxes"] = []
+        block["connected_lobe_polygons"] = []
+        block["connected_position_bboxes"] = []
+        block["connected_focus_bboxes"] = []
+        block["layout_shape"] = _infer_layout_shape_from_bbox(assigned_sub, _neutral_render_tipo(block))
+        block["layout_align"] = "center"
+        block["layout_group_size"] = 1
+        block["_is_lobe_subregion"] = True
+        block["_connected_slot_index"] = index
+        block["_connected_slot_count"] = len(ordered_subregions)
+        block["connected_balloon_orientation"] = orientation
+        block["layout_profile"] = "dark_bubble"
+        source_bbox = source_bbox or [int(v) for v in (text.get("text_pixel_bbox") or text.get("source_bbox") or text.get("bbox") or assigned_sub)]
+        block["source_bbox"] = list(source_bbox)
+        text_pixel_bbox = _layout_bbox(text.get("text_pixel_bbox"))
+        if text_pixel_bbox is not None and _bbox_area_px(text_pixel_bbox) >= 16:
+            block["text_pixel_bbox"] = list(text_pixel_bbox)
+        else:
+            block["text_pixel_bbox"] = list(source_bbox)
+        block["layout_bbox"] = list(source_bbox)
+        block["bbox"] = list(source_bbox)
+        block["_connected_source_bbox"] = source_bbox
+        block["_connected_vertical_bias_ratio"] = _compute_connected_vertical_bias_ratio(source_bbox, assigned_sub)
+        block["_source_text_ids"] = _collect_text_source_ids([text])
+        _merge_qa_flags(block, ["dark_bubble_connected_lobe_passthrough", "safe_text_box_recomputed"])
+        blocks.append(block)
+    return blocks
+
+
+def _connected_lobe_source_text_bbox(text: dict) -> list[int] | None:
+    """Return the source text extent for a connected lobe without collapsing it.
+
+    Some dark connected-bubble repairs carry a compact anchor bbox that is
+    useful for lobe assignment, but not for scale.  The passthrough path used to
+    copy that compact bbox into text_pixel_bbox/source_bbox, so the renderer
+    later believed the original text was tiny.  Prefer real glyph/pixel evidence
+    and only use compact anchors when no wider source text evidence exists.
+    """
+    refs: list[tuple[str, list[int]]] = []
+    for key in (
+        "text_pixel_bbox",
+        "source_text_mask_bbox",
+        "_source_text_mask_bbox",
+        "source_bbox",
+        "bbox",
+        "ocr_text_bbox",
+    ):
+        bbox = _layout_bbox(text.get(key))
+        if bbox is not None and _bbox_area_px(bbox) >= 16:
+            refs.append((key, bbox))
+    polygon_bbox = _layout_bbox(_bbox_from_polygons(text.get("line_polygons") or []))
+    if polygon_bbox is not None and _bbox_area_px(polygon_bbox) >= 16:
+        refs.append(("line_polygons", polygon_bbox))
+    if not refs:
+        return None
+
+    # Prefer explicit pixel/glyph masks.  If several exist, use their union so a
+    # fragmented OCR/debug bbox cannot shrink the original-text contract.
+    pixel_refs = [
+        bbox
+        for key, bbox in refs
+        if key in {"text_pixel_bbox", "source_text_mask_bbox", "_source_text_mask_bbox", "ocr_text_bbox", "line_polygons"}
+    ]
+    if pixel_refs:
+        return _bbox_union_many_for_layout(pixel_refs)
+    return max((bbox for _key, bbox in refs), key=_bbox_area_px)
+
+
 def _collect_text_source_ids(texts: list[dict]) -> list[str]:
     ids: list[str] = []
     for text in texts:
@@ -1745,6 +3095,68 @@ def _collect_text_source_ids(texts: list[dict]) -> list[str]:
             if isinstance(value, str) and value.strip() and value not in ids:
                 ids.append(value)
     return ids
+
+
+def _dark_visual_mask_bbox_from_metrics(text: dict) -> list[int] | None:
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    dark = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    return _layout_bbox(dark.get("mask_bbox") or dark.get("balloon_bbox"))
+
+
+def _repair_dark_connected_lobe_subregions_from_visual_mask(text: dict) -> dict:
+    subregions = _normalize_balloon_subregions(text.get("balloon_subregions") or text.get("connected_lobe_bboxes") or [])
+    if len(subregions) != 2:
+        return text
+    flags = _qa_flags_set(text)
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    dark_connected = bool(
+        source in {"image_dark_bubble_mask", "image_dark_panel_mask"}
+        or flags
+        & {
+            "dark_bubble_connected_lobe_passthrough",
+            "dark_bubble_connected_lobes_promoted",
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+        }
+    )
+    if not dark_connected:
+        return text
+    full = _dark_visual_mask_bbox_from_metrics(text)
+    if full is None:
+        return text
+    union = _bbox_union_many_for_layout(subregions)
+    if union is None:
+        return text
+    full_area = _bbox_area_px(full)
+    union_area = _bbox_area_px(union)
+    if full_area <= max(256, int(union_area * 1.08)):
+        return text
+    orientation = _infer_connected_orientation_from_subregions(
+        subregions,
+        str(text.get("connected_balloon_orientation") or ""),
+    )
+    fx1, fy1, fx2, fy2 = [int(v) for v in full]
+    if orientation == "top-bottom":
+        ordered = sorted(subregions, key=lambda box: ((box[1] + box[3]) / 2.0, box[0]))
+        seam = int(round((ordered[0][3] + ordered[1][1]) / 2.0))
+        seam = max(fy1 + 1, min(fy2 - 1, seam))
+        repaired = [[fx1, fy1, fx2, seam], [fx1, seam, fx2, fy2]]
+    else:
+        ordered = sorted(subregions, key=lambda box: ((box[0] + box[2]) / 2.0, box[1]))
+        seam = int(round((ordered[0][2] + ordered[1][0]) / 2.0))
+        seam = max(fx1 + 1, min(fx2 - 1, seam))
+        repaired = [[fx1, fy1, seam, fy2], [seam, fy1, fx2, fy2]]
+    text = dict(text)
+    text["balloon_bbox"] = list(full)
+    text["bubble_mask_bbox"] = list(full)
+    text["balloon_subregions"] = [list(box) for box in repaired]
+    text["connected_lobe_bboxes"] = [list(box) for box in repaired]
+    text["connected_position_bboxes"] = [list(box) for box in repaired]
+    text["connected_focus_bboxes"] = [list(box) for box in repaired]
+    text["connected_balloon_orientation"] = orientation
+    text["_dark_connected_lobes_repaired_from_visual_mask"] = True
+    _merge_qa_flags(text, ["dark_connected_lobes_repaired_from_visual_mask", "safe_text_box_recomputed"])
+    return text
 
 
 def _build_connected_group_block_from_fragment_groups(
@@ -2030,6 +3442,250 @@ def _has_confident_connected_subregions(text: dict) -> bool:
     ) or bool(str(text.get("connected_balloon_orientation", "") or "").strip())
 
 
+def _dark_bubble_mask_bbox_for_connected_pair(text: dict) -> list[int] | None:
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return None
+    for key in ("bubble_mask_bbox", "balloon_bbox"):
+        bbox = _layout_bbox(text.get(key))
+        if bbox is not None:
+            return bbox
+    return None
+
+
+def _anchor_bbox_for_dark_connected_pair(text: dict) -> list[int] | None:
+    for key in ("text_pixel_bbox", "layout_bbox", "source_bbox", "bbox"):
+        bbox = _layout_bbox(text.get(key))
+        if bbox is not None:
+            return bbox
+    return None
+
+
+def _split_overlapping_dark_bubble_lobes(
+    first_mask: list[int],
+    second_mask: list[int],
+    first_anchor: list[int],
+    second_anchor: list[int],
+) -> tuple[list[list[int]], str] | None:
+    first_cx = (first_anchor[0] + first_anchor[2]) / 2.0
+    second_cx = (second_anchor[0] + second_anchor[2]) / 2.0
+    first_cy = (first_anchor[1] + first_anchor[3]) / 2.0
+    second_cy = (second_anchor[1] + second_anchor[3]) / 2.0
+    horizontal = abs(first_cx - second_cx) >= abs(first_cy - second_cy) * 1.15
+
+    if horizontal:
+        left_mask, right_mask = (first_mask, second_mask) if first_cx <= second_cx else (second_mask, first_mask)
+        sep = int(round((first_cx + second_cx) / 2.0))
+        gap = max(8, int(round(min(first_mask[2] - first_mask[0], second_mask[2] - second_mask[0]) * 0.025)))
+        left = [int(left_mask[0]), int(left_mask[1]), min(int(left_mask[2]), sep - gap), int(left_mask[3])]
+        right = [max(int(right_mask[0]), sep + gap), int(right_mask[1]), int(right_mask[2]), int(right_mask[3])]
+        if left[2] <= left[0] or right[2] <= right[0]:
+            return None
+        ordered = [left, right]
+        return ordered if first_cx <= second_cx else [right, left], "left-right"
+
+    top_mask, bottom_mask = (first_mask, second_mask) if first_cy <= second_cy else (second_mask, first_mask)
+    sep = int(round((first_cy + second_cy) / 2.0))
+    gap = max(8, int(round(min(first_mask[3] - first_mask[1], second_mask[3] - second_mask[1]) * 0.025)))
+    top = [int(top_mask[0]), int(top_mask[1]), int(top_mask[2]), min(int(top_mask[3]), sep - gap)]
+    bottom = [int(bottom_mask[0]), max(int(bottom_mask[1]), sep + gap), int(bottom_mask[2]), int(bottom_mask[3])]
+    if top[3] <= top[1] or bottom[3] <= bottom[1]:
+        return None
+    ordered = [top, bottom]
+    return ordered if first_cy <= second_cy else [bottom, top], "top-bottom"
+
+
+def _promote_overlapping_dark_bubble_lobe_pairs(texts: list[dict]) -> None:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for text in texts:
+        if text.get("balloon_subregions") or text.get("connected_lobe_bboxes"):
+            continue
+        if _dark_bubble_mask_bbox_for_connected_pair(text) is None:
+            continue
+        page_key = str(text.get("page_id") or text.get("page_number") or "")
+        band_key = str(text.get("band_id") or "")
+        if not page_key and not band_key:
+            continue
+        groups.setdefault((page_key, band_key), []).append(text)
+
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        used: set[int] = set()
+        for i, first in enumerate(group):
+            if i in used:
+                continue
+            first_mask = _dark_bubble_mask_bbox_for_connected_pair(first)
+            first_anchor = _anchor_bbox_for_dark_connected_pair(first)
+            if first_mask is None or first_anchor is None:
+                continue
+            best: tuple[float, int, list[int], list[int], list[list[int]], str] | None = None
+            for j in range(i + 1, len(group)):
+                if j in used:
+                    continue
+                second = group[j]
+                second_mask = _dark_bubble_mask_bbox_for_connected_pair(second)
+                second_anchor = _anchor_bbox_for_dark_connected_pair(second)
+                if second_mask is None or second_anchor is None:
+                    continue
+                inter = _bbox_intersection_area(first_mask, second_mask)
+                min_area = min(_bbox_area_px(first_mask), _bbox_area_px(second_mask))
+                if inter / float(max(1, min_area)) < 0.12:
+                    continue
+                union = _bbox_union_many_for_layout([first_mask, second_mask])
+                if union is None:
+                    continue
+                union_w = max(1, union[2] - union[0])
+                union_h = max(1, union[3] - union[1])
+                dx = abs(((first_anchor[0] + first_anchor[2]) / 2.0) - ((second_anchor[0] + second_anchor[2]) / 2.0))
+                dy = abs(((first_anchor[1] + first_anchor[3]) / 2.0) - ((second_anchor[1] + second_anchor[3]) / 2.0))
+                if dx < max(64, int(union_w * 0.24)) and dy < max(48, int(union_h * 0.18)):
+                    continue
+                split = _split_overlapping_dark_bubble_lobes(first_mask, second_mask, first_anchor, second_anchor)
+                if split is None:
+                    continue
+                subregions, orientation = split
+                score = inter / float(max(1, min_area)) + max(dx / float(union_w), dy / float(union_h))
+                if best is None or score > best[0]:
+                    best = (score, j, second_mask, second_anchor, subregions, orientation)
+            if best is None:
+                continue
+            _score, j, second_mask, _second_anchor, subregions, orientation = best
+            second = group[j]
+            union = _bbox_union_many_for_layout([first_mask, second_mask])
+            if union is None:
+                continue
+            for text in (first, second):
+                text["balloon_bbox"] = [int(v) for v in union]
+                text["balloon_subregions"] = [list(sub) for sub in subregions]
+                text["connected_lobe_bboxes"] = [list(sub) for sub in subregions]
+                text["connected_lobe_ids"] = [
+                    f"{str(text.get('id') or text.get('text_id') or 'dark_bubble')}_lobe_{idx:03d}"
+                    for idx in range(1, len(subregions) + 1)
+                ]
+                text["connected_lobe_polygons"] = [[] for _ in subregions]
+                text["connected_position_bboxes"] = [list(sub) for sub in subregions]
+                text["connected_focus_bboxes"] = [list(sub) for sub in subregions]
+                text["connected_balloon_orientation"] = orientation
+                text["layout_profile"] = "connected_balloon"
+                text["layout_group_size"] = max(2, int(text.get("layout_group_size", 1) or 1))
+                text["connected_detection_confidence"] = 0.74
+                text["connected_group_confidence"] = 0.74
+                text["connected_position_confidence"] = 0.74
+                text["subregion_confidence"] = 0.74
+                _merge_qa_flags(text, ["dark_bubble_connected_lobes_promoted", "safe_text_box_recomputed"])
+            used.add(i)
+            used.add(j)
+
+
+def _is_dark_connected_fragment_identity(text: dict) -> bool:
+    identity = " ".join(
+        str(text.get(key) or "")
+        for key in ("id", "text_id", "trace_id")
+    )
+    return "_fragment_" in identity or "#fragment_" in identity
+
+
+def _is_dark_bubble_render_text(text: dict) -> bool:
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    return bool(
+        source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
+        or any(flag.startswith("dark_bubble") for flag in flags)
+    )
+
+
+def _dark_bubble_render_lobe_bbox(text: dict) -> list[int] | None:
+    if not _is_dark_bubble_render_text(text):
+        return None
+    return (
+        _layout_bbox(text.get("bubble_mask_bbox"))
+        or _layout_bbox(text.get("balloon_bbox"))
+        or _layout_bbox(text.get("target_bbox"))
+        or _layout_bbox(text.get("safe_text_box"))
+        or _layout_bbox(text.get("render_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+    )
+
+
+def _dark_bubble_render_anchor_bbox(text: dict) -> list[int] | None:
+    return (
+        _layout_bbox(text.get("text_pixel_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+        or _layout_bbox(text.get("render_bbox"))
+        or _layout_bbox(text.get("safe_text_box"))
+    )
+
+
+def _are_distinct_dark_bubble_render_lobes(left: dict, right: dict) -> bool:
+    left_lobe = _dark_bubble_render_lobe_bbox(left)
+    right_lobe = _dark_bubble_render_lobe_bbox(right)
+    if left_lobe is None or right_lobe is None:
+        return False
+    left_anchor = _dark_bubble_render_anchor_bbox(left)
+    right_anchor = _dark_bubble_render_anchor_bbox(right)
+    if left_anchor is None or right_anchor is None:
+        return False
+    union = _bbox_union_many_for_layout([left_lobe, right_lobe])
+    if union is None:
+        return False
+    union_w = max(1, int(union[2]) - int(union[0]))
+    union_h = max(1, int(union[3]) - int(union[1]))
+    left_cx = (int(left_anchor[0]) + int(left_anchor[2])) / 2.0
+    right_cx = (int(right_anchor[0]) + int(right_anchor[2])) / 2.0
+    left_cy = (int(left_anchor[1]) + int(left_anchor[3])) / 2.0
+    right_cy = (int(right_anchor[1]) + int(right_anchor[3])) / 2.0
+    center_dx = abs(left_cx - right_cx)
+    center_dy = abs(left_cy - right_cy)
+    if center_dx < max(64, int(union_w * 0.22)) and center_dy < max(48, int(union_h * 0.18)):
+        return False
+    lobe_overlap = _bbox_containment_ratio(left_lobe, right_lobe)
+    reverse_overlap = _bbox_containment_ratio(right_lobe, left_lobe)
+    if max(lobe_overlap, reverse_overlap) >= 0.82:
+        return False
+    return True
+
+
+def _should_skip_dark_connected_combined_fragment(text: dict, all_texts: list[dict]) -> bool:
+    if not _is_dark_connected_fragment_identity(text) or not _is_dark_bubble_render_text(text):
+        return False
+    translated = _normalize_duplicate_compare_text(text.get("translated") or text.get("traduzido") or text.get("text") or "")
+    if not translated:
+        return False
+    band_key = _trace_band_key(text)
+    siblings: list[dict] = []
+    for sibling in all_texts:
+        if sibling is text:
+            continue
+        if sibling.get("visible", True) is False:
+            continue
+        if str(sibling.get("render_policy") or "").strip().lower() in {
+            "merged_into_primary",
+            "suppressed_dark_connected_combined_fragment",
+        }:
+            continue
+        if band_key and _trace_band_key(sibling) != band_key:
+            continue
+        if _is_dark_connected_fragment_identity(sibling):
+            continue
+        if _dark_bubble_render_lobe_bbox(sibling) is None:
+            continue
+        sibling_text = _normalize_duplicate_compare_text(
+            sibling.get("translated") or sibling.get("traduzido") or sibling.get("text") or ""
+        )
+        if sibling_text and sibling_text in translated:
+            siblings.append(sibling)
+    if len(siblings) < 2:
+        return False
+    return any(
+        _are_distinct_dark_bubble_render_lobes(left, right)
+        for index, left in enumerate(siblings)
+        for right in siblings[index + 1 :]
+    )
+
+
 def _connected_lobe_assignment_confidence(text: dict) -> float:
     if "lobe_assignment_confidence" in text:
         try:
@@ -2059,7 +3715,32 @@ def _mark_low_confidence_lobe_assignment(text: dict) -> None:
     subregions = _normalize_balloon_subregions(
         text.get("balloon_subregions") or text.get("connected_lobe_bboxes") or []
     )
-    if len(subregions) < 2 or not _translated_text_is_non_trivial(text):
+    if not _translated_text_is_non_trivial(text):
+        return
+    has_connected_hint_without_boxes = (
+        len(subregions) < 2
+        and len([value for value in text.get("connected_lobe_ids") or [] if str(value or "").strip()]) >= 2
+    )
+    if len(subregions) < 2:
+        if not has_connected_hint_without_boxes:
+            return
+        if _resolve_english_anchor_bbox(text) is not None:
+            _merge_qa_flags(text, ["connected_lobe_boxes_missing_source_anchor_fallback"])
+            text["lobe_assignment_confidence"] = 0.0
+            text["balloon_subregions"] = []
+            text["connected_lobe_bboxes"] = []
+            text["connected_position_bboxes"] = []
+            text["connected_focus_bboxes"] = []
+            text["_single_lobe_follow_anchor"] = True
+            return
+        text["lobe_assignment_confidence"] = 0.0
+        _merge_qa_flags(text, ["lobe_assignment_low_confidence"])
+        text["needs_review"] = True
+        apply_route_action(
+            text,
+            route_action="review_required",
+            route_reason="lobe_assignment_low_confidence",
+        )
         return
     confidence = _connected_lobe_assignment_confidence(text)
     text["lobe_assignment_confidence"] = round(confidence, 3)
@@ -2074,6 +3755,8 @@ def _mark_low_confidence_lobe_assignment(text: dict) -> None:
 
 
 def _should_clamp_rejected_connected_to_anchor(text: dict) -> bool:
+    if any(str(flag).startswith("connected_split_broke_") for flag in (text.get("qa_flags") or [])):
+        return False
     anchor_bbox = (
         _layout_bbox(text.get("text_pixel_bbox"))
         or _layout_bbox(text.get("source_bbox"))
@@ -2192,6 +3875,58 @@ def _line_polygons_cross_connected_split_seam(
     return line_count >= 2 and seam_crossing_count >= max(2, int(line_count * 0.60))
 
 
+_CONNECTED_SPLIT_UNIT_TOKENS = {
+    "ano",
+    "anos",
+    "year",
+    "years",
+    "yr",
+    "yrs",
+}
+
+
+def _connected_semantic_tokens(value: object) -> list[str]:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return [
+        token.casefold()
+        for token in re.findall(r"\d+|[A-Za-z\u00C0-\u00FF]+", normalized)
+        if token.strip()
+    ]
+
+
+def _connected_split_semantic_flags(chunks: list[str]) -> list[str]:
+    flags: list[str] = []
+    cleaned = [str(chunk or "").strip() for chunk in chunks if str(chunk or "").strip()]
+    for left, right in zip(cleaned, cleaned[1:]):
+        left_tokens = _connected_semantic_tokens(left)
+        right_tokens = _connected_semantic_tokens(right)
+        if not left_tokens or not right_tokens:
+            continue
+        if left_tokens[-1].isdigit() and right_tokens[0] in _CONNECTED_SPLIT_UNIT_TOKENS:
+            flags.append("connected_split_broke_number_unit")
+    return list(dict.fromkeys(flags))
+
+
+def _connected_split_semantic_flags_for_text(
+    text: str,
+    subregions: list[list[int]],
+) -> list[str]:
+    if len(subregions) < 2:
+        return []
+    areas = [
+        max(1, int(bbox[2] - bbox[0]) * int(bbox[3] - bbox[1]))
+        for bbox in subregions
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+    ]
+    area_weights = None
+    if len(areas) == len(subregions):
+        total_area = float(max(1, sum(areas)))
+        area_weights = [area / total_area for area in areas]
+    chunks = _split_text_for_connected_balloons(str(text or ""), len(subregions), area_weights)
+    return _connected_split_semantic_flags(chunks)
+
+
 def _should_reject_connected_false_positive(text: dict, subregions: list[list[int]]) -> bool:
     if len(subregions) < 2:
         return False
@@ -2232,6 +3967,14 @@ def _should_reject_connected_false_positive(text: dict, subregions: list[list[in
         for bbox in (text.get("connected_text_groups") or text.get("connected_position_bboxes") or [])
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
+    semantic_flags = _connected_split_semantic_flags_for_text(translated, subregions)
+    if semantic_flags:
+        qa_flags = list(text.get("qa_flags") or [])
+        for flag in semantic_flags:
+            if flag not in qa_flags:
+                qa_flags.append(flag)
+        text["qa_flags"] = qa_flags
+        return True
 
     if (
         layout_group_size <= 1
@@ -2449,8 +4192,32 @@ def _split_line_polygons_by_large_gap(line_polygons: list) -> list[list[list]] |
 def _split_single_ocr_visual_lobes(text: dict) -> list[dict] | None:
     if not isinstance(text, dict):
         return None
+    if _should_use_original_text_scale_contract(text):
+        return None
+    if text.get("_render_metadata_hydrated") or text.get("_restored_from_render_plan_candidate"):
+        return None
     translated = str(text.get("translated") or text.get("traduzido") or "").strip()
     if not translated:
+        return None
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    source_trace_ids = {
+        str(value).strip()
+        for field in ("source_trace_ids", "_source_trace_ids")
+        for value in (text.get(field) or [])
+        if str(value).strip()
+    }
+    source_text_ids = {
+        str(value).strip()
+        for field in ("source_text_ids", "_source_text_ids")
+        for value in (text.get(field) or [])
+        if str(value).strip()
+    }
+    if (
+        "same_balloon_fragment_merged" in qa_flags
+        and len(source_trace_ids) <= 1
+        and len(source_text_ids) <= 1
+        and len(translated.split()) <= 3
+    ):
         return None
     subregions = _normalize_balloon_subregions(
         text.get("connected_lobe_bboxes") or text.get("balloon_subregions") or []
@@ -2507,6 +4274,66 @@ def _split_single_ocr_visual_lobes(text: dict) -> list[dict] | None:
     return children
 
 
+def _select_short_repaired_fragment_compact_target(
+    text_data: dict,
+    *,
+    balloon_bbox: list[int] | None,
+    bubble_mask_bbox: list[int] | None,
+) -> list[int] | None:
+    if balloon_bbox is None or bubble_mask_bbox is None:
+        return None
+    qa_flags = {str(flag).strip() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    if "same_balloon_fragment_merged" not in qa_flags:
+        return None
+    source_trace_ids = {
+        str(value).strip()
+        for field in ("source_trace_ids", "_source_trace_ids")
+        for value in (text_data.get(field) or [])
+        if str(value).strip()
+    }
+    source_text_ids = {
+        str(value).strip()
+        for field in ("source_text_ids", "_source_text_ids")
+        for value in (text_data.get(field) or [])
+        if str(value).strip()
+    }
+    translated = str(text_data.get("translated") or text_data.get("traduzido") or "").strip()
+    if len(source_trace_ids) > 1 or len(source_text_ids) > 1 or len(translated.split()) > 3:
+        return None
+
+    compact = _layout_bbox(text_data.get("target_bbox")) or bubble_mask_bbox
+    compact = _layout_bbox(compact)
+    if compact is None:
+        return None
+    compact_area = max(1, _bbox_area_px(compact))
+    balloon_area = max(1, _bbox_area_px(balloon_bbox))
+    balloon_w = max(1, int(balloon_bbox[2]) - int(balloon_bbox[0]))
+    balloon_h = max(1, int(balloon_bbox[3]) - int(balloon_bbox[1]))
+    compact_w = max(1, int(compact[2]) - int(compact[0]))
+    compact_h = max(1, int(compact[3]) - int(compact[1]))
+    inherited_balloon_is_broad = (
+        balloon_area >= compact_area * 4
+        or (balloon_w >= compact_w * 2 and balloon_h >= compact_h * 2)
+    )
+    if not inherited_balloon_is_broad:
+        return None
+
+    safe = _layout_bbox(text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+    render = _layout_bbox(text_data.get("render_bbox"))
+    evidence = render or safe or _layout_bbox(text_data.get("text_pixel_bbox")) or _layout_bbox(text_data.get("bbox"))
+    if evidence is None:
+        return None
+    evidence_area = max(1, _bbox_area_px(evidence))
+    compact_overlap = _bbox_intersection_area(evidence, compact) / float(evidence_area)
+    if compact_overlap < 0.25 and not _bbox_intersection_area(evidence, compact):
+        return None
+
+    text_data["_short_repaired_fragment_compact_target"] = list(compact)
+    text_data["_render_target_source"] = "short_repaired_fragment_compact_bubble"
+    _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    return compact
+
+
 def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
     if len(blocks) < 2:
         return blocks
@@ -2514,8 +4341,11 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
     def _is_white_speech_fragment(text: dict) -> bool:
         if not isinstance(text, dict):
             return False
+        source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        if source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+            return False
         profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
-        if profile != "white_balloon":
+        if profile not in {"white_balloon", "standard", ""}:
             return False
         if _normalize_balloon_subregions(text.get("balloon_subregions", [])):
             return False
@@ -2542,6 +4372,37 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
     def _bbox_area(bbox: list[int]) -> int:
         return max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
 
+    def _source_trace_ids(texts: list[dict]) -> list[str]:
+        trace_ids: list[str] = []
+
+        def add(value) -> None:
+            if isinstance(value, str) and value.strip() and value not in trace_ids:
+                trace_ids.append(value)
+
+        for text in texts:
+            add(text.get("trace_id"))
+            add(text.get("_source_trace_id"))
+            for field in ("source_trace_ids", "_source_trace_ids", "trace_ids"):
+                for value in text.get(field) or []:
+                    add(value)
+        return trace_ids
+
+    def _fragment_band_ref(text: dict) -> str:
+        value = str(text.get("band_id") or text.get("_band_id") or "").strip()
+        if value:
+            return value
+        for candidate in (
+            text.get("trace_id"),
+            text.get("_source_trace_id"),
+            *(text.get("source_trace_ids") or []),
+            *(text.get("_source_trace_ids") or []),
+            *(text.get("trace_ids") or []),
+        ):
+            match = re.search(r"(page_\d{3}_band_\d{3})", str(candidate or ""))
+            if match:
+                return match.group(1)
+        return ""
+
     def _reasonable_balloon_bbox(text: dict, text_union: list[int]) -> list[int] | None:
         bbox = _layout_bbox(text.get("balloon_bbox"))
         if bbox is None:
@@ -2555,15 +4416,23 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
     def _should_merge(a: dict, b: dict) -> bool:
         if not (_is_white_speech_fragment(a) and _is_white_speech_fragment(b)):
             return False
-        if not (a.get("_visual_lobe_split_count") or b.get("_visual_lobe_split_count")):
+        if _fragments_have_distinct_visual_targets(a, b) and not _fragment_merge_has_overreach_repair(a, b):
             return False
         abox = _text_bbox(a)
         bbox = _text_bbox(b)
         if abox is None or bbox is None:
             return False
-        top, bottom = (abox, bbox) if abox[1] <= bbox[1] else (bbox, abox)
+        if abox[1] <= bbox[1]:
+            top, bottom = abox, bbox
+            top_item = a
+        else:
+            top, bottom = bbox, abox
+            top_item = b
         vertical_gap = max(0, bottom[1] - top[3])
         min_h = max(1, min(abox[3] - abox[1], bbox[3] - bbox[1]))
+        a_band = _fragment_band_ref(a)
+        b_band = _fragment_band_ref(b)
+        same_band = bool(a_band and a_band == b_band)
         parent_bbox = _layout_bbox(a.get("_visual_lobe_split_parent_bbox")) or _layout_bbox(
             b.get("_visual_lobe_split_parent_bbox")
         )
@@ -2577,6 +4446,35 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
         overlap_x = max(0, min(abox[2], bbox[2]) - max(abox[0], bbox[0]))
         min_w = max(1, min(abox[2] - abox[0], bbox[2] - bbox[0]))
         center_dx = abs(((abox[0] + abox[2]) / 2.0) - ((bbox[0] + bbox[2]) / 2.0))
+        top_text = str(top_item.get("translated") or top_item.get("traduzido") or top_item.get("text") or "").strip()
+        top_h = max(1, top[3] - top[1])
+        short_top_fragment = top_h <= 48 and len(" ".join(top_text.split())) <= 36
+        close_same_band_lines = (
+            same_band
+            and short_top_fragment
+            and vertical_gap <= max(18, int(min_h * 0.70))
+            and (overlap_x / float(min_w)) >= 0.45
+        )
+        vertical_overlap = max(0, min(abox[3], bbox[3]) - max(abox[1], bbox[1]))
+        a_balloon = _layout_bbox(a.get("balloon_bbox"))
+        b_balloon = _layout_bbox(b.get("balloon_bbox"))
+        overlapping_same_band_lines = (
+            same_band
+            and vertical_gap == 0
+            and vertical_overlap >= max(8, int(min_h * 0.35))
+            and (overlap_x / float(min_w)) >= 0.45
+            and (
+                (b_balloon is not None and _bbox_containment_ratio(abox, b_balloon) >= 0.72)
+                or (a_balloon is not None and _bbox_containment_ratio(bbox, a_balloon) >= 0.72)
+            )
+        )
+        if not (
+            a.get("_visual_lobe_split_count")
+            or b.get("_visual_lobe_split_count")
+            or close_same_band_lines
+            or overlapping_same_band_lines
+        ):
+            return False
         return (overlap_x / float(min_w)) >= 0.35 or center_dx <= max(64, min_w * 0.55)
 
     ordered_indices = sorted(
@@ -2611,13 +4509,19 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
             consumed.remove(index)
             continue
 
-        group = sorted(
-            group,
-            key=lambda item: (
-                (_text_bbox(item) or item.get("bbox") or [0, 0, 0, 0])[1],
-                (_text_bbox(item) or item.get("bbox") or [0, 0, 0, 0])[0],
-            ),
-        )
+        if len({band for band in (_fragment_band_ref(item) for item in group) if band}) <= 1:
+            group = [
+                item
+                for _source_index, item in sorted(zip(group_indices, group), key=lambda pair: pair[0])
+            ]
+        else:
+            group = sorted(
+                group,
+                key=lambda item: (
+                    (_text_bbox(item) or item.get("bbox") or [0, 0, 0, 0])[1],
+                    (_text_bbox(item) or item.get("bbox") or [0, 0, 0, 0])[0],
+                ),
+            )
         text_bboxes = [bbox for bbox in (_text_bbox(item) for item in group) if bbox is not None]
         text_union = _union_bboxes(text_bboxes)
         if text_union is None:
@@ -2628,6 +4532,12 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
             if balloon_bbox is not None:
                 candidate_bboxes.append(balloon_bbox)
         merged_bbox = _union_bboxes(candidate_bboxes) or text_union
+        bubble_mask_union = _union_bboxes(
+            [bbox for bbox in (_layout_bbox(item.get("bubble_mask_bbox")) for item in group) if bbox is not None]
+        )
+        bubble_inner_union = _union_bboxes(
+            [bbox for bbox in (_layout_bbox(item.get("bubble_inner_bbox")) for item in group) if bbox is not None]
+        )
         merged = dict(group[0])
         merged["translated"] = "\n".join(
             " ".join(str(item.get("translated") or item.get("traduzido") or "").split())
@@ -2640,6 +4550,12 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
         merged["text_pixel_bbox"] = list(text_union)
         merged["layout_bbox"] = list(merged_bbox)
         merged["balloon_bbox"] = list(merged_bbox)
+        if bubble_mask_union is not None:
+            merged["bubble_mask_bbox"] = list(bubble_mask_union)
+        if bubble_inner_union is not None:
+            merged["bubble_inner_bbox"] = list(bubble_inner_union)
+        if bubble_mask_union is not None and len({str(item.get("bubble_id") or "") for item in group}) > 1:
+            merged["bubble_id"] = f"{str(group[0].get('bubble_id') or group[0].get('id') or 'bubble').strip()}_merged"
         merged["line_polygons"] = [
             polygon
             for item in group
@@ -2648,11 +4564,21 @@ def _merge_adjacent_white_balloon_fragments(blocks: list[dict]) -> list[dict]:
         merged["estilo"] = merge_group_style(group)
         merged["layout_group_size"] = len(group)
         merged["source_text_count"] = len(group)
+        source_text_ids = _collect_text_source_ids(group)
+        source_trace_ids = _source_trace_ids(group)
+        merged["_source_text_ids"] = source_text_ids
+        merged["source_text_ids"] = list(source_text_ids)
+        merged["_source_trace_ids"] = source_trace_ids
+        merged["source_trace_ids"] = list(source_trace_ids)
         merged["_merged_nearby_white_fragments"] = True
         first_index = min(group_indices)
         normalized_merged = normalize_text_geometry(merged)
         normalized_merged["translated"] = merged["translated"]
         normalized_merged["traduzido"] = merged["translated"]
+        normalized_merged["_source_text_ids"] = source_text_ids
+        normalized_merged["source_text_ids"] = list(source_text_ids)
+        normalized_merged["_source_trace_ids"] = source_trace_ids
+        normalized_merged["source_trace_ids"] = list(source_trace_ids)
         merged_by_first_index[first_index] = normalized_merged
         merged_source_indices.update(group_indices)
 
@@ -2711,18 +4637,302 @@ def _should_skip_noisy_overlapping_ocr_fragment(text: dict, texts: list[dict]) -
     return False
 
 
+def _should_skip_unverified_merged_fragment(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "same_balloon_fragment_merged" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    translated = str(text.get("translated") or text.get("traduzido") or text.get("text") or "").strip()
+    if (
+        source in {"image_dark_bubble_mask", "image_dark_panel_mask"}
+        and _layout_bbox(text.get("balloon_bbox")) is not None
+        and len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+", translated)) >= 5
+    ):
+        return False
+    return bool(
+        "raw_text_evidence_missing" in flags
+        or "fast_fill_no_glyph_evidence" in flags
+        or text.get("raw_text_evidence_missing")
+    )
+
+
+def _should_suppress_dark_recovered_short_fragment(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    trace_id = str(text.get("trace_id") or "").strip()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "#fragment_" not in trace_id and "_fragment_" not in str(text.get("id") or text.get("text_id") or ""):
+        return False
+    if not flags.intersection({"fast_fill_no_glyph_evidence", "debug_derived_bubble_mask_rejected"}):
+        return False
+    compact = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+", "", str(text.get("translated") or text.get("traduzido") or text.get("text") or ""))
+    return 0 < len(compact) <= 8
+
+
+def _should_suppress_dark_recovered_unverified_fragment(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if not flags.intersection(
+        {
+            "debug_derived_bubble_mask_rejected",
+            "fast_fill_no_glyph_evidence",
+            "dark_bubble_visual_mask_rejected_tiny_text",
+        }
+    ):
+        return False
+    if "dark_bubble_connected_lobe_passthrough" not in flags and "dark_bubble_oval_reocr" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source in {"image_dark_bubble_mask", "image_dark_panel_mask"}:
+        return False
+    if _layout_bbox(text.get("bubble_mask_bbox")) not in (None, [0, 0, 32, 32]):
+        return False
+    original = str(text.get("original") or text.get("raw_ocr") or text.get("text") or "").strip()
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    original_tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9']+", original)
+    translated_tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9']+", translated)
+    if len(original_tokens) <= 4:
+        return True
+    if len(translated_tokens) <= 3 and len(original_tokens) <= 6:
+        return True
+    return False
+
+
+def _dedupe_repeated_sentence_for_render(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return value
+    parts = [part.strip() for part in re.split(r"(?<=[?.!])\s+", value) if part.strip()]
+    if len(parts) == 2:
+        left = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+", "", parts[0]).lower()
+        right = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+", "", parts[1]).lower()
+        if left and right and (left == right or left in right or right in left):
+            return parts[0]
+    compact = re.sub(r"\s+", " ", value)
+    midpoint = len(compact) // 2
+    if len(compact) >= 24:
+        left = compact[:midpoint].strip()
+        right = compact[midpoint:].strip()
+        left_norm = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+", "", left).lower()
+        right_norm = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+", "", right).lower()
+        if left_norm and right_norm and left_norm == right_norm:
+            return left
+    return value
+
+
+def _should_skip_auxiliary_merged_fragment(text: dict, all_texts: list[dict]) -> bool:
+    if str(text.get("route_action") or "").strip().lower() != "merged_into_primary":
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if flags & {"raw_text_evidence_missing", "fast_fill_no_glyph_evidence"} or text.get("raw_text_evidence_missing"):
+        return True
+    bbox = _layout_bbox(text.get("bbox") or text.get("source_bbox") or text.get("text_pixel_bbox"))
+    if bbox is None:
+        return True
+    band_key = _trace_band_key(text)
+    if not band_key:
+        return True
+    bbox_area = max(1, _bbox_area_px(bbox))
+    for sibling in all_texts:
+        if sibling is text or not isinstance(sibling, dict):
+            continue
+        if str(sibling.get("route_action") or "").strip().lower() == "merged_into_primary":
+            continue
+        if _trace_band_key(sibling) != band_key:
+            continue
+        sibling_box = _layout_bbox(sibling.get("balloon_bbox") or sibling.get("bbox") or sibling.get("source_bbox"))
+        if sibling_box and _bbox_intersection_area(bbox, sibling_box) / float(bbox_area) >= 0.45:
+            return False
+    return True
+
+
+_LOW_QUALITY_DUPLICATE_BALLOON_FLAGS = {
+    "debug_derived_bubble_mask_rejected",
+    "rejected_derived_bubble_mask",
+    "missing_real_bubble_mask",
+    "mask_outside_balloon",
+    "mask_outside_balloon_critical",
+    "fast_fill_no_glyph_evidence",
+}
+
+
+def _duplicate_balloon_quality_score(text: dict) -> int:
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    score = 0
+    if flags & _LOW_QUALITY_DUPLICATE_BALLOON_FLAGS:
+        score -= 120
+    if str(text.get("bubble_mask_source") or "").strip().lower() in {
+        "image_contour_bubble_mask",
+        "image_white_bubble_mask",
+        "image_rect_bubble_mask",
+    }:
+        score += 35
+    if _layout_bbox(text.get("source_bbox")) and _layout_bbox(text.get("text_pixel_bbox") or text.get("bbox")):
+        score += 20
+    if str(text.get("route_action") or "").strip().lower() in {"translate_inpaint_render", "review_required"}:
+        score += 10
+    if str(text.get("route_action") or "").strip().lower() == "merged_into_primary":
+        score -= 200
+    return score
+
+
+def _drop_low_quality_duplicate_balloon_blocks(blocks: list[dict]) -> list[dict]:
+    if len(blocks) < 2:
+        return blocks
+    keep = [True] * len(blocks)
+    bboxes = [_layout_bbox(block.get("balloon_bbox")) for block in blocks]
+    for i, bbox_i in enumerate(bboxes):
+        if not keep[i] or bbox_i is None:
+            continue
+        for j in range(i + 1, len(blocks)):
+            bbox_j = bboxes[j]
+            if not keep[j] or bbox_j is None:
+                continue
+            inter = _bbox_intersection_area(bbox_i, bbox_j)
+            if inter <= 0:
+                continue
+            min_area = min(_bbox_area_px(bbox_i), _bbox_area_px(bbox_j))
+            if min_area <= 0 or inter / float(min_area) < 0.82:
+                continue
+            source_i = str(blocks[i].get("bubble_mask_source") or blocks[i].get("balloon_mask_source") or "").strip().lower()
+            source_j = str(blocks[j].get("bubble_mask_source") or blocks[j].get("balloon_mask_source") or "").strip().lower()
+            if (
+                source_i == "image_dark_bubble_mask"
+                and source_j == "image_dark_bubble_mask"
+                and (
+                    _fragments_have_distinct_visual_targets(blocks[i], blocks[j])
+                    or _dark_fragments_have_distinct_source_anchors(blocks[i], blocks[j])
+                )
+            ):
+                continue
+            score_i = _duplicate_balloon_quality_score(blocks[i])
+            score_j = _duplicate_balloon_quality_score(blocks[j])
+            flags_i = {str(flag).strip().lower() for flag in blocks[i].get("qa_flags") or [] if str(flag).strip()}
+            flags_j = {str(flag).strip().lower() for flag in blocks[j].get("qa_flags") or [] if str(flag).strip()}
+            if not ((flags_i | flags_j) & _LOW_QUALITY_DUPLICATE_BALLOON_FLAGS):
+                continue
+            if score_j > score_i:
+                keep[i] = False
+                break
+            keep[j] = False
+    return [block for block, should_keep in zip(blocks, keep) if should_keep]
+
+
+def _linked_duplicate_child(parent: dict, child: dict) -> bool:
+    child_trace = str(child.get("trace_id") or "").strip()
+    child_id = str(child.get("id") or child.get("text_id") or "").strip()
+    parent_trace_ids = {str(value).strip() for value in parent.get("source_trace_ids") or [] if str(value).strip()}
+    parent_text_ids = {str(value).strip() for value in parent.get("source_text_ids") or [] if str(value).strip()}
+    if child_trace and child_trace in parent_trace_ids:
+        return True
+    if child_id and child_id in parent_text_ids:
+        return True
+    return _text_duplicate_signal(parent, child)
+
+
+def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
+    if len(texts) < 2:
+        return
+    for parent in texts:
+        if not isinstance(parent, dict):
+            continue
+        parent_route_action = str(parent.get("route_action") or "").strip().lower()
+        parent_render_policy = str(parent.get("render_policy") or "").strip().lower()
+        if parent_route_action == "merged_into_primary" or parent_render_policy == "suppressed_dark_connected_combined_fragment":
+            continue
+        if parent.get("_skip_render_duplicate_child_parent"):
+            continue
+        parent_translated = _translated_text_for_residual(parent)
+        if not _is_meaningful_parent_residual(parent_translated):
+            continue
+        band_key = _trace_band_key(parent)
+        if not band_key:
+            continue
+        for child in texts:
+            if child is parent or not isinstance(child, dict):
+                continue
+            child_route_action = str(child.get("route_action") or "").strip().lower()
+            child_render_policy = str(child.get("render_policy") or "").strip().lower()
+            if child_route_action == "merged_into_primary" or child_render_policy == "suppressed_dark_connected_combined_fragment":
+                continue
+            if _trace_band_key(child) != band_key:
+                continue
+            child_translated = _translated_text_for_residual(child)
+            if not child_translated or child_translated.strip() == parent_translated.strip():
+                continue
+            if not _linked_duplicate_child(parent, child):
+                continue
+            residual, removed = _remove_child_phrase_once(parent_translated, child_translated)
+            if not removed or not _is_meaningful_parent_residual(residual):
+                continue
+            child["translated"] = f"{residual}\n{child_translated}".strip()
+            child["traduzido"] = child["translated"]
+            child["_duplicate_parent_residual_source_trace_id"] = str(parent.get("trace_id") or parent.get("id") or "")
+            _merge_qa_flags(child, ["duplicate_parent_residual_merged"])
+            parent["_skip_render_duplicate_child_parent"] = True
+            _merge_qa_flags(parent, ["duplicate_child_parent_suppressed"])
+            break
+
+
 def _neutralize_removed_render_decision_fields(text: dict) -> dict:
+    route_action = str(text.get("route_action") or "").strip().lower()
+    content_class = str(text.get("content_class") or "").strip().lower()
+    if route_action == "translate_sfx_inpaint_render" or content_class == "sfx":
+        text["skip_processing"] = False
+        text["preserve_original"] = False
+        text["content_class"] = "sfx"
+        text["render_policy"] = "sfx_style"
+        text["route_action"] = route_action or "translate_sfx_inpaint_render"
+        sfx = text.get("sfx") if isinstance(text.get("sfx"), dict) else {}
+        adapted = str(sfx.get("adapted_text") or "").strip()
+        if adapted:
+            text["translated"] = adapted
+            text["traduzido"] = adapted
+        return text
+    _remove_inline_sfx_noise_from_render_text(text)
     text["skip_processing"] = False
     text["preserve_original"] = False
     text["render_policy"] = "normal"
-    route_action = str(text.get("route_action") or "").strip().lower()
     if route_action not in ROUTE_ACTIONS:
         text["route_action"] = "translate_inpaint_render"
         text.setdefault("route_reason", "translate_inpaint_render")
-    content_class = str(text.get("content_class") or "").strip().lower()
     if content_class:
         text["content_class"] = "text"
     return text
+
+
+def _render_dialogue_word_count(text: str) -> int:
+    return len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9']+", str(text or "")))
+
+
+def _remove_inline_sfx_noise_from_render_text(text: dict) -> None:
+    if text.get("_render_metadata_hydrated") or text.get("_restored_from_render_plan_candidate"):
+        return
+    source_text = str(
+        text.get("text")
+        or text.get("original")
+        or text.get("raw_ocr")
+        or text.get("normalized_ocr")
+        or text.get("translated")
+        or ""
+    )
+    cleaned_source, sfx_word = split_sfx_inline(source_text)
+    if not sfx_word or _render_dialogue_word_count(cleaned_source) < 2:
+        return
+    text["_inline_sfx_removed"] = sfx_word
+    for key in ("text", "original", "raw_ocr", "normalized_ocr", "normalized_text_final", "source_text_sent_to_translator"):
+        if str(text.get(key) or "").strip():
+            cleaned, candidate_sfx = split_sfx_inline(str(text.get(key) or ""))
+            if candidate_sfx and _render_dialogue_word_count(cleaned) >= 2:
+                text[key] = cleaned
+    for key in ("translated", "traduzido"):
+        if str(text.get(key) or "").strip():
+            cleaned, candidate_sfx = split_sfx_inline(str(text.get(key) or ""))
+            if candidate_sfx and _render_dialogue_word_count(cleaned) >= 2:
+                text[key] = cleaned
 
 
 _UNCHANGED_NAME_STOP_WORDS = {
@@ -2916,10 +5126,51 @@ def _should_preserve_unchanged_latin_name(text: dict) -> bool:
     return True
 
 
+def _is_suppressed_scanlation_credit(text: dict) -> bool:
+    reason = str(text.get("skip_reason") or text.get("route_reason") or "").strip().lower()
+    if reason == "scanlation_credit_suppressed":
+        return True
+    return any(
+        str(flag or "").strip().lower() == "scanlation_credit_suppressed"
+        for flag in text.get("qa_flags") or []
+    )
+
+
+def _is_art_fragment_review(text: dict) -> bool:
+    reason = str(text.get("route_reason") or text.get("skip_reason") or "").strip().lower()
+    if reason in {"ocr_art_fragment_suspected", "sfx_art_fragment_suspected"}:
+        return True
+    return any(
+        str(flag or "").strip().lower() in {"ocr_art_fragment_suspected", "sfx_art_fragment_suspected"}
+        for flag in text.get("qa_flags") or []
+    )
+
+
 def _prepare_special_content_render_block(text: dict) -> dict | None:
     _neutralize_removed_render_decision_fields(text)
+    if _is_suppressed_scanlation_credit(text):
+        text["visible"] = False
+        text["render_policy"] = "preserve_original"
+        text["route_action"] = "review_required"
+        text["route_reason"] = "scanlation_credit_suppressed"
+        text["skip_processing"] = True
+        return None
+    if _is_art_fragment_review(text):
+        text["visible"] = False
+        text["render_policy"] = "preserve_original"
+        text["route_action"] = "review_required"
+        text["route_reason"] = str(text.get("route_reason") or "ocr_art_fragment_suspected")
+        text["skip_processing"] = True
+        return None
     route_action = str(text.get("route_action") or "").strip().lower()
-    route_requires_render = route_action in ROUTE_ACTIONS and route_action_requires_render(route_action)
+    has_renderable_text = bool(str(text.get("translated") or text.get("traduzido") or text.get("text") or "").strip())
+    route_requires_render = (
+        route_action in ROUTE_ACTIONS
+        and (
+            route_action_requires_render(route_action)
+            or (route_action == "review_required" and has_renderable_text)
+        )
+    )
 
     if route_action in ROUTE_ACTIONS and not route_requires_render:
         text["skip_processing"] = route_action == "skip"
@@ -3174,15 +5425,753 @@ def _dedupe_grouped_texts_by_text_signal(ordered: list[dict]) -> list[dict]:
     return deduped
 
 
+_UI_FORM_TEXT_TERMS = {
+    "CANDIDATE",
+    "FIREMAN",
+    "INQUIRY",
+    "NAME",
+    "NUMBER",
+    "RECRUITMENT",
+    "REGIONAL",
+    "REGISTRATION",
+    "RESIDENT",
+    "SEARCH",
+    "SUCCESSFUL",
+    "TEST",
+}
+
+
+def _ui_form_text_terms(text: dict) -> set[str]:
+    source = " ".join(
+        str(text.get(key) or "")
+        for key in (
+            "text",
+            "original",
+            "raw_ocr",
+            "normalized_ocr",
+            "normalized_text_final",
+            "source_text_sent_to_translator",
+            "translated",
+            "traduzido",
+        )
+    ).upper()
+    return set(re.findall(r"[A-Z]+", source))
+
+
+def _has_uied_layout_evidence(text: dict) -> bool:
+    evidence = text.get("ui_layout_evidence")
+    if not isinstance(evidence, dict):
+        return False
+    if str(evidence.get("source") or "").strip().lower() not in {"uied_cv", "uied"}:
+        return False
+    try:
+        confidence = float(evidence.get("confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+    return confidence >= 0.35
+
+
+def _uied_should_yield_to_real_bubble_text(text: dict) -> bool:
+    if not _has_uied_layout_evidence(text):
+        return False
+    if _ui_form_text_terms(text) & _UI_FORM_TEXT_TERMS:
+        return False
+    source = " ".join(str(text.get(key) or "") for key in ("text", "original", "raw_ocr")).upper()
+    if re.search(r"\b20\*+\b", source):
+        return False
+
+    bubble_bbox = _layout_bbox(text.get("bubble_mask_bbox"))
+    inner_bbox = _layout_bbox(text.get("bubble_inner_bbox"))
+    if bubble_bbox is None or inner_bbox is None:
+        return False
+    if not str(text.get("bubble_id") or "").strip():
+        return False
+    if bubble_bbox == [0, 0, 32, 32]:
+        return False
+
+    anchor_bbox = (
+        _layout_bbox(text.get("text_pixel_bbox"))
+        or _layout_bbox(text.get("source_bbox"))
+        or _layout_bbox(text.get("layout_bbox"))
+        or _layout_bbox(text.get("bbox"))
+    )
+    if anchor_bbox is None:
+        return False
+    anchor_area = _bbox_area_px(anchor_bbox)
+    if anchor_area <= 0:
+        return False
+    bubble_overlap = _bbox_intersection_area(bubble_bbox, anchor_bbox) / float(anchor_area)
+    if bubble_overlap < 0.55:
+        return False
+
+    bubble_area = _bbox_area_px(bubble_bbox)
+    inner_area = _bbox_area_px(inner_bbox)
+    if inner_area < max(1, int(bubble_area * 0.22)):
+        return False
+    return True
+
+
+def _clear_false_uied_for_real_bubble_text(text: dict) -> dict:
+    if not _uied_should_yield_to_real_bubble_text(text):
+        return text
+    cleaned = dict(text)
+    cleaned.pop("ui_layout_evidence", None)
+    cleaned.pop("_uied_original_text_anchor_bbox", None)
+    cleaned.pop("_uied_preserve_anchor_position", None)
+    cleaned.pop("_uied_component_anchor_alignment", None)
+    cleaned.pop("_uied_false_positive_reason", None)
+    cleaned["_uied_ignored_for_real_bubble"] = True
+    if str(cleaned.get("layout_safe_reason") or "").strip().lower().startswith(("uied", "ui_form")):
+        cleaned.pop("layout_safe_reason", None)
+    for profile_key in ("layout_profile", "block_profile"):
+        profile = str(cleaned.get(profile_key) or "").strip().lower()
+        if profile in {"ui_form", "connected_balloon"} and not _normalize_balloon_subregions(
+            cleaned.get("balloon_subregions", [])
+        ):
+            cleaned[profile_key] = "white_balloon"
+    flags = [
+        flag
+        for flag in cleaned.get("qa_flags") or []
+        if str(flag).strip() not in {"uied_form_label_split"}
+    ]
+    if flags:
+        cleaned["qa_flags"] = flags
+    else:
+        cleaned.pop("qa_flags", None)
+    return cleaned
+
+
+def _has_ui_form_text_signal(text: dict) -> bool:
+    terms = _ui_form_text_terms(text)
+    if terms & _UI_FORM_TEXT_TERMS:
+        return True
+    source = " ".join(str(text.get(key) or "") for key in ("text", "original", "raw_ocr")).upper()
+    if re.search(r"\b20\*+\b", source):
+        return True
+    return _has_uied_layout_evidence(text) and not _uied_should_yield_to_real_bubble_text(text)
+
+
+def _ui_form_text_anchor_bbox(text: dict) -> list[int] | None:
+    return (
+        _resolve_english_anchor_bbox(text)
+        or _layout_bbox(text.get("source_bbox"))
+        or _layout_bbox(text.get("text_pixel_bbox"))
+        or _layout_bbox(text.get("bbox"))
+    )
+
+
+def _numeric_band_y_top(text: dict) -> int:
+    for key in ("band_y_top", "_band_y_top", "strip_band_y_top", "_strip_band_y_top"):
+        try:
+            value = int(float(text.get(key)))
+        except Exception:
+            continue
+        if value:
+            return value
+    return 0
+
+
+def _uied_component_render_bbox(text: dict) -> list[int] | None:
+    evidence = text.get("ui_layout_evidence")
+    if not isinstance(evidence, dict):
+        return None
+    if str(evidence.get("role") or "").strip().lower() != "text_inside_component":
+        return None
+    component_bbox = _layout_bbox(evidence.get("component_bbox"))
+    if component_bbox is None:
+        return None
+
+    anchor_bbox = _ui_form_text_anchor_bbox(text)
+    if anchor_bbox is None:
+        return component_bbox
+    if _bbox_intersection_area(component_bbox, anchor_bbox) > 0:
+        return component_bbox
+
+    band_y_top = _numeric_band_y_top(text)
+    if not band_y_top:
+        return component_bbox
+    shifted = [
+        component_bbox[0],
+        component_bbox[1] + band_y_top,
+        component_bbox[2],
+        component_bbox[3] + band_y_top,
+    ]
+    if _bbox_intersection_area(shifted, anchor_bbox) > 0:
+        return shifted
+    return component_bbox
+
+
+def _uied_component_anchor_alignment(component_bbox: list[int] | None, text_anchor_bbox: list[int] | None) -> str:
+    if component_bbox is None or text_anchor_bbox is None:
+        return "center"
+    cx1, _cy1, cx2, _cy2 = [int(v) for v in component_bbox]
+    ax1, _ay1, ax2, _ay2 = [int(v) for v in text_anchor_bbox]
+    component_w = max(1, cx2 - cx1)
+    anchor_cx = (ax1 + ax2) / 2.0
+    relative_x = (anchor_cx - cx1) / float(component_w)
+    if relative_x <= 0.34:
+        return "left"
+    if relative_x >= 0.66:
+        return "right"
+    return "center"
+
+
+def _ui_form_anchor_bbox(text: dict) -> list[int] | None:
+    return (
+        _uied_component_render_bbox(text)
+        or _ui_form_text_anchor_bbox(text)
+    )
+
+
+def _has_missing_or_sentinel_bubble_mask(text: dict, parent_bbox: list[int] | None) -> bool:
+    bubble_bbox = _layout_bbox(text.get("bubble_mask_bbox"))
+    if bubble_bbox is None:
+        return True
+    if not str(text.get("bubble_id") or "").strip():
+        return True
+    if bubble_bbox == [0, 0, 32, 32]:
+        return True
+    if parent_bbox is not None and not _has_distinct_real_bubble_mask_bbox(text, parent_bbox):
+        return True
+    return False
+
+
+def _looks_like_ui_form_group(group: list[dict], balloon_bbox: list[int] | tuple[int, int, int, int]) -> bool:
+    if len(group) < 3:
+        return False
+    parent_bbox = _layout_bbox(balloon_bbox)
+    if parent_bbox is None:
+        return False
+
+    signal_count = sum(1 for text in group if _has_ui_form_text_signal(text))
+    if signal_count < 2:
+        return False
+
+    invalid_mask_count = sum(1 for text in group if _has_missing_or_sentinel_bubble_mask(text, parent_bbox))
+    if invalid_mask_count < max(2, len(group) - 1):
+        return False
+
+    anchors = [bbox for bbox in (_ui_form_anchor_bbox(text) for text in group) if bbox is not None]
+    if len(anchors) < max(2, len(group) - 1):
+        return False
+
+    anchor_area = sum(_bbox_area_px(anchor) for anchor in anchors)
+    if anchor_area <= 0:
+        return False
+    parent_area = _bbox_area_px(parent_bbox)
+    if parent_area < max(anchor_area * 2.4, anchor_area + 12000):
+        return False
+
+    union_bbox = _bbox_union_many_for_layout(anchors)
+    if union_bbox is None:
+        return False
+    parent_h = max(1, parent_bbox[3] - parent_bbox[1])
+    union_h = max(1, union_bbox[3] - union_bbox[1])
+    return union_h >= max(48, int(parent_h * 0.35))
+
+
+def _should_anchor_ui_form_text(text: dict) -> bool:
+    if not _has_ui_form_text_signal(text):
+        return False
+    anchor_bbox = _ui_form_anchor_bbox(text)
+    target_bbox = _layout_bbox(text.get("balloon_bbox") or text.get("layout_bbox") or text.get("bbox"))
+    if anchor_bbox is None or target_bbox is None:
+        return False
+    if _uied_component_render_bbox(text) is not None:
+        return True
+    if _has_distinct_real_bubble_mask_bbox(text, target_bbox):
+        return False
+    anchor_area = _bbox_area_px(anchor_bbox)
+    target_area = _bbox_area_px(target_bbox)
+    if target_area >= max(anchor_area * 2.2, anchor_area + 8000):
+        return True
+    anchor_overlap = _bbox_intersection_area(anchor_bbox, target_bbox) / float(max(1, anchor_area))
+    return anchor_overlap < 0.70
+
+
+def _looks_like_loose_scene_text_without_bubble(text: dict) -> bool:
+    if _should_anchor_ui_form_text(text):
+        return False
+    target_bbox = _layout_bbox(text.get("balloon_bbox") or text.get("layout_bbox") or text.get("bbox"))
+    if target_bbox is not None and _has_distinct_real_bubble_mask_bbox(text, target_bbox):
+        return False
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    weak_art_ocr_flags = {
+        "ocr_run_on_suspect",
+        "raw_text_evidence_missing",
+        "fast_fill_no_glyph_evidence",
+        "rejected_derived_bubble_mask",
+    }
+    if (
+        "render_on_art_suspected" in qa_flags
+        and len(qa_flags.intersection(weak_art_ocr_flags)) >= 2
+        and not text.get("line_polygons")
+    ):
+        return True
+    route_reason = str(text.get("route_reason") or "").strip().lower()
+    if "dialogue_balloon" in route_reason or "speech_balloon" in route_reason:
+        return False
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("background_type") or "").strip().lower(),
+    }
+    profiles.discard("")
+    if profiles & {"ui_form", "dark_panel", "colored_status_panel"}:
+        return False
+    if not profiles:
+        return False
+    anchor_bbox = _layout_bbox(text.get("text_pixel_bbox") or text.get("layout_bbox") or text.get("bbox"))
+    if target_bbox is not None and anchor_bbox is not None and _bbox_area_px(target_bbox) >= max(
+        int(_bbox_area_px(anchor_bbox) * 1.65),
+        _bbox_area_px(anchor_bbox) + 1800,
+    ):
+        anchor_overlap = _bbox_intersection_area(target_bbox, anchor_bbox) / float(max(1, _bbox_area_px(anchor_bbox)))
+        if anchor_overlap >= 0.75:
+            return False
+    normalized_text = str(text.get("translated") or text.get("traduzido") or text.get("text") or "").strip()
+    source_text = str(text.get("text") or text.get("raw_ocr") or text.get("original") or "").strip()
+    token_source = normalized_text or source_text
+    tokens = re.findall(r"[A-Za-z0-9]+", token_source)
+    compact = tokens[0] if len(tokens) == 1 else ""
+    single_token = bool(compact) and re.fullmatch(r"[A-Z0-9]{4,14}", compact) is not None
+    has_speech_punctuation = bool(re.search(r"[?!.,]", normalized_text or source_text))
+    if "standard" in profiles and not has_speech_punctuation:
+        return True
+    if single_token and not has_speech_punctuation and (profiles & {"white_balloon", "speech_balloon", "standard"}):
+        return True
+    return False
+
+
+def _looks_like_false_short_art_ocr(text: dict) -> bool:
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if not (
+        "mask_outside_balloon_critical" in qa_flags
+        or "source_glyph_area_ratio_critical" in qa_flags
+        or "fast_fill_no_glyph_evidence" in qa_flags
+        or text.get("raw_text_evidence_missing")
+    ):
+        return False
+    source_text = str(
+        text.get("text")
+        or text.get("raw_ocr")
+        or text.get("original")
+        or ""
+    ).strip()
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    source_compact = re.sub(r"[^A-Za-z0-9]+", "", source_text)
+    translated_compact = re.sub(r"[^A-Za-z0-9À-ÖØ-öø-ÿ]+", "", translated)
+    if not source_compact:
+        return False
+    if len(source_compact) > 2:
+        return False
+    if len(translated_compact) > 4:
+        return False
+    if source_compact.upper() not in {"A", "I", "O"}:
+        return False
+    if _should_anchor_ui_form_text(text):
+        profiles_for_anchor = {
+            str(text.get("layout_profile") or "").strip().lower(),
+            str(text.get("block_profile") or "").strip().lower(),
+            str(text.get("background_type") or "").strip().lower(),
+        }
+        profiles_for_anchor.discard("")
+        if "white_balloon" not in profiles_for_anchor:
+            return False
+    bubble_source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("background_type") or "").strip().lower(),
+    }
+    profiles.discard("")
+    if bubble_source == "image_dark_bubble_mask" or "dark_bubble" in profiles:
+        return False
+    return True
+
+
+def _has_critical_source_glyph_area(text: dict) -> bool:
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "source_glyph_area_ratio_critical" not in qa_flags:
+        return False
+    if not (
+        "render_on_art_suspected" in qa_flags
+        or "unsafe_derived_art_mask_review" in qa_flags
+        or "mask_outside_balloon_critical" in qa_flags
+    ):
+        return False
+    if _should_anchor_ui_form_text(text):
+        return False
+    target_bbox = _layout_bbox(text.get("balloon_bbox") or text.get("layout_bbox") or text.get("bbox"))
+    if target_bbox is not None and _has_distinct_real_bubble_mask_bbox(text, target_bbox):
+        return False
+    return True
+
+
+def _has_unsafe_broad_derived_art_mask(text: dict) -> bool:
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if not {"render_on_art_suspected", "rejected_derived_bubble_mask"}.issubset(qa_flags):
+        return False
+    if _should_anchor_ui_form_text(text):
+        return False
+    bubble_source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if bubble_source not in {"derived_white_crop", "image_white_region", "fallback_bbox", "bbox_fallback"}:
+        return False
+    target_bbox = _layout_bbox(text.get("balloon_bbox") or text.get("layout_bbox") or text.get("bbox"))
+    if target_bbox is not None and _has_distinct_real_bubble_mask_bbox(text, target_bbox):
+        return False
+    anchor_bbox = _layout_bbox(text.get("text_pixel_bbox") or text.get("ocr_text_bbox") or text.get("bbox"))
+    if target_bbox is None or anchor_bbox is None:
+        return False
+    target_area = _bbox_area_px(target_bbox)
+    anchor_area = _bbox_area_px(anchor_bbox)
+    if anchor_area <= 0:
+        return False
+    return target_area >= max(anchor_area * 4.0, anchor_area + 18000)
+
+
+def _may_need_unsafe_render_rollback(text: dict) -> bool:
+    if _should_anchor_ui_form_text(text):
+        return False
+    qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    bubble_source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    return bool(
+        "rejected_derived_bubble_mask" in qa_flags
+        or "source_glyph_area_ratio_critical" in qa_flags
+        or bubble_source in {"derived_white_crop", "derived_white_crop_rejected", "image_white_region", "fallback_bbox", "bbox_fallback"}
+    )
+
+
+def _should_disable_connected_layout_for_rejected_bubble_mask(text: dict) -> bool:
+    has_connected_metadata = bool(
+        text.get("balloon_subregions")
+        or text.get("connected_lobe_bboxes")
+        or text.get("connected_position_bboxes")
+        or str(text.get("layout_profile") or "").strip().lower() == "connected_balloon"
+        or str(text.get("connected_balloon_orientation") or "").strip()
+    )
+    if not has_connected_metadata:
+        return False
+    if _is_dark_visual_white_mask_context(text) and _has_trusted_dark_visual_capacity(text):
+        return False
+    qa_flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    bubble_source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    layout_safe_reason = str(text.get("layout_safe_reason") or "").strip().lower()
+    rejection_sources = {
+        "derived_white_crop_rejected",
+        "rejected_derived_bubble_mask",
+        "bbox_fallback",
+        "fallback_bbox",
+    }
+    rejection_flags = {
+        "rejected_derived_bubble_mask",
+        "debug_derived_bubble_mask_rejected",
+        "mask_outside_balloon_critical",
+    }
+    return bool(
+        bubble_source in rejection_sources
+        or layout_safe_reason == "debug_derived_bubble_mask_rejected"
+        or qa_flags.intersection(rejection_flags)
+    )
+
+
+def _should_disable_connected_layout_for_dark_panel_visual_mask(text: dict) -> bool:
+    if _should_preserve_dark_connected_lobe_anchor(text):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+        return False
+    qa_flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    connected_dark_bubble_flags = {
+        "dark_bubble_connected_lobe_passthrough",
+        "dark_bubble_connected_lobes_promoted",
+        "partial_dark_bubble_lobe_reocr",
+    }
+    qa_metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    has_dark_bubble_metric = bool(
+        isinstance(qa_metrics.get("image_dark_bubble_mask"), dict)
+        and (qa_metrics.get("image_dark_bubble_mask") or {}).get("mask_bbox")
+    )
+    has_connected_lobes = bool(
+        text.get("balloon_subregions")
+        or text.get("connected_lobe_bboxes")
+        or text.get("connected_position_bboxes")
+        or text.get("connected_focus_bboxes")
+        or str(text.get("connected_balloon_orientation") or "").strip()
+    )
+    if source == "image_dark_bubble_mask" and bool(qa_flags & connected_dark_bubble_flags) and has_connected_lobes:
+        return False
+    metric_key = "image_dark_bubble_mask" if source == "image_dark_bubble_mask" else "image_dark_panel_mask"
+    panel_metrics = qa_metrics.get(metric_key) if isinstance(qa_metrics.get(metric_key), dict) else {}
+    if not panel_metrics and source == "derived_card_panel_mask":
+        panel_metrics = qa_metrics.get("derived_card_panel_mask") if isinstance(qa_metrics.get("derived_card_panel_mask"), dict) else {}
+    panel_bbox = _layout_bbox(panel_metrics.get("mask_bbox")) or _layout_bbox(text.get("bubble_mask_bbox"))
+    if panel_bbox is None:
+        return False
+    profile = str(text.get("block_profile") or text.get("layout_profile") or text.get("content_class") or "").strip().lower()
+    if profile not in {"dark_bubble", "dark_panel", "card_panel", "narration", "standard", "connected_balloon"}:
+        return False
+    return bool(
+        text.get("balloon_subregions")
+        or text.get("connected_lobe_bboxes")
+        or text.get("connected_position_bboxes")
+        or str(text.get("connected_balloon_orientation") or "").strip()
+        or str(text.get("layout_profile") or "").strip().lower() == "connected_balloon"
+    )
+
+
+def _should_preserve_dark_connected_lobe_anchor(text: dict) -> bool:
+    if not text.get("_is_lobe_subregion"):
+        return False
+    qa_flags = {str(flag) for flag in (text.get("qa_flags") or [])}
+    if "dark_bubble_connected_lobe_passthrough" not in qa_flags:
+        return False
+    profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    has_dark_lobe_evidence = bool(
+        profile in {"dark_bubble", "dark_panel", "standard"}
+        or source
+        in {
+            "image_dark_panel_mask",
+            "image_dark_bubble_mask",
+            "derived_card_panel_mask",
+        }
+        or qa_flags.intersection(
+            {
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "auto_dark_panel_glow_fallback",
+            }
+        )
+    )
+    if not has_dark_lobe_evidence:
+        return False
+    if source and source not in {
+        "image_dark_panel_mask",
+        "image_dark_bubble_mask",
+        "derived_card_panel_mask",
+    }:
+        return False
+    anchor_bbox = _resolve_english_anchor_bbox(text)
+    target_bbox = _layout_bbox(text.get("target_bbox") or text.get("balloon_bbox") or text.get("bbox"))
+    if not anchor_bbox or not target_bbox:
+        return False
+    anchor_area = max(1, _bbox_area_px(anchor_bbox))
+    if _bbox_intersection_area(anchor_bbox, target_bbox) < int(anchor_area * 0.70):
+        return False
+    return bool(
+        text.get("_connected_source_bbox")
+        or text.get("_connected_source_anchor_bboxes")
+        or str(text.get("connected_balloon_orientation") or "").strip()
+        or int(text.get("_connected_slot_count", 0) or 0) >= 2
+    )
+
+
+def _rollback_unsafe_art_render_if_needed(img: Image.Image, before: Image.Image | None, text_data: dict) -> bool:
+    if before is None:
+        return False
+    if not (_has_critical_source_glyph_area(text_data) or _has_unsafe_broad_derived_art_mask(text_data)):
+        return False
+    _merge_qa_flags(text_data, ["unsafe_derived_art_mask_review"])
+    text_data["needs_review"] = True
+    text_data["_render_review_reason"] = "unsafe_derived_art_mask"
+    apply_route_action(text_data, route_action="review_required", route_reason="unsafe_derived_art_mask")
+    return False
+
+
+def _may_need_low_containment_fragment_render_rollback(text_data: dict, plan: dict) -> bool:
+    if _should_anchor_ui_form_text(text_data):
+        return False
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    target_bbox = _layout_bbox(plan.get("target_bbox") or text_data.get("target_bbox"))
+    if balloon_bbox is None or target_bbox is None:
+        return False
+    balloon_area = _bbox_area_px(balloon_bbox)
+    target_area = _bbox_area_px(target_bbox)
+    if balloon_area <= 0:
+        return False
+    return target_area >= max(balloon_area * 6.0, balloon_area + 24000)
+
+
+def _should_restore_low_containment_fragment_render(text_data: dict, plan: dict) -> bool:
+    qa_metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    try:
+        containment = float(qa_metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        return False
+    if containment >= 0.05:
+        return False
+    render_bbox = _layout_bbox(text_data.get("render_bbox"))
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    target_bbox = _layout_bbox(plan.get("target_bbox") or text_data.get("target_bbox"))
+    if render_bbox is None or balloon_bbox is None or target_bbox is None:
+        return False
+    flags = _qa_flags_set(text_data)
+    if "trusted_dark_visual_capacity_target" in flags and _bbox_intersection_area(render_bbox, target_bbox) >= int(
+        _bbox_area_px(render_bbox) * 0.80
+    ):
+        return False
+    mask_source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if mask_source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+        metric_key = "image_dark_bubble_mask" if mask_source == "image_dark_bubble_mask" else "image_dark_panel_mask"
+        metric = qa_metrics.get(metric_key) if isinstance(qa_metrics.get(metric_key), dict) else {}
+        if not metric and mask_source == "derived_card_panel_mask":
+            metric = qa_metrics.get("derived_card_panel_mask") if isinstance(qa_metrics.get("derived_card_panel_mask"), dict) else {}
+        visual_mask_bbox = _layout_bbox(metric.get("mask_bbox") if isinstance(metric, dict) else None) or _layout_bbox(
+            text_data.get("bubble_mask_bbox")
+        )
+        if visual_mask_bbox is not None:
+            visual_overlap = _bbox_intersection_area(render_bbox, visual_mask_bbox) / float(max(1, _bbox_area_px(render_bbox)))
+            if visual_overlap >= 0.60:
+                return False
+    render_area = _bbox_area_px(render_bbox)
+    balloon_area = _bbox_area_px(balloon_bbox)
+    target_area = _bbox_area_px(target_bbox)
+    if render_area <= 0 or balloon_area <= 0:
+        return False
+    if target_area < max(balloon_area * 6.0, balloon_area + 24000):
+        return False
+    overlap_ratio = _bbox_intersection_area(render_bbox, balloon_bbox) / float(render_area)
+    return overlap_ratio <= 0.10
+
+
+def _rollback_low_containment_fragment_render_if_needed(
+    img: Image.Image,
+    before: Image.Image | None,
+    text_data: dict,
+    plan: dict,
+) -> bool:
+    if before is None:
+        return False
+    if not _should_restore_low_containment_fragment_render(text_data, plan):
+        return False
+    img.paste(before)
+    _merge_qa_flags(text_data, ["render_suppressed_low_containment_fragment"])
+    text_data["visible"] = False
+    text_data["_render_review_reason"] = "low_containment_fragment"
+    text_data["render_policy"] = "suppressed_low_containment_fragment"
+    text_data["route_reason"] = "low_containment_fragment"
+    return True
+
+
+def _as_ui_form_render_block(text: dict) -> dict:
+    block = _clear_connected_balloon_metadata(text)
+    component_bbox = _uied_component_render_bbox(block)
+    text_anchor_bbox = _ui_form_text_anchor_bbox(block)
+    anchor_bbox = component_bbox or text_anchor_bbox
+    if anchor_bbox is not None:
+        block["bbox"] = list(anchor_bbox)
+        block["layout_bbox"] = list(anchor_bbox)
+        block["balloon_bbox"] = list(anchor_bbox)
+        block["layout_safe_bbox"] = list(anchor_bbox)
+        if component_bbox is not None:
+            if text_anchor_bbox is not None:
+                block["source_bbox"] = list(text_anchor_bbox)
+                block["text_pixel_bbox"] = list(_layout_bbox(block.get("text_pixel_bbox")) or text_anchor_bbox)
+                block["_uied_original_text_anchor_bbox"] = list(text_anchor_bbox)
+                block["_uied_preserve_anchor_position"] = True
+                alignment = _uied_component_anchor_alignment(component_bbox, text_anchor_bbox)
+                block["_uied_component_anchor_alignment"] = alignment
+                block["layout_align"] = alignment
+                estilo = dict(block.get("estilo") or block.get("style") or {})
+                estilo["alinhamento"] = alignment
+                block["estilo"] = estilo
+                block["style"] = dict(block.get("style") or estilo)
+                block["style"]["alinhamento"] = alignment
+            block["layout_safe_reason"] = "uied_component_bbox"
+        else:
+            block["source_bbox"] = list(anchor_bbox)
+            block["text_pixel_bbox"] = list(anchor_bbox)
+            block["layout_safe_reason"] = "ui_form_anchor"
+    for key in (
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "render_bbox",
+        "_debug_render_bbox",
+        "bubble_inner_bbox",
+        "balloon_inner_bbox",
+    ):
+        block.pop(key, None)
+    block["layout_group_size"] = 1
+    block["source_text_count"] = 1
+    block["layout_profile"] = "standard"
+    block["block_profile"] = "standard"
+    block["layout_shape"] = _infer_layout_shape_from_bbox(anchor_bbox, "texto") if anchor_bbox else "wide"
+    block["layout_align"] = block.get("layout_align") or "center"
+    block["_render_target_source"] = str(block.get("layout_safe_reason") or "ui_form_anchor")
+    return block
+
+
+def _strip_mixed_sfx_prefix_for_detached_white_bubble(text: dict) -> dict:
+    if "mixed_sfx_detached_from_white_bubble" not in (text.get("qa_flags") or []):
+        return text
+    cleaned_text = dict(text)
+    metrics = cleaned_text.get("qa_metrics")
+    detach = metrics.get("mixed_sfx_detached_from_white_bubble") if isinstance(metrics, dict) else None
+    if isinstance(detach, dict):
+        kept_bbox = _layout_bbox(detach.get("kept_bbox"))
+        white_bbox = _layout_bbox(detach.get("white_bbox"))
+        if kept_bbox is not None:
+            for key in ("bbox", "source_bbox", "text_pixel_bbox", "layout_bbox"):
+                cleaned_text[key] = list(kept_bbox)
+            cleaned_text["rotation_deg"] = 0.0
+            cleaned_text["rotation_source"] = "mixed_sfx_detached_white_bubble"
+            cleaned_text.pop("line_angle_deg", None)
+            cleaned_text.pop("line_polygons", None)
+            cleaned_text.pop("connected_position_bboxes", None)
+        if white_bbox is not None:
+            cleaned_text["balloon_bbox"] = list(white_bbox)
+            cleaned_text["bubble_mask_bbox"] = list(white_bbox)
+            cleaned_text["bubble_mask_source"] = "image_white_bubble_mask"
+            cleaned_text["layout_profile"] = "white_balloon"
+            cleaned_text["block_profile"] = "white_balloon"
+            cleaned_text.pop("safe_text_box", None)
+            cleaned_text.pop("_debug_safe_text_box", None)
+    for key in ("translated", "traduzido", "text", "original", "raw_ocr", "normalized_ocr"):
+        value = cleaned_text.get(key)
+        if isinstance(value, str):
+            cleaned = re.sub(r"^\s*\d+\s*/\s*", "", value).strip()
+            if cleaned:
+                cleaned_text[key] = cleaned
+    return cleaned_text
+
+
 def build_render_blocks(texts: list[dict]) -> list[dict]:
     simple_layout_only = os.getenv("TRADUZAI_SIMPLE_LAYOUT_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
+    for text in texts:
+        if isinstance(text, dict) and _should_skip_dark_connected_combined_fragment(text, texts):
+            text["visible"] = False
+            text["render_policy"] = "suppressed_dark_connected_combined_fragment"
+            text["route_action"] = "suppressed_dark_connected_combined_fragment"
+            _merge_qa_flags(text, ["dark_connected_combined_fragment_suppressed"])
+    _apply_duplicate_child_residual_merges(texts)
     blocks = []
     for text in texts:
+        if text.get("_skip_render_duplicate_child_parent"):
+            continue
+        if _should_skip_dark_connected_combined_fragment(text, texts):
+            text["visible"] = False
+            text["render_policy"] = "suppressed_dark_connected_combined_fragment"
+            text["route_action"] = "suppressed_dark_connected_combined_fragment"
+            _merge_qa_flags(text, ["dark_connected_combined_fragment_suppressed"])
+            continue
+        if _should_skip_auxiliary_merged_fragment(text, texts):
+            continue
         _neutralize_removed_render_decision_fields(text)
+        if _should_skip_unverified_merged_fragment(text):
+            continue
+        text = _clear_false_uied_for_real_bubble_text(text)
+        if _should_disable_connected_layout_for_rejected_bubble_mask(text):
+            text = _clear_connected_balloon_metadata(text)
+            _merge_qa_flags(text, ["connected_layout_disabled_rejected_bubble_mask"])
+        text = _strip_mixed_sfx_prefix_for_detached_white_bubble(text)
         route_action = str(text.get("route_action") or "").strip().lower()
         if _mark_broad_duplicate_parent_for_review(text, texts):
             continue
         _mark_low_confidence_lobe_assignment(text)
+        text = _repair_dark_connected_lobe_subregions_from_visual_mask(text)
+        _propagate_dark_connected_text_anchor_to_type(text)
         special_block = _prepare_special_content_render_block(text)
         if special_block is None:
             continue
@@ -3191,13 +6180,51 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             continue
         if _should_skip_noisy_overlapping_ocr_fragment(text, texts):
             continue
+        if _should_suppress_dark_recovered_short_fragment(text):
+            _merge_qa_flags(text, ["dark_recovered_short_fragment_suppressed"])
+            text["visible"] = False
+            text["render_policy"] = "suppressed_dark_recovered_short_fragment"
+            text["route_action"] = "suppress"
+            text["route_reason"] = "false_short_art_ocr"
+            continue
+        if _should_suppress_dark_recovered_unverified_fragment(text):
+            _merge_qa_flags(text, ["dark_recovered_unverified_fragment_suppressed"])
+            text["visible"] = False
+            text["render_policy"] = "suppressed_dark_recovered_unverified_fragment"
+            text["route_action"] = "suppress"
+            text["route_reason"] = "false_unverified_dark_art_ocr"
+            continue
+        if _looks_like_false_short_art_ocr(text):
+            _merge_qa_flags(text, ["false_short_art_ocr_suppressed"])
+            text["visible"] = False
+            text["needs_review"] = True
+            apply_route_action(text, route_action="review_required", route_reason="false_short_art_ocr")
+            continue
+        if _looks_like_loose_scene_text_without_bubble(text):
+            _merge_qa_flags(text, ["non_balloon_scene_text_review"])
+            text["needs_review"] = True
+            apply_route_action(text, route_action="review_required", route_reason="non_balloon_scene_text")
+            continue
+        if _has_critical_source_glyph_area(text):
+            _merge_qa_flags(text, ["unsafe_source_glyph_area_review"])
+            text["needs_review"] = True
+            apply_route_action(text, route_action="review_required", route_reason="source_glyph_area_ratio_critical")
+        elif _has_unsafe_broad_derived_art_mask(text):
+            _merge_qa_flags(text, ["unsafe_derived_art_mask_review"])
+            text["needs_review"] = True
+            apply_route_action(text, route_action="review_required", route_reason="unsafe_derived_art_mask")
+        if _should_anchor_ui_form_text(text):
+            blocks.append(_as_ui_form_render_block(text))
+            continue
         split_blocks = _split_single_ocr_visual_lobes(text)
         if split_blocks:
             blocks.extend(split_blocks)
             continue
         blocks.append(sanitize_simple_text_geometry(text) if simple_layout_only else normalize_text_geometry(text))
+    blocks = _merge_adjacent_white_balloon_fragments(blocks)
     if not simple_layout_only:
-        blocks = _merge_adjacent_white_balloon_fragments(blocks)
+        blocks = _merge_adjacent_same_balloon_fragments(blocks)
+        blocks = _drop_low_quality_duplicate_balloon_blocks(blocks)
     if simple_layout_only:
         return blocks
 
@@ -3217,6 +6244,18 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
 
     resolved_ids: set[int] = set()
     for group in shared_balloon_groups.values():
+        parent_bbox = _layout_bbox(group[0].get("balloon_bbox")) if group else None
+        if parent_bbox and _looks_like_ui_form_group(group, parent_bbox):
+            ordered = sorted(
+                group,
+                key=lambda item: (
+                    (_ui_form_anchor_bbox(item) or item.get("bbox") or [0, 0, 0, 0])[1],
+                    (_ui_form_anchor_bbox(item) or item.get("bbox") or [0, 0, 0, 0])[0],
+                ),
+            )
+            prepared_texts.extend(_as_ui_form_render_block(text) for text in ordered)
+            resolved_ids.update(id(text) for text in group)
+            continue
         resolved_group = _split_mixed_type_shared_balloon_group(group)
         if not resolved_group or len(resolved_group) != len(group):
             continue
@@ -3225,6 +6264,7 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
 
     prepared_texts.extend(text for text in blocks if id(text) not in resolved_ids)
     texts = prepared_texts
+    _promote_overlapping_dark_bubble_lobe_pairs(texts)
 
     grouped: dict[tuple[str, tuple[int, int, int, int]], list[dict]] = {}
     passthrough: list[dict] = []
@@ -3307,13 +6347,12 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
         orientation = str(group_texts[0].get("connected_balloon_orientation", "") or "")
         ordered_subregions = _order_connected_subregions(subregions, orientation)
         if len(group_texts) == len(subregions):
-            passthrough.append(
-                _build_connected_group_block(
+            passthrough.extend(
+                _build_connected_passthrough_lobe_blocks(
                     group_texts,
                     ordered_subregions,
-                    list(key[1]),
                     _infer_connected_orientation_from_subregions(ordered_subregions, orientation),
-                ),
+                )
             )
             for text in group_texts:
                 assigned_ids.add(id(text))
@@ -3437,6 +6476,9 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             ),
         )
         ordered = _dedupe_grouped_texts_by_text_signal(ordered)
+        if _looks_like_ui_form_group(ordered, list(bbox_tuple)):
+            blocks.extend(_as_ui_form_render_block(text) for text in ordered)
+            continue
         has_low_confidence_subregions = any(
             (
                 _normalize_balloon_subregions(text.get("balloon_subregions", []))
@@ -3543,8 +6585,58 @@ def _category_font_bounds(text_data: dict) -> tuple[int, int]:
 def _resolve_english_anchor_bbox(text_data: dict) -> list[int] | None:
     # Prefer per-line OCR polygons: they describe where the original ink was,
     # while merged text/source boxes can include balloon edges or adjacent noise.
+    source_text_mask_bbox = _layout_bbox(
+        text_data.get("source_text_anchor_bbox")
+        or text_data.get("_source_text_anchor_bbox")
+        or text_data.get("source_text_mask_bbox")
+        or text_data.get("_source_text_mask_bbox")
+    )
     polygon_bbox = _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or []))
     pixel_bbox = _layout_bbox(text_data.get("text_pixel_bbox"))
+    flags = {str(flag).strip().lower() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if _should_enforce_original_text_scale_contract(text_data):
+        if source_text_mask_bbox:
+            return source_text_mask_bbox
+        if polygon_bbox:
+            return polygon_bbox
+        if pixel_bbox:
+            return pixel_bbox
+    dark_lobe_context = bool(
+        source == "image_dark_bubble_mask"
+        and (
+            text_data.get("_is_lobe_subregion")
+            or text_data.get("_connected_source_bbox")
+            or "dark_bubble_connected_lobe_passthrough" in flags
+            or "partial_dark_bubble_lobe_reocr" in flags
+        )
+    )
+    if dark_lobe_context:
+        metric_anchor_bbox = _dark_connected_text_anchor_bbox_from_metrics(text_data)
+        if metric_anchor_bbox:
+            return metric_anchor_bbox
+        if source_text_mask_bbox:
+            return source_text_mask_bbox
+        local_bbox = _dark_fragment_lobe_anchor_bbox(text_data)
+        target_bbox = _layout_bbox(text_data.get("target_bbox") or text_data.get("balloon_bbox") or text_data.get("layout_safe_bbox"))
+        if local_bbox and target_bbox:
+            local_area = max(1, _bbox_area_px(local_bbox))
+            local_overlap = _bbox_intersection_area(local_bbox, target_bbox) / float(local_area)
+            pixel_area = max(1, _bbox_area_px(pixel_bbox)) if pixel_bbox else local_area
+            pixel_center_outside_target = False
+            if pixel_bbox:
+                pcx = (int(pixel_bbox[0]) + int(pixel_bbox[2])) / 2.0
+                pcy = (int(pixel_bbox[1]) + int(pixel_bbox[3])) / 2.0
+                pixel_center_outside_target = not (
+                    int(target_bbox[0]) <= pcx <= int(target_bbox[2])
+                    and int(target_bbox[1]) <= pcy <= int(target_bbox[3])
+                )
+            if local_overlap >= 0.50 and (
+                pixel_bbox is None
+                or local_area <= int(pixel_area * 0.70)
+                or pixel_center_outside_target
+            ):
+                return local_bbox
     if polygon_bbox:
         if pixel_bbox:
             poly_w = max(1, polygon_bbox[2] - polygon_bbox[0])
@@ -3566,6 +6658,8 @@ def _resolve_english_anchor_bbox(text_data: dict) -> list[int] | None:
 
 
 def _should_center_on_balloon_bbox(text_data: dict) -> bool:
+    if text_data.get("_uied_preserve_anchor_position"):
+        return False
     if text_data.get("_single_lobe_follow_anchor"):
         return False
     if text_data.get("_is_lobe_subregion"):
@@ -3608,6 +6702,59 @@ def _layout_bbox(value) -> list[int] | None:
     return [x1, y1, x2, y2]
 
 
+def _inset_bbox_for_text(bbox: list[int], ratio: float = 0.10, min_px: int = 8) -> list[int]:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    pad_x = min(width // 3, max(min_px, int(round(width * ratio))))
+    pad_y = min(height // 3, max(min_px, int(round(height * ratio))))
+    safe = [x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y]
+    if safe[2] <= safe[0] or safe[3] <= safe[1]:
+        return [x1, y1, x2, y2]
+    return safe
+
+
+def plan_fallback_render_box(layer: dict) -> dict:
+    """Ensure a review-required layer still has a visible render anchor."""
+
+    planned = dict(layer or {})
+    flags = list(planned.get("qa_flags") or [])
+    if _layout_bbox(planned.get("safe_text_box")) and _layout_bbox(planned.get("render_bbox")):
+        return planned
+    synthetic_bubble = _is_synthetic_tight_bubble_bbox_for_layout(planned)
+    balloon = _layout_bbox(planned.get("balloon_bbox"))
+    if balloon and _is_synthetic_tight_bubble_bbox_for_layout(planned, balloon):
+        balloon = None
+    anchor = (
+        _layout_bbox(planned.get("safe_text_box"))
+        or (None if synthetic_bubble else _layout_bbox(planned.get("bubble_inner_bbox")))
+        or _layout_bbox(planned.get("_bubble_inner_bbox_unclamped"))
+        or (None if synthetic_bubble else _layout_bbox(planned.get("bubble_mask_bbox")))
+        or _layout_bbox(planned.get("_bubble_mask_bbox_unclamped"))
+        or balloon
+        or _layout_bbox(planned.get("source_bbox"))
+        or _layout_bbox(planned.get("bbox"))
+    )
+    if not anchor:
+        return planned
+    safe = _layout_bbox(planned.get("safe_text_box")) or _inset_bbox_for_text(anchor)
+    planned["safe_text_box"] = safe
+    planned["_debug_safe_text_box"] = list(safe)
+    if _layout_bbox(planned.get("target_bbox")) is None:
+        planned["target_bbox"] = list(anchor)
+    if _layout_bbox(planned.get("position_bbox")) is None:
+        planned["position_bbox"] = list(safe)
+    if _layout_bbox(planned.get("capacity_bbox")) is None:
+        planned["capacity_bbox"] = list(safe)
+    if _layout_bbox(planned.get("render_bbox")) is None:
+        planned["render_bbox"] = list(safe)
+    if "rendered_with_review_fallback" not in flags:
+        flags.append("rendered_with_review_fallback")
+    planned["qa_flags"] = flags
+    planned["layout_safe_reason"] = planned.get("layout_safe_reason") or "review_fallback_anchor"
+    return planned
+
+
 def _is_manual_layout_origin(text_data: dict) -> bool:
     style_origin = str(text_data.get("style_origin") or "").strip().lower()
     return style_origin in {"editor", "manual", "user", "custom"}
@@ -3626,15 +6773,24 @@ def _median_int(values: list[int]) -> int | None:
 def _polygon_height(poly) -> int | None:
     if not isinstance(poly, (list, tuple)) or len(poly) < 2:
         return None
-    ys: list[int] = []
+    points: list[tuple[float, float]] = []
     for point in poly:
         if isinstance(point, (list, tuple)) and len(point) >= 2:
             try:
-                ys.append(int(round(float(point[1]))))
+                points.append((float(point[0]), float(point[1])))
             except Exception:
                 continue
-    if not ys:
+    if not points:
         return None
+    if len(points) >= 3:
+        try:
+            _center, (rect_w, rect_h), _angle = cv2.minAreaRect(np.asarray(points, dtype=np.float32))
+            short_side = min(float(rect_w), float(rect_h))
+            if short_side > 0.0:
+                return max(1, int(round(short_side)))
+        except Exception:
+            pass
+    ys = [int(round(point[1])) for point in points]
     height = max(ys) - min(ys)
     return height if height > 0 else None
 
@@ -3662,15 +6818,8 @@ def _estimate_original_font_size_px(text_data: dict) -> int | None:
     if explicit_size > 0:
         return max(_MIN_FONT_SIZE, min(96, explicit_size))
 
-    polygon_heights = [
-        height
-        for height in (_polygon_height(poly) for poly in (text_data.get("line_polygons") or []))
-        if height is not None
-    ]
-    median_height = _median_int(polygon_heights)
-    if median_height is not None:
-        return max(_MIN_FONT_SIZE, min(96, int(round(median_height * 1.05))))
-
+    estimates: list[int] = []
+    bbox_line_estimate: int | None = None
     text_bbox = _layout_bbox(text_data.get("text_pixel_bbox"))
     if text_bbox:
         x1, y1, x2, y2 = text_bbox
@@ -3678,7 +6827,22 @@ def _estimate_original_font_size_px(text_data: dict) -> int | None:
         bbox_w = max(1, x2 - x1)
         source = str(text_data.get("text") or text_data.get("original") or "")
         line_count = max(1, _estimate_source_line_count(source, bbox_h, bbox_w))
-        return max(_MIN_FONT_SIZE, min(96, int(round((bbox_h / float(line_count)) * 0.95))))
+        bbox_line_estimate = max(_MIN_FONT_SIZE, min(96, int(round((bbox_h / float(line_count)) * 0.95))))
+        estimates.append(bbox_line_estimate)
+
+    polygon_heights = [
+        height
+        for height in (_polygon_height(poly) for poly in (text_data.get("line_polygons") or []))
+        if height is not None
+    ]
+    median_height = _median_int(polygon_heights)
+    if median_height is not None:
+        polygon_estimate = max(_MIN_FONT_SIZE, min(96, int(round(median_height * 1.05))))
+        if bbox_line_estimate is None or polygon_estimate <= int(round(bbox_line_estimate * 1.8)):
+            estimates.append(polygon_estimate)
+
+    if estimates:
+        return max(estimates)
 
     return None
 
@@ -3712,6 +6876,60 @@ def _anchor_too_tiny_for_long_translation(
     return False
 
 
+def _is_translator_note_layer(text_data: dict) -> bool:
+    flags = _qa_flags_set(text_data)
+    if "translator_note_text_only_mask" in flags or "translator_note_marker" in flags:
+        return True
+    text = str(
+        text_data.get("translated")
+        or text_data.get("traduzido")
+        or text_data.get("text")
+        or text_data.get("original")
+        or text_data.get("source_text")
+        or ""
+    ).strip().lower()
+    if text.startswith("t/n:") or text.startswith("tn:") or text.startswith("n/t:"):
+        return True
+    return str(text_data.get("bubble_mask_source") or "").strip().lower() == "translator_note_text_mask"
+
+
+def _translator_note_target_bbox(text_data: dict, target_bbox: list[int]) -> list[int] | None:
+    if not _is_translator_note_layer(text_data):
+        return None
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    anchor_is_too_small = _anchor_too_tiny_for_long_translation(text_data, anchor_bbox, target_bbox)
+    if not anchor_is_too_small and anchor_bbox is not None:
+        translated_len = _compact_translated_len(text_data)
+        anchor_area = _bbox_area_px(anchor_bbox)
+        target_area = _bbox_area_px(target_bbox)
+        anchor_is_too_small = bool(translated_len >= 64 and anchor_area <= int(target_area * 0.16))
+    if not anchor_is_too_small:
+        return None
+
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    if balloon_bbox is not None:
+        bx1, by1, bx2, by2 = [int(v) for v in balloon_bbox]
+        bw = max(1, bx2 - bx1)
+        bh = max(1, by2 - by1)
+        if bw >= 120 and bh >= 48:
+            return balloon_bbox
+
+    source_bbox = anchor_bbox or _layout_bbox(text_data.get("source_bbox") or text_data.get("bbox"))
+    if source_bbox is None:
+        return None
+    sx1, sy1, sx2, sy2 = [int(v) for v in source_bbox]
+    page_w, page_h = _page_dimensions_for_layout(text_data, target_bbox)
+    width = max(180, min(360, int((sx2 - sx1) * 4.5)))
+    height = max(72, min(180, int((sy2 - sy1) * 2.8)))
+    cx = (sx1 + sx2) / 2.0
+    cy = (sy1 + sy2) / 2.0
+    x1, x2 = _center_span_within_bounds(cx, width, 0, page_w)
+    y1, y2 = _center_span_within_bounds(cy, height, 0, page_h)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
 def _should_ignore_tiny_anchor_safe_area(
     text_data: dict,
     anchor_bbox: list[int] | None,
@@ -3736,6 +6954,10 @@ def _should_ignore_tiny_anchor_safe_area(
 
 
 def _should_follow_original_ocr_size(text_data: dict) -> bool:
+    if _is_translator_note_layer(text_data):
+        return False
+    if _dark_bubble_visual_capacity_should_decide_size(text_data):
+        return False
     if text_data.get("_is_lobe_subregion"):
         return bool(
             str(text_data.get("connected_balloon_orientation", "") or "").strip()
@@ -3745,9 +6967,26 @@ def _should_follow_original_ocr_size(text_data: dict) -> bool:
         return False
     target_bbox = _layout_bbox(text_data.get("balloon_bbox") or text_data.get("layout_bbox") or text_data.get("bbox"))
     anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if _bubble_mask_is_text_shaped_inside_larger_balloon(text_data, balloon_bbox=target_bbox):
+        return False
     if _anchor_too_tiny_for_long_translation(text_data, anchor_bbox, target_bbox):
         return False
     style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    flags = _qa_flags_set(text_data)
+    if (
+        source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}
+        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+        or flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            "dark_panel_full_bbox_selected",
+            "dark_panel_rect_from_dark_bubble_bbox",
+        }
+    ):
+        return True
     return style_origin in {"", "auto", "legacy_auto", "ocr"}
 
 
@@ -3772,10 +7011,228 @@ def _bbox_area_px(bbox: list[int]) -> int:
     return max(1, (int(bbox[2]) - int(bbox[0])) * (int(bbox[3]) - int(bbox[1])))
 
 
+def _bubble_inner_bbox_valid_for_bubble_mask(text_data: dict, bubble_bbox: list[int]) -> bool:
+    inner_bbox = _layout_bbox(text_data.get("bubble_inner_bbox"))
+    if inner_bbox is None:
+        return True
+    if inner_bbox == [0, 0, 32, 32]:
+        return False
+    inner_area = _bbox_area_px(inner_bbox)
+    bubble_area = _bbox_area_px(bubble_bbox)
+    if inner_area < max(64, int(bubble_area * 0.08)):
+        return False
+    if _bbox_intersection_area(bubble_bbox, inner_bbox) < int(inner_area * 0.85):
+        return False
+    return True
+
+
+_NON_REAL_BUBBLE_MASK_SOURCES = {
+    "bbox_fallback",
+    "derived_rectangular_balloon",
+    "derived_white_crop",
+    "derived_white_crop_rejected",
+    "rejected_derived_bubble_mask",
+    "image_white_region",
+}
+
+
+def _bubble_mask_source_is_non_real(text_data: dict) -> bool:
+    return str(text_data.get("bubble_mask_source") or "").strip().lower() in _NON_REAL_BUBBLE_MASK_SOURCES
+
+
+def _select_edge_clipped_real_bubble_mask_target_bbox(
+    text_data: dict,
+    balloon_bbox: list[int] | None,
+) -> list[int] | None:
+    if _bubble_mask_source_is_non_real(text_data):
+        return None
+    bubble_bbox = _layout_bbox(text_data.get("bubble_mask_bbox"))
+    bubble_inner_bbox = _layout_bbox(text_data.get("bubble_inner_bbox"))
+    if bubble_bbox is None:
+        return None
+    anchor_bbox = _layout_bbox(text_data.get("source_bbox")) or _layout_bbox(text_data.get("bbox"))
+    if anchor_bbox is None:
+        return None
+    bx1, by1, bx2, by2 = [int(v) for v in bubble_bbox]
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    bubble_w = max(1, bx2 - bx1)
+    bubble_h = max(1, by2 - by1)
+    anchor_h = max(1, ay2 - ay1)
+    if _bbox_intersection_area(bubble_bbox, [ax1, max(by1, ay1), ax2, min(by2, ay2)]) <= 0:
+        return None
+    # The top/bottom page crop can leave balloon_bbox as only a thin arc while
+    # the image-derived bubble mask still covers the visible body.
+    anchor_clipped_to_page = ay1 < by1 or ay2 > by2
+    if not anchor_clipped_to_page and not text_data.get("_final_edge_clipped_bubble_safe_box"):
+        return None
+    if balloon_bbox is not None:
+        balloon_h = max(1, int(balloon_bbox[3]) - int(balloon_bbox[1]))
+        balloon_w = max(1, int(balloon_bbox[2]) - int(balloon_bbox[0]))
+        if bubble_h < max(70, int(balloon_h * 1.75)) and bubble_w < int(balloon_w * 1.25):
+            return None
+    elif bubble_h < max(70, int(anchor_h * 0.75)):
+        return None
+    if bubble_w < 140 or bubble_h < 60:
+        return None
+    if bubble_inner_bbox is not None:
+        inner_area = _bbox_area_px(bubble_inner_bbox)
+        if (
+            inner_area >= max(256, int(_bbox_area_px(bubble_bbox) * 0.08))
+            and _bbox_intersection_area(bubble_bbox, bubble_inner_bbox) > 0
+        ):
+            return _bbox_union_many_for_layout([bubble_bbox, bubble_inner_bbox]) or bubble_bbox
+    return bubble_bbox
+
+
+def _edge_clipped_unclamped_bubble_safe_area(
+    text_data: dict,
+    target_bbox: list[int],
+) -> dict | None:
+    if _bubble_mask_source_is_non_real(text_data):
+        return None
+    inner = _layout_bbox(text_data.get("bubble_inner_bbox"))
+    inner_unclamped = _layout_bbox(text_data.get("_bubble_inner_bbox_unclamped"))
+    if inner is None or inner_unclamped is None:
+        return None
+    ix1, iy1, ix2, iy2 = [int(v) for v in inner]
+    ux1, uy1, ux2, uy2 = [int(v) for v in inner_unclamped]
+    extends_top = uy1 < iy1 - 3
+    extends_bottom = uy2 > iy2 + 3
+    if not extends_top and not extends_bottom:
+        return None
+    if _bbox_intersection_area(inner, target_bbox) <= 0:
+        return None
+    if ux2 <= ux1 or uy2 <= uy1:
+        return None
+    existing_safe_unclamped = _layout_bbox(text_data.get("_safe_text_box_unclamped"))
+    existing_safe_clamped = _layout_bbox(text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+    safe_unclamped = existing_safe_unclamped or _inset_bbox_for_text(inner_unclamped, ratio=0.14, min_px=8)
+    sx1, sy1, sx2, sy2 = [int(v) for v in safe_unclamped]
+    if existing_safe_clamped is not None and _bbox_intersection_area(existing_safe_clamped, inner) > 0:
+        safe_clamped = existing_safe_clamped
+    else:
+        if extends_top:
+            sy1 = max(iy1, sy1)
+        if extends_bottom:
+            sy2 = min(iy2, sy2)
+        sx1 = max(ix1, sx1)
+        sx2 = min(ix2, sx2)
+        safe_clamped = [sx1, sy1, sx2, sy2]
+    if _layout_bbox(safe_clamped) is None:
+        safe_clamped = _inset_bbox_for_text(inner, ratio=0.06, min_px=2)
+    if _layout_bbox(safe_clamped) is None:
+        return None
+    return {
+        "safe_bbox": safe_clamped,
+        "safe_unclamped": safe_unclamped,
+        "reason": "debug_derived_bubble_mask_unclamped",
+    }
+
+
+def _geometry_bboxes_for_layout(text_data: dict) -> list[list[int]]:
+    candidates = [
+        _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
+        _layout_bbox(text_data.get("text_pixel_bbox")),
+        _layout_bbox(text_data.get("layout_bbox")),
+        _layout_bbox(text_data.get("source_bbox")),
+        _layout_bbox(text_data.get("bbox")),
+    ]
+    return [bbox for bbox in candidates if bbox is not None]
+
+
+def _layout_dark_or_colored_context(text_data: dict) -> bool:
+    rgb = text_data.get("background_rgb")
+    if isinstance(rgb, (list, tuple)) and len(rgb) >= 3:
+        try:
+            r, g, b = [float(v) for v in rgb[:3]]
+            luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            chroma = max(r, g, b) - min(r, g, b)
+            if luma < 135.0 or chroma > 48.0:
+                return True
+        except Exception:
+            pass
+    profiles = {
+        str(text_data.get("layout_profile") or "").strip().lower(),
+        str(text_data.get("block_profile") or "").strip().lower(),
+        str(text_data.get("render_profile") or "").strip().lower(),
+    }
+    return bool(profiles & {"dark_panel", "colored_status_panel", "status_panel", "card", "title_card"})
+
+
+def _is_synthetic_tight_bubble_bbox_for_layout(text_data: dict, bubble_bbox: list[int] | None = None) -> bool:
+    if not _layout_dark_or_colored_context(text_data):
+        return False
+    if text_data.get("balloon_polygon") or text_data.get("connected_lobe_polygons"):
+        return False
+    if str(text_data.get("bubble_id") or text_data.get("bubbleId") or "").strip():
+        return False
+    bubble = _layout_bbox(bubble_bbox) or _layout_bbox(text_data.get("bubble_mask_bbox")) or _layout_bbox(text_data.get("balloon_bbox"))
+    if bubble is None:
+        return False
+    bubble_area = _bbox_area_px(bubble)
+    for geometry in _geometry_bboxes_for_layout(text_data):
+        geometry_area = _bbox_area_px(geometry)
+        overlap = _bbox_intersection_area(bubble, geometry)
+        if overlap <= 0:
+            continue
+        if _bbox_iou(bubble, geometry) >= 0.72:
+            return True
+        if bubble_area <= max(512, int(geometry_area * 0.45)) and overlap >= int(bubble_area * 0.70):
+            return True
+    return False
+
+
+def _bubble_mask_is_text_shaped_inside_larger_balloon(
+    text_data: dict,
+    bubble_bbox: list[int] | None = None,
+    balloon_bbox: list[int] | None = None,
+) -> bool:
+    bubble = _layout_bbox(bubble_bbox) or _layout_bbox(text_data.get("bubble_mask_bbox"))
+    balloon = _layout_bbox(balloon_bbox) or _layout_bbox(text_data.get("balloon_bbox"))
+    if bubble is None or balloon is None:
+        return False
+    bubble_area = _bbox_area_px(bubble)
+    balloon_area = _bbox_area_px(balloon)
+    if bubble_area <= 0 or balloon_area <= 0:
+        return False
+    if balloon_area < max(int(bubble_area * 1.80), bubble_area + 4800):
+        return False
+    if balloon_area > max(int(bubble_area * 8.0), bubble_area + 95000):
+        return False
+    if _bbox_intersection_area(bubble, balloon) < int(bubble_area * 0.78):
+        return False
+
+    geometry = _bbox_union_many_for_layout(_geometry_bboxes_for_layout(text_data))
+    if geometry is None:
+        return False
+    geometry_area = _bbox_area_px(geometry)
+    if geometry_area <= 0:
+        return False
+    if _bbox_intersection_area(bubble, geometry) < int(geometry_area * 0.62):
+        return False
+    if bubble_area > max(int(geometry_area * 1.65), geometry_area + 2600):
+        return False
+    return True
+
+
+def _flag_non_real_bubble_mask_source(text_data: dict) -> None:
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if source == "bbox_fallback":
+        _merge_qa_flags(text_data, ["bbox_fallback_bubble_mask"])
+    elif source in {"derived_rectangular_balloon", "derived_white_crop", "derived_white_crop_rejected"}:
+        _merge_qa_flags(text_data, ["rejected_derived_bubble_mask"])
+
+
 def _has_distinct_real_bubble_mask_bbox(text_data: dict, target_bbox: list[int] | None = None) -> bool:
+    if _bubble_mask_source_is_non_real(text_data):
+        return False
     bubble_bbox = _layout_bbox(text_data.get("bubble_mask_bbox"))
     parent_bbox = _layout_bbox(target_bbox) or _layout_bbox(text_data.get("balloon_bbox"))
     if bubble_bbox is None or parent_bbox is None:
+        return False
+    if _is_synthetic_tight_bubble_bbox_for_layout(text_data, bubble_bbox):
+        return False
+    if _bubble_mask_is_text_shaped_inside_larger_balloon(text_data, bubble_bbox, parent_bbox):
         return False
     if not str(text_data.get("bubble_id") or "").strip():
         return False
@@ -3785,6 +7242,8 @@ def _has_distinct_real_bubble_mask_bbox(text_data: dict, target_bbox: list[int] 
     if _bbox_intersection_area(parent_bbox, bubble_bbox) < int(bubble_area * 0.85):
         return False
     if bubble_area >= int(parent_area * 0.72) or _bbox_iou(bubble_bbox, parent_bbox) >= 0.82:
+        return False
+    if not _bubble_inner_bbox_valid_for_bubble_mask(text_data, bubble_bbox):
         return False
 
     geometry_candidates = [
@@ -3800,6 +7259,55 @@ def _has_distinct_real_bubble_mask_bbox(text_data: dict, target_bbox: list[int] 
         _bbox_intersection_area(bubble_bbox, bbox) >= int(_bbox_area_px(bbox) * 0.70)
         for bbox in geometry_candidates
     )
+
+
+def _dark_panel_bubble_bbox_overbroad_against_anchor(text_data: dict, bubble_bbox: list[int] | None) -> bool:
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_panel_mask" or bubble_bbox is None:
+        return False
+    reference_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    anchor_candidates = [
+        _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
+        _layout_bbox(text_data.get("text_pixel_bbox")),
+        _layout_bbox(text_data.get("source_bbox")),
+        _layout_bbox(text_data.get("layout_bbox")),
+        _layout_bbox(text_data.get("bbox")),
+    ]
+    anchor_candidates = [bbox for bbox in anchor_candidates if bbox is not None]
+    anchor_bbox = _bbox_union_many_for_layout(anchor_candidates)
+    if reference_bbox is None or anchor_bbox is None:
+        return False
+    bubble_area = max(1, _bbox_area_px(bubble_bbox))
+    ref_area = max(1, _bbox_area_px(reference_bbox))
+    anchor_area = max(1, _bbox_area_px(anchor_bbox))
+    if _bbox_intersection_area(bubble_bbox, reference_bbox) < int(ref_area * 0.80):
+        return False
+    if _bbox_intersection_area(bubble_bbox, anchor_bbox) < int(anchor_area * 0.90):
+        return False
+    bw = max(1, int(bubble_bbox[2]) - int(bubble_bbox[0]))
+    rw = max(1, int(reference_bbox[2]) - int(reference_bbox[0]))
+    aw = max(1, int(anchor_bbox[2]) - int(anchor_bbox[0]))
+    area_vs_ref = bubble_area / float(ref_area)
+    area_vs_anchor = bubble_area / float(anchor_area)
+    width_vs_ref = bw / float(rw)
+    width_vs_anchor = bw / float(aw)
+    side_overflow = max(
+        0,
+        int(reference_bbox[0]) - int(bubble_bbox[0]),
+        int(reference_bbox[1]) - int(bubble_bbox[1]),
+        int(bubble_bbox[2]) - int(reference_bbox[2]),
+        int(bubble_bbox[3]) - int(reference_bbox[3]),
+    )
+    if (
+        area_vs_ref >= 4.2
+        or (area_vs_ref >= 3.2 and width_vs_ref >= 2.35)
+        or (area_vs_anchor >= 9.0 and width_vs_anchor >= 3.2)
+    ) and side_overflow >= max(48, int(round(max(rw, reference_bbox[3] - reference_bbox[1]) * 0.20))):
+        text_data["_dark_panel_bubble_bbox_rejected"] = "overbroad_against_balloon_bbox"
+        text_data["_dark_panel_bubble_bbox_rejected_bbox"] = list(bubble_bbox)
+        _merge_qa_flags(text_data, ["dark_panel_mask_overbroad_rejected", "safe_text_box_recomputed"])
+        return True
+    return False
 
 
 def _visual_outer_clips_source_geometry(text_data: dict, visual_outer_bbox: list[int]) -> bool:
@@ -4369,9 +7877,57 @@ def _minimum_text_fits_preplan_capacity(text_data: dict, bbox: list[int]) -> boo
 
 def _safe_area_reason_can_underfit(reason: str) -> bool:
     reason = str(reason or "").strip().lower()
-    if reason in {"visual_rect_inner", "bubble_inner_bbox", "balloon_inner_bbox"}:
+    if reason in {
+        "visual_rect_inner",
+        "bubble_inner_bbox",
+        "balloon_inner_bbox",
+        "debug_derived_bubble_mask_bbox",
+        "debug_derived_bubble_mask_unclamped",
+    }:
         return True
     return reason.startswith("single_lobe_white_run") or reason.startswith("bright_inner_run")
+
+
+def _dark_panel_full_bbox_inner_safe_area(text_data: dict, target_bbox: list[int] | tuple[int, ...]) -> list[int] | None:
+    qa_flags = _qa_flags_set(text_data)
+    if "dark_panel_full_bbox_selected" not in qa_flags:
+        return None
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if source != "image_dark_panel_mask" and "dark_panel_rect_from_dark_bubble_bbox" not in qa_flags:
+        return None
+    inner_bbox = _dark_panel_inner_bbox_in_target_space(text_data, target_bbox)
+    if inner_bbox is None:
+        return None
+    target = _layout_bbox(target_bbox)
+    if target is None:
+        return None
+    target_w = max(1, int(target[2]) - int(target[0]))
+    target_h = max(1, int(target[3]) - int(target[1]))
+    target_area = max(1, _bbox_area_px(target))
+    inner_w = max(1, int(inner_bbox[2]) - int(inner_bbox[0]))
+    inner_h = max(1, int(inner_bbox[3]) - int(inner_bbox[1]))
+    inner_area = max(1, _bbox_area_px(inner_bbox))
+    if (
+        inner_w < int(target_w * 0.70)
+        or inner_h < int(target_h * 0.58)
+        or inner_area < int(target_area * 0.42)
+    ):
+        text_data["_dark_panel_full_bbox_inner_safe_bbox_rejected"] = list(inner_bbox)
+        if isinstance(text_data.get("qa_flags"), list):
+            text_data["qa_flags"] = [
+                flag
+                for flag in text_data.get("qa_flags") or []
+                if str(flag) != "dark_panel_full_bbox_safe_clamped_to_inner"
+            ]
+        _merge_qa_flags(text_data, ["dark_panel_full_bbox_inner_safe_rejected", "safe_text_box_recomputed"])
+        return None
+    safe_bbox = _bbox_intersection(inner_bbox, target)
+    if _layout_bbox(safe_bbox) is None:
+        return None
+    text_data["_dark_panel_full_bbox_safe_clamped_to_inner"] = True
+    text_data["_dark_panel_full_bbox_inner_safe_bbox"] = list(safe_bbox)
+    _merge_qa_flags(text_data, ["dark_panel_full_bbox_safe_clamped_to_inner", "safe_text_box_recomputed"])
+    return [int(v) for v in safe_bbox]
 
 
 def _page_dimensions_for_layout(text_data: dict, target_bbox: list[int]) -> tuple[int, int]:
@@ -4419,15 +7975,54 @@ def _resolve_balloon_safe_area(text_data: dict, target_bbox: list[int]) -> dict 
     return {**safe, "safe_bbox": safe_bbox}
 
 
+def _real_bubble_body_bbox_safe_area(text_data: dict, target_bbox: list[int]) -> dict | None:
+    if str(text_data.get("_render_target_source") or "").strip() not in {
+        "real_bubble_mask_bbox",
+        "real_bubble_mask_bbox_distinct",
+        "real_bubble_mask_bbox_overmerged_guard",
+    }:
+        return None
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    if balloon_bbox is None:
+        return None
+    target_area = _bbox_area_px(target_bbox)
+    balloon_area = _bbox_area_px(balloon_bbox)
+    if target_area <= 0 or balloon_area <= 0:
+        return None
+    if _bbox_intersection_area(target_bbox, balloon_bbox) < int(balloon_area * 0.88):
+        return None
+    target_w = max(1, int(target_bbox[2]) - int(target_bbox[0]))
+    target_h = max(1, int(target_bbox[3]) - int(target_bbox[1]))
+    balloon_w = max(1, int(balloon_bbox[2]) - int(balloon_bbox[0]))
+    balloon_h = max(1, int(balloon_bbox[3]) - int(balloon_bbox[1]))
+    if target_area < int(balloon_area * 1.18) and target_w - balloon_w < 80 and target_h - balloon_h < 48:
+        return None
+    inset_x = max(12, int(round(balloon_w * 0.10)))
+    inset_y = max(10, int(round(balloon_h * 0.15)))
+    safe_bbox = [
+        int(balloon_bbox[0]) + inset_x,
+        int(balloon_bbox[1]) + inset_y,
+        int(balloon_bbox[2]) - inset_x,
+        int(balloon_bbox[3]) - inset_y,
+    ]
+    if safe_bbox[2] <= safe_bbox[0] or safe_bbox[3] <= safe_bbox[1]:
+        return None
+    if _should_reject_underfit_safe_area(text_data, target_bbox, safe_bbox):
+        return None
+    return {"safe_bbox": safe_bbox, "reason": "real_bubble_body_bbox"}
+
+
 def _should_reject_plain_balloon_visual_safe_area(
     text_data: dict,
     target_bbox: list[int],
     safe_bbox: list[int],
     reason: str,
 ) -> bool:
+    reason_text = str(reason or "")
     if not (
-        str(reason or "").startswith("single_lobe_white_run")
-        or str(reason or "").startswith("bright_inner_run")
+        reason_text.startswith("single_lobe_white_run")
+        or reason_text.startswith("bright_inner_run")
+        or reason_text == "visual_rect_inner"
     ):
         return False
     tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
@@ -4444,8 +8039,47 @@ def _should_reject_plain_balloon_visual_safe_area(
         return False
     if _normalize_balloon_subregions(text_data.get("balloon_subregions", [])):
         return False
+    bubble_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    bubble_inner = _layout_bbox(text_data.get("bubble_inner_bbox"))
+    if (
+        reason_text == "visual_rect_inner"
+        and bubble_inner is not None
+        and bubble_source in {"image_white_bubble_mask", "image_contour_bubble_mask", "real", "real_bubble_mask"}
+        and _bbox_intersection_area(target_bbox, bubble_inner) >= int(_bbox_area_px(bubble_inner) * 0.70)
+    ):
+        flags = _qa_flags_set(text_data)
+        rehomed_layout = bool(text_data.get("_cross_page_band_rehomed_geometry")) or "cross_page_band_rehomed" in flags
+        _page_width, page_height = _page_dimensions_for_layout(text_data, target_bbox)
+        target_bottom_near_page = ty2 >= page_height - 24
+        visual_leaks_above_inner = sy1 < int(bubble_inner[1]) - max(6, int(target_h * 0.025))
+        if rehomed_layout and target_bottom_near_page and visual_leaks_above_inner:
+            debug = text_data.setdefault("_render_debug", {})
+            rejected = debug.setdefault("rejected_safe_boxes", [])
+            if isinstance(rejected, list):
+                rejected.append(
+                    {
+                        "key": "_visual_rect_inner_bbox",
+                        "value": list(safe_bbox),
+                        "target_bbox": list(target_bbox),
+                        "bubble_inner_bbox": list(bubble_inner),
+                        "reason": "visual_rect_inner_leaks_above_rehomed_bubble_inner",
+                    }
+                )
+            _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+            return True
     if _detect_balloon_geometry(text_data) == "rect":
         return False
+
+    if (
+        reason_text == "visual_rect_inner"
+        and bubble_inner is not None
+        and bubble_source in {"image_white_bubble_mask", "image_contour_bubble_mask", "real", "real_bubble_mask"}
+        and _bbox_intersection_area(target_bbox, bubble_inner) >= int(_bbox_area_px(bubble_inner) * 0.70)
+    ):
+        inner_w = max(1, int(bubble_inner[2]) - int(bubble_inner[0]))
+        inner_h = max(1, int(bubble_inner[3]) - int(bubble_inner[1]))
+        if inner_w >= max(120, int(safe_w * 1.55)) and inner_h >= max(90, int(safe_h * 1.55)):
+            return True
 
     anchor_bbox = _resolve_english_anchor_bbox(text_data)
     if anchor_bbox:
@@ -4538,8 +8172,660 @@ def _should_follow_anchor_for_edge_clipped_short_text(
     return abs(anchor_cx - safe_cx) >= max(18.0, safe_w * 0.14)
 
 
+def _has_trusted_dark_visual_capacity(text_data: dict) -> bool:
+    if not isinstance(text_data, dict):
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    flags = _qa_flags_set(text_data)
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    background = text_data.get("background_rgb")
+    try:
+        bg = tuple(int(v) for v in background[:3]) if isinstance(background, (list, tuple)) else None
+    except Exception:
+        bg = None
+    if source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"} and (
+        text_data.get("bubble_inner_bbox")
+        or text_data.get("_visual_rect_inner_bbox")
+        or text_data.get("layout_safe_bbox")
+        or flags
+        & {
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            "dark_panel_full_bbox_selected",
+            "dark_panel_rect_from_dark_bubble_bbox",
+            "dark_bubble_negative_evidence",
+        }
+    ):
+        return True
+    if (
+        source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}
+        and flags
+        & {
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            "dark_panel_full_bbox_selected",
+            "dark_panel_rect_from_dark_bubble_bbox",
+            "dark_bubble_negative_evidence",
+        }
+    ):
+        background = text_data.get("background_rgb")
+        try:
+            bg = tuple(int(v) for v in background[:3]) if isinstance(background, (list, tuple)) else None
+        except Exception:
+            bg = None
+        return _dark_panel_luminance(bg) <= 110.0 if bg is not None else True
+    if source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}:
+        dark_profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+        if (
+            bg is not None
+            and _dark_panel_luminance(bg) <= 110.0
+            and (
+                style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+                or dark_profile in {"dark_bubble", "dark_panel", "connected_balloon"}
+            )
+        ):
+            return bool(text_data.get("balloon_bbox") or text_data.get("bubble_mask_bbox") or text_data.get("layout_safe_bbox"))
+    if flags & {"dark_bubble_visual_glyph_mask_replaced_geometry", "bbox_fallback_bubble_mask"} == {
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "bbox_fallback_bubble_mask",
+    }:
+        background = text_data.get("background_rgb")
+        try:
+            bg = tuple(int(v) for v in background[:3]) if isinstance(background, (list, tuple)) else None
+        except Exception:
+            bg = None
+        if bg is None or _dark_panel_luminance(bg) <= 110.0:
+            return bool(text_data.get("balloon_bbox") or text_data.get("bubble_mask_bbox") or text_data.get("layout_safe_bbox"))
+    return style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"} and bool(
+        text_data.get("bubble_inner_bbox") or text_data.get("_visual_rect_inner_bbox") or text_data.get("layout_safe_bbox")
+    )
+
+
+def _uses_trusted_dark_bubble_visual_policy(text_data: dict) -> bool:
+    if not isinstance(text_data, dict):
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    flags = _qa_flags_set(text_data)
+    if not flags & {
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_oval_reocr",
+    }:
+        return False
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if profile in {"white_balloon", "speech_balloon", "translator_note"}:
+        return False
+    background = _coerce_rgb_tuple(text_data.get("background_rgb"))
+    if background is not None and _dark_panel_luminance(background) > 140.0:
+        return False
+    anchor = _layout_bbox(text_data.get("source_bbox") or text_data.get("text_pixel_bbox") or text_data.get("bbox"))
+    visual = _layout_bbox(text_data.get("balloon_bbox") or text_data.get("bubble_mask_bbox") or text_data.get("target_bbox"))
+    if anchor is None or visual is None:
+        return False
+    return _bbox_intersection_area(anchor, visual) > 0
+
+
+def _dark_bubble_visual_capacity_should_decide_size(text_data: dict) -> bool:
+    if not isinstance(text_data, dict) or _is_translator_note_layer(text_data):
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    flags = _qa_flags_set(text_data)
+    if not flags & {
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "dark_bubble_connected_lobe_passthrough",
+    }:
+        return False
+    visual = _layout_bbox(text_data.get("layout_safe_bbox") or text_data.get("safe_text_box") or text_data.get("balloon_bbox") or text_data.get("bubble_mask_bbox"))
+    anchor = _layout_bbox(text_data.get("source_bbox") or text_data.get("bbox") or text_data.get("text_pixel_bbox"))
+    return visual is not None and anchor is not None and _bbox_intersection_area(visual, anchor) > 0
+
+
+def _is_dark_visual_white_mask_context(text_data: dict, source: str | None = None) -> bool:
+    if not isinstance(text_data, dict):
+        return False
+    source_norm = str(source or text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source_norm not in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}:
+        return False
+    bg = _coerce_rgb_tuple(text_data.get("background_rgb"))
+    if bg is None or _dark_panel_luminance(bg) > 110.0:
+        return False
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    dark_profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    return style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"} or dark_profile in {
+        "dark_bubble",
+        "dark_panel",
+        "connected_balloon",
+    }
+
+
+def _select_trusted_dark_visual_capacity_target(
+    text_data: dict,
+    target_bbox: list[int] | None,
+) -> list[int] | None:
+    if not target_bbox or not _has_trusted_dark_visual_capacity(text_data):
+        return None
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    dark_visual_white_by_context = _is_dark_visual_white_mask_context(text_data, source)
+    dark_visual_white_source_for_connected = dark_visual_white_by_context or (
+        source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}
+        and bool(
+            flags
+            & {
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "dark_panel_full_bbox_selected",
+                "dark_panel_rect_from_dark_bubble_bbox",
+                "dark_bubble_negative_evidence",
+            }
+        )
+    )
+    if (
+        text_data.get("_is_lobe_subregion")
+        or text_data.get("connected_lobe_bboxes")
+        or text_data.get("connected_position_bboxes")
+    ) and not dark_visual_white_source_for_connected:
+        return None
+    if "bbox_fallback_bubble_mask" in flags:
+        anchor_bbox = _resolve_english_anchor_bbox(text_data) or _layout_bbox(text_data.get("text_pixel_bbox")) or target_bbox
+        fallback_safe = _layout_bbox(text_data.get("safe_text_box"))
+        if anchor_bbox is not None and (
+            fallback_safe is None
+            or _bbox_area_px(fallback_safe) > int(_bbox_area_px(anchor_bbox) * 5.0)
+            or _bbox_intersection_area(fallback_safe, anchor_bbox) <= 0
+        ):
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+            anchor_w = max(1, ax2 - ax1)
+            anchor_h = max(1, ay2 - ay1)
+            pad_x = max(10, int(round(anchor_w * 0.06)))
+            pad_y = max(32, int(round(anchor_h * 1.20)))
+            fallback_safe = [ax1 - pad_x, ay1 - pad_y, ax2 + pad_x, ay2 + pad_y]
+        if fallback_safe is not None and anchor_bbox is not None and _bbox_intersection_area(fallback_safe, anchor_bbox) > 0:
+            text_data["_trusted_dark_visual_capacity_safe_bbox"] = list(fallback_safe)
+            text_data["layout_safe_bbox"] = list(fallback_safe)
+            text_data["layout_safe_reason"] = "trusted_dark_visual_capacity"
+            _merge_qa_flags(text_data, ["trusted_dark_visual_capacity_target", "safe_text_box_recomputed"])
+            return list(fallback_safe)
+    candidates = [
+        _layout_bbox(text_data.get("balloon_bbox")),
+        _layout_bbox(text_data.get("bubble_mask_bbox")),
+        _layout_bbox(text_data.get("bubble_inner_bbox")),
+    ]
+    candidates = [bbox for bbox in candidates if bbox is not None]
+    if not candidates:
+        return None
+    visual_bbox = _bbox_union_many_for_layout(candidates)
+    if visual_bbox is None:
+        return None
+    anchor_bbox = _resolve_english_anchor_bbox(text_data) or _layout_bbox(text_data.get("text_pixel_bbox")) or target_bbox
+    if anchor_bbox is not None and _bbox_intersection_area(visual_bbox, anchor_bbox) <= 0:
+        return None
+    target_area = _bbox_area_px(target_bbox)
+    visual_area = _bbox_area_px(visual_bbox)
+    target_w = max(1, int(target_bbox[2]) - int(target_bbox[0]))
+    target_h = max(1, int(target_bbox[3]) - int(target_bbox[1]))
+    visual_w = max(1, int(visual_bbox[2]) - int(visual_bbox[0]))
+    visual_h = max(1, int(visual_bbox[3]) - int(visual_bbox[1]))
+    meaningfully_larger = bool(
+        visual_area >= int(target_area * 1.18)
+        or visual_w >= int(target_w * 1.18)
+        or visual_h >= int(target_h * 1.18)
+    )
+    dark_visual_white_source = dark_visual_white_by_context or (
+        source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}
+        and bool(
+            flags
+            & {
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "dark_panel_full_bbox_selected",
+                "dark_panel_rect_from_dark_bubble_bbox",
+                "dark_bubble_negative_evidence",
+            }
+        )
+    )
+    if dark_visual_white_source:
+        preferred_candidates = [
+            _layout_bbox(text_data.get("balloon_bbox")),
+            _layout_bbox(text_data.get("bubble_mask_bbox")),
+        ]
+        preferred_candidates = [bbox for bbox in preferred_candidates if bbox is not None]
+        preferred_visual = _bbox_union_many_for_layout(preferred_candidates)
+        if preferred_visual is not None and (
+            anchor_bbox is None or _bbox_intersection_area(preferred_visual, anchor_bbox) > 0
+        ):
+            visual_bbox = preferred_visual
+            visual_area = _bbox_area_px(visual_bbox)
+            visual_w = max(1, int(visual_bbox[2]) - int(visual_bbox[0]))
+            visual_h = max(1, int(visual_bbox[3]) - int(visual_bbox[1]))
+            meaningfully_larger = bool(
+                visual_area >= int(target_area * 1.08)
+                or visual_w >= int(target_w * 1.08)
+                or visual_h >= int(target_h * 1.08)
+            )
+    inset_ratio = 0.055 if dark_visual_white_source or visual_w <= 260 or visual_h <= 170 else 0.075
+    inset_x = max(5, int(round(visual_w * inset_ratio)))
+    inset_y = max(4, int(round(visual_h * inset_ratio)))
+    safe_bbox = [
+        int(visual_bbox[0]) + inset_x,
+        int(visual_bbox[1]) + inset_y,
+        int(visual_bbox[2]) - inset_x,
+        int(visual_bbox[3]) - inset_y,
+    ]
+    if safe_bbox[2] > safe_bbox[0] and safe_bbox[3] > safe_bbox[1]:
+        text_data["_trusted_dark_visual_capacity_safe_bbox"] = safe_bbox
+        text_data["layout_safe_bbox"] = safe_bbox
+        text_data["layout_safe_reason"] = "trusted_dark_visual_capacity"
+    _merge_qa_flags(text_data, ["trusted_dark_visual_capacity_target", "safe_text_box_recomputed"])
+    if not meaningfully_larger:
+        return None
+    return list(visual_bbox)
+
+
+def _dark_oval_safe_height_factor(text_data: dict) -> float:
+    translated = str(
+        text_data.get("translated")
+        or text_data.get("traduzido")
+        or text_data.get("text")
+        or ""
+    )
+    compact_len = len(re.sub(r"\s+", "", translated))
+    if compact_len >= 68:
+        return 1.50
+    if compact_len >= 45:
+        return 1.35
+    return 1.20
+
+
+def _dark_oval_anchor_bbox(text_data: dict) -> list[int] | None:
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    dark_bubble_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    return _layout_bbox(
+        dark_bubble_metrics.get("anchor_bbox")
+        or text_data.get("text_pixel_bbox")
+        or text_data.get("source_bbox")
+        or text_data.get("bbox")
+    )
+
+
+def _should_constrain_dark_oval_safe_to_anchor(
+    text_data: dict,
+    target_bbox: list[int],
+    layout_safe_bbox: list[int],
+    anchor_bbox: list[int] | None,
+) -> bool:
+    if not anchor_bbox:
+        return False
+    flags = _qa_flags_set(text_data)
+    if "partial_dark_bubble_lobe_reocr" in flags or "detected_dark_bubble_without_text_reocr" in flags:
+        return True
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    sx1, sy1, sx2, sy2 = [int(v) for v in layout_safe_bbox]
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    target_cx = (tx1 + tx2) / 2.0
+    target_cy = (ty1 + ty2) / 2.0
+    anchor_cx = (ax1 + ax2) / 2.0
+    anchor_cy = (ay1 + ay2) / 2.0
+    if abs(anchor_cx - target_cx) >= max(34.0, target_w * 0.10):
+        return True
+    if abs(anchor_cy - target_cy) >= max(28.0, target_h * 0.13):
+        return True
+    return sy1 <= ty1 + 2 or sy2 >= ty2 - 2
+
+
+def _constrain_dark_oval_safe_to_anchor_chord(
+    text_data: dict,
+    target_bbox: list[int],
+    original_safe_bbox: list[int],
+    expanded_safe_bbox: list[int],
+) -> list[int]:
+    anchor_bbox = _dark_oval_anchor_bbox(text_data)
+    if not _should_constrain_dark_oval_safe_to_anchor(text_data, target_bbox, original_safe_bbox, anchor_bbox):
+        return expanded_safe_bbox
+    assert anchor_bbox is not None
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    sx1, sy1, sx2, sy2 = [int(v) for v in original_safe_bbox]
+    ex1, ey1, ex2, ey2 = [int(v) for v in expanded_safe_bbox]
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    safe_w = max(1, sx2 - sx1)
+    safe_h = max(1, sy2 - sy1)
+    anchor_w = max(1, ax2 - ax1)
+    anchor_h = max(1, ay2 - ay1)
+    compact_len = len(
+        re.sub(
+            r"\s+",
+            "",
+            str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+        )
+    )
+    height_cap_factor = 1.58 if compact_len >= 68 else 1.48
+    desired_h = max(safe_h, ey2 - ey1)
+    desired_h = min(desired_h, int(round(anchor_h * height_cap_factor)), int(round(target_h * 0.74)))
+    desired_h = max(anchor_h + 18, desired_h)
+    desired_h = min(desired_h, target_h)
+
+    center_y = (ay1 + ay2) / 2.0
+    new_y1 = int(round(center_y - desired_h / 2.0))
+    new_y2 = int(round(center_y + desired_h / 2.0))
+    if new_y1 < ty1:
+        new_y2 += ty1 - new_y1
+        new_y1 = ty1
+    if new_y2 > ty2:
+        new_y1 -= new_y2 - ty2
+        new_y2 = ty2
+    new_y1 = max(ty1, new_y1)
+    new_y2 = min(ty2, new_y2)
+
+    cx = (tx1 + tx2) / 2.0
+    cy = (ty1 + ty2) / 2.0
+    rx = max(1.0, target_w / 2.0)
+    ry = max(1.0, target_h / 2.0)
+    max_dy = max(abs(new_y1 - cy), abs(new_y2 - cy))
+    chord_ratio = max(0.0, 1.0 - (max_dy / ry) ** 2)
+    chord_half = rx * math.sqrt(chord_ratio)
+    chord_x1 = int(round(cx - chord_half))
+    chord_x2 = int(round(cx + chord_half))
+    chord_x1 = max(tx1, chord_x1)
+    chord_x2 = min(tx2, chord_x2)
+    chord_w = max(1, chord_x2 - chord_x1)
+    max_w = int(round(chord_w * 0.80))
+    min_w = min(safe_w, max(anchor_w + 36, int(round(anchor_w * 1.14))))
+    desired_w = min(safe_w, max_w)
+    if desired_w < min_w and chord_w >= min_w:
+        desired_w = min_w
+    desired_w = max(1, min(desired_w, chord_w))
+
+    anchor_cx = (ax1 + ax2) / 2.0
+    center_tolerance = max(10.0, target_w * 0.03)
+    center_x = anchor_cx + max(-center_tolerance, min(center_tolerance, cx - anchor_cx))
+    text_data["_dark_oval_safe_anchor_center_tolerance"] = center_tolerance
+    new_x1, new_x2 = _center_span_within_bounds(center_x, desired_w, chord_x1, chord_x2)
+    constrained = [int(new_x1), int(new_y1), int(new_x2), int(new_y2)]
+    if constrained != [ex1, ey1, ex2, ey2]:
+        text_data["_dark_oval_safe_anchor_constrained_from"] = [ex1, ey1, ex2, ey2]
+        _merge_qa_flags(text_data, ["dark_oval_safe_anchor_chord_constrained", "safe_text_box_recomputed"])
+    return constrained
+
+
+def _should_preserve_short_dark_anchor_scale(text_data: dict, anchor_bbox: list[int] | None, target_bbox: list[int]) -> bool:
+    if not anchor_bbox or _is_translator_note_layer(text_data):
+        return False
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    dark_context = bool(
+        source == "image_dark_bubble_mask"
+        or "dark_bubble_ellipse_bbox_mask" in flags
+        or (
+            "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+            and "dark_bubble_oval_reocr" in flags
+        )
+    )
+    if not dark_context:
+        return False
+    if flags & {"partial_dark_bubble_lobe_reocr", "detected_dark_bubble_without_text_reocr"}:
+        return False
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    anchor_w = max(1, ax2 - ax1)
+    anchor_h = max(1, ay2 - ay1)
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    if anchor_w < 70 or anchor_h < 18:
+        return False
+    if anchor_h > 45:
+        return False
+    if anchor_w / float(max(1, anchor_h)) < 4.2:
+        return False
+    compact_len = len(
+        re.sub(
+            r"\s+",
+            "",
+            str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+        )
+    )
+    if compact_len > 44:
+        return False
+    anchor_area = anchor_w * anchor_h
+    target_area = max(1, target_w * target_h)
+    if anchor_area > int(target_area * 0.36):
+        return False
+    return True
+
+
+def _preserve_short_dark_anchor_scale_safe_box(
+    text_data: dict,
+    target_bbox: list[int],
+    safe_text_box: list[int] | None,
+) -> list[int] | None:
+    anchor_bbox = _layout_bbox(
+        text_data.get("text_pixel_bbox")
+        or text_data.get("source_bbox")
+        or text_data.get("bbox")
+    )
+    if not safe_text_box or not _should_preserve_short_dark_anchor_scale(text_data, anchor_bbox, target_bbox):
+        return None
+    assert anchor_bbox is not None
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    sx1, sy1, sx2, sy2 = [int(v) for v in safe_text_box]
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    safe_w = max(1, sx2 - sx1)
+    safe_h = max(1, sy2 - sy1)
+    anchor_w = max(1, ax2 - ax1)
+    anchor_h = max(1, ay2 - ay1)
+    anchor_cx = (ax1 + ax2) / 2.0
+    anchor_cy = (ay1 + ay2) / 2.0
+    desired_w = safe_w
+    desired_h = safe_h
+    if desired_w <= 0 or desired_h <= 0:
+        return None
+    new_x1, new_x2 = _center_span_within_bounds(anchor_cx, desired_w, tx1, tx2)
+    new_y1 = int(round(anchor_cy - desired_h / 2.0))
+    new_y2 = int(round(anchor_cy + desired_h / 2.0))
+    if new_y1 < ty1:
+        new_y2 += ty1 - new_y1
+        new_y1 = ty1
+    if new_y2 > ty2:
+        new_y1 -= new_y2 - ty2
+        new_y2 = ty2
+    new_y1 = max(ty1, new_y1)
+    new_y2 = min(ty2, new_y2)
+    adjusted = [int(new_x1), int(new_y1), int(new_x2), int(new_y2)]
+    if adjusted == [sx1, sy1, sx2, sy2]:
+        return None
+    text_data["_short_dark_anchor_scale_safe_from"] = [sx1, sy1, sx2, sy2]
+    text_data["_short_dark_anchor_scale_anchor_bbox"] = [ax1, ay1, ax2, ay2]
+    text_data["_anchor_center_only_layout"] = True
+    _merge_qa_flags(text_data, ["short_dark_anchor_center_preserved", "safe_text_box_recomputed"])
+    return adjusted
+
+
+def _should_expand_dark_oval_safe_height(text_data: dict, layout_safe_bbox: list[int] | None) -> bool:
+    if not layout_safe_bbox or text_data.get("_is_lobe_subregion") or text_data.get("_single_lobe_follow_anchor"):
+        return False
+    if text_data.get("connected_lobe_bboxes") or text_data.get("connected_position_bboxes"):
+        return False
+    flags = _qa_flags_set(text_data)
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    dark_bubble_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    has_dark_ellipse = (
+        "dark_bubble_ellipse_bbox_mask" in flags
+        or str(dark_bubble_metrics.get("shape_kind") or "").strip().lower() == "ellipse"
+    )
+    if not has_dark_ellipse:
+        return False
+    translated = str(
+        text_data.get("translated")
+        or text_data.get("traduzido")
+        or text_data.get("text")
+        or ""
+    )
+    if len(re.sub(r"\s+", "", translated)) < 45:
+        return False
+    bg = _coerce_rgb_tuple(text_data.get("background_rgb"))
+    if bg is not None and _dark_panel_luminance(bg) > 120.0:
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source == "image_dark_panel_mask" and "dark_bubble_ellipse_bbox_mask" not in flags:
+        return False
+    safe_w = max(1, int(layout_safe_bbox[2]) - int(layout_safe_bbox[0]))
+    safe_h = max(1, int(layout_safe_bbox[3]) - int(layout_safe_bbox[1]))
+    if safe_w < 90 or safe_h < 36:
+        return False
+    return safe_h < int(round(safe_w * 0.72))
+
+
+def _expand_dark_oval_safe_height(
+    text_data: dict,
+    target_bbox: list[int],
+    layout_safe_bbox: list[int] | None,
+) -> list[int] | None:
+    if not _should_expand_dark_oval_safe_height(text_data, layout_safe_bbox):
+        return None
+    assert layout_safe_bbox is not None
+    sx1, sy1, sx2, sy2 = [int(v) for v in layout_safe_bbox]
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    safe_h = max(1, sy2 - sy1)
+    target_h = max(1, ty2 - ty1)
+    factor = _dark_oval_safe_height_factor(text_data)
+    desired_h = min(target_h, max(safe_h, int(round(safe_h * factor))))
+    if desired_h <= safe_h + 3:
+        return None
+    center_y = (sy1 + sy2) / 2.0
+    new_y1 = int(round(center_y - desired_h / 2.0))
+    new_y2 = int(round(center_y + desired_h / 2.0))
+    if new_y1 < ty1:
+        new_y2 += ty1 - new_y1
+        new_y1 = ty1
+    if new_y2 > ty2:
+        new_y1 -= new_y2 - ty2
+        new_y2 = ty2
+    new_y1 = max(ty1, new_y1)
+    new_y2 = min(ty2, new_y2)
+    expanded = [sx1, new_y1, sx2, new_y2]
+    expanded = _constrain_dark_oval_safe_to_anchor_chord(text_data, target_bbox, [sx1, sy1, sx2, sy2], expanded)
+    if expanded[3] - expanded[1] <= safe_h + 3:
+        if expanded != [sx1, sy1, sx2, sy2] and text_data.get("_dark_oval_safe_anchor_constrained_from"):
+            text_data["_dark_oval_safe_height_expanded_from"] = [sx1, sy1, sx2, sy2]
+            text_data["_dark_oval_safe_height_factor"] = factor
+            _merge_qa_flags(text_data, ["dark_oval_safe_height_expanded", "safe_text_box_recomputed"])
+            return expanded
+        return None
+    text_data["_dark_oval_safe_height_expanded_from"] = [sx1, sy1, sx2, sy2]
+    text_data["_dark_oval_safe_height_factor"] = factor
+    _merge_qa_flags(text_data, ["dark_oval_safe_height_expanded", "safe_text_box_recomputed"])
+    return expanded
+
+
+def _dark_oval_safe_expansion_bounds(text_data: dict, target_bbox: list[int]) -> list[int]:
+    """Use the visible dark oval as the hard vertical bound for capacity growth."""
+    target = _layout_bbox(target_bbox)
+    if target is None:
+        return target_bbox
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    dark_oval_context = bool(
+        source == "image_dark_bubble_mask"
+        or "dark_bubble_ellipse_bbox_mask" in flags
+        or "dark_bubble_oval_reocr" in flags
+        or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+    )
+    if not dark_oval_context:
+        return target
+    if (
+        "connected_layout_disabled_dark_panel_visual_mask" in flags
+        and "dark_bubble_ellipse_bbox_mask" not in flags
+        and "dark_bubble_oval_reocr" not in flags
+    ):
+        return target
+    if "dark_bubble_ellipse_bbox_mask" not in flags and "dark_bubble_oval_reocr" not in flags:
+        return target
+    visible = _layout_bbox(text_data.get("balloon_bbox") or text_data.get("bubble_mask_bbox"))
+    if visible is None:
+        return target
+    visible_area = _bbox_area_px(visible)
+    target_area = _bbox_area_px(target)
+    if visible_area < max(256, int(target_area * 0.18)):
+        return target
+    if _bbox_intersection_area(visible, target) < max(128, int(visible_area * 0.55)):
+        return target
+    if _dark_oval_visible_bbox_is_clip_fragment(text_data, target, visible):
+        _merge_qa_flags(text_data, ["dark_oval_visible_bbox_fragment_ignored", "safe_text_box_recomputed"])
+        return target
+    if visible != target:
+        text_data["_dark_oval_safe_expansion_bounds_from"] = list(target)
+        _merge_qa_flags(text_data, ["dark_oval_safe_expansion_limited_to_visible_balloon"])
+    return visible
+
+
+def _dark_oval_visible_bbox_is_clip_fragment(text_data: dict, target_bbox: list[int], visible_bbox: list[int]) -> bool:
+    flags = _qa_flags_set(text_data)
+    if flags & {"partial_dark_bubble_lobe_reocr", "detected_dark_bubble_without_text_reocr"}:
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    target_w = max(1, int(target_bbox[2]) - int(target_bbox[0]))
+    target_h = max(1, int(target_bbox[3]) - int(target_bbox[1]))
+    visible_w = max(1, int(visible_bbox[2]) - int(visible_bbox[0]))
+    visible_h = max(1, int(visible_bbox[3]) - int(visible_bbox[1]))
+    if visible_w >= int(target_w * 0.80) or visible_h >= int(target_h * 0.52):
+        return False
+    anchor = _dark_oval_anchor_bbox(text_data)
+    if anchor is not None:
+        anchor_area = max(1, _bbox_area_px(anchor))
+        if _bbox_intersection_area(anchor, visible_bbox) < int(anchor_area * 0.70):
+            return False
+    return True
+
+
+def _clip_dark_oval_safe_to_visible_balloon(text_data: dict, safe_bbox: list[int] | None) -> list[int] | None:
+    safe = _layout_bbox(safe_bbox)
+    if safe is None:
+        return None
+    flags = _qa_flags_set(text_data)
+    if "dark_bubble_ellipse_bbox_mask" not in flags and "dark_bubble_oval_reocr" not in flags:
+        return safe
+    if (
+        "connected_layout_disabled_dark_panel_visual_mask" in flags
+        and "dark_bubble_ellipse_bbox_mask" not in flags
+        and "dark_bubble_oval_reocr" not in flags
+    ):
+        return safe
+    visible = _layout_bbox(text_data.get("balloon_bbox") or text_data.get("bubble_mask_bbox"))
+    if visible is None:
+        return safe
+    safe_area = _bbox_area_px(safe)
+    visible_area = _bbox_area_px(visible)
+    if visible_area < 256 or safe_area <= 0:
+        return safe
+    target = _layout_bbox(text_data.get("target_bbox") or text_data.get("capacity_bbox"))
+    if target is not None and _dark_oval_visible_bbox_is_clip_fragment(text_data, target, visible):
+        _merge_qa_flags(text_data, ["dark_oval_visible_bbox_fragment_ignored", "safe_text_box_recomputed"])
+        return safe
+    if _bbox_intersection_area(safe, visible) < max(128, int(min(safe_area, visible_area) * 0.35)):
+        return safe
+    inset_visible = _inset_bbox_for_text(visible, ratio=0.025, min_px=3)
+    clipped = _bbox_intersection(safe, inset_visible) or _bbox_intersection(safe, visible)
+    if clipped is None:
+        return safe
+    if _bbox_area_px(clipped) < max(192, int(safe_area * 0.28)):
+        return safe
+    if clipped != safe:
+        text_data["_dark_oval_safe_clipped_to_visible_balloon_from"] = list(safe)
+        _merge_qa_flags(text_data, ["dark_oval_safe_clipped_to_visible_balloon", "safe_text_box_recomputed"])
+    return clipped
+
+
 def _should_compact_small_text_capacity(text_data: dict, capacity_bbox: list[int]) -> bool:
     if text_data.get("_is_lobe_subregion") or text_data.get("_visual_lobe_split_count") or text_data.get("_visual_lobe_split_parent_bbox"):
+        return False
+    if _has_trusted_dark_visual_capacity(text_data):
         return False
     inner_bbox = _layout_bbox(
         text_data.get("_visual_rect_inner_bbox")
@@ -4561,7 +8847,39 @@ def _should_compact_small_text_capacity(text_data: dict, capacity_bbox: list[int
     return 1 <= translated_len <= 44
 
 
+def _should_use_full_dark_panel_visual_capacity(text_data: dict, target_bbox: list[int] | None) -> bool:
+    target = _layout_bbox(target_bbox)
+    if target is None or text_data.get("_is_lobe_subregion"):
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_panel_mask":
+        return False
+    flags = _qa_flags_set(text_data)
+    if not (
+        "dark_panel_full_bbox_selected" in flags
+        or "dark_panel_rect_from_dark_bubble_bbox" in flags
+        or str(text_data.get("_render_target_source") or "").strip().lower() == "dark_panel_visual_mask_bbox"
+    ):
+        return False
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if profile not in {"dark_panel", "dark_bubble", "standard", ""}:
+        return False
+    target_w = int(target[2]) - int(target[0])
+    target_h = int(target[3]) - int(target[1])
+    return target_w >= 96 and target_h >= 42
+
+
 def _should_detect_visual_rect_safe_area(text_data: dict) -> bool:
+    if str(text_data.get("style_origin") or "").strip().lower() == "auto_dark_panel_glow":
+        return True
+    if "auto_dark_panel_glow_fallback" in _qa_flags_set(text_data):
+        return True
+    if (
+        "mask_outside_balloon_critical" in _qa_flags_set(text_data)
+        and str(text_data.get("bubble_mask_source") or "").strip().lower()
+        in {"image_white_bubble_mask", "image_contour_bubble_mask"}
+    ):
+        return True
     if text_data.get("_is_lobe_subregion"):
         return bool(
             str(text_data.get("connected_balloon_orientation", "") or "").strip()
@@ -5168,7 +9486,150 @@ def _detect_visual_rect_safe_area_from_image(img: Image.Image, text_data: dict, 
     }
 
 
+def _detect_dark_panel_rect_safe_area_from_image(
+    img: Image.Image,
+    text_data: dict,
+    target_bbox: list[int],
+    *,
+    max_panel_median: float = 82.0,
+    reason: str = "visual_rect_dark_panel",
+    bright_percentile: float = 90.0,
+    bright_cap: int = 132,
+) -> dict | None:
+    """Find a dark UI/card panel around source text by its bright outline.
+
+    This is intentionally gated by auto_dark_panel_glow callers. Generic dark
+    art can have many bright strokes, so this only accepts a rectangular pair of
+    horizontal/vertical strokes that encloses the OCR anchor.
+    """
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if not anchor_bbox:
+        return None
+    try:
+        page_w, page_h = img.size
+    except Exception:
+        return None
+    if page_w <= 0 or page_h <= 0:
+        return None
+
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    margin_x = max(80, int(target_w * 0.70))
+    margin_y = max(70, int(target_h * 1.20))
+    sx1 = max(0, tx1 - margin_x)
+    sy1 = max(0, ty1 - margin_y)
+    sx2 = min(page_w, tx2 + margin_x)
+    sy2 = min(page_h, ty2 + margin_y)
+    if sx2 - sx1 < 120 or sy2 - sy1 < 80:
+        return None
+
+    try:
+        crop = np.asarray(img.crop((sx1, sy1, sx2, sy2)).convert("RGB"))
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    except Exception:
+        return None
+    if gray.size == 0:
+        return None
+
+    # Border is light/cyan over a very dark card. Threshold relative to the crop
+    # keeps faint glow from becoming the panel body.
+    bright_threshold = max(90, min(int(bright_cap), int(np.percentile(gray, float(bright_percentile)))))
+    bright_mask = (gray >= bright_threshold).astype("uint8") * 255
+    crop_h, crop_w = gray.shape[:2]
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(46, min(220, int(crop_w * 0.20))), 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(36, min(180, int(crop_h * 0.28)))))
+    horizontal = cv2.morphologyEx(bright_mask, cv2.MORPH_OPEN, h_kernel)
+    vertical = cv2.morphologyEx(bright_mask, cv2.MORPH_OPEN, v_kernel)
+
+    min_h_width = max(96, int(target_w * 0.75))
+    min_v_height = max(52, int(target_h * 0.80))
+    h_lines = [
+        [x1 + sx1, y1 + sy1, x2 + sx1, y2 + sy1]
+        for x1, y1, x2, y2 in _component_bboxes((horizontal > 0).astype("uint8"), min_area=24)
+        if (x2 - x1) >= min_h_width and (y2 - y1) <= 10
+    ]
+    v_lines = [
+        [x1 + sx1, y1 + sy1, x2 + sx1, y2 + sy1]
+        for x1, y1, x2, y2 in _component_bboxes((vertical > 0).astype("uint8"), min_area=24)
+        if (y2 - y1) >= min_v_height and (x2 - x1) <= 12
+    ]
+    if len(h_lines) < 2 or len(v_lines) < 2:
+        return None
+
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    anchor_cx = (ax1 + ax2) / 2.0
+    anchor_cy = (ay1 + ay2) / 2.0
+    best: tuple[float, list[int], list[int]] | None = None
+
+    for left in v_lines:
+        for right in v_lines:
+            left_x = int(round((left[0] + left[2]) / 2.0))
+            right_x = int(round((right[0] + right[2]) / 2.0))
+            if right_x <= left_x:
+                continue
+            rect_w = right_x - left_x
+            if rect_w < max(120, int(target_w * 0.80)) or rect_w > max(420, int(target_w * 2.60)):
+                continue
+            spanning_h = [
+                line
+                for line in h_lines
+                if line[0] <= left_x + 16 and line[2] >= right_x - 16
+            ]
+            if len(spanning_h) < 2:
+                continue
+            for top in spanning_h:
+                for bottom in spanning_h:
+                    top_y = int(round((top[1] + top[3]) / 2.0))
+                    bottom_y = int(round((bottom[1] + bottom[3]) / 2.0))
+                    if bottom_y <= top_y:
+                        continue
+                    rect_h = bottom_y - top_y
+                    if rect_h < max(64, int(target_h * 0.95)) or rect_h > max(240, int(target_h * 3.0)):
+                        continue
+                    outer_bbox = [left_x, top_y, right_x, bottom_y]
+                    if not (outer_bbox[0] - 8 <= anchor_cx <= outer_bbox[2] + 8):
+                        continue
+                    if not (outer_bbox[1] - 8 <= anchor_cy <= outer_bbox[3] + 8):
+                        continue
+
+                    panel = np.asarray(img.crop(tuple(outer_bbox)).convert("L"))
+                    if panel.size == 0 or float(np.median(panel)) > float(max_panel_median):
+                        continue
+                    pad_x = max(12, min(26, int(round(rect_w * 0.08))))
+                    pad_y = max(10, min(22, int(round(rect_h * 0.11))))
+                    safe_bbox = [
+                        max(0, outer_bbox[0] + pad_x),
+                        max(0, outer_bbox[1] + pad_y),
+                        min(page_w, outer_bbox[2] - pad_x),
+                        min(page_h, outer_bbox[3] - pad_y),
+                    ]
+                    if safe_bbox[2] <= safe_bbox[0] or safe_bbox[3] <= safe_bbox[1]:
+                        continue
+                    center_penalty = abs(((outer_bbox[0] + outer_bbox[2]) / 2.0) - anchor_cx) + abs(
+                        ((outer_bbox[1] + outer_bbox[3]) / 2.0) - anchor_cy
+                    )
+                    area_bonus = rect_w * rect_h / 100.0
+                    score = area_bonus - center_penalty
+                    if best is None or score > best[0]:
+                        best = (score, outer_bbox, safe_bbox)
+
+    if best is None:
+        return None
+    return {
+        "outer_bbox": best[1],
+        "safe_bbox": best[2],
+        "reason": reason,
+    }
+
+
 def _apply_visual_rect_safe_area_if_needed(img: Image.Image, text_data: dict) -> None:
+    if (
+        bool(text_data.get("_allow_unclamped_safe_text_box"))
+        and str(text_data.get("layout_safe_reason") or "").strip().lower()
+        == "debug_derived_bubble_mask_unclamped"
+    ):
+        return
     if not _should_detect_visual_rect_safe_area(text_data):
         return
     target_bbox = _layout_bbox(
@@ -5180,7 +9641,53 @@ def _apply_visual_rect_safe_area_if_needed(img: Image.Image, text_data: dict) ->
     )
     if not target_bbox:
         return
-    detected = _detect_visual_rect_safe_area_from_image(img, text_data, target_bbox)
+    dark_panel_case = (
+        str(text_data.get("style_origin") or "").strip().lower() == "auto_dark_panel_glow"
+        or "auto_dark_panel_glow_fallback" in _qa_flags_set(text_data)
+    )
+    colored_panel_case = (
+        not dark_panel_case
+        and "mask_outside_balloon_critical" in _qa_flags_set(text_data)
+        and str(text_data.get("bubble_mask_source") or "").strip().lower() in {"image_white_bubble_mask", "image_contour_bubble_mask"}
+    )
+    detected = (
+        _detect_dark_panel_rect_safe_area_from_image(img, text_data, target_bbox)
+        if dark_panel_case
+        else None
+    )
+    if not detected and colored_panel_case:
+        detected = _detect_dark_panel_rect_safe_area_from_image(
+            img,
+            text_data,
+            target_bbox,
+            max_panel_median=230.0,
+            reason="visual_rect_colored_panel",
+            bright_percentile=97.0,
+            bright_cap=245,
+        )
+    if not detected and colored_panel_case:
+        anchor_bbox = _resolve_english_anchor_bbox(text_data)
+        if anchor_bbox:
+            tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+            target_w = max(1, tx2 - tx1)
+            target_h = max(1, ty2 - ty1)
+            anchor_w = max(1, ax2 - ax1)
+            anchor_h = max(1, ay2 - ay1)
+            if (
+                target_w >= max(120, int(anchor_w * 1.35))
+                and target_h >= max(64, int(anchor_h * 1.20))
+                and _bbox_intersection_area(target_bbox, anchor_bbox) >= int(_bbox_area_px(anchor_bbox) * 0.70)
+            ):
+                pad_x = max(10, min(24, int(round(target_w * 0.08))))
+                pad_y = max(8, min(18, int(round(target_h * 0.10))))
+                detected = {
+                    "outer_bbox": list(target_bbox),
+                    "safe_bbox": [tx1 + pad_x, ty1 + pad_y, tx2 - pad_x, ty2 - pad_y],
+                    "reason": "visual_rect_colored_panel",
+                }
+    if not detected:
+        detected = _detect_visual_rect_safe_area_from_image(img, text_data, target_bbox)
     prefer_single_lobe = bool(text_data.get("_single_lobe_follow_anchor") or text_data.get("_is_lobe_subregion"))
     if not detected and prefer_single_lobe:
         detected = _detect_single_lobe_white_run_safe_area_from_image(img, text_data, target_bbox)
@@ -5662,6 +10169,8 @@ def _should_use_safe_area_for_follow_anchor_capacity(
     layout_safe_bbox: list[int] | None,
     target_bbox: list[int],
 ) -> bool:
+    if text_data.get("_uied_preserve_anchor_position"):
+        return True
     if not anchor_bbox or not layout_safe_bbox or text_data.get("_is_lobe_subregion"):
         return False
     ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
@@ -5676,7 +10185,7 @@ def _should_use_safe_area_for_follow_anchor_capacity(
     translated_len = len(re.sub(r"\s+", "", str(text_data.get("translated") or text_data.get("traduzido") or "")))
     tiny_text_anchor = (
         translated_len >= 12
-        and anchor_h <= 28
+        and anchor_h <= 48
         and safe_h >= int(anchor_h * 1.45)
         and target_h >= int(anchor_h * 1.75)
     )
@@ -5688,12 +10197,55 @@ def _should_use_safe_area_for_follow_anchor_capacity(
     return safe_is_meaningfully_larger and anchor_is_not_whole_balloon
 
 
+def _dark_connected_lobe_visual_capacity_bbox(
+    text_data: dict,
+    target_bbox: list[int],
+    layout_safe_bbox: list[int] | None,
+    anchor_bbox: list[int] | None,
+) -> list[int] | None:
+    if not text_data.get("_is_lobe_subregion"):
+        return None
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return None
+    flags = {str(flag).strip().lower() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    if not (
+        "dark_bubble_connected_lobe_passthrough" in flags
+        or "partial_dark_bubble_lobe_reocr" in flags
+        or text_data.get("_connected_source_bbox")
+    ):
+        return None
+    lobe_safe = _inset_bbox_for_text(target_bbox, ratio=0.11, min_px=14)
+    lobe_safe = _layout_bbox(lobe_safe)
+    if lobe_safe is None:
+        return None
+    if anchor_bbox and _bbox_intersection_area(lobe_safe, anchor_bbox) <= 0:
+        return None
+    if layout_safe_bbox is None:
+        _merge_qa_flags(text_data, ["dark_lobe_visual_capacity_bbox"])
+        return lobe_safe
+    current_area = max(1, _bbox_area_px(layout_safe_bbox))
+    lobe_area = max(1, _bbox_area_px(lobe_safe))
+    current_h = max(1, int(layout_safe_bbox[3]) - int(layout_safe_bbox[1]))
+    lobe_h = max(1, int(lobe_safe[3]) - int(lobe_safe[1]))
+    current_w = max(1, int(layout_safe_bbox[2]) - int(layout_safe_bbox[0]))
+    lobe_w = max(1, int(lobe_safe[2]) - int(lobe_safe[0]))
+    if current_area < int(lobe_area * 0.55) or current_h < int(lobe_h * 0.55) or current_w < int(lobe_w * 0.62):
+        _merge_qa_flags(text_data, ["dark_lobe_visual_capacity_bbox"])
+        return lobe_safe
+    return None
+
+
 def _should_follow_english_anchor_position(
     text_data: dict,
     anchor_bbox: list[int] | None,
     center_on_balloon_bbox: bool,
 ) -> bool:
-    if not anchor_bbox or center_on_balloon_bbox or text_data.get("_is_lobe_subregion"):
+    if text_data.get("_uied_preserve_anchor_position") and anchor_bbox:
+        return True
+    if not anchor_bbox or center_on_balloon_bbox:
+        return False
+    if text_data.get("_is_lobe_subregion") and not _should_preserve_dark_connected_lobe_anchor(text_data):
         return False
     target_bbox = _layout_bbox(
         text_data.get("balloon_bbox")
@@ -5718,6 +10270,60 @@ def _should_follow_english_anchor_position(
     if _normalize_balloon_subregions(text_data.get("balloon_subregions", [])):
         return True
     return bool(str(text_data.get("connected_balloon_orientation", "") or "").strip())
+
+
+def _recenter_reliable_bubble_safe_area_on_anchor(
+    text_data: dict,
+    target_bbox: list[int],
+    layout_safe_bbox: list[int] | None,
+    anchor_bbox: list[int] | None,
+) -> list[int] | None:
+    if not layout_safe_bbox or not anchor_bbox or text_data.get("_is_lobe_subregion"):
+        return None
+    if "same_balloon_fragment_merged" in {str(flag) for flag in (text_data.get("qa_flags") or [])}:
+        return None
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if source not in {"image_contour_bubble_mask", "image_white_bubble_mask", "image_rect_bubble_mask"}:
+        return None
+    if str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower() != "white_balloon":
+        return None
+    if abs(_normalize_rotation_deg(text_data.get("rotation_deg", 0))) >= 5.0:
+        return None
+    if _bbox_intersection_area(target_bbox, anchor_bbox) < int(_bbox_area_px(anchor_bbox) * 0.45):
+        return None
+
+    sx1, sy1, sx2, sy2 = [int(v) for v in layout_safe_bbox]
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    safe_w = max(1, sx2 - sx1)
+    safe_h = max(1, sy2 - sy1)
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    if safe_w >= int(target_w * 0.92) and safe_h >= int(target_h * 0.92):
+        return None
+
+    safe_cx = (sx1 + sx2) / 2.0
+    safe_cy = (sy1 + sy2) / 2.0
+    anchor_cx = (ax1 + ax2) / 2.0
+    anchor_cy = (ay1 + ay2) / 2.0
+    if abs(anchor_cx - safe_cx) < max(18.0, target_w * 0.04) and abs(anchor_cy - safe_cy) < max(18.0, target_h * 0.10):
+        return None
+
+    new_x1 = int(round(anchor_cx - safe_w / 2.0))
+    new_y1 = int(round(anchor_cy - safe_h / 2.0))
+    new_x1 = max(tx1, min(new_x1, tx2 - safe_w))
+    new_y1 = max(ty1, min(new_y1, ty2 - safe_h))
+    shifted = [new_x1, new_y1, new_x1 + safe_w, new_y1 + safe_h]
+    if shifted == layout_safe_bbox:
+        return None
+
+    text_data["_reliable_bubble_anchor_safe_text_box"] = {
+        "from": list(layout_safe_bbox),
+        "to": list(shifted),
+        "anchor_bbox": list(anchor_bbox),
+    }
+    _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    return shifted
 
 
 def _is_overbroad_textured_target_anchor(
@@ -5758,6 +10364,9 @@ def _is_overbroad_textured_target_anchor(
 
 
 def _select_real_bubble_render_target_bbox(text_data: dict, target_bbox: list[int]) -> list[int] | None:
+    if _bubble_mask_source_is_non_real(text_data):
+        _flag_non_real_bubble_mask_source(text_data)
+        return None
     if str(text_data.get("_render_target_source") or "") in {
         "validated_text_source",
         "disjoint_source_text_bbox",
@@ -5770,8 +10379,32 @@ def _select_real_bubble_render_target_bbox(text_data: dict, target_bbox: list[in
     bubble_inner_bbox = _layout_bbox(text_data.get("bubble_inner_bbox"))
     if bubble_bbox is None or bubble_inner_bbox is None or target_bbox is None:
         return None
+    if _dark_panel_bubble_bbox_overbroad_against_anchor(text_data, bubble_bbox):
+        return None
     target_area = _bbox_area_px(target_bbox)
     bubble_area = _bbox_area_px(bubble_bbox)
+    geometry_candidates = [
+        _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
+        _layout_bbox(text_data.get("text_pixel_bbox")),
+        _layout_bbox(text_data.get("layout_bbox")),
+        _layout_bbox(text_data.get("bbox")),
+    ]
+    geometry_candidates = [bbox for bbox in geometry_candidates if bbox is not None]
+    geometry_inside_bubble = bool(
+        geometry_candidates
+        and any(
+            _bbox_intersection_area(bubble_bbox, bbox) >= int(_bbox_area_px(bbox) * 0.70)
+            for bbox in geometry_candidates
+        )
+    )
+    if (
+        geometry_inside_bubble
+        and bubble_area >= max(int(target_area * 1.18), target_area + 18000)
+        and _bbox_intersection_area(bubble_bbox, target_bbox) >= int(target_area * 0.55)
+    ):
+        text_data["_render_target_source"] = "real_bubble_mask_bbox"
+        _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+        return [int(v) for v in bubble_bbox]
     if _has_distinct_real_bubble_mask_bbox(text_data, target_bbox):
         text_data["_render_target_source"] = "real_bubble_mask_bbox_distinct"
         _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
@@ -5787,21 +10420,10 @@ def _select_real_bubble_render_target_bbox(text_data: dict, target_bbox: list[in
     if inner_overlap < int(_bbox_area_px(bubble_inner_bbox) * 0.90):
         return None
 
-    geometry_candidates = [
-        _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
-        _layout_bbox(text_data.get("text_pixel_bbox")),
-        _layout_bbox(text_data.get("layout_bbox")),
-        _layout_bbox(text_data.get("bbox")),
-    ]
-    geometry_candidates = [bbox for bbox in geometry_candidates if bbox is not None]
     if not geometry_candidates:
         return None
     geometry_union = _bbox_union_many_for_layout(geometry_candidates)
     target_overlap = _bbox_intersection_area(bubble_bbox, target_bbox) / float(max(1, target_area))
-    geometry_inside_bubble = any(
-        _bbox_intersection_area(bubble_bbox, bbox) >= int(_bbox_area_px(bbox) * 0.70)
-        for bbox in geometry_candidates
-    )
     underfit_refined_target = False
     if geometry_union is not None:
         geometry_area = _bbox_area_px(geometry_union)
@@ -5827,6 +10449,501 @@ def _select_real_bubble_render_target_bbox(text_data: dict, target_bbox: list[in
         return None
     text_data["_render_target_source"] = text_data.get("_render_target_source") or "real_bubble_mask_bbox"
     return [int(v) for v in bubble_bbox]
+
+
+def _dark_panel_inner_bbox_in_target_space(text_data: dict, target_bbox: list[int] | tuple[int, ...]) -> list[int] | None:
+    inner_bbox = _layout_bbox(text_data.get("bubble_inner_bbox"))
+    target = _layout_bbox(target_bbox)
+    if inner_bbox is None or target is None:
+        return None
+    inner_area = max(1, _bbox_area_px(inner_bbox))
+    if _bbox_intersection_area(inner_bbox, target) >= int(inner_area * 0.60):
+        return list(inner_bbox)
+    band_y_top = _numeric_band_y_top(text_data)
+    if band_y_top:
+        shifted = [inner_bbox[0], inner_bbox[1] - band_y_top, inner_bbox[2], inner_bbox[3] - band_y_top]
+        if _bbox_intersection_area(shifted, target) >= int(inner_area * 0.60):
+            return [int(v) for v in shifted]
+    inferred_offsets: list[int] = []
+    for key in ("bubble_mask_bbox", "balloon_bbox", "target_bbox"):
+        source_bbox = _layout_bbox(text_data.get(key))
+        if source_bbox is None:
+            continue
+        offset_y = int(source_bbox[1]) - int(target[1])
+        if offset_y > 0 and offset_y not in inferred_offsets:
+            inferred_offsets.append(offset_y)
+    for offset_y in inferred_offsets:
+        shifted = [inner_bbox[0], inner_bbox[1] - offset_y, inner_bbox[2], inner_bbox[3] - offset_y]
+        if _bbox_intersection_area(shifted, target) >= int(inner_area * 0.60):
+            text_data["_dark_panel_inner_bbox_inferred_band_y_top"] = int(offset_y)
+            return [int(v) for v in shifted]
+    return None
+
+
+def _select_dark_panel_visual_mask_render_target_bbox(
+    text_data: dict,
+    target_bbox: list[int],
+) -> list[int] | None:
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
+        return None
+    qa_metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    metric_key = "image_dark_bubble_mask" if source == "image_dark_bubble_mask" else "image_dark_panel_mask"
+    metric = qa_metrics.get(metric_key) if isinstance(qa_metrics.get(metric_key), dict) else {}
+    panel_bbox = _layout_bbox(metric.get("mask_bbox"))
+    if source == "image_dark_bubble_mask":
+        own_lobe_bbox = _layout_bbox(text_data.get("bubble_mask_bbox") or text_data.get("target_bbox"))
+        flags = _qa_flags_set(text_data)
+        lobe_specific = bool(text_data.get("_is_lobe_subregion") or "dark_bubble_connected_lobe_passthrough" in flags)
+        balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+        if own_lobe_bbox is not None and balloon_bbox is not None and not lobe_specific:
+            own_area = max(1, _bbox_area_px(own_lobe_bbox))
+            balloon_area = max(1, _bbox_area_px(balloon_bbox))
+            own_w = max(1, int(own_lobe_bbox[2]) - int(own_lobe_bbox[0]))
+            own_h = max(1, int(own_lobe_bbox[3]) - int(own_lobe_bbox[1]))
+            balloon_w = max(1, int(balloon_bbox[2]) - int(balloon_bbox[0]))
+            balloon_h = max(1, int(balloon_bbox[3]) - int(balloon_bbox[1]))
+            anchor = _bbox_union_many_for_layout(_geometry_bboxes_for_layout(text_data))
+            anchor_overlap = (
+                _bbox_intersection_area(own_lobe_bbox, anchor) / float(max(1, _bbox_area_px(anchor)))
+                if anchor is not None
+                else 0.0
+            )
+            if (
+                anchor_overlap >= 0.65
+                and own_area <= int(balloon_area * 0.55)
+                and (own_w <= int(balloon_w * 0.72) or own_h <= int(balloon_h * 0.55))
+            ):
+                text_data["_dark_bubble_visual_mask_rejected"] = "text_shaped_inside_balloon_capacity"
+                text_data["_render_target_source"] = text_data.get("_render_target_source") or "dark_bubble_balloon_bbox_capacity"
+                _merge_qa_flags(
+                    text_data,
+                    ["dark_bubble_text_shaped_visual_mask_kept_balloon_capacity", "safe_text_box_recomputed"],
+                )
+                return None
+        if own_lobe_bbox is not None and lobe_specific:
+            if panel_bbox is None or _bbox_iou(own_lobe_bbox, panel_bbox) < 0.86:
+                panel_bbox = own_lobe_bbox
+                _merge_qa_flags(text_data, ["dark_bubble_lobe_mask_bbox_preferred"])
+        elif panel_bbox is None:
+            panel_bbox = own_lobe_bbox
+    if panel_bbox is None:
+        return None
+    if source == "image_dark_bubble_mask":
+        visible_balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+        flags = _qa_flags_set(text_data)
+        lobe_specific = bool(text_data.get("_is_lobe_subregion") or "dark_bubble_connected_lobe_passthrough" in flags)
+        if visible_balloon_bbox is not None and not lobe_specific:
+            panel_area = max(1, _bbox_area_px(panel_bbox))
+            visible_area = max(1, _bbox_area_px(visible_balloon_bbox))
+            panel_w = max(1, int(panel_bbox[2]) - int(panel_bbox[0]))
+            panel_h = max(1, int(panel_bbox[3]) - int(panel_bbox[1]))
+            visible_w = max(1, int(visible_balloon_bbox[2]) - int(visible_balloon_bbox[0]))
+            visible_h = max(1, int(visible_balloon_bbox[3]) - int(visible_balloon_bbox[1]))
+            visible_overlap = _bbox_intersection_area(panel_bbox, visible_balloon_bbox) / float(visible_area)
+            anchor = _bbox_union_many_for_layout(_geometry_bboxes_for_layout(text_data))
+            anchor_ok = bool(
+                anchor is None
+                or _bbox_intersection_area(visible_balloon_bbox, anchor) >= int(_bbox_area_px(anchor) * 0.45)
+            )
+            overbroad_against_visible = bool(
+                visible_overlap >= 0.86
+                and anchor_ok
+                and (
+                    panel_area >= int(visible_area * 1.38)
+                    or panel_w >= int(visible_w * 1.20)
+                    or panel_h >= int(visible_h * 1.20)
+                )
+            )
+            if overbroad_against_visible:
+                panel_bbox = list(visible_balloon_bbox)
+                text_data["bubble_mask_bbox"] = list(visible_balloon_bbox)
+                text_data["_render_target_source"] = text_data.get("_render_target_source") or "dark_bubble_visible_balloon_bbox"
+                _merge_qa_flags(text_data, ["dark_bubble_overbroad_mask_clamped_to_visible_balloon", "safe_text_box_recomputed"])
+        compact_ellipse = _dark_bubble_compact_ellipse_bbox(text_data, panel_bbox)
+        if compact_ellipse is not None:
+            panel_bbox = compact_ellipse
+            text_data["bubble_mask_bbox"] = list(compact_ellipse)
+            text_data["_render_target_source"] = text_data.get("_render_target_source") or "dark_bubble_compact_ellipse_bbox"
+            _merge_qa_flags(text_data, ["dark_bubble_compact_ellipse_bbox_preferred", "safe_text_box_recomputed"])
+    if _dark_bubble_visual_mask_is_overbroad_for_tiny_text(text_data, panel_bbox):
+        text_data["_dark_bubble_visual_mask_rejected"] = "tiny_text_overbroad"
+        _merge_qa_flags(text_data, ["dark_bubble_visual_mask_rejected_tiny_text", "safe_text_box_recomputed"])
+        return None
+    px1, py1, px2, py2 = [int(v) for v in panel_bbox]
+    panel_w = max(1, px2 - px1)
+    panel_h = max(1, py2 - py1)
+    if panel_w < 96 or panel_h < 42:
+        return None
+    anchor_candidates = _geometry_bboxes_for_layout(text_data)
+    anchor = _bbox_union_many_for_layout(anchor_candidates)
+    if anchor is None:
+        return None
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor]
+    anchor_cx = (ax1 + ax2) / 2.0
+    anchor_cy = (ay1 + ay2) / 2.0
+    anchor_inside = bool(px1 <= anchor_cx <= px2 and py1 <= anchor_cy <= py2)
+    anchor_overlap = _bbox_intersection_area(panel_bbox, anchor) / float(max(1, _bbox_area_px(anchor)))
+    if not anchor_inside and anchor_overlap < 0.55:
+        return None
+    if (
+        source != "image_dark_bubble_mask"
+        and target_bbox
+        and _bbox_area_px(panel_bbox) > max(_bbox_area_px(target_bbox) * 7.5, _bbox_area_px(target_bbox) + 120000)
+    ):
+        return None
+    flags = _qa_flags_set(text_data)
+    trusted_dark_ellipse = bool(
+        source == "image_dark_bubble_mask"
+        and "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+        and (
+            "dark_bubble_ellipse_bbox_mask" in flags
+            or "dark_bubble_compact_ellipse_bbox_preferred" in flags
+            or isinstance(text_data.get("bubble_mask_ellipse"), dict)
+        )
+    )
+    safe_ratio = 0.10 if trusted_dark_ellipse else (0.18 if source == "image_dark_bubble_mask" else 0.06)
+    safe_bbox = _inset_bbox_for_text(panel_bbox, ratio=safe_ratio, min_px=10)
+    if source == "image_dark_panel_mask" and "dark_panel_full_bbox_selected" in _qa_flags_set(text_data):
+        inner_bbox = _dark_panel_inner_bbox_in_target_space(text_data, panel_bbox)
+        if inner_bbox is not None:
+            inner_w = max(1, int(inner_bbox[2]) - int(inner_bbox[0]))
+            inner_h = max(1, int(inner_bbox[3]) - int(inner_bbox[1]))
+            inner_area = max(1, _bbox_area_px(inner_bbox))
+            panel_area = max(1, _bbox_area_px(panel_bbox))
+            safe_area = max(1, _bbox_area_px(safe_bbox)) if safe_bbox is not None else inner_area
+            inner_covers_panel = bool(
+                inner_w >= int(panel_w * 0.70)
+                and inner_h >= int(panel_h * 0.58)
+                and inner_area >= int(panel_area * 0.42)
+            )
+            inner_does_not_shrink_safe = bool(inner_area >= int(safe_area * 0.72))
+            if inner_covers_panel and inner_does_not_shrink_safe and _layout_bbox(
+                _bbox_intersection(safe_bbox, inner_bbox) if safe_bbox is not None else inner_bbox
+            ) is not None:
+                intersected_safe = _bbox_intersection(safe_bbox, inner_bbox) if safe_bbox is not None else inner_bbox
+                safe_bbox = list(intersected_safe)
+                text_data["_dark_panel_full_bbox_safe_clamped_to_inner"] = True
+                text_data["_dark_panel_full_bbox_inner_safe_bbox"] = list(inner_bbox)
+                _merge_qa_flags(text_data, ["dark_panel_full_bbox_safe_clamped_to_inner"])
+            else:
+                text_data["_dark_panel_full_bbox_inner_safe_bbox_rejected"] = list(inner_bbox)
+                if isinstance(text_data.get("qa_flags"), list):
+                    text_data["qa_flags"] = [
+                        flag
+                        for flag in text_data.get("qa_flags") or []
+                        if str(flag) != "dark_panel_full_bbox_safe_clamped_to_inner"
+                    ]
+                _merge_qa_flags(text_data, ["dark_panel_full_bbox_inner_safe_rejected", "safe_text_box_recomputed"])
+    if _layout_bbox(safe_bbox) is None:
+        return None
+    text_data["_visual_rect_outer_bbox"] = list(panel_bbox)
+    text_data["_visual_rect_inner_bbox"] = list(safe_bbox)
+    text_data["layout_safe_bbox"] = list(safe_bbox)
+    text_data["layout_safe_reason"] = (
+        "visual_dark_bubble_mask" if source == "image_dark_bubble_mask" else "visual_rect_dark_panel_mask"
+    )
+    text_data["_render_target_source"] = (
+        "dark_bubble_visual_mask_bbox" if source == "image_dark_bubble_mask" else "dark_panel_visual_mask_bbox"
+    )
+    _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    return [int(v) for v in panel_bbox]
+
+
+def _dark_bubble_visual_mask_is_overbroad_for_tiny_text(text_data: dict, bubble_bbox: list[int] | tuple[int, ...]) -> bool:
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    bubble = _layout_bbox(bubble_bbox)
+    if bubble is None:
+        return False
+    geometry_candidates = _geometry_bboxes_for_layout(text_data)
+    geometry = _bbox_union_many_for_layout(geometry_candidates)
+    if geometry is None:
+        return False
+    bw = max(1, int(bubble[2]) - int(bubble[0]))
+    bh = max(1, int(bubble[3]) - int(bubble[1]))
+    gw = max(1, int(geometry[2]) - int(geometry[0]))
+    gh = max(1, int(geometry[3]) - int(geometry[1]))
+    bubble_area = max(1, _bbox_area_px(bubble))
+    geometry_area = max(1, _bbox_area_px(geometry))
+    overlap = _bbox_intersection_area(bubble, geometry) / float(geometry_area)
+    if overlap < 0.50:
+        return False
+    compact = len(
+        re.sub(
+            r"\s+",
+            "",
+            str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+        )
+    )
+    is_tiny_text = gh <= 20 or (gh <= 28 and gw <= 220 and compact <= 34)
+    if not is_tiny_text:
+        return False
+    return bool(
+        bubble_area >= geometry_area * 18
+        or bh >= gh * 8
+        or bw >= gw * 3.2
+    )
+
+
+def _dark_bubble_visible_bbox_from_overbroad_target(text_data: dict, target_bbox: list[int]) -> list[int] | None:
+    if text_data.get("_is_lobe_subregion"):
+        return None
+    flags = _qa_flags_set(text_data)
+    if "dark_bubble_connected_lobe_passthrough" in flags:
+        return None
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    dark_metric = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    has_dark_bubble_evidence = bool(dark_metric) or str(text_data.get("layout_profile") or "").strip().lower() == "dark_bubble"
+    if not has_dark_bubble_evidence and not (
+        "dark_bubble_ellipse_bbox_mask" in flags
+        or "dark_bubble_oval_reocr" in flags
+        or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+        or "dark_bubble_promoted_from_rejected_mask" in flags
+    ):
+        return None
+    overreach_metric = metrics.get("bbox_overreach") if isinstance(metrics.get("bbox_overreach"), dict) else {}
+    metric_visible = _layout_bbox(overreach_metric.get("bbox"))
+    target = _layout_bbox(target_bbox)
+    visible = _layout_bbox(metric_visible or text_data.get("bbox") or text_data.get("source_bbox") or text_data.get("balloon_bbox"))
+    anchor = _layout_bbox(text_data.get("text_pixel_bbox") or text_data.get("source_bbox"))
+    if target is None or visible is None:
+        return None
+    target_area = max(1, _bbox_area_px(target))
+    visible_area = max(1, _bbox_area_px(visible))
+    if visible_area >= target_area or target_area < int(visible_area * 1.35):
+        return None
+    tx1, ty1, tx2, ty2 = [int(v) for v in target]
+    vx1, vy1, vx2, vy2 = [int(v) for v in visible]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    visible_w = max(1, vx2 - vx1)
+    visible_h = max(1, vy2 - vy1)
+    if visible_w < int(target_w * 0.52) or visible_h < int(target_h * 0.42):
+        return None
+    if anchor is not None:
+        anchor_area = max(1, _bbox_area_px(anchor))
+        if _bbox_intersection_area(visible, anchor) < int(anchor_area * 0.45):
+            return None
+    touches_band_edges = tx1 <= 4 or ty1 <= 4 or tx2 >= max(vx2 + 20, 796)
+    if not touches_band_edges and (target_w < int(visible_w * 1.22) and target_h < int(visible_h * 1.22)):
+        return None
+    return visible
+
+
+def _clean_text_geometry_bbox_from_metrics(text_data: dict) -> list[int] | None:
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    overreach = metrics.get("bbox_overreach") if isinstance(metrics.get("bbox_overreach"), dict) else {}
+    metric_bbox = _layout_bbox(overreach.get("text_geometry_bbox"))
+    if metric_bbox is not None:
+        return metric_bbox
+    polygon_bbox = _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or []))
+    if polygon_bbox is not None:
+        return polygon_bbox
+    return None
+
+
+def _geometry_bbox_looks_overbroad(candidate: list[int], clean_bbox: list[int]) -> bool:
+    candidate_area = max(1, _bbox_area_px(candidate))
+    clean_area = max(1, _bbox_area_px(clean_bbox))
+    candidate_w = max(1, int(candidate[2]) - int(candidate[0]))
+    candidate_h = max(1, int(candidate[3]) - int(candidate[1]))
+    clean_w = max(1, int(clean_bbox[2]) - int(clean_bbox[0]))
+    clean_h = max(1, int(clean_bbox[3]) - int(clean_bbox[1]))
+    clean_overlap = _bbox_intersection_area(candidate, clean_bbox) / float(clean_area)
+    return bool(
+        clean_overlap >= 0.72
+        and (
+            candidate_area >= int(clean_area * 1.80)
+            or candidate_w >= int(clean_w * 1.38)
+            or candidate_h >= int(clean_h * 1.42)
+        )
+    )
+
+
+def _sanitize_overbroad_text_geometry_for_layout(text_data: dict) -> None:
+    """Use real OCR glyph geometry when merged boxes include sibling/noise.
+
+    The dark-bubble OCR pass can keep a broad source/text bbox after removing
+    false side fragments. Position and original-scale sizing must not use that
+    stale box, otherwise the translated text is centered/scaled against the
+    wrong area.
+    """
+    clean_bbox = _clean_text_geometry_bbox_from_metrics(text_data)
+    if clean_bbox is None:
+        return
+
+    target_bbox = _layout_bbox(
+        text_data.get("target_bbox")
+        or text_data.get("balloon_bbox")
+        or text_data.get("bubble_mask_bbox")
+        or text_data.get("layout_safe_bbox")
+    )
+    if target_bbox is not None:
+        clean_area = max(1, _bbox_area_px(clean_bbox))
+        if _bbox_intersection_area(clean_bbox, target_bbox) / float(clean_area) < 0.35:
+            return
+
+    keys_to_check = ("text_pixel_bbox", "source_bbox", "bbox", "layout_bbox")
+    changed = False
+    for key in keys_to_check:
+        candidate = _layout_bbox(text_data.get(key))
+        if candidate is None:
+            continue
+        if _geometry_bbox_looks_overbroad(candidate, clean_bbox):
+            text_data[f"_overbroad_{key}_before_layout_sanitize"] = list(candidate)
+            text_data[key] = list(clean_bbox)
+            changed = True
+
+    if changed:
+        qa_metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(qa_metrics, dict):
+            qa_metrics["layout_text_geometry_sanitized"] = {
+                "clean_bbox": list(clean_bbox),
+            }
+        _merge_qa_flags(text_data, ["layout_text_geometry_sanitized", "safe_text_box_recomputed"])
+        for stale_key in (
+            "position_bbox",
+            "capacity_bbox",
+            "safe_text_box",
+            "_debug_safe_text_box",
+            "layout_safe_bbox",
+            "render_bbox",
+            "_debug_render_bbox",
+            "fit_status",
+            "layout_fit_result",
+        ):
+            text_data.pop(stale_key, None)
+
+
+def _clamp_lobe_safe_geometry_to_target(text_data: dict, target_bbox: list[int]) -> None:
+    if not text_data.get("_is_lobe_subregion"):
+        return
+    target = _layout_bbox(target_bbox)
+    if target is None:
+        return
+    changed = False
+    for key in ("safe_text_box", "_debug_safe_text_box", "layout_safe_bbox", "position_bbox", "capacity_bbox"):
+        bbox = _layout_bbox(text_data.get(key))
+        if bbox is None:
+            continue
+        inter = _bbox_intersection(bbox, target)
+        if inter is None:
+            text_data[f"_{key}_outside_lobe_rejected"] = list(bbox)
+            text_data.pop(key, None)
+            changed = True
+            continue
+        if inter != bbox:
+            text_data[f"_{key}_clamped_to_lobe_before"] = list(bbox)
+            text_data[key] = list(inter)
+            changed = True
+    if changed:
+        _merge_qa_flags(text_data, ["dark_lobe_safe_geometry_clamped", "safe_text_box_recomputed"])
+
+
+def _dark_bubble_compact_ellipse_bbox(text_data: dict, mask_bbox: list[int]) -> list[int] | None:
+    compact_text = re.sub(
+        r"\s+",
+        "",
+        str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+    )
+    word_count = len(str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or "").split())
+    if len(compact_text) >= 34 or word_count >= 6:
+        return None
+    ellipse = text_data.get("bubble_mask_ellipse")
+    if not isinstance(ellipse, dict):
+        metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+        dark_metric = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+        ellipse = dark_metric.get("ellipse") if isinstance(dark_metric.get("ellipse"), dict) else None
+    if not isinstance(ellipse, dict):
+        return None
+    center = ellipse.get("center")
+    axes = ellipse.get("axes")
+    if not isinstance(center, (list, tuple)) or len(center) < 2:
+        return None
+    if not isinstance(axes, (list, tuple)) or len(axes) < 2:
+        return None
+    try:
+        cx = float(center[0])
+        cy = float(center[1])
+        aw = abs(float(axes[0]))
+        ah = abs(float(axes[1]))
+    except Exception:
+        return None
+    if aw < 80 or ah < 50:
+        return None
+    mx1, my1, mx2, my2 = [int(v) for v in mask_bbox]
+    mask_w = max(1, mx2 - mx1)
+    mask_h = max(1, my2 - my1)
+    if aw >= mask_w * 0.82 and ah >= mask_h * 0.82:
+        return None
+    # Some detectors store ellipse center relative to the mask bbox, while older
+    # records can store it in page coordinates.
+    if 0 <= cx <= mask_w and 0 <= cy <= mask_h:
+        cx += mx1
+        cy += my1
+    ellipse_bbox = [
+        int(round(cx - aw / 2.0)),
+        int(round(cy - ah / 2.0)),
+        int(round(cx + aw / 2.0)),
+        int(round(cy + ah / 2.0)),
+    ]
+    ellipse_bbox = _bbox_intersection(ellipse_bbox, mask_bbox)
+    if ellipse_bbox is None:
+        return None
+    anchor = _bbox_union_many_for_layout(_geometry_bboxes_for_layout(text_data))
+    if anchor is not None:
+        anchor_area = max(1, _bbox_area_px(anchor))
+        if _bbox_intersection_area(ellipse_bbox, anchor) / float(anchor_area) < 0.50:
+            return None
+    return ellipse_bbox
+
+
+def _clear_stale_dark_panel_visual_render_geometry(text_data: dict) -> None:
+    source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    dark_visual_white_context = _is_dark_visual_white_mask_context(text_data, source)
+    if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"} and not dark_visual_white_context:
+        return
+    qa_metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    metric_key = "image_dark_bubble_mask" if source == "image_dark_bubble_mask" else "image_dark_panel_mask"
+    metric = qa_metrics.get(metric_key) if isinstance(qa_metrics.get(metric_key), dict) else {}
+    panel_bbox = _layout_bbox(metric.get("mask_bbox"))
+    if panel_bbox is None and source == "image_dark_bubble_mask":
+        panel_bbox = _layout_bbox(text_data.get("bubble_mask_bbox"))
+    if panel_bbox is None and dark_visual_white_context:
+        panel_bbox = _bbox_union_many_for_layout(
+            [
+                _layout_bbox(text_data.get("balloon_bbox")),
+                _layout_bbox(text_data.get("bubble_mask_bbox")),
+            ]
+        )
+    if panel_bbox is None:
+        return
+    current_safe = _layout_bbox(text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+    safe_ratio = 0.055 if dark_visual_white_context else 0.18 if source == "image_dark_bubble_mask" else 0.06
+    expected_safe = _inset_bbox_for_text(panel_bbox, ratio=safe_ratio, min_px=10)
+    if current_safe is not None:
+        current_area = max(1, _bbox_area_px(current_safe))
+        expected_area = max(1, _bbox_area_px(expected_safe))
+        overlap = _bbox_intersection_area(current_safe, expected_safe) / float(current_area)
+        if current_area >= int(expected_area * 0.72) and overlap >= 0.72:
+            return
+    for stale_key in (
+        "target_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "layout_safe_bbox",
+        "render_bbox",
+        "_debug_render_bbox",
+        "fit_status",
+        "layout_fit_result",
+    ):
+        text_data.pop(stale_key, None)
+    text_data["_dark_panel_visual_geometry_recomputed"] = True
+    _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
 
 
 def _ocr_geometry_looks_overmerged_for_bubble(
@@ -5867,21 +10984,208 @@ def _ocr_geometry_looks_overmerged_for_bubble(
     return _bbox_area_px(geometry_union) >= max(bubble_area * 1.20, bubble_area + 2400)
 
 
+def _select_overbroad_white_balloon_text_evidence_target(text_data: dict, target_bbox: list[int]) -> list[int] | None:
+    if text_data.get("_is_lobe_subregion"):
+        return None
+    if str(text_data.get("_render_target_source") or "").strip():
+        return None
+
+    qa_flags = {str(flag) for flag in text_data.get("qa_flags") or []}
+    qa_metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    try:
+        containment = float(qa_metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        containment = 1.0
+    merged_fragment_with_rejected_bubble = bool(
+        "same_balloon_fragment_merged" in qa_flags
+        and (
+            "rejected_derived_bubble_mask" in qa_flags
+            or str(text_data.get("bubble_mask_source") or "").strip().lower()
+            in {"rejected_derived_bubble_mask", "derived_white_crop_rejected", "derived_white_crop"}
+        )
+        and not _has_distinct_real_bubble_mask_bbox(text_data, target_bbox)
+    )
+    if (
+        "tiny_bubble_inner_bbox_rejected" not in qa_flags
+        and containment >= 0.30
+        and not merged_fragment_with_rejected_bubble
+    ):
+        return None
+
+    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    if target_w < 520 or target_h < 180:
+        return None
+
+    geometry_candidates = [
+        _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
+        _layout_bbox(text_data.get("text_pixel_bbox")),
+        _layout_bbox(text_data.get("source_bbox")),
+        _layout_bbox(text_data.get("bbox")),
+    ]
+    geometry_candidates = [bbox for bbox in geometry_candidates if bbox is not None]
+    if not geometry_candidates:
+        return None
+    geometry = _bbox_union_many_for_layout(geometry_candidates)
+    if geometry is None:
+        return None
+
+    gx1, gy1, gx2, gy2 = [int(v) for v in geometry]
+    geom_w = max(1, gx2 - gx1)
+    geom_h = max(1, gy2 - gy1)
+    if geom_w < 80 or geom_h < 22:
+        return None
+    if target_w < geom_w * 2.3 or target_h < geom_h * 1.45:
+        return None
+
+    geometry_overlap = _bbox_intersection_area(geometry, target_bbox) / float(max(1, _bbox_area_px(geometry)))
+    min_geometry_overlap = 0.55 if merged_fragment_with_rejected_bubble else 0.80
+    if geometry_overlap < min_geometry_overlap:
+        return None
+
+    if merged_fragment_with_rejected_bubble:
+        desired_w = int(min(target_w * 0.55, max(geom_w * 1.75, 260)))
+        desired_h = int(min(target_h * 0.65, max(geom_h * 1.40, 120)))
+    else:
+        desired_w = int(min(target_w * 0.72, max(geom_w * 2.25, 420)))
+        desired_h = int(min(target_h * 0.76, max(geom_h * 1.85, 160)))
+    if desired_w <= geom_w + 24 or desired_h <= geom_h + 24:
+        return None
+
+    center_x = (gx1 + gx2) / 2.0
+    center_y = (gy1 + gy2) / 2.0
+    nx1, nx2 = _center_span_within_bounds(center_x, desired_w, tx1, tx2)
+    ny1, ny2 = _center_span_within_bounds(center_y, desired_h, ty1, ty2)
+    derived = [int(nx1), int(ny1), int(nx2), int(ny2)]
+    if _bbox_intersection_area(geometry, derived) < int(_bbox_area_px(geometry) * min_geometry_overlap):
+        return None
+
+    text_data["_overbroad_white_balloon_original_target_bbox"] = list(target_bbox)
+    text_data["_overbroad_white_balloon_text_evidence_bbox"] = list(geometry)
+    text_data["_overbroad_white_balloon_target_bbox"] = list(derived)
+    text_data["_render_target_source"] = "overbroad_white_balloon_text_evidence"
+    _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    return derived
+
+
 def plan_text_layout(text_data: dict) -> dict:
+    _propagate_dark_connected_text_anchor_to_type(text_data)
+    _sanitize_overbroad_text_geometry_for_layout(text_data)
+    _propagate_dark_connected_text_anchor_to_type(text_data)
     visual_outer_bbox = _layout_bbox(text_data.get("_visual_rect_outer_bbox"))
     if visual_outer_bbox and _visual_outer_clips_source_geometry(text_data, visual_outer_bbox):
         text_data["_visual_outer_target_rejected"] = "source_geometry_clipped"
         _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
         visual_outer_bbox = None
+    balloon_target_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    bubble_mask_target_bbox = _layout_bbox(text_data.get("bubble_mask_bbox"))
+    qa_flags_for_target = {str(flag).strip() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    source_for_target = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source_for_target == "image_dark_bubble_mask":
+        probe_bbox = bubble_mask_target_bbox or balloon_target_bbox
+        if probe_bbox and _dark_bubble_visual_mask_is_overbroad_for_tiny_text(text_data, probe_bbox):
+            text_data["_dark_bubble_visual_mask_rejected"] = "tiny_text_overbroad"
+            _merge_qa_flags(text_data, ["dark_bubble_visual_mask_rejected_tiny_text", "safe_text_box_recomputed"])
+            bubble_mask_target_bbox = None
+            balloon_target_bbox = None
+    unsafe_merged_bubble_target = None
+    if (
+        bubble_mask_target_bbox
+        and balloon_target_bbox
+        and "same_balloon_fragment_merged" in qa_flags_for_target
+        and "mask_outside_balloon_critical" in qa_flags_for_target
+        and str(text_data.get("bubble_mask_source") or "").strip().lower() != "text_rect_fallback"
+    ):
+        bubble_area = max(1, _bbox_area_px(bubble_mask_target_bbox))
+        balloon_area = max(1, _bbox_area_px(balloon_target_bbox))
+        if bubble_area <= int(balloon_area * 0.82):
+            unsafe_merged_bubble_target = bubble_mask_target_bbox
+            text_data["_render_target_source"] = "unsafe_merged_bubble_mask_bbox"
+            _merge_qa_flags(text_data, ["unsafe_merged_bubble_mask_target", "safe_text_box_recomputed"])
+    if balloon_target_bbox and _is_synthetic_tight_bubble_bbox_for_layout(text_data, balloon_target_bbox):
+        text_data["_synthetic_tight_balloon_target_rejected"] = list(balloon_target_bbox)
+        _merge_qa_flags(text_data, ["tiny_bubble_inner_bbox_rejected", "safe_text_box_recomputed"])
+        balloon_target_bbox = None
+    edge_clipped_real_bubble_target = _select_edge_clipped_real_bubble_mask_target_bbox(
+        text_data,
+        balloon_target_bbox,
+    )
+    if edge_clipped_real_bubble_target is not None:
+        text_data["_render_target_source"] = "edge_clipped_real_bubble_mask_bbox"
+        _merge_qa_flags(text_data, ["tiny_bubble_inner_bbox_rejected", "safe_text_box_recomputed"])
+    short_fragment_compact_target = _select_short_repaired_fragment_compact_target(
+        text_data,
+        balloon_bbox=balloon_target_bbox,
+        bubble_mask_bbox=bubble_mask_target_bbox,
+    )
+    if short_fragment_compact_target is not None:
+        balloon_target_bbox = short_fragment_compact_target
     target_bbox = (
         visual_outer_bbox
-        or text_data.get("balloon_bbox")
+        or unsafe_merged_bubble_target
+        or edge_clipped_real_bubble_target
+        or balloon_target_bbox
         or text_data.get("layout_bbox")
         or resolve_text_anchor_bbox(text_data)
         or text_data.get("bbox")
         or [0, 0, 0, 0]
     )
     target_bbox = _layout_bbox(target_bbox) or [0, 0, 0, 0]
+    _clamp_lobe_safe_geometry_to_target(text_data, target_bbox)
+    visual_rect_reason = str(text_data.get("layout_safe_reason") or "").strip().lower()
+    visual_rect_target_locked = bool(
+        visual_outer_bbox
+        and visual_rect_reason in {"visual_rect_dark_panel", "visual_rect_colored_panel", "visual_rect_inner"}
+    )
+    dark_panel_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    dark_visual_flags = _qa_flags_set(text_data)
+    has_connected_dark_lobes_for_target = bool(
+        text_data.get("connected_lobe_bboxes")
+        or text_data.get("connected_position_bboxes")
+        or text_data.get("connected_focus_bboxes")
+        or len(text_data.get("balloon_subregions") or []) >= 2
+        or str(text_data.get("connected_balloon_orientation") or "").strip()
+    )
+    dark_bubble_oval_without_rect_evidence = bool(
+        dark_panel_source == "image_dark_bubble_mask"
+        and not has_connected_dark_lobes_for_target
+        and dark_visual_flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_oval_safe_height_expanded",
+        }
+        and not dark_visual_flags
+        & {
+            "dark_panel_rect_from_border_lines",
+            "dark_panel_full_bbox_selected",
+            "dark_panel_rect_from_uied",
+        }
+    )
+    dark_panel_visual_target = (
+        None
+        if dark_bubble_oval_without_rect_evidence
+        else _select_dark_panel_visual_mask_render_target_bbox(text_data, target_bbox)
+    )
+    dark_panel_mask_authoritative = dark_panel_source in {
+        "image_dark_panel_mask",
+        "image_dark_bubble_mask",
+        "derived_card_panel_mask",
+    }
+    if dark_panel_visual_target is not None and (not visual_rect_target_locked or dark_panel_mask_authoritative):
+        target_bbox = dark_panel_visual_target
+        visual_rect_target_locked = True
+    translator_note_target = _translator_note_target_bbox(text_data, target_bbox)
+    translator_note_target_locked = translator_note_target is not None
+    if translator_note_target_locked:
+        target_bbox = translator_note_target
+        text_data["_translator_note_layout"] = True
+        text_data["_render_target_source"] = text_data.get("_render_target_source") or "translator_note_target"
+        _merge_qa_flags(text_data, ["translator_note_best_effort_render"])
+    overbroad_white_target = _select_overbroad_white_balloon_text_evidence_target(text_data, target_bbox)
+    if overbroad_white_target and not visual_rect_target_locked and not translator_note_target_locked:
+        target_bbox = overbroad_white_target
     disjoint_source_render_target = _select_disjoint_source_text_render_target_bbox(text_data, target_bbox)
     validated_source_render_target = (
         disjoint_source_render_target
@@ -5889,35 +11193,137 @@ def plan_text_layout(text_data: dict) -> dict:
         else _select_validated_source_render_target_bbox(text_data)
     )
     merged_source_render_target = None
-    if validated_source_render_target:
+    if validated_source_render_target and not visual_rect_target_locked and not translator_note_target_locked:
         target_bbox = validated_source_render_target
-    else:
+    elif not visual_rect_target_locked and not translator_note_target_locked:
         collapsed_source_render_target = _select_collapsed_balloon_source_target_bbox(text_data, target_bbox)
         if collapsed_source_render_target:
             target_bbox = collapsed_source_render_target
         else:
             merged_source_render_target = _select_merged_white_balloon_render_target_bbox(text_data, target_bbox)
-    if merged_source_render_target:
+    if merged_source_render_target and not visual_rect_target_locked and not translator_note_target_locked:
         target_bbox = merged_source_render_target
     tiny_anchor_render_target = _select_tiny_anchor_render_target_bbox(text_data, target_bbox)
-    if tiny_anchor_render_target:
+    if tiny_anchor_render_target and not visual_rect_target_locked and not translator_note_target_locked:
         target_bbox = tiny_anchor_render_target
-    real_bubble_render_target = _select_real_bubble_render_target_bbox(text_data, target_bbox)
-    if real_bubble_render_target:
+    real_bubble_render_target = (
+        None
+        if visual_rect_target_locked or translator_note_target_locked
+        else _select_real_bubble_render_target_bbox(text_data, target_bbox)
+    )
+    if real_bubble_render_target and not visual_rect_target_locked and not translator_note_target_locked:
         target_bbox = real_bubble_render_target
         _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    trusted_dark_visual_target = (
+        None
+        if visual_rect_target_locked or translator_note_target_locked
+        else _select_trusted_dark_visual_capacity_target(text_data, target_bbox)
+    )
+    if trusted_dark_visual_target and not visual_rect_target_locked and not translator_note_target_locked:
+        target_bbox = trusted_dark_visual_target
+    dark_visible_target = _dark_bubble_visible_bbox_from_overbroad_target(text_data, target_bbox)
+    if dark_visible_target and not visual_rect_target_locked and not translator_note_target_locked:
+        target_bbox = dark_visible_target
+        for stale_key in (
+            "position_bbox",
+            "capacity_bbox",
+            "safe_text_box",
+            "_debug_safe_text_box",
+            "layout_safe_bbox",
+            "layout_safe_reason",
+            "render_bbox",
+            "_debug_render_bbox",
+            "fit_status",
+            "layout_fit_result",
+        ):
+            text_data.pop(stale_key, None)
+        text_data["_render_target_source"] = text_data.get("_render_target_source") or "dark_bubble_visible_bbox_from_overbroad_target"
+        _merge_qa_flags(text_data, ["dark_bubble_overbroad_target_clamped_to_visible_bbox", "safe_text_box_recomputed"])
+    unclamped_bubble_safe_area = _edge_clipped_unclamped_bubble_safe_area(text_data, target_bbox)
+    if unclamped_bubble_safe_area is not None:
+        text_data["_safe_text_box_unclamped"] = list(unclamped_bubble_safe_area["safe_unclamped"])
+        text_data["safe_text_box"] = list(unclamped_bubble_safe_area["safe_bbox"])
+        text_data["_debug_safe_text_box"] = list(unclamped_bubble_safe_area["safe_bbox"])
+        text_data["layout_safe_bbox"] = list(unclamped_bubble_safe_area["safe_bbox"])
+        text_data["layout_safe_reason"] = "debug_derived_bubble_mask_unclamped"
+        _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    debug_unclamped_layout = (
+        str(text_data.get("layout_safe_reason") or "").strip().lower()
+        == "debug_derived_bubble_mask_unclamped"
+    )
+    debug_unclamped_safe_bbox = (
+        _layout_bbox(text_data.get("_safe_text_box_unclamped"))
+        if debug_unclamped_layout and bool(text_data.get("_allow_unclamped_safe_text_box"))
+        else _layout_bbox(text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+        if debug_unclamped_layout
+        else None
+    )
     explicit_layout_safe_bbox = None
     explicit_layout_safe_reason = "explicit_layout_safe_bbox"
-    for safe_key, safe_reason in (
-        ("_visual_rect_inner_bbox", "visual_rect_inner"),
-        ("bubble_inner_bbox", "bubble_inner_bbox"),
-        ("layout_safe_bbox", str(text_data.get("layout_safe_reason") or "explicit_layout_safe_bbox")),
-        ("balloon_inner_bbox", "balloon_inner_bbox"),
-    ):
+    safe_candidates = []
+    if debug_unclamped_safe_bbox is not None:
+        safe_candidates.append(("safe_text_box", "debug_derived_bubble_mask_unclamped"))
+    elif short_fragment_compact_target is not None:
+        safe_candidates.append(("safe_text_box", "short_repaired_fragment_compact_safe_text_box"))
+    dark_panel_inner_safe_bbox = _dark_panel_full_bbox_inner_safe_area(text_data, target_bbox)
+    if dark_panel_inner_safe_bbox is not None:
+        text_data["_dark_panel_full_bbox_inner_safe_bbox"] = list(dark_panel_inner_safe_bbox)
+        safe_candidates.append(("_dark_panel_full_bbox_inner_safe_bbox", "dark_panel_full_bbox_inner_safe_bbox"))
+    if _layout_bbox(text_data.get("_trusted_dark_visual_capacity_safe_bbox")) is not None:
+        safe_candidates.append(("_trusted_dark_visual_capacity_safe_bbox", "trusted_dark_visual_capacity"))
+    safe_candidates.extend(
+        [
+            ("_visual_rect_inner_bbox", "visual_rect_inner"),
+            ("bubble_inner_bbox", "bubble_inner_bbox"),
+            ("layout_safe_bbox", str(text_data.get("layout_safe_reason") or "explicit_layout_safe_bbox")),
+            ("balloon_inner_bbox", "balloon_inner_bbox"),
+        ]
+    )
+    for safe_key, safe_reason in safe_candidates:
         if safe_key == "bubble_inner_bbox" and _is_manual_layout_origin(text_data):
             continue
-        candidate_safe_bbox = _layout_bbox(text_data.get(safe_key))
+        if safe_key == "bubble_inner_bbox" and (
+            _is_synthetic_tight_bubble_bbox_for_layout(text_data)
+            or _bubble_mask_is_text_shaped_inside_larger_balloon(text_data)
+        ):
+            debug = text_data.setdefault("_render_debug", {})
+            rejected = debug.setdefault("rejected_safe_boxes", [])
+            if isinstance(rejected, list):
+                rejected.append(
+                    {
+                        "key": safe_key,
+                        "value": list(_layout_bbox(text_data.get(safe_key)) or []),
+                        "target_bbox": list(target_bbox) if target_bbox else None,
+                        "reason": "text_shaped_bubble_mask_inside_larger_balloon",
+                    }
+                )
+            _merge_qa_flags(text_data, ["tiny_bubble_inner_bbox_rejected", "safe_text_box_recomputed"])
+            continue
+        candidate_safe_bbox = (
+            list(debug_unclamped_safe_bbox)
+            if safe_key == "safe_text_box" and debug_unclamped_safe_bbox is not None
+            else _layout_bbox(text_data.get(safe_key))
+        )
         if candidate_safe_bbox is not None:
+            if _should_reject_plain_balloon_visual_safe_area(
+                text_data,
+                target_bbox,
+                candidate_safe_bbox,
+                safe_reason,
+            ):
+                debug = text_data.setdefault("_render_debug", {})
+                rejected = debug.setdefault("rejected_safe_boxes", [])
+                if isinstance(rejected, list):
+                    rejected.append(
+                        {
+                            "key": safe_key,
+                            "value": list(candidate_safe_bbox),
+                            "target_bbox": list(target_bbox),
+                            "reason": "plain_balloon_visual_safe_area_rejected",
+                        }
+                    )
+                _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+                continue
             if target_bbox and _bbox_intersection_area(candidate_safe_bbox, target_bbox) <= 0:
                 debug = text_data.setdefault("_render_debug", {})
                 rejected = debug.setdefault("rejected_safe_boxes", [])
@@ -5978,14 +11384,58 @@ def plan_text_layout(text_data: dict) -> dict:
         < int(min(_bbox_area_px(explicit_layout_safe_bbox), _bbox_area_px(target_bbox)) * 0.50)
     ):
         explicit_layout_safe_bbox = None
-    layout_safe_area = (
-        {
-            "safe_bbox": explicit_layout_safe_bbox,
-            "reason": explicit_layout_safe_reason,
+    if explicit_layout_safe_bbox and "same_balloon_fragment_merged" in {str(flag) for flag in (text_data.get("qa_flags") or [])}:
+        safe_w = max(1, explicit_layout_safe_bbox[2] - explicit_layout_safe_bbox[0])
+        safe_h = max(1, explicit_layout_safe_bbox[3] - explicit_layout_safe_bbox[1])
+        target_w = max(1, target_bbox[2] - target_bbox[0])
+        target_h = max(1, target_bbox[3] - target_bbox[1])
+        if (
+            str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+            == "white_balloon"
+            and safe_h <= max(44, int(target_h * 0.42))
+            and safe_w >= int(target_w * 0.55)
+        ):
+            debug = text_data.setdefault("_render_debug", {})
+            rejected = debug.setdefault("rejected_safe_boxes", [])
+            if isinstance(rejected, list):
+                rejected.append(
+                    {
+                        "key": "layout_safe_bbox",
+                        "value": list(explicit_layout_safe_bbox),
+                        "target_bbox": list(target_bbox),
+                        "reason": "merged_oval_underfit_safe_area",
+                    }
+                )
+            explicit_layout_safe_bbox = None
+            _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    if translator_note_target_locked:
+        layout_safe_area = {
+            "safe_bbox": _inset_bbox_for_text(target_bbox, ratio=0.035, min_px=2),
+            "reason": "translator_note_target",
         }
-        if explicit_layout_safe_bbox
-        else _resolve_balloon_safe_area(text_data, target_bbox)
-    )
+    elif edge_clipped_real_bubble_target is not None:
+        layout_safe_area = {
+            "safe_bbox": _inset_bbox_for_text(target_bbox, ratio=0.025, min_px=2),
+            "reason": "edge_clipped_real_bubble_mask_bbox",
+        }
+    elif unclamped_bubble_safe_area is not None:
+        layout_safe_area = {
+            "safe_bbox": list(
+                unclamped_bubble_safe_area["safe_unclamped"]
+                if bool(text_data.get("_allow_unclamped_safe_text_box"))
+                else unclamped_bubble_safe_area["safe_bbox"]
+            ),
+            "reason": "debug_derived_bubble_mask_unclamped",
+        }
+    else:
+        layout_safe_area = (
+            {
+                "safe_bbox": explicit_layout_safe_bbox,
+                "reason": explicit_layout_safe_reason,
+            }
+            if explicit_layout_safe_bbox
+            else (_real_bubble_body_bbox_safe_area(text_data, target_bbox) or _resolve_balloon_safe_area(text_data, target_bbox))
+        )
     layout_safe_bbox = layout_safe_area.get("safe_bbox") if layout_safe_area else None
     if (
         layout_safe_bbox
@@ -6014,8 +11464,71 @@ def plan_text_layout(text_data: dict) -> dict:
     elif _should_ignore_tiny_anchor_safe_area(text_data, anchor_bbox, target_bbox, layout_safe_bbox):
         layout_safe_area = None
         layout_safe_bbox = None
+    if layout_safe_bbox and anchor_bbox and not text_data.get("_is_lobe_subregion"):
+        qa_flag_set = {str(flag) for flag in (text_data.get("qa_flags") or [])}
+        rehomed_layout = bool(text_data.get("_cross_page_band_rehomed_geometry")) or "cross_page_band_rehomed" in qa_flag_set
+        layout_reason_for_edge = str((layout_safe_area or {}).get("reason") or text_data.get("layout_safe_reason") or "").strip().lower()
+        _page_width_for_layout, page_height_for_layout = _page_dimensions_for_layout(text_data, target_bbox)
+        target_bottom_near_page = target_bbox[3] >= page_height_for_layout - 24
+        anchor_below_safe = anchor_bbox[3] > layout_safe_bbox[3] + 8
+        if (
+            rehomed_layout
+            and target_bottom_near_page
+            and anchor_below_safe
+            and layout_reason_for_edge
+            in {
+                "debug_derived_bubble_mask_unclamped",
+                "edge_clipped_real_bubble_mask_bbox",
+                "bubble_inner_bbox",
+                "real_bubble_body_bbox",
+            }
+        ):
+            sx1, sy1, sx2, sy2 = [int(v) for v in layout_safe_bbox]
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+            extended_safe = [
+                min(sx1, ax1),
+                sy1,
+                max(sx2, ax2),
+                min(page_height_for_layout, max(sy2, ay2)),
+            ]
+            if extended_safe[3] > sy2:
+                layout_safe_bbox = extended_safe
+                if layout_safe_area is None:
+                    layout_safe_area = {}
+                layout_safe_area["safe_bbox"] = layout_safe_bbox
+                layout_safe_area["reason"] = "edge_clipped_rehomed_visible_anchor_safe_area"
+                text_data["_edge_clipped_rehomed_safe_extended"] = True
+                _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+
+    anchored_safe_bbox = _recenter_reliable_bubble_safe_area_on_anchor(
+        text_data,
+        target_bbox,
+        layout_safe_bbox,
+        anchor_bbox,
+    )
+    if anchored_safe_bbox is not None:
+        layout_safe_bbox = anchored_safe_bbox
+        if layout_safe_area is None:
+            layout_safe_area = {}
+        layout_safe_area["safe_bbox"] = list(anchored_safe_bbox)
+        layout_safe_area["reason"] = "reliable_bubble_anchor_position"
+
+    dark_oval_expansion_bounds = _dark_oval_safe_expansion_bounds(text_data, target_bbox)
+    expanded_dark_oval_safe = _expand_dark_oval_safe_height(text_data, dark_oval_expansion_bounds, layout_safe_bbox)
+    if expanded_dark_oval_safe is not None:
+        layout_safe_bbox = expanded_dark_oval_safe
+        if layout_safe_area is None:
+            layout_safe_area = {}
+        layout_safe_area["safe_bbox"] = list(expanded_dark_oval_safe)
+        layout_safe_area["reason"] = "dark_oval_safe_height_expanded"
+        text_data["layout_safe_bbox"] = list(expanded_dark_oval_safe)
+        text_data["layout_safe_reason"] = "dark_oval_safe_height_expanded"
 
     center_on_balloon_bbox = _should_center_on_balloon_bbox(text_data)
+    if text_data.get("_reliable_bubble_anchor_safe_text_box"):
+        center_on_balloon_bbox = False
+    if translator_note_target_locked:
+        center_on_balloon_bbox = True
     if _is_overbroad_white_narration_anchor(text_data, anchor_bbox, target_bbox):
         center_on_balloon_bbox = False
     if _is_overbroad_textured_target_anchor(text_data, anchor_bbox, target_bbox):
@@ -6024,6 +11537,14 @@ def plan_text_layout(text_data: dict) -> dict:
     if _has_overbroad_ocr_box_against_anchor(text_data, anchor_bbox, target_bbox):
         center_on_balloon_bbox = False
         text_data["_render_target_source"] = text_data.get("_render_target_source") or "ocr_anchor_overbroad_raw_box"
+    early_rotation_deg, _early_rotation_source = _resolve_render_rotation_deg(
+        text_data,
+        text_data.get("estilo") if isinstance(text_data.get("estilo"), dict) else {},
+    )
+    rotated_anchor_position = bool(anchor_bbox and abs(_normalize_rotation_deg(early_rotation_deg)) >= 5.0)
+    if rotated_anchor_position:
+        center_on_balloon_bbox = False
+        text_data["_rotated_source_anchor_position"] = True
     force_edge_clipped_anchor_position = _should_follow_anchor_for_edge_clipped_short_text(
         text_data,
         anchor_bbox,
@@ -6046,6 +11567,55 @@ def plan_text_layout(text_data: dict) -> dict:
         anchor_bbox,
         center_on_balloon_bbox,
     )
+    if rotated_anchor_position:
+        follow_english_anchor_position = True
+    merged_white_balloon_layout = bool(
+        "same_balloon_fragment_merged" in {str(flag) for flag in (text_data.get("qa_flags") or [])}
+        and str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+        == "white_balloon"
+        and not rotated_anchor_position
+        and not text_data.get("_is_lobe_subregion")
+    )
+    if merged_white_balloon_layout:
+        follow_english_anchor_position = False
+        center_on_balloon_bbox = True
+    if text_data.get("_reliable_bubble_anchor_safe_text_box"):
+        follow_english_anchor_position = True
+    if translator_note_target_locked:
+        follow_english_anchor_position = False
+    preserve_dark_lobe_anchor_position = bool(
+        follow_english_anchor_position and _should_preserve_dark_connected_lobe_anchor(text_data)
+    )
+    dark_panel_center_on_source_anchor = bool(
+        anchor_bbox
+        and _should_use_full_dark_panel_visual_capacity(text_data, target_bbox)
+    )
+    if dark_panel_center_on_source_anchor:
+        center_on_balloon_bbox = False
+        follow_english_anchor_position = True
+        preserve_dark_lobe_anchor_position = False
+        text_data["_dark_panel_center_on_source_anchor"] = True
+        text_data["_anchor_center_only_layout"] = True
+    flags_for_dark_visual_capacity = _qa_flags_set(text_data)
+    source_for_dark_visual_capacity = str(
+        text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or ""
+    ).strip().lower()
+    dark_visual_white_context_for_capacity = _is_dark_visual_white_mask_context(
+        text_data,
+        source_for_dark_visual_capacity,
+    )
+    trusted_dark_visual_connected_capacity = bool(
+        layout_safe_bbox
+        and _has_trusted_dark_visual_capacity(text_data)
+        and source_for_dark_visual_capacity
+        in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}
+        and (
+            "dark_bubble_visual_glyph_mask_replaced_geometry" in flags_for_dark_visual_capacity
+            or dark_visual_white_context_for_capacity
+        )
+        and (text_data.get("connected_lobe_bboxes") or text_data.get("connected_position_bboxes"))
+        and not text_data.get("_is_lobe_subregion")
+    )
     _lobe_poly = text_data.get("_lobe_polygon") or None
     if follow_english_anchor_position:
         position_bbox = anchor_bbox
@@ -6057,11 +11627,20 @@ def plan_text_layout(text_data: dict) -> dict:
             position_bbox = _bbox_intersection(position_bbox, layout_safe_bbox) or layout_safe_bbox
         elif center_on_balloon_bbox:
             position_bbox = layout_safe_bbox or target_bbox
+    if preserve_dark_lobe_anchor_position and anchor_bbox:
+        position_bbox = list(anchor_bbox)
     capacity_bbox = position_bbox
+    if trusted_dark_visual_connected_capacity:
+        position_bbox = list(layout_safe_bbox)
+        capacity_bbox = list(layout_safe_bbox)
+        text_data["_trusted_dark_visual_capacity_position_bbox"] = list(layout_safe_bbox)
+    if rotated_anchor_position and anchor_bbox:
+        capacity_bbox = anchor_bbox
     use_safe_area_follow_anchor_capacity = bool(
         layout_safe_bbox
         and not anchor_capacity_locked
         and follow_english_anchor_position
+        and not rotated_anchor_position
         and _should_use_safe_area_for_follow_anchor_capacity(
             text_data,
             anchor_bbox,
@@ -6070,29 +11649,59 @@ def plan_text_layout(text_data: dict) -> dict:
         )
     )
     if text_data.get("_is_lobe_subregion"):
-        capacity_bbox = layout_safe_bbox or _resolve_connected_position_bbox(
+        dark_lobe_capacity_bbox = _dark_connected_lobe_visual_capacity_bbox(
+            text_data,
+            target_bbox,
+            layout_safe_bbox,
+            anchor_bbox,
+        )
+        capacity_bbox = dark_lobe_capacity_bbox or layout_safe_bbox or _resolve_connected_position_bbox(
             text_data,
             target_bbox,
             prefer_explicit_focus=False,
             lobe_polygon=_lobe_poly,
         )
-    elif layout_safe_bbox and not anchor_capacity_locked:
+    elif layout_safe_bbox and not anchor_capacity_locked and not rotated_anchor_position:
         if use_safe_area_follow_anchor_capacity:
             capacity_bbox = layout_safe_bbox
         else:
             capacity_bbox = _bbox_intersection(capacity_bbox, layout_safe_bbox) or layout_safe_bbox
         if single_lobe_follow_anchor:
             capacity_bbox = layout_safe_bbox
-    elif follow_english_anchor_position and not anchor_capacity_locked:
+    elif follow_english_anchor_position and not anchor_capacity_locked and not rotated_anchor_position:
         capacity_bbox = layout_safe_bbox or target_bbox
 
     position_on_capacity_bbox = False
-    if use_safe_area_follow_anchor_capacity and anchor_bbox:
+    full_dark_panel_visual_capacity = False
+    if _should_use_full_dark_panel_visual_capacity(text_data, target_bbox):
+        visual_capacity_bbox = list(layout_safe_bbox or target_bbox)
+        capacity_bbox = list(visual_capacity_bbox)
+        position_bbox = list(anchor_bbox) if dark_panel_center_on_source_anchor and anchor_bbox else list(visual_capacity_bbox)
+        layout_safe_bbox = list(visual_capacity_bbox)
+        if layout_safe_area is None:
+            layout_safe_area = {}
+        layout_safe_area["safe_bbox"] = list(visual_capacity_bbox)
+        layout_safe_area["reason"] = "full_dark_panel_visual_capacity"
+        position_on_capacity_bbox = not dark_panel_center_on_source_anchor
+        full_dark_panel_visual_capacity = True
+        text_data["_full_dark_panel_visual_capacity_bbox"] = list(visual_capacity_bbox)
+        text_data["_render_target_source"] = "dark_panel_visual_mask_bbox"
+        _merge_qa_flags(text_data, ["full_dark_panel_visual_capacity", "safe_text_box_recomputed"])
+    if trusted_dark_visual_connected_capacity:
+        position_on_capacity_bbox = True
+    if (
+        use_safe_area_follow_anchor_capacity
+        and anchor_bbox
+        and not text_data.get("_uied_preserve_anchor_position")
+        and not full_dark_panel_visual_capacity
+    ):
         ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
         ccx1, _ccy1, ccx2, _ccy2 = [int(v) for v in capacity_bbox]
         anchor_center_x = (ax1 + ax2) / 2.0
         capacity_center_x = (ccx1 + ccx2) / 2.0
         capacity_w = max(1, ccx2 - ccx1)
+        capacity_h = max(1, int(capacity_bbox[3]) - int(capacity_bbox[1]))
+        anchor_h = max(1, ay2 - ay1)
         position_on_capacity_bbox = abs(anchor_center_x - capacity_center_x) >= max(24, int(capacity_w * 0.055))
     if single_lobe_follow_anchor and layout_safe_bbox and anchor_bbox:
         anchor_area = max(1, _bbox_area_px(anchor_bbox))
@@ -6104,6 +11713,9 @@ def plan_text_layout(text_data: dict) -> dict:
 
     x1, y1, x2, y2 = target_bbox
     bounds_x1, bounds_y1, bounds_x2, bounds_y2 = layout_safe_bbox or target_bbox
+    position_bounds_x1, position_bounds_y1, position_bounds_x2, position_bounds_y2 = (
+        target_bbox if preserve_dark_lobe_anchor_position else [bounds_x1, bounds_y1, bounds_x2, bounds_y2]
+    )
     px1, py1, px2, py2 = [int(v) for v in position_bbox]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
@@ -6159,15 +11771,55 @@ def plan_text_layout(text_data: dict) -> dict:
     elif layout_profile == "connected_balloon" and text_data.get("_is_lobe_subregion"):
         width_ratio = max(width_ratio, 0.90)
         line_spacing = min(line_spacing, 0.04)
+    elif trusted_dark_visual_connected_capacity:
+        width_ratio = max(width_ratio, 0.94)
+        padding_y = min(padding_y, max(4, int(round(padding_ref_height * 0.045))))
+        line_spacing = min(line_spacing, 0.08)
 
     if center_on_balloon_bbox:
         vertical_anchor = "center"
         padding_y = max(padding_y, int(padding_ref_height * 0.12))
+    layout_safe_reason_norm = str((layout_safe_area or {}).get("reason") or "").strip().lower()
+    rehomed_geometry = bool(text_data.get("_cross_page_band_rehomed_geometry")) or "cross_page_band_rehomed" in {
+        str(flag) for flag in (text_data.get("qa_flags") or [])
+    }
+    if layout_safe_area and (
+        layout_safe_reason_norm == "edge_clipped_real_bubble_mask_bbox"
+        or layout_safe_reason_norm == "edge_clipped_rehomed_visible_anchor_safe_area"
+        or (
+            layout_safe_reason_norm == "debug_derived_bubble_mask_unclamped"
+            and rehomed_geometry
+        )
+    ):
+        # The visible BubbleMask is already the usable clipped body. Applying
+        # the normal ellipse padding again makes partial balloons top-heavy and
+        # forces unnecessarily tiny text.
+        width_ratio = max(width_ratio, 0.90)
+        padding_y = min(padding_y, max(2, int(round(padding_ref_height * 0.025))))
+        line_spacing = min(line_spacing, 0.06)
+        if isinstance(text_data.get("qa_flags"), list):
+            text_data["qa_flags"] = [
+                flag for flag in text_data.get("qa_flags") or [] if str(flag) != "tiny_bubble_inner_bbox_rejected"
+            ]
+    elif (
+        layout_safe_bbox
+        and not text_data.get("_is_lobe_subregion")
+        and layout_safe_reason_norm == "bubble_inner_bbox"
+        and rehomed_geometry
+    ):
+        # Rehomed layers can carry a page-space bubble_inner_bbox recovered from
+        # the final BubbleMask. Treat it as the usable body area instead of
+        # reapplying the generic ellipse padding that was designed for raw OCR
+        # boxes.
+        width_ratio = max(width_ratio, 0.90)
+        padding_y = min(padding_y, max(2, int(round(padding_ref_height * 0.025))))
+        line_spacing = min(line_spacing, 0.06)
     visual_rect_safe_area = bool(
         layout_safe_bbox
         and (
             text_data.get("_visual_rect_outer_bbox")
             or str((layout_safe_area or {}).get("reason") or "").startswith("visual_rect")
+            or str((layout_safe_area or {}).get("reason") or "") == "full_dark_panel_visual_capacity"
         )
     )
     translated_compact_len = len(
@@ -6177,9 +11829,17 @@ def plan_text_layout(text_data: dict) -> dict:
             str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
         )
     )
-    if visual_rect_safe_area and translated_compact_len >= 48:
+    if visual_rect_safe_area and str(text_data.get("_render_target_source") or "") == "dark_panel_visual_mask_bbox":
+        width_ratio = max(width_ratio, 0.96)
+        padding_y = min(padding_y, max(2, int(round(padding_ref_height * 0.03))))
+        line_spacing = min(line_spacing, 0.05)
+    elif visual_rect_safe_area and translated_compact_len >= 48:
         width_ratio = max(width_ratio, 0.90)
         padding_y = min(padding_y, max(4, int(padding_ref_height * 0.06)))
+    elif translator_note_target_locked:
+        width_ratio = max(width_ratio, 0.98)
+        padding_y = min(padding_y, max(1, int(round(padding_ref_height * 0.025))))
+        line_spacing = min(line_spacing, 0.04)
     elif (
         layout_safe_bbox
         and not text_data.get("_is_lobe_subregion")
@@ -6228,8 +11888,15 @@ def plan_text_layout(text_data: dict) -> dict:
     )
 
     style_target_size = max(10, int(estilo.get("tamanho", 24)) + target_size_delta)
+    if translator_note_target_locked:
+        style_target_size = min(style_target_size, 12)
     original_font_size = _estimate_original_font_size_px(text_data)
     follow_original_ocr_size = _should_follow_original_ocr_size(text_data) and original_font_size is not None
+    prefer_original_font_size = bool(
+        original_font_size is not None
+        and not translator_note_target_locked
+        and not _anchor_too_tiny_for_long_translation(text_data, anchor_bbox, target_bbox)
+    )
     target_size = (
         max(_MIN_FONT_SIZE, int(original_font_size or style_target_size) + target_size_delta)
         if follow_original_ocr_size
@@ -6237,6 +11904,137 @@ def plan_text_layout(text_data: dict) -> dict:
     )
     explicit_outline = bool(estilo.get("contorno")) or int(estilo.get("contorno_px", 0) or 0) > 0
     outline_px = max(int(estilo.get("contorno_px", 0)), outline_boost) if explicit_outline else 0
+    dark_visual_source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    trusted_dark_visual_capacity = _has_trusted_dark_visual_capacity(text_data)
+    trusted_dark_bubble_visual_policy = _uses_trusted_dark_bubble_visual_policy(text_data)
+    dark_visual_flags = _qa_flags_set(text_data)
+    card_panel_font_cap = 0
+    dark_visual_text = trusted_dark_visual_capacity or dark_visual_source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"} or bool(
+        dark_visual_flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            "dark_bubble_negative_evidence",
+        }
+    ) or (
+        str(text_data.get("style_origin") or "").strip().lower()
+        in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+    )
+    if dark_visual_text and not translator_note_target_locked and not trusted_dark_visual_capacity:
+        glow_px = int(estilo.get("glow_px", 0) or 0) if bool(estilo.get("glow")) else 0
+        effect_px = max(outline_px, glow_px)
+        if effect_px > 0:
+            # Glow/outline expands the rendered ink beyond the measured glyph box.
+            # Dark UI bubbles need extra visual leading, otherwise PT-BR multi-line
+            # text looks stacked even when the glyph bbox technically fits.
+            if full_dark_panel_visual_capacity:
+                line_spacing = max(line_spacing, 0.16 if effect_px <= 2 else 0.18)
+            elif trusted_dark_visual_connected_capacity:
+                line_spacing = max(line_spacing, 0.12 if effect_px <= 2 else 0.16)
+            else:
+                line_spacing = max(line_spacing, 0.30 if effect_px <= 2 else 0.38)
+        if (
+            not trusted_dark_bubble_visual_policy
+            and not _dark_bubble_visual_capacity_should_decide_size(text_data)
+            and not text_data.get("_is_lobe_subregion")
+            and capacity_height <= 180
+        ):
+            compact_len = len(
+                re.sub(
+                    r"\s+",
+                    "",
+                    str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+                )
+            )
+            flags_for_cap = _qa_flags_set(text_data)
+            trusted_dark_panel_rect = bool(
+                trusted_dark_visual_capacity
+                and dark_visual_source in {"image_dark_panel_mask", "image_white_bubble_mask", "image_rect_bubble_mask"}
+                and (
+                    "dark_panel_full_bbox_selected" in flags_for_cap
+                    or "dark_panel_rect_from_dark_bubble_bbox" in flags_for_cap
+                    or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags_for_cap
+                )
+            )
+            if trusted_dark_panel_rect:
+                cap_ratio = 0.40 if compact_len <= 34 else 0.34
+            else:
+                cap_ratio = 0.30 if compact_len <= 24 else 0.26
+            visual_cap = max(_MIN_FONT_SIZE, int(round(capacity_height * cap_ratio)))
+            source_anchor = _layout_bbox(
+                text_data.get("source_bbox")
+                or text_data.get("text_pixel_bbox")
+                or text_data.get("bbox")
+            )
+            if source_anchor is not None and not trusted_dark_visual_capacity:
+                anchor_h = max(1, int(source_anchor[3]) - int(source_anchor[1]))
+                visual_cap = min(visual_cap, max(_MIN_FONT_SIZE, int(round(anchor_h * 0.65))))
+            if target_size > visual_cap:
+                target_size = visual_cap
+                _merge_qa_flags(text_data, ["dark_visual_font_capped_for_readability"])
+        if (
+            not trusted_dark_bubble_visual_policy
+            and not _dark_bubble_visual_capacity_should_decide_size(text_data)
+            and not text_data.get("_is_lobe_subregion")
+            and _qa_flags_set(text_data) & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            }
+        ):
+            compact_len = len(
+                re.sub(
+                    r"\s+",
+                    "",
+                    str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+                )
+            )
+            style_origin_norm = str(text_data.get("style_origin") or "").strip().lower()
+            auto_dark_style = style_origin_norm in {"", "auto", "auto_dark_panel_glow_fallback"}
+            source_anchor = _layout_bbox(
+                text_data.get("source_bbox")
+                or text_data.get("text_pixel_bbox")
+                or text_data.get("bbox")
+            )
+            if auto_dark_style and source_anchor is not None and compact_len >= 44:
+                anchor_h = max(1, int(source_anchor[3]) - int(source_anchor[1]))
+                if compact_len >= 68:
+                    anchor_ratio = 0.34
+                elif compact_len >= 56:
+                    anchor_ratio = 0.38
+                else:
+                    anchor_ratio = 0.44
+                visual_cap = max(_MIN_FONT_SIZE, int(round(anchor_h * anchor_ratio)))
+                if target_size > visual_cap:
+                    target_size = visual_cap
+                    _merge_qa_flags(text_data, ["dark_visual_auto_font_capped_to_source_scale"])
+    if (
+        (bool(text_data.get("card_panel_text_context")) or "short_dark_anchor_center_preserved" in dark_visual_flags)
+        and not translator_note_target_locked
+        and not text_data.get("_is_lobe_subregion")
+        and dark_visual_source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask", ""}
+    ):
+        compact_len = len(
+            re.sub(
+                r"\s+",
+                "",
+                str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+            )
+        )
+        if 1 <= compact_len <= 34:
+            panel_cap = max(
+                _MIN_FONT_SIZE,
+                min(
+                    int(round(capacity_width * 0.145)),
+                    int(round(capacity_height * 0.20)),
+                    int(round(max(1, target_size) * 0.88)),
+                ),
+            )
+            if target_size > panel_cap:
+                target_size = panel_cap
+                _merge_qa_flags(text_data, ["dark_card_panel_font_capped_for_margin"])
+            card_panel_font_cap = max(card_panel_font_cap, panel_cap)
 
     simple_anchor_capacity_expanded = False
     simple_anchor_capacity_reason = ""
@@ -6247,7 +12045,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "yes",
         "on",
     }
-    auto_ocr_font_cap = max(_MIN_FONT_SIZE, int(target_size)) if follow_original_ocr_size else 0
+    auto_ocr_font_cap = 0
     font_search_floor = _MIN_FONT_SIZE if follow_original_ocr_size else 0
     auto_visual_lobe_capacity = _should_auto_expand_visual_lobe_anchor(
         text_data,
@@ -6308,6 +12106,23 @@ def plan_text_layout(text_data: dict) -> dict:
     connected_orientation = str(text_data.get("connected_balloon_orientation", "") or "")
     raw_slot_index = text_data.get("_connected_slot_index", -1)
     slot_index = int(-1 if raw_slot_index is None else raw_slot_index)
+    debug_unclamped_final_safe_bbox = (
+        _layout_bbox(text_data.get("_safe_text_box_unclamped"))
+        if (
+            layout_safe_area
+            and str(layout_safe_area.get("reason") or "").strip().lower()
+            == "debug_derived_bubble_mask_unclamped"
+            and not bool(text_data.get("_allow_unclamped_safe_text_box"))
+        )
+        else None
+    )
+    if debug_unclamped_final_safe_bbox is not None:
+        if layout_safe_bbox and _bbox_intersection_area(debug_unclamped_final_safe_bbox, layout_safe_bbox) <= 0:
+            debug_unclamped_final_safe_bbox = None
+        else:
+            # The safe box was already inset from the real debug-derived bubble mask.
+            # Applying another vertical inset leaves edge-clipped balloons visibly top-heavy.
+            padding_y = 0
     
     vertical_bias_px = 0
     horizontal_bias_px = 0
@@ -6344,6 +12159,24 @@ def plan_text_layout(text_data: dict) -> dict:
             vertical_bias_px += max(44, int(box_height * 0.095) + 20)
         elif slot_index == 1:
             vertical_bias_px += max(28, int(box_height * 0.04) + 18)
+    if (
+        layout_safe_reason_norm == "edge_clipped_rehomed_visible_anchor_safe_area"
+        and anchor_bbox
+        and not text_data.get("_is_lobe_subregion")
+    ):
+        _ax1, ay1, _ax2, ay2 = [int(v) for v in anchor_bbox]
+        anchor_center_y = (ay1 + ay2) / 2.0
+        capacity_center_y = (capacity_bbox[1] + capacity_bbox[3]) / 2.0
+        downward_bias = int(round(anchor_center_y - capacity_center_y))
+        if downward_bias > 0:
+            vertical_bias_px += max(0, min(capacity_height // 3, downward_bias))
+    if debug_unclamped_final_safe_bbox is not None and layout_safe_bbox:
+        _ux1, _uy1, _ux2, _uy2 = [int(v) for v in debug_unclamped_final_safe_bbox]
+        _sx1, _sy1, _sx2, _sy2 = [int(v) for v in layout_safe_bbox]
+        unclamped_center_y = (_uy1 + _uy2) / 2.0
+        clamped_center_y = (_sy1 + _sy2) / 2.0
+        unclamped_bias = int(round(unclamped_center_y - clamped_center_y))
+        vertical_bias_px += max(-capacity_height // 3, min(capacity_height // 3, unclamped_bias))
 
     if capacity_height <= 72 and not text_data.get("_is_lobe_subregion"):
         if _should_compact_small_text_capacity(text_data, capacity_bbox):
@@ -6360,48 +12193,78 @@ def plan_text_layout(text_data: dict) -> dict:
     
     computed_max_width = max(4, int(capacity_width * width_ratio))
     computed_max_height = max(4, capacity_height - (padding_y * 2))
-    if follow_english_anchor_position and not anchor_capacity_locked and anchor_bbox and not position_on_capacity_bbox:
+    capacity_h = capacity_height
+    anchor_h = 0
+    if (
+        follow_english_anchor_position
+        and not anchor_capacity_locked
+        and anchor_bbox
+        and not position_on_capacity_bbox
+        and not rotated_anchor_position
+    ):
         ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
         anchor_cx = (ax1 + ax2) / 2.0
         anchor_cy = (ay1 + ay2) / 2.0
         anchor_w = max(1, ax2 - ax1)
         anchor_h = max(1, ay2 - ay1)
-        max_centered_w = int(
-            max(
-                4,
-                2
-                * min(
-                    max(0.0, anchor_cx - float(bounds_x1)),
-                    max(0.0, float(bounds_x2) - anchor_cx),
-                ),
+        uied_alignment = str(text_data.get("_uied_component_anchor_alignment") or "").strip().lower()
+        if uied_alignment == "left":
+            max_centered_w = max(4, int(float(bounds_x2) - float(ax1)))
+        elif uied_alignment == "right":
+            max_centered_w = max(4, int(float(ax2) - float(bounds_x1)))
+        else:
+            max_centered_w = int(
+                max(
+                    4,
+                    2
+                    * min(
+                        max(0.0, anchor_cx - float(position_bounds_x1)),
+                        max(0.0, float(position_bounds_x2) - anchor_cx),
+                    ),
+                )
             )
-        )
         max_centered_h = int(
             max(
                 4,
                 2
                 * min(
-                    max(0.0, anchor_cy - float(bounds_y1)),
-                    max(0.0, float(bounds_y2) - anchor_cy),
+                    max(0.0, anchor_cy - float(position_bounds_y1)),
+                    max(0.0, float(position_bounds_y2) - anchor_cy),
                 ),
             )
         )
+        anchor_centered_height_too_tight = bool(
+            use_safe_area_follow_anchor_capacity
+            and translated_compact_len >= 10
+            and anchor_h <= max(48, int(target_size * 1.65))
+            and capacity_h >= max(90, int(anchor_h * 2.0))
+            and max_centered_h <= max(72, int(target_size * 2.05))
+        )
         computed_max_width = min(computed_max_width, max(4, max_centered_w))
-        if max_centered_h > padding_y * 2:
+        if anchor_centered_height_too_tight:
+            position_on_capacity_bbox = True
+        elif max_centered_h > padding_y * 2:
             computed_max_height = min(computed_max_height, max(4, max_centered_h - (padding_y * 2)))
         desired_position_w = max(anchor_w, computed_max_width)
         desired_position_h = max(anchor_h, computed_max_height + (padding_y * 2))
-        pos_x1, pos_x2 = _center_span_within_bounds(
-            anchor_cx,
-            desired_position_w,
-            bounds_x1,
-            bounds_x2,
-        )
+        if uied_alignment == "left":
+            pos_x1 = max(bounds_x1, min(ax1, bounds_x2 - 4))
+            pos_x2 = min(bounds_x2, pos_x1 + desired_position_w)
+        elif uied_alignment == "right":
+            pos_x2 = min(bounds_x2, max(ax2, bounds_x1 + 4))
+            pos_x1 = max(bounds_x1, pos_x2 - desired_position_w)
+        else:
+            pos_x1, pos_x2 = _center_span_within_bounds(
+                anchor_cx,
+                desired_position_w,
+                position_bounds_x1,
+                position_bounds_x2,
+            )
         pos_y1, pos_y2 = _center_span_within_bounds(
             anchor_cy,
             desired_position_h,
-            bounds_y1,
-            bounds_y2,
+            position_bounds_y1,
+            position_bounds_y2,
         )
         position_bbox = [pos_x1, pos_y1, pos_x2, pos_y2]
         px1, py1, px2, py2 = [int(v) for v in position_bbox]
@@ -6417,7 +12280,11 @@ def plan_text_layout(text_data: dict) -> dict:
     safe_center_x = cap_center_x if position_on_capacity_bbox else (spx1 + spx2) / 2.0 if follow_english_anchor_position else cap_center_x
     if not anchor_capacity_locked and not follow_english_anchor_position and not center_on_balloon_bbox:
         safe_center_x += float(horizontal_bias_px)
-    if anchor_capacity_locked or (simple_anchor_capacity_expanded and not layout_safe_bbox):
+    if preserve_dark_lobe_anchor_position:
+        safe_bounds_x1, safe_bounds_y1, safe_bounds_x2, safe_bounds_y2 = [
+            int(v) for v in target_bbox
+        ]
+    elif anchor_capacity_locked or (simple_anchor_capacity_expanded and not layout_safe_bbox):
         safe_bounds_x1, safe_bounds_y1, safe_bounds_x2, safe_bounds_y2 = [int(v) for v in capacity_bbox]
     else:
         safe_bounds_x1, safe_bounds_y1, safe_bounds_x2, safe_bounds_y2 = bounds_x1, bounds_y1, bounds_x2, bounds_y2
@@ -6431,6 +12298,73 @@ def plan_text_layout(text_data: dict) -> dict:
     _stb_y1 = max(safe_bounds_y1, safe_source_y + padding_y)
     _stb_y2 = min(safe_bounds_y2, safe_source_y + padding_y + computed_max_height)
     safe_text_box = [_stb_x1, _stb_y1, _stb_x2, _stb_y2]
+    if (
+        layout_safe_area
+        and str(layout_safe_area.get("reason") or "").strip().lower() == "debug_derived_bubble_mask_unclamped"
+        and debug_unclamped_safe_bbox is not None
+    ):
+        safe_text_box = [int(v) for v in debug_unclamped_safe_bbox]
+    qa_flag_set_for_final_safe = {str(flag) for flag in text_data.get("qa_flags") or []}
+    if "same_balloon_fragment_merged" in qa_flag_set_for_final_safe:
+        safe_w = max(1, int(safe_text_box[2]) - int(safe_text_box[0]))
+        safe_h = max(1, int(safe_text_box[3]) - int(safe_text_box[1]))
+        target_w = max(1, int(target_bbox[2]) - int(target_bbox[0]))
+        target_h = max(1, int(target_bbox[3]) - int(target_bbox[1]))
+        safe_area = safe_w * safe_h
+        target_area = target_w * target_h
+        if (
+            target_area > 0
+            and safe_area < int(target_area * 0.48)
+            and safe_h < int(target_h * 0.68)
+            and safe_w >= int(target_w * 0.45)
+        ):
+            promoted_safe = _inset_bbox_for_text(target_bbox, ratio=0.12, min_px=10)
+            if _layout_bbox(promoted_safe) is not None:
+                safe_text_box = promoted_safe
+                layout_safe_bbox = promoted_safe
+                layout_safe_area = {"safe_bbox": promoted_safe, "reason": "merged_balloon_target_inset"}
+                _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
+    final_dark_oval_safe = _expand_dark_oval_safe_height(text_data, dark_oval_expansion_bounds, safe_text_box)
+    if final_dark_oval_safe is not None:
+        safe_text_box = list(final_dark_oval_safe)
+        layout_safe_bbox = list(final_dark_oval_safe)
+        layout_safe_area = {"safe_bbox": list(final_dark_oval_safe), "reason": "dark_oval_safe_height_expanded"}
+        text_data["layout_safe_bbox"] = list(final_dark_oval_safe)
+        text_data["layout_safe_reason"] = "dark_oval_safe_height_expanded"
+    clipped_dark_oval_safe = _clip_dark_oval_safe_to_visible_balloon(text_data, safe_text_box)
+    if clipped_dark_oval_safe is not None and list(clipped_dark_oval_safe) != list(safe_text_box):
+        safe_text_box = list(clipped_dark_oval_safe)
+        layout_safe_bbox = list(clipped_dark_oval_safe)
+        layout_safe_area = {"safe_bbox": list(clipped_dark_oval_safe), "reason": "dark_oval_safe_clipped_to_visible_balloon"}
+        text_data["layout_safe_bbox"] = list(clipped_dark_oval_safe)
+        text_data["layout_safe_reason"] = "dark_oval_safe_clipped_to_visible_balloon"
+    short_dark_anchor_safe = _preserve_short_dark_anchor_scale_safe_box(text_data, target_bbox, safe_text_box)
+    if short_dark_anchor_safe is not None:
+        safe_text_box = list(short_dark_anchor_safe)
+        layout_safe_bbox = list(short_dark_anchor_safe)
+        layout_safe_area = {"safe_bbox": list(short_dark_anchor_safe), "reason": "short_dark_anchor_scale_preserved"}
+        text_data["layout_safe_bbox"] = list(short_dark_anchor_safe)
+        text_data["layout_safe_reason"] = "short_dark_anchor_scale_preserved"
+    final_safe_bbox = _layout_bbox(safe_text_box)
+    if final_safe_bbox is not None:
+        final_safe_w = max(4, int(final_safe_bbox[2]) - int(final_safe_bbox[0]))
+        final_safe_h = max(4, int(final_safe_bbox[3]) - int(final_safe_bbox[1]))
+        if computed_max_width > final_safe_w or computed_max_height > final_safe_h:
+            computed_max_width = min(computed_max_width, final_safe_w)
+            computed_max_height = min(computed_max_height, final_safe_h)
+            _merge_qa_flags(text_data, ["safe_text_box_capacity_synced"])
+    if dark_visual_text and not translator_note_target_locked and not trusted_dark_visual_capacity:
+        visual_glow_px = int(estilo.get("glow_px", 0) or 0) if bool(estilo.get("glow")) else 0
+        visual_effect_px = max(int(outline_px or 0), int(visual_glow_px or 0))
+        if visual_effect_px > 0:
+            effect_margin = max(2, min(10, int(math.ceil(visual_effect_px * 1.75))))
+            adjusted_w = max(4, int(computed_max_width) - (effect_margin * 2))
+            adjusted_h = max(4, int(computed_max_height) - (effect_margin * 2))
+            if adjusted_w < computed_max_width or adjusted_h < computed_max_height:
+                computed_max_width = adjusted_w
+                computed_max_height = adjusted_h
+                text_data["_dark_visual_effect_fit_margin_px"] = int(effect_margin)
+                _merge_qa_flags(text_data, ["dark_visual_effect_capacity_inset"])
     rotation_deg, rotation_source = _resolve_render_rotation_deg(text_data, estilo)
     if rotation_deg != 0.0:
         text_data["rotation_deg"] = rotation_deg
@@ -6442,7 +12376,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "position_bbox": position_bbox,
         "capacity_bbox": capacity_bbox,
         "layout_safe_bbox": layout_safe_bbox,
-        "layout_safe_reason": layout_safe_area.get("reason") if layout_safe_area else "",
+        "layout_safe_reason": layout_safe_area.get("reason") if layout_safe_area else str(text_data.get("layout_safe_reason") or ""),
         "safe_text_box": safe_text_box,
         "layout_shape": layout_shape,
         "balloon_geo": balloon_geo,
@@ -6458,6 +12392,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "font_name": estilo.get("fonte", DEFAULT_FONTS.get(tipo, "ComicNeue-Bold.ttf")),
         "target_size": target_size,
         "text_color": estilo.get("cor", "#000000"),
+        "background_rgb": list(_uied_background_rgb(text_data) or _coerce_rgb_tuple(text_data.get("background_rgb")) or []),
         "cor_gradiente": estilo.get("cor_gradiente", []),
         "outline_color": estilo.get("contorno", ""),
         "outline_px": outline_px,
@@ -6467,23 +12402,30 @@ def plan_text_layout(text_data: dict) -> dict:
         "sombra": estilo.get("sombra", False),
         "sombra_cor": estilo.get("sombra_cor", ""),
         "sombra_offset": estilo.get("sombra_offset", [0, 0]),
+        "curva": bool(estilo.get("curva", False)),
+        "curva_direcao": str(estilo.get("curva_direcao", "") or ""),
+        "curva_intensidade": float(estilo.get("curva_intensidade", 0.0) or 0.0),
         "rotation_deg": rotation_deg,
         "rotation_source": rotation_source,
         "line_spacing_ratio": line_spacing,
         "vertical_bias_px": vertical_bias_px,
         "horizontal_bias_px": horizontal_bias_px,
         "_target_source": text_data.get("_render_target_source") or "",
+        "_style_origin": text_data.get("style_origin") or "",
         "_validated_source_target_bbox": text_data.get("_validated_source_target_bbox") or [],
         "_anchor_capacity_locked": anchor_capacity_locked,
         "_simple_anchor_capacity_expanded": simple_anchor_capacity_expanded,
         "_simple_anchor_capacity_reason": simple_anchor_capacity_reason,
-        "_font_search_cap": simple_anchor_font_cap or auto_ocr_font_cap,
+        "_font_search_cap": simple_anchor_font_cap or auto_ocr_font_cap or card_panel_font_cap,
         "_font_search_floor": font_search_floor,
         "_font_search_emergency_floor": 6 if capacity_height <= 64 else 8,
         "_follow_original_ocr_size": follow_original_ocr_size,
+        "_prefer_original_font_size": prefer_original_font_size,
+        "_source_font_size_px": int(original_font_size or 0),
         "_follow_english_anchor_position": follow_english_anchor_position,
         "_position_on_capacity_bbox": position_on_capacity_bbox,
         "_center_on_balloon_bbox": center_on_balloon_bbox,
+        "_anchor_center_only_layout": bool(text_data.get("_anchor_center_only_layout")),
     }
 
 
@@ -6853,6 +12795,8 @@ def _fits_in_box(text: str, font_name: str, size: int, max_width: int, max_heigh
 
 
 def _minimum_legible_font_px(text_data: dict, plan: dict) -> int:
+    if _is_translator_note_layer(text_data) or bool(text_data.get("_translator_note_layout")):
+        return max(7, min(_MIN_FONT_SIZE, 9))
     target_bbox = _layout_bbox(plan.get("target_bbox")) or _layout_bbox(text_data.get("balloon_bbox")) or [0, 0, 0, 0]
     page_width, _page_height = _page_dimensions_for_layout(text_data, target_bbox)
     return max(_MIN_FONT_SIZE, int(math.ceil(max(0, page_width) * 0.012)))
@@ -6890,6 +12834,61 @@ def _resolved_fit_attempt(resolved: dict, plan: dict) -> dict:
         "lines": max(1, len(lines)),
         "status": status,
     }
+
+
+def _should_prefer_largest_dark_single_line_candidate(text_data: dict, plan: dict, wrapped: list[str]) -> bool:
+    if len(wrapped) != 1:
+        return False
+    if text_data.get("_is_lobe_subregion"):
+        return False
+    text_len = len(re.sub(r"\s+", "", str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or "")))
+    if text_len <= 0 or text_len > 24:
+        return False
+    flags = _qa_flags_set(text_data)
+    style_origin = str(text_data.get("style_origin") or "").strip().lower()
+    plan_style_origin = str(plan.get("_style_origin") or "").strip().lower()
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or plan.get("layout_profile") or "").strip().lower()
+    plan_background_luma = _dark_panel_luminance(_coerce_rgb_tuple(plan.get("background_rgb")))
+    plan_dark_glow = bool(plan.get("glow")) and plan_background_luma <= 90.0
+    dark_visual = (
+        source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}
+        or profile in {"dark_panel", "dark_bubble"}
+        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+        or plan_style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+        or plan_dark_glow
+        or "auto_dark_panel_glow_fallback" in flags
+    )
+    if not dark_visual:
+        return False
+    return (
+        "compact_small_text_capacity" in flags
+        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style"}
+        or plan_style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style"}
+        or plan_dark_glow
+    )
+
+
+def _should_prefer_largest_dark_panel_candidate(text_data: dict, plan: dict, wrapped: list[str]) -> bool:
+    if text_data.get("_is_lobe_subregion"):
+        return False
+    if len(wrapped) <= 1:
+        return False
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or plan.get("layout_profile") or "").strip().lower()
+    target_source = str(text_data.get("_render_target_source") or plan.get("_target_source") or "").strip().lower()
+    full_dark_panel = (
+        source == "image_dark_panel_mask"
+        or "dark_panel_rect_from_dark_bubble_bbox" in flags
+        or "dark_panel_full_bbox_selected" in flags
+        or target_source == "dark_panel_visual_mask_bbox"
+    )
+    if not full_dark_panel:
+        return False
+    if profile not in {"dark_panel", "dark_bubble", "standard", ""}:
+        return False
+    return True
 
 
 def _persist_fit_attempts(text_data: dict, plan: dict, text: str, resolved: dict, initial_font_px: int) -> None:
@@ -7007,8 +13006,894 @@ def _compute_font_search_upper_bound(plan: dict, text: str) -> int:
     return max(8, hi)
 
 
+def _original_text_scale_experiment_enabled() -> bool:
+    return str(os.getenv("TRADUZAI_EXPERIMENT_ORIGINAL_TEXT_SCALE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _should_use_original_text_scale_contract(text_data: dict) -> bool:
+    content_class = str(text_data.get("content_class") or "").strip().lower()
+    if content_class == "sfx":
+        return False
+    render_policy = str(text_data.get("render_policy") or "").strip().lower()
+    route_action = str(text_data.get("route_action") or "").strip().lower()
+    if (
+        bool(text_data.get("skip_processing"))
+        or bool(text_data.get("preserve_original"))
+        or render_policy in {"merged_into_primary", "preserve_original"}
+        or route_action in {"skip", "preserve_original"}
+    ):
+        return False
+    if _original_text_mask_bbox_for_scale(text_data) is None:
+        return False
+    if _original_text_scale_experiment_enabled():
+        return True
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    flags = _qa_flags_set(text_data)
+    dark_connected_lobe_context = bool(
+        source == "image_dark_bubble_mask"
+        and (
+            text_data.get("_is_lobe_subregion")
+            or text_data.get("_connected_source_bbox")
+            or text_data.get("_connected_slot_count")
+            or flags
+            & {
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+                "dark_bubble_lobe_mask_bbox_preferred",
+            }
+        )
+    )
+    if dark_connected_lobe_context:
+        return False
+    if source in {
+        "image_dark_bubble_mask",
+        "image_dark_panel_mask",
+        "derived_card_panel_mask",
+        "translator_note_text_mask",
+        "text_rect_fallback",
+    }:
+        return True
+    profiles = {
+        str(text_data.get("layout_profile") or "").strip().lower(),
+        str(text_data.get("block_profile") or "").strip().lower(),
+        str(text_data.get("background_type") or "").strip().lower(),
+    }
+    if profiles & {"dark_bubble", "dark_panel", "white_balloon", "speech_balloon"}:
+        return True
+    if (
+        text_data.get("_is_lobe_subregion")
+        or text_data.get("_connected_source_bbox")
+        or text_data.get("_connected_slot_count")
+        or flags
+        & {
+            "dark_panel_style_grouped",
+            "dark_bubble_connected_lobes_promoted",
+            "dark_bubble_connected_lobe_passthrough",
+            "dark_bubble_lobe_mask_bbox_preferred",
+            "visual_text_only_inpaint_contract",
+            "weak_text_residual_after_inpaint",
+        }
+    ):
+        return True
+    # White balloons and plain narration can still use the original glyph mask
+    # as a size/center contract when that mask exists. This deliberately does
+    # not use broad balloon/safe boxes as evidence.
+    if source == "image_white_bubble_mask" and (
+        text_data.get("source_text_anchor_bbox")
+        or text_data.get("_source_text_anchor_bbox")
+        or text_data.get("source_text_mask_bbox")
+        or text_data.get("_source_text_mask_bbox")
+        or text_data.get("text_pixel_bbox")
+        or text_data.get("ocr_text_bbox")
+        or text_data.get("line_polygons")
+    ):
+        return True
+    return False
+
+
+def _should_enforce_original_text_scale_contract(text_data: dict) -> bool:
+    content_class = str(text_data.get("content_class") or "").strip().lower()
+    if content_class == "sfx":
+        return False
+    render_policy = str(text_data.get("render_policy") or "").strip().lower()
+    route_action = str(text_data.get("route_action") or "").strip().lower()
+    if (
+        bool(text_data.get("skip_processing"))
+        or bool(text_data.get("preserve_original"))
+        or render_policy in {"merged_into_primary", "preserve_original"}
+        or route_action in {"skip", "preserve_original"}
+    ):
+        return False
+    # Enforcement is deliberately broader than _should_use_original_text_scale_contract:
+    # planning/split heuristics stay conservative, but render size and center
+    # must follow the real original text mask whenever that mask exists.
+    return _original_text_mask_bbox_for_scale(text_data) is not None
+
+
+def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
+    _propagate_dark_connected_text_anchor_to_type(text_data)
+    candidates: list[tuple[str, list[int]]] = []
+    def _valid_scale_bbox(bbox: list[int] | None) -> bool:
+        if bbox is None or _bbox_area_px(bbox) < 16:
+            return False
+        # Placeholder produced by page-space scrub/hydration is not real text
+        # geometry and must not poison the geometry union.
+        if [int(v) for v in bbox] == [0, 0, 32, 32]:
+            return False
+        return True
+
+    for key in (
+        "source_text_anchor_bbox",
+        "_source_text_anchor_bbox",
+        "source_text_mask_bbox",
+        "_source_text_mask_bbox",
+        "_connected_source_bbox",
+        "text_pixel_bbox",
+        "ocr_text_bbox",
+    ):
+        bbox = _layout_bbox(text_data.get(key))
+        if _valid_scale_bbox(bbox):
+            candidates.append((key, bbox))
+    polygon_bbox = _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or []))
+    if _valid_scale_bbox(polygon_bbox):
+        candidates.append(("line_polygons", polygon_bbox))
+    if not candidates:
+        return None
+
+    anchor_ref = next(
+        (
+            bbox
+            for key, bbox in candidates
+            if key in {"source_text_anchor_bbox", "_source_text_anchor_bbox", "_connected_source_bbox"}
+        ),
+        None,
+    )
+
+    def _candidate_far_from_anchor(key: str, bbox: list[int]) -> bool:
+        if anchor_ref is None or key not in {
+            "source_text_mask_bbox",
+            "_source_text_mask_bbox",
+            "text_pixel_bbox",
+            "ocr_text_bbox",
+            "line_polygons",
+        }:
+            return False
+        ax, ay = _bbox_center(anchor_ref)
+        bx, by = _bbox_center(bbox)
+        aw = max(1, int(anchor_ref[2]) - int(anchor_ref[0]))
+        ah = max(1, int(anchor_ref[3]) - int(anchor_ref[1]))
+        max_dx = max(80.0, aw * 0.55)
+        max_dy = max(64.0, ah * 0.65)
+        return bool(abs(bx - ax) > max_dx or abs(by - ay) > max_dy)
+
+    filtered_candidates = [
+        (key, bbox) for key, bbox in candidates if not _candidate_far_from_anchor(key, bbox)
+    ]
+    if filtered_candidates:
+        candidates = filtered_candidates
+
+    geometry_refs = [
+        bbox
+        for key, bbox in candidates
+        if key in {
+            "source_text_mask_bbox",
+            "_source_text_mask_bbox",
+            "text_pixel_bbox",
+            "ocr_text_bbox",
+            "line_polygons",
+        }
+    ]
+    geometry_union = _bbox_union_many_for_layout(geometry_refs) if geometry_refs else None
+
+    propagated_anchor_as_mask = bool(text_data.get("_anchor_center_only_layout")) or (
+        "dark_connected_text_anchor_propagated_to_type" in _qa_flags_set(text_data)
+    )
+
+    def _candidate_under_covers_geometry(key: str, bbox: list[int]) -> bool:
+        keys_that_can_undercover = {
+            "source_text_anchor_bbox",
+            "_source_text_anchor_bbox",
+            "_connected_source_bbox",
+            "source_text_mask_bbox",
+            "_source_text_mask_bbox",
+            "text_pixel_bbox",
+            "ocr_text_bbox",
+            "line_polygons",
+        }
+        if key not in keys_that_can_undercover and not (
+            propagated_anchor_as_mask and key in {"source_text_mask_bbox", "_source_text_mask_bbox"}
+        ):
+            return False
+        if geometry_union is None:
+            return False
+        bw = max(1, int(bbox[2]) - int(bbox[0]))
+        bh = max(1, int(bbox[3]) - int(bbox[1]))
+        gw = max(1, int(geometry_union[2]) - int(geometry_union[0]))
+        gh = max(1, int(geometry_union[3]) - int(geometry_union[1]))
+        area_ratio = _bbox_area_px(bbox) / float(max(1, _bbox_area_px(geometry_union)))
+        width_ratio = bw / float(gw)
+        height_ratio = bh / float(gh)
+        # Dark connected-lobe repairs may preserve a narrow anchor from a text
+        # fragment. That anchor is useful for center, but not for the scale
+        # contract; otherwise the renderer is forced to make the translated
+        # text tiny even when the real glyph mask is wider.
+        return bool(area_ratio < 0.55 or width_ratio < 0.62 or height_ratio < 0.62)
+
+    # For size, prefer the real glyph/mask geometry. Anchor bboxes are still
+    # useful for positioning, but using a compact anchor as the scale contract
+    # is what makes connected dark lobes collapse to tiny text.
+    for priority_key in (
+        "source_text_mask_bbox",
+        "_source_text_mask_bbox",
+        "text_pixel_bbox",
+        "ocr_text_bbox",
+        "line_polygons",
+        "source_text_anchor_bbox",
+        "_source_text_anchor_bbox",
+    ):
+        for key, bbox in candidates:
+            if key == priority_key and not _candidate_under_covers_geometry(key, bbox):
+                return bbox
+
+    pixel_like = [
+        (key, bbox)
+        for key, bbox in candidates
+        if key in {
+            "source_text_anchor_bbox",
+            "_source_text_anchor_bbox",
+            "source_text_mask_bbox",
+            "_source_text_mask_bbox",
+            "text_pixel_bbox",
+            "ocr_text_bbox",
+            "line_polygons",
+        }
+        and not _candidate_under_covers_geometry(key, bbox)
+    ]
+    pixel_ref = min(pixel_like, key=lambda item: _bbox_area_px(item[1]))[1] if pixel_like else None
+    connected = next((bbox for key, bbox in candidates if key == "_connected_source_bbox"), None)
+    if connected is not None:
+        if pixel_ref is None or _bbox_area_px(connected) <= max(48, int(_bbox_area_px(pixel_ref) * 2.2)):
+            return connected
+    if pixel_ref is not None:
+        return pixel_ref
+
+    # Do not fall back to source_bbox/bbox here. In current debug runs those can
+    # be balloon/safe areas, and using them as an original-text contract moves
+    # type away from the actual old glyph center.
+    return min((bbox for _key, bbox in candidates), key=_bbox_area_px)
+
+
+def _original_text_scale_min_lines(text_data: dict, source_bbox: list[int]) -> int:
+    sx1, sy1, sx2, sy2 = [int(v) for v in source_bbox]
+    source_w = max(1, sx2 - sx1)
+    source_h = max(1, sy2 - sy1)
+    source_text = str(text_data.get("original") or text_data.get("text") or "")
+    translated_text = str(text_data.get("translated") or text_data.get("traduzido") or "")
+    compact_len = len(re.sub(r"\s+", "", translated_text))
+    line_polygons = text_data.get("line_polygons")
+    polygon_lines = 0
+    if isinstance(line_polygons, list):
+        polygon_lines = sum(1 for item in line_polygons if isinstance(item, (list, tuple)) and len(item) >= 3)
+    estimated = max(1, _estimate_source_line_count(source_text, source_h, source_w), int(polygon_lines or 0))
+    aspect_height = source_h / float(source_w)
+    heuristic = 1
+    if compact_len >= 44 and (source_h >= 70 or aspect_height >= 0.42):
+        heuristic = 3
+    elif compact_len >= 26 and (source_h >= 48 or aspect_height >= 0.30):
+        heuristic = 2
+    return max(1, min(4, max(estimated, heuristic)))
+
+
+ORIGINAL_TEXT_SCALE_MIN_WIDTH_RATIO = 0.85
+ORIGINAL_TEXT_SCALE_MIN_HEIGHT_RATIO = 0.85
+ORIGINAL_TEXT_SCALE_MAX_WIDTH_RATIO = 1.20
+ORIGINAL_TEXT_SCALE_MAX_HEIGHT_RATIO = 1.60
+ORIGINAL_TEXT_SCALE_MIN_AREA_RATIO = 0.80
+
+
+def _original_text_scale_dark_oval_context(text_data: dict) -> bool:
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    flags = _qa_flags_set(text_data)
+    explicit_dark_rect = bool(
+        flags
+        & {
+            "dark_panel_rect_from_border_lines",
+            "dark_panel_rect_from_dark_bubble_bbox",
+            "dark_panel_visual_rect_candidate_selected",
+            "dark_panel_full_bbox_selected",
+        }
+    )
+    explicit_dark_oval = bool(
+        flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_connected_lobes_promoted",
+            "dark_bubble_connected_lobe_passthrough",
+            "dark_bubble_lobe_mask_bbox_preferred",
+            "dark_bubble_visual_bbox_refined",
+            "dark_bubble_full_crop_reocr_replaced",
+        }
+    )
+    if explicit_dark_oval and not explicit_dark_rect:
+        return True
+    has_dark_oval_evidence = source == "image_dark_bubble_mask"
+    if not has_dark_oval_evidence or explicit_dark_rect:
+        return False
+    try:
+        return _detect_balloon_geometry(text_data) != "rect"
+    except Exception:
+        return True
+
+
+def _original_text_scale_area_score(candidate: dict, source_bbox: list[int], text_data: dict) -> tuple[float, dict]:
+    sx1, sy1, sx2, sy2 = [int(v) for v in source_bbox]
+    source_w = max(1, sx2 - sx1)
+    source_h = max(1, sy2 - sy1)
+    source_area = max(1, source_w * source_h)
+    block_w = max(1, int(candidate.get("block_width", 0) or 0))
+    block_h = max(1, int(candidate.get("block_height", 0) or 0))
+    block_area = max(1, block_w * block_h)
+    area_ratio = block_area / float(source_area)
+    width_ratio = block_w / float(source_w)
+    height_ratio = block_h / float(source_h)
+    source_text = str(text_data.get("original") or text_data.get("text") or "")
+    source_line_count = max(1, _estimate_source_line_count(source_text, source_h, source_w))
+    min_line_count = _original_text_scale_min_lines(text_data, source_bbox)
+    candidate_line_count = max(1, len(candidate.get("lines") or []))
+    dark_oval_context = _original_text_scale_dark_oval_context(text_data)
+
+    # Desired experiment: translated ink area may be up to 10% larger than the
+    # original text mask, and no more than 20% smaller.
+    if 0.80 <= area_ratio <= 1.10:
+        area_penalty = 0.0
+    elif area_ratio < 0.80:
+        area_penalty = (0.80 - area_ratio) * (260.0 if dark_oval_context else 160.0)
+    else:
+        area_penalty = (area_ratio - 1.10) * (1400.0 if dark_oval_context else 180.0)
+
+    shape_penalty = abs(width_ratio - 1.0) * 18.0 + abs(height_ratio - 1.0) * 18.0
+    if dark_oval_context:
+        if width_ratio > 1.20:
+            shape_penalty += (width_ratio - 1.20) * 42.0
+        if width_ratio > 1.32:
+            shape_penalty += (width_ratio - 1.32) * 620.0
+        if height_ratio > 1.15:
+            shape_penalty += (height_ratio - 1.15) * 520.0
+        if height_ratio > 1.60:
+            shape_penalty += (height_ratio - 1.60) * 4200.0
+    elif width_ratio > 1.20:
+        shape_penalty += (width_ratio - 1.20) * 95.0
+    if width_ratio < ORIGINAL_TEXT_SCALE_MIN_WIDTH_RATIO:
+        shape_penalty += (ORIGINAL_TEXT_SCALE_MIN_WIDTH_RATIO - width_ratio) * (780.0 if dark_oval_context else 420.0)
+    if height_ratio < ORIGINAL_TEXT_SCALE_MIN_HEIGHT_RATIO:
+        shape_penalty += (ORIGINAL_TEXT_SCALE_MIN_HEIGHT_RATIO - height_ratio) * (720.0 if dark_oval_context else 360.0)
+    if min_line_count >= 2 and height_ratio < 0.62:
+        shape_penalty += (0.62 - height_ratio) * 120.0
+    line_penalty = abs(candidate_line_count - source_line_count) * (8.0 if dark_oval_context else 22.0)
+    if candidate_line_count < min_line_count:
+        line_penalty += (min_line_count - candidate_line_count) * (620.0 if dark_oval_context else 520.0)
+    if source_line_count >= 3 and candidate_line_count < source_line_count:
+        line_penalty += (source_line_count - candidate_line_count) * (20.0 if dark_oval_context else 180.0)
+    if not dark_oval_context and candidate_line_count < min_line_count and height_ratio < 0.92:
+        line_penalty += (0.92 - height_ratio) * 360.0
+    if dark_oval_context and candidate_line_count < min_line_count:
+        line_penalty += 20000.0
+    score = 10000.0 - area_penalty - shape_penalty
+    score -= line_penalty
+    if (
+        dark_oval_context
+        and area_ratio <= 1.12
+        and width_ratio <= 1.34
+        and height_ratio <= 1.10
+        and candidate_line_count < source_line_count
+    ):
+        score += min(2, source_line_count - candidate_line_count) * 90.0
+    metrics = {
+        "source_bbox": [int(v) for v in source_bbox],
+        "source_area": int(source_area),
+        "block_area": int(block_area),
+        "area_ratio": round(float(area_ratio), 4),
+        "width_ratio": round(float(width_ratio), 4),
+        "height_ratio": round(float(height_ratio), 4),
+        "source_line_count": int(source_line_count),
+        "min_line_count": int(min_line_count),
+        "candidate_line_count": int(candidate_line_count),
+        "dark_oval_context": bool(dark_oval_context),
+    }
+    return score, metrics
+
+
+def _original_text_scale_contract_metrics(candidate: dict, source_bbox: list[int]) -> dict:
+    sx1, sy1, sx2, sy2 = [int(v) for v in source_bbox]
+    source_w = max(1, sx2 - sx1)
+    source_h = max(1, sy2 - sy1)
+    source_area = max(1, source_w * source_h)
+    block_w = max(1, int(candidate.get("block_width", 0) or 0))
+    block_h = max(1, int(candidate.get("block_height", 0) or 0))
+    block_area = max(1, block_w * block_h)
+    return {
+        "source_width": int(source_w),
+        "source_height": int(source_h),
+        "source_area": int(source_area),
+        "block_width": int(block_w),
+        "block_height": int(block_h),
+        "block_area": int(block_area),
+        "width_ratio": block_w / float(source_w),
+        "height_ratio": block_h / float(source_h),
+        "area_ratio": block_area / float(source_area),
+    }
+
+
+def _original_text_scale_candidate_violations(candidate: dict, source_bbox: list[int]) -> list[str]:
+    metrics = _original_text_scale_contract_metrics(candidate, source_bbox)
+    violations: list[str] = []
+    if metrics["width_ratio"] < ORIGINAL_TEXT_SCALE_MIN_WIDTH_RATIO:
+        violations.append("width_lt_0.85x_source_text")
+    if metrics["height_ratio"] < ORIGINAL_TEXT_SCALE_MIN_HEIGHT_RATIO:
+        violations.append("height_lt_0.85x_source_text")
+    if metrics["width_ratio"] > ORIGINAL_TEXT_SCALE_MAX_WIDTH_RATIO:
+        violations.append("width_gt_1.2x_source_text")
+    if metrics["height_ratio"] > ORIGINAL_TEXT_SCALE_MAX_HEIGHT_RATIO:
+        violations.append("height_gt_1.6x_source_text")
+    return violations
+
+
+def _original_text_scale_candidate_hard_violations(candidate: dict, source_bbox: list[int]) -> list[str]:
+    return _original_text_scale_candidate_violations(candidate, source_bbox)
+
+
+def _original_text_scale_overflow_violations(violations: list[str]) -> list[str]:
+    return [str(item) for item in violations if "_gt_" in str(item)]
+
+
+def _apply_original_text_width_wrap_limit(text_data: dict, plan: dict, source_bbox: list[int]) -> None:
+    sx1, _sy1, sx2, _sy2 = [int(v) for v in source_bbox]
+    source_w = max(1, sx2 - sx1)
+    dark_oval_context = _original_text_scale_dark_oval_context(text_data)
+    width_ratio = ORIGINAL_TEXT_SCALE_MAX_WIDTH_RATIO
+    width_limit = max(8, int(round(source_w * width_ratio)))
+    current = int(plan.get("max_width", width_limit) or width_limit)
+    width_limit = min(width_limit, current)
+    if current <= width_limit:
+        return
+    plan["_original_text_scale_max_width_before"] = int(current)
+    plan["_original_text_scale_max_width"] = int(width_limit)
+    plan["max_width"] = int(width_limit)
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["original_text_scale_width_limit"] = {
+            "source_bbox": [int(v) for v in source_bbox],
+            "source_width": int(source_w),
+            "max_width_before": int(current),
+            "max_width_after": int(width_limit),
+            "ratio": float(width_ratio),
+            "min_visual_width_applied": False,
+            "dark_oval_context": bool(dark_oval_context),
+        }
+    _merge_qa_flags(text_data, ["original_text_scale_width_limited"])
+
+
+def _dark_auto_font_search_cap(text_data: dict) -> int | None:
+    if _uses_trusted_dark_bubble_visual_policy(text_data) or _dark_bubble_visual_capacity_should_decide_size(text_data):
+        return None
+    if _has_grouped_dark_visual_style(text_data):
+        return None
+    flags = _qa_flags_set(text_data)
+    if not (
+        flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+        }
+    ):
+        return None
+    if text_data.get("_is_lobe_subregion"):
+        return None
+    style_origin_norm = str(text_data.get("style_origin") or "").strip().lower()
+    estilo = text_data.get("estilo") if isinstance(text_data.get("estilo"), dict) else {}
+    estilo_origin_norm = str(estilo.get("style_origin") or "").strip().lower()
+    if style_origin_norm not in {"", "auto", "auto_dark_panel_glow_fallback"} and estilo_origin_norm not in {
+        "",
+        "auto",
+        "auto_dark_panel_glow_fallback",
+    }:
+        return None
+    compact_len = len(
+        re.sub(
+            r"\s+",
+            "",
+            str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or ""),
+        )
+    )
+    if compact_len < 44:
+        return None
+    source_anchor = _layout_bbox(
+        text_data.get("source_bbox")
+        or text_data.get("text_pixel_bbox")
+        or text_data.get("bbox")
+    )
+    if source_anchor is None:
+        return None
+    anchor_h = max(1, int(source_anchor[3]) - int(source_anchor[1]))
+    if compact_len >= 68:
+        ratio = 0.24
+    elif compact_len >= 56:
+        ratio = 0.28
+    else:
+        ratio = 0.34
+    return max(_MIN_FONT_SIZE, int(round(anchor_h * ratio)))
+
+
+def _apply_dark_visual_safe_width_limit(text_data: dict, plan: dict) -> None:
+    if not isinstance(text_data, dict) or not isinstance(plan, dict):
+        return
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profiles = {
+        str(text_data.get("layout_profile") or "").strip().lower(),
+        str(text_data.get("block_profile") or "").strip().lower(),
+        str(text_data.get("background_type") or "").strip().lower(),
+    }
+    flags = _qa_flags_set(text_data)
+    if not (
+        source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
+        or bool(profiles & {"dark_bubble", "dark_panel"})
+        or any(flag.startswith("dark_bubble") for flag in flags)
+    ):
+        return
+    safe_candidates = [
+        _layout_bbox(plan.get("safe_text_box")),
+        _layout_bbox(text_data.get("safe_text_box")),
+        _layout_bbox(text_data.get("_debug_safe_text_box")),
+    ]
+    safe_candidates = [candidate for candidate in safe_candidates if candidate is not None]
+    if not safe_candidates:
+        return
+    safe = min(safe_candidates, key=lambda bbox: max(1, int(bbox[2]) - int(bbox[0])))
+    safe_w = max(1, int(safe[2]) - int(safe[0]))
+    if safe_w < 80:
+        return
+    ratio = 0.90
+    max_width = max(4, int(round(safe_w * ratio)))
+    current = int(plan.get("max_width", max_width) or max_width)
+    if current <= max_width:
+        return
+    plan["_dark_visual_safe_width_limit_from"] = current
+    plan["_dark_visual_safe_width_limit_ratio"] = ratio
+    plan["max_width"] = max_width
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_visual_safe_width_limit"] = {
+            "safe_width": int(safe_w),
+            "max_width_before": int(current),
+            "max_width_after": int(max_width),
+            "ratio": float(ratio),
+        }
+    _merge_qa_flags(text_data, ["dark_visual_safe_width_limited"])
+
+
+def _uses_dark_visual_layout_contract(text_data: dict, plan: dict | None = None) -> bool:
+    plan = plan or {}
+    flags = _qa_flags_set(text_data)
+    source = str(
+        text_data.get("bubble_mask_source")
+        or text_data.get("balloon_mask_source")
+        or ""
+    ).strip().lower()
+    profile = str(
+        text_data.get("layout_profile")
+        or text_data.get("block_profile")
+        or plan.get("layout_profile")
+        or ""
+    ).strip().lower()
+    target_source = str(text_data.get("_render_target_source") or plan.get("_target_source") or "").strip().lower()
+    return bool(
+        source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
+        or profile in {"dark_bubble", "dark_panel"}
+        or target_source in {
+            "dark_bubble_visible_bbox_from_overbroad_target",
+            "dark_panel_visual_mask_bbox",
+            "trusted_dark_visual_capacity",
+        }
+        or flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            "trusted_dark_visual_capacity_target",
+            "bbox_fallback_bubble_mask",
+            "dark_panel_rect_from_border_lines",
+            "false_dark_white_style_neutralized",
+        }
+    )
+
+
+def _expand_dark_visual_underfit_layout_capacity(text_data: dict, plan: dict) -> None:
+    if not _uses_dark_visual_layout_contract(text_data, plan):
+        return
+
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profile = str(
+        text_data.get("layout_profile")
+        or text_data.get("block_profile")
+        or plan.get("layout_profile")
+        or ""
+    ).strip().lower()
+    if profile == "dark_panel" or source in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return
+
+    target = _layout_bbox(plan.get("target_bbox"))
+    safe = _layout_bbox(plan.get("safe_text_box") or text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+    if target is None:
+        return
+
+    flags = _qa_flags_set(text_data)
+    tx1, ty1, tx2, ty2 = [int(v) for v in target]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    new_safe: list[int] | None = None
+    reason = ""
+
+    if safe is not None:
+        sx1, sy1, sx2, sy2 = [int(v) for v in safe]
+        safe_w = max(1, sx2 - sx1)
+        safe_h = max(1, sy2 - sy1)
+        safe_area = safe_w * safe_h
+        target_area = target_w * target_h
+        anchor_bbox = _layout_bbox(text_data.get("text_pixel_bbox") or text_data.get("source_bbox"))
+        anchor_area = _bbox_area_px(anchor_bbox) if anchor_bbox is not None else 0
+        if (
+            "false_dark_white_style_neutralized" in flags
+            and anchor_bbox is not None
+            and anchor_area >= 64
+            and target_area > max(anchor_area * 2, anchor_area + 8000)
+        ):
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+            pad_x = max(10, min(36, int(round((ax2 - ax1) * 0.22))))
+            pad_y = max(8, min(28, int(round((ay2 - ay1) * 0.25))))
+            new_safe = [ax1 - pad_x, ay1 - pad_y, ax2 + pad_x, ay2 + pad_y]
+            reason = "false_dark_white_text_anchor_preserved"
+            plan["target_bbox"] = list(new_safe)
+            plan["position_bbox"] = list(new_safe)
+            plan["capacity_bbox"] = list(new_safe)
+            _merge_qa_flags(text_data, ["false_dark_white_text_anchor_preserved"])
+        elif (
+            "bbox_fallback_bubble_mask" in flags
+            and source == "bbox_fallback"
+            and anchor_bbox is not None
+            and anchor_area >= 64
+            and target_area > max(anchor_area * 3, anchor_area + 12000)
+        ):
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+            pad_x = max(8, min(28, int(round((ax2 - ax1) * 0.16))))
+            pad_y = max(6, min(20, int(round((ay2 - ay1) * 0.28))))
+            new_safe = [ax1 - pad_x, ay1 - pad_y, ax2 + pad_x, ay2 + pad_y]
+            reason = "bbox_fallback_text_anchor_preserved"
+            plan["target_bbox"] = list(new_safe)
+            plan["position_bbox"] = list(new_safe)
+            plan["capacity_bbox"] = list(new_safe)
+            _merge_qa_flags(text_data, ["bbox_fallback_text_anchor_preserved"])
+        elif (
+            "bbox_fallback_bubble_mask" in flags
+            and safe_area >= int(target_area * 1.18)
+            and (safe_h >= target_h + 12 or safe_w >= target_w + 24)
+        ):
+            plan["target_bbox"] = list(safe)
+            plan["position_bbox"] = list(safe)
+            plan["capacity_bbox"] = list(safe)
+            new_safe = list(safe)
+            reason = "dark_visual_bbox_fallback_safe_promoted"
+        elif (
+            target_area >= 3600
+            and (
+                safe_area < int(target_area * 0.66)
+                or safe_w < int(target_w * 0.76)
+                or safe_h < int(target_h * 0.70)
+            )
+        ):
+            new_safe = _inset_bbox_for_text(list(target), ratio=0.07, min_px=6)
+            reason = "dark_visual_underfit_safe_expanded"
+    elif target_w >= 80 and target_h >= 44:
+        new_safe = _inset_bbox_for_text(list(target), ratio=0.07, min_px=6)
+        reason = "dark_visual_missing_safe_expanded"
+
+    if new_safe is None or _layout_bbox(new_safe) is None:
+        return
+
+    nsx1, nsy1, nsx2, nsy2 = [int(v) for v in new_safe]
+    safe_w = max(4, nsx2 - nsx1)
+    safe_h = max(4, nsy2 - nsy1)
+    pad_y = max(0, int(plan.get("padding_y", 0) or 0))
+    plan["safe_text_box"] = [nsx1, nsy1, nsx2, nsy2]
+    plan["layout_safe_bbox"] = [nsx1, nsy1, nsx2, nsy2]
+    plan["layout_safe_reason"] = reason
+    plan["position_bbox"] = [nsx1, nsy1, nsx2, nsy2]
+    plan["capacity_bbox"] = [nsx1, nsy1, nsx2, nsy2]
+    if reason == "dark_visual_bbox_fallback_safe_promoted":
+        plan["max_width"] = max(int(plan.get("max_width", 0) or 0), max(4, safe_w - 8))
+        plan["max_height"] = max(int(plan.get("max_height", 0) or 0), max(4, safe_h - 6))
+    else:
+        plan["max_width"] = max(int(plan.get("max_width", 0) or 0), max(4, safe_w - 10))
+        plan["max_height"] = max(int(plan.get("max_height", 0) or 0), max(4, safe_h - 8 - pad_y))
+    text_data["safe_text_box"] = list(plan["safe_text_box"])
+    text_data["_debug_safe_text_box"] = list(plan["safe_text_box"])
+    text_data["layout_safe_bbox"] = list(plan["safe_text_box"])
+    text_data["layout_safe_reason"] = reason
+    _merge_qa_flags(text_data, ["dark_visual_underfit_capacity_expanded", "safe_text_box_recomputed"])
+
+
+def _recover_dark_bubble_glow_capacity_from_image(
+    img: Image.Image,
+    text_data: dict,
+    plan: dict,
+) -> list[int] | None:
+    if not _uses_dark_visual_layout_contract(text_data, plan):
+        return None
+    flags = _qa_flags_set(text_data)
+    if (
+        text_data.get("_is_lobe_subregion")
+        or text_data.get("connected_lobe_bboxes")
+        or text_data.get("connected_position_bboxes")
+        or "dark_bubble_connected_lobe_passthrough" in flags
+        or "dark_bubble_connected_lobes_promoted" in flags
+        or "partial_dark_bubble_lobe_reocr" in flags
+    ):
+        return None
+    profile = str(
+        text_data.get("layout_profile")
+        or text_data.get("block_profile")
+        or plan.get("layout_profile")
+        or ""
+    ).strip().lower()
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return None
+
+    target = _layout_bbox(plan.get("target_bbox"))
+    anchor = _resolve_english_anchor_bbox(text_data) or _layout_bbox(text_data.get("text_pixel_bbox") or text_data.get("bbox"))
+    if target is None or anchor is None:
+        return None
+    tx1, ty1, tx2, ty2 = [int(v) for v in target]
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor]
+    target_w = max(1, tx2 - tx1)
+    target_h = max(1, ty2 - ty1)
+    anchor_w = max(1, ax2 - ax1)
+    anchor_h = max(1, ay2 - ay1)
+    if target_w >= max(220, int(anchor_w * 2.2)) and target_h >= max(130, int(anchor_h * 1.8)):
+        return None
+
+    try:
+        arr = np.array(img.convert("RGB"))
+    except Exception:
+        return None
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return None
+    h, w = arr.shape[:2]
+    if h <= 0 or w <= 0:
+        return None
+
+    cx = (float(ax1) + float(ax2)) / 2.0
+    cy = (float(ay1) + float(ay2)) / 2.0
+    search_w = max(int(target_w * 3.0), int(anchor_w * 3.2), 220)
+    search_h = max(int(target_h * 2.6), int(anchor_h * 3.2), 150)
+    sx1 = max(0, int(round(cx - search_w / 2.0)))
+    sy1 = max(0, int(round(cy - search_h / 2.0)))
+    sx2 = min(w, int(round(cx + search_w / 2.0)))
+    sy2 = min(h, int(round(cy + search_h / 2.0)))
+    if sx2 - sx1 < 40 or sy2 - sy1 < 40:
+        return None
+
+    roi = arr[sy1:sy2, sx1:sx2]
+    r = roi[:, :, 0].astype(np.int16)
+    g = roi[:, :, 1].astype(np.int16)
+    b = roi[:, :, 2].astype(np.int16)
+    glow = (
+        ((b >= 48) & (g >= 34) & (b >= r + 18) & (g >= r + 6))
+        | ((b >= 70) & (b >= r + 28) & (g >= r + 2))
+    )
+    if int(np.count_nonzero(glow)) < 30:
+        return None
+    mask = glow.astype("uint8")
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    component_boxes: list[list[int]] = []
+    expanded_target = [
+        max(0, tx1 - max(24, target_w // 2)),
+        max(0, ty1 - max(24, target_h // 2)),
+        min(w, tx2 + max(24, target_w // 2)),
+        min(h, ty2 + max(24, target_h // 2)),
+    ]
+    for label in range(1, num_labels):
+        x, y, cw, ch, area = [int(v) for v in stats[label]]
+        if area < 18 or cw < 3 or ch < 3:
+            continue
+        box = [sx1 + x, sy1 + y, sx1 + x + cw, sy1 + y + ch]
+        if _bbox_intersection_area(box, expanded_target) <= 0:
+            continue
+        component_boxes.append(box)
+    if not component_boxes:
+        return None
+
+    glow_bbox = _bbox_union_many_for_layout(component_boxes)
+    if glow_bbox is None:
+        return None
+    gx1, gy1, gx2, gy2 = [int(v) for v in glow_bbox]
+    glow_w = max(1, gx2 - gx1)
+    glow_h = max(1, gy2 - gy1)
+    if glow_w < int(target_w * 1.18) and glow_h < int(target_h * 1.18):
+        return None
+    if glow_w > int(w * 0.82) or glow_h > int(h * 0.72):
+        return None
+    if _bbox_intersection_area(glow_bbox, anchor) <= 0 and not (
+        gx1 <= cx <= gx2 and gy1 - max(24, anchor_h) <= cy <= gy2 + max(24, anchor_h)
+    ):
+        return None
+
+    pad_x = max(8, int(round(glow_w * 0.08)))
+    pad_y = max(8, int(round(glow_h * 0.10)))
+    recovered = [
+        max(0, gx1 - pad_x),
+        max(0, gy1 - pad_y),
+        min(w, gx2 + pad_x),
+        min(h, gy2 + pad_y),
+    ]
+    if _bbox_area_px(recovered) <= int(_bbox_area_px(target) * 1.15):
+        return None
+    return recovered
+
+
+def _apply_recovered_dark_bubble_glow_capacity(
+    img: Image.Image,
+    text_data: dict,
+    plan: dict,
+) -> None:
+    recovered = _recover_dark_bubble_glow_capacity_from_image(img, text_data, plan)
+    if recovered is None:
+        return
+    rx1, ry1, rx2, ry2 = [int(v) for v in recovered]
+    rw = max(1, rx2 - rx1)
+    rh = max(1, ry2 - ry1)
+    safe = _inset_bbox_for_text(recovered, ratio=0.11, min_px=8)
+    plan["target_bbox"] = list(recovered)
+    plan["position_bbox"] = list(safe)
+    plan["capacity_bbox"] = list(safe)
+    plan["safe_text_box"] = list(safe)
+    plan["layout_safe_bbox"] = list(safe)
+    plan["layout_safe_reason"] = "dark_bubble_glow_capacity_recovered"
+    plan["max_width"] = max(int(plan.get("max_width", 0) or 0), max(4, int((safe[2] - safe[0]) * 0.94)))
+    plan["max_height"] = max(int(plan.get("max_height", 0) or 0), max(4, int((safe[3] - safe[1]) * 0.90)))
+    text_data["target_bbox"] = list(recovered)
+    text_data["balloon_bbox"] = list(recovered)
+    text_data["safe_text_box"] = list(safe)
+    text_data["_debug_safe_text_box"] = list(safe)
+    text_data["layout_safe_bbox"] = list(safe)
+    text_data["layout_safe_reason"] = "dark_bubble_glow_capacity_recovered"
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_bubble_glow_capacity_recovered"] = {
+            "target_bbox_before": list(_layout_bbox(text_data.get("bubble_mask_bbox") or text_data.get("bbox")) or []),
+            "target_bbox_after": list(recovered),
+            "safe_text_box": list(safe),
+            "width": int(rw),
+            "height": int(rh),
+        }
+    _merge_qa_flags(text_data, ["dark_bubble_glow_capacity_recovered", "safe_text_box_recomputed"])
+
+
 def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
+    _expand_dark_visual_underfit_layout_capacity(text_data, plan)
+    _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
+    original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    if original_scale_bbox is not None:
+        _merge_qa_flags(text_data, ["original_text_scale_size_experiment"])
     x1, y1, x2, y2 = plan["target_bbox"]
     use_capacity_position = bool(plan.get("_simple_anchor_capacity_expanded") or plan.get("_position_on_capacity_bbox"))
     effective_position_bbox = plan.get("capacity_bbox") if use_capacity_position else plan.get("position_bbox", plan["target_bbox"])
@@ -7022,6 +13907,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         if sx2 > sx1 and sy2 > sy1:
             pad_y = max(0, int(plan.get("padding_y", 0) or 0))
             effective_position_bbox = [sx1, sy1 - pad_y, sx2, sy2 + pad_y]
+    if original_scale_bbox is not None:
+        _apply_original_text_width_wrap_limit(text_data, plan, original_scale_bbox)
     px1, py1, px2, py2 = [int(v) for v in effective_position_bbox]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
@@ -7030,43 +13917,80 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     score_width = position_width if use_capacity_position else box_width
     score_height = position_height if use_capacity_position else box_height
 
+    contract_candidate = _candidate_from_render_layout_contract(text_data, plan)
+    if contract_candidate is not None:
+        if _render_plan_debug_enabled():
+            _append_render_debug_item(
+                text_data,
+                "_render_debug_candidates",
+                {
+                    "candidate_kind": "render_layout_contract",
+                    "status": "candidate",
+                    "selected": True,
+                    "font_name": plan.get("font_name"),
+                    "font_size": int(contract_candidate.get("font_size", 0) or 0),
+                    "line_height": int(contract_candidate.get("line_height", 0) or 0),
+                    "line_count": len(contract_candidate.get("lines") or []),
+                    "wrapped_lines": list(contract_candidate.get("lines") or []),
+                    "line_widths": [int(width) for width in contract_candidate.get("line_widths") or []],
+                    "block_bbox": [int(v) for v in contract_candidate.get("block_bbox") or []],
+                    "block_width": int(contract_candidate.get("block_width", 0) or 0),
+                    "block_height": int(contract_candidate.get("block_height", 0) or 0),
+                    "score": float(contract_candidate.get("score", 0.0) or 0.0),
+                    "target_bbox": plan.get("target_bbox"),
+                    "position_bbox": plan.get("position_bbox"),
+                    "capacity_bbox": plan.get("capacity_bbox"),
+                },
+            )
+        _persist_fit_attempts(text_data, plan, text, contract_candidate, int(contract_candidate.get("font_size", 0) or 0))
+        return contract_candidate
+
     category_min, category_max = _category_font_bounds(text_data)
     height_limit = position_height if use_capacity_position else box_height
-    font_size = min(
-        _compute_font_search_upper_bound(plan, text),
-        max(_MIN_FONT_SIZE, height_limit - 4),
-        category_max,
-        96,
-    )
+    if original_scale_bbox is not None:
+        font_size = min(category_max, 96)
+    else:
+        font_size = min(
+            _compute_font_search_upper_bound(plan, text),
+            max(_MIN_FONT_SIZE, height_limit - 4),
+            category_max,
+            96,
+        )
+    dark_auto_cap = _dark_auto_font_search_cap(text_data)
+    if dark_auto_cap is not None and font_size > dark_auto_cap:
+        font_size = max(_MIN_FONT_SIZE, int(dark_auto_cap))
+        _merge_qa_flags(text_data, ["dark_visual_auto_font_capped_to_source_scale"])
     best_candidate = None
     trace_candidates = _render_plan_debug_enabled()
 
     # Binary search: achar o maior tamanho que cabe
     floor_bound = int(plan.get("_font_search_floor", category_min) or category_min)
-    lo = max(_MIN_FONT_SIZE, min(floor_bound, font_size))
-    hi = max(lo, font_size)
-    best_fit: int | None = None
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        if _fits_in_box(text, plan["font_name"], mid, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"]):
-            best_fit = mid
-            lo = mid + 1
-        else:
-            hi = mid - 1
+    if original_scale_bbox is not None:
+        floor_bound = max(6, min(int(plan.get("_font_search_emergency_floor", 6) or 6), font_size))
+        best_fit = None
+    else:
+        lo = max(_MIN_FONT_SIZE, min(floor_bound, font_size))
+        hi = max(lo, font_size)
+        best_fit: int | None = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if _fits_in_box(text, plan["font_name"], mid, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"]):
+                best_fit = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
 
-    # Refinar: testar best_fit e vizinhos (Â±2, Â±1, melhor) para scoring
+    # Refinar: testar best_fit e vizinhos. A janela negativa é um pouco maior
+    # para permitir trocar poucos pixels de tamanho por quebras semanticamente
+    # melhores, como evitar artigo/conectivo isolado na primeira linha.
     candidate_sizes = []
-    if best_fit is not None:
+    if original_scale_bbox is not None:
+        candidate_sizes = list(range(int(font_size), int(floor_bound) - 1, -1))
+    elif best_fit is not None:
         candidate_sizes = sorted(
             {
                 size
-                for size in (
-                    best_fit + 2,
-                    best_fit + 1,
-                    best_fit,
-                    best_fit - 1,
-                    best_fit - 2,
-                )
+                for size in range(best_fit + 2, best_fit - 7, -1)
                 if floor_bound <= size <= font_size
             },
             reverse=True,
@@ -7094,6 +14018,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             attempt_size,
             plan["line_spacing_ratio"],
         )
+        if original_scale_bbox is not None and len(wrapped) > 1:
+            line_height = max(line_height, int(round(attempt_size * 1.28)))
         
         total_text_height = line_height * len(wrapped)
         line_widths = [measure_text_width(font, line, attempt_size) for line in wrapped]
@@ -7102,7 +14028,10 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         # TolerÃ¢ncia de +4px na altura (alinhada com _fits_in_box) para evitar
         # que candidatos vÃ¡lidos pelo binary-search sejam descartados aqui e
         # caiam no fallback de category_min.
-        if block_width > plan["max_width"] or total_text_height > plan["max_height"] + height_tolerance:
+        if (
+            original_scale_bbox is None
+            and (block_width > plan["max_width"] or total_text_height > plan["max_height"] + height_tolerance)
+        ):
             if trace_candidates:
                 _append_render_debug_item(
                     text_data,
@@ -7124,13 +14053,19 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 )
             continue
 
-        start_y = (
-            py1 + plan["padding_y"]
-            if plan["vertical_anchor"] == "top"
-            else py1 + max(plan["padding_y"], (position_height - total_text_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
-        )
-        
-        if plan["vertical_anchor"] != "top":
+        if original_scale_bbox is not None:
+            anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
+            center_x = int(round(anchor_cx))
+            start_y = int(round(anchor_cy - (total_text_height / 2.0)))
+        else:
+            start_y = (
+                py1 + plan["padding_y"]
+                if plan["vertical_anchor"] == "top"
+                else py1 + max(plan["padding_y"], (position_height - total_text_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
+            )
+            center_x = px1 + (position_width // 2)
+
+        if original_scale_bbox is None and plan["vertical_anchor"] != "top":
             min_start_y = py1 + int(plan["padding_y"])
             max_start_y = py2 - int(plan["padding_y"]) - total_text_height
             if max_start_y >= min_start_y:
@@ -7138,7 +14073,6 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             else:
                 start_y = min_start_y
                 
-        center_x = px1 + (position_width // 2)
         inner_x1 = center_x - (plan["max_width"] // 2)
         inner_x2 = center_x + (plan["max_width"] // 2)
         
@@ -7173,11 +14107,68 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             "block_width": max(1, block_x2 - block_x1),
             "block_height": max(1, block_y2 - block_y1),
         }
+        if original_scale_bbox is not None:
+            contract_violations = _original_text_scale_candidate_hard_violations(candidate, original_scale_bbox)
+            blocking_violations = _original_text_scale_overflow_violations(contract_violations)
+            if blocking_violations:
+                if trace_candidates:
+                    _append_render_debug_item(
+                        text_data,
+                        "_render_debug_skipped",
+                        {
+                            "candidate_kind": "layout_fit",
+                            "status": "skipped",
+                            "skip_reason": "original_text_scale_contract_violation",
+                            "violations": list(contract_violations),
+                            "font_name": plan.get("font_name"),
+                            "font_size": int(attempt_size),
+                            "line_height": int(line_height),
+                            "line_count": len(wrapped),
+                            "line_widths": [int(width) for width in line_widths],
+                            "block_bbox": [int(round(v)) for v in candidate["block_bbox"]],
+                            "block_width": int(candidate["block_width"]),
+                            "block_height": int(candidate["block_height"]),
+                            "wrapped_lines": list(wrapped),
+                            "source_bbox": [int(v) for v in original_scale_bbox],
+                            "contract_metrics": _original_text_scale_contract_metrics(candidate, original_scale_bbox),
+                        },
+                    )
+                continue
+            if contract_violations:
+                candidate["original_text_scale_underflow_violations"] = list(contract_violations)
+                _merge_qa_flags(text_data, ["original_text_scale_min_underflow"])
         candidate["width_ratio"] = candidate["block_width"] / float(max(1, box_width))
         candidate["height_ratio"] = candidate["block_height"] / float(max(1, box_height))
-        if plan.get("_follow_original_ocr_size"):
-            preferred_size = int(plan.get("target_size", attempt_size) or attempt_size)
-            candidate["score"] = -(abs(preferred_size - attempt_size) * 100.0) + (attempt_size * 0.01)
+        if original_scale_bbox is not None:
+            original_score, original_metrics = _original_text_scale_area_score(candidate, original_scale_bbox, text_data)
+            candidate["score"] = original_score - _wrapped_lines_orphan_penalty(wrapped)
+            candidate["original_text_scale_metrics"] = original_metrics
+            candidate["original_text_scale_preferred"] = True
+            if candidate.get("original_text_scale_underflow_violations"):
+                candidate["score"] -= 100000.0
+        elif plan.get("_prefer_original_font_size") or plan.get("_follow_original_ocr_size"):
+            preferred_size = int(plan.get("_source_font_size_px") or plan.get("target_size", attempt_size) or attempt_size)
+            base_score = _score_layout_candidate(
+                block_width=candidate["block_width"],
+                block_height=candidate["block_height"],
+                box_width=score_width,
+                box_height=score_height,
+                font_size=attempt_size,
+                layout_shape=plan.get("layout_shape", "square"),
+                balloon_geo=plan.get("balloon_geo", "ellipse"),
+            )
+            candidate["score"] = base_score - (abs(preferred_size - attempt_size) * 1.35)
+            if abs(preferred_size - attempt_size) <= max(2, int(round(preferred_size * 0.12))):
+                candidate["score"] += 18.0
+            candidate["score"] -= _wrapped_lines_orphan_penalty(wrapped)
+            candidate["source_font_size_preferred"] = preferred_size
+        elif _should_prefer_largest_dark_single_line_candidate(text_data, plan, wrapped):
+            candidate["score"] = 10000.0 + (attempt_size * 10.0)
+            candidate["dark_single_line_size_preferred"] = True
+        elif _should_prefer_largest_dark_panel_candidate(text_data, plan, wrapped):
+            candidate["score"] = 9000.0 + (attempt_size * 10.0)
+            candidate["score"] -= _wrapped_lines_orphan_penalty(wrapped)
+            candidate["dark_panel_size_preferred"] = True
         else:
             candidate["score"] = _score_layout_candidate(
                 block_width=candidate["block_width"],
@@ -7188,6 +14179,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 layout_shape=plan.get("layout_shape", "square"),
                 balloon_geo=plan.get("balloon_geo", "ellipse"),
             )
+            candidate["score"] -= _wrapped_lines_orphan_penalty(wrapped)
         if trace_candidates:
             _append_render_debug_item(
                 text_data,
@@ -7211,12 +14203,28 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     "target_bbox": plan.get("target_bbox"),
                     "position_bbox": plan.get("position_bbox"),
                     "capacity_bbox": plan.get("capacity_bbox"),
+                    "original_text_scale_metrics": candidate.get("original_text_scale_metrics"),
                 },
             )
         if best_candidate is None or candidate["score"] > best_candidate["score"]:
             best_candidate = candidate
 
     if best_candidate is not None:
+        if original_scale_bbox is not None:
+            soft_violations = [
+                violation
+                for violation in _original_text_scale_candidate_violations(best_candidate, original_scale_bbox)
+                if violation in {"width_lt_0.85x_source_text", "height_lt_0.85x_source_text"}
+            ]
+            if soft_violations:
+                _merge_qa_flags(text_data, ["original_text_scale_min_underflow"])
+                metrics = text_data.setdefault("qa_metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["original_text_scale_min_underflow"] = {
+                        "violations": list(soft_violations),
+                        "source_bbox": [int(v) for v in original_scale_bbox],
+                        "contract_metrics": _original_text_scale_contract_metrics(best_candidate, original_scale_bbox),
+                    }
         if trace_candidates:
             _mark_selected_render_candidate(text_data, best_candidate)
         _persist_fit_attempts(text_data, plan, text, best_candidate, font_size)
@@ -7241,20 +14249,27 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
+    if original_scale_bbox is not None and len(fallback_lines) > 1:
+        fallback_line_height = max(fallback_line_height, int(round(fallback_size * 1.28)))
     fallback_total_height = fallback_line_height * len(fallback_lines)
-    start_y = (
-        py1 + plan["padding_y"]
-        if plan["vertical_anchor"] == "top"
-        else py1 + max(plan["padding_y"], (position_height - fallback_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
-    )
-    if plan["vertical_anchor"] != "top":
+    if original_scale_bbox is not None:
+        anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
+        center_x = int(round(anchor_cx))
+        start_y = int(round(anchor_cy - (fallback_total_height / 2.0)))
+    else:
+        start_y = (
+            py1 + plan["padding_y"]
+            if plan["vertical_anchor"] == "top"
+            else py1 + max(plan["padding_y"], (position_height - fallback_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
+        )
+        center_x = px1 + (position_width // 2)
+    if original_scale_bbox is None and plan["vertical_anchor"] != "top":
         min_start_y = py1 + int(plan["padding_y"])
         max_start_y = py2 - int(plan["padding_y"]) - fallback_total_height
         if max_start_y >= min_start_y:
             start_y = min(max(start_y, min_start_y), max_start_y)
         else:
             start_y = min_start_y
-    center_x = px1 + (position_width // 2)
     fallback_widths = [measure_text_width(fallback_font, line, fallback_size) for line in fallback_lines]
     positions = [
         (center_x - (width // 2), start_y + index * fallback_line_height)
@@ -7278,6 +14293,66 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         "height_ratio": max(1, fallback_total_height) / float(max(1, box_height)),
         "score": -9999.0,
     }
+    fallback_violations = (
+        _original_text_scale_candidate_violations(fallback, original_scale_bbox)
+        if original_scale_bbox is not None
+        else []
+    )
+    if original_scale_bbox is not None and _original_text_scale_overflow_violations(fallback_violations):
+        for size in range(max(1, int(fallback_size) - 1), 0, -1):
+            test_font = get_font(plan["font_name"], size)
+            test_lines = wrap_text(text, test_font, plan["max_width"])
+            test_line_height = get_line_height(test_font, size, plan["line_spacing_ratio"])
+            if len(test_lines) > 1:
+                test_line_height = max(test_line_height, int(round(size * 1.28)))
+            test_total_height = test_line_height * len(test_lines)
+            test_widths = [measure_text_width(test_font, line, size) for line in test_lines]
+            test_start_y = (
+                py1 + plan["padding_y"]
+                if plan["vertical_anchor"] == "top"
+                else py1 + max(plan["padding_y"], (position_height - test_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
+            )
+            if plan["vertical_anchor"] != "top":
+                min_start_y = py1 + int(plan["padding_y"])
+                max_start_y = py2 - int(plan["padding_y"]) - test_total_height
+                if max_start_y >= min_start_y:
+                    test_start_y = min(max(test_start_y, min_start_y), max_start_y)
+                else:
+                    test_start_y = min_start_y
+            test_positions = [
+                (center_x - (width // 2), test_start_y + index * test_line_height)
+                for index, width in enumerate(test_widths)
+            ]
+            test_x1 = min((px for px, _ in test_positions), default=center_x)
+            test_x2 = max((px + width for (px, _), width in zip(test_positions, test_widths)), default=center_x)
+            test_candidate = {
+                "font": test_font,
+                "lines": test_lines,
+                "font_size": size,
+                "line_height": test_line_height,
+                "positions": test_positions,
+                "start_y": test_start_y,
+                "total_text_height": test_total_height,
+                "line_widths": test_widths,
+                "block_bbox": [test_x1, test_start_y, test_x2, test_start_y + test_total_height],
+                "block_width": max(1, test_x2 - test_x1),
+                "block_height": max(1, test_total_height),
+                "width_ratio": max(1, test_x2 - test_x1) / float(max(1, box_width)),
+                "height_ratio": max(1, test_total_height) / float(max(1, box_height)),
+                "score": -9999.0,
+            }
+            if not _original_text_scale_candidate_violations(test_candidate, original_scale_bbox):
+                fallback = test_candidate
+                fallback_size = size
+                fallback_font = test_font
+                fallback_lines = test_lines
+                fallback_line_height = test_line_height
+                fallback_total_height = test_total_height
+                fallback_widths = test_widths
+                _merge_qa_flags(text_data, ["original_text_scale_fallback_contract_shrunk"])
+                break
+    elif original_scale_bbox is not None and fallback_violations:
+        _merge_qa_flags(text_data, ["original_text_scale_fallback_underflow_not_shrunk"])
     if trace_candidates:
         _append_render_debug_item(
             text_data,
@@ -7344,6 +14419,223 @@ def _line_x(center_x: int, inner_x1: int, inner_x2: int, alignment: str, line_wi
     return center_x - (line_width // 2)
 
 
+def _text_layout_contract_text_key(text: str) -> str:
+    return " ".join(_normalize_render_text(str(text or "")).split()).casefold()
+
+
+def _layout_contract_bbox_from_positions(
+    positions: list[tuple[int, int]],
+    line_widths: list[int],
+    line_height: int,
+) -> list[int] | None:
+    if not positions:
+        return None
+    x1 = min(int(px) for px, _ in positions)
+    y1 = min(int(py) for _, py in positions)
+    x2 = max(int(px) + int(width) for (px, _), width in zip(positions, line_widths))
+    y2 = max(int(py) for _, py in positions) + max(1, int(line_height))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _render_layout_contract_band_y_top(*sources: dict) -> int:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("band_y_top", "_band_y_top", "strip_band_y_top", "_strip_band_y_top"):
+            try:
+                value = int(source.get(key) or 0)
+            except Exception:
+                value = 0
+            if value:
+                return value
+    return 0
+
+
+def _render_layout_contract_fits_current_geometry(
+    block_bbox: list[int],
+    text_data: dict,
+    plan: dict,
+) -> bool:
+    target_bbox = _layout_bbox(plan.get("target_bbox"))
+    if target_bbox is None:
+        return False
+    block_area = max(1, _bbox_area_px(block_bbox))
+    target_overlap = _bbox_intersection_area(block_bbox, target_bbox) / float(block_area)
+    if target_overlap < 0.55:
+        return False
+
+    safe_bbox = _layout_bbox(plan.get("safe_text_box") or text_data.get("safe_text_box"))
+    if safe_bbox is not None:
+        safe_overlap = _bbox_intersection_area(block_bbox, safe_bbox) / float(block_area)
+        if safe_overlap < 0.45:
+            return False
+        bx, by = _bbox_center(block_bbox)
+        sx1, sy1, sx2, sy2 = [int(v) for v in safe_bbox]
+        if not (sx1 <= bx <= sx2 and sy1 <= by <= sy2):
+            return False
+
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if anchor_bbox is not None and text_data.get("_is_lobe_subregion"):
+        ax, ay = _bbox_center(anchor_bbox)
+        bx, by = _bbox_center(block_bbox)
+        target_w = max(1, int(target_bbox[2]) - int(target_bbox[0]))
+        target_h = max(1, int(target_bbox[3]) - int(target_bbox[1]))
+        if abs(ax - bx) > max(24, int(target_w * 0.35)):
+            return False
+        if abs(ay - by) > max(24, int(target_h * 0.35)):
+            return False
+
+    return True
+
+
+def _persist_render_layout_contract(text_data: dict, plan: dict, resolved: dict, positions: list[tuple[int, int]]) -> None:
+    lines = [str(line) for line in (resolved.get("lines") or []) if str(line)]
+    if not lines or not positions or len(lines) != len(positions):
+        return
+    try:
+        font_size = int(resolved.get("font_size", 0) or 0)
+        line_height = int(resolved.get("line_height", 0) or 0)
+    except Exception:
+        return
+    if font_size <= 0 or line_height <= 0:
+        return
+    line_widths = [int(width) for width in (resolved.get("line_widths") or [])]
+    if len(line_widths) != len(lines):
+        font = get_font(str(plan.get("font_name") or ""), font_size)
+        line_widths = [int(measure_text_width(font, line, font_size)) for line in lines]
+    block_bbox = _layout_contract_bbox_from_positions(
+        [(int(x), int(y)) for x, y in positions],
+        line_widths,
+        line_height,
+    )
+    if block_bbox is None:
+        return
+    text = str(text_data.get("translated") or text_data.get("traduzido") or "")
+    text_data["render_layout_contract"] = {
+        "schema_version": 1,
+        "source": "typesetter_resolved_layout",
+        "translated_key": _text_layout_contract_text_key(text),
+        "font_name": str(plan.get("font_name") or ""),
+        "font_size": font_size,
+        "line_height": line_height,
+        "lines": lines,
+        "positions": [[int(x), int(y)] for x, y in positions],
+        "line_widths": line_widths,
+        "block_bbox": block_bbox,
+        "target_bbox": [int(v) for v in (plan.get("target_bbox") or [])[:4]],
+        "position_bbox": [int(v) for v in (plan.get("position_bbox") or [])[:4]],
+        "safe_text_box": [int(v) for v in (plan.get("safe_text_box") or [])[:4]],
+        "coordinate_space": str(text_data.get("coordinate_space") or text_data.get("source_coordinate_space") or ""),
+        "band_y_top": _render_layout_contract_band_y_top(text_data),
+    }
+
+
+def _candidate_from_render_layout_contract(text_data: dict, plan: dict) -> dict | None:
+    contract = text_data.get("render_layout_contract")
+    if not isinstance(contract, dict):
+        return None
+    if int(contract.get("schema_version", 0) or 0) != 1:
+        return None
+    text = str(text_data.get("translated") or text_data.get("traduzido") or "")
+    if _text_layout_contract_text_key(text) != str(contract.get("translated_key") or ""):
+        return None
+    font_name = str(contract.get("font_name") or "")
+    if font_name and font_name != str(plan.get("font_name") or ""):
+        return None
+    lines = [str(line) for line in (contract.get("lines") or []) if str(line)]
+    raw_positions = contract.get("positions") or []
+    if not lines or len(raw_positions) != len(lines):
+        return None
+    try:
+        font_size = int(contract.get("font_size", 0) or 0)
+        line_height = int(contract.get("line_height", 0) or 0)
+        positions = [(int(item[0]), int(item[1])) for item in raw_positions]
+    except Exception:
+        return None
+    if font_size <= 0 or line_height <= 0:
+        return None
+    font = get_font(str(plan.get("font_name") or font_name), font_size)
+    line_widths = [int(measure_text_width(font, line, font_size)) for line in lines]
+    block_bbox = _layout_contract_bbox_from_positions(positions, line_widths, line_height)
+    target_bbox = _layout_bbox(plan.get("target_bbox"))
+    if block_bbox is None or target_bbox is None:
+        return None
+    if block_bbox == [0, 0, 32, 32] or target_bbox == [0, 0, 32, 32]:
+        _merge_qa_flags(text_data, ["stale_render_layout_contract_rejected"])
+        return None
+    if not _render_layout_contract_fits_current_geometry(block_bbox, text_data, plan):
+        coord = str(contract.get("coordinate_space") or "").strip().lower()
+        band_y_top = _render_layout_contract_band_y_top(contract, text_data)
+        if coord in {"band", "local", "band_local"} and band_y_top:
+            shifted_positions = [(int(x), int(y) + band_y_top) for x, y in positions]
+            shifted_bbox = _layout_contract_bbox_from_positions(shifted_positions, line_widths, line_height)
+            if shifted_bbox is not None and _render_layout_contract_fits_current_geometry(
+                shifted_bbox,
+                text_data,
+                plan,
+            ):
+                positions = shifted_positions
+                block_bbox = shifted_bbox
+                text_data["_render_layout_contract_band_y_shift"] = int(band_y_top)
+            else:
+                _merge_qa_flags(text_data, ["stale_render_layout_contract_rejected"])
+                return None
+        else:
+            _merge_qa_flags(text_data, ["stale_render_layout_contract_rejected"])
+            return None
+    original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    if original_scale_bbox is not None:
+        block_width = max(1, int(block_bbox[2]) - int(block_bbox[0]))
+        block_height = max(1, int(block_bbox[3]) - int(block_bbox[1]))
+        contract_probe = {
+            "block_width": block_width,
+            "block_height": block_height,
+            "block_bbox": block_bbox,
+        }
+        violations = _original_text_scale_candidate_violations(contract_probe, original_scale_bbox)
+        anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
+        block_cx, block_cy = _bbox_center(block_bbox)
+        center_dx = float(block_cx - anchor_cx)
+        center_dy = float(block_cy - anchor_cy)
+        if violations or abs(center_dx) > 3.0 or abs(center_dy) > 3.0:
+            metrics = text_data.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["stale_render_layout_contract_rejected"] = {
+                    "reason": "violates_original_text_mask_contract",
+                    "violations": list(violations),
+                    "source_bbox": [int(v) for v in original_scale_bbox],
+                    "contract_block_bbox": [int(v) for v in block_bbox],
+                    "center_dx": round(center_dx, 3),
+                    "center_dy": round(center_dy, 3),
+                }
+            _merge_qa_flags(text_data, ["stale_render_layout_contract_rejected"])
+            return None
+    block_width = max(1, int(block_bbox[2]) - int(block_bbox[0]))
+    block_height = max(1, int(block_bbox[3]) - int(block_bbox[1]))
+    candidate = {
+        "font": font,
+        "lines": lines,
+        "font_size": font_size,
+        "line_height": line_height,
+        "positions": positions,
+        "start_y": int(min(y for _, y in positions)),
+        "total_text_height": line_height * len(lines),
+        "line_widths": line_widths,
+        "block_bbox": block_bbox,
+        "block_width": block_width,
+        "block_height": block_height,
+        "width_ratio": block_width / float(max(1, int(target_bbox[2]) - int(target_bbox[0]))),
+        "height_ratio": block_height / float(max(1, int(target_bbox[3]) - int(target_bbox[1]))),
+        "score": 999999.0,
+        "render_layout_contract_replayed": True,
+    }
+    text_data["_render_layout_contract_replayed"] = True
+    _merge_qa_flags(text_data, ["render_layout_contract_replayed"])
+    return candidate
+
+
 def _parse_hex_color(hex_str: str) -> tuple:
     h = hex_str.lstrip("#")
     if len(h) < 6:
@@ -7370,13 +14662,40 @@ def _sample_background_color(img: Image.Image, bbox: list[int]) -> tuple[int, in
     return tuple(int(v) for v in np.median(crop.reshape(-1, 3), axis=0))
 
 
+def _legibility_background_bbox(plan: dict) -> list[int]:
+    for key in ("safe_text_box", "position_bbox", "capacity_bbox", "target_bbox"):
+        bbox = _layout_bbox(plan.get(key))
+        if bbox is not None:
+            return bbox
+    return [0, 0, 0, 0]
+
+
+def _should_sample_actual_dark_visual_background(plan: dict) -> bool:
+    origin = str(plan.get("_style_origin") or "").strip().lower()
+    profile = str(plan.get("layout_profile") or "").strip().lower()
+    mask_source = str(plan.get("bubble_mask_source") or "").strip().lower()
+    flags = {str(flag).strip().lower() for flag in (plan.get("qa_flags") or [])}
+    return bool(
+        origin == "auto_dark_panel_glow"
+        or profile == "dark_bubble"
+        or mask_source == "image_dark_bubble_mask"
+        or "dark_bubble_oval_reocr" in flags
+    )
+
+
 def _contrast_gap(color_a: str, color_b: str) -> float:
     return abs(_color_luminance(color_a) - _color_luminance(color_b))
 
 
 def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
     adjusted = dict(plan)
-    bg_rgb = _sample_background_color(img, adjusted["target_bbox"])
+    if str(adjusted.get("_style_origin") or "").strip().lower() in {"source_detected", "inferred_visual_card"}:
+        return adjusted
+    if _should_sample_actual_dark_visual_background(adjusted):
+        bg_rgb = _sample_background_color(img, _legibility_background_bbox(adjusted))
+        adjusted["background_rgb"] = [int(v) for v in bg_rgb]
+    else:
+        bg_rgb = _coerce_rgb_tuple(adjusted.get("background_rgb")) or _sample_background_color(img, adjusted["target_bbox"])
     bg_hex = "#{:02X}{:02X}{:02X}".format(*bg_rgb)
     bg_luma = _color_luminance(bg_hex)
 
@@ -7699,6 +15018,12 @@ def _score_connected_group_candidate(
         if re.search(r"[.!?ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦]$", previous_text) and current_text.startswith("ESSE PODER"):
             score += 5.0
 
+    semantic_flags = _connected_split_semantic_flags(
+        [str(child.get("translated", "") or "") for child in children]
+    )
+    if semantic_flags:
+        score -= 30.0 * len(semantic_flags)
+
     score += semantic_bonus
     return score
 
@@ -7723,6 +15048,14 @@ def _build_connected_children_candidates(
         for i in range(len(ordered_subregions))
     ]
     source_anchor_bboxes = _connected_source_groups_from_line_polygons(text_data, ordered_subregions)
+    if len(source_anchor_bboxes) == len(ordered_subregions):
+        anchors = [list(bbox) for bbox in source_anchor_bboxes]
+        if not text_data.get("connected_position_bboxes"):
+            text_data["connected_position_bboxes"] = copy.deepcopy(anchors)
+        if not text_data.get("connected_focus_bboxes"):
+            text_data["connected_focus_bboxes"] = copy.deepcopy(anchors)
+        if not text_data.get("connected_text_groups"):
+            text_data["connected_text_groups"] = copy.deepcopy(anchors)
     connected_lobe_ids = text_data.get("connected_lobe_ids")
     if not isinstance(connected_lobe_ids, list) or len(connected_lobe_ids) != len(ordered_subregions):
         base_id = str(text_data.get("bubble_id") or text_data.get("id") or text_data.get("text_id") or "bubble").strip() or "bubble"
@@ -7847,14 +15180,25 @@ def _render_connected_subregions(
                 child["translated"] = child.get("translated", "").upper()
 
         plans = [ensure_legible_plan(img, plan_text_layout(child)) for child in children]
-        target_sizes = _resolve_connected_target_sizes(children, plans)
+        use_original_scale_experiment = any(_should_enforce_original_text_scale_contract(child) for child in children)
+        target_sizes = (
+            [int(plan.get("target_size", 0) or 0) for plan in plans]
+            if use_original_scale_experiment
+            else _resolve_connected_target_sizes(children, plans)
+        )
         resolved_items = []
         final_plans = []
         for child, plan, target_size in zip(children, plans, target_sizes):
             fixed_plan = dict(plan)
-            fixed_plan["target_size"] = max(8, int(target_size))
-            fixed_plan["_font_search_cap"] = max(8, int(target_size))
-            fixed_plan["_font_search_floor"] = max(8, int(target_size))
+            if use_original_scale_experiment:
+                fixed_plan["target_size"] = max(8, int(target_size))
+                fixed_plan.pop("_font_search_cap", None)
+                fixed_plan.pop("_font_search_floor", None)
+                _merge_qa_flags(child, ["original_text_scale_size_experiment"])
+            else:
+                fixed_plan["target_size"] = max(8, int(target_size))
+                fixed_plan["_font_search_cap"] = max(8, int(target_size))
+                fixed_plan["_font_search_floor"] = max(8, int(target_size))
             resolved_items.append(_resolve_text_layout(child, fixed_plan))
             final_plans.append(fixed_plan)
 
@@ -7903,6 +15247,7 @@ def _render_connected_subregions(
         child = dict(text_data)
         child["balloon_subregions"] = []
         render_text_block(img, child)
+        _copy_render_debug_fields(text_data, child)
         return
 
     if connected_debug_candidates is not None:
@@ -7991,6 +15336,44 @@ def _connected_children_have_distinct_lobe_anchors(text_data: dict, subregions: 
             occupied_lobes.add(best_index)
 
     return anchored_children >= 2 and len(occupied_lobes) >= 2
+
+
+def _should_disable_single_text_false_connected_split(text_data: dict, subregions: list[list[int]]) -> bool:
+    if not _should_use_original_text_scale_contract(text_data) or len(subregions) < 2:
+        return False
+    children = [child for child in (text_data.get("connected_children") or []) if isinstance(child, dict)]
+    if len(children) >= 2 or _connected_children_have_distinct_lobe_anchors(text_data, subregions):
+        return False
+    flags = {str(flag).strip() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    source_count = int(text_data.get("source_text_count") or len(text_data.get("source_text_ids") or []) or 1)
+    visual_contract = bool(
+        "visual_text_only_inpaint_contract" in flags
+        or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+        or "dark_bubble_negative_evidence" in flags
+    )
+    if source_count > 1 or not visual_contract:
+        return False
+    anchor_bbox = (
+        _layout_bbox(text_data.get("text_pixel_bbox"))
+        or _layout_bbox(text_data.get("source_bbox"))
+        or _layout_bbox(text_data.get("bbox"))
+    )
+    if anchor_bbox is None:
+        return False
+    anchor_area = max(1, (anchor_bbox[2] - anchor_bbox[0]) * (anchor_bbox[3] - anchor_bbox[1]))
+    overlap_ratios = []
+    for subregion in subregions:
+        sub = _layout_bbox(subregion)
+        if sub is not None:
+            overlap_ratios.append(_bbox_intersection_area(anchor_bbox, sub) / float(anchor_area))
+    if not overlap_ratios:
+        return False
+    overlap_ratios.sort(reverse=True)
+    # If one lobe clearly owns the text, _single_lobe_bbox_for_anchor handles it.
+    # Here we only reject "lobes" that are really stacked bands inside one oval.
+    best = overlap_ratios[0]
+    second = overlap_ratios[1] if len(overlap_ratios) > 1 else 0.0
+    return bool(best < 0.72 and second >= 0.18)
 
 
 def _single_lobe_bbox_for_anchor(text_data: dict, subregions: list[list[int]]) -> list[int] | None:
@@ -8122,6 +15505,112 @@ def _debug_recorder_enabled() -> bool:
     return _render_plan_debug_enabled()
 
 
+def _try_render_single_text_block_with_rust(
+    img: Image.Image,
+    text_data: dict,
+    plan: dict,
+    resolved: dict,
+    pre_render_np=None,
+) -> bool:
+    try:
+        from typesetter import backend_contract, rust_backend
+    except Exception as exc:
+        logger.warning("Rust renderer backend import failed: %s", exc)
+        return False
+
+    if not rust_backend.rust_renderer_enabled():
+        return False
+    if resolved.get("original_text_scale_preferred") or resolved.get("original_text_scale_metrics"):
+        return False
+
+    try:
+        rust_text_data = dict(text_data)
+        style = dict(rust_text_data.get("style") or {})
+        estilo = rust_text_data.get("estilo") if isinstance(rust_text_data.get("estilo"), dict) else {}
+        font_name = plan.get("font_name") or estilo.get("fonte")
+        style.setdefault("fontFamily", font_name)
+        font_path = find_font(str(font_name or ""))
+        if font_path:
+            style.setdefault("fontFile", font_path)
+        style["fontSize"] = int(resolved.get("font_size", 0) or plan.get("target_size", 0) or 0)
+        style.setdefault("color", plan.get("text_color") or estilo.get("cor") or "#000000")
+        if plan.get("outline_color"):
+            style.setdefault("strokeColor", plan.get("outline_color"))
+            style.setdefault("strokeWidth", int(plan.get("outline_px", 0) or 0))
+        style.setdefault("textAlign", estilo.get("alinhamento") or "center")
+        rust_text_data["style"] = style
+        rust_text_data["safe_text_box"] = [int(v) for v in plan.get("safe_text_box") or []]
+        rust_text_data["rotation_deg"] = _normalize_rotation_deg(plan.get("rotation_deg", 0))
+        rust_text_data["_renderer_layout_lines"] = [
+            {"text": str(line), "x": float(lx), "y": float(ly)}
+            for line, (lx, ly) in zip(resolved.get("lines") or [], resolved.get("positions") or [])
+            if str(line).strip()
+        ]
+
+        request = backend_contract.build_rust_render_request(img.size, rust_text_data)
+        rendered = rust_backend.render_request_to_image(request)
+    except Exception as exc:
+        if rust_backend.rust_renderer_strict():
+            raise
+        logger.warning("Rust renderer failed; falling back to Python renderer: %s", exc)
+        return False
+
+    if rendered.size != img.size:
+        if rust_backend.rust_renderer_strict():
+            raise RuntimeError(f"Rust renderer returned unexpected size {rendered.size}, expected {img.size}")
+        logger.warning("Rust renderer returned unexpected size %s, expected %s", rendered.size, img.size)
+        return False
+
+    rendered, render_bbox = _align_rgba_layer_to_source_text_center(
+        rendered,
+        rust_text_data,
+        plan.get("safe_text_box") or plan.get("target_bbox"),
+    )
+    if not render_bbox:
+        return False
+
+    composed = img.convert("RGBA")
+    composed.alpha_composite(rendered)
+    img.paste(composed.convert(img.mode))
+
+    text_data["render_bbox"] = render_bbox
+    if plan.get("safe_text_box"):
+        text_data["safe_text_box"] = [int(v) for v in plan["safe_text_box"]]
+        text_data["_debug_safe_text_box"] = [int(v) for v in plan["safe_text_box"]]
+    render_debug = dict(text_data.get("_render_debug") or {})
+    render_debug["renderer_backend"] = "koharu_rust"
+    render_debug["renderer_backend_request_blocks"] = len(request.get("blocks") or [])
+    request_block = (request.get("blocks") or [{}])[0]
+    request_style = request_block.get("style") if isinstance(request_block.get("style"), dict) else {}
+    render_debug["renderer_backend_layout_lines"] = len(request_block.get("layout_lines") or [])
+    render_debug["renderer_backend_font_file"] = str(request_style.get("font_file") or "")
+    render_debug["renderer_backend_font_family"] = str(request_style.get("font_family") or "")
+    bridge_meta = rendered.info.get("renderer_bridge") if hasattr(rendered, "info") else None
+    if isinstance(bridge_meta, dict) and bridge_meta.get("rasterizer"):
+        render_debug["renderer_backend_rasterizer"] = str(bridge_meta.get("rasterizer") or "")
+    text_data["_render_debug"] = render_debug
+    if not plan.get("_suppress_render_qa"):
+        _run_render_qa(text_data, plan, background_image=pre_render_np)
+    qa_metrics = dict(text_data.get("qa_metrics") or {})
+    qa_metrics.setdefault(
+        "render_fit",
+        {
+            "flags": [],
+            "render_bbox": [int(v) for v in render_bbox],
+            "safe_text_box": [int(v) for v in plan.get("safe_text_box")] if plan.get("safe_text_box") else None,
+            "target_bbox": [int(v) for v in plan.get("target_bbox")] if plan.get("target_bbox") else None,
+            "balloon_bbox": (
+                [int(v) for v in text_data.get("balloon_bbox")]
+                if isinstance(text_data.get("balloon_bbox"), (list, tuple)) and len(text_data.get("balloon_bbox")) == 4
+                else None
+            ),
+            "renderer_backend": "koharu_rust",
+        },
+    )
+    text_data["qa_metrics"] = qa_metrics
+    return True
+
+
 def _render_single_text_block(
     img: Image.Image, text_data: dict, plan: dict, pre_render_np=None,
 ) -> None:
@@ -8130,7 +15619,7 @@ def _render_single_text_block(
         _render_single_text_block_unrotated(img, text_data, plan, pre_render_np=pre_render_np)
         return
 
-    sentinel = _rotation_sentinel_rgb(plan)
+    sentinel = _coerce_rgb_tuple(plan.get("background_rgb")) or _rotation_sentinel_rgb(plan)
     scratch = Image.new("RGB", img.size, sentinel)
     unrotated_plan = _plan_for_unrotated_sideways_render(plan, img.size)
     scratch_text_data = dict(text_data)
@@ -8147,20 +15636,29 @@ def _render_single_text_block(
     crop_alpha = Image.fromarray(alpha_mask[crop_box[1]:crop_box[3], crop_box[0]:crop_box[2]], mode="L")
     crop_rgba = crop_rgb.convert("RGBA")
     crop_rgba.putalpha(crop_alpha)
+    crop_rgba = _clear_transparent_rgb(crop_rgba)
 
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     layer.paste(crop_rgba, crop_box[:2], crop_alpha)
-    search_bbox = plan.get("position_bbox") if plan.get("_simple_anchor_capacity_expanded") else plan["target_bbox"]
+    if text_data.get("_uied_preserve_anchor_position") and plan.get("position_bbox"):
+        search_bbox = plan["position_bbox"]
+    else:
+        search_bbox = plan.get("position_bbox") if plan.get("_simple_anchor_capacity_expanded") else plan["target_bbox"]
     x1, y1, x2, y2 = [int(v) for v in search_bbox]
     center = ((float(x1) + float(x2)) / 2.0, (float(y1) + float(y2)) / 2.0)
     resampling = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
     rotated_layer = layer.rotate(-rotation_deg, resample=resampling, center=center, expand=False)
+    rotated_layer, aligned_render_bbox = _align_uied_rotated_layer_to_source_center(
+        rotated_layer,
+        text_data,
+        plan.get("safe_text_box") or plan["target_bbox"],
+    )
 
     composed = img.convert("RGBA")
     composed.alpha_composite(rotated_layer)
     img.paste(composed.convert(img.mode))
 
-    render_bbox = _alpha_bbox_to_list(rotated_layer.getchannel("A").getbbox(), img.width, img.height)
+    render_bbox = aligned_render_bbox or _alpha_bbox_to_list(rotated_layer.getchannel("A").getbbox(), img.width, img.height)
     if render_bbox:
         text_data["render_bbox"] = render_bbox
     text_data["rotation_deg"] = rotation_deg
@@ -8193,6 +15691,53 @@ def _render_single_text_block_unrotated(
     if not text:
         return
 
+    _apply_recovered_dark_bubble_glow_capacity(img, text_data, plan)
+
+    dark_visible_target = _dark_bubble_visible_bbox_from_overbroad_target(
+        text_data,
+        plan.get("target_bbox") or text_data.get("balloon_bbox") or text_data.get("bbox"),
+    )
+    if dark_visible_target is not None and _layout_bbox(plan.get("target_bbox")) != dark_visible_target:
+        anchor_bbox = _layout_bbox(text_data.get("text_pixel_bbox") or text_data.get("source_bbox") or text_data.get("layout_bbox"))
+        safe_bbox = anchor_bbox if anchor_bbox and _bbox_intersection_area(anchor_bbox, dark_visible_target) >= int(_bbox_area_px(anchor_bbox) * 0.70) else None
+        if safe_bbox is None:
+            vx1, vy1, vx2, vy2 = [int(v) for v in dark_visible_target]
+            vw = max(1, vx2 - vx1)
+            vh = max(1, vy2 - vy1)
+            safe_bbox = [
+                vx1 + max(10, int(vw * 0.12)),
+                vy1 + max(10, int(vh * 0.12)),
+                vx2 - max(10, int(vw * 0.12)),
+                vy2 - max(10, int(vh * 0.12)),
+            ]
+        for stale_key in (
+            "position_bbox",
+            "capacity_bbox",
+            "safe_text_box",
+            "_debug_safe_text_box",
+            "layout_safe_bbox",
+            "layout_safe_reason",
+            "render_bbox",
+            "_debug_render_bbox",
+            "fit_status",
+            "layout_fit_result",
+        ):
+            text_data.pop(stale_key, None)
+        text_data["_render_target_source"] = text_data.get("_render_target_source") or "dark_bubble_visible_bbox_from_overbroad_target"
+        _merge_qa_flags(text_data, ["dark_bubble_overbroad_target_clamped_to_visible_bbox", "safe_text_box_recomputed"])
+        plan = dict(plan)
+        plan["target_bbox"] = list(dark_visible_target)
+        plan["position_bbox"] = list(safe_bbox)
+        plan["capacity_bbox"] = list(safe_bbox)
+        plan["safe_text_box"] = list(safe_bbox)
+        plan["layout_safe_bbox"] = list(safe_bbox)
+        plan["layout_safe_reason"] = "dark_bubble_visible_bbox_from_overbroad_target"
+        plan["max_width"] = max(4, int(safe_bbox[2]) - int(safe_bbox[0]) - 12)
+        plan["max_height"] = max(4, int(safe_bbox[3]) - int(safe_bbox[1]) - 8)
+        if int(plan.get("target_size", 0) or 0) > 30:
+            plan["target_size"] = 30
+        plan["_target_source"] = "dark_bubble_visible_bbox_from_overbroad_target"
+
     x1, y1, x2, y2 = plan["target_bbox"]
     box_width = max(1, x2 - x1)
     box_height = max(1, y2 - y1)
@@ -8211,9 +15756,13 @@ def _render_single_text_block_unrotated(
         "capacity_bbox": plan.get("capacity_bbox"),
         "layout_safe_bbox": plan.get("layout_safe_bbox"),
         "layout_safe_reason": plan.get("layout_safe_reason"),
+        "safe_text_box": plan.get("safe_text_box"),
         "font_name": plan.get("font_name"),
         "font_size_seed": int(plan.get("target_size", 0) or 0),
         "font_size_final": int(resolved.get("font_size", 0) or 0),
+        "source_font_size_px": int(plan.get("_source_font_size_px", 0) or 0),
+        "prefer_original_font_size": bool(plan.get("_prefer_original_font_size")),
+        "follow_original_ocr_size": bool(plan.get("_follow_original_ocr_size")),
         "line_height": int(resolved.get("line_height", 0) or 0),
         "wrapped_lines": list(resolved.get("lines") or []),
         "rotation_deg": _normalize_rotation_deg(plan.get("rotation_deg", 0)),
@@ -8223,6 +15772,7 @@ def _render_single_text_block_unrotated(
         "skipped_candidate_count": len(text_data.get("_render_debug_skipped") or []),
         "simple_anchor_capacity_expanded": bool(plan.get("_simple_anchor_capacity_expanded")),
         "simple_anchor_capacity_reason": plan.get("_simple_anchor_capacity_reason", ""),
+        "render_layout_contract_replayed": bool(resolved.get("render_layout_contract_replayed")),
     }
     if (
         pre_render_np is None
@@ -8239,29 +15789,73 @@ def _render_single_text_block_unrotated(
     total_text_height = resolved["total_text_height"]
     start_y = resolved["start_y"]
     positions = resolved["positions"]
+    _persist_render_layout_contract(text_data, plan, resolved, positions)
 
     outline_color = plan["outline_color"]
     outline_px = int(plan["outline_px"])
 
+    if (
+        not bool(plan.get("curva"))
+        and not bool(plan.get("_anchor_center_only_layout"))
+        and _try_render_single_text_block_with_rust(img, text_data, plan, resolved, pre_render_np=pre_render_np)
+    ):
+        return
+
     if isinstance(best_font, SafeTextPathFont):
         image_np = np.array(img)
-        center_x = x1 + (box_width // 2)
+        center_ref_bbox = _layout_bbox(plan.get("safe_text_box") or plan.get("position_bbox") or plan["target_bbox"])
+        if plan.get("_position_on_capacity_bbox") or plan.get("_simple_anchor_capacity_expanded"):
+            center_ref_bbox = _layout_bbox(plan.get("capacity_bbox")) or center_ref_bbox
+        if center_ref_bbox is None:
+            center_ref_bbox = [x1, y1, x2, y2]
+        center_x = int(center_ref_bbox[0]) + ((int(center_ref_bbox[2]) - int(center_ref_bbox[0])) // 2)
+        alignment = str(plan.get("alignment") or "center").strip().lower()
 
         corrected_positions = []
-        for line, (lx, ly) in zip(best_lines, positions):
+        for index, (line, (lx, ly)) in enumerate(zip(best_lines, positions)):
             mask = _build_textpath_mask(best_font, line, padding=0)
             real_width = mask.shape[1] if mask.size > 1 else 0
-            new_lx = center_x - (real_width // 2)
+            if alignment == "left":
+                new_lx = lx
+            elif alignment == "right":
+                measured_width = 0
+                try:
+                    measured_width = int(resolved.get("line_widths", [])[index] or 0)
+                except Exception:
+                    measured_width = 0
+                new_lx = lx + max(0, measured_width - real_width)
+            else:
+                new_lx = center_x - (real_width // 2)
             corrected_positions.append((new_lx, ly))
-        positions = _recenter_safe_text_positions(
+        if alignment in {"left", "right"}:
+            positions = corrected_positions
+        else:
+            positions = _recenter_safe_text_positions(
+                best_font,
+                best_lines,
+                corrected_positions,
+                target_bbox=(
+                    plan.get("safe_text_box")
+                    if plan.get("_anchor_center_only_layout") and plan.get("safe_text_box")
+                    else plan.get("position_bbox", plan["target_bbox"])
+                ),
+                padding_y=int(plan["padding_y"]),
+                vertical_anchor=str(plan["vertical_anchor"]),
+                vertical_bias_px=int(plan.get("vertical_bias_px", 0) or 0),
+                horizontal_bias_px=int(plan.get("horizontal_bias_px", 0) or 0),
+            )
+        positions = _clamp_safe_text_positions_to_bbox(
             best_font,
             best_lines,
-            corrected_positions,
-            target_bbox=plan.get("position_bbox", plan["target_bbox"]),
-            padding_y=int(plan["padding_y"]),
-            vertical_anchor=str(plan["vertical_anchor"]),
-            vertical_bias_px=int(plan.get("vertical_bias_px", 0) or 0),
-            horizontal_bias_px=int(plan.get("horizontal_bias_px", 0) or 0),
+            positions,
+            plan.get("safe_text_box") or plan["target_bbox"],
+        )
+        positions = _align_uied_positions_to_source_center(
+            best_font,
+            best_lines,
+            positions,
+            text_data,
+            plan.get("safe_text_box") or plan["target_bbox"],
         )
         positions = _clamp_safe_text_positions_to_bbox(
             best_font,
@@ -8269,6 +15863,38 @@ def _render_single_text_block_unrotated(
             positions,
             plan.get("safe_text_box") or plan["target_bbox"],
         )
+        _persist_render_layout_contract(text_data, plan, resolved, positions)
+
+        if _should_render_safe_arc_text(plan, best_lines):
+            if plan["sombra"] and plan["sombra_cor"]:
+                dx, dy = plan["sombra_offset"]
+                _render_safe_arc_text_layer(
+                    image_np,
+                    best_lines[0],
+                    best_font,
+                    (positions[0][0] + int(dx), positions[0][1] + int(dy)),
+                    plan,
+                    fill_color=plan["sombra_cor"],
+                )
+            ink_bbox = _render_safe_arc_text_layer(
+                image_np,
+                best_lines[0],
+                best_font,
+                positions[0],
+                plan,
+                fill_color=plan["text_color"],
+                outline_color=outline_color,
+                outline_px=outline_px,
+            )
+            if ink_bbox:
+                text_data["render_bbox"] = [int(v) for v in ink_bbox]
+            text_data["_render_debug"]["curva"] = True
+            text_data["_render_debug"]["curva_direcao"] = plan.get("curva_direcao", "")
+            text_data["_render_debug"]["curva_intensidade"] = float(plan.get("curva_intensidade", 0.0) or 0.0)
+            img.paste(Image.fromarray(image_np))
+            if not plan.get("_suppress_render_qa"):
+                _run_render_qa(text_data, plan, background_image=pre_render_np)
+            return
 
         if plan["sombra"] and plan["sombra_cor"]:
             dx, dy = plan["sombra_offset"]
@@ -8312,17 +15938,18 @@ def _render_single_text_block_unrotated(
         return
 
     # PIL path (system fallback fonts)
+    render_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     if plan["sombra"] and plan["sombra_cor"]:
-        draw = ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(render_layer)
         dx, dy = plan["sombra_offset"]
         for line, (lx, ly) in zip(best_lines, positions):
             draw.text((lx + dx, ly + dy), line, font=best_font, fill=plan["sombra_cor"])
 
     if plan["glow"] and plan["glow_cor"] and plan["glow_px"] > 0:
-        _apply_glow(img, best_lines, best_font, positions, plan["glow_cor"], plan["glow_px"])
+        _apply_glow(render_layer, best_lines, best_font, positions, plan["glow_cor"], plan["glow_px"])
 
     if outline_color and outline_px > 0:
-        draw = ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(render_layer)
         for line, (lx, ly) in zip(best_lines, positions):
             for dx in range(-outline_px, outline_px + 1):
                 for dy in range(-outline_px, outline_px + 1):
@@ -8333,17 +15960,37 @@ def _render_single_text_block_unrotated(
     gradient = plan["cor_gradiente"]
     if gradient and len(gradient) >= 2:
         _apply_gradient_text(
-            img, best_lines, best_font, positions,
+            render_layer, best_lines, best_font, positions,
             gradient[0], gradient[1],
             outline_color, outline_px,
             start_y, total_text_height,
         )
     else:
-        draw = ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(render_layer)
         for line, (lx, ly) in zip(best_lines, positions):
             draw.text((lx, ly), line, font=best_font, fill=plan["text_color"])
 
-    block_bbox = resolved.get("block_bbox")
+    render_layer, aligned_bbox = _align_rgba_layer_to_source_text_center(
+        render_layer,
+        text_data,
+        plan.get("safe_text_box") or plan["target_bbox"],
+    )
+    if aligned_bbox:
+        dx = int(aligned_bbox[0]) - min((int(px) for px, _ in positions), default=int(aligned_bbox[0]))
+        dy = int(aligned_bbox[1]) - min((int(py) for _, py in positions), default=int(aligned_bbox[1]))
+        _persist_render_layout_contract(
+            text_data,
+            plan,
+            resolved,
+            [(int(px) + dx, int(py) + dy) for px, py in positions],
+        )
+    else:
+        _persist_render_layout_contract(text_data, plan, resolved, positions)
+    composed = img.convert("RGBA")
+    composed.alpha_composite(render_layer)
+    img.paste(composed.convert(img.mode))
+
+    block_bbox = aligned_bbox or _alpha_bbox_to_list(render_layer.getchannel("A").getbbox(), img.width, img.height)
     if block_bbox:
         text_data["render_bbox"] = [int(v) for v in block_bbox]
 
@@ -8515,6 +16162,14 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         )
         if background_check.get("background_luma") is not None:
             qa_metrics["render_background_luma"] = background_check["background_luma"]
+        if background_check.get("background_luma_std") is not None:
+            qa_metrics["render_background_luma_std"] = background_check["background_luma_std"]
+        if background_check.get("balloon_background_luma") is not None:
+            qa_metrics["render_balloon_background_luma"] = background_check["balloon_background_luma"]
+        if background_check.get("balloon_background_luma_std") is not None:
+            qa_metrics["render_balloon_background_luma_std"] = background_check["balloon_background_luma_std"]
+        if background_check.get("flat_balloon_background"):
+            qa_metrics["render_flat_balloon_background"] = True
         for flag in background_check.get("flags") or []:
             if flag == "render_on_art_suspected" and _is_preserved_source_text_safe_for_background_qa():
                 continue
@@ -8656,33 +16311,242 @@ def _apply_gradient_text(
         img.paste(Image.fromarray(gradient, "RGB"), (lx - pad, ly - pad), mask)
 
 
+def _clamp_render_bbox_to_image(bbox: list[int] | None, img: Image.Image) -> list[int] | None:
+    bbox = _layout_bbox(bbox)
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    clamped = [
+        max(0, min(int(img.width), x1)),
+        max(0, min(int(img.height), y1)),
+        max(0, min(int(img.width), x2)),
+        max(0, min(int(img.height), y2)),
+    ]
+    if clamped[2] <= clamped[0] or clamped[3] <= clamped[1]:
+        return None
+    return clamped
+
+
+def _expanded_canvas_geometry_for_unclamped_render(img: Image.Image, text_data: dict) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    if bool(text_data.get("_expanded_canvas_render_active")):
+        return None
+    if str(text_data.get("layout_safe_reason") or "").strip().lower() != "debug_derived_bubble_mask_unclamped":
+        return None
+    safe_unclamped = _layout_bbox(text_data.get("_safe_text_box_unclamped"))
+    if safe_unclamped is None:
+        return None
+    geometry_boxes = [safe_unclamped]
+    for key in ("_bubble_inner_bbox_unclamped", "bubble_inner_bbox", "bubble_mask_bbox", "balloon_bbox"):
+        box = _layout_bbox(text_data.get(key))
+        if box is not None:
+            geometry_boxes.append(box)
+    min_y = min(int(box[1]) for box in geometry_boxes)
+    max_y = max(int(box[3]) for box in geometry_boxes)
+    extra_top = max(0, -min_y)
+    extra_bottom = max(0, max_y - int(img.height))
+    if extra_top <= 3 and extra_bottom <= 3:
+        return None
+    max_extra = max(128, int(img.height * 0.75))
+    top_pad = min(extra_top, max_extra)
+    bottom_pad = min(extra_bottom + 24, max_extra)
+    new_height = int(img.height) + top_pad + bottom_pad
+    if new_height <= img.height:
+        return None
+    return (int(img.width), int(new_height)), (0, int(top_pad))
+
+
+def _expanded_canvas_size_for_unclamped_render(img: Image.Image, text_data: dict) -> tuple[int, int] | None:
+    geometry = _expanded_canvas_geometry_for_unclamped_render(img, text_data)
+    return geometry[0] if geometry else None
+
+
+def _shift_render_geometry_y(value, delta_y: int):
+    if not delta_y:
+        return value
+    if isinstance(value, list):
+        if len(value) >= 4 and all(isinstance(v, (int, float)) for v in value[:4]):
+            shifted = list(value)
+            shifted[1] = int(round(float(shifted[1]))) + delta_y
+            shifted[3] = int(round(float(shifted[3]))) + delta_y
+            return shifted
+        shifted_items = []
+        changed = False
+        for item in value:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and all(isinstance(v, (int, float)) for v in item[:2]):
+                point = list(item)
+                point[1] = int(round(float(point[1]))) + delta_y
+                shifted_items.append(point)
+                changed = True
+            elif isinstance(item, list):
+                shifted_items.append(_shift_render_geometry_y(item, delta_y))
+                changed = True
+            else:
+                shifted_items.append(item)
+        return shifted_items if changed else value
+    return value
+
+
+def _shift_render_data_y(render_data: dict, delta_y: int) -> None:
+    if not delta_y:
+        return
+    for key in (
+        "bbox",
+        "source_bbox",
+        "text_pixel_bbox",
+        "layout_bbox",
+        "target_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "_safe_text_box_unclamped",
+        "render_bbox",
+        "balloon_bbox",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
+        "_bubble_inner_bbox_unclamped",
+    ):
+        if key in render_data:
+            render_data[key] = _shift_render_geometry_y(render_data.get(key), delta_y)
+    if "line_polygons" in render_data:
+        render_data["line_polygons"] = _shift_render_geometry_y(render_data.get("line_polygons"), delta_y)
+
+
+def _render_text_block_on_expanded_canvas_if_needed(
+    img: Image.Image,
+    text_data: dict,
+    *,
+    pre_render_np=None,
+) -> bool:
+    del pre_render_np
+    expanded_geometry = _expanded_canvas_geometry_for_unclamped_render(img, text_data)
+    if expanded_geometry is None:
+        return False
+    expanded_size, origin = expanded_geometry
+
+    background = _coerce_rgb_tuple(text_data.get("background_rgb")) or (255, 255, 255)
+    expanded = Image.new(img.mode, expanded_size, background)
+    expanded.paste(img, origin)
+    original_safe_text_box = _layout_bbox(text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+    render_data = dict(text_data)
+    render_data["_expanded_canvas_render_active"] = True
+    render_data["_allow_unclamped_safe_text_box"] = True
+    _shift_render_data_y(render_data, int(origin[1]))
+
+    render_text_block(expanded, render_data, pre_render_np=None)
+    if int(origin[1]):
+        _shift_render_data_y(render_data, -int(origin[1]))
+    img.paste(expanded.crop((0, origin[1], img.width, origin[1] + img.height)))
+    _copy_render_debug_fields(text_data, render_data)
+    text_data["_expanded_canvas_render_used"] = True
+    text_data["_expanded_canvas_size"] = [int(expanded_size[0]), int(expanded_size[1])]
+    text_data["_expanded_canvas_origin"] = [int(origin[0]), int(origin[1])]
+    clamped_render_bbox = _clamp_render_bbox_to_image(render_data.get("render_bbox"), img)
+    if clamped_render_bbox is not None:
+        text_data["render_bbox"] = clamped_render_bbox
+    if original_safe_text_box is not None:
+        text_data["safe_text_box"] = [int(v) for v in original_safe_text_box]
+        text_data["_debug_safe_text_box"] = [int(v) for v in original_safe_text_box]
+    elif text_data.get("safe_text_box"):
+        text_data["_debug_safe_text_box"] = [int(v) for v in text_data["safe_text_box"]]
+    render_debug = dict(text_data.get("_render_debug") or {})
+    render_debug["expanded_canvas_render_used"] = True
+    render_debug["expanded_canvas_size"] = [int(expanded_size[0]), int(expanded_size[1])]
+    render_debug["expanded_canvas_safe_text_box_unclamped"] = list(text_data.get("_safe_text_box_unclamped") or [])
+    text_data["_render_debug"] = render_debug
+    return True
+
+
 
 
 
 def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None, pre_render_np=None):
     del img_size
-    text = text_data.get("translated", "")
+    if str(text_data.get("content_class") or "").strip().lower() == "sfx":
+        from sfx.renderer import render_sfx_layer
+
+        rendered = render_sfx_layer(np.asarray(img.convert("RGB")), text_data)
+        img.paste(Image.fromarray(rendered.astype(np.uint8), "RGB"))
+        return
+    text = text_data.get("translated") or text_data.get("traduzido") or ""
     if not text:
         return
     text = _normalize_render_text(text)
+    qa_flags_for_text = {str(flag).strip() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
+    if "same_balloon_fragment_merged" in qa_flags_for_text:
+        deduped_text = _dedupe_repeated_sentence_for_render(text)
+        if deduped_text != text:
+            text = deduped_text
+            text_data["translated"] = text
+            text_data["traduzido"] = text
+            _merge_qa_flags(text_data, ["same_balloon_duplicate_sentence_removed"])
+    text_data["translated"] = text
     text_data.update(normalize_text_geometry(text_data))
+    _clear_stale_dark_panel_visual_render_geometry(text_data)
+    qa_flags = {str(flag).strip().lower() for flag in (text_data.get("qa_flags") or [])}
+    needs_review_fallback = bool(
+        "missing_render_bbox" in qa_flags
+        or text_data.get("needs_review")
+        or str(text_data.get("route_action") or "").strip().lower() == "review_required"
+        or str(text_data.get("render_policy") or "").strip().lower() == "review_required"
+    )
+    if (
+        needs_review_fallback
+        and _layout_bbox(text_data.get("safe_text_box")) is None
+        and _layout_bbox(text_data.get("render_bbox")) is None
+    ):
+        text_data.update(plan_fallback_render_box(text_data))
+    skip_preplan_expanded_canvas = _is_dark_visual_white_mask_context(
+        text_data,
+        str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower(),
+    )
+    if not skip_preplan_expanded_canvas and _render_text_block_on_expanded_canvas_if_needed(
+        img,
+        text_data,
+        pre_render_np=pre_render_np,
+    ):
+        return
     original_text_data = text_data
     single_lobe_render = False
+    rollback_before = img.copy() if _may_need_unsafe_render_rollback(text_data) else None
 
     subregions = [
         [int(v) for v in bbox]
         for bbox in text_data.get("balloon_subregions", []) or []
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4
     ]
-    if len(subregions) >= 2 and _should_reject_connected_false_positive(text_data, subregions):
+    if _should_disable_connected_layout_for_rejected_bubble_mask(text_data):
         sanitized = _clear_connected_balloon_metadata(text_data)
+        _merge_qa_flags(sanitized, ["connected_layout_disabled_rejected_bubble_mask"])
         text_data.clear()
         text_data.update(sanitized)
+        subregions = []
+    if _should_disable_connected_layout_for_dark_panel_visual_mask(text_data):
+        sanitized = _clear_connected_balloon_metadata(text_data)
+        sanitized["layout_profile"] = "standard"
+        sanitized["_render_target_source"] = "dark_panel_visual_mask_bbox"
+        _merge_qa_flags(sanitized, ["connected_layout_disabled_dark_panel_visual_mask"])
+        text_data.clear()
+        text_data.update(sanitized)
+        subregions = []
+    if len(subregions) >= 2 and _should_reject_connected_false_positive(text_data, subregions):
+        if _is_dark_visual_white_mask_context(text_data) and _has_trusted_dark_visual_capacity(text_data):
+            _merge_qa_flags(text_data, ["connected_split_disabled_preserved_visual_capacity"])
+        else:
+            sanitized = _clear_connected_balloon_metadata(text_data)
+            text_data.clear()
+            text_data.update(sanitized)
         subregions = []
     single_lobe_bbox = _single_lobe_bbox_for_anchor(text_data, subregions)
     if single_lobe_bbox is not None:
         text_data = _as_single_lobe_render_block(text_data, single_lobe_bbox)
         single_lobe_render = True
+        subregions = []
+    elif _should_disable_single_text_false_connected_split(text_data, subregions):
+        sanitized = _clear_connected_balloon_metadata(text_data)
+        _merge_qa_flags(sanitized, ["single_text_false_connected_split_disabled"])
+        text_data.clear()
+        text_data.update(sanitized)
         subregions = []
     should_render_connected = len(subregions) >= 2 and (
         int(text_data.get("layout_group_size", 1) or 1) > 1
@@ -8696,33 +16560,118 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None,
         _apply_auto_style_policy_if_needed(img, render_data)
         _render_connected_subregions(img, render_data, text, subregions)
         _copy_render_debug_fields(text_data, render_data)
+        _rollback_unsafe_art_render_if_needed(img, rollback_before, text_data)
         if single_lobe_render:
             _copy_render_debug_fields(original_text_data, render_data)
+            _rollback_unsafe_art_render_if_needed(img, rollback_before, original_text_data)
         return
 
-    _apply_visual_rect_safe_area_if_needed(img, text_data)
     _apply_auto_style_policy_if_needed(img, text_data)
+    _apply_visual_rect_safe_area_if_needed(img, text_data)
     estilo = _canonical_render_style(text_data.get("estilo", {}))
     if estilo.get("force_upper"):
         text = text.upper()
         render_data = dict(text_data)
         render_data["translated"] = text
+        plan = ensure_legible_plan(img, plan_text_layout(render_data))
+        for key in ("target_bbox", "position_bbox", "capacity_bbox", "safe_text_box", "layout_safe_bbox", "layout_safe_reason"):
+            if plan.get(key) is not None:
+                if key != "layout_safe_reason" or str(plan.get(key) or "").strip():
+                    render_data[key] = plan[key]
+        if plan.get("safe_text_box") is not None:
+            render_data["_debug_safe_text_box"] = plan["safe_text_box"]
+        if _render_text_block_on_expanded_canvas_if_needed(img, render_data, pre_render_np=pre_render_np):
+            _copy_render_debug_fields(text_data, render_data)
+            _rollback_unsafe_art_render_if_needed(img, rollback_before, text_data)
+            if single_lobe_render:
+                _copy_render_debug_fields(original_text_data, render_data)
+                _rollback_unsafe_art_render_if_needed(img, rollback_before, original_text_data)
+            return
+        low_containment_before = (
+            img.copy()
+            if _may_need_low_containment_fragment_render_rollback(render_data, plan)
+            else None
+        )
         _render_single_text_block(
             img,
             render_data,
-            ensure_legible_plan(img, plan_text_layout(render_data)),
+            plan,
             pre_render_np=pre_render_np,
         )
         _copy_render_debug_fields(text_data, render_data)
+        _rollback_low_containment_fragment_render_if_needed(
+            img,
+            low_containment_before,
+            text_data,
+            plan,
+        )
+        _rollback_unsafe_art_render_if_needed(img, rollback_before, text_data)
         if single_lobe_render:
             _copy_render_debug_fields(original_text_data, render_data)
+            _rollback_unsafe_art_render_if_needed(img, rollback_before, original_text_data)
         text_data["_render_debug"] = render_data.get("_render_debug", {})
+        if isinstance(text_data["_render_debug"], dict):
+            for key in (
+                "target_bbox",
+                "position_bbox",
+                "capacity_bbox",
+                "safe_text_box",
+                "layout_safe_bbox",
+                "layout_safe_reason",
+            ):
+                value = text_data["_render_debug"].get(key)
+                if value is not None:
+                    text_data[key] = value
+                    if key == "safe_text_box":
+                        text_data["_debug_safe_text_box"] = value
         return
 
     plan = ensure_legible_plan(img, plan_text_layout(text_data))
+    for key in ("target_bbox", "position_bbox", "capacity_bbox", "safe_text_box", "layout_safe_bbox", "layout_safe_reason"):
+        value = plan.get(key)
+        if value is not None:
+            if key != "layout_safe_reason" or str(value or "").strip():
+                text_data[key] = value
+            if key == "safe_text_box":
+                text_data["_debug_safe_text_box"] = value
+    if _render_text_block_on_expanded_canvas_if_needed(img, text_data, pre_render_np=pre_render_np):
+        _rollback_unsafe_art_render_if_needed(img, rollback_before, text_data)
+        if single_lobe_render:
+            _copy_render_debug_fields(original_text_data, text_data)
+            _rollback_unsafe_art_render_if_needed(img, rollback_before, original_text_data)
+        return
+    low_containment_before = (
+        img.copy()
+        if _may_need_low_containment_fragment_render_rollback(text_data, plan)
+        else None
+    )
     _render_single_text_block(img, text_data, plan, pre_render_np=pre_render_np)
+    render_debug = text_data.get("_render_debug") if isinstance(text_data.get("_render_debug"), dict) else {}
+    for key in (
+        "target_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "safe_text_box",
+        "layout_safe_bbox",
+        "layout_safe_reason",
+    ):
+        value = render_debug.get(key)
+        if value is not None:
+            text_data[key] = value
+            if key == "safe_text_box":
+                text_data["_debug_safe_text_box"] = value
+    low_containment_rolled_back = _rollback_low_containment_fragment_render_if_needed(
+        img,
+        low_containment_before,
+        text_data,
+        plan,
+    )
+    _rollback_unsafe_art_render_if_needed(img, rollback_before, text_data)
     if single_lobe_render:
         _copy_render_debug_fields(original_text_data, text_data)
+        if low_containment_rolled_back:
+            _copy_render_debug_fields(original_text_data, text_data)
+        _rollback_unsafe_art_render_if_needed(img, rollback_before, original_text_data)
 
 
 def _render_block_source_ids(block: dict) -> list[str]:
@@ -8735,14 +16684,26 @@ def _render_block_source_ids(block: dict) -> list[str]:
     add(block.get("id"))
     add(block.get("text_id"))
     add(block.get("_source_text_id"))
+    for value in block.get("source_text_ids") or []:
+        add(value)
     for value in block.get("_source_text_ids") or []:
+        add(value)
+    for value in block.get("source_trace_ids") or []:
+        add(value)
+    for value in block.get("_source_trace_ids") or []:
         add(value)
     for child in block.get("connected_children") or []:
         if isinstance(child, dict):
             add(child.get("id"))
             add(child.get("text_id"))
             add(child.get("_source_text_id"))
+            for value in child.get("source_text_ids") or []:
+                add(value)
             for value in child.get("_source_text_ids") or []:
+                add(value)
+            for value in child.get("source_trace_ids") or []:
+                add(value)
+            for value in child.get("_source_trace_ids") or []:
                 add(value)
     return ids
 
@@ -8834,6 +16795,9 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         ]
         rendered_flags = [flag for flag in rendered_flags if flag not in stale_resolved_flags]
     for key in (
+        "target_bbox",
+        "position_bbox",
+        "capacity_bbox",
         "safe_text_box",
         "_debug_safe_text_box",
         "layout_safe_bbox",
@@ -8858,11 +16822,31 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         value = rendered.get(key)
         if value is not None:
             source[key] = value
+    render_debug = rendered.get("_render_debug") if isinstance(rendered.get("_render_debug"), dict) else {}
+    for key in (
+        "target_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "safe_text_box",
+        "layout_safe_bbox",
+        "layout_safe_reason",
+    ):
+        value = render_debug.get(key)
+        if value is not None:
+            source[key] = value
+            if key == "safe_text_box":
+                source["_debug_safe_text_box"] = value
     _apply_auto_rotation_to_layer_style(
         source,
         source.get("rotation_deg", 0),
         str(source.get("rotation_source") or rendered.get("rotation_source") or ""),
     )
+    for key in ("estilo", "style"):
+        if isinstance(rendered.get(key), dict):
+            source[key] = copy.deepcopy(rendered[key])
+    for key in ("style_origin", "style_confidence", "style_source"):
+        if rendered.get(key) is not None:
+            source[key] = rendered[key]
     _merge_qa_flags(source, rendered_flags)
     _drop_stale_render_geometry_flags(source)
 
@@ -9054,6 +17038,17 @@ def _ensure_typeset_trace_metadata(ocr_page: dict) -> None:
                     break
             except Exception:
                 continue
+    resolved_band_id = _typeset_band_id(ocr_page)
+    resolved_page_id = _page_id_from_band_id(resolved_band_id or "") or _typeset_page_id(ocr_page)
+    for text in texts:
+        if resolved_band_id and not str(text.get("band_id") or "").strip():
+            text["band_id"] = resolved_band_id
+        if resolved_page_id and not str(text.get("page_id") or "").strip():
+            text["page_id"] = resolved_page_id
+        if not str(text.get("trace_id") or "").strip() and resolved_band_id:
+            text_id = str(text.get("id") or text.get("text_id") or "").strip()
+            if text_id:
+                text["trace_id"] = f"{text_id}@{resolved_band_id}"
 
 
 def _active_debug_recorder():
@@ -9095,6 +17090,8 @@ def _source_trace_ids_for_block(ocr_page: dict, block: dict) -> list[str]:
     band_id = _typeset_band_id(ocr_page)
 
     _add_unique(trace_ids, block.get("trace_id"))
+    for value in block.get("source_trace_ids") or []:
+        _add_unique(trace_ids, value)
     for value in block.get("_source_trace_ids") or []:
         _add_unique(trace_ids, value)
 
@@ -9110,6 +17107,8 @@ def _source_trace_ids_for_block(ocr_page: dict, block: dict) -> list[str]:
         if not isinstance(child, dict):
             continue
         _add_unique(trace_ids, child.get("trace_id"))
+        for value in child.get("source_trace_ids") or []:
+            _add_unique(trace_ids, value)
         for value in child.get("_source_trace_ids") or []:
             _add_unique(trace_ids, value)
 
@@ -9237,6 +17236,9 @@ def _record_render_plan(ocr_page: dict, block: dict) -> None:
         "original": block.get("text") or block.get("original"),
         "translated": block.get("translated"),
         "target_bbox": render_debug.get("target_bbox"),
+        "bbox": block.get("bbox"),
+        "layout_bbox": block.get("layout_bbox"),
+        "text_pixel_bbox": block.get("text_pixel_bbox"),
         "position_bbox": render_debug.get("position_bbox"),
         "capacity_bbox": render_debug.get("capacity_bbox"),
         "layout_safe_bbox": render_debug.get("layout_safe_bbox"),
@@ -9418,11 +17420,15 @@ def _shift_render_plan_to_page(payload: dict) -> dict:
 def _render_plan_identity_key(payload: dict) -> tuple:
     trace_id = str(payload.get("trace_id") or "").strip()
     if trace_id:
+        base_trace_id = trace_id.split("#", 1)[0].strip()
+        text_id = str(payload.get("text_id") or payload.get("id") or "").strip()
+        base_text_id = text_id.rsplit("_fragment_", 1)[0].strip() if "_fragment_" in text_id else text_id
         return (
             "trace",
-            trace_id,
-            tuple(payload.get("target_bbox") or payload.get("balloon_bbox") or payload.get("render_bbox") or []),
-            str(payload.get("translated") or ""),
+            base_trace_id,
+            base_text_id,
+            str(payload.get("band_id") or ""),
+            _normalize_duplicate_compare_text(str(payload.get("translated") or "")),
         )
     source_trace_ids = tuple(str(value).strip() for value in payload.get("source_trace_ids") or [] if str(value).strip())
     if source_trace_ids:
@@ -9449,6 +17455,7 @@ def _write_deduped_render_plan_final(recorder, payload: dict) -> None:
         stage = recorder._stage_from_rel("09_typeset/render_plan_final.jsonl")
         final_payload = recorder._header(payload, stage=stage)
         entries: list[dict] = []
+        matching_entries: list[dict] = []
         if target.exists():
             for line in target.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -9459,6 +17466,23 @@ def _write_deduped_render_plan_final(recorder, payload: dict) -> None:
                     continue
                 if _render_plan_identity_key(entry) != identity_key:
                     entries.append(entry)
+                else:
+                    matching_entries.append(entry)
+        incoming_flags = {str(flag) for flag in final_payload.get("qa_flags") or []}
+        incoming_source = str(final_payload.get("source") or "").strip().lower()
+        if incoming_source == "project_json_final":
+            preferred_existing = next(
+                (
+                    entry
+                    for entry in matching_entries
+                    if "dark_oval_safe_height_expanded" in {str(flag) for flag in entry.get("qa_flags") or []}
+                    and entry.get("safe_text_box")
+                    and entry.get("layout_safe_bbox")
+                ),
+                None,
+            )
+            if preferred_existing is not None and "dark_oval_safe_height_expanded" in incoming_flags:
+                final_payload = preferred_existing
         entries.append(final_payload)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
@@ -9537,6 +17561,140 @@ def _record_render_skipped_sources(ocr_page: dict, blocks: list[dict]) -> None:
         recorder.write_jsonl("09_typeset/render_plan_skipped.jsonl", payload)
 
 
+def _cleanup_bbox4(value, width: int, height: int, *, band_y_top: int = 0) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    if y1 >= height and band_y_top:
+        y1 -= int(band_y_top)
+        y2 -= int(band_y_top)
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    if [x1, y1, x2, y2] == [0, 0, 32, 32]:
+        return None
+    box_w = x2 - x1
+    box_h = y2 - y1
+    if box_w > int(width * 0.72) or box_h > int(height * 0.42):
+        return None
+    if box_w * box_h > int(width * height * 0.18):
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _text_mask_cleanup_allowed(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    if not translated:
+        return False
+    original = str(text.get("original") or text.get("text") or "").strip()
+    if original and original == translated:
+        return False
+    route_action = str(text.get("route_action") or "").strip().lower()
+    render_policy = str(text.get("render_policy") or "").strip().lower()
+    content_class = str(text.get("content_class") or text.get("tipo") or "").strip().lower()
+    if content_class == "sfx" or route_action == "translate_sfx_inpaint_render":
+        return False
+    if route_action in {"merged_into_primary", "review_required", "skip", "preserve_original"}:
+        return False
+    if render_policy in {"merged_into_primary", "preserve_original", "review_required"}:
+        return False
+    return route_action.startswith("translate") or route_action == ""
+
+
+def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) -> tuple[int, int, int]:
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"} or flags & {
+        "visual_text_only_inpaint_contract",
+        "text_contract_direct_fill",
+        "dark_panel_style_grouped",
+    }:
+        return (0, 0, 0)
+    raw_background = text.get("background_rgb")
+    if isinstance(raw_background, (list, tuple)) and len(raw_background) >= 3:
+        try:
+            rgb = tuple(int(max(0, min(255, round(float(v))))) for v in raw_background[:3])
+            luma = sum(rgb) / 3.0
+            if luma <= 80.0 or luma >= 180.0:
+                return rgb
+        except Exception:
+            pass
+    try:
+        sample_pad = 18
+        x1, y1, x2, y2 = bbox
+        sx1 = max(0, x1 - sample_pad)
+        sy1 = max(0, y1 - sample_pad)
+        sx2 = min(img.width, x2 + sample_pad)
+        sy2 = min(img.height, y2 + sample_pad)
+        sample = np.asarray(img.crop((sx1, sy1, sx2, sy2)).convert("RGB"), dtype=np.uint8)
+        flat = sample.reshape(-1, 3)
+        if flat.size:
+            luma = flat.astype(np.float32).mean(axis=1)
+            dark = flat[luma <= 72]
+            light = flat[luma >= 190]
+            if dark.shape[0] >= max(24, flat.shape[0] // 12):
+                rgb = np.median(dark, axis=0)
+                return tuple(int(max(0, min(255, round(float(v))))) for v in rgb[:3])
+            if light.shape[0] >= max(24, flat.shape[0] // 12):
+                rgb = np.median(light, axis=0)
+                return tuple(int(max(0, min(255, round(float(v))))) for v in rgb[:3])
+    except Exception:
+        pass
+    return (0, 0, 0)
+
+
+def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], ocr_page: dict | None = None) -> bool:
+    if not texts:
+        return False
+    from PIL import ImageDraw
+
+    band_y_top = _render_plan_band_y_top(ocr_page or {}, {}) if isinstance(ocr_page, dict) else 0
+    draw = ImageDraw.Draw(img)
+    changed = False
+    for text in texts:
+        if not _text_mask_cleanup_allowed(text):
+            continue
+        bbox = None
+        for key in ("source_text_mask_bbox", "_source_text_mask_bbox", "text_pixel_bbox"):
+            bbox = _cleanup_bbox4(text.get(key), img.width, img.height, band_y_top=int(band_y_top or 0))
+            if bbox is not None:
+                break
+        if bbox is None:
+            continue
+        pad = 8
+        style = text.get("estilo") or text.get("style")
+        if isinstance(style, dict):
+            for key in ("outline_width", "stroke_width", "glow_radius", "shadow_radius"):
+                try:
+                    pad = max(pad, int(math.ceil(float(style.get(key) or 0))) + 4)
+                except Exception:
+                    pass
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(img.width, x2 + pad)
+        y2 = min(img.height, y2 + pad)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        fill = _cleanup_fill_rgb_for_text(img, text, [x1, y1, x2, y2])
+        draw.rectangle((x1, y1, x2, y2), fill=fill)
+        flags = text.setdefault("qa_flags", [])
+        if isinstance(flags, list) and "render_text_mask_cleanup" not in flags:
+            flags.append("render_text_mask_cleanup")
+        changed = True
+    return changed
+
+
 
 def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     """Adapter em-memÃ³ria: renderiza textos traduzidos sobre a banda.
@@ -9551,7 +17709,17 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     _ensure_typeset_trace_metadata(ocr_page)
 
     img = Image.fromarray(band_rgb.copy())
+    _apply_text_mask_cleanup_before_render(img, ocr_page.get("texts", []), ocr_page)
     blocks = build_render_blocks(ocr_page["texts"])
+    band_y_top = _render_plan_band_y_top(ocr_page, {})
+    if band_y_top:
+        for block in blocks:
+            block.setdefault("band_y_top", int(band_y_top))
+            block.setdefault("_band_y_top", int(band_y_top))
+            for child in block.get("connected_children") or []:
+                if isinstance(child, dict):
+                    child.setdefault("band_y_top", int(band_y_top))
+                    child.setdefault("_band_y_top", int(band_y_top))
     # PrÃ©-condiÃ§Ã£o real: todo bloco renderizÃ¡vel precisa de balloon_bbox.
     # Textos skip/noise podem chegar sem bbox e nÃ£o devem virar alerta visual.
     missing_bbox = [block for block in blocks if not block.get("balloon_bbox")]

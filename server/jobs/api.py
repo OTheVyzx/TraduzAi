@@ -17,6 +17,7 @@ from server.storage import delete as storage_delete
 from server.storage import put_file
 from server.usage import record_usage_event
 from server.vast.orchestrator import ensure_worker_available
+from server.vast.serverless import ensure_serverless_job_started
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -254,7 +255,10 @@ def _ensure_worker_available_safely(settings: Settings, job_id: str) -> None:
     if not settings.vast_autostart:
         return
     try:
-        result = ensure_worker_available(settings)
+        if settings.vast_provider == "serverless":
+            result = ensure_serverless_job_started(settings, job_id)
+        else:
+            result = ensure_worker_available(settings)
         message = f"Vast auto-start: {result.get('action')}"
         kind = "status" if result.get("ok") else "warning"
     except Exception as exc:

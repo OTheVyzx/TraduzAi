@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "band_count": 60,
+  "bands_with_mask": 60,
+  "bands_with_flags": 13,
+  "totals": {
+    "raw_mask_pixels": 1397848,
+    "expanded_mask_pixels": 1661834,
+    "outside_balloon_pixels": 80108
+  },
+  "by_source": {
+    "line_polygons": 60
+  },
+  "flagged_bands": [
+    "page_002_band_008",
+    "page_002_band_015",
+    "page_002_band_020",
+    "page_003_band_035",
+    "page_003_band_042",
+    "page_003_band_043",
+    "page_003_band_047",
+    "page_004_band_053",
+    "page_004_band_054",
+    "page_005_band_073",
+    "page_005_band_076",
+    "page_005_band_077",
+    "page_005_band_102"
+  ]
+}

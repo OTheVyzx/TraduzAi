@@ -19,6 +19,11 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+
+class OcrBackendUnavailable(RuntimeError):
+    """Raised when the required OCR backend cannot be initialized."""
+
+
 try:
     from ocr.postprocess import normalize_rotated_text_metadata
 except ImportError:  # pragma: no cover - supports package imports
@@ -609,7 +614,7 @@ class OCREngine:
         elif self.model_name == "paddleocr":
             self._load_paddle_ocr()
         elif self.model_name == "easyocr":
-            self._load_easyocr()
+            raise OcrBackendUnavailable("EasyOCR esta desativado; PaddleOCR e obrigatorio.")
         else:
             raise ValueError(f"OCR backend '{self.model_name}' não suportado")
 
@@ -658,19 +663,16 @@ class OCREngine:
                 self.device = torch.device("cuda")
                 self.half = True
             if sys.version_info >= (3, 12) and self.device.type != "cuda":
-                raise ImportError("PaddleOCR incompativel com Python 3.12 via CPU (C++ Segfault). Forcando EasyOCR.")
+                raise ImportError("PaddleOCR incompativel com Python 3.12 via CPU; backend PaddleOCR indisponivel.")
             from paddleocr import PaddleOCR
             from vision_stack.paddle_compat import create_paddle_ocr
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
                 libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
         except Exception as exc:
-            if _env_bool("TRADUZAI_REQUIRE_GPU", False):
-                raise RuntimeError(f"PaddleOCR obrigatorio em ambiente GPU nao carregou: {exc}") from exc
-            logger.warning("PaddleOCR nÃ£o carregou (%s); usando EasyOCR como fallback", exc)
-            self.model_name = "easyocr"
-            self._load_easyocr()
-            return
+            raise OcrBackendUnavailable(
+                f"PaddleOCR indisponivel; EasyOCR fallback removido: {exc}"
+            ) from exc
         
         mapped_lang = normalize_paddleocr_language(self.lang)
         
@@ -690,14 +692,7 @@ class OCREngine:
         logger.info(f"PaddleOCR carregado (lang={mapped_lang}, gpu={use_gpu})")
 
     def _load_easyocr(self):
-        import easyocr
-
-        languages = normalize_easyocr_languages(self.lang)
-
-        use_gpu = self.device.type == "cuda"
-        self._model = easyocr.Reader(languages, gpu=use_gpu, verbose=False)
-        self._backend = "easyocr"
-        logger.info(f"EasyOCR carregado (lang={languages}, gpu={use_gpu})")
+        raise OcrBackendUnavailable("EasyOCR esta desativado; PaddleOCR e obrigatorio.")
 
     # ------------------------------------------------------------------
     # API pública
@@ -1044,32 +1039,13 @@ class OCREngine:
         if self._backend == "manga-ocr":
             return self._manga_ocr_batch(crops)
         if self._backend == "easyocr":
-            return self._easyocr_batch(crops)
+            raise OcrBackendUnavailable("EasyOCR esta desativado; PaddleOCR e obrigatorio.")
         else:
             return self._paddle_ocr_batch(crops)
 
     def _easyocr_batch(self, crops: list[np.ndarray]) -> list[str]:
-        texts = []
-        for crop in crops:
-            if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
-                texts.append("")
-                continue
-            try:
-                results = self._model.readtext(
-                    crop,
-                    text_threshold=0.35,
-                    low_text=0.25,
-                    canvas_size=2048,
-                    paragraph=False,
-                )
-            except Exception as exc:
-                logger.warning(f"EasyOCR error: {exc}")
-                texts.append("")
-                continue
-
-            lines = [str(item[1]).strip() for item in results if item and len(item) >= 2 and str(item[1]).strip()]
-            texts.append(" ".join(lines).strip())
-        return texts
+        del crops
+        raise OcrBackendUnavailable("EasyOCR esta desativado; PaddleOCR e obrigatorio.")
 
     def _manga_ocr_batch(self, crops: list[np.ndarray]) -> list[str]:
         """Inferência batched com manga-ocr."""

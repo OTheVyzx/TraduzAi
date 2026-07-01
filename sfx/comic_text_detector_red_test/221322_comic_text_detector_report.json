@@ -1,0 +1,83 @@
+{
+  "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221322.png",
+  "backend": "comic-text-detector",
+  "device": "cuda",
+  "model_path": "C:\\Users\\PICHAU\\.mangatl\\models\\comic-text-detector.pt",
+  "thresholds": [
+    {
+      "conf_threshold": 0.42,
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_042_overlay.png"
+    },
+    {
+      "conf_threshold": 0.3,
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_03_overlay.png"
+    },
+    {
+      "conf_threshold": 0.25,
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_025_overlay.png"
+    },
+    {
+      "conf_threshold": 0.15,
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_015_overlay.png"
+    },
+    {
+      "conf_threshold": 0.1,
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            55,
+            109,
+            226,
+            285
+          ],
+          "confidence": 0.1485595703125
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_01_overlay.png"
+    },
+    {
+      "conf_threshold": 0.05,
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            55,
+            109,
+            226,
+            285
+          ],
+          "confidence": 0.1485595703125
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_005_overlay.png"
+    },
+    {
+      "conf_threshold": 0.02,
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            55,
+            109,
+            226,
+            285
+          ],
+          "confidence": 0.1485595703125
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_red_test\\221322_comic_text_detector_conf_002_overlay.png"
+    }
+  ]
+}

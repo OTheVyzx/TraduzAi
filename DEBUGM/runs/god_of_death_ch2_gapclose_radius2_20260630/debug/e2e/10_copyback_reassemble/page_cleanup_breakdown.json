@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_gapclose_radius2",
+  "stage": "copyback_reassemble",
+  "durations_sec": {
+    "cleanup_copyback": 0.0,
+    "cleanup_inpaint": 0.0,
+    "cleanup_save": 0.2111,
+    "cleanup_total": 13.6592,
+    "cleanup_typeset": 0.0,
+    "page_inpaint_clamp_changed_outside": 4224.0,
+    "page_inpaint_clamp_count": 6.0,
+    "page_inpaint_clamp_limit_pixels": 8482680.0,
+    "page_line_art_restore_pixels": 10142.0
+  },
+  "cleanup_skipped": true
+}

@@ -35,6 +35,15 @@ function labelForAction(cmd: ReturnType<typeof getTopAction>): string {
       if (cmd.layerKey === "inpaint") return "Recuperacao";
       if (cmd.layerKey === "mask") return "Mascara";
       return "Pincel";
+    case "bitmap-asset-replace":
+      if (cmd.layerKey === "inpaint") return "Atualizar inpaint";
+      if (cmd.layerKey === "mask") return "Atualizar mascara";
+      if (cmd.layerKey === "brush") return "Atualizar pincel";
+      return "Atualizar imagem";
+    case "toggle-image-layer-visibility": return "Visibilidade da imagem";
+    case "toggle-image-layer-lock": return "Bloqueio da imagem";
+    case "edit-image-layer-props": return "Editar camada de imagem";
+    case "reorder-image-layers": return "Reordenar imagens";
     case "toggle-visibility": return "Alternar visibilidade";
     case "toggle-lock": return "Alternar bloqueio";
     case "page-snapshot": return cmd.label;

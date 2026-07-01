@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TraduzAI Studio",
+  "version": "0.1.0",
+  "identifier": "com.traduzai.studio",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1430",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "TraduzAI Studio",
+        "width": 1360,
+        "height": 820,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "resources": [
+      "../../pipeline/studio_lite"
+    ]
+  },
+  "plugins": {
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
+  }
+}

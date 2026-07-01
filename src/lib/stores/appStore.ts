@@ -26,9 +26,14 @@ export interface TextLayerStyle {
   bold: boolean;
   italico: boolean;
   rotacao: number;
+  curva?: boolean;
+  curva_direcao?: "" | "arc_up" | "arc_down";
+  curva_intensidade?: number;
   alinhamento: "left" | "center" | "right";
   force_upper?: boolean;
 }
+
+export type TextLayerStyleOrigin = "auto" | "editor" | "legacy" | "legacy_auto" | "source_detected";
 
 export interface QaAction {
   flag_id: string;
@@ -37,10 +42,29 @@ export interface QaAction {
   ignored_at?: string;
 }
 
+export interface SfxMetadata {
+  source_text?: string;
+  adapted_text?: string;
+  confidence?: number | null;
+  translation_mode?: string;
+  style_confidence?: number | null;
+  inpaint_allowed?: boolean;
+  review_required?: boolean;
+  qa_flags?: string[];
+  [key: string]: unknown;
+}
+
 export interface TextEntry {
   id: string;
   kind?: "text";
-  style_origin?: "auto" | "editor" | "legacy" | "legacy_auto";
+  content_class?: string;
+  script?: string | null;
+  route_action?: string | null;
+  translation_route?: string | null;
+  style_origin?: TextLayerStyleOrigin;
+  style_confidence?: number | null;
+  style_source?: string | null;
+  style_evidence?: unknown;
   source_bbox?: [number, number, number, number];
   layout_bbox?: [number, number, number, number];
   render_bbox?: [number, number, number, number] | null;
@@ -72,6 +96,7 @@ export interface TextEntry {
   layout_group_size?: number;
   qa_flags?: string[];
   qa_actions?: QaAction[];
+  sfx?: SfxMetadata;
 }
 
 export interface ImageLayer {
@@ -141,6 +166,17 @@ export interface ProjectContext {
   internet_context?: unknown;
 }
 
+export interface SystemFontAsset {
+  family: string;
+  path: string;
+  weight: string;
+  style: string;
+}
+
+export interface ProjectFontAssets {
+  system?: Record<string, SystemFontAsset>;
+}
+
 export interface WorkContextSummary {
   selected: boolean;
   work_id: string;
@@ -166,6 +202,7 @@ export interface Project {
   work_context?: WorkContextSummary | null;
   /** Contexto rico da obra para guiar a tradução (persiste no project.json) */
   translation_context?: WorkContext;
+  font_assets?: ProjectFontAssets;
   qa?: unknown;
   output_review_state?: OutputReviewState;
   completion_status?: CompletionStatus;

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_crop_rerender_yfix",
+  "stage": "copyback_reassemble",
+  "band_id": "page_004_band_056",
+  "source_page_number": 4,
+  "y_top": 41116,
+  "y_bottom": 41596,
+  "coordinate_space": "band",
+  "post_typeset": "09_typeset/page_004_band_056/post_typeset.jpg",
+  "post_copyback": "10_copyback_reassemble/page_004_band_056/post_copyback.jpg"
+}

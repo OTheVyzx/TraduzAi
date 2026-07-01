@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_complete_contract_inpaintfix5",
+  "stage": "copyback_reassemble",
+  "durations_sec": {
+    "cleanup_copyback": 0.0,
+    "cleanup_inpaint": 0.0,
+    "cleanup_save": 0.1826,
+    "cleanup_total": 10.1324,
+    "cleanup_typeset": 0.0,
+    "page_inpaint_clamp_changed_outside": 4224.0,
+    "page_inpaint_clamp_count": 6.0,
+    "page_inpaint_clamp_limit_pixels": 8679157.0,
+    "page_line_art_restore_pixels": 20089.0
+  },
+  "cleanup_skipped": true
+}

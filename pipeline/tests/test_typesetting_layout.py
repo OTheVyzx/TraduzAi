@@ -24,6 +24,7 @@ from typesetter.renderer import (
     ensure_legible_plan,
     plan_text_layout,
     preserve_explicit_lines,
+    render_text_block,
 )
 
 
@@ -48,7 +49,7 @@ class TypesettingLayoutTests(unittest.TestCase):
         "test_tall_balloon_without_english_anchor_falls_back_to_balloon_width",
     }
 
-    def test_build_render_blocks_skips_noisy_overlapping_textured_fragment(self):
+    def test_build_render_blocks_does_not_skip_by_legacy_balloon_type(self):
         noisy = {
             "text": "ANCE, TE YOU",
             "translated": "ANCE, VOCE",
@@ -69,8 +70,8 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         blocks = build_render_blocks([noisy, real_text])
 
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0]["text"], real_text["text"])
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual([block["text"] for block in blocks], [noisy["text"], real_text["text"]])
 
     def test_white_narration_overbroad_balloon_keeps_capacity_near_ocr_anchor(self):
         plan = plan_text_layout(
@@ -92,9 +93,344 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertGreaterEqual(plan["safe_text_box"][3], 590)
         self.assertLess(plan["safe_text_box"][2] - plan["safe_text_box"][0], 520)
 
+    def test_plan_text_layout_uses_real_bubble_mask_area_when_inner_is_text_tight(self):
+        text_data = {
+            "text": "HYUNGNIM! I FOUND IT OVER HERE!",
+            "translated": "HYUNG-NIM! ENCONTREI AQUI!",
+            "bbox": [350, 112, 557, 230],
+            "source_bbox": [350, 112, 557, 230],
+            "text_pixel_bbox": [350, 112, 557, 230],
+            "line_polygons": [
+                [[350, 112], [557, 112], [557, 148], [350, 148]],
+                [[370, 150], [540, 150], [540, 188], [370, 188]],
+                [[390, 190], [520, 190], [520, 230], [390, 230]],
+            ],
+            "balloon_bbox": [173, 40, 733, 280],
+            "bubble_mask_bbox": [53, 0, 800, 320],
+            "bubble_inner_bbox": [353, 108, 553, 212],
+            "bubble_mask_source": "outline_seeded_contour",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "qa_flags": ["tiny_bubble_inner_bbox_rejected"],
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["target_bbox"], [53, 0, 800, 320])
+        self.assertGreater(plan["safe_text_box"][2] - plan["safe_text_box"][0], 360)
+        self.assertGreater(plan["safe_text_box"][3] - plan["safe_text_box"][1], 100)
+        self.assertGreaterEqual(plan["safe_text_box"][0], 220)
+        self.assertEqual(plan["layout_safe_reason"], "real_bubble_body_bbox")
+        safe_cx = (plan["safe_text_box"][0] + plan["safe_text_box"][2]) / 2
+        bubble_cx = (text_data["balloon_bbox"][0] + text_data["balloon_bbox"][2]) / 2
+        self.assertLess(abs(safe_cx - bubble_cx), 70)
+
+    def test_plan_text_layout_recomputes_edge_clipped_balloon_from_full_safe_area(self):
+        text_data = {
+            "id": "ocr_002",
+            "text": "ACTRESS...",
+            "translated": "A QUANTIA ESTÁ CERTA. ESSA VADIA É REAL ATRIZ...",
+            "bbox": [298, 16287, 525, 16374],
+            "source_bbox": [298, 16276, 533, 16383],
+            "text_pixel_bbox": [298, 16287, 525, 16374],
+            "line_polygons": [
+                [[298, 16163], [525, 16163], [525, 16285], [298, 16285]],
+            ],
+            "target_bbox": [234, 16180, 575, 16368],
+            "bubble_inner_bbox": [275, 16138, 547, 16321],
+            "bubble_mask_bbox": [234, 16180, 575, 16368],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "qa_flags": ["same_balloon_fragment_merged", "safe_text_box_recomputed", "tiny_bubble_inner_bbox_rejected"],
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertGreaterEqual(plan["safe_text_box"][3] - plan["safe_text_box"][1], 165)
+        self.assertLessEqual(plan["safe_text_box"][1], 16155)
+        self.assertGreaterEqual(plan["max_height"], 165)
+        self.assertNotIn("tiny_bubble_inner_bbox_rejected", text_data.get("qa_flags", []))
+
+    def test_merged_white_balloon_rejects_shallow_safe_box_for_centered_render(self):
+        text_data = {
+            "id": "ocr_001",
+            "text": "OPPA, WHY ARE YOU ALONE?",
+            "translated": "OPPA, POR QUE VOCÊ ESTÁ SOLITÁRIO?",
+            "bbox": [120, 191, 294, 276],
+            "source_bbox": [120, 191, 294, 276],
+            "text_pixel_bbox": [120, 191, 294, 276],
+            "target_bbox": [0, 57, 498, 266],
+            "balloon_bbox": [0, 57, 498, 266],
+            "safe_text_box": [92, 124, 377, 199],
+            "_debug_safe_text_box": [92, 124, 377, 199],
+            "_safe_text_box_unclamped": [92, 124, 377, 199],
+            "layout_safe_bbox": [92, 124, 377, 199],
+            "layout_safe_reason": "debug_derived_bubble_mask_unclamped",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "qa_flags": ["same_balloon_fragment_merged", "same_band_dependent_fragment_merged"],
+            "estilo": {"tamanho": 26, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["target_bbox"], [0, 57, 498, 266])
+        self.assertGreaterEqual(plan["safe_text_box"][3] - plan["safe_text_box"][1], 115)
+        self.assertGreater(plan["safe_text_box"][1], 80)
+        self.assertLess(plan["safe_text_box"][3], 245)
+        self.assertNotEqual(plan["layout_safe_reason"], "debug_derived_bubble_mask_unclamped")
+
+    def test_merged_white_balloon_promotes_final_shallow_safe_box_to_target_inset(self):
+        text_data = {
+            "id": "ocr_001",
+            "text": "OPPA, WHY ARE YOU ALONE?",
+            "translated": "OPPA, POR QUE VOCÊ ESTÁ SOLITÁRIO?",
+            "bbox": [120, 191, 294, 276],
+            "text_pixel_bbox": [120, 191, 294, 276],
+            "target_bbox": [0, 57, 498, 266],
+            "balloon_bbox": [0, 57, 498, 266],
+            "safe_text_box": [92, 124, 377, 199],
+            "_debug_safe_text_box": [92, 124, 377, 199],
+            "qa_flags": ["same_balloon_fragment_merged", "same_band_dependent_fragment_merged"],
+            "estilo": {"tamanho": 26, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertGreaterEqual(plan["safe_text_box"][3] - plan["safe_text_box"][1], 120)
+        self.assertEqual(plan["layout_safe_reason"], "merged_balloon_target_inset")
+
+    def test_plan_text_layout_ignores_stale_local_layout_safe_bbox_after_rehome(self):
+        text_data = {
+            "id": "ocr_001",
+            "text": "THE AMOUNT IS JUST RIGHT. THIS BITCH IS A REAL ACTRESS...",
+            "translated": "A QUANTIA ESTÁ CERTA. ESSA VADIA É REAL ATRIZ...",
+            "bbox": [298, 16287, 525, 16374],
+            "source_bbox": [298, 16276, 533, 16383],
+            "text_pixel_bbox": [298, 16287, 525, 16374],
+            "target_bbox": [242, 16087, 580, 16372],
+            "balloon_bbox": [242, 16087, 580, 16372],
+            "bubble_mask_bbox": [242, 16087, 580, 16372],
+            "bubble_inner_bbox": [275, 16138, 547, 16321],
+            "safe_text_box": [275, 16138, 547, 16321],
+            "_debug_safe_text_box": [275, 16138, 547, 16321],
+            "_safe_text_box_unclamped": [288, -59, 521, 38],
+            "render_bbox": [275, 16138, 547, 16321],
+            "layout_safe_bbox": [288, 0, 521, 38],
+            "layout_safe_reason": "debug_derived_bubble_mask_unclamped",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "qa_flags": ["cross_page_band_rehomed", "safe_text_box_recomputed"],
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertGreaterEqual(plan["safe_text_box"][1], 16120)
+        self.assertGreaterEqual(plan["safe_text_box"][3] - plan["safe_text_box"][1], 165)
+        self.assertGreaterEqual(plan["max_height"], 165)
+        self.assertNotEqual(plan.get("layout_safe_bbox"), [288, 0, 521, 38])
+
+    def test_ensure_legible_plan_keeps_rehomed_bubble_text_centered(self):
+        img = Image.new("RGB", (800, 16383), "white")
+        text_data = {
+            "id": "ocr_001",
+            "text": "THE AMOUNT IS JUST RIGHT. THIS BITCH IS A REAL ACTRESS...",
+            "translated": "A QUANTIA ESTÁ CERTA. ESSA VADIA É REAL ATRIZ...",
+            "bbox": [298, 16287, 525, 16374],
+            "source_bbox": [298, 16276, 533, 16383],
+            "text_pixel_bbox": [298, 16287, 525, 16374],
+            "target_bbox": [242, 16087, 580, 16372],
+            "balloon_bbox": [242, 16087, 580, 16372],
+            "bubble_mask_bbox": [242, 16087, 580, 16372],
+            "bubble_inner_bbox": [275, 16138, 547, 16321],
+            "safe_text_box": [275, 16138, 547, 16321],
+            "_debug_safe_text_box": [275, 16138, 547, 16321],
+            "_safe_text_box_unclamped": [288, -59, 521, 38],
+            "render_bbox": [275, 16138, 547, 16321],
+            "layout_safe_bbox": [288, 0, 521, 38],
+            "layout_safe_reason": "debug_derived_bubble_mask_unclamped",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "_cross_page_band_rehomed_geometry": True,
+            "qa_flags": ["cross_page_band_rehomed", "safe_text_box_recomputed"],
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = ensure_legible_plan(img, plan_text_layout(text_data))
+        resolved = _resolve_text_layout(text_data, plan)
+
+        safe_y1, safe_y2 = plan["safe_text_box"][1], plan["safe_text_box"][3]
+        block_y1, block_y2 = resolved["block_bbox"][1], resolved["block_bbox"][3]
+        safe_center = (safe_y1 + safe_y2) / 2
+        block_center = (block_y1 + block_y2) / 2
+        self.assertGreaterEqual(safe_y2, 16360)
+        self.assertGreaterEqual(block_y1, 16270)
+        self.assertGreaterEqual(block_center, 16300)
+        self.assertLessEqual(block_y2, safe_y2)
+
+    def test_render_text_block_rejects_visual_rect_inner_for_rehomed_edge_bubble(self):
+        img = Image.new("RGB", (800, 16383), "white")
+        text_data = {
+            "id": "ocr_001",
+            "text": "THE AMOUNT IS JUST RIGHT. THIS BITCH IS A REAL ACTRESS...",
+            "translated": "A QUANTIA ESTÁ CERTA. ESSA VADIA É REAL ATRIZ...",
+            "bbox": [298, 16287, 525, 16374],
+            "source_bbox": [298, 16276, 533, 16383],
+            "text_pixel_bbox": [298, 16287, 525, 16374],
+            "target_bbox": [242, 16087, 580, 16372],
+            "balloon_bbox": [242, 16087, 580, 16372],
+            "bubble_mask_bbox": [242, 16087, 580, 16372],
+            "bubble_inner_bbox": [275, 16138, 547, 16321],
+            "safe_text_box": [275, 16138, 547, 16321],
+            "_debug_safe_text_box": [275, 16138, 547, 16321],
+            "_visual_rect_inner_bbox": [312, 16110, 512, 16349],
+            "layout_safe_bbox": [312, 16110, 512, 16349],
+            "layout_safe_reason": "visual_rect_inner",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "_cross_page_band_rehomed_geometry": True,
+            "qa_flags": [
+                "cross_page_band_rehomed",
+                "same_balloon_fragment_merged",
+                "safe_text_box_recomputed",
+            ],
+            "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        render_text_block(img, text_data)
+
+        render_debug = text_data.get("_render_debug") or {}
+        self.assertEqual(
+            render_debug.get("layout_safe_reason"),
+            "edge_clipped_rehomed_visible_anchor_safe_area",
+        )
+        self.assertNotEqual(render_debug.get("layout_safe_reason"), "visual_rect_inner")
+        self.assertGreaterEqual(text_data["render_bbox"][1], 16270)
+
     def setUp(self):
         if self._testMethodName in self._LEGACY_CONNECTED_DEFAULT_TESTS:
             self.skipTest("legacy balloon/connected render behavior disabled by simple OCR-position layout")
+
+    def test_real_bubble_fragments_ignore_false_uied_and_merge_in_balloon(self):
+        texts = [
+            {
+                "id": "ocr_001",
+                "text": "AS EXPECTED",
+                "translated": "COMO ESPERADO",
+                "bbox": [309, 4364, 979, 4613],
+                "text_pixel_bbox": [527, 4551, 745, 4580],
+                "layout_bbox": [527, 4551, 745, 4580],
+                "balloon_bbox": [309, 4364, 979, 4613],
+                "bubble_id": "page_004_band_041_bubble_001",
+                "bubble_mask_bbox": [309, 4364, 979, 4613],
+                "bubble_inner_bbox": [326, 4381, 962, 4596],
+                "band_id": "page_004_band_041",
+                "trace_id": "ocr_001@page_004_band_041",
+                "line_polygons": [[[527, 4551], [745, 4551], [745, 4580], [527, 4580]]],
+                "layout_profile": "ui_form",
+                "block_profile": "ui_form",
+                "layout_safe_reason": "uied_cv_component",
+                "ui_layout_evidence": {
+                    "source": "uied_cv",
+                    "role": "text_inside_component",
+                    "component_type": "ui_component",
+                    "component_bbox": [309, 96, 979, 345],
+                    "background_rgb": [255, 255, 255],
+                    "confidence": 0.386,
+                },
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            },
+            {
+                "id": "ocr_003",
+                "text": "IT'S ON A WHOLE DIFFERENT LEVEL FROM A KOREAN PRODUCTION SITE. AH, IM NERVOUS",
+                "translated": "ESTA EM UM NIVEL TOTALMENTE DIFERENTE DE UM LOCAL DE PRODUCAO COREANO. AH, ESTOU NERVOSO",
+                "bbox": [440, 4538, 834, 4729],
+                "text_pixel_bbox": [450, 4585, 828, 4717],
+                "layout_bbox": [450, 4585, 828, 4717],
+                "balloon_bbox": [440, 4538, 834, 4729],
+                "bubble_id": "page_004_band_041_bubble_003",
+                "bubble_mask_bbox": [440, 4538, 834, 4729],
+                "bubble_inner_bbox": [453, 4551, 821, 4716],
+                "band_id": "page_004_band_041",
+                "trace_id": "ocr_003@page_004_band_041",
+                "line_polygons": [[[450, 4585], [828, 4585], [828, 4717], [450, 4717]]],
+                "layout_profile": "ui_form",
+                "block_profile": "ui_form",
+                "layout_safe_reason": "uied_cv_component",
+                "ui_layout_evidence": {
+                    "source": "uied_cv",
+                    "role": "text_inside_component",
+                    "component_type": "ui_component",
+                    "component_bbox": [309, 96, 979, 345],
+                    "background_rgb": [255, 255, 255],
+                    "confidence": 0.386,
+                },
+                "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+            },
+        ]
+
+        blocks = build_render_blocks(texts)
+
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertTrue(block.get("_merged_nearby_white_fragments"))
+        self.assertNotEqual(block.get("layout_safe_reason"), "uied_cv_component")
+        self.assertFalse(block.get("_uied_preserve_anchor_position"))
+        self.assertIn("COMO ESPERADO", block["translated"])
+        self.assertIn("ESTA EM UM NIVEL", block["translated"])
+        self.assertLessEqual(block["balloon_bbox"][1], 4364)
+        self.assertGreaterEqual(block["balloon_bbox"][3], 4729)
+        plan = plan_text_layout(dict(block))
+        self.assertGreaterEqual(plan["layout_safe_bbox"][3], 4700)
+
+    def test_real_bubble_label_near_component_row_keeps_balloon_capacity(self):
+        text = {
+            "id": "ocr_001_uied_label_02",
+            "text": "BUT I'VE COME ALL THE WAY HERE! I CAN'T LOOK LIKE AN AMATEUR!!",
+            "translated": "MAS EU VIM ATE AQUI! EU NAO POSSO PARECER UM AMADOR!!",
+            "bbox": [755, 5961, 1189, 6151],
+            "source_bbox": [755, 5961, 1189, 6151],
+            "text_pixel_bbox": [755, 5961, 1189, 6151],
+            "layout_bbox": [755, 6008, 1189, 6051],
+            "balloon_bbox": [523, 5902, 1421, 6110],
+            "bubble_id": "page_004_band_043_bubble_001",
+            "bubble_mask_bbox": [751, 5950, 1190, 6153],
+            "bubble_inner_bbox": [765, 5964, 1176, 6139],
+            "band_id": "page_004_band_043",
+            "trace_id": "ocr_001_uied_label_02@page_004_band_043",
+            "line_polygons": [[[755, 5961], [1189, 5961], [1189, 6151], [755, 6151]]],
+            "layout_profile": "connected_balloon",
+            "block_profile": "ui_form",
+            "layout_safe_reason": "uied_cv_label_row_split",
+            "ui_layout_evidence": {
+                "source": "uied_cv",
+                "role": "label_near_component_row",
+                "component_type": "ui_input",
+                "component_bbox": [1242, 155, 1321, 165],
+                "background_rgb": [231, 232, 232],
+                "confidence": 0.607,
+                "parent_role": "label_near_components",
+            },
+            "qa_flags": ["uied_form_label_split"],
+            "estilo": {"tamanho": 24, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertEqual(block["balloon_bbox"], [523, 5902, 1421, 6110])
+        self.assertNotEqual(block.get("layout_safe_reason"), "ui_form_anchor")
+        self.assertFalse(block.get("_uied_preserve_anchor_position"))
+        plan = plan_text_layout(dict(block))
+        self.assertGreaterEqual(plan["safe_text_box"][3] - plan["safe_text_box"][1], 120)
 
     def test_build_render_blocks_preserves_connected_group_by_default(self):
         texts = [
@@ -262,6 +598,44 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(plan["max_width"], 265)
         self.assertEqual(plan["max_height"], 140)
 
+    def test_plan_text_layout_preserves_reliable_bubble_anchor_position(self):
+        text_data = {
+            "text": "OPPA, WHY ARE YOU SO LATE~",
+            "translated": "OPPA, POR QUE VOCE ESTA SOLITARIO?",
+            "bbox": [120, 191, 294, 276],
+            "source_bbox": [120, 191, 294, 276],
+            "text_pixel_bbox": [120, 191, 294, 276],
+            "line_polygons": [
+                [[172, 191], [246, 191], [246, 210], [172, 210]],
+                [[120, 254], [294, 254], [294, 276], [120, 276]],
+            ],
+            "balloon_bbox": [0, 57, 498, 266],
+            "bubble_mask_bbox": [57, 115, 361, 266],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_type": "white",
+            "layout_profile": "white_balloon",
+            "qa_flags": ["safe_text_box_recomputed"],
+            "tipo": "fala",
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 28,
+                "cor": "#111111",
+                "contorno": "#FFFFFF",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+        }
+
+        plan = plan_text_layout(text_data)
+
+        safe = plan["safe_text_box"]
+        anchor_cy = (text_data["text_pixel_bbox"][1] + text_data["text_pixel_bbox"][3]) / 2.0
+        safe_cy = (safe[1] + safe[3]) / 2.0
+        self.assertGreaterEqual(safe[1], 170)
+        self.assertLess(abs(safe_cy - anchor_cy), 35)
+        self.assertGreaterEqual(safe[1], text_data["balloon_bbox"][1])
+        self.assertLessEqual(safe[3], text_data["balloon_bbox"][3])
+
     def test_plan_text_layout_relaxes_tiny_anchor_capacity_for_long_white_balloon_text(self):
         text_data = {
             "translated": "EU NÃƒO QUERIA USAR O PODER PARA ISSO, MAS RECEBI ESSA FORÃ‡A DA FAMÃLIA DUCAL.",
@@ -302,13 +676,13 @@ class TypesettingLayoutTests(unittest.TestCase):
 
         self.assertEqual(_category_font_bounds(text_data), (16, 48))
 
-    def test_category_font_bounds_clamp_textured_balloon(self):
+    def test_category_font_bounds_ignores_legacy_balloon_type(self):
         text_data = {
             "tipo": "fala",
             "balloon_type": "textured",
         }
 
-        self.assertEqual(_category_font_bounds(text_data), (14, 44))
+        self.assertEqual(_category_font_bounds(text_data), (16, 48))
 
     def test_plan_text_layout_uses_uniform_leading_for_fala(self):
         text_data = {
@@ -331,7 +705,7 @@ class TypesettingLayoutTests(unittest.TestCase):
         plan = plan_text_layout(text_data)
 
         self.assertEqual(plan["line_spacing_ratio"], 0.10)
-        self.assertEqual(plan["alignment"], "center")
+        self.assertEqual(plan["alignment"], "left")
 
     def test_plan_text_layout_keeps_compact_leading_for_connected_lobe(self):
         text_data = {
@@ -1509,7 +1883,8 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertEqual(len(block.get("balloon_subregions", [])), 2)
         children = block.get("connected_children") or []
         self.assertEqual(len(children), 2)
-        self.assertEqual(children[0].get("translated"), "CLARO,\nEU SEI.")
+        self.assertEqual(children[0].get("translated"), "CLARO,")
+        self.assertIn("EU SEI.", children[1].get("translated", ""))
         self.assertIn("TRABALHEI TENTANDO RASTREAR", children[1].get("translated", ""))
         combined = block.get("translated", "")
         self.assertIn("CLARO", combined)

@@ -80,9 +80,10 @@ type Job = {
   created_at?: string;
   started_at?: string;
   finished_at?: string;
+  project_config?: WebProjectConfig | null;
   artifacts?: Artifact[];
 };
-type Artifact = { id: string; kind: string; filename: string; size: number };
+type Artifact = { id: string; kind: string; filename: string; size: number; download_url?: string };
 type JobEvent = { stage: string; kind: string; message: string; payload?: Record<string, unknown>; created_at?: string };
 type AdminOverview = {
   jobs: Pick<Job, "id" | "obra" | "capitulo" | "status">[];
@@ -173,10 +174,6 @@ function Shell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
       <main className="workspace desktop-clone-workspace">
-        <div className="desktop-clone-session">
-          <span className="user-pill">{userName} · {creditLabel}</span>
-          <LogoutButton />
-        </div>
         {children}
       </main>
     </div>
@@ -391,6 +388,10 @@ function AuthScreen({
 }
 
 function Landing() {
+  const [demoImage, setDemoImage] = useState<File | null>(null);
+  const [demoPreviewUrl, setDemoPreviewUrl] = useState("");
+  const [demoStatus, setDemoStatus] = useState<"idle" | "ready" | "processing" | "done">("idle");
+
   useEffect(() => {
     const targets = Array.from(document.querySelectorAll<HTMLElement>("[data-reveal]"));
     if (!targets.length) return;
@@ -408,6 +409,45 @@ function Landing() {
     targets.forEach((target) => observer.observe(target));
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (!demoImage) {
+      setDemoPreviewUrl("");
+      return;
+    }
+
+    const nextUrl = URL.createObjectURL(demoImage);
+    setDemoPreviewUrl(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [demoImage]);
+
+  const demoStatusText = {
+    idle: "Selecione uma página em imagem",
+    ready: "Pronto para traduzir",
+    processing: "Criando job e processando a página",
+    done: "Resultado pronto para visualizar",
+  } satisfies Record<typeof demoStatus, string>;
+
+  const handleDemoSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!demoImage || demoStatus === "processing") return;
+
+    setDemoStatus("processing");
+    window.setTimeout(() => {
+      setDemoStatus("done");
+    }, 1200);
+  };
+
+  const handleDemoFile = (file?: File | null) => {
+    if (!file || !file.type.startsWith("image/")) {
+      setDemoImage(null);
+      setDemoStatus("idle");
+      return;
+    }
+
+    setDemoImage(file);
+    setDemoStatus("ready");
+  };
 
   const workflow = [
     { title: "Envie o capítulo", body: "Faça upload das páginas em imagem, ZIP ou CBZ.", icon: UploadCloud },
@@ -444,6 +484,58 @@ function Landing() {
 
       <section className="landing-hero">
         <div className="landing-hero-copy">
+          <h1 className="landing-demo-title hero-reveal reveal-delay-1">
+            <span>TraduzAí</span>
+            <small>sua obra em poucos instantes.</small>
+          </h1>
+          <p className="landing-demo-subtitle hero-reveal reveal-delay-2">
+            Envie uma página, traduza para PT-BR e veja o antes/depois direto aqui na landing.
+          </p>
+          <form className="landing-demo-card hero-reveal reveal-delay-3" onSubmit={handleDemoSubmit}>
+            <label className="landing-demo-upload">
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={(event) => handleDemoFile(event.target.files?.[0])}
+              />
+              <span className="landing-demo-upload-icon"><UploadCloud size={22} /></span>
+              <strong>{demoImage ? demoImage.name : "Adicionar uma página"}</strong>
+              <small>PNG, JPG ou WEBP</small>
+            </label>
+
+            <div className="landing-demo-preview" aria-live="polite">
+              {demoPreviewUrl ? (
+                <img src={demoPreviewUrl} alt="Página selecionada para tradução" />
+              ) : (
+                <div className="landing-demo-empty">
+                  <Image size={28} />
+                  <span>Prévia da página</span>
+                </div>
+              )}
+            </div>
+
+            <div className="landing-demo-side">
+              <div className={`landing-demo-status status-${demoStatus}`}>
+                <span>{demoStatusText[demoStatus]}</span>
+                <div className="landing-demo-progress">
+                  <i />
+                </div>
+              </div>
+
+              <button className="landing-cta primary landing-demo-submit" type="submit" disabled={!demoImage || demoStatus === "processing"}>
+                {demoStatus === "processing" ? "Traduzindo..." : "Traduzir"}
+              </button>
+
+              {demoStatus === "done" ? (
+                <div className="landing-demo-result">
+                  <CheckCircle2 size={18} />
+                  <span>Resultado visual pronto. A integração real com Vast.ai entra na próxima etapa.</span>
+                </div>
+              ) : (
+                <p className="landing-demo-note">Nesta etapa o fluxo é visual. O job real será conectado depois.</p>
+              )}
+            </div>
+          </form>
           <div className="hero-kicker hero-reveal reveal-delay-1">
             <span>100% local · suas páginas não saem do PC</span>
           </div>
@@ -583,19 +675,19 @@ function Landing() {
         <div className="faq-list">
           <div className="faq-item">
             <strong>O TraduzAI fornece mangás?</strong>
-            <p>Não. O app edita arquivos do próprio usuário e não hospeda nem distribui obras.</p>
+            <p>Não. O TraduzAI processa apenas arquivos enviados pelo usuário e não hospeda nem distribui obras.</p>
           </div>
           <div className="faq-item">
-            <strong>Minhas páginas são enviadas para a internet?</strong>
-            <p>Não. As imagens ficam no seu computador. A internet é usada apenas para busca de contexto textual e tradução quando o usuário ativa esses recursos.</p>
+            <strong>Como meus arquivos são processados?</strong>
+            <p>Você envia o capítulo pelo site, acompanha o processamento e revisa o resultado no editor web antes de exportar.</p>
           </div>
           <div className="faq-item">
             <strong>Posso revisar antes de exportar?</strong>
             <p>Sim. O fluxo inclui glossário, memória de obra, editor visual, QA automático e múltiplos modos de exportação.</p>
           </div>
           <div className="faq-item">
-            <strong>Funciona em qual sistema operacional?</strong>
-            <p>Windows 10 e 11 são suportados nesta versão. macOS e Linux estão no roadmap.</p>
+            <strong>Preciso instalar algum programa?</strong>
+            <p>Não. O fluxo principal roda pelo site: upload, tradução, revisão, editor e exportação.</p>
           </div>
         </div>
       </section>
@@ -1150,6 +1242,7 @@ function ProjectSetup() {
               selected: true,
               work_id: selectedWork.work_id,
               title: selectedWork.title,
+              cover_url: selectedWork.cover_url?.trim() || undefined,
               context_loaded: true,
               internet_context_loaded: Boolean(context.internet_context?.internet_context_loaded),
               glossary_loaded: true,
@@ -1426,18 +1519,35 @@ function ProjectSetup() {
 function ProjectPreview() {
   const { id } = useParams();
   const [pageIndex, setPageIndex] = useState(0);
+  const [previewMode, setPreviewMode] = useState<"translated" | "original">("translated");
+  const [showExportPanel, setShowExportPanel] = useState(false);
   const query = useQuery({ queryKey: ["project", id], queryFn: () => projectApi.getProject(id!), enabled: Boolean(id), retry: false });
   const page = useQuery({ queryKey: ["project-page", id, pageIndex], queryFn: () => projectApi.getPage(id!, pageIndex), enabled: Boolean(id) && Boolean(query.data?.project), retry: false });
   const materialize = useMutation({ mutationFn: () => projectApi.materialize(id!), onSuccess: () => query.refetch() });
-  const render = useMutation({ mutationFn: () => projectApi.renderPreview(id!, pageIndex), onSuccess: () => page.refetch() });
   const exportMutation = useMutation({
     mutationFn: (format: "zip-full" | "cbz" | "jpg-zip") => projectApi.exportProject(id!, format),
     onSuccess: (data) => {
       window.location.href = assetUrl(data.artifact.download_url);
     },
   });
+  const exportPsd = useMutation({
+    mutationFn: () => projectApi.exportPsdPage(id!, pageIndex),
+    onSuccess: (data) => {
+      window.location.href = assetUrl(data.artifact.download_url);
+    },
+  });
   const project = query.data?.project;
   const pages = project?.paginas ?? [];
+  const layers = page.data?.layers ?? {};
+  const previewUrl = previewImageUrl(id, page.data?.state, pageIndex);
+  const translatedUrl = normalizedAssetUrl(layers.rendered?.url || layers.translated?.url);
+  const imageUrl = previewMode === "original" ? normalizedAssetUrl(layers.base?.url) : translatedUrl || previewUrl;
+  const currentPage = pages[pageIndex] ?? {};
+  const pageLabel = `${pageIndex + 1} / ${pages.length || 1}`;
+  const canGoPrev = pageIndex > 0;
+  const canGoNext = pageIndex < pages.length - 1;
+  const goPrev = () => canGoPrev && setPageIndex((value) => Math.max(0, value - 1));
+  const goNext = () => canGoNext && setPageIndex((value) => Math.min(pages.length - 1, value + 1));
   if (query.error) {
     return (
       <section className="panel narrow">
@@ -1458,55 +1568,78 @@ function ProjectPreview() {
           <p>Capítulo {project?.capitulo ?? "-"} · {pages.length} páginas</p>
         </div>
         <div className="action-row">
-          <Link className="link-button" to={`/projects/${id}/editor?page=${pageIndex}`}>Editar página</Link>
-          <Link className="link-button" to={`/projects/${id}/settings`}>Configurar</Link>
+          <button type="button" className="link-button preview-nav-button" onClick={goPrev} disabled={!canGoPrev}><ChevronLeft size={16} />Anterior</button>
+          <span className="preview-page-count">{pageLabel}</span>
+          <button type="button" className="link-button preview-nav-button" onClick={goNext} disabled={!canGoNext}>Proxima<ArrowRight size={16} /></button>
+          <Link className="link-button preview-nav-button" to={`/projects/${id}/editor?page=${pageIndex}`}>Editar página</Link>
+          <button type="button" className="link-button preview-nav-button" onClick={() => setShowExportPanel((value) => !value)}>Exportar</button>
         </div>
       </div>
       <div className="preview-layout desktop-preview-layout">
-        <aside className="thumbnail-rail">
+        <aside className="thumbnail-rail preview-thumb-rail">
           {pages.map((item: any, index: number) => (
             <button key={index} className={index === pageIndex ? "thumb active" : "thumb"} onClick={() => setPageIndex(index)}>
               <span>{index + 1}</span>
-              <small>{item.rendered_path || item.translated_path || "página"}</small>
+              {id && thumbnailUrl(id, item) && <img src={thumbnailUrl(id, item) ?? ""} alt={`Pagina ${index + 1}`} />}
             </button>
           ))}
         </aside>
-        <main className="preview-main desktop-preview-canvas">
-          <LayerComparison projectId={id!} layers={page.data?.layers ?? {}} state={page.data?.state} pageIndex={pageIndex} />
-          <div className="preview-actions">
-            <button onClick={() => render.mutate()} disabled={render.isPending}>Renderizar preview</button>
-            <button onClick={() => exportMutation.mutate("zip-full")} disabled={exportMutation.isPending}>ZIP completo</button>
+        <main className={showExportPanel ? "preview-main desktop-preview-canvas export-open" : "preview-main desktop-preview-canvas"}>
+          <div className="preview-reader-shell">
+            <div className="preview-reader-topbar">
+              <div>
+                <strong>Pagina {pageIndex + 1}</strong>
+                <span>{currentPage.arquivo_traduzido || currentPage.rendered_path || currentPage.translated_path || "Sem caminho final"}</span>
+              </div>
+              <div className="preview-mode-switch">
+                <button type="button" className={previewMode === "translated" ? "active" : ""} onClick={() => setPreviewMode("translated")}>Traduzido</button>
+                <button type="button" className={previewMode === "original" ? "active" : ""} onClick={() => setPreviewMode("original")}>Original</button>
+              </div>
+            </div>
+            <div className="preview-reader-stage">
+              {imageUrl ? (
+                <img key={`${pageIndex}-${previewMode}-${imageUrl}`} src={imageUrl} alt={`Preview da pagina ${pageIndex + 1}`} />
+              ) : (
+                <div className="preview-empty-state"><Image size={34} /><strong>Sem imagem para este modo</strong></div>
+              )}
+            </div>
+          </div>
+          {showExportPanel && <aside className="preview-side-panel">
+            <div className="preview-side-card">
+              <p className="eyebrow">Exportar</p>
+              <div className="preview-actions">
+            <button className="preview-action-primary" onClick={() => exportMutation.mutate("zip-full")} disabled={exportMutation.isPending}>ZIP completo</button>
             <button onClick={() => exportMutation.mutate("cbz")} disabled={exportMutation.isPending}>CBZ</button>
             <button onClick={() => exportMutation.mutate("jpg-zip")} disabled={exportMutation.isPending}>JPG</button>
+            <button onClick={() => exportPsd.mutate()} disabled={exportPsd.isPending}>PSD</button>
           </div>
-          {(render.error || exportMutation.error) && <p className="error">{(render.error || exportMutation.error)?.message}</p>}
+            </div>
+          {(exportMutation.error || exportPsd.error) && <p className="error">{(exportMutation.error || exportPsd.error)?.message}</p>}
+          </aside>}
         </main>
       </div>
     </section>
   );
 }
 
-function LayerComparison({ projectId, layers, state, pageIndex }: { projectId: string; layers: ProjectLayerMap; state: any; pageIndex: number }) {
-  const preview = state?.preview?.[String(pageIndex)];
-  const previewUrl = preview?.asset_path ? assetUrl(`/api/projects/${projectId}/assets/${preview.asset_path}`) : null;
-  const items = [
-    ["Original", layers.base?.url],
-    ["Traduzido", layers.rendered?.url || layers.translated?.url],
-    ["Preview fiel", previewUrl],
-  ] as const;
-  return (
-    <div className="comparison-grid">
-      {items.map(([label, url]) => (
-        <article className="preview-image-panel" key={label}>
-          <strong>{label}</strong>
-          {url ? <img src={url.startsWith("/api") ? assetUrl(url) : url} alt={label} /> : <div className="empty">Sem imagem</div>}
-        </article>
-      ))}
-      <div className="layer-status">
-        {["base", "mask", "inpaint", "brush", "recovery", "rendered"].map((key) => <span key={key} className={layers[key] ? "available" : ""}>{key}</span>)}
-      </div>
-    </div>
-  );
+function previewImageUrl(projectId: string | undefined, state: any, pageIndex: number) {
+  if (!projectId) return null;
+  const assetPath = state?.preview?.[String(pageIndex)]?.asset_path;
+  return typeof assetPath === "string" && assetPath ? assetUrl(`/api/projects/${projectId}/assets/${assetPath}`) : null;
+}
+
+function normalizedAssetUrl(url?: string | null) {
+  if (!url) return null;
+  return url.startsWith("/api") ? assetUrl(url) : url;
+}
+
+function thumbnailUrl(projectId: string, page: any) {
+  const layerPath = page?.image_layers?.rendered?.path || page?.image_layers?.base?.path;
+  const rel = page?.arquivo_traduzido || page?.rendered_path || page?.translated_path || layerPath || page?.arquivo_original || page?.original_path;
+  if (!rel || typeof rel !== "string") return null;
+  if (/^(data|blob|https?:|file:)/i.test(rel)) return rel;
+  if (rel.startsWith("/api")) return assetUrl(rel);
+  return assetUrl(`/api/projects/${projectId}/assets/${rel.replace(/\\/g, "/")}`);
 }
 
 function WebEditor() {
@@ -1683,7 +1816,7 @@ function WebEditor() {
           {pages.map((item: any, index: number) => (
             <button key={index} className={index === pageIndex ? "active" : ""} onClick={() => goPage(index)}>
               <span>{index + 1}</span>
-              <small>{item.rendered_path || item.translated_path || item.original_path || "Página"}</small>
+
             </button>
           ))}
         </aside>
@@ -1995,8 +2128,33 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function Results() {
   const { id } = useParams();
+  const queryClient = useQueryClient();
   const { data } = useQuery({ queryKey: ["job", id], queryFn: () => api<{ job: Job }>(`/api/jobs/${id}`), enabled: Boolean(id) });
+  const exportZip = useMutation({
+    mutationFn: async () => {
+      if (!id) throw new Error("Projeto nao encontrado");
+      await projectApi.materialize(id);
+      return projectApi.exportProject(id, "zip-full");
+    },
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["job", id] });
+      window.location.href = assetUrl(result.artifact.download_url);
+    },
+  });
+  const job = data?.job;
   const artifacts = data?.job.artifacts ?? [];
+  const translatedCount = artifacts.filter((artifact) => artifact.kind === "translated_image").length;
+  const bundle = artifacts.find((artifact) => artifact.kind === "bundle_zip");
+  const displayTitle = resultWorkTitle(job);
+  const savedCoverUrl = resultCoverUrl(job);
+  const coverSearch = useQuery({
+    queryKey: ["result-cover", displayTitle],
+    queryFn: () => setupApi.searchWork(displayTitle),
+    enabled: Boolean(job && !savedCoverUrl && shouldSearchResultCover(displayTitle)),
+    staleTime: 1000 * 60 * 15,
+  });
+  const coverUrl = savedCoverUrl ?? coverSearch.data?.results.find((item) => item.cover_url)?.cover_url ?? null;
+  const chapterLabel = job?.capitulo || DEFAULT_CHAPTER;
   return (
     <section className="panel desktop-results-screen">
       <div className="section-head">
@@ -2006,20 +2164,54 @@ function Results() {
         </div>
         <div className="action-row">
           {id && <Link className="link-button" to={`/projects/${id}/preview`}><Eye size={16} />Preview</Link>}
-          {id && <a className="primary link-button" href={`${API_URL}/api/jobs/${id}/download/zip`}><Download size={16} />Baixar ZIP</a>}
+          {id && (
+            <button className="primary link-button" type="button" onClick={() => exportZip.mutate()} disabled={exportZip.isPending}>
+              <Download size={16} />{exportZip.isPending ? "Gerando ZIP" : "Baixar ZIP"}
+            </button>
+          )}
         </div>
       </div>
-      <div className="artifact-list">
-        {artifacts.map((artifact) => (
-          <a key={artifact.id} href={`${API_URL}/api/artifacts/${artifact.id}`} className="artifact-row">
-            <span><FileText size={14} />{artifactLabel(artifact.kind)}</span>
-            <strong>{artifact.filename}</strong>
-            <small>{formatBytes(artifact.size)}</small>
-          </a>
-        ))}
+      <div className="results-work-card">
+        <div className="results-cover-frame">
+          {coverUrl ? (
+            <img src={coverUrl} alt={`Capa de ${displayTitle}`} />
+          ) : (
+            <div className="results-cover-empty"><Image size={28} /><span>Sem capa</span></div>
+          )}
+        </div>
+        <div className="results-work-body">
+          <p className="eyebrow">Obra selecionada</p>
+          <h2>{displayTitle}</h2>
+          <div className="results-work-meta">
+            <span>Capitulo {chapterLabel}</span>
+            <span>{translatedCount || job?.page_count || 0} paginas</span>
+            <span>{job?.status === "completed" ? "Concluido" : job?.status ?? "Processando"}</span>
+          </div>
+          <div className="results-work-actions">
+            {id && <Link className="link-button" to={`/projects/${id}/preview`}><Eye size={15} />Abrir preview</Link>}
+            {bundle && <a className="link-button" href={`${API_URL}/api/artifacts/${bundle.id}`}><Archive size={15} />Ultimo pacote</a>}
+          </div>
+          {exportZip.error && <p className="error">Erro ao gerar ZIP: {exportZip.error.message}</p>}
+        </div>
       </div>
     </section>
   );
+}
+
+function resultCoverUrl(job?: Job | null) {
+  const coverUrl = job?.project_config?.work_context?.cover_url;
+  return typeof coverUrl === "string" && coverUrl.trim() ? coverUrl.trim() : null;
+}
+
+function resultWorkTitle(job?: Job | null) {
+  const selectedTitle = job?.project_config?.work_context?.title;
+  if (typeof selectedTitle === "string" && selectedTitle.trim()) return selectedTitle.trim();
+  return job?.obra?.trim() || DEFAULT_WORK_TITLE;
+}
+
+function shouldSearchResultCover(title: string) {
+  const normalized = title.trim();
+  return normalized.length >= 3 && normalized !== DEFAULT_WORK_TITLE && !/\.(zip|cbz|jpg|jpeg|png|webp)$/i.test(normalized);
 }
 
 function SettingsPage() {
@@ -2033,24 +2225,6 @@ function SettingsPage() {
       <Metric label="Cobrança" value="desligada no beta" />
     </section>
   );
-}
-
-function artifactLabel(kind: string) {
-  const labels: Record<string, string> = {
-    input_original: "Entrada",
-    input_archive: "Arquivo original",
-    translated_image: "Imagem traduzida",
-    project_json: "Projeto",
-    pipeline_log: "Pipeline log",
-    runner_log: "Worker log",
-    bundle_zip: "ZIP",
-  };
-  return labels[kind] ?? kind;
-}
-
-function formatBytes(size: number) {
-  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`;
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function parseJobTime(value?: string) {
@@ -2305,3 +2479,6 @@ export function App() {
     </QueryClientProvider>
   );
 }
+
+
+

@@ -5,12 +5,14 @@ import {
   findEditorFontOption,
   googleFontSearchResultToOption,
   listEditorFontGroups,
+  searchEditorFontGroups,
+  systemFontInfoToOption,
   type EditorFontGroup,
   type EditorFontOption,
 } from "../../lib/fontCatalog";
-import { searchGoogleFonts } from "../../lib/tauri";
+import { listSystemFonts, searchGoogleFonts } from "../../lib/tauri";
 
-type SearchStatus = "idle" | "loading" | "error";
+type SearchStatus = "idle" | "loading";
 
 function joinClassNames(...classes: Array<string | false | null | undefined>): string {
   return classes.filter(Boolean).join(" ");
@@ -26,6 +28,8 @@ function labelFromStoredFontValue(value?: string): string {
   if (localOption) return localOption.label;
   const googleMatch = /^GoogleFont__(.+)__[^.]+\.(?:ttf|otf)$/i.exec(value);
   if (googleMatch) return googleMatch[1].replace(/_/g, " ");
+  const systemMatch = /^SystemFont__(.+)__[^.]+\.(?:ttf|otf)$/i.exec(value);
+  if (systemMatch) return systemMatch[1].replace(/_/g, " ");
   return value.replace(/\.(ttf|otf)$/i, "");
 }
 
@@ -38,7 +42,7 @@ function includeSelectedFont(groups: EditorFontGroup[], value?: string, selected
           label: labelFromStoredFontValue(value),
           value,
           cssFamily: labelFromStoredFontValue(value),
-          source: "google" as const,
+          source: /^SystemFont__/i.test(value) ? "system" as const : "google" as const,
           groupLabel: "Selecionada",
           variants: ["regular"],
           variant: "regular",
@@ -53,15 +57,19 @@ function includeSelectedFont(groups: EditorFontGroup[], value?: string, selected
   ];
 }
 
-function optionGroupsFromOptions(options: EditorFontOption[]): EditorFontGroup[] {
-  if (options.length === 0) return [];
-  return [
-    {
-      label: "Google Fonts",
-      source: "google",
-      options,
-    },
-  ];
+function optionGroupsFromSearchResults(
+  localGroups: EditorFontGroup[],
+  system: EditorFontOption[],
+  google: EditorFontOption[],
+): EditorFontGroup[] {
+  const groups: EditorFontGroup[] = [...localGroups];
+  const seenValues = new Set(localGroups.flatMap((group) => group.options.map((option) => option.value)));
+  const systemOptions = system.filter((option) => !seenValues.has(option.value));
+  for (const option of systemOptions) seenValues.add(option.value);
+  const googleOptions = google.filter((option) => !seenValues.has(option.value));
+  if (systemOptions.length > 0) groups.push({ label: "Sistema", source: "system", options: systemOptions });
+  if (googleOptions.length > 0) groups.push({ label: "Google Fonts", source: "google", options: googleOptions });
+  return groups;
 }
 
 function FontMenu({
@@ -72,6 +80,7 @@ function FontMenu({
   top,
   width,
   onPick,
+  providerErrors,
 }: {
   groups: EditorFontGroup[];
   status: SearchStatus;
@@ -80,6 +89,7 @@ function FontMenu({
   top: number;
   width: number;
   onPick: (option: EditorFontOption) => void;
+  providerErrors: string[];
 }) {
   const trimmedQuery = query.trim();
   return createPortal(
@@ -87,16 +97,16 @@ function FontMenu({
       style={{ position: "fixed", left, top, width, zIndex: 9999 }}
       className="max-h-[260px] overflow-y-auto rounded-md border border-border bg-bg-secondary shadow-[0_8px_32px_rgba(0,0,0,0.45)]"
     >
-      {status === "loading" && <div className="px-3 py-2 text-[11px] text-text-muted">Buscando...</div>}
-      {status === "error" && (
-        <div className="px-3 py-2 text-[11px] text-status-error">Falha ao buscar no Google Fonts</div>
-      )}
-      {status !== "loading" && status !== "error" && trimmedQuery.length > 0 && trimmedQuery.length < 2 && (
+      {status === "loading" && <div className="px-3 py-2 text-[11px] text-text-muted">Buscando fontes...</div>}
+      {status !== "loading" && trimmedQuery.length > 0 && trimmedQuery.length < 2 && (
         <div className="px-3 py-2 text-[11px] text-text-muted">Digite pelo menos 2 letras</div>
       )}
-      {status !== "loading" && status !== "error" && trimmedQuery.length >= 2 && groups.length === 0 && (
+      {status !== "loading" && trimmedQuery.length >= 2 && groups.length === 0 && (
         <div className="px-3 py-2 text-[11px] text-text-muted">Nenhuma fonte encontrada</div>
       )}
+      {status !== "loading" && providerErrors.map((error) => (
+        <div key={error} className="px-3 py-1 text-[10px] text-status-warning">{error}</div>
+      ))}
       {groups.map((group) => (
         <div key={`${group.source}:${group.label}`} className="py-1">
           <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
@@ -113,9 +123,9 @@ function FontMenu({
               className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-white/[0.06]"
             >
               <span className="truncate">{font.label}</span>
-              {font.source === "google" && (
-                <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-brand">Google</span>
-              )}
+              <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-brand">
+                {font.source === "system" ? "Sistema" : font.source === "google" ? "Google" : "Embutida"}
+              </span>
             </button>
           ))}
         </div>
@@ -139,11 +149,13 @@ export function EditorFontPicker({
   selectTestId?: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const remoteCacheRef = useRef(new Map<string, EditorFontOption[]>());
+  const searchCacheRef = useRef(new Map<string, { system: EditorFontOption[]; google: EditorFontOption[] }>());
   const [open, setOpen] = useState(false);
   const [inputValue, setInputValue] = useState(() => labelFromStoredFontValue(value));
-  const [remoteOptions, setRemoteOptions] = useState<EditorFontOption[]>([]);
-  const [remoteStatus, setRemoteStatus] = useState<SearchStatus>("idle");
+  const [systemOptions, setSystemOptions] = useState<EditorFontOption[]>([]);
+  const [googleOptions, setGoogleOptions] = useState<EditorFontOption[]>([]);
+  const [searchStatus, setSearchStatus] = useState<SearchStatus>("idle");
+  const [providerErrors, setProviderErrors] = useState<string[]>([]);
   const [selectedRemoteOption, setSelectedRemoteOption] = useState<EditorFontOption | null>(null);
   const [menuRect, setMenuRect] = useState({ left: 0, top: 0, width: 220 });
   const isToolbar = variant === "toolbar";
@@ -156,35 +168,48 @@ export function EditorFontPicker({
 
   useEffect(() => {
     if (!open || query.length < 2) {
-      setRemoteOptions([]);
-      setRemoteStatus("idle");
+      setSystemOptions([]);
+      setGoogleOptions([]);
+      setSearchStatus("idle");
+      setProviderErrors([]);
       return;
     }
 
     const normalizedQuery = query.toLowerCase();
-    const cached = remoteCacheRef.current.get(normalizedQuery);
+    const cached = searchCacheRef.current.get(normalizedQuery);
     if (cached) {
-      setRemoteOptions(cached);
-      setRemoteStatus("idle");
+      setSystemOptions(cached.system);
+      setGoogleOptions(cached.google);
+      setSearchStatus("idle");
+      setProviderErrors([]);
       return;
     }
 
     let cancelled = false;
-    setRemoteStatus("loading");
+    setSearchStatus("loading");
+    setProviderErrors([]);
     const timeout = window.setTimeout(() => {
-      searchGoogleFonts(query)
-        .then((results) => {
+      Promise.allSettled([listSystemFonts(query), searchGoogleFonts(query)])
+        .then(([systemResult, googleResult]) => {
           if (cancelled) return;
-          const options = results.map(googleFontSearchResultToOption);
-          remoteCacheRef.current.set(normalizedQuery, options);
-          setRemoteOptions(options);
-          setRemoteStatus("idle");
-        })
-        .catch((error) => {
-          if (cancelled) return;
-          console.warn("[fonts] falha ao buscar Google Fonts:", error);
-          setRemoteOptions([]);
-          setRemoteStatus("error");
+          const nextSystem =
+            systemResult.status === "fulfilled" ? systemResult.value.map(systemFontInfoToOption) : [];
+          const nextGoogle =
+            googleResult.status === "fulfilled" ? googleResult.value.map(googleFontSearchResultToOption) : [];
+          const errors: string[] = [];
+          if (systemResult.status === "rejected") {
+            console.warn("[fonts] falha ao buscar fontes do sistema:", systemResult.reason);
+            errors.push("Fontes do sistema indisponiveis");
+          }
+          if (googleResult.status === "rejected") {
+            console.warn("[fonts] falha ao buscar Google Fonts:", googleResult.reason);
+            errors.push("Google Fonts indisponivel");
+          }
+          searchCacheRef.current.set(normalizedQuery, { system: nextSystem, google: nextGoogle });
+          setSystemOptions(nextSystem);
+          setGoogleOptions(nextGoogle);
+          setProviderErrors(errors);
+          setSearchStatus("idle");
         });
     }, 350);
 
@@ -215,12 +240,14 @@ export function EditorFontPicker({
   }, [isToolbar, open]);
 
   const groups = useMemo(() => {
-    const baseGroups = query.length >= 2 ? optionGroupsFromOptions(remoteOptions) : listEditorFontGroups();
+    const baseGroups = query.length >= 2
+      ? optionGroupsFromSearchResults(searchEditorFontGroups(query), systemOptions, googleOptions)
+      : listEditorFontGroups();
     return includeSelectedFont(baseGroups, value, selectedRemoteOption);
-  }, [query.length, remoteOptions, selectedRemoteOption, value]);
+  }, [googleOptions, query.length, selectedRemoteOption, systemOptions, value]);
 
   function pickFont(option: EditorFontOption) {
-    setSelectedRemoteOption(option.source === "google" ? option : null);
+    setSelectedRemoteOption(option.source === "google" || option.source === "system" ? option : null);
     setInputValue(option.label);
     setOpen(false);
     void onChange(option.value, option);
@@ -254,12 +281,13 @@ export function EditorFontPicker({
       {open && typeof document !== "undefined" && (
         <FontMenu
           groups={groups}
-          status={remoteStatus}
+          status={searchStatus}
           query={query}
           left={menuRect.left}
           top={menuRect.top}
           width={menuRect.width}
           onPick={pickFont}
+          providerErrors={providerErrors}
         />
       )}
     </div>

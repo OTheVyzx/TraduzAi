@@ -138,6 +138,7 @@ export function TextStylePresetPopover({ currentStyle, onApply }: TextStylePrese
           <div
             ref={popoverRef}
             data-testid="text-style-preset-popover"
+            data-editor-preserve-text-selection="true"
             style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 9999 }}
             className="w-[340px] rounded-xl border border-border bg-bg-secondary p-3 shadow-[0_8px_32px_rgba(0,0,0,0.45)] backdrop-blur-md"
           >

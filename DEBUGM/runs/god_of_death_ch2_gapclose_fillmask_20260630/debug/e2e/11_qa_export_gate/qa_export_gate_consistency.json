@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_gapclose_fillmask",
+  "stage": "qa_export_gate",
+  "summary": {
+    "critical_count": 44,
+    "critical_flag_count": 44,
+    "critical_issue_count": 33,
+    "highest_severity": "critical"
+  },
+  "export_gate": {
+    "status": "BLOCK",
+    "critical_issue_count": 16,
+    "critical_flag_count": 21,
+    "review_issue_count": 80
+  },
+  "consistency": {
+    "critical_count_matches": false,
+    "critical_issue_count_matches": false,
+    "highest_severity_matches_block": true
+  },
+  "render_plan_sync": {
+    "source": "project_json_final",
+    "project_page_count": 6,
+    "project_rendered_count": 74,
+    "written_count": 74
+  },
+  "consistent": false
+}

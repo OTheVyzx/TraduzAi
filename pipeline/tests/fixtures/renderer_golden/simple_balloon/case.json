@@ -1,0 +1,26 @@
+{
+  "name": "simple_balloon",
+  "width": 220,
+  "height": 140,
+  "background": "#ffffff",
+  "texts": [
+    {
+      "id": "txt-1",
+      "translated": "SIM, NAO FUNCIONA",
+      "bbox": [30, 25, 190, 115],
+      "balloon_bbox": [30, 25, 190, 115],
+      "safe_text_box": [45, 42, 175, 92],
+      "estilo": {
+        "fonte": "ComicNeue-Bold.ttf",
+        "tamanho": 24,
+        "cor": "#000000",
+        "contorno": "#ffffff",
+        "contorno_px": 1,
+        "alinhamento": "center",
+        "sombra": false,
+        "glow": false,
+        "cor_gradiente": []
+      }
+    }
+  ]
+}

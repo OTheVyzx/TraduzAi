@@ -94,6 +94,109 @@ class SplitIntoChunksTests(unittest.TestCase):
 
 
 class DetectStripBalloonsTests(unittest.TestCase):
+    def _make_negative_detector_for(self, bbox, confidence=0.91):
+        from unittest.mock import MagicMock
+
+        block = type("FakeBlock", (), {})()
+        block.x1, block.y1, block.x2, block.y2 = bbox
+        block.confidence = confidence
+        detector = MagicMock()
+        detector.detect.side_effect = [[], [block]]
+        return detector
+
+    def _assert_dark_candidate_contract(self, candidate):
+        metadata = getattr(candidate, "metadata", None)
+        if metadata is None:
+            metadata = candidate if isinstance(candidate, dict) else {}
+
+        self.assertNotEqual(metadata.get("balloon_type"), "white")
+        self.assertEqual(metadata.get("background_polarity"), "dark")
+        self.assertTrue(metadata.get("dark_light_text_evidence", {}).get("useful"))
+
+    def test_dark_bubble_negative_geometry_reports_dark_profile(self):
+        from unittest.mock import patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.zeros((260, 360, 3), dtype=np.uint8)
+        cv2.ellipse(image, (180, 130), (112, 58), 0, 0, 360, (4, 8, 12), -1)
+        cv2.ellipse(image, (180, 130), (112, 58), 0, 0, 360, (40, 145, 190), 4)
+        cv2.putText(image, "WHITE", (116, 122), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (245, 248, 255), 2, cv2.LINE_AA)
+        cv2.putText(image, "WORDS", (112, 154), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (245, 248, 255), 2, cv2.LINE_AA)
+
+        strip = VerticalStrip(image=image, width=360, height=260, source_page_breaks=[0, 260])
+        detector = self._make_negative_detector_for((96, 92, 264, 166))
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+            },
+        ):
+            candidates = detect_strip_balloons(strip, detector=detector)
+
+        self.assertEqual(len(candidates), 1)
+        self._assert_dark_candidate_contract(candidates[0])
+
+    def test_dark_panel_negative_geometry_reports_dark_profile(self):
+        from unittest.mock import patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.full((220, 420, 3), 235, dtype=np.uint8)
+        cv2.rectangle(image, (72, 62), (348, 154), (8, 8, 10), -1)
+        cv2.rectangle(image, (72, 62), (348, 154), (95, 190, 220), 3)
+        cv2.putText(image, "QUEST", (124, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (248, 248, 255), 2, cv2.LINE_AA)
+
+        strip = VerticalStrip(image=image, width=420, height=220, source_page_breaks=[0, 220])
+        detector = self._make_negative_detector_for((106, 82, 302, 126))
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+            },
+        ):
+            candidates = detect_strip_balloons(strip, detector=detector)
+
+        self.assertEqual(len(candidates), 1)
+        self._assert_dark_candidate_contract(candidates[0])
+
+    def test_negative_white_text_without_balloon_reports_dark_profile_not_white_balloon(self):
+        from unittest.mock import patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.full((180, 360, 3), 5, dtype=np.uint8)
+        cv2.putText(image, "SYSTEM", (82, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (246, 246, 250), 2, cv2.LINE_AA)
+        cv2.putText(image, "ONLINE", (86, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (246, 246, 250), 2, cv2.LINE_AA)
+
+        strip = VerticalStrip(image=image, width=360, height=180, source_page_breaks=[0, 180])
+        detector = self._make_negative_detector_for((76, 52, 240, 126))
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+            },
+        ):
+            candidates = detect_strip_balloons(strip, detector=detector)
+
+        self.assertEqual(len(candidates), 1)
+        self._assert_dark_candidate_contract(candidates[0])
+
     def test_detect_strip_balloons_full_page_env_runs_one_detection_per_source_page(self):
         from unittest.mock import MagicMock, patch
         from strip.detect_balloons import detect_strip_balloons
@@ -120,7 +223,13 @@ class DetectStripBalloonsTests(unittest.TestCase):
             source_page_breaks=[0, 3000, 6000, 9000],
         )
 
-        with patch.dict("os.environ", {"TRADUZAI_STRIP_DETECT_FULL_PAGE": "1"}):
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "0",
+            },
+        ):
             balloons = detect_strip_balloons(strip, detector=fake_detector)
 
         self.assertEqual(fake_detector.detect.call_count, 3)
@@ -212,6 +321,163 @@ class DetectStripBalloonsTests(unittest.TestCase):
         self.assertGreaterEqual(balloon.x2, 190)
         self.assertLessEqual(balloon.y1, 245)
         self.assertGreaterEqual(balloon.y2, 268)
+
+    def test_detect_strip_balloons_adds_perspective_ui_panel_band_candidate(self):
+        from unittest.mock import MagicMock
+        from strip.bands import group_balloons_into_bands
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.full((500, 420, 3), 255, dtype=np.uint8)
+        panel = np.array([[90, 232], [360, 252], [338, 326], [70, 308]], dtype=np.int32)
+        cv2.fillPoly(image, [panel], [86, 82, 80])
+        cv2.putText(
+            image,
+            "Search",
+            (118, 292),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.82,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        fake_block = type("FakeBlock", (), {})()
+        fake_block.x1, fake_block.y1, fake_block.x2, fake_block.y2 = 50, 160, 150, 220
+        fake_block.confidence = 0.9
+        fake_detector = MagicMock()
+        fake_detector.detect.return_value = [fake_block]
+
+        strip = VerticalStrip(
+            image=image,
+            width=420,
+            height=500,
+            source_page_breaks=[0, 500],
+        )
+
+        balloons = detect_strip_balloons(strip, detector=fake_detector)
+        bands = group_balloons_into_bands(balloons, gap_threshold=64, margin=16)
+
+        self.assertTrue(any(balloon.strip_bbox.y2 >= 326 for balloon in balloons), balloons)
+        self.assertEqual(len(bands), 1)
+        self.assertGreaterEqual(bands[0].y_bottom, 342)
+
+    def test_negative_detect_merge_adds_dark_balloon_text_candidate(self):
+        from unittest.mock import MagicMock, patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.zeros((360, 420, 3), dtype=np.uint8)
+        cv2.ellipse(image, (210, 180), (130, 70), 0, 0, 360, (4, 8, 12), -1)
+        cv2.ellipse(image, (210, 180), (130, 70), 0, 0, 360, (35, 145, 190), 4)
+        cv2.putText(image, "DARK", (155, 172), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (245, 248, 255), 2, cv2.LINE_AA)
+        cv2.putText(image, "TEXT", (158, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (245, 248, 255), 2, cv2.LINE_AA)
+
+        block = type("FakeBlock", (), {})()
+        block.x1, block.y1, block.x2, block.y2 = 145, 145, 280, 215
+        block.confidence = 0.91
+        fake_detector = MagicMock()
+        fake_detector.detect.side_effect = [[], [block]]
+
+        strip = VerticalStrip(image=image, width=420, height=360, source_page_breaks=[0, 360])
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+            },
+        ):
+            balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertLessEqual(balloons[0].strip_bbox.x1, 145)
+        self.assertGreaterEqual(balloons[0].strip_bbox.x2, 280)
+
+    def test_dark_balloon_scan_adds_sparse_light_text_candidate_without_detector(self):
+        from unittest.mock import MagicMock, patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.zeros((420, 420, 3), dtype=np.uint8)
+        cv2.ellipse(image, (210, 190), (120, 70), 0, 0, 360, (2, 5, 8), -1)
+        cv2.ellipse(image, (210, 190), (120, 70), 0, 0, 360, (35, 145, 190), 3)
+        cv2.putText(image, "1,000 points..", (112, 198), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (245, 248, 255), 2, cv2.LINE_AA)
+
+        fake_detector = MagicMock()
+        fake_detector.detect.return_value = []
+
+        strip = VerticalStrip(image=image, width=420, height=420, source_page_breaks=[0, 420])
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_DARK_BALLOON_BAND_SCAN": "1",
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "0",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+            },
+        ):
+            balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertEqual(len(balloons), 1)
+        balloon = balloons[0].strip_bbox
+        self.assertLessEqual(balloon.x1, 115)
+        self.assertGreaterEqual(balloon.x2, 290)
+        self.assertLessEqual(balloon.y1, 175)
+        self.assertGreaterEqual(balloon.y2, 214)
+        self.assertTrue(balloons[0].metadata.get("dark_band_scan_candidate"))
+
+    def test_sparse_negative_dark_candidate_expands_to_bubble_body(self):
+        from strip.detect_balloons import BBox, _expand_sparse_dark_negative_candidate
+        import cv2
+        import numpy as np
+
+        image = np.zeros((520, 420, 3), dtype=np.uint8)
+        cv2.ellipse(image, (165, 300), (145, 120), 0, 0, 360, (4, 8, 12), -1)
+        cv2.ellipse(image, (165, 300), (145, 120), 0, 0, 360, (35, 145, 190), 4)
+        cv2.putText(image, "1,000 points..", (82, 382), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (245, 245, 245), 2, cv2.LINE_AA)
+        tight_text = BBox(84, 356, 266, 400)
+
+        expanded = _expand_sparse_dark_negative_candidate(image, tight_text, confidence=0.82)
+
+        self.assertLessEqual(expanded.x1, 10)
+        self.assertLessEqual(expanded.y1, 100)
+        self.assertGreaterEqual(expanded.x2, 330)
+        self.assertGreaterEqual(expanded.y2, 470)
+
+    def test_negative_detect_merge_rejects_thin_artifact_line(self):
+        from unittest.mock import MagicMock, patch
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+        import cv2
+        import numpy as np
+
+        image = np.zeros((260, 420, 3), dtype=np.uint8)
+        cv2.line(image, (80, 120), (340, 120), (245, 245, 245), 3, cv2.LINE_AA)
+
+        block = type("FakeBlock", (), {})()
+        block.x1, block.y1, block.x2, block.y2 = 80, 114, 340, 126
+        block.confidence = 0.88
+        fake_detector = MagicMock()
+        fake_detector.detect.side_effect = [[], [block]]
+
+        strip = VerticalStrip(image=image, width=420, height=260, source_page_breaks=[0, 260])
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+            },
+        ):
+            balloons = detect_strip_balloons(strip, detector=fake_detector)
+
+        self.assertEqual(balloons, [])
 
     def test_white_balloon_scan_adds_connected_component_clipped_by_chunk_edge(self):
         from strip.detect_balloons import _scan_white_balloon_band_candidates

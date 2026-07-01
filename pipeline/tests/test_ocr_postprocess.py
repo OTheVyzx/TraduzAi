@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ocr.postprocess import (
+    apply_language_guards,
     classify_text_type,
     fix_ocr_errors,
     has_run_on_tokens,
@@ -18,6 +19,7 @@ from ocr.postprocess import (
     is_vlm_failure_phrase,
     is_watermark,
     looks_suspicious,
+    postprocess_ocr_fragments,
     should_preserve_cjk_sfx_candidate,
 )
 from ocr.text_router import route_text_record
@@ -126,6 +128,40 @@ class OcrPostprocessTests(unittest.TestCase):
             self.assertFalse(routed.get("skip_processing"))
             self.assertIsNot(routed.get("preserve_original"), True)
 
+    def test_art_fragment_inside_same_phrase_is_not_rendered(self):
+        texts = [
+            {"id": "ocr_001", "text": "PLEASE, FOR", "bbox": [25, 4357, 667, 4629], "confidence": 0.91},
+            {"id": "ocr_002", "text": "THE CHILD'S SAKE.", "bbox": [501, 4559, 661, 4666], "confidence": 0.94},
+            {
+                "id": "ocr_003",
+                "text": "THE SA",
+                "bbox": [320, 4620, 562, 4870],
+                "confidence": 0.42,
+                "qa_flags": ["ocr_art_fragment_suspected"],
+            },
+        ]
+
+        out = postprocess_ocr_fragments(texts, page_language="en")
+
+        by_id = {item["id"]: item for item in out}
+        self.assertIs(by_id["ocr_003"]["skip_processing"], True)
+        self.assertIn("suppressed_duplicate_phrase_fragment", by_id["ocr_003"]["qa_flags"])
+        self.assertEqual(by_id["ocr_002"]["text"], "THE CHILD'S SAKE.")
+
+    def test_latin_gibberish_over_cjk_visual_mask_is_suppressed_for_english_source(self):
+        item = {
+            "id": "ocr_001",
+            "text": "3 TI2]2H",
+            "bbox": [237, 2890, 635, 3059],
+            "confidence": 0.51,
+            "visual_script_hint": "cjk",
+        }
+
+        out = apply_language_guards([item], source_language="en")
+
+        self.assertIs(out[0]["skip_processing"], True)
+        self.assertIn("visual_cjk_suppressed", out[0]["qa_flags"])
+
     def test_korean_dialogue_is_not_forced_to_sfx(self):
         self.assertFalse(is_korean_sfx("도저히 생문을 찾을 수가 없다"))
         self.assertFalse(is_korean_sfx("진법은 이 갈사량의 짓이 분명합니다"))
@@ -150,6 +186,18 @@ class OcrPostprocessTests(unittest.TestCase):
             "북명대는 무적입니다",
         )
 
+    def test_fix_ocr_errors_preserves_short_numeric_tokens(self):
+        self.assertEqual(
+            fix_ocr_errors("HoSu 24 years old Unemployed", idioma_origem="en"),
+            "HoSu 24 years old Unemployed",
+        )
+
+    def test_fix_ocr_errors_repairs_age_digit_alpha_confusion(self):
+        self.assertEqual(
+            fix_ocr_errors("Hosu 2a years old Unemployed", idioma_origem="en"),
+            "Hosu 24 years old Unemployed",
+        )
+
     def test_low_confidence_korean_dialogue_is_not_suspicious_noise(self):
         self.assertFalse(looks_suspicious("죽여라!", 0.49))
 
@@ -158,6 +206,7 @@ class OcrPostprocessTests(unittest.TestCase):
 
     def test_run_on_token_detector_ignores_normal_long_word(self):
         self.assertFalse(has_run_on_tokens("CONGRATULATIONS, SENIOR BROTHER."))
+        self.assertFalse(has_run_on_tokens("SYNCHRONIZED HUMANS WILL ATTACK ENEMIES."))
 
     def test_quoted_short_dialogue_is_not_dropped_as_textured_sfx(self):
         self.assertFalse(is_short_textured_sfx_or_noise('"WE"?!', [502, 16, 718, 108], 0.828, False))

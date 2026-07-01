@@ -207,3 +207,110 @@ def test_render_band_image_copies_debug_by_trace_when_text_ids_repeat(tmp_path):
 
     assert first.get("render_bbox") is None
     assert second["render_bbox"] == [22, 24, 78, 46]
+
+
+def test_project_render_plan_final_preserves_source_style_debug_fields(tmp_path):
+    from debug_tools import DebugRecorder
+    import main
+
+    evidence = {
+        "source": "pixel_analysis",
+        "text_color": "#FFFFFF",
+        "text_color_confidence": 0.82,
+        "stroke_color": "#000000",
+        "stroke_width_px": 3,
+        "stroke_confidence": 0.78,
+    }
+    project = {
+        "paginas": [
+            {
+                "numero": 1,
+                "text_layers": [
+                    {
+                        "id": "ocr_001",
+                        "text_id": "ocr_001",
+                        "trace_id": "ocr_001@page_001_band_002",
+                        "band_id": "page_001_band_002",
+                        "original": "BOOM",
+                        "translated": "BUM",
+                        "target_bbox": [20, 1010, 140, 1080],
+                        "safe_text_box": [28, 1018, 132, 1070],
+                        "render_bbox": [32, 1022, 128, 1064],
+                        "tipo": "sfx",
+                        "estilo": {
+                            "fonte": "KOMIKAX_.ttf",
+                            "cor": "#FFFFFF",
+                            "contorno": "#000000",
+                            "contorno_px": 3,
+                        },
+                        "style_origin": "source_detected",
+                        "style_confidence": 0.82,
+                        "style_source": "pixel_analysis",
+                        "style_evidence": evidence,
+                    }
+                ],
+            }
+        ],
+    }
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+
+    audit = main._write_debug_render_plan_final_from_project(recorder, project)
+
+    rows = _jsonl(tmp_path / "debug" / "e2e" / "09_typeset" / "render_plan_final.jsonl")
+    assert audit["summary"]["written_count"] == 1
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["source"] == "project_json_final"
+    assert row["style_origin"] == "source_detected"
+    assert row["style_confidence"] == 0.82
+    assert row["style_source"] == "pixel_analysis"
+    assert row["style_evidence"] == evidence
+    assert row["estilo"]["cor"] == "#FFFFFF"
+    assert row["estilo"]["contorno"] == "#000000"
+    assert row["estilo"]["contorno_px"] == 3
+
+
+def test_project_render_plan_final_skips_merged_into_primary_layers(tmp_path):
+    from debug_tools import DebugRecorder
+    import main
+
+    project = {
+        "paginas": [
+            {
+                "numero": 1,
+                "text_layers": [
+                    {
+                        "id": "ocr_001",
+                        "text_id": "ocr_001",
+                        "trace_id": "ocr_001@page_001_band_001",
+                        "band_id": "page_001_band_001",
+                        "translated": "PRIMARIO",
+                        "render_bbox": [20, 30, 120, 70],
+                        "safe_text_box": [10, 20, 130, 80],
+                        "visible": True,
+                        "route_action": "translate_inpaint_render",
+                        "render_policy": "normal",
+                    },
+                    {
+                        "id": "ocr_001_fragment_2",
+                        "text_id": "ocr_001_fragment_2",
+                        "trace_id": "ocr_001@page_001_band_001#fragment_2",
+                        "band_id": "page_001_band_001",
+                        "translated": "FRAGMENTO",
+                        "render_bbox": [40, 90, 150, 130],
+                        "safe_text_box": [30, 80, 160, 140],
+                        "visible": False,
+                        "route_action": "merged_into_primary",
+                        "render_policy": "normal",
+                    },
+                ],
+            }
+        ],
+    }
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+
+    audit = main._write_debug_render_plan_final_from_project(recorder, project)
+
+    rows = _jsonl(tmp_path / "debug" / "e2e" / "09_typeset" / "render_plan_final.jsonl")
+    assert audit["summary"]["written_count"] == 1
+    assert [row["text_id"] for row in rows] == ["ocr_001"]

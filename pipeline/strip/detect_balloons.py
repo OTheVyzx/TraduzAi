@@ -163,10 +163,62 @@ def _inner_dark_text_evidence(image: np.ndarray, bbox: BBox) -> dict:
             if gray.size:
                 bright_ratio = float(np.mean(gray >= 238))
                 dark_ratio = float(np.mean(gray <= 105))
+                h, w = gray.shape[:2]
+                pad_x = max(5, int(w * 0.08))
+                pad_y = max(5, int(h * 0.10))
+                light_boxes: list[BBox] = []
+                if w > pad_x * 2 and h > pad_y * 2:
+                    inner = gray[pad_y : h - pad_y, pad_x : w - pad_x]
+                    light = (inner >= 150).astype(np.uint8) * 255
+                    light = cv2.morphologyEx(
+                        light,
+                        cv2.MORPH_OPEN,
+                        cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)),
+                        iterations=1,
+                    )
+                    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(light, connectivity=8)
+                    inner_h, inner_w = inner.shape[:2]
+                    for label in range(1, num_labels):
+                        area = int(stats[label, cv2.CC_STAT_AREA])
+                        comp_x = int(stats[label, cv2.CC_STAT_LEFT])
+                        comp_y = int(stats[label, cv2.CC_STAT_TOP])
+                        comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+                        comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+                        if comp_x <= 1 or comp_y <= 1 or (comp_x + comp_w) >= inner_w - 1 or (comp_y + comp_h) >= inner_h - 1:
+                            continue
+                        if area < 8 or area > max(900, int(w * h * 0.20)):
+                            continue
+                        if comp_w < 2 or comp_h < 3:
+                            continue
+                        if comp_w > 120 or comp_h > 56:
+                            continue
+                        if comp_w > int(w * 0.42) or comp_h > int(h * 0.38):
+                            continue
+                        light_boxes.append(
+                            BBox(
+                                x1 + pad_x + comp_x,
+                                y1 + pad_y + comp_y,
+                                x1 + pad_x + comp_x + comp_w,
+                                y1 + pad_y + comp_y + comp_h,
+                            )
+                        )
+                light_count, light_area = _significant_text_component_count(light_boxes)
+            else:
+                light_count = 0
+                light_area = 0
+        else:
+            light_count = 0
+            light_area = 0
+    else:
+        light_count = 0
+        light_area = 0
     return {
         "has_inner_dark_text": len(boxes) >= 2 and inner_dark_area >= 18,
+        "has_inner_light_text": int(light_count) >= 2 and int(light_area) >= 180 and dark_ratio >= 0.35,
         "inner_dark_component_count": int(len(boxes)),
         "inner_dark_area": int(inner_dark_area),
+        "inner_light_component_count": int(light_count),
+        "inner_light_area": int(light_area),
         "significant_component_count": int(significant_count),
         "significant_area": int(significant_area),
         "bright_pixel_ratio": round(bright_ratio, 4),
@@ -214,6 +266,171 @@ def _cluster_text_components_for_band_scan(boxes: list[BBox]) -> list[list[BBox]
 def _white_balloon_band_scan_enabled() -> bool:
     raw = os.getenv("TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN", "1")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dark_balloon_band_scan_enabled() -> bool:
+    raw = os.getenv("TRADUZAI_STRIP_DARK_BALLOON_BAND_SCAN", "1")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_inner_light_text_boxes(image: np.ndarray, bbox: BBox) -> list[BBox]:
+    height, width = image.shape[:2]
+    x1 = max(0, min(width, int(bbox.x1)))
+    x2 = max(0, min(width, int(bbox.x2)))
+    y1 = max(0, min(height, int(bbox.y1)))
+    y2 = max(0, min(height, int(bbox.y2)))
+    if x2 <= x1 or y2 <= y1:
+        return []
+
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return []
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape[:2]
+    pad_x = max(5, int(w * 0.08))
+    pad_y = max(5, int(h * 0.10))
+    if w <= pad_x * 2 or h <= pad_y * 2:
+        return []
+
+    inner = gray[pad_y : h - pad_y, pad_x : w - pad_x]
+    light = (inner >= 150).astype(np.uint8) * 255
+    light = cv2.morphologyEx(
+        light,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)),
+        iterations=1,
+    )
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(light, connectivity=8)
+    boxes: list[BBox] = []
+    inner_h, inner_w = inner.shape[:2]
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        comp_x = int(stats[label, cv2.CC_STAT_LEFT])
+        comp_y = int(stats[label, cv2.CC_STAT_TOP])
+        comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if comp_x <= 1 or comp_y <= 1 or (comp_x + comp_w) >= inner_w - 1 or (comp_y + comp_h) >= inner_h - 1:
+            continue
+        if area < 8 or area > max(900, int(w * h * 0.20)):
+            continue
+        if comp_w < 2 or comp_h < 3:
+            continue
+        if comp_w > 120 or comp_h > 56:
+            continue
+        if comp_w > int(w * 0.42) or comp_h > int(h * 0.38):
+            continue
+        boxes.append(
+            BBox(
+                x1 + pad_x + comp_x,
+                y1 + pad_y + comp_y,
+                x1 + pad_x + comp_x + comp_w,
+                y1 + pad_y + comp_y + comp_h,
+            )
+        )
+    return boxes
+
+
+def _extract_light_text_boxes_for_band_scan(image: np.ndarray) -> list[BBox]:
+    if image.size == 0:
+        return []
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    light = (gray >= 172).astype(np.uint8) * 255
+    light = cv2.morphologyEx(
+        light,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)),
+        iterations=1,
+    )
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(light, connectivity=8)
+    height, width = gray.shape[:2]
+    boxes: list[BBox] = []
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if area < 10 or area > 1400:
+            continue
+        if w < 2 or h < 4:
+            continue
+        if w > 140 or h > 64:
+            continue
+        if x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1:
+            continue
+        boxes.append(BBox(x, y, x + w, y + h))
+    return boxes
+
+
+def _scan_dark_balloon_band_candidates(
+    image: np.ndarray,
+    existing: list[Balloon],
+    *,
+    y_offset: int = 0,
+) -> list[Balloon]:
+    """Add lightweight bands for dark bubbles whose light text was missed."""
+    if image.size == 0:
+        return []
+
+    height, width = image.shape[:2]
+    if height <= 0 or width <= 0:
+        return []
+
+    local_existing = [
+        Balloon(
+            strip_bbox=BBox(
+                b.strip_bbox.x1,
+                b.strip_bbox.y1 - y_offset,
+                b.strip_bbox.x2,
+                b.strip_bbox.y2 - y_offset,
+            ),
+            confidence=b.confidence,
+            lobe_count=b.lobe_count,
+            metadata=dict(getattr(b, "metadata", {}) or {}),
+        )
+        for b in existing
+        if b.strip_bbox.y2 > y_offset and b.strip_bbox.y1 < y_offset + height
+    ]
+
+    added: list[Balloon] = []
+    for cluster in _cluster_text_components_for_band_scan(_extract_light_text_boxes_for_band_scan(image)):
+        text_union = _bbox_union(cluster)
+        if text_union is None:
+            continue
+        if _bbox_area(text_union) < 220:
+            continue
+        candidate = _expand_bbox(text_union, image.shape)
+        evidence = _dark_light_text_evidence(image, candidate)
+        if not evidence["useful"]:
+            continue
+        if evidence["dark_ratio"] < 0.35:
+            continue
+        if evidence["light_count"] < 2 and evidence["light_area"] < 120:
+            continue
+        if any(
+            _iou(candidate, existing_box.strip_bbox) >= 0.35
+            or _bbox_contains_center(existing_box.strip_bbox, candidate, margin=12)
+            or _bbox_intersection_ratio(candidate, existing_box.strip_bbox) >= 0.45
+            for existing_box in local_existing
+        ):
+            continue
+
+        metadata = _dark_negative_candidate_metadata(image, candidate)
+        metadata["dark_band_scan_candidate"] = True
+        added_balloon = Balloon(
+            strip_bbox=BBox(
+                candidate.x1,
+                candidate.y1 + y_offset,
+                candidate.x2,
+                candidate.y2 + y_offset,
+            ),
+            confidence=0.57,
+            metadata=metadata,
+        )
+        added.append(added_balloon)
+        local_existing.append(Balloon(strip_bbox=candidate, confidence=0.57, metadata=metadata))
+
+    return added
 
 
 def _scan_white_balloon_band_candidates(
@@ -342,6 +559,258 @@ def _scan_white_balloon_band_candidates(
     return added
 
 
+def _ui_layout_band_scan_enabled() -> bool:
+    return _env_flag("TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN", True)
+
+
+def _negative_detect_merge_enabled() -> bool:
+    return _env_flag("TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE", True)
+
+
+def _bbox_intersection_ratio(a: BBox, b: BBox) -> float:
+    x1 = max(a.x1, b.x1)
+    y1 = max(a.y1, b.y1)
+    x2 = min(a.x2, b.x2)
+    y2 = min(a.y2, b.y2)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    return inter / float(max(1, min(_bbox_area(a), _bbox_area(b))))
+
+
+def _dark_light_text_evidence(image: np.ndarray, bbox: BBox) -> dict:
+    evidence = _inner_dark_text_evidence(image, bbox)
+    dark_ratio = float(evidence.get("dark_pixel_ratio", 0.0) or 0.0)
+    bright_ratio = float(evidence.get("bright_pixel_ratio", 0.0) or 0.0)
+    light_count = int(evidence.get("inner_light_component_count", 0) or 0)
+    light_area = int(evidence.get("inner_light_area", 0) or 0)
+    return {
+        "dark_ratio": dark_ratio,
+        "bright_ratio": bright_ratio,
+        "light_count": light_count,
+        "light_area": light_area,
+        "useful": bool(dark_ratio >= 0.25 and ((light_count >= 1 and light_area >= 60) or bright_ratio >= 0.025)),
+    }
+
+
+def _dark_negative_candidate_metadata(image: np.ndarray, bbox: BBox) -> dict:
+    evidence = _dark_light_text_evidence(image, bbox)
+    return {
+        "background_polarity": "dark",
+        "balloon_type": "dark",
+        "dark_light_text_evidence": evidence,
+        "negative_detect_candidate": True,
+    }
+
+
+def _negative_detect_candidate_is_useful(
+    image: np.ndarray,
+    bbox: BBox,
+    existing: list[Balloon],
+) -> bool:
+    if image.size == 0:
+        return False
+    height, width = image.shape[:2]
+    if bbox.x2 <= bbox.x1 or bbox.y2 <= bbox.y1:
+        return False
+    if bbox.x1 < 0 or bbox.y1 < 0 or bbox.x2 > width or bbox.y2 > height:
+        return False
+
+    box_w = bbox.x2 - bbox.x1
+    box_h = bbox.y2 - bbox.y1
+    box_area = _bbox_area(bbox)
+    if box_w < 48 or box_h < 22 or box_area < 900:
+        return False
+    aspect = box_w / float(max(1, box_h))
+    if aspect > 8.0 or aspect < 0.20:
+        return False
+
+    overlaps_existing = any(
+        _iou(bbox, item.strip_bbox) >= 0.18
+        or _bbox_intersection_ratio(bbox, item.strip_bbox) >= 0.45
+        or _bbox_contains_center(item.strip_bbox, bbox, margin=14)
+        for item in existing
+    )
+
+    evidence = _dark_light_text_evidence(image, bbox)
+    dark_ratio = evidence["dark_ratio"]
+    bright_ratio = evidence["bright_ratio"]
+    light_count = evidence["light_count"]
+    light_area = evidence["light_area"]
+    has_light_text = (light_count >= 2 and light_area >= 180) or bright_ratio >= 0.035
+    if overlaps_existing:
+        return dark_ratio >= 0.25 and ((light_count >= 1 and light_area >= 60) or bright_ratio >= 0.025)
+    return dark_ratio >= 0.35 and has_light_text
+
+
+def _copy_balloon_with_bbox(balloon: Balloon, bbox: BBox) -> Balloon:
+    return Balloon(
+        strip_bbox=bbox,
+        confidence=float(balloon.confidence),
+        lobe_count=int(balloon.lobe_count),
+        metadata=dict(getattr(balloon, "metadata", {}) or {}),
+    )
+
+
+def _expand_sparse_dark_negative_candidate(image: np.ndarray, bbox: BBox, *, confidence: float) -> BBox:
+    if confidence < 0.70:
+        return bbox
+    box_w = max(1, bbox.x2 - bbox.x1)
+    box_h = max(1, bbox.y2 - bbox.y1)
+    if box_w > 260 or box_h > 60:
+        return bbox
+    evidence = _dark_light_text_evidence(image, bbox)
+    if evidence["dark_ratio"] < 0.45 or evidence["bright_ratio"] < 0.08:
+        return bbox
+    height, width = image.shape[:2]
+    pad_left = max(90, int(round(box_w * 0.70)))
+    pad_right = max(80, int(round(box_w * 0.55)))
+    pad_top = max(260, int(round(box_h * 6.0)))
+    pad_bottom = max(90, int(round(box_h * 1.6)))
+    expanded = BBox(
+        max(0, bbox.x1 - pad_left),
+        max(0, bbox.y1 - pad_top),
+        min(width, bbox.x2 + pad_right),
+        min(height, bbox.y2 + pad_bottom),
+    )
+    expanded_evidence = _dark_light_text_evidence(image, expanded)
+    if expanded_evidence["dark_ratio"] < 0.35:
+        return bbox
+    if expanded_evidence["light_area"] < max(90, int(evidence["light_area"] * 0.65)):
+        return bbox
+    return expanded
+
+
+def _merge_negative_detect_candidates(
+    image: np.ndarray,
+    current: list[Balloon],
+    candidates: list[Balloon],
+) -> list[Balloon]:
+    if not candidates:
+        return current
+
+    merged = list(current)
+    for candidate in candidates:
+        candidate_metadata = dict(getattr(candidate, "metadata", {}) or {})
+        if candidate_metadata.get("negative_detect_candidate"):
+            expanded_bbox = _expand_sparse_dark_negative_candidate(
+                image,
+                candidate.strip_bbox,
+                confidence=float(candidate.confidence),
+            )
+            if expanded_bbox != candidate.strip_bbox:
+                candidate_metadata["dark_sparse_text_candidate_expanded"] = {
+                    "from": [
+                        int(candidate.strip_bbox.x1),
+                        int(candidate.strip_bbox.y1),
+                        int(candidate.strip_bbox.x2),
+                        int(candidate.strip_bbox.y2),
+                    ],
+                    "to": [int(expanded_bbox.x1), int(expanded_bbox.y1), int(expanded_bbox.x2), int(expanded_bbox.y2)],
+                }
+                candidate = Balloon(
+                    strip_bbox=expanded_bbox,
+                    confidence=float(candidate.confidence),
+                    lobe_count=int(candidate.lobe_count),
+                    metadata=candidate_metadata,
+                )
+        if not _negative_detect_candidate_is_useful(image, candidate.strip_bbox, merged):
+            continue
+
+        best_index = -1
+        best_score = 0.0
+        for index, existing in enumerate(merged):
+            score = max(
+                _iou(candidate.strip_bbox, existing.strip_bbox),
+                _bbox_intersection_ratio(candidate.strip_bbox, existing.strip_bbox),
+            )
+            if score > best_score:
+                best_score = score
+                best_index = index
+
+        if best_index >= 0 and best_score >= 0.25:
+            existing = merged[best_index]
+            union = _bbox_union([existing.strip_bbox, candidate.strip_bbox])
+            if union is None:
+                continue
+            metadata = dict(getattr(existing, "metadata", {}) or {})
+            metadata.update(dict(getattr(candidate, "metadata", {}) or {}))
+            merged[best_index] = Balloon(
+                strip_bbox=union,
+                confidence=max(float(existing.confidence), float(candidate.confidence)),
+                lobe_count=max(int(existing.lobe_count), int(candidate.lobe_count)),
+                metadata=metadata,
+            )
+        else:
+            merged.append(candidate)
+    return merged
+
+
+def _scan_ui_layout_band_candidates(
+    image: np.ndarray,
+    existing: list[Balloon],
+    *,
+    y_offset: int = 0,
+) -> list[Balloon]:
+    """Add UI/form panels as band candidates before OCR crops are created."""
+    if image.size == 0:
+        return []
+    height, width = image.shape[:2]
+    if height <= 0 or width <= 0:
+        return []
+
+    try:
+        from vision_stack.ui_layout import detect_uied_like_components
+    except Exception:
+        return []
+
+    local_existing = [
+        Balloon(
+            strip_bbox=BBox(
+                b.strip_bbox.x1,
+                b.strip_bbox.y1 - y_offset,
+                b.strip_bbox.x2,
+                b.strip_bbox.y2 - y_offset,
+            ),
+            confidence=b.confidence,
+        )
+        for b in existing
+        if b.strip_bbox.y2 > y_offset and b.strip_bbox.y1 < y_offset + height
+    ]
+
+    added: list[Balloon] = []
+    image_area = max(1, width * height)
+    for component in detect_uied_like_components(image):
+        x1, y1, x2, y2 = [int(v) for v in component.bbox]
+        box = BBox(max(0, x1), max(0, y1), min(width, x2), min(height, y2))
+        if box.width < 48 or box.height < 12:
+            continue
+        area = _bbox_area(box)
+        if area < 480 or area > int(image_area * 0.28):
+            continue
+        if any(
+            _iou(box, existing_box.strip_bbox) >= 0.45
+            or _bbox_contains_center(existing_box.strip_bbox, box, margin=14)
+            for existing_box in local_existing
+        ):
+            continue
+        confidence = max(0.52, min(0.86, float(component.confidence)))
+        added.append(
+            Balloon(
+                strip_bbox=BBox(
+                    box.x1,
+                    box.y1 + y_offset,
+                    box.x2,
+                    box.y2 + y_offset,
+                ),
+                confidence=confidence,
+            )
+        )
+        local_existing.append(Balloon(strip_bbox=box, confidence=confidence))
+
+    return added
+
+
 def _split_into_chunks(
     strip_height: int,
     chunk_height: int = 4096,
@@ -447,6 +916,7 @@ def detect_strip_balloons(
     for y0, y1 in chunks:
         chunk_img = strip.image[y0:y1, :, :]
         blocks = detector.detect(chunk_img, conf_threshold=confidence_threshold)
+        chunk_balloons: list[Balloon] = []
         for b in blocks:
             bbox = BBox(
                 x1=int(b.x1),
@@ -454,35 +924,151 @@ def detect_strip_balloons(
                 x2=int(b.x2),
                 y2=int(b.y2) + y0,
             )
-            all_balloons.append(
+            chunk_balloons.append(
                 Balloon(strip_bbox=bbox, confidence=float(b.confidence))
             )
+        all_balloons.extend(chunk_balloons)
         if _white_balloon_band_scan_enabled():
-            all_balloons.extend(
-                _scan_white_balloon_band_candidates(
-                    chunk_img,
-                    all_balloons,
-                    y_offset=y0,
-                )
+            added = _scan_white_balloon_band_candidates(
+                chunk_img,
+                all_balloons,
+                y_offset=y0,
             )
+            all_balloons.extend(added)
+        if _dark_balloon_band_scan_enabled():
+            added = _scan_dark_balloon_band_candidates(
+                chunk_img,
+                all_balloons,
+                y_offset=y0,
+            )
+            all_balloons.extend(added)
+        if _ui_layout_band_scan_enabled():
+            added = _scan_ui_layout_band_candidates(
+                chunk_img,
+                all_balloons,
+                y_offset=y0,
+            )
+            all_balloons.extend(added)
+        if _negative_detect_merge_enabled() and chunk_img.size:
+            negative_blocks = detector.detect(cv2.bitwise_not(chunk_img), conf_threshold=confidence_threshold)
+            negative_balloons = [
+                Balloon(
+                    strip_bbox=BBox(
+                        x1=int(b.x1),
+                        y1=int(b.y1) + y0,
+                        x2=int(b.x2),
+                        y2=int(b.y2) + y0,
+                    ),
+                    confidence=float(b.confidence),
+                )
+                for b in negative_blocks
+            ]
+            if negative_balloons:
+                local_existing = [
+                    Balloon(
+                        strip_bbox=BBox(
+                            item.strip_bbox.x1,
+                            item.strip_bbox.y1 - y0,
+                            item.strip_bbox.x2,
+                            item.strip_bbox.y2 - y0,
+                        ),
+                        confidence=item.confidence,
+                        lobe_count=item.lobe_count,
+                        metadata=dict(getattr(item, "metadata", {}) or {}),
+                    )
+                    for item in all_balloons
+                    if item.strip_bbox.y2 > y0 and item.strip_bbox.y1 < y1
+                ]
+                local_negative = [
+                    Balloon(
+                        strip_bbox=BBox(
+                            item.strip_bbox.x1,
+                            item.strip_bbox.y1 - y0,
+                            item.strip_bbox.x2,
+                            item.strip_bbox.y2 - y0,
+                        ),
+                        confidence=item.confidence,
+                        lobe_count=item.lobe_count,
+                        metadata=dict(getattr(item, "metadata", {}) or {}),
+                    )
+                    for item in negative_balloons
+                ]
+                for item in local_negative:
+                    item.metadata.update(_dark_negative_candidate_metadata(chunk_img, item.strip_bbox))
+                local_merged = _merge_negative_detect_candidates(
+                    chunk_img,
+                    local_existing,
+                    local_negative,
+                )
+                all_balloons = [
+                    item
+                    for item in all_balloons
+                    if not (item.strip_bbox.y2 > y0 and item.strip_bbox.y1 < y1)
+                ]
+                all_balloons.extend(
+                    Balloon(
+                        strip_bbox=BBox(
+                            item.strip_bbox.x1,
+                            item.strip_bbox.y1 + y0,
+                            item.strip_bbox.x2,
+                            item.strip_bbox.y2 + y0,
+                        ),
+                        confidence=item.confidence,
+                        lobe_count=item.lobe_count,
+                        metadata=dict(getattr(item, "metadata", {}) or {}),
+                    )
+                    for item in local_merged
+                )
 
     after_nms = _nms_balloons(all_balloons, iou_threshold=iou_threshold)
 
     # Filtro pós-NMS: descartar false-positives gigantes
     filtered = []
     for balloon in after_nms:
+        expanded_bbox = _expand_sparse_dark_negative_candidate(
+            strip.image,
+            balloon.strip_bbox,
+            confidence=float(balloon.confidence),
+        )
+        if expanded_bbox != balloon.strip_bbox:
+            metadata = dict(getattr(balloon, "metadata", {}) or {})
+            metadata["dark_sparse_text_candidate_expanded"] = {
+                "from": [
+                    int(balloon.strip_bbox.x1),
+                    int(balloon.strip_bbox.y1),
+                    int(balloon.strip_bbox.x2),
+                    int(balloon.strip_bbox.y2),
+                ],
+                "to": [int(expanded_bbox.x1), int(expanded_bbox.y1), int(expanded_bbox.x2), int(expanded_bbox.y2)],
+            }
+            balloon = Balloon(
+                strip_bbox=expanded_bbox,
+                confidence=float(balloon.confidence),
+                lobe_count=int(balloon.lobe_count),
+                metadata=metadata,
+            )
         filter_height = (
             _source_page_height_for_bbox(strip, balloon.strip_bbox)
             if chunk_mode == "source_page"
             else strip.height
         )
-        if not _is_oversized(
+        dark_negative_candidate = bool((getattr(balloon, "metadata", {}) or {}).get("negative_detect_candidate"))
+        oversized = _is_oversized(
             balloon.strip_bbox,
             strip.width,
             filter_height,
             max_height_fraction,
             max_width_fraction,
-        ):
+        )
+        if oversized and dark_negative_candidate:
+            oversized = _is_oversized(
+                balloon.strip_bbox,
+                strip.width,
+                filter_height,
+                max(max_height_fraction, 0.55),
+                max_width_fraction,
+            )
+        if not oversized:
             filtered.append(balloon)
     return sorted(
         filtered,

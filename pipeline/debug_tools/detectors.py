@@ -26,7 +26,7 @@ SUSPECT_OCR_TOKENS: set[str] = {
     "AU",
 }
 
-SFX_MARKER_PATTERN = re.compile(r"\bSFX\s*:", re.IGNORECASE)
+SFX_MARKER_PATTERN = re.compile(r"\bSFX(?:\s*:?\s*[A-Za-z0-9'_-]+)?", re.IGNORECASE)
 MOJIBAKE_PATTERN = re.compile(
     # Double-encoded UTF-8 markers such as "VOCÃƒÅ ", "JÃƒï¿½",
     # or "CÃ‚NCER". Do not flag valid Portuguese letters like Ã/Â
@@ -46,9 +46,19 @@ MOJIBAKE_PATTERN = re.compile(
     r"(?:\u00c3[\u0080-\u00bf\u0100-\u017f\u0192\u201a-\u2026\u2030\u20ac])"
     r"|(?:\u00c2[\u0080-\u00bf])"
     r"|(?:\u00e2[\u0080-\u009f\u20ac][^\s]{0,2})"
+    r"|(?:[\u0102\u0103\u0118\u0119])"
     r"|(?:\ufffd)"
     r"|(?:[\ud800-\udfff])",
     re.UNICODE,
+)
+
+CP1250_PORTUGUESE_MOJIBAKE = str.maketrans(
+    {
+        "\u0102": "\u00c3",  # NĂO -> NÃO, MĂE -> MÃE
+        "\u0103": "\u00e3",
+        "\u0118": "\u00ca",  # VOCĘ -> VOCÊ, TRĘS -> TRÊS
+        "\u0119": "\u00ea",
+    }
 )
 
 
@@ -91,6 +101,12 @@ def _decode_cp1252_utf8_once(text: str) -> str | None:
 def fix_mojibake(text: str, *, max_passes: int = 3) -> str:
     current = str(text or "")
     for _ in range(max(1, max_passes)):
+        translated = current.translate(CP1250_PORTUGUESE_MOJIBAKE)
+        if translated != current:
+            current = translated
+            if not has_mojibake(current):
+                break
+            continue
         decoded = _decode_cp1252_utf8_once(current)
         if decoded is None or decoded == current:
             break

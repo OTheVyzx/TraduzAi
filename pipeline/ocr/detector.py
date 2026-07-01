@@ -3,37 +3,40 @@ OCR entrypoint for the active visual stack.
 
 The previous OCR implementation is preserved in `ocr_legacy/`.
 This module now routes `run_ocr()` through the new detector -> OCR stack
-and falls back to the legacy path only if the new stack fails.
+and fails closed if that stack cannot run.
 """
 
 from __future__ import annotations
 
 import logging
 
-from ocr_legacy.detector import _check_gpu, _get_reader, _preprocess, _run_primary_regions
-from ocr_legacy.detector import run_ocr as run_legacy_ocr
-from ocr_legacy.recognizer_paddle import is_paddle_available, run_paddle_primary_recognition
-from ocr_legacy.recognizer_primary import run_primary_recognition
+from ocr_legacy.detector import _check_gpu
+from ocr_legacy.recognizer_paddle import (
+    OcrBackendUnavailable,
+    is_paddle_available,
+    run_paddle_primary_recognition,
+)
 from vision_stack.runtime import run_detect_ocr
 
 logger = logging.getLogger(__name__)
 
 
 def _run_primary_regions(reader, image_bgr, preprocessed_image) -> list[dict]:
+    del reader, preprocessed_image
     if is_paddle_available():
         try:
             paddle_runs = run_paddle_primary_recognition(image_bgr, use_gpu=_check_gpu())
             if paddle_runs:
                 return paddle_runs
-            logger.warning("PaddleOCR retornou vazio; removendo EasyOCR fallback conforme solicitado.")
+            raise OcrBackendUnavailable("PaddleOCR retornou vazio; EasyOCR fallback removido.")
+        except OcrBackendUnavailable:
+            raise
         except Exception as exc:
-            logger.warning("PaddleOCR falhou, e o fallback para EasyOCR foi removido: %s", exc)
-            raise exc
+            raise OcrBackendUnavailable(
+                f"PaddleOCR falhou; EasyOCR fallback removido: {exc}"
+            ) from exc
     
-    # Se nem PaddleOCR está disponivel, vamos ver se o user ainda quer o EasyOCR como primario.
-    # Mas o user disse "retire o easyocr de fallback", entao vamos falhar aqui tbm se não tiver Paddle?
-    # Actually, legacy still uses easyocr intentionally if paddle is not available.
-    return run_primary_recognition(reader, preprocessed_image)
+    raise OcrBackendUnavailable("PaddleOCR indisponivel; EasyOCR fallback removido.")
 
 
 def run_ocr(
@@ -62,12 +65,8 @@ def run_ocr(
             work_title_user_provided=work_title_user_provided,
         )
     except Exception as exc:
-        logger.warning("Novo stack visual falhou no OCR, fallback para legacy: %s", exc)
-        return run_legacy_ocr(
-            image_path=image_path,
-            models_dir=models_dir,
-            profile=profile,
-        )
+        logger.error("Novo stack visual falhou no OCR; sem fallback para legacy/EasyOCR: %s", exc)
+        raise
 
 
 def run_ocr_on_block(
@@ -122,6 +121,8 @@ def run_ocr_on_block(
                 ]
                 if text:
                     return text, float(np.mean(confidences)) if confidences else 0.0
+        except OcrBackendUnavailable:
+            raise
         except Exception as exc:
             logger.warning("OCR regional com preset %s falhou; fallback PaddleOCR crop: %s", engine_preset_id, exc)
         finally:
@@ -136,5 +137,5 @@ def run_ocr_on_block(
             text = " ".join([r["text"] for r in results])
             conf = np.mean([r["confidence"] for r in results])
             return text, float(conf)
-            
-    return "", 0.0
+
+    raise OcrBackendUnavailable("PaddleOCR indisponivel; OCR regional nao pode usar EasyOCR.")

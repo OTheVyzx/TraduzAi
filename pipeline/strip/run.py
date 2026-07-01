@@ -140,7 +140,12 @@ def _strip_band_margin_px(idioma_origem: str = "") -> int:
             return max(0, int(raw))
         except ValueError:
             pass
-    return 96
+    # Dark/black balloons and burst balloons often have low-contrast outlines;
+    # their detected bbox can start inside the visual bubble, so a 96px band
+    # margin still lets the real balloon/text touch the crop edge.  Keep the
+    # split logic unchanged, but use a safer default crop margin so inpaint and
+    # mask debug receive the whole balloon.
+    return 160
 
 
 @dataclass(frozen=True)
@@ -197,7 +202,18 @@ def _paste_band_attr_into_image(strip_image, bands: list, attr_name: str):
         h_avail = y1 - y0
         if h_avail <= 0:
             continue
-        result[y0:y1, :, :] = band_slice[:h_avail, :, :]
+        source = band_slice[:h_avail, :, :]
+        original_slice = getattr(band, "original_slice", None)
+        if isinstance(original_slice, np.ndarray) and original_slice.shape[:2] == band_slice.shape[:2]:
+            original = original_slice[:h_avail, :, :]
+            changed = np.any(source != original, axis=2)
+            if not np.any(changed):
+                continue
+            target = result[y0:y1, :, :]
+            target[changed] = source[changed]
+            result[y0:y1, :, :] = target
+            continue
+        result[y0:y1, :, :] = source
     return result
 
 
@@ -350,6 +366,12 @@ def _inpaint_block_from_vision_block(block: dict) -> dict | None:
         "_merged_source_bboxes",
         "merged_source_bboxes",
         "balloon_bbox",
+        "bubble_mask_bbox",
+        "bubble_mask_source",
+        "bubble_mask_shape",
+        "bubble_mask_ellipse",
+        "dark_panel_effect_colors",
+        "card_panel_text_context",
         "layout_bbox",
         "block_profile",
         "background_type",
@@ -418,6 +440,12 @@ def _enrich_inpaint_block_from_text_layers(block: dict, texts: list[dict]) -> di
         "bbox",
         "source_bbox",
         "balloon_bbox",
+        "bubble_mask_bbox",
+        "bubble_mask_source",
+        "bubble_mask_shape",
+        "bubble_mask_ellipse",
+        "dark_panel_effect_colors",
+        "card_panel_text_context",
         "layout_bbox",
         "render_policy",
     ):
@@ -688,6 +716,73 @@ def _source_page_number_for_band(strip: VerticalStrip, band: Band) -> int:
     return best_page
 
 
+def _sync_record_page_identity_for_output_page(record: dict, page_index: int) -> dict:
+    """Keep final page metadata aligned with the output page that owns the record."""
+    final_page_id = _page_id_for(int(page_index) + 1)
+    previous_page_id = str(record.get("page_id") or "").strip()
+    if previous_page_id and previous_page_id != final_page_id:
+        record.setdefault("source_page_id", previous_page_id)
+    record["page_id"] = final_page_id
+    record["assigned_page_id"] = final_page_id
+    return record
+
+
+def _clamp_record_geometry_to_page(record: dict, *, page_width: int, page_height: int) -> dict:
+    if not isinstance(record, dict):
+        return record
+    max_x = max(1, int(page_width))
+    max_y = max(1, int(page_height))
+
+    def _clamp_bbox(value):
+        if not isinstance(value, (list, tuple)) or len(value) < 4:
+            return None
+        try:
+            x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+        except (TypeError, ValueError):
+            return None
+        x1 = max(0, min(max_x, x1))
+        x2 = max(0, min(max_x, x2))
+        y1 = max(0, min(max_y, y1))
+        y2 = max(0, min(max_y, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1, y1, x2, y2]
+
+    for key in (
+        "bbox",
+        "source_bbox",
+        "text_pixel_bbox",
+        "layout_bbox",
+        "_raw_text_evidence_bbox",
+        "balloon_bbox",
+        "bubble_mask_bbox",
+        "bubble_inner_bbox",
+        "target_bbox",
+        "position_bbox",
+        "capacity_bbox",
+        "layout_safe_bbox",
+        "safe_text_box",
+        "_debug_safe_text_box",
+        "render_bbox",
+    ):
+        clamped = _clamp_bbox(record.get(key))
+        if clamped is not None:
+            record[key] = clamped
+
+    for key in ("balloon_subregions", "connected_lobe_bboxes", "_merged_source_bboxes", "merged_source_bboxes"):
+        values = record.get(key)
+        if not isinstance(values, list):
+            continue
+        clamped_values = []
+        for value in values:
+            clamped = _clamp_bbox(value)
+            if clamped is not None:
+                clamped_values.append(clamped)
+        if clamped_values:
+            record[key] = clamped_values
+    return record
+
+
 def _write_strip_detect_debug_artifacts(
     strip: VerticalStrip,
     bands: list[Band],
@@ -795,6 +890,42 @@ def _bbox_overlap_area(a, b) -> int:
     return ix * iy
 
 
+def _bbox_area_for_match(bbox) -> int:
+    value = _bbox4_or_none(bbox)
+    if value is None:
+        return 0
+    return max(0, value[2] - value[0]) * max(0, value[3] - value[1])
+
+
+def _bbox_center_inside(outer, inner) -> bool:
+    outer_bbox = _bbox4_or_none(outer)
+    inner_bbox = _bbox4_or_none(inner)
+    if outer_bbox is None or inner_bbox is None:
+        return False
+    cx = (inner_bbox[0] + inner_bbox[2]) / 2.0
+    cy = (inner_bbox[1] + inner_bbox[3]) / 2.0
+    return outer_bbox[0] <= cx <= outer_bbox[2] and outer_bbox[1] <= cy <= outer_bbox[3]
+
+
+def _candidate_matches_band_text_bbox(candidate_bbox: list[int], text: dict) -> bool:
+    text_bbox = (
+        text.get("text_pixel_bbox")
+        or text.get("layout_bbox")
+        or text.get("bbox")
+        or text.get("balloon_bbox")
+    )
+    text_area = _bbox_area_for_match(text_bbox)
+    if text_area <= 0:
+        return False
+    overlap = _bbox_overlap_area(candidate_bbox, text_bbox)
+    if overlap <= 0:
+        return False
+    overlap_ratio = overlap / float(text_area)
+    if overlap_ratio >= 0.45:
+        return True
+    return overlap_ratio >= 0.20 and _bbox_center_inside(candidate_bbox, text_bbox)
+
+
 def _write_strip_detect_text_matching_debug_artifacts(
     strip: VerticalStrip,
     bands: list[Band],
@@ -850,17 +981,10 @@ def _write_strip_detect_text_matching_debug_artifacts(
                 matched = [
                     text
                     for text in band_texts
-                    if _bbox_overlap_area(
-                        bbox_page,
-                        text.get("balloon_bbox")
-                        or text.get("layout_bbox")
-                        or text.get("text_pixel_bbox")
-                        or text.get("bbox"),
-                    )
-                    > 0
+                    if _candidate_matches_band_text_bbox(bbox_page, text)
                 ]
                 match_reason = "same_band_bbox_overlap"
-                if not matched and band_texts:
+                if not matched and len(band_texts) == 1:
                     matched = list(band_texts)
                     match_reason = "same_band_fallback"
                 matched_trace_ids = [
@@ -1105,6 +1229,123 @@ def _mark_pipeline_artifact_status(
         page.page_profile["_pipeline_artifacts"] = artifacts
 
 
+_BUBBLE_IMAGE_FALLBACK_SOURCES = frozenset(
+    {
+        "image_white_bubble_mask",
+        "image_rect_bubble_mask",
+        "image_contour_bubble_mask",
+    }
+)
+_BUBBLE_DERIVED_FALLBACK_SOURCES = frozenset(
+    {
+        "bbox_fallback",
+        "balloon_bbox_fallback",
+        "derived_white_crop",
+        "derived_rectangular_balloon",
+        "derived_white_crop_rejected",
+        "image_white_region",
+        "outline_seeded_contour",
+        "rejected_derived_bubble_mask",
+    }
+)
+_BUBBLE_REAL_SOURCES = frozenset(
+    {
+        "real",
+        "real_bubble_mask",
+        "worker_bubble_mask",
+        "speech-bubble-segmentation",
+        "speech_bubble_segmentation",
+    }
+)
+
+
+def _contract_value_present(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, np.ndarray):
+        return bool(value.size > 0 and np.any(value))
+    if isinstance(value, (list, tuple, dict, str, bytes)):
+        return bool(value)
+    return True
+
+
+def _bubble_mask_artifact_status_for_texts(texts: list[dict]) -> tuple[str, str]:
+    saw_real = False
+    saw_image_fallback = False
+    saw_fallback = False
+    saw_text_needing_bubble = False
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        has_text_bbox = _contract_value_present(text.get("bbox")) or _contract_value_present(text.get("text_pixel_bbox"))
+        has_balloon_hint = (
+            _contract_value_present(text.get("balloon_bbox"))
+            or _contract_value_present(text.get("bubble_mask_bbox"))
+            or _contract_value_present(text.get("balloon_polygon"))
+        )
+        if has_text_bbox or has_balloon_hint:
+            saw_text_needing_bubble = True
+        source = str(text.get("bubble_mask_source") or "").strip().lower()
+        error = str(text.get("bubble_mask_error") or "").strip().lower()
+        has_mask_payload = (
+            _contract_value_present(text.get("bubble_mask"))
+            or _contract_value_present(text.get("bubble_mask_path"))
+            or _contract_value_present(text.get("bubble_mask_layer_path"))
+        )
+        if source in _BUBBLE_IMAGE_FALLBACK_SOURCES:
+            saw_image_fallback = True
+            continue
+        if source in _BUBBLE_DERIVED_FALLBACK_SOURCES or error:
+            saw_fallback = True
+            continue
+        if source in _BUBBLE_REAL_SOURCES and has_mask_payload:
+            saw_real = True
+            continue
+        if has_mask_payload and source and source not in _BUBBLE_IMAGE_FALLBACK_SOURCES:
+            saw_real = True
+            continue
+        if has_balloon_hint:
+            saw_fallback = True
+    if saw_image_fallback:
+        return "fallback", "image_fallback_mask"
+    if saw_fallback:
+        return "fallback", "derived_or_bbox_fallback"
+    if saw_real:
+        return "ok", "real_bubble_mask"
+    if saw_text_needing_bubble:
+        return "missing", "missing_real_bubble_mask"
+    return "missing", "no_text_bubble_evidence"
+
+
+def _mark_bubble_mask_artifact_from_contract(page: OutputPage) -> None:
+    if not isinstance(getattr(page, "ocr_result", None), dict):
+        return
+    texts = [text for text in page.ocr_result.get("texts") or [] if isinstance(text, dict)]
+    status, evidence = _bubble_mask_artifact_status_for_texts(texts)
+    _mark_pipeline_artifact_status(page, "BubbleMask", status, producer="speech-bubble-segmentation")
+    artifacts = page.ocr_result.get("_pipeline_artifacts")
+    if isinstance(artifacts, dict) and isinstance(artifacts.get("BubbleMask"), dict):
+        artifacts["BubbleMask"]["evidence"] = evidence
+    for band_entry in page.ocr_result.get("_pipeline_artifacts_by_band") or []:
+        if not isinstance(band_entry, dict):
+            continue
+        band_id = str(band_entry.get("band_id") or "")
+        band_texts = [text for text in texts if str(text.get("band_id") or "") == band_id] if band_id else texts
+        if band_id and not band_texts and not any(str(text.get("band_id") or "") for text in texts):
+            band_texts = texts
+        band_status, band_evidence = _bubble_mask_artifact_status_for_texts(band_texts)
+        band_artifacts = band_entry.get("artifacts")
+        if not isinstance(band_artifacts, dict):
+            continue
+        band_bubble = band_artifacts.get("BubbleMask")
+        if not isinstance(band_bubble, dict):
+            band_bubble = {"producer": "speech-bubble-segmentation"}
+            band_artifacts["BubbleMask"] = band_bubble
+        band_bubble["status"] = band_status
+        band_bubble["evidence"] = band_evidence
+        band_bubble["updated_by"] = "strip_pipeline"
+
+
 def _mark_pipeline_artifacts_after_render(output_pages: list[OutputPage]) -> None:
     for page in output_pages:
         inpaint_status = "ok" if isinstance(getattr(page, "inpainted_image", None), np.ndarray) else "skipped"
@@ -1116,6 +1357,7 @@ def _mark_pipeline_artifacts_after_render(output_pages: list[OutputPage]) -> Non
             render_status,
             producer="traduzai-typesetter",
         )
+        _mark_bubble_mask_artifact_from_contract(page)
 
 
 def _get_debug_recorder():
@@ -1259,6 +1501,73 @@ def _write_page_cleanup_breakdown_debug(breakdown: dict[str, float]) -> None:
         return
 
 
+def _dark_text_cleanup_loses_visible_ink(
+    before: np.ndarray,
+    after: np.ndarray,
+    page_texts: list[dict],
+) -> bool:
+    if not isinstance(before, np.ndarray) or not isinstance(after, np.ndarray):
+        return False
+    if before.shape != after.shape or before.ndim < 3:
+        return False
+
+    def _bbox4(value) -> list[int] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            return None
+        try:
+            x1, y1, x2, y2 = [int(round(float(v))) for v in value]
+        except Exception:
+            return None
+        h, w = before.shape[:2]
+        x1, x2 = max(0, min(w, x1)), max(0, min(w, x2))
+        y1, y2 = max(0, min(h, y1)), max(0, min(h, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1, y1, x2, y2]
+
+    def _bright_ink(image: np.ndarray, bbox: list[int]) -> int:
+        x1, y1, x2, y2 = bbox
+        crop = image[y1:y2, x1:x2, :3]
+        if crop.size == 0:
+            return 0
+        bright = (crop[:, :, 0] >= 170) & (crop[:, :, 1] >= 170) & (crop[:, :, 2] >= 170)
+        return int(np.count_nonzero(bright))
+
+    for text in page_texts or []:
+        if not isinstance(text, dict):
+            continue
+        flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        dark_text = bool(
+            source in {"image_dark_bubble_mask", "image_dark_panel_mask"}
+            or flags
+            & {
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_bubble_oval_reocr",
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "auto_dark_panel_glow_fallback",
+            }
+        )
+        if not dark_text:
+            continue
+        bbox = _bbox4(
+            text.get("safe_text_box")
+            or text.get("render_bbox")
+            or text.get("balloon_bbox")
+            or text.get("bubble_mask_bbox")
+            or text.get("bbox")
+        )
+        if bbox is None:
+            continue
+        before_ink = _bright_ink(before, bbox)
+        if before_ink < 160:
+            continue
+        after_ink = _bright_ink(after, bbox)
+        if after_ink < int(before_ink * 0.52):
+            return True
+    return False
+
+
 def _write_contact_sheets_debug(
     original_pages: list[OutputPage],
     output_pages: list[OutputPage],
@@ -1282,11 +1591,106 @@ def _write_contact_sheets_debug(
         return
 
 
+def _band_debug_id(band: Band, fallback_index: int) -> str:
+    ocr_result = getattr(band, "ocr_result", None)
+    if isinstance(ocr_result, dict):
+        raw = ocr_result.get("_band_id") or ocr_result.get("band_id")
+        if raw:
+            return str(raw)
+        for text in list(ocr_result.get("texts") or []):
+            if isinstance(text, dict) and text.get("band_id"):
+                return str(text["band_id"])
+        for block in list(ocr_result.get("_vision_blocks") or []):
+            if isinstance(block, dict) and block.get("band_id"):
+                return str(block["band_id"])
+        source_page_number = ocr_result.get("_source_page_number") or ocr_result.get("source_page_number")
+        if source_page_number:
+            return _band_id_for(int(source_page_number), fallback_index)
+    return _band_id_for(1, fallback_index)
+
+
+def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Band]) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    try:
+        trace_ids_by_page = {
+            page_index: _trace_ids_by_band_from_page(page)
+            for page_index, page in enumerate(output_pages)
+        }
+        for band_index, band in enumerate(bands):
+            band_id = _band_debug_id(band, band_index)
+            rendered = getattr(band, "rendered_slice", None)
+            rendered_rel = f"09_typeset/rendered_bands/{band_id}.jpg"
+            if isinstance(rendered, np.ndarray) and rendered.size:
+                recorder.write_image(rendered_rel, rendered, quality=92)
+
+            best_page_index = None
+            best_overlap = 0
+            band_y_top = int(getattr(band, "y_top", 0) or 0)
+            band_y_bottom = int(getattr(band, "y_bottom", 0) or 0)
+            for page_index, page in enumerate(output_pages):
+                overlap = max(
+                    0,
+                    min(band_y_bottom, int(getattr(page, "y_bottom", 0) or 0))
+                    - max(band_y_top, int(getattr(page, "y_top", 0) or 0)),
+                )
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_page_index = page_index
+            if best_page_index is None or best_overlap <= 0:
+                continue
+
+            page = output_pages[best_page_index]
+            image = getattr(page, "image", None)
+            if not isinstance(image, np.ndarray) or image.ndim < 2 or image.size == 0:
+                continue
+            page_y_top = int(getattr(page, "y_top", 0) or 0)
+            crop_y1 = max(0, band_y_top - page_y_top)
+            crop_y2 = min(int(image.shape[0]), band_y_bottom - page_y_top)
+            if crop_y2 <= crop_y1:
+                continue
+            crop = image[crop_y1:crop_y2, :, :]
+            if crop.size == 0:
+                continue
+
+            final_rel = f"10_copyback_reassemble/final_bands/{band_id}.jpg"
+            recorder.write_image(final_rel, crop, quality=92)
+            output_name = (
+                Path(getattr(page, "path")).name
+                if getattr(page, "path", None)
+                else f"{best_page_index + 1:03d}.jpg"
+            )
+            recorder.write_jsonl(
+                "10_copyback_reassemble/final_band_crops.jsonl",
+                {
+                    "band_id": band_id,
+                    "translated_output_page": output_name,
+                    "output_page_number": int(best_page_index + 1),
+                    "output_page_y_top": page_y_top,
+                    "output_page_y_bottom": int(getattr(page, "y_bottom", 0) or 0),
+                    "band_y_top": band_y_top,
+                    "band_y_bottom": band_y_bottom,
+                    "crop_bbox_in_translated_page": [0, crop_y1, int(image.shape[1]), crop_y2],
+                    "final_crop_path": final_rel,
+                    "rendered_band_path": rendered_rel,
+                    "trace_ids": list(trace_ids_by_page.get(best_page_index, {}).get(band_id, [])),
+                },
+            )
+    except Exception:
+        return
+
+
 def _debug_skip_page_cleanup_rerender() -> bool:
     rerender = os.getenv("TRADUZAI_PAGE_CLEANUP_RERENDER")
     if rerender is not None:
         return str(rerender).strip().lower() in {"0", "false", "no", "off"}
     raw = os.getenv("TRADUZAI_DEBUG_SKIP_PAGE_CLEANUP_RERENDER", "")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _strip_final_page_space_typeset_enabled() -> bool:
+    raw = os.getenv("TRADUZAI_STRIP_FINAL_PAGE_SPACE_TYPESET", "")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -2459,6 +2863,68 @@ def _apply_page_cleanup_background_delta(
     return result
 
 
+def _restore_rendered_text_regions_after_page_clamp(
+    rendered_image: np.ndarray,
+    clamped_rendered: np.ndarray,
+    page_texts: list[dict] | None,
+) -> np.ndarray:
+    if (
+        not isinstance(rendered_image, np.ndarray)
+        or not isinstance(clamped_rendered, np.ndarray)
+        or rendered_image.shape != clamped_rendered.shape
+        or rendered_image.size == 0
+    ):
+        return clamped_rendered
+    height, width = rendered_image.shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for text in page_texts or []:
+        if not isinstance(text, dict):
+            continue
+        source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        if source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+            for key in ("bubble_mask_bbox", "balloon_bbox"):
+                bbox = _shift_bbox_y(text.get(key), 0)
+                if bbox is None:
+                    continue
+                x1, y1, x2, y2 = bbox
+                x1 = max(0, min(width, int(x1) + 1))
+                x2 = max(0, min(width, int(x2) - 1))
+                y1 = max(0, min(height, int(y1) + 1))
+                y2 = max(0, min(height, int(y2) - 1))
+                if x2 > x1 and y2 > y1:
+                    mask[y1:y2, x1:x2] = 255
+                    break
+        for key in (
+            "render_bbox",
+            "_debug_render_bbox",
+            "safe_text_box",
+            "_debug_safe_text_box",
+            "target_bbox",
+            "position_bbox",
+            "text_pixel_bbox",
+            "bbox",
+        ):
+            bbox = _shift_bbox_y(text.get(key), 0)
+            if bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            bw = max(1, int(x2) - int(x1))
+            bh = max(1, int(y2) - int(y1))
+            pad = max(2, min(10, int(round(max(bw, bh) * 0.04))))
+            x1 = max(0, min(width, int(x1) - pad))
+            x2 = max(0, min(width, int(x2) + pad))
+            y1 = max(0, min(height, int(y1) - pad))
+            y2 = max(0, min(height, int(y2) + pad))
+            if x2 > x1 and y2 > y1:
+                mask[y1:y2, x1:x2] = 255
+            break
+    if not np.any(mask):
+        return clamped_rendered
+    result = clamped_rendered.copy()
+    result[mask > 0] = rendered_image[mask > 0]
+    return result
+
+
 def _cleanup_page_inpaint_and_rerender(
     *,
     original_image,
@@ -2539,6 +3005,164 @@ def _cleanup_page_inpaint_and_rerender(
         return clean_image, rendered_image, False
 
 
+def _dark_visual_text_cleanup_mask(shape: tuple[int, int], text: dict) -> np.ndarray | None:
+    height, width = shape
+    if height <= 0 or width <= 0 or not isinstance(text, dict):
+        return None
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    dark_sources = {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
+    rejected_visual_sources = {"derived_white_crop_rejected", "rejected_derived_bubble_mask"}
+    colors = text.get("dark_panel_effect_colors") if isinstance(text.get("dark_panel_effect_colors"), dict) else {}
+    has_visual_colors = isinstance(colors, dict) and isinstance(colors.get("panel_fill_rgb"), (list, tuple))
+    if source not in dark_sources and not (source in rejected_visual_sources and has_visual_colors):
+        return None
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    def _mark_polygon(points) -> None:
+        if not isinstance(points, (list, tuple)) or len(points) < 3:
+            return
+        clipped: list[list[int]] = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                return
+            try:
+                x = max(0, min(width - 1, int(round(float(point[0])))))
+                y = max(0, min(height - 1, int(round(float(point[1])))))
+            except Exception:
+                return
+            clipped.append([x, y])
+        if len(clipped) >= 3:
+            cv2.fillPoly(mask, [np.asarray(clipped, dtype=np.int32)], 255)
+
+    polygons = text.get("line_polygons")
+    if isinstance(polygons, (list, tuple)) and polygons:
+        first = polygons[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2 and not (
+            first and isinstance(first[0], (list, tuple))
+        ):
+            _mark_polygon(polygons)
+        else:
+            for polygon in polygons:
+                _mark_polygon(polygon)
+    bbox = _shift_bbox_y(text.get("text_pixel_bbox") or text.get("bbox") or text.get("source_bbox"), 0)
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        pad = 18 if source == "image_dark_bubble_mask" else (16 if source in rejected_visual_sources else 12)
+        x1 = max(0, min(width, int(x1) - pad))
+        x2 = max(0, min(width, int(x2) + pad))
+        y1 = max(0, min(height, int(y1) - pad))
+        y2 = max(0, min(height, int(y2) + pad))
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 255
+    if not np.any(mask):
+        return None
+    kernel_size = 15 if source == "image_dark_bubble_mask" else (13 if source in rejected_visual_sources else 11)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    clip_source = (text.get("bubble_mask_bbox") or text.get("balloon_bbox")) if source in dark_sources else text.get("balloon_bbox")
+    clip_bbox = _shift_bbox_y(clip_source, 0)
+    if clip_bbox is not None:
+        clip = np.zeros((height, width), dtype=np.uint8)
+        x1, y1, x2, y2 = clip_bbox
+        x1 = max(0, min(width, int(x1)))
+        x2 = max(0, min(width, int(x2)))
+        y1 = max(0, min(height, int(y1)))
+        y2 = max(0, min(height, int(y2)))
+        if x2 > x1 and y2 > y1:
+            clip[y1:y2, x1:x2] = 255
+            mask = np.where(clip > 0, mask, 0).astype(np.uint8)
+    return mask if np.any(mask) else None
+
+
+def _dark_visual_cleanup_bubble_bbox_overbroad(text: dict, text_bbox: list[int] | None, bubble_bbox: list[int] | None) -> bool:
+    if not isinstance(text, dict) or text_bbox is None or bubble_bbox is None:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source not in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+        return False
+    text_area = _bbox_area(text_bbox)
+    bubble_area = _bbox_area(bubble_bbox)
+    if text_area <= 0 or bubble_area <= 0:
+        return False
+    tw = max(1, int(text_bbox[2]) - int(text_bbox[0]))
+    th = max(1, int(text_bbox[3]) - int(text_bbox[1]))
+    bw = max(1, int(bubble_bbox[2]) - int(bubble_bbox[0]))
+    bh = max(1, int(bubble_bbox[3]) - int(bubble_bbox[1]))
+    overflow = max(
+        int(text_bbox[0]) - int(bubble_bbox[0]),
+        int(bubble_bbox[2]) - int(text_bbox[2]),
+        int(text_bbox[1]) - int(bubble_bbox[1]),
+        int(bubble_bbox[3]) - int(text_bbox[3]),
+    )
+    area_ratio = bubble_area / float(text_area)
+    width_ratio = bw / float(tw)
+    height_ratio = bh / float(th)
+    return (
+        overflow >= 48
+        and area_ratio >= 4.0
+        and (width_ratio >= 2.25 or height_ratio >= 2.25)
+    )
+
+
+def _apply_dark_visual_text_geometry_cleanup(clean_image, page_texts: list[dict]) -> tuple[object, int]:
+    if not isinstance(clean_image, np.ndarray) or clean_image.ndim != 3:
+        return clean_image, 0
+    result = clean_image.copy()
+    changed_count = 0
+    height, width = result.shape[:2]
+    for text in page_texts or []:
+        if not isinstance(text, dict):
+            continue
+        mask = _dark_visual_text_cleanup_mask((height, width), text)
+        if mask is None or not np.any(mask):
+            continue
+        text_bbox = _shift_bbox_y(text.get("text_pixel_bbox") or text.get("bbox") or text.get("source_bbox"), 0)
+        bubble_bbox = _shift_bbox_y(text.get("bubble_mask_bbox") or text.get("balloon_bbox"), 0)
+        overbroad_bubble_bbox = _dark_visual_cleanup_bubble_bbox_overbroad(text, text_bbox, bubble_bbox)
+        if text_bbox is not None and bubble_bbox is not None and not overbroad_bubble_bbox:
+            tx1, ty1, tx2, ty2 = text_bbox
+            bx1, by1, bx2, by2 = bubble_bbox
+            wx1 = max(0, min(width, min(int(tx1), int(bx1)) - 48))
+            wx2 = max(0, min(width, max(int(tx2), int(bx2)) + 48))
+            wy1 = max(0, min(height, int(ty1) - 48))
+            wy2 = max(0, min(height, min(int(by2), int(ty2) + 72)))
+            bx1 = max(0, min(width, int(bx1) + 6))
+            bx2 = max(0, min(width, int(bx2) - 6))
+            by1 = max(0, min(height, int(by1) + 6))
+            by2 = max(0, min(height, int(by2) - 6))
+            if wx2 > wx1 and wy2 > wy1 and bx2 > bx1 and by2 > by1:
+                window = np.zeros((height, width), dtype=np.uint8)
+                window[max(wy1, by1) : min(wy2, by2), max(wx1, bx1) : min(wx2, bx2)] = 255
+                rgb = result.astype(np.float32)
+                luma = rgb[:, :, 0] * 0.299 + rgb[:, :, 1] * 0.587 + rgb[:, :, 2] * 0.114
+                bright = np.where((window > 0) & (luma >= 96.0), 255, 0).astype(np.uint8)
+                if np.any(bright):
+                    bright = cv2.dilate(
+                        bright,
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+                        iterations=1,
+                    )
+                    mask = np.maximum(mask, bright).astype(np.uint8)
+        colors = text.get("dark_panel_effect_colors") if isinstance(text.get("dark_panel_effect_colors"), dict) else {}
+        source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        if source in {"derived_white_crop_rejected", "rejected_derived_bubble_mask"}:
+            before = result.copy()
+            result = cv2.inpaint(result, mask.astype(np.uint8), 5, cv2.INPAINT_TELEA)
+            changed_count += int(np.count_nonzero(np.any(result != before, axis=2)))
+            continue
+        fill = colors.get("panel_fill_rgb") if isinstance(colors, dict) else None
+        if not isinstance(fill, (list, tuple)) or len(fill) < 3:
+            fill = [0, 0, 0]
+        fill_color = np.asarray(
+            [max(0, min(255, int(round(float(channel))))) for channel in fill[:3]],
+            dtype=np.uint8,
+        )
+        before = result.copy()
+        result[mask > 0] = fill_color
+        changed_count += int(np.count_nonzero(np.any(result != before, axis=2)))
+    return result, changed_count
+
+
 def _cleanup_dark_panel_page_and_rerender(
     *,
     clean_image,
@@ -2559,6 +3183,14 @@ def _cleanup_dark_panel_page_and_rerender(
             breakdown["cleanup_inpaint"] = float(breakdown.get("cleanup_inpaint", 0.0) or 0.0) + (
                 time.perf_counter() - started
             )
+        geometry_clean, geometry_count = _apply_dark_visual_text_geometry_cleanup(fixed_clean, stage_texts)
+        if geometry_count:
+            fixed_clean = geometry_clean
+            count = int(count or 0) + int(geometry_count)
+            if breakdown is not None:
+                breakdown["cleanup_dark_visual_geometry_pixels"] = float(
+                    breakdown.get("cleanup_dark_visual_geometry_pixels", 0.0) or 0.0
+                ) + float(geometry_count)
         if not count or not isinstance(fixed_clean, np.ndarray) or not np.any(cv2.absdiff(clean_image, fixed_clean)):
             return clean_image, rendered_image, False
         started = time.perf_counter()
@@ -2758,6 +3390,16 @@ def _build_page_inpaint_limit_mask(
             return None
         return [min(xs), min(ys), max(xs) + 1, max(ys) + 1]
 
+    def _polygon_count(value) -> int:
+        if not isinstance(value, (list, tuple)) or not value:
+            return 0
+        first = value[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2 and not (
+            first and isinstance(first[0], (list, tuple))
+        ):
+            return 1
+        return sum(1 for item in value if isinstance(item, (list, tuple)) and len(item) >= 3)
+
     def _bbox_gap(a: list[int], b: list[int]) -> int:
         x_gap = max(0, max(int(a[0]) - int(b[2]), int(b[0]) - int(a[2])))
         y_gap = max(0, max(int(a[1]) - int(b[3]), int(b[1]) - int(a[3])))
@@ -2793,14 +3435,47 @@ def _build_page_inpaint_limit_mask(
                 marked = _mark_bbox(reference) or marked
         return marked
 
+    def _mark_single_line_text_bbox(record: dict, geometry_bbox: list[int] | None) -> bool:
+        if _polygon_count(record.get("line_polygons")) != 1:
+            return False
+        reference = _tight_reference_bbox(record.get("text_pixel_bbox"), geometry_bbox)
+        if reference is None:
+            return False
+        return _mark_bbox(reference)
+
+    def _rotation_abs(record: dict) -> float:
+        try:
+            return abs(float(record.get("rotation_deg") or record.get("rotation") or 0.0))
+        except Exception:
+            return 0.0
+
+    def _mark_rotated_source_bbox(record: dict) -> bool:
+        if _rotation_abs(record) < 8.0:
+            return False
+        for key in ("source_bbox", "bbox", "text_pixel_bbox"):
+            if _mark_bbox(record.get(key)):
+                return True
+        return False
+
     for record in records:
         if not isinstance(record, dict):
             continue
+        mask_source = str(record.get("bubble_mask_source") or record.get("balloon_mask_source") or "").strip().lower()
+        if mask_source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+            marked_visual_mask = False
+            for key in ("bubble_mask_bbox", "balloon_bbox", "target_bbox", "position_bbox"):
+                marked_visual_mask = _mark_bbox(record.get(key)) or marked_visual_mask
+            if marked_visual_mask:
+                continue
         geometry_bbox = _bbox_from_polygons(record.get("line_polygons"))
         if geometry_bbox is None:
             geometry_bbox = _shift_bbox_y(record.get("text_pixel_bbox") or record.get("bbox"), 0)
+        if _mark_rotated_source_bbox(record):
+            _mark_polygons(record.get("line_polygons"))
+            continue
         if _mark_polygons(record.get("line_polygons")):
             _mark_tight_reference_bbox(record, geometry_bbox)
+            _mark_single_line_text_bbox(record, geometry_bbox)
             continue
         for key in ("text_pixel_bbox", "layout_bbox", "source_bbox", "bbox"):
             if _mark_bbox(record.get(key)):
@@ -2870,6 +3545,11 @@ def _clamp_page_inpaint_to_mask(
     )
     if clamped_rendered is None:
         clamped_rendered = rendered_image.copy()
+    clamped_rendered = _restore_rendered_text_regions_after_page_clamp(
+        rendered_image,
+        clamped_rendered,
+        page_texts,
+    )
 
     if breakdown is not None:
         breakdown["page_inpaint_clamp_count"] = float(
@@ -4611,6 +5291,14 @@ def run_chapter(
         if "_band_y_top" in local_txt:
             local_txt["_strip_band_y_top"] = int(txt.get("_band_y_top") or 0)
             local_txt["_band_y_top"] = int(local_txt["_strip_band_y_top"]) - int(p_y0)
+        local_txt = _sync_record_page_identity_for_output_page(local_txt, pidx)
+        local_txt["coordinate_space"] = "page"
+        local_txt["source_coordinate_space"] = "page"
+        local_txt = _clamp_record_geometry_to_page(
+            local_txt,
+            page_width=int(page.image.shape[1]) if isinstance(page.image, np.ndarray) and page.image.ndim >= 2 else 0,
+            page_height=int(page.image.shape[0]) if isinstance(page.image, np.ndarray) and page.image.ndim >= 2 else int(page.y_bottom - page.y_top),
+        )
         page.text_layers["texts"].append(local_txt)
 
     # Distribuir vision_blocks igualmente
@@ -4629,6 +5317,14 @@ def run_chapter(
             local_vb["_strip_band_y_top"] = int(vb.get("_band_y_top") or 0)
             local_vb["_band_y_top"] = int(local_vb["_strip_band_y_top"]) - int(p_y0)
         local_vb["bbox"] = [vx1, vy1 - p_y0, vx2, vy2 - p_y0]
+        local_vb = _sync_record_page_identity_for_output_page(local_vb, pidx)
+        local_vb["coordinate_space"] = "page"
+        local_vb["source_coordinate_space"] = "page"
+        local_vb = _clamp_record_geometry_to_page(
+            local_vb,
+            page_width=int(page.image.shape[1]) if isinstance(page.image, np.ndarray) and page.image.ndim >= 2 else 0,
+            page_height=int(page.image.shape[0]) if isinstance(page.image, np.ndarray) and page.image.ndim >= 2 else int(page.y_bottom - page.y_top),
+        )
         page.ocr_result["_vision_blocks"].append(local_vb)
     _add_timing(chapter_telemetry, "assign_metadata_to_pages", time.perf_counter() - assign_started)
 
@@ -4754,6 +5450,12 @@ def run_chapter(
                 did_fix = True
             except Exception:
                 pass
+        if did_fix and _dark_text_cleanup_loses_visible_ink(rendered_base, fixed_rendered, page_texts):
+            cleanup_breakdown["cleanup_rerender_rejected_dark_text_ink_loss"] = float(
+                cleanup_breakdown.get("cleanup_rerender_rejected_dark_text_ink_loss", 0.0) or 0.0
+            ) + 1.0
+            fixed_rendered = rendered_base
+            did_fix = False
         page.inpainted_image = fixed_clean
         if did_fix:
             page.image = fixed_rendered
@@ -4784,7 +5486,7 @@ def run_chapter(
 
     final_page_space_started = time.perf_counter()
     final_page_space_count = 0
-    if not skip_page_cleanup:
+    if not skip_page_cleanup and _strip_final_page_space_typeset_enabled():
         for page in output_pages:
             page_texts = _page_texts_from_text_layers(page.text_layers)
             if not _page_requires_page_space_typeset(page_texts):
@@ -4813,6 +5515,7 @@ def run_chapter(
 
     with _timed(chapter_telemetry, "write_translated_pages"):
         cleanup_breakdown["cleanup_save"] += _write_output_pages_jpegs(output_pages, output_dir)
+    _write_final_band_crop_debug(output_pages, bands)
 
     _write_page_cleanup_breakdown_debug(cleanup_breakdown)
 

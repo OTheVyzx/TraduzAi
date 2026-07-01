@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ocr import ocr_normalizer
 from ocr.ocr_normalizer import normalize_ocr_record
 from ocr.postprocess import is_ocr_truncated_or_joined
 from qa.translation_qa import severity_for_flag
@@ -73,6 +74,11 @@ def test_low_confidence_visual_noise_flag_is_neutral_metadata():
     assert "low_confidence_visual_noise" not in record.get("qa_flags", [])
     assert record.get("content_class") in (None, "", "text", "dialogue")
     assert record["route_action"] == "translate_inpaint_render"
+
+
+def test_ocr_normalizer_has_no_legacy_low_confidence_or_skip_route_helpers():
+    assert not hasattr(ocr_normalizer, "_neutralize_low_confidence_visual_noise_filter")
+    assert not hasattr(ocr_normalizer, "_should_preserve_legacy_skip_route")
 
 
 def test_low_confidence_dialogue_is_retained_even_when_better_duplicate_exists():
@@ -204,6 +210,24 @@ def test_joined_or_truncated_detector_covers_known_ocr_shapes():
     assert is_ocr_truncated_or_joined("lyingil") is True
     assert is_ocr_truncated_or_joined("CPR TS Notecpr") is True
     assert is_ocr_truncated_or_joined("What happened?") is False
+
+
+def test_long_run_on_dialogue_is_retained_for_translation_before_review():
+    record = normalize_ocr_record(
+        {
+            "text": "BEFORE LEAVING WEREN'T YOU FOCUSING MORE ON THE OTHER MARTIALARTSMASTER MIXED IN RATHER THAN HUNWON ART?",
+            "confidence": 0.90,
+            "bbox": [70, 170, 441, 418],
+            "balloon_bbox": [0, 78, 719, 510],
+            "tipo": "fala",
+            "content_class": "dialogue",
+        }
+    )
+
+    assert "ocr_truncated_or_joined" in record["qa_flags"]
+    assert record["route_action"] == "translate_inpaint_render"
+    assert record["route_reason"] == "ocr_truncated_or_joined_retained_for_translation"
+    assert record["skip_processing"] is False
 
 
 def test_ocr_truncated_or_joined_is_high_severity():

@@ -9,6 +9,10 @@ def test_classify_inline_sfx_dialogue_and_split():
     assert split_sfx_inline(text) == ("DON'T HIT MY MOM!", "KICK")
 
 
+def test_classify_compact_inline_sfx_dialogue_and_split():
+    assert split_sfx_inline("DON'T HIT SFXKICK MY MOM!") == ("DON'T HIT MY MOM!", "KICK")
+
+
 def test_classify_tn_note():
     assert classify_content("T/N: thanks for reading", "fala") == ContentClass.TN_NOTE
 

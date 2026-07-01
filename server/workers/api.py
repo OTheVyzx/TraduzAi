@@ -15,7 +15,7 @@ from server.config import Settings
 from server.db import session_scope
 from server.deps import get_settings
 from server.models import Artifact, Job, JobEvent, WorkerHeartbeat, WorkerNode, new_id, utc_now
-from server.queue import claim_next
+from server.queue import claim_next, claim_specific
 from server.storage import delete as delete_storage
 from server.storage import open_for_read
 from server.storage import put_file
@@ -58,6 +58,7 @@ class HeartbeatPayload(BaseModel):
 class ClaimPayload(BaseModel):
     worker_id: str
     capabilities: dict = {}
+    job_id: str | None = None
 
 
 class EventPayload(BaseModel):
@@ -118,7 +119,10 @@ def heartbeat(payload: HeartbeatPayload, settings: Settings = Depends(get_settin
 
 @router.post("/claim-job")
 def claim_job(payload: ClaimPayload, settings: Settings = Depends(get_settings)):
-    job = claim_next(settings, payload.worker_id, payload.capabilities)
+    if payload.job_id:
+        job = claim_specific(settings, payload.worker_id, payload.job_id, payload.capabilities)
+    else:
+        job = claim_next(settings, payload.worker_id, payload.capabilities)
     if job is None:
         return {"job": None}
     with session_scope(settings) as db:

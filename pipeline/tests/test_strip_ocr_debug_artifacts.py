@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from debug_tools import DebugRecorder, bind_recorder
-from strip.run import run_chapter
+from strip.run import _candidate_matches_band_text_bbox, run_chapter
 from strip.process_bands import _band_to_page_dict, process_band
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
@@ -98,6 +98,25 @@ def test_translate_stage_metadata_merge_preserves_band_trace_ids():
     assert merged["_band_id"] == "page_002_band_004"
     assert merged["_band_y_top"] == 1200
     assert merged["texts"][0]["bbox"] == [1, 2, 3, 4]
+
+
+def test_candidate_text_matching_rejects_edge_overlap_from_next_balloon():
+    candidate_bbox = [29, 7109, 642, 7722]
+    lower_balloon_text = {
+        "id": "ocr_003",
+        "text_pixel_bbox": [344, 7702, 540, 7761],
+        "layout_bbox": [344, 7702, 540, 7761],
+        "bbox": [344, 7702, 540, 7761],
+    }
+    top_balloon_text = {
+        "id": "ocr_001",
+        "text_pixel_bbox": [148, 7248, 310, 7268],
+        "layout_bbox": [148, 7248, 310, 7268],
+        "bbox": [148, 7248, 310, 7268],
+    }
+
+    assert _candidate_matches_band_text_bbox(candidate_bbox, top_balloon_text)
+    assert not _candidate_matches_band_text_bbox(candidate_bbox, lower_balloon_text)
 
 
 def test_run_chapter_writes_bands_manifest_with_stable_ids(tmp_path):
@@ -192,6 +211,9 @@ def test_run_chapter_writes_pr16_debug_artifacts(tmp_path):
         assert (root / "10_copyback_reassemble" / "copyback_decisions.jsonl").exists()
         assert (root / "10_copyback_reassemble" / "reassemble_manifest.json").exists()
         assert (root / "10_copyback_reassemble" / "page_cleanup_breakdown.json").exists()
+        assert (root / "09_typeset" / "rendered_bands" / "page_001_band_000.jpg").exists()
+        assert (root / "10_copyback_reassemble" / "final_bands" / "page_001_band_000.jpg").exists()
+        assert (root / "10_copyback_reassemble" / "final_band_crops.jsonl").exists()
         assert (root / "12_contact_sheets" / "translated_comparison.jpg").exists()
         assert (root / "12_contact_sheets" / "problem_bands.jpg").exists()
         assert (root / "02_strip_detect" / "candidate_text_matching.jsonl").exists()
@@ -225,6 +247,56 @@ def test_run_chapter_writes_pr16_debug_artifacts(tmp_path):
         assert decision["text_ids"] == ["ocr_001"]
         assert decision["trace_ids"] == ["ocr_001@page_001_band_000"]
         assert decision["trace_ids_in_band"] == ["ocr_001@page_001_band_000"]
+        final_crop = json.loads(
+            (root / "10_copyback_reassemble" / "final_band_crops.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert final_crop["band_id"] == "page_001_band_000"
+        assert final_crop["translated_output_page"] == "001.jpg"
+        assert final_crop["crop_bbox_in_translated_page"] == [0, 0, 120, 166]
+        assert final_crop["final_crop_path"] == "10_copyback_reassemble/final_bands/page_001_band_000.jpg"
+    finally:
+        bind_recorder(None)
+
+
+def test_process_band_writes_post_typeset_and_copyback_visual_debug(tmp_path):
+    class MarkingTypesetter:
+        def render_band_image(self, image_rgb, _page):
+            out = np.array(image_rgb, copy=True)
+            out[12:40, 10:50] = [0, 0, 0]
+            return out
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[Balloon(BBox(10, 112, 50, 140), confidence=0.87)],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+
+        process_band(
+            band,
+            runtime=FakeRuntime(),
+            translator=FakeTranslator(),
+            inpainter=FakeInpainter(),
+            typesetter=MarkingTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+        root = tmp_path / "debug" / "e2e"
+        assert (root / "09_typeset" / "page_001_band_000" / "post_typeset.jpg").exists()
+        assert (root / "10_copyback_reassemble" / "page_001_band_000" / "post_copyback.jpg").exists()
+        manifest = json.loads(
+            (root / "10_copyback_reassemble" / "page_001_band_000" / "band_crop_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert manifest["band_id"] == "page_001_band_000"
+        assert manifest["post_typeset"] == "09_typeset/page_001_band_000/post_typeset.jpg"
+        assert manifest["post_copyback"] == "10_copyback_reassemble/page_001_band_000/post_copyback.jpg"
     finally:
         bind_recorder(None)
 

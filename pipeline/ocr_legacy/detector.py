@@ -2,8 +2,7 @@
 OCR module for manga pages.
 Current flow:
 - page preprocessing
-- primary EasyOCR full-page pass
-- fallback rereads for low-confidence regions
+- primary PaddleOCR full-page pass
 - local reviewer chooses the best candidate per region
 """
 
@@ -23,13 +22,12 @@ from .postprocess import (
     is_watermark,
     normalize_bbox,
 )
-from .recognizer_fallback import run_fallback_recognition
 from .recognizer_paddle import (
+    OcrBackendUnavailable,
     choose_primary_ocr_engine,
     is_paddle_available,
     run_paddle_primary_recognition,
 )
-from .recognizer_primary import run_primary_recognition
 from .reviewer import choose_best_candidate
 from .semantic_reviewer import semantic_refine_text
 
@@ -69,14 +67,7 @@ QUALITY_TO_PROFILE = {
 
 
 def _get_reader():
-    global _reader
-    if _reader is None:
-        import easyocr
-
-        logger.info("Inicializando EasyOCR...")
-        _reader = easyocr.Reader(["en", "ko"], gpu=_check_gpu(), verbose=False)
-        logger.info("EasyOCR pronto.")
-    return _reader
+    raise OcrBackendUnavailable("EasyOCR esta desativado; PaddleOCR e obrigatorio.")
 
 
 def _check_gpu() -> bool:
@@ -115,9 +106,8 @@ def run_ocr(
     """
     del models_dir
     resolved_profile = QUALITY_TO_PROFILE.get(profile, "quality")
-    ocr_mode = "easyocr"  # Legacy path uses EasyOCR
+    ocr_mode = "paddleocr"
 
-    reader = _get_reader()
     img_cv = cv2.imread(image_path)
     if img_cv is None:
         return {"image": image_path, "width": 0, "height": 0, "texts": []}
@@ -128,7 +118,7 @@ def run_ocr(
     img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
 
     primary_regions = _run_primary_regions(
-        reader=reader,
+        reader=None,
         image_bgr=img_cv,
         preprocessed_image=preprocessed,
     )
@@ -156,14 +146,7 @@ def run_ocr(
             continue
 
         provisional_type = classify_text_type(primary_candidate["text"], bbox, orig_w)
-        fallback_candidates = run_fallback_recognition(
-            reader=reader,
-            image_bgr=img_cv,
-            bbox=bbox,
-            primary_text=primary_candidate["text"],
-            primary_confidence=primary_candidate["confidence"],
-            profile=resolved_profile,
-        )
+        fallback_candidates = []
         chosen = choose_best_candidate(
             primary=primary_candidate,
             fallback_candidates=fallback_candidates,
@@ -215,14 +198,19 @@ def run_ocr(
 
 
 def _run_primary_regions(reader, image_bgr, preprocessed_image) -> list[dict]:
+    del reader, preprocessed_image
     engine = choose_primary_ocr_engine(is_paddle_available())
     if engine == "paddle":
         try:
             paddle_runs = run_paddle_primary_recognition(image_bgr, use_gpu=_check_gpu())
             if paddle_runs:
                 return paddle_runs
-            logger.warning("PaddleOCR retornou vazio; usando EasyOCR como fallback.")
+            raise OcrBackendUnavailable("PaddleOCR retornou vazio; EasyOCR fallback removido.")
+        except OcrBackendUnavailable:
+            raise
         except Exception as exc:
-            logger.warning("PaddleOCR falhou, fallback para EasyOCR: %s", exc)
+            raise OcrBackendUnavailable(
+                f"PaddleOCR falhou; EasyOCR fallback removido: {exc}"
+            ) from exc
 
-    return run_primary_recognition(reader, preprocessed_image)
+    raise OcrBackendUnavailable("PaddleOCR indisponivel; EasyOCR fallback removido.")

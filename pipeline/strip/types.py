@@ -54,6 +54,7 @@ class Balloon:
     strip_bbox: BBox
     confidence: float
     lobe_count: int = 1
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass

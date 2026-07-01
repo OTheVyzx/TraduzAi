@@ -268,3 +268,81 @@ class TestCopyBackExpandedBbox:
         assert result[50, 100, 0] == 200
         # Fora do balloon → original
         assert result[5, 5, 0] == 50
+
+    def test_copy_back_preserves_render_bbox_when_balloon_bbox_collapses_to_text(self):
+        """Texto renderizado fora do bbox original nao pode ser apagado pelo copyback."""
+        from strip.process_bands import _apply_copy_back_outside_balloons
+        from strip.types import Band
+
+        original = np.zeros((220, 420, 3), dtype=np.uint8)
+        rendered = original.copy()
+
+        # Simula texto branco renderizado que cresceu para cima/baixo do bbox
+        # original, como nos baloes escuros conectados com geometria colapsada.
+        rendered[58:166, 80:340] = 255
+
+        band = Band(
+            y_top=16468,
+            y_bottom=16688,
+            balloons=[],
+            original_slice=original.copy(),
+            rendered_slice=rendered.copy(),
+        )
+        ocr_page = {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "bbox": [110, 90, 310, 130],
+                    "balloon_bbox": [110, 90, 310, 130],
+                    "text_pixel_bbox": [110, 90, 310, 130],
+                    "render_bbox": [80, 58, 340, 166],
+                    "safe_text_box": [70, 50, 350, 176],
+                    "qa_flags": [
+                        "visual_text_only_inpaint_contract",
+                        "dark_bubble_visual_glyph_mask_replaced_geometry",
+                    ],
+                }
+            ]
+        }
+
+        result = _apply_copy_back_outside_balloons(
+            band,
+            balloon_margin=0,
+            ocr_page=ocr_page,
+            rendered_slice=rendered,
+        )
+
+        assert result[60, 100, 0] == 255
+        assert result[164, 320, 0] == 255
+        assert result[10, 10, 0] == 0
+
+    def test_typeset_stage_keeps_render_geometry_for_copyback(self):
+        """O copyback deve receber render_bbox/safe_text_box produzidos no typeset."""
+        from strip.process_bands import _run_typeset_stage
+
+        class FakeTypesetter:
+            def render_band_image(self, image, page):
+                page["texts"][0]["render_bbox"] = [80, 58, 340, 166]
+                page["texts"][0]["safe_text_box"] = [70, 50, 350, 176]
+                return image.copy()
+
+        translated_page = {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "translated": "TEXTO",
+                    "bbox": [110, 90, 310, 130],
+                    "balloon_bbox": [110, 90, 310, 130],
+                }
+            ]
+        }
+        image = np.zeros((220, 420, 3), dtype=np.uint8)
+
+        _run_typeset_stage(
+            image,
+            typesetter=FakeTypesetter(),
+            translated_page=translated_page,
+        )
+
+        assert translated_page["texts"][0]["render_bbox"] == [80, 58, 340, 166]
+        assert translated_page["texts"][0]["safe_text_box"] == [70, 50, 350, 176]

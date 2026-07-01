@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from tools.analyze_cjk_quality_run import analyze_cjk_quality_run
+from tools.analyze_cjk_quality_run import analyze_cjk_quality_run, main
 
 
 def test_analyze_cjk_quality_run_extracts_plan_issue_classes(tmp_path):
@@ -86,3 +86,14 @@ def test_analyze_cjk_quality_run_can_force_manual_review_pages(tmp_path):
 
     assert result["selected_pages"] == [58]
     assert result["issue_counts"]["manual_review"] == 1
+
+
+def test_sfx_benchmark_missing_folder_exits_cleanly(tmp_path, capsys):
+    exit_code = main(["--sfx-benchmark", str(tmp_path / "missing")])
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert exit_code == 0
+    assert result["status"] == "SKIP"
+    assert result["benchmark"] == "sfx_manhwa"
+    assert result["reason"] == "folder_not_found"

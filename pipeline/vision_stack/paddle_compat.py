@@ -11,7 +11,7 @@ class PaddleOCRCompat:
         self.api_version = api_version
 
     def ocr(self, img: Any, *, det: bool = True, rec: bool = True, cls: bool = False) -> list:
-        if self.api_version < 3:
+        if self.api_version < 3 or not hasattr(self._model, "predict"):
             return self._model.ocr(img, det=det, rec=rec, cls=cls)
 
         results = self._model.predict(
@@ -51,6 +51,16 @@ def create_paddle_ocr(
     enable_mkldnn: bool | None = None,
     show_log: bool | None = None,
 ) -> PaddleOCRCompat:
+    if not hasattr(paddle_ocr_cls, "predict"):
+        return _create_legacy_paddle_ocr(
+            paddle_ocr_cls,
+            lang=lang,
+            use_gpu=use_gpu,
+            use_angle_cls=use_angle_cls,
+            enable_mkldnn=enable_mkldnn,
+            show_log=show_log,
+        )
+
     device = "gpu:0" if use_gpu else "cpu"
     try:
         model = paddle_ocr_cls(
@@ -66,6 +76,25 @@ def create_paddle_ocr(
         if "Unknown argument" not in str(exc) and "unexpected keyword" not in str(exc):
             raise
 
+    return _create_legacy_paddle_ocr(
+        paddle_ocr_cls,
+        lang=lang,
+        use_gpu=use_gpu,
+        use_angle_cls=use_angle_cls,
+        enable_mkldnn=enable_mkldnn,
+        show_log=show_log,
+    )
+
+
+def _create_legacy_paddle_ocr(
+    paddle_ocr_cls: Any,
+    *,
+    lang: str,
+    use_gpu: bool,
+    use_angle_cls: bool,
+    enable_mkldnn: bool | None,
+    show_log: bool | None,
+) -> PaddleOCRCompat:
     kwargs: dict[str, Any] = {
         "use_angle_cls": use_angle_cls,
         "lang": lang,

@@ -20,6 +20,7 @@ const freshPreview = {
   status: "fresh",
   path: "translated/001.jpg",
   previewPath: "render-cache/preview/001-preview.jpg",
+  rendererBackend: "python",
   fingerprint: "fresh",
   generatedAt: 1,
   error: null,

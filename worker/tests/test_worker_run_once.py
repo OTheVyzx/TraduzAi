@@ -30,7 +30,7 @@ def test_run_once_can_disable_fast_page_runner_and_use_legacy_pipeline(tmp_path:
         def heartbeat(self, worker_id):
             pass
 
-        def claim_job(self, worker_id, capabilities):
+        def claim_job(self, worker_id, capabilities, job_id=None):
             return {
                 "id": "job-1",
                 "mode": "real",
@@ -159,7 +159,7 @@ def test_run_once_uses_fast_page_runner_by_default(tmp_path: Path, monkeypatch):
         def heartbeat(self, worker_id):
             pass
 
-        def claim_job(self, worker_id, capabilities):
+        def claim_job(self, worker_id, capabilities, job_id=None):
             return {
                 "id": "job-1",
                 "mode": "real",
@@ -229,7 +229,7 @@ def test_main_closes_fast_page_client_on_exit(monkeypatch, tmp_path: Path):
             closed.append(True)
 
     monkeypatch.setattr(WorkerSettings, "from_env", classmethod(lambda cls: settings))
-    monkeypatch.setattr(worker_main, "run_once", lambda settings, mock: 0)
+    monkeypatch.setattr(worker_main, "run_once", lambda settings, mock, job_id=None: 0)
     worker_main._FAST_PAGE_CLIENT = FakeFastClient()
 
     assert worker_main.main(["--once"]) == 0

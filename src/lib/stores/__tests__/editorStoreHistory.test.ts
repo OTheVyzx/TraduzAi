@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { EditorBackendApi } from "../../editorBackend";
+import { configureEditorBackend } from "../../editorBackend";
 import type { PageData, TextEntry, TextLayerStyle } from "../appStore";
 import { useAppStore } from "../appStore";
 import { useEditorStore } from "../editorStore";
 import { BUILTIN_TEXT_STYLE_PRESETS } from "../../editorTextStylePresets";
+
+function lastItem<T>(items: T[]): T | undefined {
+  return items[items.length - 1];
+}
 
 function makeLayer(overrides: Partial<TextEntry> = {}): TextEntry {
   const estilo: TextLayerStyle = {
@@ -51,7 +57,12 @@ function makePage(layers = [makeLayer()]): PageData {
     numero: 1,
     arquivo_original: "originals/001.png",
     arquivo_traduzido: "translated/001.png",
-    image_layers: {},
+    image_layers: {
+      base: { key: "base", path: "originals/001.png", visible: true, locked: true, order: 0 },
+      inpaint: { key: "inpaint", path: "images/inpaint.png", visible: true, locked: false, opacity: 1, order: 1 },
+      brush: { key: "brush", path: "images/brush.png", visible: true, locked: false, opacity: 1, order: 2 },
+      mask: { key: "mask", path: "images/mask.png", visible: true, locked: false, opacity: 1, order: 3 },
+    },
     inpaint_blocks: [],
     text_layers: layers,
     textos: layers,
@@ -60,6 +71,9 @@ function makePage(layers = [makeLayer()]): PageData {
 
 beforeEach(() => {
   const page = makePage();
+  configureEditorBackend({
+    setEditorLayerVisibility: async () => undefined,
+  } as Partial<EditorBackendApi> as EditorBackendApi);
   useAppStore.setState({
     project: {
       id: "project-a",
@@ -275,6 +289,24 @@ describe("editorStore history working state", () => {
     });
   });
 
+  it("commits numeric bbox edits through undoable history", () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+
+    expect(useEditorStore.getState().commitTextBbox("layer-a", [20, 30, 120, 140])).toEqual({ ok: true });
+    expect(useEditorStore.getState().getLayer(pageKey, "layer-a")?.bbox).toEqual([20, 30, 120, 140]);
+    expect(lastItem(useEditorStore.getState().historyByPageKey[pageKey].commands)).toMatchObject({
+      type: "edit-bbox",
+      layerId: "layer-a",
+      before: [0, 0, 100, 100],
+      after: [20, 30, 120, 140],
+    });
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().getLayer(pageKey, "layer-a")?.bbox).toEqual([0, 0, 100, 100]);
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().getLayer(pageKey, "layer-a")?.bbox).toEqual([20, 30, 120, 140]);
+  });
+
   it("applies a text style preset through the undoable style history", () => {
     const pageKey = useEditorStore.getState().currentPageKey();
     const preset = BUILTIN_TEXT_STYLE_PRESETS.find((item) => item.id === "bang_comic");
@@ -349,5 +381,58 @@ describe("editorStore history working state", () => {
     expect(ids).toHaveLength(2);
     expect(useEditorStore.getState().pendingStructuralEdits.created.map((item) => item.id)).toHaveLength(1);
     expect(useEditorStore.getState().selectedLayerId).toBe(ids[1]);
+  });
+
+  it("uses history-backed working state for public image layer actions", async () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+
+    await useEditorStore.getState().toggleImageLayerVisibility("mask");
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.visible).toBe(false);
+    expect(lastItem(useEditorStore.getState().historyByPageKey[pageKey].commands)).toMatchObject({
+      type: "toggle-image-layer-visibility",
+      layerKey: "mask",
+      before: true,
+      after: false,
+    });
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.visible).toBe(true);
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.visible).toBe(false);
+
+    await useEditorStore.getState().setImageLayerLocked("brush", true);
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.locked).toBe(true);
+    expect(lastItem(useEditorStore.getState().historyByPageKey[pageKey].commands)).toMatchObject({
+      type: "toggle-image-layer-lock",
+      layerKey: "brush",
+      before: false,
+      after: true,
+    });
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.locked).toBe(false);
+
+    await useEditorStore.getState().setImageLayerOpacity("inpaint", 0.5);
+    expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.opacity).toBe(0.5);
+    expect(lastItem(useEditorStore.getState().historyByPageKey[pageKey].commands)).toMatchObject({
+      type: "edit-image-layer-props",
+      layerKey: "inpaint",
+      before: { opacity: 1 },
+      after: { opacity: 0.5 },
+    });
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.opacity).toBe(1);
+
+    await useEditorStore.getState().reorderImageLayers(["mask", "brush", "inpaint"]);
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.order).toBe(0);
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.order).toBe(1);
+    expect(lastItem(useEditorStore.getState().historyByPageKey[pageKey].commands)).toMatchObject({
+      type: "reorder-image-layers",
+      before: ["inpaint", "brush", "mask"],
+      after: ["mask", "brush", "inpaint"],
+    });
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.order).toBe(0);
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.order).toBe(1);
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.order).toBe(2);
   });
 });

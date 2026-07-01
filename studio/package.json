@@ -1,0 +1,36 @@
+{
+  "name": "traduzai-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "TraduzAI Studio - scan-focused editor for TraduzAI projects",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1430",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run --config vitest.config.ts",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-dialog": "^2.2.0",
+    "@tauri-apps/plugin-fs": "^2.2.0",
+    "ag-psd": "^30.1.1",
+    "konva": "^10.2.5",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-konva": "^19.2.3",
+    "traduzai": "file:..",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "^4.1.5"
+  }
+}

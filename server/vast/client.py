@@ -71,13 +71,81 @@ class VastClient:
             body["onstart"] = onstart
         return self._request("PUT", f"/asks/{offer_id}/", body)
 
+    def list_serverless_endpoints(self) -> list[dict[str, Any]]:
+        response = self._request("GET", "/serverless/endpoints/")
+        return _list_from_response(response, "endpoints")
+
+    def create_serverless_endpoint(self, *, name: str, min_load: int, target_load: int, cold_mult: float) -> dict[str, Any]:
+        return self._request(
+            "PUT",
+            "/serverless/endpoints/",
+            {
+                "endpoint_name": name,
+                "min_load": min_load,
+                "target_load": target_load,
+                "cold_mult": cold_mult,
+            },
+        )
+
+    def list_serverless_workergroups(self, endpoint_id: str | None = None) -> list[dict[str, Any]]:
+        path = "/serverless/workergroups/"
+        if endpoint_id:
+            path = f"{path}?endpoint_id={endpoint_id}"
+        response = self._request("GET", path)
+        return _list_from_response(response, "workergroups")
+
+    def create_serverless_workergroup(
+        self,
+        *,
+        endpoint_id: str,
+        name: str,
+        search_params: str,
+        template_id: str | None = None,
+        template_hash: str | None = None,
+        max_load: int = 100,
+        min_load: int = 0,
+        test_workers: int = 0,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "endpoint_id": endpoint_id,
+            "name": name,
+            "search_params": search_params,
+            "max_load": max_load,
+            "min_load": min_load,
+            "test_workers": test_workers,
+        }
+        if template_id:
+            body["template_id"] = template_id
+        if template_hash:
+            body["template_hash"] = template_hash
+        return self._request("PUT", "/serverless/workergroups/", body)
+
+    def route_serverless_request(self, *, endpoint_id: str, cost: float) -> dict[str, Any]:
+        return self._request_absolute("POST", "https://run.vast.ai/route/", {"endpoint_id": endpoint_id, "cost": cost})
+
+    def post_serverless_worker(self, worker_url: str, route_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = worker_url.rstrip("/") + "/" + route_path.strip("/")
+        return self._request_absolute("POST", url, payload, include_api_auth=False)
+
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._request_absolute(method, f"{self.base_url}{path}", body)
+
+    def _request_absolute(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, Any] | None = None,
+        *,
+        include_api_auth: bool = True,
+    ) -> dict[str, Any]:
         data = None
-        headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
+        headers = {"Accept": "application/json"}
+        if include_api_auth:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        request = Request(f"{self.base_url}{path}", data=data, headers=headers, method=method)
+        request = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 raw = response.read()
@@ -92,3 +160,14 @@ class VastClient:
             return json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise VastApiError("Vast API retornou JSON invalido") from exc
+
+
+def _list_from_response(response: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    if isinstance(response, list):
+        return [item for item in response if isinstance(item, dict)]
+    value = response.get(key)
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [value]
+    return []
