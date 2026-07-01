@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_anchor_late_rerender",
+  "stage": "copyback_reassemble",
+  "band_id": "page_002_band_015",
+  "source_page_number": 2,
+  "y_top": 11306,
+  "y_bottom": 11707,
+  "coordinate_space": "band",
+  "post_typeset": "09_typeset/page_002_band_015/post_typeset.jpg",
+  "post_copyback": "10_copyback_reassemble/page_002_band_015/post_copyback.jpg"
+}

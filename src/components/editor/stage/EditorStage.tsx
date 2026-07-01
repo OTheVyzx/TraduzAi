@@ -1,6 +1,6 @@
-import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, Fragment, lazy, Suspense, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
-import { Group, Image as KonvaImage, Layer, Line, Rect, Stage } from "react-konva";
+import { Image as KonvaImage, Layer, Rect, Stage } from "react-konva";
 import { loadImageSource, preloadImageSource } from "../../../lib/imageSource";
 import type { PageData } from "../../../lib/stores/appStore";
 import { useEditorStore, type EditorViewMode } from "../../../lib/stores/editorStore";
@@ -14,6 +14,7 @@ import { EditorTextLayer } from "./EditorTextLayer";
 import { EditorTransformer } from "./EditorTransformer";
 import { LassoSelectionOverlay } from "./LassoSelectionOverlay";
 import { MaskInProgressOverlay } from "./MaskInProgressOverlay";
+import { strokePassesForHardness } from "./bitmapStrokePreview";
 import { editingBaseImagePath, originalImagePath } from "./renderModeUtils";
 import type { SnapGuide } from "./snapGuides";
 import { useEditorStageController } from "./useEditorStageController";
@@ -37,6 +38,117 @@ function readerImagePathForPage(page: PageData, viewMode: EditorViewMode) {
   if (viewMode === "original") return originalImagePath(page);
   return editingBaseImagePath(page);
 }
+
+type PaintStrokeCanvasOverlayHandle = {
+  begin: (point: [number, number]) => void;
+  append: (point: [number, number]) => void;
+  clear: () => void;
+};
+
+const PaintStrokeCanvasOverlay = forwardRef<PaintStrokeCanvasOverlayHandle, {
+  width: number;
+  height: number;
+  toolMode: string;
+  brushSize: number;
+  brushColor: string;
+  brushOpacity: number;
+  brushHardness: number;
+  clipPolygon?: [number, number][];
+}>(function PaintStrokeCanvasOverlay({
+  width,
+  height,
+  toolMode,
+  brushSize,
+  brushColor,
+  brushOpacity,
+  brushHardness,
+  clipPolygon,
+}, ref) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastPointRef = useRef<[number, number] | null>(null);
+
+  const clear = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, width, height);
+    lastPointRef.current = null;
+  };
+
+  const drawSegment = (from: [number, number], to: [number, number]) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.save();
+    if (clipPolygon && clipPolygon.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(clipPolygon[0][0], clipPolygon[0][1]);
+      for (const [x, y] of clipPolygon.slice(1)) {
+        ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.clip();
+    }
+
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle =
+      toolMode === "brush"
+        ? brushColor
+        : toolMode === "eraser"
+          ? "rgba(255,255,255,0.72)"
+          : toolMode === "reinpaintBrush"
+            ? "rgba(34, 211, 238, 0.90)"
+            : "rgba(108, 92, 231, 0.90)";
+
+    const opacity = toolMode === "brush" ? brushOpacity : 0.85;
+    for (const pass of strokePassesForHardness({ brushSize: Math.max(4, brushSize), opacity, hardness: brushHardness })) {
+      ctx.globalAlpha = pass.alpha;
+      ctx.lineWidth = pass.width;
+      ctx.beginPath();
+      ctx.moveTo(from[0], from[1]);
+      ctx.lineTo(to[0], to[1]);
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  useImperativeHandle(ref, () => ({
+    begin(point) {
+      clear();
+      lastPointRef.current = point;
+      drawSegment(point, [point[0] + 0.01, point[1] + 0.01]);
+    },
+    append(point) {
+      const lastPoint = lastPointRef.current;
+      if (!lastPoint) {
+        lastPointRef.current = point;
+        drawSegment(point, [point[0] + 0.01, point[1] + 0.01]);
+        return;
+      }
+      drawSegment(lastPoint, point);
+      lastPointRef.current = point;
+    },
+    clear,
+  }), [brushColor, brushHardness, brushOpacity, brushSize, clipPolygon, height, toolMode, width]);
+
+  useEffect(() => {
+    clear();
+  }, [height, width]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={width}
+      height={height}
+      className="pointer-events-none absolute inset-0 z-10"
+      aria-hidden="true"
+    />
+  );
+});
 
 function ProcessRegionOverlayNode({
   cropPath,
@@ -108,20 +220,28 @@ function EditorReaderStaticPage({
   viewMode,
   pageWidth,
   setPageRef,
+  onSelectTextLayer,
 }: {
   page: PageData;
   pageIndex: number;
   viewMode: EditorViewMode;
   pageWidth: number;
   setPageRef: (index: number, node: HTMLDivElement | null) => void;
+  onSelectTextLayer: (pageIndex: number, layerId: string) => void;
 }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   const [shouldLoad, setShouldLoad] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const textLayers = page.text_layers ?? page.textos ?? [];
+  const displayedWidth = Math.max(1, Math.round(pageWidth));
+  const scale = naturalSize?.width ? displayedWidth / naturalSize.width : 1;
+  const displayedHeight = naturalSize?.height ? Math.max(1, Math.round(naturalSize.height * scale)) : null;
 
   useEffect(() => {
     setShouldLoad(false);
     setSrc(null);
+    setNaturalSize(null);
   }, [pageIndex]);
 
   useEffect(() => {
@@ -190,19 +310,59 @@ function EditorReaderStaticPage({
       className="m-0 flex w-full min-w-0 justify-center p-0 leading-none"
     >
       {src ? (
-        <img
-          src={src}
-          alt={`Pagina ${page.numero}`}
-          draggable={false}
-          loading="lazy"
-          decoding="async"
-          className="block h-auto max-w-none select-none"
-          style={{ width: `${Math.max(1, Math.round(pageWidth))}px` }}
-        />
+        <div
+          className="relative max-w-none"
+          style={{
+            width: `${displayedWidth}px`,
+            height: displayedHeight ? `${displayedHeight}px` : undefined,
+          }}
+        >
+          <img
+            src={src}
+            alt={`Pagina ${page.numero}`}
+            draggable={false}
+            loading="lazy"
+            decoding="async"
+            onLoad={(event) => {
+              const image = event.currentTarget;
+              setNaturalSize({
+                width: image.naturalWidth || displayedWidth,
+                height: image.naturalHeight || Math.max(1, image.clientHeight),
+              });
+            }}
+            className="block h-auto max-w-none select-none"
+            style={{ width: `${displayedWidth}px` }}
+          />
+          {naturalSize && textLayers.map((layer) => {
+            if (layer.visible === false) return null;
+            const bbox = layer.layout_bbox ?? layer.bbox;
+            if (!Array.isArray(bbox) || bbox.length !== 4) return null;
+            const [x1, y1, x2, y2] = bbox;
+            const left = Math.max(0, Math.min(x1, x2) * scale);
+            const top = Math.max(0, Math.min(y1, y2) * scale);
+            const width = Math.max(8, Math.abs(x2 - x1) * scale);
+            const height = Math.max(8, Math.abs(y2 - y1) * scale);
+            const label = layer.traduzido || layer.translated || layer.original || "Texto";
+            return (
+              <button
+                key={layer.id}
+                type="button"
+                title={`Abrir pagina ${pageIndex + 1} e selecionar: ${label}`}
+                aria-label={`Abrir pagina ${pageIndex + 1} e selecionar texto`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelectTextLayer(pageIndex, layer.id);
+                }}
+                className="absolute rounded-md border border-transparent bg-transparent transition-smooth hover:border-brand/80 hover:bg-brand/10 focus-visible:border-brand/90 focus-visible:bg-brand/15"
+                style={{ left, top, width, height }}
+              />
+            );
+          })}
+        </div>
       ) : (
         <div
           className="flex h-64 items-center justify-center text-sm text-text-secondary"
-          style={{ width: `${Math.max(1, Math.round(pageWidth))}px` }}
+          style={{ width: `${displayedWidth}px` }}
         >
           Carregando imagem...
         </div>
@@ -276,6 +436,7 @@ export function EditorStage() {
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
   const brushColor = useEditorStore((s) => s.brushColor);
   const brushOpacity = useEditorStore((s) => s.brushOpacity);
+  const brushHardness = useEditorStore((s) => s.brushHardness);
   // Selectors estáveis (escalares) para evitar loop por nova referência {} a cada render
   const maskLayerOpacity = useEditorStore((s) => s.currentPage?.image_layers?.mask?.opacity ?? 1);
   const brushLayerOpacity = useEditorStore((s) => s.currentPage?.image_layers?.brush?.opacity ?? 1);
@@ -295,7 +456,6 @@ export function EditorStage() {
     brushSize,
     zoom,
     panOffset,
-    panSession,
     viewportCursor,
     baseImage,
     maskImage,
@@ -303,7 +463,6 @@ export function EditorStage() {
     recoveryPreviewPatches,
     reinpaintPreviewPatches,
     blockDraft,
-    paintStroke,
     layers,
     selectedLayerId,
     hoveredLayerId,
@@ -321,6 +480,7 @@ export function EditorStage() {
     handleStageMouseUp,
     handleStageMouseEnter,
     handleStageMouseLeave,
+    setPaintPreviewOverlay,
     cursorViewportPoint,
     maskInProgress,
     activeLassoSelection,
@@ -365,53 +525,9 @@ export function EditorStage() {
     setSnapGuides([]);
   }, [currentPageIndex, selectedLayerId, toolMode]);
 
-  const hintText =
-    toolMode === "block"
-      ? "Arraste para criar uma nova camada de texto"
-      : toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser"
-        ? "Pintura ativa no Stage"
-        : "Ctrl+scroll: zoom · Scroll: navegar paginas · Space+drag: mover";
-
-  const paintStrokePreview =
-    paintStroke.length > 0 ? (
-      <Line
-        points={paintStroke.flatMap(([x, y]) => [x, y])}
-        stroke={
-          toolMode === "brush"
-            ? brushColor
-            : toolMode === "eraser"
-              ? "rgba(255,255,255,0.72)"
-              : toolMode === "reinpaintBrush"
-                ? "rgba(34, 211, 238, 0.90)"
-                : "rgba(108, 92, 231, 0.90)"
-        }
-        opacity={toolMode === "brush" ? brushOpacity : 0.85}
-        strokeWidth={Math.max(4, brushSize)}
-        lineCap="round"
-        lineJoin="round"
-        listening={false}
-      />
-    ) : null;
-  const clippedPaintStrokePreview =
-    paintStrokePreview && activeLassoSelection?.pageIndex === currentPageIndex ? (
-      <Group
-        listening={false}
-        clipFunc={(ctx) => {
-          const points = activeLassoSelection.points;
-          if (points.length < 3) return;
-          ctx.beginPath();
-          ctx.moveTo(points[0][0], points[0][1]);
-          for (const [x, y] of points.slice(1)) {
-            ctx.lineTo(x, y);
-          }
-          ctx.closePath();
-        }}
-      >
-        {paintStrokePreview}
-      </Group>
-    ) : (
-      paintStrokePreview
-    );
+  const paintStrokeClipPolygon =
+    activeLassoSelection?.pageIndex === currentPageIndex ? activeLassoSelection.points : undefined;
+  const paintPreviewRef = useRef<PaintStrokeCanvasOverlayHandle | null>(null);
 
   const setReaderPageRef = (index: number, node: HTMLDivElement | null) => {
     readerPageRefs.current[index] = node;
@@ -552,6 +668,15 @@ export function EditorStage() {
       });
   };
 
+  const selectTextOnReaderPage = (pageIndex: number, layerId: string) => {
+    const pageChange = setCurrentPage(pageIndex);
+    readerScrollSyncTargetRef.current = pageIndex;
+    void pageChange.then(() => {
+      selectLayer(layerId);
+      scrollReaderPageIntoView(pageIndex);
+    });
+  };
+
   return (
     <div
       data-testid="editor-stage"
@@ -575,13 +700,6 @@ export function EditorStage() {
             toolMode={toolMode as "brush" | "repairBrush" | "reinpaintBrush" | "eraser"}
           />
         )}
-
-      {/* Bottom hint */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4">
-        <div className="rounded-lg border border-border bg-bg-secondary/80 px-3 py-1 text-[10px] text-text-muted backdrop-blur-md">
-          {hintText}
-        </div>
-      </div>
 
       {/* Status badges (StageStatusBadge removido — canvas é WYSIWYG) */}
       {/* Fase 5: FloatingTextEditor — painel flutuante para edição rápida */}
@@ -645,6 +763,7 @@ export function EditorStage() {
               viewMode={viewMode}
               pageWidth={readerPageWidth}
               setPageRef={setReaderPageRef}
+              onSelectTextLayer={selectTextOnReaderPage}
             />
             {index < projectPages.length - 1 && (
               <EditorReaderPageBarrier
@@ -683,9 +802,10 @@ export function EditorStage() {
                 style={{
                   width,
                   height,
+                  position: "relative",
                   transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${stageScale})`,
                   transformOrigin: "top left",
-                  transition: panSession ? "none" : "transform 0.12s ease-out",
+                  transition: "none",
                 }}
               >
             <Stage
@@ -732,26 +852,14 @@ export function EditorStage() {
                     listening={false}
                   />
                 ))}
-                {maskImage.image && (
-                  <EditorBitmapOverlay
-                    image={maskImage.image}
-                    width={width}
-                    height={height}
-                    color="#6C5CE7"
-                    opacity={maskLayerOpacity * 0.65}
-                  />
-                )}
-                {brushImage.image && (
-                  <KonvaImage
-                    image={brushImage.image}
-                    x={0}
-                    y={0}
-                    width={width}
-                    height={height}
-                    opacity={brushLayerOpacity}
-                    listening={false}
-                  />
-                )}
+                <EditorBitmapOverlay
+                  brushImage={brushImage.image}
+                  brushOpacity={brushLayerOpacity}
+                  maskImage={maskImage.image}
+                  maskOpacity={maskLayerOpacity * 0.65}
+                  width={width}
+                  height={height}
+                />
                 {(currentPage.process_overlays ?? [])
                   .filter((overlay) => overlay.visible !== false)
                   .map((overlay) => (
@@ -780,7 +888,6 @@ export function EditorStage() {
                     listening={false}
                   />
                 )}
-                {clippedPaintStrokePreview}
                 {translatedEditing &&
                   layers.map((entry) => (
                     <EditorTextLayer
@@ -831,8 +938,24 @@ export function EditorStage() {
                   points={maskInProgress.points}
                   shape={maskShape}
                 />
-            )}
+              )}
             </Stage>
+            {(toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") && (
+              <PaintStrokeCanvasOverlay
+                ref={(handle) => {
+                  paintPreviewRef.current = handle;
+                  setPaintPreviewOverlay(handle);
+                }}
+                width={width}
+                height={height}
+                toolMode={toolMode}
+                brushSize={brushSize}
+                brushColor={brushColor}
+                brushOpacity={brushOpacity}
+                brushHardness={brushHardness}
+                clipPolygon={paintStrokeClipPolygon}
+              />
+            )}
               </div>
             </div>
           </div>
@@ -870,6 +993,7 @@ export function EditorStage() {
                 viewMode={viewMode}
                 pageWidth={readerPageWidth}
                 setPageRef={setReaderPageRef}
+                onSelectTextLayer={selectTextOnReaderPage}
               />
               {pageIndex < projectPages.length - 1 && (
                 <EditorReaderPageBarrier
@@ -883,6 +1007,11 @@ export function EditorStage() {
           );
         })}
       </div>
+      </div>
+      <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
+        <div className="rounded-full border border-border-primary bg-bg-secondary/90 px-4 py-1 text-[11px] text-text-muted shadow-lg backdrop-blur">
+          Ctrl+scroll: zoom - Scroll: navegar paginas - Space+drag: mover
+        </div>
       </div>
     </div>
   );

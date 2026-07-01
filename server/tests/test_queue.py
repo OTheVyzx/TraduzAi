@@ -1,7 +1,7 @@
 from server.config import Settings
 from server.db import bootstrap_database, session_scope
 from server.models import Job, Organization, User, WorkerNode
-from server.queue import claim_next, enqueue
+from server.queue import claim_next, claim_specific, enqueue
 
 
 def make_settings(tmp_path):
@@ -91,3 +91,23 @@ def test_claim_next_respects_worker_mode_capabilities(tmp_path):
     claimed = claim_next(settings, "worker-1", {"mode": ["real"]})
     assert claimed is not None
     assert claimed.id == "job-real"
+
+
+def test_claim_specific_only_claims_requested_job(tmp_path):
+    settings = make_settings(tmp_path)
+    bootstrap_database(settings)
+
+    with session_scope(settings) as session:
+        admin = session.query(User).filter_by(email="admin@local").one()
+        org = session.query(Organization).filter_by(slug="default").one()
+        session.add(WorkerNode(id="worker-1", name="serverless", status="online", max_concurrent_jobs=1))
+        add_job(session, "job-old", org.id, admin.id)
+        add_job(session, "job-target", org.id, admin.id)
+
+    claimed = claim_specific(settings, "worker-1", "job-target", {"mode": ["mock"]})
+
+    assert claimed is not None
+    assert claimed.id == "job-target"
+    with session_scope(settings) as session:
+        assert session.get(Job, "job-old").status == "queued"
+        assert session.get(Job, "job-target").status == "claimed"

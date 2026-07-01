@@ -38,6 +38,34 @@ def test_collect_output_artifacts_includes_translated_images(tmp_path: Path):
     ]
 
 
+def test_collect_output_artifacts_fast_profile_skips_debug_layers(tmp_path: Path):
+    runner_log = tmp_path / "runner.log"
+    runner_log.write_text("runner\n", encoding="utf-8")
+    work_dir = tmp_path / "work"
+    translated_dir = work_dir / "translated"
+    originals_dir = work_dir / "originals"
+    images_dir = work_dir / "images"
+    mask_dir = work_dir / "layers" / "mask"
+    translated_dir.mkdir(parents=True)
+    originals_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+    (work_dir / "pipeline.log").write_text("pipeline\n", encoding="utf-8")
+    (work_dir / "project.json").write_text("{}", encoding="utf-8")
+    (translated_dir / "001.png").write_bytes(b"translated")
+    (originals_dir / "001.png").write_bytes(b"original")
+    (images_dir / "001.png").write_bytes(b"inpaint")
+    (mask_dir / "001.png").write_bytes(b"mask")
+
+    artifacts = collect_output_artifacts(runner_log, work_dir, profile="fast")
+
+    assert [(artifact.kind, artifact.path.name) for artifact in artifacts] == [
+        ("runner_log", "runner.log"),
+        ("project_json", "project.json"),
+        ("translated_image", "001.png"),
+    ]
+
+
 def test_pipeline_mode_uses_project_config_manual_mode():
     assert pipeline_mode_for_job({"mode": "real", "project_config": {"mode": "manual"}}) == "manual"
     assert pipeline_mode_for_job({"mode": "real", "project_config": {"mode": "auto"}}) == "auto"
@@ -127,14 +155,14 @@ def test_run_fast_page_job_uses_hot_client_and_streams_artifact(tmp_path: Path):
         def __init__(self):
             self.requests = []
 
-        def process_page(self, request):
+        def process_page(self, request, event_callback=None):
             self.requests.append(request)
             work_dir = Path(request["work_dir"])
             translated_dir = work_dir / "translated"
             translated_dir.mkdir(parents=True)
             (work_dir / "project.json").write_text('{"paginas":[{}]}', encoding="utf-8")
             (translated_dir / "001.png").write_bytes(b"translated")
-            return [
+            events = [
                 {
                     "type": "page_completed",
                     "step": "page",
@@ -144,6 +172,9 @@ def test_run_fast_page_job_uses_hot_client_and_streams_artifact(tmp_path: Path):
                 },
                 {"type": "complete", "page_count": 1},
             ]
+            for event in events:
+                event_callback(event)
+            return events
 
     fast_client = FakeFastPageClient()
 
@@ -191,12 +222,16 @@ def test_run_fast_page_job_merges_project_config_into_request(tmp_path: Path):
         def __init__(self):
             self.requests = []
 
-        def process_page(self, request):
+        def process_page(self, request, event_callback=None):
             self.requests.append(request)
             work_dir = Path(request["work_dir"])
             (work_dir / "translated").mkdir(parents=True)
             (work_dir / "translated" / "001.png").write_bytes(b"translated")
-            return [{"type": "complete", "page_count": 1}]
+            events = [{"type": "complete", "page_count": 1}]
+            if event_callback is not None:
+                for event in events:
+                    event_callback(event)
+            return events
 
     fast_client = FakeFastPageClient()
 

@@ -1,6 +1,8 @@
 import { useEditorStore } from "../../lib/stores/editorStore";
+import { useAppStore, type ProjectFontAssets } from "../../lib/stores/appStore";
 import { buildEditorScene } from "../../lib/editorScene";
 import { ensureEditorFontOptionReady, type EditorFontOption } from "../../lib/fontCatalog";
+import { useTextEditSession } from "../../lib/useTextEditSession";
 import { EditorFontPicker } from "./EditorFontPicker";
 import {
   AlignLeft,
@@ -71,6 +73,22 @@ function InputField({
   );
 }
 
+function upsertSystemFontAsset(assets: ProjectFontAssets | undefined, option: EditorFontOption): ProjectFontAssets {
+  if (option.source !== "system" || !option.localPath) return assets ?? {};
+  return {
+    ...(assets ?? {}),
+    system: {
+      ...(assets?.system ?? {}),
+      [option.value]: {
+        family: option.cssFamily,
+        path: option.localPath,
+        weight: option.variant ?? "400",
+        style: option.style ?? "normal",
+      },
+    },
+  };
+}
+
 export function PropertyEditor() {
   const {
     selectedLayerId,
@@ -79,8 +97,11 @@ export function PropertyEditor() {
     isRetypesetting
   } = useEditorStore();
 
-  const updateEdit = useEditorStore((s) => s.updatePendingEdit);
+  const commitTextBbox = useEditorStore((s) => s.commitTextBbox);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
+  const updateProject = useAppStore((s) => s.updateProject);
+  const fontAssets = useAppStore((s) => s.project?.font_assets);
+  const textSession = useTextEditSession(selectedLayerId ?? "");
   const [loadingFont, setLoadingFont] = useState<string | null>(null);
 
   const selectedLayer = useMemo(
@@ -100,7 +121,7 @@ export function PropertyEditor() {
   }
   const activeLayerId = selectedLayerId;
 
-  const traduzido = entry.displayText;
+  const traduzido = textSession.value;
   const original = entry.displayOriginal;
   const estilo = entry.estilo;
   const [x1, y1, x2, y2] = entry.effectiveBbox;
@@ -116,7 +137,10 @@ export function PropertyEditor() {
   async function handleFontChange(value: string, option?: EditorFontOption) {
     setLoadingFont(value);
     try {
-      await ensureEditorFontOptionReady(option ?? value);
+      const prepared = await ensureEditorFontOptionReady(option ?? value);
+      if (prepared?.source === "system") {
+        updateProject({ font_assets: upsertSystemFontAsset(fontAssets, prepared) });
+      }
       updateEstilo(activeLayerId, { fonte: value });
     } catch (error) {
       console.warn("[fonts] falha ao preparar fonte do editor:", error);
@@ -164,12 +188,12 @@ export function PropertyEditor() {
           <textarea
             value={traduzido}
             title="Texto traduzido"
-            onChange={(e) =>
-              updateEdit(selectedLayerId, {
-                traduzido: e.target.value,
-                translated: e.target.value,
-              })
-            }
+            onFocus={textSession.onFocus}
+            onBlur={textSession.onBlur}
+            onCompositionStart={textSession.onCompositionStart}
+            onCompositionEnd={textSession.onCompositionEnd}
+            onChange={(e) => textSession.onChange(e.target.value)}
+            onKeyDown={textSession.onKeyDown}
             rows={4}
             className="w-full px-2 py-1.5 bg-bg-tertiary/60 border border-border rounded-md text-[11px]
               text-text-primary resize-y focus:border-brand/40 focus:outline-none transition-smooth"
@@ -188,7 +212,7 @@ export function PropertyEditor() {
               onChange={(v) => {
                 const nx = parseInt(v) || 0;
                 const w = x2 - x1;
-                updateEdit(selectedLayerId, { bbox: [nx, y1, nx + w, y2] });
+                commitTextBbox(selectedLayerId, [nx, y1, nx + w, y2]);
               }}
             />
           </div>
@@ -200,7 +224,7 @@ export function PropertyEditor() {
               onChange={(v) => {
                 const ny = parseInt(v) || 0;
                 const h = y2 - y1;
-                updateEdit(selectedLayerId, { bbox: [x1, ny, x2, ny + h] });
+                commitTextBbox(selectedLayerId, [x1, ny, x2, ny + h]);
               }}
             />
           </div>
@@ -211,7 +235,7 @@ export function PropertyEditor() {
               value={x2 - x1}
               onChange={(v) => {
                 const w = parseInt(v) || 1;
-                updateEdit(selectedLayerId, { bbox: [x1, y1, x1 + w, y2] });
+                commitTextBbox(selectedLayerId, [x1, y1, x1 + w, y2]);
               }}
             />
           </div>
@@ -222,7 +246,7 @@ export function PropertyEditor() {
               value={y2 - y1}
               onChange={(v) => {
                 const h = parseInt(v) || 1;
-                updateEdit(selectedLayerId, { bbox: [x1, y1, x2, y1 + h] });
+                commitTextBbox(selectedLayerId, [x1, y1, x2, y1 + h]);
               }}
             />
           </div>

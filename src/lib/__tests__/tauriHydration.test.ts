@@ -107,6 +107,80 @@ describe("hydratePageData text style", () => {
     });
     expect(page.text_layers[0].style_origin).toBe("editor");
   });
+
+  it("preserves source-detected style metadata and effects", () => {
+    const page = hydratePageData(
+      {
+        numero: 1,
+        arquivo_original: "originals/001.jpg",
+        arquivo_traduzido: "translated/001.jpg",
+        text_layers: [
+          {
+            id: "tl_001_002",
+            bbox: [100, 200, 500, 700],
+            tipo: "sfx",
+            original: "Boom",
+            traduzido: "Bum",
+            confianca_ocr: 0.91,
+            style_origin: "source_detected",
+            style_confidence: 0.84,
+            style_source: "pixel_analysis",
+            style_evidence: {
+              source: "pixel_analysis",
+              text_color: "#FFFFFF",
+              stroke_color: "#000000",
+              stroke_width_px: 2,
+            },
+            estilo: {
+              fonte: "ComicNeue-Bold.ttf",
+              tamanho: 34,
+              cor: "#FFFFFF",
+              cor_gradiente: [],
+              contorno: "#000000",
+              contorno_px: 2,
+              glow: false,
+              glow_cor: "",
+              glow_px: 0,
+              sombra: true,
+              sombra_cor: "#333333",
+              sombra_offset: [3, 4],
+              bold: true,
+              italico: false,
+              rotacao: 0,
+              curva: true,
+              curva_direcao: "arc_up",
+              curva_intensidade: 0.35,
+              alinhamento: "center",
+              force_upper: false,
+            },
+          },
+        ],
+      },
+      "D:/TraduzAi/outapp/traduzido15/project.json",
+    );
+
+    expect(page.text_layers[0].estilo).toMatchObject({
+      fonte: "ComicNeue-Bold.ttf",
+      cor: "#FFFFFF",
+      contorno: "#000000",
+      contorno_px: 2,
+      sombra: true,
+      sombra_cor: "#333333",
+      sombra_offset: [3, 4],
+      curva: true,
+      curva_direcao: "arc_up",
+      curva_intensidade: 0.35,
+    });
+    expect(page.text_layers[0].style_origin).toBe("source_detected");
+    expect(page.text_layers[0].style_confidence).toBe(0.84);
+    expect(page.text_layers[0].style_source).toBe("pixel_analysis");
+    expect(page.text_layers[0].style_evidence).toMatchObject({
+      source: "pixel_analysis",
+      text_color: "#FFFFFF",
+      stroke_color: "#000000",
+      stroke_width_px: 2,
+    });
+  });
 });
 
 describe("hydrateProjectJson", () => {

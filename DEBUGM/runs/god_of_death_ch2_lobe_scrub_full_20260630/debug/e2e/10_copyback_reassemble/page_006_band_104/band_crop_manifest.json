@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_lobe_scrub_full",
+  "stage": "copyback_reassemble",
+  "band_id": "page_006_band_104",
+  "source_page_number": 6,
+  "y_top": 77046,
+  "y_bottom": 78435,
+  "coordinate_space": "band",
+  "post_typeset": "09_typeset/page_006_band_104/post_typeset.jpg",
+  "post_copyback": "10_copyback_reassemble/page_006_band_104/post_copyback.jpg"
+}

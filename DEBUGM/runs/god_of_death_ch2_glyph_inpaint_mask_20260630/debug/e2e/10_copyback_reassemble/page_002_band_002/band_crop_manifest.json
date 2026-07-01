@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_glyph_inpaint_mask",
+  "stage": "copyback_reassemble",
+  "band_id": "page_002_band_002",
+  "source_page_number": 2,
+  "y_top": 2123,
+  "y_bottom": 2512,
+  "coordinate_space": "band",
+  "post_typeset": "09_typeset/page_002_band_002/post_typeset.jpg",
+  "post_copyback": "10_copyback_reassemble/page_002_band_002/post_copyback.jpg"
+}

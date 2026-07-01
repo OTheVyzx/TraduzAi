@@ -1,16 +1,19 @@
 {
   "default": {
-    "fala":      { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
-    "narracao":  { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
-    "sfx":       { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
-    "pensamento":{ "fonte": "ComicNeue-Bold.ttf", "force_upper": true }
+    "fala": { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
+    "narracao": { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
+    "sfx": { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
+    "sfx_impact": { "fonte": "KOMIKAX_.ttf", "force_upper": true },
+    "sfx_motion": { "fonte": "KOMIKAX_.ttf", "force_upper": true },
+    "sfx_mechanical": { "fonte": "CCDaveGibbonsLower W00 Regular.ttf", "force_upper": true },
+    "pensamento": { "fonte": "ComicNeue-Bold.ttf", "force_upper": true },
+    "visual_card": { "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "force_upper": true }
   },
   "available": [
-    { "arquivo": "ComicNeue-Bold.ttf",                 "estilo": "comic-padrao",  "serif": false, "detector": true },
-    { "arquivo": "ComicNeue-Regular.ttf",              "estilo": "comic-alt",     "serif": false, "detector": true },
-    { "arquivo": "Newrotic.ttf",                       "estilo": "impacto",       "serif": false, "detector": true },
-    { "arquivo": "KOMIKAX_.ttf",                       "estilo": "acao",          "serif": false, "detector": true },
-    { "arquivo": "CCDaveGibbonsLower W00 Regular.ttf", "estilo": "comic-legado",  "serif": false, "detector": true }
+    { "arquivo": "ComicNeue-Bold.ttf", "estilo": "comic-padrao", "serif": false, "detector": true },
+    { "arquivo": "KOMIKAX_.ttf", "estilo": "acao", "serif": false, "detector": true },
+    { "arquivo": "CCDaveGibbonsLower W00 Regular.ttf", "estilo": "comic-legado", "serif": false, "detector": true },
+    { "arquivo": "LeagueGothic-Regular-VariableFont_wdth.ttf", "estilo": "condensado-status", "serif": false, "detector": true }
   ],
-  "notes": "Comic Neue Bold é o padrão global. Fallback para CCDave se necessário. Newrotic e KOMIKAX disponíveis para impacto/ação."
+  "notes": "Detector restrito a Comic Neue Bold, KOMIKAX, CCDave e League Gothic para testes de copia de fonte/estilo."
 }

@@ -423,6 +423,7 @@ class TextDetector:
         os.environ["MKL_NUM_THREADS"] = "1"
         try:
             from paddleocr import PaddleOCR
+            from vision_stack.paddle_compat import create_paddle_ocr
             import paddle.base.libpaddle as libpaddle
             if hasattr(libpaddle, 'AnalysisConfig') and not hasattr(libpaddle.AnalysisConfig, 'set_optimization_level'):
                 libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
@@ -431,7 +432,8 @@ class TextDetector:
             return False
 
         use_gpu = self.device.type == "cuda"
-        self._model = PaddleOCR(
+        self._model = create_paddle_ocr(
+            PaddleOCR,
             use_angle_cls=False,
             lang="en",
             use_gpu=use_gpu,
@@ -661,7 +663,14 @@ class TextDetector:
 
             if self._backend in {"ultralytics", "anime-text-yolo"}:
                 with torch.inference_mode():
-                    conf = min(float(conf_threshold), 0.30) if self._backend == "anime-text-yolo" else 0.45
+                    if self._backend == "anime-text-yolo":
+                        try:
+                            anime_conf = float(os.getenv("TRADUZAI_ANIME_TEXT_YOLO_CONF", "0.02"))
+                        except Exception:
+                            anime_conf = 0.02
+                        conf = max(0.001, min(float(conf_threshold), anime_conf))
+                    else:
+                        conf = 0.45
                     results = self._model(img_resized, conf=conf, verbose=False)
                 blocks = self._parse_ultralytics(results, orig_h, orig_w, target_size)
             else:

@@ -1,0 +1,161 @@
+{
+  "min_iou": 0.42,
+  "require_all_pages": true,
+  "require_reviewed_pages": true,
+  "pages": {
+    "001.webp": {
+      "reviewed": true,
+      "min_final_count": 3,
+      "max_final_count": 3,
+      "required_boxes": [
+        {"label": "page 001 mid red sfx", "bbox": [519, 3051, 684, 3216]},
+        {"label": "page 001 lower green sfx", "bbox": [254, 11351, 499, 11493]},
+        {"label": "page 001 lower left green sfx", "bbox": [57, 11769, 270, 11911]}
+      ]
+    },
+    "002.webp": {
+      "reviewed": true,
+      "min_final_count": 3,
+      "max_final_count": 3,
+      "required_boxes": [
+        {"label": "page 002 upper red sfx", "bbox": [70, 5670, 266, 5768]},
+        {"label": "page 002 vertical red sfx", "bbox": [523, 5853, 686, 6133]},
+        {"label": "page 002 green sfx", "bbox": [243, 9750, 478, 9919]}
+      ]
+    },
+    "003.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 003 top red sfx", "bbox": [533, 191, 709, 333]}
+      ],
+      "forbidden_boxes": [
+        {"label": "page 003 english caption", "bbox": [73, 2328, 373, 2426]},
+        {"label": "page 003 prose caption", "bbox": [171, 5093, 536, 5250]}
+      ]
+    },
+    "004.webp": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "page 004 brown sfx", "bbox": [122, 4069, 598, 4461]},
+        {"label": "page 004 cyan slash sfx", "bbox": [389, 5653, 645, 5803]}
+      ]
+    },
+    "005.webp": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "page 005 red body sfx", "bbox": [53, 5666, 508, 6027]},
+        {"label": "page 005 blue diagonal sfx", "bbox": [243, 7056, 628, 7487]}
+      ],
+      "forbidden_boxes": [
+        {"label": "page 005 title/credit block", "bbox": [6, 2704, 720, 3235]}
+      ]
+    },
+    "006.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 006 lower red hangul sfx", "bbox": [165, 8400, 542, 8979]}
+      ]
+    },
+    "007.webp": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "page 007 upper white sfx", "bbox": [452, 581, 699, 785]},
+        {"label": "page 007 gray slash sfx", "bbox": [323, 6433, 612, 6648]}
+      ]
+    },
+    "008.webp": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "page 008 left blue sfx", "bbox": [207, 6140, 435, 6290]},
+        {"label": "page 008 right blue sfx", "bbox": [445, 6274, 660, 6443]}
+      ]
+    },
+    "009.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 009 green sfx", "bbox": [73, 5928, 465, 6274]}
+      ],
+      "forbidden_boxes": [
+        {"label": "page 009 master caption", "bbox": [232, 2342, 470, 2481]}
+      ]
+    },
+    "010.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 010 pale vertical sfx", "bbox": [82, 1599, 316, 1919]}
+      ]
+    },
+    "011.webp": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "page 011 upper olive sfx", "bbox": [442, 2812, 715, 3400]},
+        {"label": "page 011 red sfx", "bbox": [41, 8445, 276, 8811]}
+      ]
+    },
+    "012.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 012 green sfx cluster", "bbox": [60, 3241, 582, 3652]}
+      ]
+    },
+    "013.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 013 teal sfx", "bbox": [5, 5837, 214, 6098]}
+      ],
+      "forbidden_boxes": [
+        {"label": "page 013 english question caption", "bbox": [106, 2724, 416, 3000]},
+        {"label": "page 013 english narration caption", "bbox": [103, 5579, 416, 5794]}
+      ]
+    },
+    "014.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 014 red rain sfx", "bbox": [37, 1012, 692, 1687]}
+      ],
+      "forbidden_boxes": [
+        {"label": "page 014 scanlator logo", "bbox": [106, 4868, 321, 5077]}
+      ]
+    },
+    "015.webp": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "page 015 blue sfx", "bbox": [90, 6776, 214, 6945]}
+      ],
+      "forbidden_boxes": [
+        {"label": "page 015 english apology caption", "bbox": [96, 5781, 292, 5912]}
+      ]
+    },
+    "016.webp": {
+      "reviewed": true,
+      "min_final_count": 0,
+      "max_final_count": 0
+    }
+  }
+}

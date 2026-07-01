@@ -9,8 +9,10 @@ import numpy as np
 
 try:
     from inpainter.mask_builder import build_inpaint_mask
+    from ocr.text_router import ROUTE_ACTIONS, route_action_requires_inpaint
 except ImportError:
     from ..inpainter.mask_builder import build_inpaint_mask
+    from ..ocr.text_router import ROUTE_ACTIONS, route_action_requires_inpaint
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +496,10 @@ def _recover_orphan_segmentation_components(
 
 
 def _is_preserved_item(item: dict) -> bool:
-    return bool(item.get("skip_processing") or item.get("preserve_original"))
+    route_action = str(item.get("route_action") or "").strip().lower()
+    if route_action in ROUTE_ACTIONS:
+        return not route_action_requires_inpaint(route_action)
+    return bool(item.get("preserve_original") or item.get("skip_processing") or item.get("ignored_reason"))
 
 
 def _active_items(items: list[dict] | None) -> list[dict]:

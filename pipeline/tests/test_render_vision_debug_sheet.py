@@ -53,3 +53,30 @@ def test_render_vision_debug_sheet_blocks_without_project(tmp_path):
 
     assert result["status"] == "BLOCK"
     assert "missing project.json" in result["reasons"]
+
+
+def test_render_vision_debug_sheet_selects_visual_sfx_flags(tmp_path):
+    output = tmp_path / "out"
+    _write_project(output)
+    project_path = output / "project.json"
+    project = json.loads(project_path.read_text(encoding="utf-8"))
+    project["paginas"][0]["text_layers"] = [
+        {
+            "id": "sfx_visual_001",
+            "tipo": "sfx",
+            "content_class": "sfx",
+            "route_action": "review_required",
+            "original": "",
+            "translated": "",
+            "qa_flags": ["sfx_visual_candidate", "sfx_script_unknown"],
+            "sfx": {"visual_detector": "sfx_visual", "inpaint_allowed": False},
+        }
+    ]
+    project_path.write_text(json.dumps(project), encoding="utf-8")
+
+    result = render_vision_debug_sheet(output, tmp_path / "debug" / "sheet.html", filters=["sfx"])
+
+    html = (tmp_path / "debug" / "sheet.html").read_text(encoding="utf-8")
+    assert result["status"] == "PASS"
+    assert result["selected_pages"] == [1]
+    assert "sfx_visual_candidate" in html

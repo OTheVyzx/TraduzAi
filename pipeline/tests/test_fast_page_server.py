@@ -382,6 +382,37 @@ def test_fast_page_session_captures_inner_pipeline_stdout(tmp_path: Path, capsys
     assert events[0]["message"] == "inner"
 
 
+def test_serve_jsonl_streams_pipeline_progress_before_runner_finishes(tmp_path: Path) -> None:
+    input_stream = StringIO(
+        json.dumps(
+            {
+                "type": "process_page",
+                "source_path": str(tmp_path / "001.png"),
+                "work_dir": str(tmp_path / "jobs" / "one"),
+                "models_dir": str(tmp_path / "models"),
+            }
+        )
+        + "\n"
+    )
+    output_stream = StringIO()
+
+    def streaming_runner(config_path: str) -> None:
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        work_dir = Path(config["work_dir"])
+        translated_dir = work_dir / "translated"
+        print(json.dumps({"type": "progress", "step": "extract", "message": "streamed"}))
+        assert '"message": "streamed"' in output_stream.getvalue()
+        translated_dir.mkdir(parents=True, exist_ok=True)
+        (translated_dir / "001.png").write_bytes(b"fake image")
+
+    session = FastPageSession(pipeline_runner=streaming_runner, session_id="fixed-session")
+
+    serve_jsonl(input_stream, output_stream, session=session)
+
+    events = [json.loads(line) for line in output_stream.getvalue().splitlines()]
+    assert [event["type"] for event in events] == ["progress", "page_completed", "complete"]
+
+
 def test_fast_page_session_reports_source_page_when_pipeline_renumbers_single_input(tmp_path: Path) -> None:
     def renumbering_runner(config_path: str) -> None:
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))

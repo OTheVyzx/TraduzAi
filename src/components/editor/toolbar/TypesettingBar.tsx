@@ -21,6 +21,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import { useEditorStore } from "../../../lib/stores/editorStore";
+import { useAppStore, type ProjectFontAssets } from "../../../lib/stores/appStore";
 import { ensureEditorFontOptionReady, type EditorFontOption } from "../../../lib/fontCatalog";
 import { EditorFontPicker } from "../EditorFontPicker";
 import { TextStylePresetPopover } from "./TextStylePresetPopover";
@@ -84,6 +85,7 @@ function EffectPopover({
         createPortal(
           <div
             ref={popoverRef}
+            data-editor-preserve-text-selection="true"
             style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 9999 }}
             className="min-w-[220px] rounded-xl border border-border bg-bg-secondary shadow-[0_8px_32px_rgba(0,0,0,0.45)] backdrop-blur-md p-3 space-y-2.5"
           >
@@ -138,11 +140,29 @@ function defaultGradientEnd(startColor: string) {
   return startColor.toLowerCase() === "#ffffff" ? "#000000" : "#ffffff";
 }
 
+function upsertSystemFontAsset(assets: ProjectFontAssets | undefined, option: EditorFontOption): ProjectFontAssets {
+  if (option.source !== "system" || !option.localPath) return assets ?? {};
+  return {
+    ...(assets ?? {}),
+    system: {
+      ...(assets?.system ?? {}),
+      [option.value]: {
+        family: option.cssFamily,
+        path: option.localPath,
+        weight: option.variant ?? "400",
+        style: option.style ?? "normal",
+      },
+    },
+  };
+}
+
 export function TypesettingBar() {
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   const currentPage = useEditorStore((s) => s.currentPage);
   const pendingEdits = useEditorStore((s) => s.pendingEdits);
   const updateEstilo = useEditorStore((s) => s.updatePendingEstilo);
+  const updateProject = useAppStore((s) => s.updateProject);
+  const fontAssets = useAppStore((s) => s.project?.font_assets);
   const [loadingFont, setLoadingFont] = useState<string | null>(null);
 
   const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
@@ -176,7 +196,10 @@ export function TypesettingBar() {
   async function handleFontChange(value: string, option?: EditorFontOption) {
     setLoadingFont(value);
     try {
-      await ensureEditorFontOptionReady(option ?? value);
+      const prepared = await ensureEditorFontOptionReady(option ?? value);
+      if (prepared?.source === "system") {
+        updateProject({ font_assets: upsertSystemFontAsset(fontAssets, prepared) });
+      }
       updateEstilo(activeLayerId, { fonte: value });
     } catch (error) {
       console.warn("[fonts] falha ao preparar fonte do editor:", error);
@@ -186,7 +209,10 @@ export function TypesettingBar() {
   }
 
   return (
-    <div className="flex items-center gap-1 border-b border-border bg-bg-secondary/80 px-3 py-1 overflow-x-auto overflow-y-visible">
+    <div
+      data-editor-preserve-text-selection="true"
+      className="flex items-center gap-1 border-b border-border bg-bg-secondary/80 px-3 py-1 overflow-x-auto overflow-y-visible"
+    >
       {/* Fonte */}
       <EditorFontPicker
         value={fonte}

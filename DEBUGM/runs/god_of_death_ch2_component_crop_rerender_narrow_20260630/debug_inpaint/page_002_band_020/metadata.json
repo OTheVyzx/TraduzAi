@@ -1,0 +1,136 @@
+{
+  "page_number": 2,
+  "band_index": 21,
+  "band_id": "page_002_band_020",
+  "band_y_top": 14409,
+  "text_count": 1,
+  "text_samples": [
+    {
+      "id": "ocr_002",
+      "trace_id": "ocr_002@page_002_band_020",
+      "band_id": "page_002_band_020",
+      "bbox": [
+        497,
+        257,
+        717,
+        349
+      ],
+      "text_pixel_bbox": [
+        509,
+        281,
+        716,
+        346
+      ],
+      "balloon_bbox": [
+        440,
+        191,
+        773,
+        438
+      ],
+      "bubble_mask_bbox": [
+        417,
+        177,
+        797,
+        429
+      ],
+      "bubble_mask_source": "image_white_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "component_bubble_cleaner",
+        "raw_mask_pixels": 1943,
+        "expanded_mask_pixels": 6668,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    }
+  ],
+  "vision_block_samples": [
+    {
+      "id": "ocr_002",
+      "trace_id": "ocr_002@page_002_band_020",
+      "band_id": "page_002_band_020",
+      "bbox": [
+        497,
+        257,
+        717,
+        349
+      ],
+      "text_pixel_bbox": [
+        509,
+        281,
+        716,
+        346
+      ],
+      "balloon_bbox": [
+        440,
+        191,
+        773,
+        438
+      ],
+      "bubble_mask_bbox": [
+        417,
+        177,
+        797,
+        429
+      ],
+      "bubble_mask_source": "image_white_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "component_bubble_cleaner",
+        "raw_mask_pixels": 2152,
+        "expanded_mask_pixels": 6668,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    }
+  ],
+  "pre_recovery_text_samples": [],
+  "initial_empty_recovery_attempts": [],
+  "recovered_initial_empty_vision_blocks_from_texts": false,
+  "remaining_inpaint_blocks": 1,
+  "engine_preset_id": "default",
+  "mask_strategy": "roi_segmentation_assisted",
+  "detector_engine_id": "default",
+  "validated_text_source_bboxes": [],
+  "rejected_text_source_bboxes": [],
+  "fast_fill_mask_pixels": 0,
+  "raw_mask_pixels": 6668,
+  "expanded_mask_pixels": 17448,
+  "used_real_inpaint": true,
+  "fast_fill_without_raw_mask": false,
+  "used_fast_solid_fill": false,
+  "fast_solid_balloon_count": 0,
+  "fast_solid_white_count": 0,
+  "fast_solid_black_count": 0,
+  "fast_solid_colored_count": 0,
+  "used_fast_white_fill": false,
+  "fast_solid_fill_samples": [],
+  "fast_solid_rejection_reasons": {},
+  "fast_solid_fill_reject_reasons": {},
+  "unsafe_inpaint_block_count": 0,
+  "unsafe_inpaint_block_reasons": {},
+  "unsafe_inpaint_block_samples": [],
+  "connected_white_geometry_fill_count": 0,
+  "connected_white_geometry_fill_mask_pixels": 0,
+  "used_fast_local_fill": false,
+  "used_fast_dark_fill": false,
+  "used_dark_panel_fill": false,
+  "dark_panel_fill_count": 0,
+  "changed_pixels_after_inpaint": 8961,
+  "post_cleanup_skipped_reason": "",
+  "changed_pixels_outside_expanded_mask": 0,
+  "changed_pixels_outside_effective_limit_mask": 0,
+  "raw_changed_outside_limit_mask": 0,
+  "cleanup_changed_outside_limit_mask": 0,
+  "final_clamped_outside_expanded_mask_pixels": 0,
+  "final_action_mask_white_cleanup_added_pixels": 481,
+  "flags": []
+}

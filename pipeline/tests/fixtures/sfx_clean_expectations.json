@@ -1,0 +1,121 @@
+{
+  "min_iou": 0.42,
+  "require_all_pages": true,
+  "require_reviewed_pages": true,
+  "pages": {
+    "Captura de tela 2026-06-05 221235.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "purple floor sfx", "bbox": [64, 165, 132, 262]}
+      ],
+      "forbidden_boxes": [
+        {"label": "people and floor artifact", "bbox": [262, 7, 454, 199]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221245.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "black strike sfx", "bbox": [63, 14, 167, 163]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221309.png": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "left gold sfx", "bbox": [45, 87, 105, 141]},
+        {"label": "right gold sfx", "bbox": [182, 179, 230, 224]}
+      ],
+      "forbidden_boxes": [
+        {"label": "blue forest artifact", "bbox": [167, 103, 265, 157]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221315.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "black vertical sfx", "bbox": [28, 0, 186, 170]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221319.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "stair sfx cluster", "bbox": [26, 55, 242, 220]}
+      ],
+      "forbidden_boxes": [
+        {"label": "right edge building sliver", "bbox": [238, 0, 291, 220]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221322.png": {
+      "reviewed": true,
+      "min_final_count": 3,
+      "max_final_count": 3,
+      "required_boxes": [
+        {"label": "left red sliver sfx", "bbox": [0, 0, 39, 186]},
+        {"label": "upper red sfx", "bbox": [182, 0, 254, 52]},
+        {"label": "main red sfx", "bbox": [55, 109, 226, 285]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221325.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "cyan question sfx", "bbox": [88, 84, 143, 127]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221336.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "red top sfx", "bbox": [193, 33, 261, 101]}
+      ],
+      "forbidden_boxes": [
+        {"label": "face and collar artifact", "bbox": [0, 158, 171, 240]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221342.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "cyan glow sfx", "bbox": [84, 59, 157, 113]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221350.png": {
+      "reviewed": true,
+      "min_final_count": 3,
+      "max_final_count": 3,
+      "required_boxes": [
+        {"label": "top gray sfx", "bbox": [30, 19, 84, 136]},
+        {"label": "right gray sfx", "bbox": [222, 212, 272, 311]},
+        {"label": "lower gray sfx", "bbox": [55, 327, 97, 403]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221354.png": {
+      "reviewed": true,
+      "min_final_count": 1,
+      "max_final_count": 1,
+      "required_boxes": [
+        {"label": "blue tall sfx", "bbox": [18, 30, 88, 177]}
+      ]
+    },
+    "Captura de tela 2026-06-05 221401.png": {
+      "reviewed": true,
+      "min_final_count": 2,
+      "max_final_count": 2,
+      "required_boxes": [
+        {"label": "upper purple sfx", "bbox": [223, 19, 306, 135]},
+        {"label": "lower purple sfx", "bbox": [189, 222, 309, 380]}
+      ]
+    }
+  }
+}

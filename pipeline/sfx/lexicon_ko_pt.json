@@ -1,0 +1,32 @@
+{
+  "쿵": {
+    "pt": "TUM",
+    "kind": "impact",
+    "confidence": 0.9
+  },
+  "쾅": {
+    "pt": "BOOM",
+    "kind": "explosion_impact",
+    "confidence": 0.9
+  },
+  "탕": {
+    "pt": "BANG",
+    "kind": "shot",
+    "confidence": 0.82
+  },
+  "철컥": {
+    "pt": "CLAC",
+    "kind": "mechanical_click",
+    "confidence": 0.88
+  },
+  "우우웅": {
+    "pt": "VUUUM",
+    "kind": "hum",
+    "confidence": 0.84
+  },
+  "파앗": {
+    "pt": "FWISH",
+    "kind": "burst_motion",
+    "confidence": 0.76
+  }
+}

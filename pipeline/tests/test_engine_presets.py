@@ -85,6 +85,7 @@ def test_engine_steps_exclude_default_and_disabled_stages():
     assert default_preset.segmenter == "comic-text-detector-seg"
     assert default_preset.bubble_segmenter == "speech-bubble-segmentation"
     assert default_preset.inpainter == "aot-inpainting"
+    assert default_preset.mask_strategy == "roi_segmentation_assisted"
     assert engine_steps_for_preset(default_preset) == [
         "comic-text-detector-seg",
         "speech-bubble-segmentation",

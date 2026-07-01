@@ -21,6 +21,7 @@ from server.projects.export_api import router as export_router
 from server.projects.setup_api import router as setup_router
 from server.workers.api import router as workers_router
 from server.workers.lease import fail_lost_jobs
+from server.vast.orchestrator import stop_idle_worker_if_needed
 
 
 class SPAStaticFiles(StaticFiles):
@@ -65,6 +66,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def _loop():
             while True:
                 fail_lost_jobs(settings)
+                try:
+                    stop_idle_worker_if_needed(settings)
+                except Exception:
+                    pass
                 await asyncio.sleep(30)
 
         app.state.janitor_task = asyncio.create_task(_loop())

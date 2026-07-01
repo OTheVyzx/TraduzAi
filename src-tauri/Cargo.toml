@@ -32,6 +32,7 @@ html-escape = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 unicode-normalization = "0.1"
 base64 = "0.22"
+dafont = { git = "https://github.com/fcoury/dafont", rev = "a00628cc56bc4831f2b6801504eb0621606a2688" }
 
 [dev-dependencies]
 tempfile = "3"

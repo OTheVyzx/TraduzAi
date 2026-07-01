@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Home } from "./pages/Home";
 import { Layout } from "./components/ui/Layout";
-import { BootSplash } from "./components/ui/BootSplash";
 import { useAppStore } from "./lib/stores/appStore";
 import { checkModels, getCredits, getSystemProfile, onPipelineProgress, warmupVisualStack } from "./lib/tauri";
 import { installE2EFixtureProject } from "./lib/e2e/fixtureProject";
@@ -18,7 +17,14 @@ const Editor = lazy(() => import("./pages/Editor").then((module) => ({ default: 
 const Lab = lazy(() => import("./pages/Lab").then((module) => ({ default: module.Lab })));
 
 function RouteFallback() {
-  return <BootSplash progress={0.32} message="Carregando tela..." />;
+  return (
+    <div
+      data-testid="route-pending"
+      className="flex min-h-full items-center justify-center px-6 py-10 text-center text-sm text-text-secondary"
+    >
+      Preparando tela...
+    </div>
+  );
 }
 
 function isTauriRuntime() {
@@ -55,38 +61,45 @@ function AppRoutes() {
 
   if (standaloneLab) {
     return (
-      <Suspense fallback={<RouteFallback />}>
-        <Routes>
-          <Route
-            path="/lab/*"
-            element={
-              <div className="h-screen overflow-y-auto overflow-x-hidden bg-bg-primary bg-noise">
+      <div className="h-screen overflow-y-auto overflow-x-hidden bg-bg-primary bg-noise">
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
+            <Route
+              path="/lab/*"
+              element={
                 <Lab />
-              </div>
-            }
-          />
-          <Route
-            path="*"
-            element={
-              <Navigate
-                to={{ pathname: "/lab/home", search: "?window=lab" }}
-                replace
-              />
-            }
-          />
-        </Routes>
-      </Suspense>
+              }
+            />
+            <Route
+              path="*"
+              element={
+                <Navigate
+                  to={{ pathname: "/lab/home", search: "?window=lab" }}
+                  replace
+                />
+              }
+            />
+          </Routes>
+        </Suspense>
+      </div>
     );
   }
 
   return (
-    <Suspense fallback={<RouteFallback />}>
-      <Routes>
-        <Route path="/editor" element={<Editor />} />
-        <Route
-          path="/*"
-          element={
-            <Layout>
+    <Routes>
+      <Route
+        path="/editor"
+        element={
+          <Suspense fallback={<RouteFallback />}>
+            <Editor />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/*"
+        element={
+          <Layout>
+            <Suspense fallback={<RouteFallback />}>
               <Routes>
                 <Route path="/" element={<Home />} />
                 <Route path="/setup" element={<Setup />} />
@@ -99,11 +112,11 @@ function AppRoutes() {
                 )}
                 <Route path="/settings" element={<Settings />} />
               </Routes>
-            </Layout>
-          }
-        />
-      </Routes>
-    </Suspense>
+            </Suspense>
+          </Layout>
+        }
+      />
+    </Routes>
   );
 }
 

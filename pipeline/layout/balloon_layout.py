@@ -24,7 +24,6 @@ _TEXTURED_FONT_KEYWORDS = (
     "singlefighter",
     "badaboom",
 )
-_NORMAL_TEXT_TIPOS = {"", "fala", "pensamento", "texto"}
 _RENDER_ROUTE_ACTIONS = {"translate_inpaint_render", "translate_render_only"}
 
 try:
@@ -78,7 +77,7 @@ def _route_action_requires_render(text: dict) -> bool:
 
 
 def _is_normal_visual_text_type(text: dict) -> bool:
-    return str(text.get("tipo") or "").strip().lower() in _NORMAL_TEXT_TIPOS
+    return True
 
 
 def _safe_balloon_bbox(
@@ -138,18 +137,10 @@ def _expand_text_only_white_balloon_bbox(
 
     if not candidate or len(candidate) != 4 or page_width <= 0 or page_height <= 0:
         return candidate, False
-    if (text.get("skip_processing") or text.get("preserve_original")) and not _route_action_requires_render(text):
-        return candidate, False
-    if (
-        str(text.get("content_class") or "").strip().lower() in {"noise", "logo", "watermark"}
-        and not _route_action_requires_render(text)
-    ):
-        return candidate, False
     if not _is_normal_visual_text_type(text):
         return candidate, False
     profile = str(layout_profile or text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
-    balloon_type = str(text.get("balloon_type") or "").strip().lower()
-    if profile not in {"white_balloon", "connected_balloon"} and balloon_type != "white":
+    if profile not in {"white_balloon", "connected_balloon"}:
         return candidate, False
 
     anchors = [
@@ -173,8 +164,13 @@ def _expand_text_only_white_balloon_bbox(
         return candidate, False
     box_w = x2 - x1
     box_h = y2 - y1
-    pad_x = max(18, int(box_w * 0.75), int(box_h * 0.18))
-    pad_y = max(14, int(box_h * 0.10), int(box_w * 0.25))
+    aspect = box_w / float(max(1, box_h))
+    if aspect >= 1.8:
+        pad_x = max(18, int(box_w * 0.25), int(box_h * 0.35))
+        pad_y = max(14, int(box_h * 0.25))
+    else:
+        pad_x = max(18, int(box_w * 0.75), int(box_h * 0.18))
+        pad_y = max(14, int(box_h * 0.10), int(box_w * 0.25))
     if box_h / float(max(1, box_w)) >= 3.0:
         pad_x = max(pad_x, int(box_h * 0.28))
     expanded = [
@@ -192,8 +188,7 @@ def _select_white_balloon_merged_anchor_bbox(text: dict, inferred_bbox: list[int
     if not _is_normal_visual_text_type(text):
         return None
     profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
-    balloon_type = str(text.get("balloon_type") or "").strip().lower()
-    if profile not in {"white_balloon", "connected_balloon"} and balloon_type != "white":
+    if profile not in {"white_balloon", "connected_balloon"}:
         return None
 
     source_bbox = _normalize_bbox_list(text.get("source_bbox")) or _normalize_bbox_list(inferred_bbox)
@@ -236,7 +231,8 @@ def _clamp_top_narration_bbox(
     tipo: str,
     profile: str = "standard",
 ) -> tuple[list[int], float | None]:
-    if tipo != "narracao" or not inferred_bbox or len(inferred_bbox) != 4:
+    del tipo
+    if str(profile or "").strip().lower() != "top_narration" or not inferred_bbox or len(inferred_bbox) != 4:
         return balloon_bbox, None
 
     ox1, oy1, ox2, oy2 = [int(v) for v in inferred_bbox]
@@ -284,8 +280,6 @@ def _detect_top_narration_rect_bbox(
     """
 
     if image_bgr is None or not seed_bbox or len(seed_bbox) != 4:
-        return None
-    if str(text.get("tipo") or "").strip().lower() != "narracao":
         return None
     profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
     if profile != "top_narration":
@@ -380,9 +374,6 @@ def _resolve_text_font_name(text: dict) -> str:
 
 
 def _looks_like_textured_lettering(text: dict) -> bool:
-    balloon_type = str(text.get("balloon_type") or "").strip().lower()
-    if balloon_type == "textured":
-        return True
     font_name = _resolve_text_font_name(text).strip().lower()
     return any(keyword in font_name for keyword in _TEXTURED_FONT_KEYWORDS)
 
@@ -449,30 +440,15 @@ def _can_try_connected_balloon_detection(
     layout_shape: str,
     page_image: np.ndarray | None,
 ) -> bool:
-    tipo = str(text.get("tipo") or "").strip().lower()
     if _looks_like_textured_lettering(text):
-        visually_white_balloon = bool(
-            str(text.get("balloon_type") or "").strip().lower() == "textured"
-            and _balloon_region_looks_white(page_image, balloon_bbox)
-        )
-        if not visually_white_balloon:
+        if not _balloon_region_looks_white(page_image, balloon_bbox):
             return False
 
     block_profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
     if layout_shape in {"box", "rectangle"}:
         return False
 
-    if tipo in _NORMAL_TEXT_TIPOS:
-        return True
-    if tipo != "narracao":
-        return False
-
-    text_body = str(text.get("translated") or text.get("text") or "")
-    return (
-        block_profile in {"white_balloon", "connected_balloon"}
-        and _has_multiple_sentences(text_body)
-        and _balloon_region_looks_white(page_image, balloon_bbox)
-    )
+    return True
 
 
 def _should_skip_outline_connected_detection(
@@ -512,6 +488,15 @@ def _should_skip_connected_detection_for_dense_single_cluster(
     return len(merged) < 2
 
 
+def _synthetic_balloon_reference_allows_connected_detection(
+    image_bgr: np.ndarray | None,
+    balloon_bbox: list[int],
+) -> bool:
+    if image_bgr is None:
+        return False
+    return _balloon_region_looks_white(image_bgr, balloon_bbox)
+
+
 def _has_multiple_sentences(text: str) -> bool:
     return len(re.findall(r"[.!?…]+", str(text or ""))) >= 2
 
@@ -537,8 +522,8 @@ def enrich_page_layout(page_result: dict) -> dict:
                 if not updated.get("line_polygons"):
                     updated["text_pixel_bbox"] = list(validated_source_bbox)
             anchor_bbox = updated.get("layout_bbox") or updated.get("balloon_bbox") or text.get("bbox", [0, 0, 0, 0])
-            updated["layout_shape"] = classify_layout_shape(anchor_bbox, updated.get("tipo", "fala"), None)
-            updated["layout_align"] = classify_layout_align(updated.get("tipo", "fala"), updated["layout_shape"])
+            updated["layout_shape"] = classify_layout_shape(anchor_bbox, "text", None)
+            updated["layout_align"] = classify_layout_align("text", updated["layout_shape"])
             record_decision(
                 stage="layout",
                 action="assign_text_anchor_bbox",
@@ -572,7 +557,7 @@ def enrich_page_layout(page_result: dict) -> dict:
     for index, text in enumerate(texts, start=1):
         layer_ref = str(text.get("id") or f"ocr_{index:03d}")
         region = _find_region_for_text(text, regions)
-        use_shared_layout = bool(region) and _region_supports_shared_layout(region, text.get("tipo", "fala"))
+        use_shared_layout = bool(region) and _region_supports_shared_layout(region, "text")
         shared_group_size = len(region["texts"]) if region else 1
         separate_cluster_layout = bool(region) and shared_group_size > 1 and not use_shared_layout
         use_region_bbox = bool(region) and use_shared_layout and shared_group_size > 1
@@ -596,7 +581,7 @@ def enrich_page_layout(page_result: dict) -> dict:
         refined_reason = "refined_from_merged_anchor" if merged_anchor_bbox is not None else "refined_from_image"
         if page_image is not None and not separate_cluster_layout:
             refined_bbox = refine_balloon_bbox_from_image(
-                page_image, inferred_bbox, text.get("tipo", "fala")
+                page_image, inferred_bbox, "text"
             )
             if refined_bbox is not None:
                 refined_area = _bbox_area(refined_bbox)
@@ -614,7 +599,7 @@ def enrich_page_layout(page_result: dict) -> dict:
                 pixel_refined = refine_balloon_bbox_from_image(
                     page_image,
                     [int(v) for v in text_pixel_bbox],
-                    text.get("tipo", "fala"),
+                    "text",
                 )
                 if _should_prefer_text_pixel_refinement(
                     primary_bbox=refined_bbox,
@@ -655,11 +640,7 @@ def enrich_page_layout(page_result: dict) -> dict:
         block_profile = str(text.get("block_profile") or "")
         layout_profile = str(text.get("layout_profile") or block_profile or "standard")
         if layout_profile.strip().lower() == "top_narration":
-            layout_profile = (
-                "white_balloon"
-                if str(text.get("balloon_type") or "").strip().lower() == "white"
-                else "standard"
-            )
+            layout_profile = "standard"
         visual_rect_bbox = _detect_top_narration_rect_bbox(
             page_image,
             balloon_bbox,
@@ -673,7 +654,7 @@ def enrich_page_layout(page_result: dict) -> dict:
             inferred_bbox,
             width,
             height,
-            text.get("tipo", "fala"),
+            "text",
             profile=layout_profile,
         )
         existing_subregions = [
@@ -688,6 +669,38 @@ def enrich_page_layout(page_result: dict) -> dict:
         elif _validated_text_source_union(text) is not None and existing_balloon_bbox is not None:
             balloon_bbox = existing_balloon_bbox
             layout_reason = "existing_balloon_bbox_with_validated_text_source"
+        mask_source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        existing_bubble_mask_bbox = _normalize_bbox_list(text.get("bubble_mask_bbox"))
+        text_anchor_bbox = (
+            _normalize_bbox_list(text.get("text_pixel_bbox"))
+            or _normalize_bbox_list(text.get("source_bbox"))
+            or _normalize_bbox_list(text.get("bbox"))
+        )
+        if (
+            mask_source == "image_dark_bubble_mask"
+            and existing_bubble_mask_bbox is not None
+            and text_anchor_bbox is not None
+            and _bbox_intersection_area(existing_bubble_mask_bbox, text_anchor_bbox)
+            >= int(_bbox_area(text_anchor_bbox) * 0.70)
+            and _bbox_area(existing_bubble_mask_bbox) >= max(_bbox_area(balloon_bbox) * 1.35, _bbox_area(text_anchor_bbox) * 2)
+        ):
+            balloon_bbox = existing_bubble_mask_bbox
+            layout_reason = "existing_dark_bubble_mask_bbox"
+            layout_profile = "dark_bubble"
+        elif (
+            mask_source in {"image_dark_panel_mask", "derived_card_panel_mask"}
+            and existing_bubble_mask_bbox is not None
+            and text_anchor_bbox is not None
+            and _bbox_intersection_area(existing_bubble_mask_bbox, text_anchor_bbox)
+            >= int(_bbox_area(text_anchor_bbox) * 0.70)
+            and _bbox_area(existing_bubble_mask_bbox) >= max(
+                _bbox_area(balloon_bbox) * 1.35,
+                _bbox_area(text_anchor_bbox) * 2,
+            )
+        ):
+            balloon_bbox = existing_bubble_mask_bbox
+            layout_reason = "existing_dark_panel_mask_bbox"
+            layout_profile = "dark_panel"
         if separate_cluster_layout:
             expanded_text_only_balloon = False
         else:
@@ -710,10 +723,10 @@ def enrich_page_layout(page_result: dict) -> dict:
         )
         layout_shape = classify_layout_shape(
             balloon_bbox,
-            text.get("tipo", "fala"),
+            "text",
             region,
         )
-        layout_align = classify_layout_align(text.get("tipo", "fala"), layout_shape)
+        layout_align = classify_layout_align("text", layout_shape)
         updated = normalize_text_geometry(text)
         updated["balloon_bbox"] = balloon_bbox
         updated["layout_reason"] = layout_reason
@@ -782,7 +795,7 @@ def enrich_page_layout(page_result: dict) -> dict:
         subregion_key = (
             tuple(int(v) for v in inferred_bbox),
             tuple(int(v) for v in balloon_bbox),
-            str(text.get("tipo", "fala")),
+            "text",
         )
         can_try_connected = (not separate_cluster_layout) and _can_try_connected_balloon_detection(
             text,
@@ -790,15 +803,16 @@ def enrich_page_layout(page_result: dict) -> dict:
             layout_shape=layout_shape,
             page_image=page_image,
         )
+        if can_try_connected and expanded_text_only_balloon and not isinstance(bubble_region, dict):
+            can_try_connected = _synthetic_balloon_reference_allows_connected_detection(
+                page_image,
+                balloon_bbox,
+            )
         if subregion_key not in subregion_cache:
             # TRAVA ANTI-BURACO: Caixas de narração retangulares não têm lobos.
             # Mas narração dentro de balão branco (block_profile == "white_balloon")
             # pode ser um balão duplo conectado — deixa a detecção topológica decidir.
-            block_profile = str(text.get("block_profile") or "")
-            tipo_text = text.get("tipo", "fala")
-            is_rect_narration = layout_shape in ("box", "rectangle") or (
-                tipo_text == "narracao" and block_profile != "white_balloon"
-            )
+            is_rect_narration = layout_shape in ("box", "rectangle")
 
             if is_rect_narration or not can_try_connected:
                 subregion_cache[subregion_key] = []
@@ -816,7 +830,7 @@ def enrich_page_layout(page_result: dict) -> dict:
                         page_image,
                         inferred_bbox,
                         balloon_bbox,
-                        text.get("tipo", "fala"),
+                        "text",
                     )
         rich_subs = subregion_cache[subregion_key]
         subs = [item["bbox"] for item in rich_subs]
@@ -991,9 +1005,6 @@ def _merge_connected_nearby_texts(
         if ti.get("connected_lobe_bboxes"):
             already_connected.add(i)
             continue
-        tipo_i = str(ti.get("tipo") or "").strip().lower()
-        if tipo_i not in _NORMAL_TEXT_TIPOS:
-            continue
         bbox_i = [int(v) for v in (ti.get("bbox") or [0, 0, 0, 0])]
 
         for j in range(i + 1, n):
@@ -1001,9 +1012,6 @@ def _merge_connected_nearby_texts(
                 continue
             tj = texts[j]
             if tj.get("connected_lobe_bboxes"):
-                continue
-            tipo_j = str(tj.get("tipo") or "").strip().lower()
-            if tipo_j not in _NORMAL_TEXT_TIPOS:
                 continue
             bbox_j = [int(v) for v in (tj.get("bbox") or [0, 0, 0, 0])]
             if _should_skip_merge_for_distinct_existing_balloons(ti, tj):
@@ -1040,7 +1048,7 @@ def _merge_connected_nearby_texts(
                 page_image,
                 union_bbox,
                 balloon_search,
-                tipo_i,
+                "text",
             )
             if len(subs) < 2:
                 continue
@@ -1051,7 +1059,7 @@ def _merge_connected_nearby_texts(
             if not (covers_i and covers_j):
                 continue
 
-            full_balloon = refine_balloon_bbox_from_image(page_image, balloon_search, tipo_i)
+            full_balloon = refine_balloon_bbox_from_image(page_image, balloon_search, "text")
 
             for k in (i, j):
                 texts[k]["balloon_bbox"] = full_balloon
@@ -1117,45 +1125,9 @@ def _text_bbox_for_connected_pair(text: dict) -> list[int] | None:
 
 
 def _is_renderable_connected_pair_text(text: dict) -> bool:
-    route_requires_render = _route_action_requires_render(text)
-    if (text.get("skip_processing") or text.get("preserve_original")) and not route_requires_render:
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if route_action and not _route_action_requires_render(text):
         return False
-
-    render_policy = str(text.get("render_policy") or "").strip().lower()
-    if render_policy in {"skip", "preserve", "preserve_original", "remove"} and not route_requires_render:
-        return False
-
-    tipo = str(text.get("tipo") or "").strip().lower()
-    if tipo not in (_NORMAL_TEXT_TIPOS | {"narracao"}):
-        return False
-
-    content_class = str(text.get("content_class") or "").strip().lower()
-    if content_class in {
-        "logo",
-        "emblem",
-        "noise",
-        "watermark",
-        "url_watermark",
-        "scanlator_credit",
-        "cover_credit",
-        "editorial_note",
-        "tn_note",
-    } and not route_requires_render:
-        return False
-
-    non_renderable_terms = ("logo", "emblem", "watermark", "scanlator", "credit", "noise")
-    skip_reason = str(text.get("skip_reason") or "").strip().lower()
-    if skip_reason and any(term in skip_reason for term in non_renderable_terms) and not route_requires_render:
-        return False
-
-    qa_flags = text.get("qa_flags") or []
-    if not isinstance(qa_flags, (list, tuple, set)):
-        qa_flags = [qa_flags]
-    for flag in qa_flags:
-        flag_text = str(flag or "").strip().lower()
-        if flag_text and any(term in flag_text for term in non_renderable_terms):
-            return False
-
     return True
 
 
@@ -1178,6 +1150,12 @@ def _looks_like_shared_connected_pair(first: dict, second: dict, balloon: list[i
     center_second = _bbox_center(bbox_second)
     dx = abs(center_first[0] - center_second[0])
     dy = abs(center_first[1] - center_second[1])
+    overlap_x = max(0, min(bbox_first[2], bbox_second[2]) - max(bbox_first[0], bbox_second[0]))
+    overlap_y = max(0, min(bbox_first[3], bbox_second[3]) - max(bbox_first[1], bbox_second[1]))
+    min_text_w = max(1, min(bbox_first[2] - bbox_first[0], bbox_second[2] - bbox_second[0]))
+    min_text_h = max(1, min(bbox_first[3] - bbox_first[1], bbox_second[3] - bbox_second[1]))
+    if overlap_y > 0 and overlap_y / float(min_text_h) <= 0.25 and overlap_x / float(min_text_w) >= 0.45:
+        return False
 
     if dx < max(72, int(bw * 0.18)) and dy < max(56, int(bh * 0.18)):
         return False
@@ -1329,11 +1307,7 @@ def _separate_false_shared_white_balloons(texts: list[dict], page_image) -> None
 
 
 def _is_white_balloon_speech_candidate(text: dict) -> bool:
-    balloon_type = str(text.get("balloon_type") or "").strip().lower()
-    if balloon_type and balloon_type != "white":
-        return False
-    tipo = str(text.get("tipo") or "").strip().lower()
-    return tipo in (_NORMAL_TEXT_TIPOS | {"narracao"})
+    return _normalize_bbox_list(text.get("balloon_bbox")) is not None or _normalize_bbox_list(text.get("bbox")) is not None
 
 
 def _looks_like_false_shared_balloon_pair(first: dict, second: dict) -> bool:
@@ -1380,7 +1354,7 @@ def _refine_local_text_balloon(page_image, text: dict) -> list[int] | None:
     refined = refine_balloon_bbox_from_image(
         page_image,
         [int(v) for v in seed],
-        text.get("tipo", "fala"),
+        "text",
     )
     if refined is None:
         return None
@@ -1648,24 +1622,26 @@ def _apply_geometric_fallback_subregions(
             continue
         if text.get("_separate_cluster_lobe"):
             continue
-        tipo = str(text.get("tipo") or "").strip().lower()
-        if tipo not in (_NORMAL_TEXT_TIPOS | {"narracao"}):
-            continue
-        key = (tipo, tuple(int(v) for v in balloon))
+        key = tuple(int(v) for v in balloon)
         groups.setdefault(key, []).append(text)
 
-    for (tipo, bbox_tuple), group in groups.items():
+    for bbox_tuple, group in groups.items():
         balloon = list(bbox_tuple)
         bw = max(1, balloon[2] - balloon[0])
         bh = max(1, balloon[3] - balloon[1])
         aspect = bw / float(bh)
         sample = group[0]
-        sample_shape = str(sample.get("layout_shape") or classify_layout_shape(balloon, tipo))
+        sample_shape = str(sample.get("layout_shape") or classify_layout_shape(balloon, "text"))
         if not _can_try_connected_balloon_detection(
             sample,
             balloon_bbox=balloon,
             layout_shape=sample_shape,
             page_image=page_image,
+        ):
+            continue
+        if (
+            str(sample.get("layout_reason") or "") == "expanded_text_only_balloon"
+            and not _synthetic_balloon_reference_allows_connected_detection(page_image, balloon)
         ):
             continue
         if _group_looks_like_line_stack(group, balloon):
@@ -3157,6 +3133,7 @@ def _geometric_fallback_subregions(
 
 
 def classify_layout_shape(bbox: list[int], tipo: str, region: dict | None = None) -> str:
+    del tipo
     x1, y1, x2, y2 = bbox
     width = max(1, x2 - x1)
     height = max(1, y2 - y1)
@@ -3167,8 +3144,6 @@ def classify_layout_shape(bbox: list[int], tipo: str, region: dict | None = None
         if stacked and aspect < 1.6:
             return "tall"
 
-    if tipo == "narracao":
-        return "wide" if aspect >= 1.6 else "square"
     if aspect >= 1.45:
         return "wide"
     if aspect <= 0.9:
@@ -3177,10 +3152,7 @@ def classify_layout_shape(bbox: list[int], tipo: str, region: dict | None = None
 
 
 def classify_layout_align(tipo: str, layout_shape: str) -> str:
-    if tipo == "narracao":
-        return "top"
-    if tipo == "sfx" and layout_shape == "tall":
-        return "center"
+    del tipo, layout_shape
     return "center"
 
 
@@ -3221,14 +3193,34 @@ def _is_vertically_stacked(texts: list[dict]) -> bool:
 
 
 def _region_supports_shared_layout(region: dict, tipo: str) -> bool:
+    del tipo
     texts = list(region.get("texts", []))
     if len(texts) <= 1:
         return True
+    if _texts_have_distinct_bubble_regions(texts):
+        return False
     if _looks_like_diagonal_separate_cluster(texts):
         return False
-    if tipo == "narracao":
-        return _is_compact_text_cluster(texts, max_vertical_gap=40, max_horizontal_gap=50)
     return _is_compact_text_cluster(texts, max_vertical_gap=35, max_horizontal_gap=30)
+
+
+def _texts_have_distinct_bubble_regions(texts: list[dict]) -> bool:
+    bboxes: list[list[int]] = []
+    for text in texts:
+        bbox = _normalize_bbox_list(text.get("bubble_mask_bbox")) or _normalize_bbox_list(text.get("balloon_bbox"))
+        if not bbox:
+            return False
+        if _bbox_area(bbox) <= 0:
+            return False
+        bboxes.append(bbox)
+    if len(bboxes) <= 1:
+        return False
+
+    for previous, current in zip(bboxes, bboxes[1:]):
+        overlap = _bbox_intersection_area(previous, current) / float(max(1, min(_bbox_area(previous), _bbox_area(current))))
+        if overlap >= 0.35:
+            return False
+    return True
 
 
 def _looks_like_diagonal_separate_cluster(texts: list[dict]) -> bool:
@@ -3334,7 +3326,8 @@ def refine_balloon_bbox_from_image(
     cluster_bbox: list[int],
     tipo: str,
 ) -> list[int]:
-    if image_bgr is None or str(tipo or "").strip().lower() not in (_NORMAL_TEXT_TIPOS | {"narracao"}):
+    del tipo
+    if image_bgr is None:
         return cluster_bbox
 
     x1, y1, x2, y2 = cluster_bbox
@@ -3738,7 +3731,8 @@ def _detect_connected_balloon_subregions_rich(
     Cai no método baseado em fill como fallback.
     Retorna [] se não detectar balão conectado.
     """
-    if image_bgr is None or str(tipo or "").strip().lower() not in (_NORMAL_TEXT_TIPOS | {"narracao"}):
+    del tipo
+    if image_bgr is None:
         return []
 
     # 1. Tentativa topológica (baseada no contorno real do balão)

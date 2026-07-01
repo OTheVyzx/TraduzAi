@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_anchor",
+  "stage": "run",
+  "config_path": "N:\\TraduzAI\\.codex-tmp\\config_god_of_death_ch2_component_anchor_20260630.json",
+  "argv": [
+    "N:\\TraduzAI\\pipeline\\main.py",
+    "N:\\TraduzAI\\.codex-tmp\\config_god_of_death_ch2_component_anchor_20260630.json"
+  ]
+}

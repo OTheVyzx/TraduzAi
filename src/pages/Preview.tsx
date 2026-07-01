@@ -900,7 +900,7 @@ export function Preview() {
   const hasBatchReturn = Boolean(batchCompletion);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-border bg-bg-secondary px-6 py-3">
         <div className="flex items-center gap-3">
           <button
@@ -1410,32 +1410,37 @@ export function Preview() {
         )}
       </div>
 
-      <div className="flex items-center justify-center gap-4 border-t border-border bg-bg-secondary px-6 py-3">
-        <button
-          onClick={() => goToPreviewPage(currentPage - 1)}
-          onFocus={() => preloadPreviewPage(currentPage - 1)}
-          onMouseEnter={() => preloadPreviewPage(currentPage - 1)}
-          disabled={currentPage === 0}
-          title="Pagina anterior"
-          className="rounded-lg bg-bg-tertiary p-2 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
-        >
-          <ArrowLeft size={16} />
-        </button>
+      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-40 flex items-center justify-center px-6">
+        <div className="pointer-events-auto flex items-center justify-center gap-4 rounded-full border border-white/[0.04] bg-black/25 px-3 py-1 shadow-[0_8px_28px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
+          <button
+            onClick={() => goToPreviewPage(currentPage - 1)}
+            onFocus={() => preloadPreviewPage(currentPage - 1)}
+            onMouseEnter={() => preloadPreviewPage(currentPage - 1)}
+            disabled={currentPage === 0}
+            title="Pagina anterior"
+            className="rounded-lg bg-transparent p-2 text-text-secondary transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-30"
+          >
+            <ArrowLeft size={16} />
+          </button>
 
-        <span data-testid="preview-page-counter" className="min-w-[80px] text-center font-mono text-sm text-text-secondary">
-          {currentPage + 1} / {totalPages}
-        </span>
+          <span
+            data-testid="preview-page-counter"
+            className="min-w-[80px] text-center font-mono text-sm text-text-secondary drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]"
+          >
+            {currentPage + 1} / {totalPages}
+          </span>
 
-        <button
-          onClick={() => goToPreviewPage(currentPage + 1)}
-          onFocus={() => preloadPreviewPage(currentPage + 1)}
-          onMouseEnter={() => preloadPreviewPage(currentPage + 1)}
-          disabled={currentPage >= totalPages - 1}
-          title="Proxima pagina"
-          className="rounded-lg bg-bg-tertiary p-2 text-text-secondary transition-smooth hover:text-text-primary disabled:opacity-30"
-        >
-          <ArrowRight size={16} />
-        </button>
+          <button
+            onClick={() => goToPreviewPage(currentPage + 1)}
+            onFocus={() => preloadPreviewPage(currentPage + 1)}
+            onMouseEnter={() => preloadPreviewPage(currentPage + 1)}
+            disabled={currentPage >= totalPages - 1}
+            title="Proxima pagina"
+            className="rounded-lg bg-transparent p-2 text-text-secondary transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-30"
+          >
+            <ArrowRight size={16} />
+          </button>
+        </div>
       </div>
     </div>
   );

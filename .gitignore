@@ -8,6 +8,7 @@ pipeline/**/__pycache__/
 # Build outputs
 dist/
 src-tauri/target/
+src-tauri/renderer-bridge/target/
 vision-worker/target/
 vision-worker/.toolvenv/
 

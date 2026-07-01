@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import {
+  Check,
   Eye,
   EyeOff,
   Lock,
@@ -11,6 +12,7 @@ import {
   ScanText,
   Languages,
   Eraser,
+  Trash2,
 } from "lucide-react";
 import { useEditorStore } from "../../lib/stores/editorStore";
 import type { NormalizedTextLayer } from "../../lib/editorScene";
@@ -38,6 +40,8 @@ export function LayerItem({ entry, index, hasEdits = false }: LayerItemProps) {
   const toggleVisibility = useEditorStore((s) => s.toggleTextLayerVisibility);
   const toggleLock = useEditorStore((s) => s.toggleTextLayerLock);
   const reProcessBlock = useEditorStore((s) => s.reProcessBlock);
+  const commitEdits = useEditorStore((s) => s.commitEdits);
+  const deleteSelectedLayer = useEditorStore((s) => s.deleteSelectedLayer);
 
   const isSelected = selectedLayerId === entry.id;
   const isHovered = hoveredLayerId === entry.id;
@@ -156,7 +160,7 @@ export function LayerItem({ entry, index, hasEdits = false }: LayerItemProps) {
                 {entry.confidencePercent}%
               </span>
             </div>
-            <div className="mt-2 flex items-center gap-1">
+            <div className="mt-2 flex flex-wrap items-center gap-1">
               <button
                 disabled={pendingAction !== null}
                 className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
@@ -184,6 +188,34 @@ export function LayerItem({ entry, index, hasEdits = false }: LayerItemProps) {
                 <Eraser size={11} />
                 Limpar
               </button>
+              {isSelected && (
+                <>
+                  <button
+                    disabled={!hasEdits || pendingAction !== null}
+                    className="ml-auto inline-flex items-center gap-1 rounded border border-status-success/25 bg-status-success/8 px-1.5 py-1 text-[10px] text-status-success transition-smooth hover:bg-status-success/12 disabled:cursor-not-allowed disabled:opacity-35"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void commitEdits();
+                    }}
+                    title="Salvar alteracoes deste texto"
+                  >
+                    <Check size={11} />
+                    Salvar
+                  </button>
+                  <button
+                    disabled={pendingAction !== null}
+                    className="inline-flex items-center gap-1 rounded border border-status-error/25 bg-status-error/8 px-1.5 py-1 text-[10px] text-status-error transition-smooth hover:bg-status-error/12 disabled:cursor-not-allowed disabled:opacity-35"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void deleteSelectedLayer();
+                    }}
+                    title="Excluir texto selecionado"
+                  >
+                    <Trash2 size={11} />
+                    Excluir
+                  </button>
+                </>
+              )}
             </div>
             {actionError && (
               <p className="mt-1 text-[10px] leading-tight text-status-error">{actionError}</p>

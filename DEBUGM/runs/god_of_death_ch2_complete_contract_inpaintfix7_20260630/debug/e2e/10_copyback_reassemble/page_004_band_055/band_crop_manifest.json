@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_complete_contract_inpaintfix7",
+  "stage": "copyback_reassemble",
+  "band_id": "page_004_band_055",
+  "source_page_number": 4,
+  "y_top": 40627,
+  "y_bottom": 41329,
+  "coordinate_space": "band",
+  "post_typeset": "09_typeset/page_004_band_055/post_typeset.jpg",
+  "post_copyback": "10_copyback_reassemble/page_004_band_055/post_copyback.jpg"
+}

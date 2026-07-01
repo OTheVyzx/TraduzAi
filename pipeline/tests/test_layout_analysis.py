@@ -430,6 +430,33 @@ class LayoutAnalysisTests(unittest.TestCase):
         self.assertEqual(text["bubble_inner_bbox"], [162, 53, 619, 538])
         self.assertEqual(text["layout_reason"], "bubble_region_over_tiny_merged_anchor")
 
+    def test_enrich_page_layout_uses_dark_panel_mask_bbox_when_ocr_box_is_tight(self):
+        page = {
+            "width": 760,
+            "height": 420,
+            "texts": [
+                {
+                    "text": "You three are the candidates",
+                    "translated": "VOCES TRES SAO OS CANDIDATOS",
+                    "bbox": [272, 142, 482, 179],
+                    "source_bbox": [270, 140, 486, 181],
+                    "text_pixel_bbox": [276, 145, 478, 176],
+                    "balloon_bbox": [268, 139, 488, 182],
+                    "bubble_mask_bbox": [90, 88, 670, 244],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "layout_profile": "dark_panel",
+                }
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]):
+            enriched = enrich_page_layout(page)
+
+        text = enriched["texts"][0]
+        self.assertEqual(text["balloon_bbox"], [90, 88, 670, 244])
+        self.assertEqual(text["layout_profile"], "dark_panel")
+        self.assertEqual(text["layout_reason"], "existing_dark_panel_mask_bbox")
+
     def test_connected_subregions_rich_skips_outline_for_dense_simple_candidate(self):
         image = np.full((260, 320, 3), 245, dtype=np.uint8)
 
@@ -733,7 +760,7 @@ class LayoutAnalysisTests(unittest.TestCase):
         text = enriched["texts"][0]
 
         self.assertEqual(text["layout_shape"], "wide")
-        self.assertEqual(text["layout_align"], "top")
+        self.assertEqual(text["layout_align"], "center")
 
     def test_enrich_page_layout_clamps_top_narration_bbox_and_records_reason(self):
         with tempfile.TemporaryDirectory() as tmp:

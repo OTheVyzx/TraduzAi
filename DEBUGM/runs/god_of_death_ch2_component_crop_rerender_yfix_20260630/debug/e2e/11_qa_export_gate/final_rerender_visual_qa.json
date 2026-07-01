@@ -1,0 +1,3152 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_crop_rerender_yfix",
+  "stage": "qa_export_gate",
+  "source": "translated_after_final_project_rerender",
+  "summary": {
+    "row_count": 105,
+    "pass_count": 9,
+    "warn_count": 38,
+    "fail_count": 58
+  },
+  "rows": [
+    {
+      "band_id": "page_001_band_000",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_003@page_001_band_000",
+        "ocr_004@page_001_band_000",
+        "ocr_007@page_001_band_000"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_missing"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.16308878292461398,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_003@page_001_band_000",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false
+          },
+          {
+            "trace_id": "ocr_004@page_001_band_000",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false
+          },
+          {
+            "trace_id": "ocr_007@page_001_band_000",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_001",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.29020190895741554,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_002",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.05729648671808055,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_003",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_003"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_safe_or_balloon",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09566032608695652,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.737383240746658,
+        "dark_text_center_drift": 2.0615528128088303,
+        "dark_text_underfilled_height_ratio": 1.0,
+        "dark_text_underfilled_area_ratio": 1.0,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 35,
+        "dark_text_underfilled_text_word_count": 7,
+        "dark_text_outside_balloon_ratio": 0.1089108910891089,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_003",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.1089108910891089,
+            "center_drift_px": 2.0615528128088303,
+            "tiny_text_ratio": 0.737383240746658,
+            "dark_text_underfilled_height_ratio": 1.2095808383233533,
+            "dark_text_underfilled_area_ratio": 1.0475834046193329
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_004",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_004"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_safe_or_balloon",
+        "tiny_text",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.13392574353032058,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_004",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.0,
+            "tiny_text_ratio": 0.3060831074836844
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_005",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_002_band_005",
+        "ocr_002@page_002_band_005"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.06564650310208686,
+        "translated_crop_max_abs_diff": 4,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.5884623964433942,
+        "dark_text_center_drift": 0.7071067811865476,
+        "dark_text_underfilled_height_ratio": 0.6130952380952381,
+        "dark_text_underfilled_area_ratio": 0.6197593167701864,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 51,
+        "dark_text_underfilled_text_word_count": 12,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_005",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.6084782868788076,
+            "dark_text_underfilled_height_ratio": 0.6130952380952381,
+            "dark_text_underfilled_area_ratio": 0.6197593167701864
+          },
+          {
+            "trace_id": "ocr_002@page_002_band_005",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.5884623964433942,
+            "dark_text_underfilled_height_ratio": 0.8695652173913043,
+            "dark_text_underfilled_area_ratio": 0.7461084272678475
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_006",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_002_band_006"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.12623019645120406,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.4366917920971526,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.4262295081967213,
+        "dark_text_underfilled_area_ratio": 0.36871064722899766,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 57,
+        "dark_text_underfilled_text_word_count": 10,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_006",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.4366917920971526,
+            "dark_text_underfilled_height_ratio": 0.4262295081967213,
+            "dark_text_underfilled_area_ratio": 0.36871064722899766
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_007",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_002_band_007"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07563281824871229,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.42200773649676415,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.39464882943143814,
+        "dark_text_underfilled_area_ratio": 0.23974916387959866,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 56,
+        "dark_text_underfilled_text_word_count": 11,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_007",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.42200773649676415,
+            "dark_text_underfilled_height_ratio": 0.39464882943143814,
+            "dark_text_underfilled_area_ratio": 0.23974916387959866
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_008",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "negative_dark_000@page_002_band_008",
+        "ocr_001@page_002_band_008"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_center_drift",
+        "dark_connected_lobe_issue",
+        "tiny_text",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09235615786970994,
+        "translated_crop_max_abs_diff": 8,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.515832385726354,
+        "dark_text_center_drift": 63.198101237299845,
+        "dark_text_underfilled_height_ratio": 0.4117647058823529,
+        "dark_text_underfilled_area_ratio": 0.3609093039606281,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 40,
+        "dark_text_underfilled_text_word_count": 8,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "negative_dark_000@page_002_band_008",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 63.198101237299845,
+            "tiny_text_ratio": 0.515832385726354,
+            "dark_text_underfilled_height_ratio": 0.4117647058823529,
+            "dark_text_underfilled_area_ratio": 0.3609093039606281
+          },
+          {
+            "trace_id": "ocr_001@page_002_band_008",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 10.594810050208546,
+            "tiny_text_ratio": 0.31343283582089554
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_009",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_009"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_safe_or_balloon",
+        "tiny_text",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.05258954008954009,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_009",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.24984682993015556
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_010",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_010"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11038606911447084,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_010",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 8.514693182963201,
+            "tiny_text_ratio": 0.31584964539346205
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_011",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07523464912280702,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_012",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11669659587757651,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_013",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_002_band_013",
+        "direct_paddle_reocr_001_002@page_002_band_013"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0970260989010989,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.23224050908084065,
+        "dark_text_center_drift": 10.5,
+        "dark_text_underfilled_height_ratio": 0.08196721311475409,
+        "dark_text_underfilled_area_ratio": 0.0730369330866875,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 21,
+        "dark_text_underfilled_text_word_count": 5,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_013",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.0,
+            "tiny_text_ratio": 0.5153727064387201,
+            "dark_text_underfilled_height_ratio": 0.92,
+            "dark_text_underfilled_area_ratio": 0.8212682926829268
+          },
+          {
+            "trace_id": "direct_paddle_reocr_001_002@page_002_band_013",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 10.5,
+            "tiny_text_ratio": 0.23224050908084065,
+            "dark_text_underfilled_height_ratio": 0.08196721311475409,
+            "dark_text_underfilled_area_ratio": 0.0730369330866875
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_014",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.2603916666666667,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_015",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_015"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.06363570241064007,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_015",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 11.629703349613008,
+            "tiny_text_ratio": 0.23089883448557727
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_016",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_016",
+        "ocr_004@page_002_band_016"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.13204540383757252,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_016",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.0,
+            "tiny_text_ratio": 0.5596233506329444
+          },
+          {
+            "trace_id": "ocr_004@page_002_band_016",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 4.716990566028302,
+            "tiny_text_ratio": 0.4171825714661427
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_017",
+      "translated_output_page": "001.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_002_band_017"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11592623252391464,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.42208399341162567,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.2877906976744186,
+        "dark_text_underfilled_area_ratio": 0.24122509407192647,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 63,
+        "dark_text_underfilled_text_word_count": 16,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_017",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.42208399341162567,
+            "dark_text_underfilled_height_ratio": 0.2877906976744186,
+            "dark_text_underfilled_area_ratio": 0.24122509407192647
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_018",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_002_band_018"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07679031427099434,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.3330866937632456,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.22508591065292097,
+        "dark_text_underfilled_area_ratio": 0.15005727376861397,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 66,
+        "dark_text_underfilled_text_word_count": 11,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_018",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.3330866937632456,
+            "dark_text_underfilled_height_ratio": 0.22508591065292097,
+            "dark_text_underfilled_area_ratio": 0.15005727376861397
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_019",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_019"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.05688945578231293,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_019",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 7.0710678118654755,
+            "tiny_text_ratio": 0.28798338055366296
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_020",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_002@page_002_band_020"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.13177128427128426,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_002@page_002_band_020",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 11.853269591129697,
+            "tiny_text_ratio": 0.26944046108898767
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_021",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_021"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "render_bbox_outside_safe_or_balloon",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0408637798827244,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_021",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.6804123711340206,
+            "center_drift_px": 1.118033988749895,
+            "tiny_text_ratio": 1.6495143575332332
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_022",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.13570464767616192,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_023",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_023",
+        "direct_paddle_reocr_001@page_002_band_023"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "dark_text_center_drift",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.056828493647912884,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 1.0,
+        "dark_text_center_drift": 48.75705077217038,
+        "dark_text_underfilled_height_ratio": 1.0,
+        "dark_text_underfilled_area_ratio": 1.0,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 63,
+        "dark_text_underfilled_text_word_count": 13,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_023",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 48.75705077217038,
+            "tiny_text_ratio": 1.0,
+            "dark_text_underfilled_height_ratio": 1.0,
+            "dark_text_underfilled_area_ratio": 1.0
+          },
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_023",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 25.59785147234041,
+            "tiny_text_ratio": 1.0,
+            "dark_text_underfilled_height_ratio": 1.0,
+            "dark_text_underfilled_area_ratio": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_024",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.12764454134366926,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_002_band_025",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_002_band_025",
+        "direct_paddle_reocr_001@page_002_band_025"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09890625,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.27828451903517,
+        "dark_text_center_drift": 1.118033988749895,
+        "dark_text_underfilled_height_ratio": 0.2564705882352941,
+        "dark_text_underfilled_area_ratio": 0.14935640138408304,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 42,
+        "dark_text_underfilled_text_word_count": 9,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_002_band_025",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 1.118033988749895,
+            "tiny_text_ratio": 0.27828451903517,
+            "dark_text_underfilled_height_ratio": 0.2564705882352941,
+            "dark_text_underfilled_area_ratio": 0.14935640138408304
+          },
+          {
+            "trace_id": "direct_paddle_reocr_001@page_002_band_025",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.4181827917198894,
+            "dark_text_underfilled_height_ratio": 0.28174603174603174,
+            "dark_text_underfilled_area_ratio": 0.23666666666666666
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_002_band_026",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "negative_dark_000@page_002_band_026",
+        "ocr_001@page_002_band_026"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_center_drift",
+        "dark_text_underfilled",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.06456061896649631,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.410934796363819,
+        "dark_text_center_drift": 23.0,
+        "dark_text_underfilled_height_ratio": 0.42641509433962266,
+        "dark_text_underfilled_area_ratio": 0.30749933563646026,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 32,
+        "dark_text_underfilled_text_word_count": 9,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "negative_dark_000@page_002_band_026",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 23.0,
+            "tiny_text_ratio": 0.410934796363819,
+            "dark_text_underfilled_height_ratio": 0.42641509433962266,
+            "dark_text_underfilled_area_ratio": 0.30749933563646026
+          },
+          {
+            "trace_id": "ocr_001@page_002_band_026",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.43731299206185553,
+            "dark_text_underfilled_height_ratio": 1.03,
+            "dark_text_underfilled_area_ratio": 0.8887428571428572
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_027",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_003_band_027",
+        "ocr_001@page_003_band_027"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.1354381443298969,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.38652423806313746,
+        "dark_text_center_drift": 0.7071067811865476,
+        "dark_text_underfilled_height_ratio": 0.26044226044226043,
+        "dark_text_underfilled_area_ratio": 0.2023270453022519,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 55,
+        "dark_text_underfilled_text_word_count": 12,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_003_band_027",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.38652423806313746,
+            "dark_text_underfilled_height_ratio": 0.26044226044226043,
+            "dark_text_underfilled_area_ratio": 0.2023270453022519
+          },
+          {
+            "trace_id": "ocr_001@page_003_band_027",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.0,
+            "tiny_text_ratio": 0.46677306581685607,
+            "dark_text_underfilled_height_ratio": 0.5591397849462365,
+            "dark_text_underfilled_area_ratio": 0.39043381535038935
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_028",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_028",
+        "direct_paddle_reocr_001@page_003_band_028"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_center_drift",
+        "dark_text_underfilled",
+        "render_bbox_outside_crop"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.10320186421814134,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.4136418927708421,
+        "dark_text_center_drift": 54.67174773134658,
+        "dark_text_underfilled_height_ratio": 0.33783783783783783,
+        "dark_text_underfilled_area_ratio": 0.2953611506243085,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 76,
+        "dark_text_underfilled_text_word_count": 18,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_028",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 54.67174773134658,
+            "tiny_text_ratio": 0.4136418927708421,
+            "dark_text_underfilled_height_ratio": 0.33783783783783783,
+            "dark_text_underfilled_area_ratio": 0.2953611506243085
+          },
+          {
+            "trace_id": "direct_paddle_reocr_001@page_003_band_028",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 17.507141400011598,
+            "tiny_text_ratio": 0.5528030139591291,
+            "dark_text_underfilled_height_ratio": 0.46348314606741575,
+            "dark_text_underfilled_area_ratio": 0.4129476005460464
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_029",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_029"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07144572025052193,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_029",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 10.04987562112089,
+            "tiny_text_ratio": 0.28782774978844905
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_030",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_030"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.05365697674418605,
+        "translated_crop_max_abs_diff": 4,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_030",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 5.5901699437494745,
+            "tiny_text_ratio": 0.25803199755097184
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_031",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0594926844783715,
+        "translated_crop_max_abs_diff": 4,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_032",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_032"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07699553001277139,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.3599714063538423,
+        "dark_text_center_drift": 0.0,
+        "dark_text_underfilled_height_ratio": 0.8909090909090909,
+        "dark_text_underfilled_area_ratio": 0.779108734402852,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 67,
+        "dark_text_underfilled_text_word_count": 12,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_032",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.0,
+            "tiny_text_ratio": 0.3599714063538423,
+            "dark_text_underfilled_height_ratio": 0.8909090909090909,
+            "dark_text_underfilled_area_ratio": 0.779108734402852
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_033",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_033"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.08670967125382263,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.3044279665110186,
+        "dark_text_center_drift": 1.118033988749895,
+        "dark_text_underfilled_height_ratio": 0.2515923566878981,
+        "dark_text_underfilled_area_ratio": 0.12484076433121019,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 30,
+        "dark_text_underfilled_text_word_count": 6,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_033",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 1.118033988749895,
+            "tiny_text_ratio": 0.3044279665110186,
+            "dark_text_underfilled_height_ratio": 0.2515923566878981,
+            "dark_text_underfilled_area_ratio": 0.12484076433121019
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_034",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_034"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.048928038777032064,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_034",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 1.118033988749895,
+            "tiny_text_ratio": 0.35284043687199823
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_035",
+      "translated_output_page": "002.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.12225191700496166,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_036",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_003_band_036"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.08772910372608257,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.4835359169658489,
+        "dark_text_center_drift": 0.7071067811865476,
+        "dark_text_underfilled_height_ratio": 0.397212543554007,
+        "dark_text_underfilled_area_ratio": 0.29584673125239097,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 52,
+        "dark_text_underfilled_text_word_count": 13,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_003_band_036",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.4835359169658489,
+            "dark_text_underfilled_height_ratio": 0.397212543554007,
+            "dark_text_underfilled_area_ratio": 0.29584673125239097
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_037",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_003_band_037"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.10888696369636963,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.42618768312446853,
+        "dark_text_center_drift": 0.0,
+        "dark_text_underfilled_height_ratio": 0.38997214484679665,
+        "dark_text_underfilled_area_ratio": 0.24550519118764244,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 48,
+        "dark_text_underfilled_text_word_count": 12,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_003_band_037",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.0,
+            "tiny_text_ratio": 0.42618768312446853,
+            "dark_text_underfilled_height_ratio": 0.38997214484679665,
+            "dark_text_underfilled_area_ratio": 0.24550519118764244
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_038",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_038"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07772751750134625,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_038",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 8.860022573334675,
+            "tiny_text_ratio": 0.3555696235508764
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_039",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11878404139433552,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_040",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.12360004284490146,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_041",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.1389439870259481,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_042",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "ocr_002@page_003_band_042"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.22544787516600265,
+        "translated_crop_max_abs_diff": 11,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_002@page_003_band_042",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 6.519202405202649,
+            "tiny_text_ratio": 0.23470047448515408
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_043",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_043"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "render_bbox_outside_safe_or_balloon",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.21727610733915292,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_043",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.7604166666666666,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 1.7340126636148758
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_044",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.1973731884057971,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_045",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.030400449101796408,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_003_band_046",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "ocr_001@page_003_band_046"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.17236289631533847,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.26198760056160897,
+        "dark_text_center_drift": 1.5811388300841898,
+        "dark_text_underfilled_height_ratio": 0.1388888888888889,
+        "dark_text_underfilled_area_ratio": 0.09297839506172839,
+        "dark_text_underfilled_min_height_ratio": 0.42,
+        "dark_text_underfilled_min_area_ratio": 0.24,
+        "dark_text_underfilled_text_alnum_count": 20,
+        "dark_text_underfilled_text_word_count": 3,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_003_band_046",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 1.5811388300841898,
+            "tiny_text_ratio": 0.26198760056160897,
+            "dark_text_underfilled_height_ratio": 0.1388888888888889,
+            "dark_text_underfilled_area_ratio": 0.09297839506172839
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_047",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_003_band_047"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.15916569654637175,
+        "translated_crop_max_abs_diff": 10,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.27008547008547007,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.21380243572395127,
+        "dark_text_underfilled_area_ratio": 0.09995958033847073,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 33,
+        "dark_text_underfilled_text_word_count": 6,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_003_band_047",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.27008547008547007,
+            "dark_text_underfilled_height_ratio": 0.21380243572395127,
+            "dark_text_underfilled_area_ratio": 0.09995958033847073
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_003_band_048",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.33738505747126435,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_049",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.16894076305220884,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_050",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.29518408764367815,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_051",
+      "translated_output_page": "003.jpg",
+      "trace_ids": [
+        "ocr_001@page_004_band_051"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09726586391437309,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_004_band_051",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 8.514693182963201,
+            "tiny_text_ratio": 0.3462874484646784
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_052",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.10122700216450216,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_053",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "ocr_002@page_004_band_053"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.10600166251039068,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_002@page_004_band_053",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 4.123105625617661,
+            "tiny_text_ratio": 0.23038966478754133
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_054",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "ocr_001@page_004_band_054"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_safe_or_balloon",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.05634304207119741,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_004_band_054",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.0615528128088303,
+            "tiny_text_ratio": 0.6837663400365583
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_055",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_004_band_055"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11387583095916429,
+        "translated_crop_max_abs_diff": 10,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.4397916310149573,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.3136645962732919,
+        "dark_text_underfilled_area_ratio": 0.2613871635610766,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 25,
+        "dark_text_underfilled_text_word_count": 7,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_004_band_055",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.4397916310149573,
+            "dark_text_underfilled_height_ratio": 0.3136645962732919,
+            "dark_text_underfilled_area_ratio": 0.2613871635610766
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_056",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "negative_dark_000@page_004_band_056",
+        "direct_paddle_reocr_001@page_004_band_056"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "center_drift",
+        "dark_text_center_drift",
+        "dark_connected_lobe_issue"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09260590277777778,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.5993519343120383,
+        "dark_text_center_drift": 99.07825190222121,
+        "dark_text_underfilled_height_ratio": 1.0,
+        "dark_text_underfilled_area_ratio": 1.0,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 44,
+        "dark_text_underfilled_text_word_count": 10,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "negative_dark_000@page_004_band_056",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 95.818839483684,
+            "tiny_text_ratio": 1.0,
+            "dark_text_underfilled_height_ratio": 1.0,
+            "dark_text_underfilled_area_ratio": 1.0
+          },
+          {
+            "trace_id": "direct_paddle_reocr_001@page_004_band_056",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 99.07825190222121,
+            "tiny_text_ratio": 0.5993519343120383,
+            "dark_text_underfilled_height_ratio": 1.0,
+            "dark_text_underfilled_area_ratio": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_057",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_004_band_057"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0869164937759336,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.5387986978371483,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.5706214689265536,
+        "dark_text_underfilled_area_ratio": 0.39303009339328954,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 60,
+        "dark_text_underfilled_text_word_count": 13,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_004_band_057",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.5387986978371483,
+            "dark_text_underfilled_height_ratio": 0.5706214689265536,
+            "dark_text_underfilled_area_ratio": 0.39303009339328954
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_058",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001_002@page_004_band_058"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_missing"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.22718533886583678,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001_002@page_004_band_058",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_059",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "ocr_001@page_004_band_059"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0733459051724138,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.41159360937657097,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.5325077399380805,
+        "dark_text_underfilled_area_ratio": 0.2290879979596319,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 48,
+        "dark_text_underfilled_text_word_count": 11,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_004_band_059",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.41159360937657097,
+            "dark_text_underfilled_height_ratio": 0.5325077399380805,
+            "dark_text_underfilled_area_ratio": 0.2290879979596319
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_060",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.20268892585551332,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_061",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "ocr_001@page_004_band_061"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_missing"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.319446414499606,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_004_band_061",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_062",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.18752297794117648,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_063",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.06995390455531453,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_064",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11001926782273604,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_065",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [
+        "ocr_001@page_004_band_065"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.20673611111111112,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_004_band_065",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.24317812733218655
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_066",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.12124403815580286,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_067",
+      "translated_output_page": "004.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.15194569795427196,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_068",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_004_band_068"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.08672123015873016,
+        "translated_crop_max_abs_diff": 4,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_004_band_068",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 8.902246907382429,
+            "tiny_text_ratio": 0.3267808352485107
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_004_band_069",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.16053220255653883,
+        "translated_crop_max_abs_diff": 4,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_004_band_070",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07930258899676375,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_071",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_071",
+        "ocr_003@page_005_band_071"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_center_drift",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.05856749661246612,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.17563189017533476,
+        "dark_text_center_drift": 95.52094011262662,
+        "dark_text_underfilled_height_ratio": 0.11447084233261338,
+        "dark_text_underfilled_area_ratio": 0.09432054424410093,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 24,
+        "dark_text_underfilled_text_word_count": 6,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_071",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 9.433981132056603,
+            "tiny_text_ratio": 0.17370453028052396
+          },
+          {
+            "trace_id": "ocr_003@page_005_band_071",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 95.52094011262662,
+            "tiny_text_ratio": 0.17563189017533476,
+            "dark_text_underfilled_height_ratio": 0.11447084233261338,
+            "dark_text_underfilled_area_ratio": 0.09432054424410093
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_072",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_072"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.14057959109163928,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_072",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 7.566372975210778,
+            "tiny_text_ratio": 0.2899529742436302
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_073",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_073"
+      ],
+      "status": "fail",
+      "flags": [
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.10192119944211994,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_073",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.5635028618673521
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_074",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.12337080792682927,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_075",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_075"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.03618477414330218,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_075",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 7.158910531638177,
+            "tiny_text_ratio": 0.29592457558801805
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_076",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_076"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09223466003316749,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_076",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 7.433034373659253,
+            "tiny_text_ratio": 0.22818000723656606
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_077",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_077",
+        "negative_dark_003@page_005_band_077",
+        "negative_dark_004@page_005_band_077"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "center_drift",
+        "dark_text_center_drift",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.21182959734329598,
+        "translated_crop_max_abs_diff": 10,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.4186282284852508,
+        "dark_text_center_drift": 146.50767897963573,
+        "dark_text_underfilled_height_ratio": 0.43873517786561267,
+        "dark_text_underfilled_area_ratio": 0.23803717096964092,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 42,
+        "dark_text_underfilled_text_word_count": 7,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_077",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 6.020797289396148,
+            "tiny_text_ratio": 0.5443827546741595
+          },
+          {
+            "trace_id": "negative_dark_003@page_005_band_077",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 146.50767897963573,
+            "tiny_text_ratio": 0.45703553113974793,
+            "dark_text_underfilled_height_ratio": 0.8014705882352942,
+            "dark_text_underfilled_area_ratio": 0.28242296918767507
+          },
+          {
+            "trace_id": "negative_dark_004@page_005_band_077",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.0,
+            "tiny_text_ratio": 0.4186282284852508,
+            "dark_text_underfilled_height_ratio": 0.43873517786561267,
+            "dark_text_underfilled_area_ratio": 0.23803717096964092
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_078",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_078",
+        "direct_paddle_reocr_001@page_005_band_078"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "center_drift",
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_center_drift",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.057226480312593926,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 2,
+        "dark_text_tiny_ratio": 0.24680260619942476,
+        "dark_text_center_drift": 240.9782147829965,
+        "dark_text_underfilled_height_ratio": 0.2980599647266314,
+        "dark_text_underfilled_area_ratio": 0.082241501690828,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 57,
+        "dark_text_underfilled_text_word_count": 11,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_005_band_078",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 240.9782147829965,
+            "tiny_text_ratio": 0.24680260619942476,
+            "dark_text_underfilled_height_ratio": 0.2980599647266314,
+            "dark_text_underfilled_area_ratio": 0.082241501690828
+          },
+          {
+            "trace_id": "ocr_001@page_005_band_078",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 80.01562347441904,
+            "tiny_text_ratio": 0.36799513729850675,
+            "dark_text_underfilled_height_ratio": 0.35412026726057905,
+            "dark_text_underfilled_area_ratio": 0.30063757243403855
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_079",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_079"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0646460262345679,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_079",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 6.519202405202649,
+            "tiny_text_ratio": 0.32094886512687953
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_080",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_002@page_005_band_080"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.2501600378787879,
+        "translated_crop_max_abs_diff": 8,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_002@page_005_band_080",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 11.40175425099138,
+            "tiny_text_ratio": 0.32798014866449016
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_081",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_081"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.06108624031007752,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_081",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.5,
+            "tiny_text_ratio": 0.19167284993131076
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_082",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_082"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.11593357740585775,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.3853066179147894,
+        "dark_text_center_drift": 1.0,
+        "dark_text_underfilled_height_ratio": 0.46200607902735563,
+        "dark_text_underfilled_area_ratio": 0.20138726521705244,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 25,
+        "dark_text_underfilled_text_word_count": 8,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_082",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 1.0,
+            "tiny_text_ratio": 0.3853066179147894,
+            "dark_text_underfilled_height_ratio": 0.46200607902735563,
+            "dark_text_underfilled_area_ratio": 0.20138726521705244
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_083",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.2197113453815261,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_084",
+      "translated_output_page": "005.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_084"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.09223529411764705,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.2953442879038147,
+        "dark_text_center_drift": 2.5495097567963922,
+        "dark_text_underfilled_height_ratio": 0.225,
+        "dark_text_underfilled_area_ratio": 0.11804347826086957,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 29,
+        "dark_text_underfilled_text_word_count": 6,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_084",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.5495097567963922,
+            "tiny_text_ratio": 0.2953442879038147,
+            "dark_text_underfilled_height_ratio": 0.225,
+            "dark_text_underfilled_area_ratio": 0.11804347826086957
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_085",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_085"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.07750841750841751,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.29558352116351955,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.23828125,
+        "dark_text_underfilled_area_ratio": 0.11029980123674912,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 21,
+        "dark_text_underfilled_text_word_count": 5,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_085",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.29558352116351955,
+            "dark_text_underfilled_height_ratio": 0.23828125,
+            "dark_text_underfilled_area_ratio": 0.11029980123674912
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_086",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.2213562252964427,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_087",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_087"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.08979734848484848,
+        "translated_crop_max_abs_diff": 5,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.28691260094270893,
+        "dark_text_center_drift": 2.23606797749979,
+        "dark_text_underfilled_height_ratio": 0.23666666666666666,
+        "dark_text_underfilled_area_ratio": 0.11156004489337823,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 20,
+        "dark_text_underfilled_text_word_count": 5,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_087",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.23606797749979,
+            "tiny_text_ratio": 0.28691260094270893,
+            "dark_text_underfilled_height_ratio": 0.23666666666666666,
+            "dark_text_underfilled_area_ratio": 0.11156004489337823
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_088",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.28868544600938967,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_089",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_005_band_089"
+      ],
+      "status": "fail",
+      "flags": [
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.13427482269503546,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.4394874384725639,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.37537537537537535,
+        "dark_text_underfilled_area_ratio": 0.2612261384191209,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 44,
+        "dark_text_underfilled_text_word_count": 12,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_005_band_089",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.4394874384725639,
+            "dark_text_underfilled_height_ratio": 0.37537537537537535,
+            "dark_text_underfilled_area_ratio": 0.2612261384191209
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_090",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_090",
+        "ocr_003@page_005_band_090",
+        "negative_dark_002@page_005_band_090"
+      ],
+      "status": "fail",
+      "flags": [
+        "tiny_text",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.061626151012891345,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.5613187772490985,
+        "dark_text_center_drift": 3.905124837953327,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_090",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 5.70087712549569,
+            "tiny_text_ratio": 0.32882746743206187
+          },
+          {
+            "trace_id": "ocr_003@page_005_band_090",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 7.158910531638177,
+            "tiny_text_ratio": 0.3242123322201615
+          },
+          {
+            "trace_id": "negative_dark_002@page_005_band_090",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 3.905124837953327,
+            "tiny_text_ratio": 0.5613187772490985
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_091",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.16177566964285714,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_092",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_005_band_092"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.22967562134502925,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.504117775670202,
+        "dark_text_center_drift": 0.7071067811865476,
+        "dark_text_underfilled_height_ratio": 0.5943396226415094,
+        "dark_text_underfilled_area_ratio": 0.4932279026070618,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 31,
+        "dark_text_underfilled_text_word_count": 6,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_005_band_092",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.504117775670202,
+            "dark_text_underfilled_height_ratio": 0.5943396226415094,
+            "dark_text_underfilled_area_ratio": 0.4932279026070618
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_093",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_005_band_093"
+      ],
+      "status": "pass",
+      "flags": [],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.20964001447178002,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.6402975505699035,
+        "dark_text_center_drift": 0.7071067811865476,
+        "dark_text_underfilled_height_ratio": 0.7454545454545455,
+        "dark_text_underfilled_area_ratio": 0.7923905723905724,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 89,
+        "dark_text_underfilled_text_word_count": 15,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_005_band_093",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.7071067811865476,
+            "tiny_text_ratio": 0.6402975505699035,
+            "dark_text_underfilled_height_ratio": 0.7454545454545455,
+            "dark_text_underfilled_area_ratio": 0.7923905723905724
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_094",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.3835192563081009,
+        "translated_crop_max_abs_diff": 9,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_095",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_005_band_095"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "tiny_text",
+        "dark_text_tiny",
+        "dark_text_underfilled"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.18717055422647527,
+        "translated_crop_max_abs_diff": 8,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.3082522717195471,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 0.1827956989247312,
+        "dark_text_underfilled_area_ratio": 0.18389028394823256,
+        "dark_text_underfilled_min_height_ratio": 0.42,
+        "dark_text_underfilled_min_area_ratio": 0.24,
+        "dark_text_underfilled_text_alnum_count": 19,
+        "dark_text_underfilled_text_word_count": 2,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_005_band_095",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.3082522717195471,
+            "dark_text_underfilled_height_ratio": 0.1827956989247312,
+            "dark_text_underfilled_area_ratio": 0.18389028394823256
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_096",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "ocr_001@page_005_band_096",
+        "ocr_002@page_005_band_096"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_crop",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.0792687074829932,
+        "translated_crop_max_abs_diff": 6,
+        "translated_crop_matches_final_band": true,
+        "layers": [
+          {
+            "trace_id": "ocr_001@page_005_band_096",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.5,
+            "tiny_text_ratio": 0.627743035686104
+          },
+          {
+            "trace_id": "ocr_002@page_005_band_096",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 2.5,
+            "tiny_text_ratio": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_097",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.36018257168458784,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_098",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.15417872807017544,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_099",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.2995899602385686,
+        "translated_crop_max_abs_diff": 7,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_100",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.14834935897435897,
+        "translated_crop_max_abs_diff": 8,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_101",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.013472560975609756,
+        "translated_crop_max_abs_diff": 1,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_005_band_102",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "direct_paddle_reocr_001@page_005_band_102"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_outside_safe_or_balloon",
+        "clipped_text_flag"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.020370283018867924,
+        "translated_crop_max_abs_diff": 4,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.4718341178089538,
+        "dark_text_center_drift": 0.5,
+        "dark_text_underfilled_height_ratio": 1.0,
+        "dark_text_underfilled_area_ratio": 1.0,
+        "dark_text_underfilled_min_height_ratio": 0.42,
+        "dark_text_underfilled_min_area_ratio": 0.24,
+        "dark_text_underfilled_text_alnum_count": 15,
+        "dark_text_underfilled_text_word_count": 1,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "direct_paddle_reocr_001@page_005_band_102",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": true,
+            "render_bbox_inside_safe_or_balloon": false,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 0.5,
+            "tiny_text_ratio": 0.4718341178089538,
+            "dark_text_underfilled_height_ratio": 1.619047619047619,
+            "dark_text_underfilled_area_ratio": 1.0124387485865058
+          }
+        ]
+      }
+    },
+    {
+      "band_id": "page_005_band_103",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [],
+      "status": "warn",
+      "flags": [
+        "no_matching_project_layer"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.019949810606060606,
+        "translated_crop_max_abs_diff": 3,
+        "translated_crop_matches_final_band": true,
+        "layers": []
+      }
+    },
+    {
+      "band_id": "page_006_band_104",
+      "translated_output_page": "006.jpg",
+      "trace_ids": [
+        "ocr_002@page_006_band_104",
+        "ocr_003@page_006_band_104",
+        "direct_paddle_reocr_001@page_006_band_104"
+      ],
+      "status": "fail",
+      "flags": [
+        "render_bbox_missing",
+        "render_bbox_outside_crop"
+      ],
+      "metrics": {
+        "translated_crop_mean_abs_diff": 0.30897610294117644,
+        "translated_crop_max_abs_diff": 14,
+        "translated_crop_matches_final_band": true,
+        "dark_layer_count": 1,
+        "dark_text_tiny_ratio": 0.508300367104173,
+        "dark_text_center_drift": 17.507141400011598,
+        "dark_text_underfilled_height_ratio": 0.5300546448087432,
+        "dark_text_underfilled_area_ratio": 0.3491829176702147,
+        "dark_text_underfilled_min_height_ratio": 0.52,
+        "dark_text_underfilled_min_area_ratio": 0.36,
+        "dark_text_underfilled_text_alnum_count": 25,
+        "dark_text_underfilled_text_word_count": 6,
+        "dark_text_outside_balloon_ratio": 0.0,
+        "dark_original_residual_score": 0.0,
+        "dark_connected_lobe_overlap": 0.0,
+        "layers": [
+          {
+            "trace_id": "ocr_002@page_006_band_104",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false
+          },
+          {
+            "trace_id": "ocr_003@page_006_band_104",
+            "dark_bubble": false,
+            "render_bbox_inside_crop": false
+          },
+          {
+            "trace_id": "direct_paddle_reocr_001@page_006_band_104",
+            "dark_bubble": true,
+            "render_bbox_inside_crop": false,
+            "render_bbox_inside_safe_or_balloon": true,
+            "text_outside_balloon_ratio": 0.0,
+            "center_drift_px": 17.507141400011598,
+            "tiny_text_ratio": 0.508300367104173,
+            "dark_text_underfilled_height_ratio": 0.5300546448087432,
+            "dark_text_underfilled_area_ratio": 0.3491829176702147
+          }
+        ]
+      }
+    }
+  ]
+}

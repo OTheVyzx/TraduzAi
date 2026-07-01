@@ -38,6 +38,7 @@ export interface WebProjectConfig {
     selected: boolean;
     work_id: string;
     title: string;
+    cover_url?: string;
     context_loaded: boolean;
     internet_context_loaded: boolean;
     glossary_loaded: boolean;

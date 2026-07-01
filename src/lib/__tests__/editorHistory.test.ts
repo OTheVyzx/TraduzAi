@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { PageData, TextEntry, TextLayerStyle } from "../stores/appStore";
+import type { ImageLayerKey, PageData, TextEntry, TextLayerStyle } from "../stores/appStore";
 import {
   bitmapCache,
   commandMatchesWorkingState,
@@ -130,6 +130,88 @@ class Draft implements WorkingStateDraft {
     bytes: Uint8Array,
   ): void {
     this.bitmapPaths.set(layerKey, new TextDecoder().decode(bytes));
+  }
+
+  setWorkingImageLayerVisibility(_pageKey: string, layerKey: ImageLayerKey, visible: boolean): void {
+    this.pageSnapshot.image_layers = {
+      ...this.pageSnapshot.image_layers,
+      [layerKey]: {
+        key: layerKey,
+        path: this.pageSnapshot.image_layers?.[layerKey]?.path ?? null,
+        visible,
+        locked: this.pageSnapshot.image_layers?.[layerKey]?.locked ?? false,
+        opacity: this.pageSnapshot.image_layers?.[layerKey]?.opacity,
+        order: this.pageSnapshot.image_layers?.[layerKey]?.order,
+      },
+    };
+  }
+
+  setWorkingImageLayerLocked(_pageKey: string, layerKey: ImageLayerKey, locked: boolean): void {
+    this.pageSnapshot.image_layers = {
+      ...this.pageSnapshot.image_layers,
+      [layerKey]: {
+        key: layerKey,
+        path: this.pageSnapshot.image_layers?.[layerKey]?.path ?? null,
+        visible: this.pageSnapshot.image_layers?.[layerKey]?.visible ?? true,
+        locked,
+        opacity: this.pageSnapshot.image_layers?.[layerKey]?.opacity,
+        order: this.pageSnapshot.image_layers?.[layerKey]?.order,
+      },
+    };
+  }
+
+  setWorkingImageLayerProps(
+    _pageKey: string,
+    layerKey: ImageLayerKey,
+    patch: { opacity?: number },
+    touchedKeys: ("opacity")[],
+  ): void {
+    const existing = this.pageSnapshot.image_layers?.[layerKey];
+    const next = {
+      key: layerKey,
+      path: existing?.path ?? null,
+      visible: existing?.visible ?? true,
+      locked: existing?.locked ?? false,
+      opacity: existing?.opacity,
+      order: existing?.order,
+    };
+    for (const key of touchedKeys) {
+      next[key] = patch[key];
+    }
+    this.pageSnapshot.image_layers = {
+      ...this.pageSnapshot.image_layers,
+      [layerKey]: next,
+    };
+  }
+
+  reorderWorkingImageLayers(_pageKey: string, orderedKeys: ImageLayerKey[]): void {
+    const imageLayers = { ...this.pageSnapshot.image_layers };
+    orderedKeys.forEach((layerKey, index) => {
+      imageLayers[layerKey] = {
+        key: layerKey,
+        path: imageLayers[layerKey]?.path ?? null,
+        visible: imageLayers[layerKey]?.visible ?? true,
+        locked: imageLayers[layerKey]?.locked ?? false,
+        opacity: imageLayers[layerKey]?.opacity,
+        order: index,
+      };
+    });
+    this.pageSnapshot.image_layers = imageLayers;
+  }
+
+  setWorkingImageLayerPath(_pageKey: string, layerKey: ImageLayerKey, path: string | null): void {
+    const existing = this.pageSnapshot.image_layers?.[layerKey];
+    this.pageSnapshot.image_layers = {
+      ...this.pageSnapshot.image_layers,
+      [layerKey]: {
+        key: layerKey,
+        path,
+        visible: existing?.visible ?? true,
+        locked: existing?.locked ?? false,
+        opacity: existing?.opacity,
+        order: existing?.order,
+      },
+    };
   }
 
   setWorkingVisibility(_pageKey: string, layerId: string, visible: boolean): void {
@@ -420,5 +502,110 @@ describe("editorHistory", () => {
 
     expect(undo(stack, draft)).toEqual({ ok: true });
     expect(draft.getLayer(pageKey, "a")?.visible).toBe(true);
+  });
+
+  it("applies and reverts image layer visibility, lock and opacity commands", () => {
+    const draft = new Draft();
+    const stack = createHistoryStack(pageKey, "base-a");
+
+    expect(
+      executeCommand(
+        { ...meta("cmd1"), type: "toggle-image-layer-visibility", layerKey: "mask", before: true, after: false },
+        draft,
+        stack,
+      ),
+    ).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.mask?.visible).toBe(false);
+
+    expect(
+      executeCommand(
+        { ...meta("cmd2"), type: "toggle-image-layer-lock", layerKey: "brush", before: false, after: true },
+        draft,
+        stack,
+      ),
+    ).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.brush?.locked).toBe(true);
+
+    expect(
+      executeCommand(
+        {
+          ...meta("cmd3"),
+          type: "edit-image-layer-props",
+          layerKey: "inpaint",
+          before: { opacity: 1 },
+          after: { opacity: 0.5 },
+          touchedKeys: ["opacity"],
+        },
+        draft,
+        stack,
+      ),
+    ).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.inpaint?.opacity).toBe(0.5);
+
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.inpaint?.opacity).toBe(1);
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.brush?.locked).toBe(false);
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.mask?.visible).toBe(true);
+
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.mask?.visible).toBe(false);
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.brush?.locked).toBe(true);
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.inpaint?.opacity).toBe(0.5);
+  });
+
+  it("applies and reverts image layer reorder and asset replace commands", () => {
+    const draft = new Draft();
+    draft.pageSnapshot.image_layers = {
+      brush: { key: "brush", path: "brush.png", visible: true, locked: false, order: 0 },
+      mask: { key: "mask", path: "mask.png", visible: true, locked: false, order: 1 },
+      inpaint: { key: "inpaint", path: "inpaint-before.png", visible: true, locked: false, order: 2 },
+    };
+    const stack = createHistoryStack(pageKey, "base-a");
+
+    expect(
+      executeCommand(
+        {
+          ...meta("cmd1"),
+          type: "reorder-image-layers",
+          before: ["brush", "mask", "inpaint"],
+          after: ["mask", "brush", "inpaint"],
+        },
+        draft,
+        stack,
+      ),
+    ).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.mask?.order).toBe(0);
+    expect(draft.pageSnapshot.image_layers?.brush?.order).toBe(1);
+
+    expect(
+      executeCommand(
+        {
+          ...meta("cmd2"),
+          type: "bitmap-asset-replace",
+          layerKey: "inpaint",
+          beforePath: "inpaint-before.png",
+          afterPath: "inpaint-after.png",
+          bbox: [0, 0, 10, 10],
+        },
+        draft,
+        stack,
+      ),
+    ).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.inpaint?.path).toBe("inpaint-after.png");
+
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.inpaint?.path).toBe("inpaint-before.png");
+    expect(undo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.brush?.order).toBe(0);
+    expect(draft.pageSnapshot.image_layers?.mask?.order).toBe(1);
+
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.mask?.order).toBe(0);
+    expect(redo(stack, draft)).toEqual({ ok: true });
+    expect(draft.pageSnapshot.image_layers?.inpaint?.path).toBe("inpaint-after.png");
   });
 });

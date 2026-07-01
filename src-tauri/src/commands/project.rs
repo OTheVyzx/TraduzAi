@@ -3,6 +3,7 @@ use crate::export::psd::engine_data::{TextEngineSpec, TextJustification, TextOri
 use crate::export::psd::{export_psd, PsdLayer};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
+use dafont::{FcFontCache, PatternMatch};
 use image::imageops::FilterType;
 use image::{
     open, DynamicImage, GrayImage, ImageBuffer, ImageFormat, ImageReader, Luma, RgbaImage,
@@ -48,6 +49,17 @@ pub struct GoogleFontSearchResult {
     pub filename: String,
     pub download_url: String,
     pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SystemFontInfo {
+    pub family: String,
+    pub full_name: String,
+    pub filename: String,
+    pub path: String,
+    pub weight: String,
+    pub style: String,
+    pub monospace: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,6 +165,72 @@ pub async fn search_google_fonts(query: String) -> Result<Vec<GoogleFontSearchRe
     Ok(results)
 }
 
+#[tauri::command]
+pub async fn list_system_fonts(query: Option<String>) -> Result<Vec<SystemFontInfo>, String> {
+    let normalized_query = normalize_system_font_query(query.as_deref().unwrap_or(""));
+    let cache = FcFontCache::build();
+    let mut fonts = Vec::new();
+
+    for (pattern, font_path) in cache.list() {
+        let family = pattern
+            .family
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if family.is_empty() {
+            continue;
+        }
+        let full_name = pattern
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| family.clone());
+        let haystack = normalize_system_font_query(&format!("{} {}", family, full_name));
+        if normalized_query.len() >= 2 && !haystack.contains(&normalized_query) {
+            continue;
+        }
+        let path = font_path.path.clone();
+        let extension = Path::new(&path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("ttf");
+        let style_name = system_font_style_name(pattern.bold.clone(), pattern.italic.clone());
+        let filename = match system_font_cache_filename(&family, &style_name, extension) {
+            Ok(filename) => filename,
+            Err(_) => continue,
+        };
+        fonts.push(SystemFontInfo {
+            family,
+            full_name,
+            filename,
+            path,
+            weight: system_font_weight(pattern.bold.clone()),
+            style: system_font_style(pattern.italic.clone()),
+            monospace: pattern.monospace == PatternMatch::True,
+        });
+    }
+
+    fonts.sort_by(|a, b| {
+        a.family
+            .to_lowercase()
+            .cmp(&b.family.to_lowercase())
+            .then(a.full_name.to_lowercase().cmp(&b.full_name.to_lowercase()))
+            .then(a.filename.cmp(&b.filename))
+    });
+    fonts.dedup_by(|a, b| a.filename == b.filename);
+    Ok(fonts)
+}
+
+#[tauri::command]
+pub async fn resolve_system_font(filename: String) -> Result<Option<SystemFontInfo>, String> {
+    let wanted = sanitize_system_font_filename(&filename)?;
+    Ok(list_system_fonts(None)
+        .await?
+        .into_iter()
+        .find(|font| font.filename == wanted))
+}
+
 fn google_fonts_cache_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -240,6 +318,114 @@ fn google_font_cache_filename(family: &str, extension: &str) -> String {
         google_font_cache_slug(family),
         normalized_extension
     )
+}
+
+fn normalize_system_font_query(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn system_font_cache_slug(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." || trimmed.contains("..") {
+        return Err("Nome de fonte do sistema invalido".to_string());
+    }
+    let mut slug = String::new();
+    let mut needs_separator = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if needs_separator && !slug.is_empty() {
+                slug.push('_');
+            }
+            slug.push(ch);
+            needs_separator = false;
+        } else if ch.is_whitespace() || matches!(ch, '-' | '_') {
+            needs_separator = true;
+        } else {
+            return Err("Nome de fonte do sistema contem caracteres invalidos".to_string());
+        }
+    }
+    if slug.is_empty() {
+        Err("Nome de fonte do sistema invalido".to_string())
+    } else {
+        Ok(slug)
+    }
+}
+
+fn system_font_cache_filename(
+    family: &str,
+    style: &str,
+    extension: &str,
+) -> Result<String, String> {
+    let normalized_extension = match extension.to_ascii_lowercase().as_str() {
+        "otf" => "otf",
+        _ => "ttf",
+    };
+    Ok(format!(
+        "SystemFont__{}__{}.{}",
+        system_font_cache_slug(family)?,
+        system_font_cache_slug(style)?,
+        normalized_extension
+    ))
+}
+
+fn sanitize_system_font_filename(filename: &str) -> Result<String, String> {
+    let trimmed = filename.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains("..")
+        || !trimmed.starts_with("SystemFont__")
+        || trimmed.chars().any(|ch| {
+            matches!(
+                ch,
+                '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*'
+            ) || ch.is_control()
+        })
+    {
+        return Err("Nome de fonte do sistema invalido".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.ends_with(".ttf") && !lower.ends_with(".otf") {
+        return Err("Fonte do sistema deve terminar em .ttf ou .otf".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn system_font_weight(bold: PatternMatch) -> String {
+    if bold == PatternMatch::True {
+        "700".to_string()
+    } else {
+        "400".to_string()
+    }
+}
+
+fn system_font_style(italic: PatternMatch) -> String {
+    if italic == PatternMatch::True {
+        "italic".to_string()
+    } else {
+        "normal".to_string()
+    }
+}
+
+fn system_font_style_name(bold: PatternMatch, italic: PatternMatch) -> String {
+    match (bold == PatternMatch::True, italic == PatternMatch::True) {
+        (true, true) => "Bold Italic".to_string(),
+        (true, false) => "Bold".to_string(),
+        (false, true) => "Italic".to_string(),
+        (false, false) => "Regular".to_string(),
+    }
 }
 
 fn search_google_fonts_metadata_json(
@@ -1752,6 +1938,15 @@ pub struct WriteMaskFromPngConfig {
     pub compose: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SnapshotImageLayerConfig {
+    pub project_path: String,
+    pub page_index: usize,
+    pub layer_key: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
+}
+
 /// Escreve uma imagem PNG (passada como base64) diretamente na camada mask/brush da página.
 /// Usado pelo lasso tool (Fase 8) para polygon fill.
 #[derive(Debug, Deserialize)]
@@ -2216,6 +2411,58 @@ pub async fn write_mask_from_png(config: WriteMaskFromPngConfig) -> Result<Strin
 
         Ok(absolute_layer_path.to_string_lossy().replace('\\', "/"))
     })
+}
+
+#[tauri::command]
+pub async fn snapshot_image_layer(
+    config: SnapshotImageLayerConfig,
+) -> Result<Option<String>, String> {
+    let project_file = resolve_project_file(&config.project_path);
+    let project = project_schema::load_project_value(&project_file)?;
+    let pages = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Projeto sem paginas validas".to_string())?;
+    let page = pages
+        .get(config.page_index)
+        .ok_or_else(|| "Pagina do snapshot invalida".to_string())?;
+    let project_dir = project_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let source = config
+        .source_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| page_image_layer_path(page, &config.layer_key));
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let source_path = resolve_project_relative_path(&project_dir, &source);
+    if !source_path.exists() {
+        return Ok(None);
+    }
+    let extension = source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.trim().is_empty())
+        .unwrap_or("png");
+    let snapshot_dir = project_dir
+        .join("editor_cache")
+        .join("history")
+        .join(format!("page-{:04}", config.page_index + 1));
+    std::fs::create_dir_all(&snapshot_dir)
+        .map_err(|e| format!("Erro ao criar cache de historico do editor: {e}"))?;
+    let destination = snapshot_dir.join(format!(
+        "{}-{}.{}",
+        config.layer_key,
+        uuid::Uuid::new_v4(),
+        extension
+    ));
+    std::fs::copy(&source_path, &destination)
+        .map_err(|e| format!("Erro ao copiar snapshot da camada: {e}"))?;
+    Ok(Some(destination.to_string_lossy().replace('\\', "/")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4640,6 +4887,20 @@ mod tests {
             resolve_text_layer_bbox(&only_balloon),
             Some([80, 170, 540, 760])
         );
+    }
+
+    #[test]
+    fn system_font_cache_filename_is_stable_and_safe() {
+        assert_eq!(
+            system_font_cache_filename("Arial", "Regular", "ttf").unwrap(),
+            "SystemFont__Arial__Regular.ttf"
+        );
+        assert!(system_font_cache_filename("..", "Regular", "ttf").is_err());
+    }
+
+    #[test]
+    fn normalizes_system_font_query() {
+        assert_eq!(normalize_system_font_query("  Times-New  "), "times new");
     }
 
     #[tokio::test]

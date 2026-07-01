@@ -11,6 +11,12 @@ const {
   healInpaintRegion,
   patchEditorTextLayer,
   processBlock,
+  retypesetPage,
+  reinpaintPage,
+  detectPage,
+  ocrPage,
+  translatePage,
+  snapshotImageLayer,
   runProcessRegion,
   runPageActionWithOptionalMask,
   writeMaskFromPng,
@@ -29,6 +35,14 @@ const {
   })),
   patchEditorTextLayer: vi.fn(async () => ({})),
   processBlock: vi.fn(async () => "translated/001.png"),
+  retypesetPage: vi.fn(async () => "translated/001.png"),
+  reinpaintPage: vi.fn(async () => "images/reinpaint-page.png"),
+  detectPage: vi.fn(async () => "detected"),
+  ocrPage: vi.fn(async () => "ocr"),
+  translatePage: vi.fn(async () => "translate"),
+  snapshotImageLayer: vi.fn(async ({ source_path }: { source_path?: string | null }) =>
+    source_path ? `editor_cache/history/${source_path.replace(/[/:\\]/g, "_")}-${crypto.randomUUID()}.png` : null,
+  ),
   runProcessRegion: vi.fn(async () => ({
     page_index: 0,
     overlay: {
@@ -85,6 +99,12 @@ vi.mock("../../editorBackend", () => ({
     healInpaintRegion,
     patchEditorTextLayer,
     processBlock,
+    retypesetPage,
+    reinpaintPage,
+    detectPage,
+    ocrPage,
+    translatePage,
+    snapshotImageLayer,
     runProcessRegion,
     runPageActionWithOptionalMask,
     writeMaskFromPng,
@@ -159,6 +179,33 @@ function makePage(pageNumber = 1): PageData {
     inpaint_blocks: [],
     text_layers: [layer],
     textos: [layer],
+  };
+}
+
+function makeBackendChangedPage(pageNumber = 1): PageData {
+  const page = makePage(pageNumber);
+  return {
+    ...page,
+    arquivo_traduzido: `translated/${String(pageNumber).padStart(3, "0")}-changed.png`,
+    image_layers: {
+      ...page.image_layers,
+      inpaint: { key: "inpaint", path: `images/${String(pageNumber).padStart(3, "0")}-changed.png`, visible: true, locked: false },
+      rendered: { key: "rendered", path: `translated/${String(pageNumber).padStart(3, "0")}-changed.png`, visible: true, locked: false },
+    },
+    text_layers: [
+      {
+        ...page.text_layers[0],
+        traduzido: "Alterado",
+        translated: "Alterado",
+      },
+    ],
+    textos: [
+      {
+        ...page.text_layers[0],
+        traduzido: "Alterado",
+        translated: "Alterado",
+      },
+    ],
   };
 }
 
@@ -332,6 +379,39 @@ describe("editor bitmap tools", () => {
     expect(useEditorStore.getState().currentPage?.image_layers?.inpaint?.path).toBe("images/inpaint.png");
   });
 
+  it("makes direct bitmap stroke persistence undoable when no optimistic command exists", async () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+    useEditorStore.setState({ toolMode: "brush" });
+
+    await useEditorStore.getState().applyBitmapStroke({
+      width: 100,
+      height: 100,
+      strokes: [[[10, 10], [20, 20]]],
+      layerKey: "brush",
+      erase: false,
+    });
+
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.path).toBe("images/brush.png");
+    expect(useEditorStore.getState().historyByPageKey[pageKey].commands).toEqual([
+      expect.objectContaining({
+        type: "bitmap-asset-replace",
+        layerKey: "brush",
+        beforePath: expect.stringContaining("editor_cache/history/images_brush-001.png"),
+        afterPath: expect.stringContaining("editor_cache/history/images_brush.png"),
+      }),
+    ]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.path).toContain(
+      "editor_cache/history/images_brush-001.png",
+    );
+
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.brush?.path).toContain(
+      "editor_cache/history/images_brush.png",
+    );
+  });
+
   it("sends composed png data for recovery strokes", async () => {
     const pngData = "data:image/png;base64,recovered";
 
@@ -404,6 +484,80 @@ describe("editor bitmap tools", () => {
       idioma_destino: "pt-BR",
     });
     expect(useEditorStore.getState().activeLassoSelection).toBeNull();
+  });
+
+  it("makes clearing the mask undoable and redoable", async () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+
+    await useEditorStore.getState().clearMask();
+
+    expect(writeMaskFromPng).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      png_data: expect.stringContaining("data:image/png"),
+      layer_key: "mask",
+      op: "replace",
+    });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.path).toBe("editor_cache/masks/lasso-area.png");
+    expect(useEditorStore.getState().historyByPageKey[pageKey].commands).toEqual([
+      expect.objectContaining({
+        type: "bitmap-asset-replace",
+        layerKey: "mask",
+        beforePath: "images/mask-001.png",
+        afterPath: "editor_cache/masks/lasso-area.png",
+      }),
+    ]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.path).toBe("images/mask-001.png");
+
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.path).toBe("editor_cache/masks/lasso-area.png");
+  });
+
+  it("makes applying a lasso selection to the mask undoable and redoable", async () => {
+    const pageKey = useEditorStore.getState().currentPageKey();
+    useEditorStore.setState({
+      activeLassoSelection: {
+        pageKey,
+        pageIndex: 0,
+        points: [
+          [12, 14],
+          [62, 14],
+          [62, 54],
+          [12, 54],
+        ],
+        bbox: [12, 14, 50, 40],
+        width: 100,
+        height: 100,
+      },
+    });
+
+    await useEditorStore.getState().applyLassoSelectionToMask();
+
+    expect(writeMaskFromPng).toHaveBeenCalledWith({
+      project_path: "D:/tmp/project.json",
+      page_index: 0,
+      png_data: "data:image/png;base64,lasso",
+      layer_key: "mask",
+      op: "replace",
+    });
+    expect(useEditorStore.getState().activeLassoSelection).toBeNull();
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.path).toBe("editor_cache/masks/lasso-area.png");
+    expect(useEditorStore.getState().historyByPageKey[pageKey].commands).toEqual([
+      expect.objectContaining({
+        type: "bitmap-asset-replace",
+        layerKey: "mask",
+        beforePath: "images/mask-001.png",
+        afterPath: "editor_cache/masks/lasso-area.png",
+      }),
+    ]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.path).toBe("images/mask-001.png");
+
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.image_layers?.mask?.path).toBe("editor_cache/masks/lasso-area.png");
   });
 
   it("runs the automatic process tool with a lasso mask and stores the returned crop overlay", async () => {
@@ -490,6 +644,67 @@ describe("editor bitmap tools", () => {
     );
   });
 
+  it("makes full-page masked actions undoable and redoable", async () => {
+    const beforePage = makePage();
+    const afterPage = makeBackendChangedPage();
+    useAppStore.setState({ project: makeProject(beforePage) });
+    useEditorStore.setState({ currentPage: beforePage, currentPageIndex: 0 });
+    loadEditorPage.mockResolvedValueOnce({
+      page_index: 0,
+      total_pages: 1,
+      page: afterPage as never,
+    });
+
+    await useEditorStore.getState().runMaskedAction("inpaint");
+
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Alterado");
+    expect(useEditorStore.getState().historyByPageKey[useEditorStore.getState().currentPageKey()].commands).toEqual([
+      expect.objectContaining({ type: "page-snapshot", label: "Limpar fundo" }),
+    ]);
+
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Ola");
+
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Alterado");
+  });
+
+  it("makes lasso page actions undoable and redoable", async () => {
+    const beforePage = makePage();
+    const afterPage = makeBackendChangedPage();
+    useAppStore.setState({ project: makeProject(beforePage) });
+    useEditorStore.setState({
+      currentPage: beforePage,
+      currentPageIndex: 0,
+      activeLassoSelection: {
+        pageKey: useEditorStore.getState().currentPageKey(),
+        pageIndex: 0,
+        points: [
+          [12, 14],
+          [62, 14],
+          [62, 54],
+          [12, 54],
+        ],
+        bbox: [12, 14, 50, 40],
+        width: 100,
+        height: 100,
+      },
+    });
+    loadEditorPage.mockResolvedValueOnce({
+      page_index: 0,
+      total_pages: 1,
+      page: afterPage as never,
+    });
+
+    await useEditorStore.getState().runMaskedActionFromLasso("ocr");
+
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Alterado");
+    expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Ola");
+    expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+    expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Alterado");
+  });
+
   it("routes detector-only page action as a separate editor action", async () => {
     const page = makePage();
     useAppStore.setState({ project: makeProject(page) });
@@ -523,6 +738,39 @@ describe("editor bitmap tools", () => {
         idioma_origem: "ko",
       }),
     );
+  });
+
+  it("makes standalone page pipeline actions undoable and redoable", async () => {
+    const beforePage = makePage();
+    const afterPage = makeBackendChangedPage();
+    useAppStore.setState({ project: makeProject(beforePage) });
+    useEditorStore.setState({ currentPage: beforePage, currentPageIndex: 0, selectedLayerId: "text-a" });
+
+    for (const run of [
+      () => useEditorStore.getState().retypesetCurrentPage(),
+      () => useEditorStore.getState().reinpaintCurrentPage(),
+      () => useEditorStore.getState().detectInPage(),
+      () => useEditorStore.getState().ocrInPage(),
+      () => useEditorStore.getState().translateInPage(),
+      () => useEditorStore.getState().reProcessBlock("ocr"),
+      () => useEditorStore.getState().disconnectBlock(),
+    ]) {
+      useEditorStore.setState({ currentPage: beforePage, historyByPageKey: {}, selectedLayerId: "text-a" });
+      useAppStore.setState({ project: makeProject(beforePage) });
+      loadEditorPage.mockResolvedValueOnce({
+        page_index: 0,
+        total_pages: 1,
+        page: afterPage as never,
+      });
+
+      await run();
+
+      expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Alterado");
+      expect(useEditorStore.getState().undoEditor()).toEqual({ ok: true });
+      expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Ola");
+      expect(useEditorStore.getState().redoEditor()).toEqual({ ok: true });
+      expect(useEditorStore.getState().currentPage?.text_layers[0].traduzido).toBe("Alterado");
+    }
   });
 
   it("requests editor vision preload after loading a page", async () => {

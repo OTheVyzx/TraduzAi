@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from worker.client import WorkerClient
 from worker.config import WorkerSettings
@@ -25,13 +28,13 @@ def doctor(settings: WorkerSettings) -> int:
     return 0
 
 
-def run_once(settings: WorkerSettings, mock: bool) -> int:
+def run_once(settings: WorkerSettings, mock: bool, job_id: str | None = None) -> int:
     client = WorkerClient(settings)
     capabilities = build_worker_capabilities(settings, mock)
     registration = client.register(capabilities)
     worker_id = registration["worker_id"]
     client.heartbeat(worker_id)
-    job = client.claim_job(worker_id, capabilities)
+    job = client.claim_job(worker_id, capabilities, job_id=job_id)
     if job is None:
         print("Nenhum job na fila")
         return 0
@@ -60,6 +63,33 @@ def run_once(settings: WorkerSettings, mock: bool) -> int:
         client.upload_artifact(worker_id, job["id"], artifact.kind, artifact.path)
         uploaded_artifacts.add(key)
         return True
+
+    def reserve_artifacts_once(artifacts: list[OutputArtifact]) -> list[OutputArtifact]:
+        pending: list[OutputArtifact] = []
+        for artifact in artifacts:
+            key = artifact_key(artifact)
+            if key in uploaded_artifacts:
+                continue
+            uploaded_artifacts.add(key)
+            pending.append(artifact)
+        return pending
+
+    def upload_final_artifacts(artifacts: list[OutputArtifact]) -> None:
+        pending = reserve_artifacts_once([_normalize_artifact(artifact) for artifact in artifacts])
+        if not pending:
+            return
+        if settings.artifact_upload_workers <= 1 or len(pending) == 1:
+            for artifact in pending:
+                client.upload_artifact(worker_id, job["id"], artifact.kind, artifact.path)
+            return
+
+        def upload_with_fresh_client(artifact: OutputArtifact) -> None:
+            WorkerClient(settings).upload_artifact(worker_id, job["id"], artifact.kind, artifact.path)
+
+        with ThreadPoolExecutor(max_workers=settings.artifact_upload_workers) as executor:
+            futures = [executor.submit(upload_with_fresh_client, artifact) for artifact in pending]
+            for future in as_completed(futures):
+                future.result()
 
     def safe_stream_page_artifact(artifact: OutputArtifact, event: dict) -> None:
         output_artifact = _normalize_artifact(artifact)
@@ -102,9 +132,7 @@ def run_once(settings: WorkerSettings, mock: bool) -> int:
                     event_callback,
                     page_artifact_callback=safe_stream_page_artifact,
                 )
-        for artifact in result["artifacts"]:
-            output_artifact = _normalize_artifact(artifact)
-            upload_artifact_once(output_artifact)
+        upload_final_artifacts(result["artifacts"])
         client.complete(worker_id, job["id"], result["page_count"], result["processing_seconds"])
         return 0
     except Exception as exc:
@@ -128,13 +156,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs="?", default="run")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--mock", action="store_true")
+    parser.add_argument("--job-id")
     args = parser.parse_args(argv)
     settings = WorkerSettings.from_env()
     if args.command == "doctor":
         return doctor(settings)
+    if not args.mock and settings.fast_page_server_enabled and _warmup_on_start_enabled():
+        warmup_fast_page_client(settings)
     try:
         while True:
-            code = run_once(settings, args.mock)
+            code = run_once(settings, args.mock, job_id=args.job_id)
             if args.once:
                 return code
             time.sleep(3)
@@ -174,6 +205,32 @@ def close_fast_page_client() -> None:
         _FAST_PAGE_CLIENT.close()
     finally:
         _FAST_PAGE_CLIENT = None
+
+
+def _warmup_on_start_enabled() -> bool:
+    value = os.environ.get("TRADUZAI_WORKER_WARMUP_ON_START")
+    if value is None:
+        return False
+    return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def warmup_fast_page_client(settings: WorkerSettings) -> None:
+    models_dir = os.environ.get("TRADUZAI_MODELS_DIR") or str(settings.project_root / "pipeline" / "models")
+    profile = os.environ.get("TRADUZAI_WARMUP_PROFILE", "quality")
+    lang = os.environ.get("TRADUZAI_WARMUP_LANG", "en")
+    require_warmup = os.environ.get("TRADUZAI_REQUIRE_WARMUP", "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        events = get_fast_page_client(settings).warmup(
+            {"models_dir": models_dir, "profile": profile, "lang": lang, "idioma_origem": lang}
+        )
+        last_event = events[-1] if events else {}
+        session_id = last_event.get("session_id") or "unknown"
+        print(f"Fast-page warmup pronto: profile={profile} lang={lang} session={session_id}")
+    except Exception as exc:
+        close_fast_page_client()
+        print(f"AVISO: warmup fast-page falhou: {exc}")
+        if require_warmup:
+            raise
 
 
 if __name__ == "__main__":

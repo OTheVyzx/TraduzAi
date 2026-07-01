@@ -16,6 +16,8 @@ class WorkerSettings:
     worker_work_dir: Path
     heartbeat_interval_seconds: int = 20
     fast_page_server_enabled: bool = True
+    artifact_profile: str = "fast"
+    artifact_upload_workers: int = 1
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -30,6 +32,8 @@ class WorkerSettings:
             worker_work_dir=Path(os.environ.get("TRADUZAI_WORKER_WORK_DIR", project_root / "data" / "worker")),
             heartbeat_interval_seconds=int(os.environ.get("TRADUZAI_HEARTBEAT_INTERVAL_SECONDS", "20")),
             fast_page_server_enabled=_fast_page_server_enabled_from_env(),
+            artifact_profile=_artifact_profile_from_env(),
+            artifact_upload_workers=_positive_int_from_env("TRADUZAI_ARTIFACT_UPLOAD_WORKERS", 1),
         )
 
     def validate(self) -> list[str]:
@@ -40,6 +44,10 @@ class WorkerSettings:
             errors.append("TRADUZAI_WORKER_TOKEN obrigatorio")
         if not self.project_root.exists():
             errors.append("TRADUZAI_PROJECT_ROOT nao existe")
+        if self.artifact_profile not in {"fast", "full"}:
+            errors.append("TRADUZAI_ARTIFACT_PROFILE deve ser fast ou full")
+        if self.artifact_upload_workers < 1:
+            errors.append("TRADUZAI_ARTIFACT_UPLOAD_WORKERS deve ser maior que zero")
         return errors
 
 
@@ -48,3 +56,26 @@ def _fast_page_server_enabled_from_env() -> bool:
     if value is None:
         return True
     return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _artifact_profile_from_env() -> str:
+    value = os.environ.get("TRADUZAI_ARTIFACT_PROFILE", "fast").strip().lower()
+    aliases = {
+        "prod": "fast",
+        "production": "fast",
+        "minimal": "fast",
+        "debug": "full",
+        "editor": "full",
+    }
+    return aliases.get(value, value)
+
+
+def _positive_int_from_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, value)

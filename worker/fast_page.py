@@ -21,13 +21,13 @@ class FastPageProcessClient:
         self._popen_factory = popen_factory
         self._process = None
 
-    def process_page(self, request: dict) -> list[dict]:
+    def process_page(self, request: dict, event_callback: Callable[[dict], None] | None = None) -> list[dict]:
         payload = {"type": "process_page", **request}
-        return self._request(payload, terminal_types={"complete"})
+        return self._request(payload, terminal_types={"complete"}, event_callback=event_callback)
 
-    def warmup(self, request: dict) -> list[dict]:
+    def warmup(self, request: dict, event_callback: Callable[[dict], None] | None = None) -> list[dict]:
         payload = {"type": "warmup", **request}
-        return self._request(payload, terminal_types={"ready"})
+        return self._request(payload, terminal_types={"ready"}, event_callback=event_callback)
 
     def close(self) -> None:
         if self._process is None:
@@ -44,15 +44,27 @@ class FastPageProcessClient:
         finally:
             self._process = None
 
-    def _request(self, payload: dict, *, terminal_types: set[str], retry: bool = True) -> list[dict]:
+    def _request(
+        self,
+        payload: dict,
+        *,
+        terminal_types: set[str],
+        retry: bool = True,
+        event_callback: Callable[[dict], None] | None = None,
+    ) -> list[dict]:
         self._ensure_started()
         try:
             self._write(payload)
-            return self._read_until(terminal_types)
+            return self._read_until(terminal_types, event_callback=event_callback)
         except (BrokenPipeError, OSError, FastPageTransportError):
             self._discard_process()
             if retry:
-                return self._request(payload, terminal_types=terminal_types, retry=False)
+                return self._request(
+                    payload,
+                    terminal_types=terminal_types,
+                    retry=False,
+                    event_callback=event_callback,
+                )
             raise
 
     def _ensure_started(self) -> None:
@@ -93,7 +105,12 @@ class FastPageProcessClient:
         self._process.stdin.write(json.dumps(payload, ensure_ascii=True) + "\n")
         self._process.stdin.flush()
 
-    def _read_until(self, terminal_types: set[str]) -> list[dict]:
+    def _read_until(
+        self,
+        terminal_types: set[str],
+        *,
+        event_callback: Callable[[dict], None] | None = None,
+    ) -> list[dict]:
         assert self._process is not None
         assert self._process.stdout is not None
         events: list[dict] = []
@@ -103,11 +120,13 @@ class FastPageProcessClient:
                 raise FastPageTransportError("processo fast-page encerrou sem resposta completa")
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise FastPageTransportError(f"resposta fast-page invalida: {line.strip()}") from exc
+            except json.JSONDecodeError:
+                continue
             if not isinstance(event, dict):
                 raise FastPageTransportError("resposta fast-page nao e objeto JSON")
             events.append(event)
+            if event_callback is not None:
+                event_callback(event)
             if event.get("type") == "error":
                 raise RuntimeError(str(event.get("message") or "fast-page retornou erro"))
             if event.get("type") in terminal_types:

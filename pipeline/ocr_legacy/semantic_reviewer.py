@@ -75,6 +75,8 @@ def _refine_token(token: str, tipo: str) -> str:
     core, prefix, suffix = _split_affixes(token)
     if not core:
         return token
+    if core.isdigit():
+        return token
 
     was_upper = core.isupper()
     normalized = core.upper()

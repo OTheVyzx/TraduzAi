@@ -22,6 +22,9 @@ describe("editorTextStylePolicy", () => {
       glow_px: 0,
       contorno: "",
       contorno_px: 0,
+      curva: false,
+      curva_direcao: "",
+      curva_intensidade: 0,
     });
   });
 
@@ -107,6 +110,58 @@ describe("editorTextStylePolicy", () => {
       bold: false,
       contorno: "#000000",
       contorno_px: 2,
+    });
+  });
+
+  it("preserves source-detected outline style during hydration", () => {
+    const style = canonicalizeTextStyle(
+      {
+        fonte: "KOMIKAX_.ttf",
+        cor: "#FFFFFF",
+        contorno: "#000000",
+        contorno_px: 3,
+        glow: false,
+      sombra: true,
+      sombra_cor: "#333333",
+      sombra_offset: [3, 4],
+      curva: true,
+      curva_direcao: "arc_up",
+      curva_intensidade: 0.35,
+      style_origin: "source_detected",
+    },
+      { mode: "hydrate" },
+    );
+
+    expect(style.contorno).toBe("#000000");
+    expect(style.contorno_px).toBe(3);
+    expect(style.sombra).toBe(true);
+    expect(style.sombra_cor).toBe("#333333");
+    expect(style.sombra_offset).toEqual([3, 4]);
+    expect(style.curva).toBe(true);
+    expect(style.curva_direcao).toBe("arc_up");
+    expect(style.curva_intensidade).toBe(0.35);
+  });
+
+  it("does not normalize source-detected styles that resemble legacy defaults", () => {
+    const style = canonicalizeTextStyle(
+      {
+        fonte: "ComicNeue-Bold.ttf",
+        cor: "#FFFFFF",
+        contorno: "#000000",
+        contorno_px: 2,
+        glow: false,
+        sombra: false,
+      },
+      { mode: "hydrate", styleOrigin: "source_detected" },
+    );
+
+    expect(style).toMatchObject({
+      fonte: "ComicNeue-Bold.ttf",
+      cor: "#FFFFFF",
+      contorno: "#000000",
+      contorno_px: 2,
+      glow: false,
+      sombra: false,
     });
   });
 });

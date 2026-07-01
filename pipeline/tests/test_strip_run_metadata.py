@@ -174,6 +174,56 @@ class RunChapterMetadataTests(unittest.TestCase):
                 "comic-text-bubble-detector",
             )
 
+    def test_bubble_mask_artifact_does_not_promote_image_fallback_to_real(self):
+        from strip.run import _mark_pipeline_artifacts_after_render
+        from strip.types import OutputPage
+
+        image = np.zeros((80, 120, 3), dtype=np.uint8)
+        page = OutputPage(
+            y_top=0,
+            y_bottom=80,
+            image=image.copy(),
+            inpainted_image=image.copy(),
+            ocr_result={
+                "texts": [
+                    {
+                        "id": "ocr_001",
+                        "bbox": [30, 20, 80, 45],
+                        "bubble_mask": np.ones((80, 120), dtype=np.uint8),
+                        "bubble_mask_bbox": [20, 10, 100, 60],
+                        "bubble_mask_source": "image_white_bubble_mask",
+                    }
+                ],
+                "_pipeline_artifacts": {
+                    "BubbleMask": {
+                        "producer": "speech-bubble-segmentation",
+                        "status": "ok",
+                    }
+                },
+                "_pipeline_artifacts_by_band": [
+                    {
+                        "band_id": "page_002_band_008",
+                        "artifacts": {
+                            "BubbleMask": {
+                                "producer": "speech-bubble-segmentation",
+                                "status": "ok",
+                            }
+                        },
+                    }
+                ],
+            },
+            page_profile={},
+        )
+
+        _mark_pipeline_artifacts_after_render([page])
+
+        bubble = page.ocr_result["_pipeline_artifacts"]["BubbleMask"]
+        band_bubble = page.ocr_result["_pipeline_artifacts_by_band"][0]["artifacts"]["BubbleMask"]
+        self.assertEqual(bubble["status"], "fallback")
+        self.assertEqual(bubble["evidence"], "image_fallback_mask")
+        self.assertEqual(band_bubble["status"], "fallback")
+        self.assertEqual(band_bubble["evidence"], "image_fallback_mask")
+
     def test_no_bbox_less_text_survives_in_output(self):
         """Textos sem 'bbox' definido não devem aparecer no output final."""
         from strip.run import run_chapter

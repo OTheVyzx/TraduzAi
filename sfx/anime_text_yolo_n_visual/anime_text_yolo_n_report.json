@@ -1,0 +1,235 @@
+{
+  "root": "N:\\TraduzAI\\sfx",
+  "output_dir": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual",
+  "model": "anime-text-yolo-n",
+  "items": [
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221235.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            64,
+            165,
+            132,
+            262
+          ],
+          "confidence": 0.6495651602745056,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221235_crops\\01_64_165_132_262.png",
+          "attempts": [
+            {
+              "lang": "ko",
+              "text": "라",
+              "confidence": 0.5569
+            },
+            {
+              "lang": "zh",
+              "text": "价",
+              "confidence": 0.5679
+            }
+          ]
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221235_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221245.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221245_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221309.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            45,
+            87,
+            105,
+            141
+          ],
+          "confidence": 0.3115931451320648,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221309_crops\\01_45_87_105_141.png",
+          "attempts": []
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221309_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221315.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221315_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221319.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            26,
+            55,
+            242,
+            220
+          ],
+          "confidence": 0.33780327439308167,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221319_crops\\01_26_55_242_220.png",
+          "attempts": [
+            {
+              "lang": "ja",
+              "text": "NIC",
+              "confidence": 0.5156
+            }
+          ]
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221319_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221322.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221322_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221325.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            88,
+            84,
+            143,
+            127
+          ],
+          "confidence": 0.35663318634033203,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221325_crops\\01_88_84_143_127.png",
+          "attempts": [
+            {
+              "lang": "ko",
+              "text": "어?",
+              "confidence": 0.7169
+            },
+            {
+              "lang": "ja",
+              "text": "H?",
+              "confidence": 0.7184
+            },
+            {
+              "lang": "zh",
+              "text": "H?",
+              "confidence": 0.9257
+            }
+          ]
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221325_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221336.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            193,
+            33,
+            261,
+            101
+          ],
+          "confidence": 0.5485204458236694,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221336_crops\\01_193_33_261_101.png",
+          "attempts": []
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221336_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221342.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221342_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221350.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221350_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221354.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            18,
+            30,
+            88,
+            177
+          ],
+          "confidence": 0.5445611476898193,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221354_crops\\01_18_30_88_177.png",
+          "attempts": []
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221354_anime_text_yolo_n_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221401.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            223,
+            19,
+            306,
+            135
+          ],
+          "confidence": 0.34798306226730347,
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "ocr_confidence": null,
+          "crop": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221401_crops\\01_223_19_306_135.png",
+          "attempts": [
+            {
+              "lang": "ja",
+              "text": "ん",
+              "confidence": 0.5569
+            }
+          ]
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\anime_text_yolo_n_visual\\Captura de tela 2026-06-05 221401_anime_text_yolo_n_overlay.png"
+    }
+  ],
+  "detector_backend": "anime-text-yolo",
+  "detector_device": "cuda",
+  "detector_model_path": "N:\\TraduzAI\\models\\huggingface\\models--mayocream--anime-text-yolo\\yolo12n_animetext.safetensors",
+  "total_detected": 7,
+  "total_recognized": 0
+}

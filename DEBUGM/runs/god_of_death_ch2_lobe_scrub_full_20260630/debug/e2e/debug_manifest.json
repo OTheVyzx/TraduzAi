@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_lobe_scrub_full",
+  "created_at": "2026-06-30T21:37:10.785566+00:00",
+  "level": "standard",
+  "stage_durations_sec": {},
+  "artifact_count": 2355,
+  "config_snapshot": {
+    "schema_version": 1,
+    "run_id": "2026-06-30T_ch2_lobe_scrub_full",
+    "stage": "run",
+    "source_path": "D:\\Mihon pra pc\\downloads\\mangas\\Manhwatop (EN)\\The God of Death\\Chapter 2.cbz",
+    "work_dir": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_lobe_scrub_full_20260630",
+    "models_dir": "N:\\TraduzAI\\pipeline\\models",
+    "obra": "Supreme Yanluo System",
+    "capitulo": "2",
+    "idioma_origem": "en",
+    "idioma_destino": "pt-BR",
+    "mode": "auto",
+    "debug": true,
+    "skip_final_page_space_typeset": false,
+    "run_name": "god_of_death_ch2_lobe_scrub_full_20260630",
+    "output_dir": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_lobe_scrub_full_20260630",
+    "engine_preset_id": "default",
+    "engine_preset": {
+      "id": "default",
+      "content_family": "default",
+      "detector": "default",
+      "font_detector": "default",
+      "segmenter": "comic-text-detector-seg",
+      "bubble_segmenter": "speech-bubble-segmentation",
+      "ocr": "default",
+      "inpainter": "aot-inpainting",
+      "mask_strategy": "roi_segmentation_assisted",
+      "preserve_sfx": true
+    },
+    "work_title_user_provided": false,
+    "runtime_profile": "balanced",
+    "runtime_profile_decision": {
+      "requested_profile": "balanced",
+      "profile": "balanced",
+      "ready_for_default": true,
+      "visual_stack_warmup": true,
+      "strip_inpainter_prewarm": true,
+      "semantic_review": false,
+      "smart_skip": "off",
+      "macro_ocr": "off",
+      "cpu_thread_limit": null,
+      "env_defaults": {
+        "TRADUZAI_SEMANTIC_REVIEW": "0",
+        "TRADUZAI_STRIP_SCHEDULER_EXECUTOR": "overlap_context_release",
+        "TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS": "3",
+        "TRADUZAI_STRIP_FAST_SOLID_INPAINT": "0",
+        "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+        "TRADUZAI_STRIP_FAST_WHITE_NARRATION": "0",
+        "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "0",
+        "TRADUZAI_PAGE_CLEANUP_RERENDER": "0",
+        "TRADUZAI_PADDLE_FULL_PAGE": "1",
+        "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+        "TRADUZAI_GOOGLE_PARALLEL_CHUNKS": "1",
+        "TRADUZAI_GOOGLE_TRANSLATE_WORKERS": "3"
+      },
+      "blocked_features": [],
+      "visual_pipeline_flags": {
+        "strict_export_gate": true,
+        "safe_fast_fill": true,
+        "ocr_residual_check": "targeted",
+        "name_lock": true,
+        "connected_balloon_v2": false,
+        "rotated_text_v2": false
+      },
+      "rotated_text_policy": {
+        "dialogue": {
+          "render_same_angle_if_abs_angle_in": [
+            5,
+            35
+          ],
+          "block_if_vertical": true
+        },
+        "signage": {
+          "render_same_angle": true
+        },
+        "sfx_preserve": {
+          "inpaint": false,
+          "render": false
+        },
+        "title_card": {
+          "preserve_by_default": true
+        }
+      },
+      "notes": [
+        "Balanced profile enables the current automatic pipeline defaults without real macro OCR."
+      ]
+    },
+    "runtime_profile_env": {
+      "TRADUZAI_SEMANTIC_REVIEW": "applied",
+      "TRADUZAI_STRIP_SCHEDULER_EXECUTOR": "applied",
+      "TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS": "applied",
+      "TRADUZAI_STRIP_FAST_SOLID_INPAINT": "applied",
+      "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "applied",
+      "TRADUZAI_STRIP_FAST_WHITE_NARRATION": "applied",
+      "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "applied",
+      "TRADUZAI_PAGE_CLEANUP_RERENDER": "applied",
+      "TRADUZAI_PADDLE_FULL_PAGE": "applied",
+      "TRADUZAI_STRIP_DETECT_FULL_PAGE": "applied",
+      "TRADUZAI_GOOGLE_PARALLEL_CHUNKS": "applied",
+      "TRADUZAI_GOOGLE_TRANSLATE_WORKERS": "applied"
+    }
+  },
+  "exit_code": 0,
+  "export_gate_status": "BLOCK"
+}

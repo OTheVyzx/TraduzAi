@@ -3,8 +3,9 @@ import type { EditorViewMode, RenderPreviewCacheEntry } from "../../../lib/store
 
 export function editingBaseImagePath(page: PageData | null | undefined) {
   if (!page) return null;
+  const inpaintLayer = page.image_layers?.inpaint;
   return (
-    page.image_layers?.inpaint?.path ??
+    (inpaintLayer?.visible !== false ? inpaintLayer?.path : null) ??
     page.image_layers?.base?.path ??
     page.arquivo_original ??
     null

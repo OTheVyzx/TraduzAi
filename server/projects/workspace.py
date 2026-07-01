@@ -209,14 +209,39 @@ def _build_minimal_project(job: Job, root: Path) -> dict[str, Any]:
         pages.append(
             {
                 "index": index,
+                "arquivo_original": relative_asset(root, original) if original.exists() else rel,
+                "arquivo_traduzido": rel,
                 "original_path": relative_asset(root, original) if original.exists() else rel,
                 "translated_path": rel,
                 "rendered_path": rel,
+                "image_layers": {
+                    "base": {
+                        "key": "base",
+                        "path": relative_asset(root, original) if original.exists() else rel,
+                        "visible": True,
+                        "locked": True,
+                    },
+                    "rendered": {
+                        "key": "rendered",
+                        "path": rel,
+                        "visible": True,
+                        "locked": True,
+                    },
+                },
                 "text_layers": [],
             }
         )
     if not pages:
-        pages.append({"index": 0, "original_path": "", "translated_path": "", "rendered_path": "", "text_layers": []})
+        pages.append({
+            "index": 0,
+            "arquivo_original": "",
+            "arquivo_traduzido": "",
+            "original_path": "",
+            "translated_path": "",
+            "rendered_path": "",
+            "image_layers": {},
+            "text_layers": [],
+        })
     return {
         "job_id": job.id,
         "obra": job.obra,

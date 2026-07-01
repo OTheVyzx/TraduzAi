@@ -60,6 +60,24 @@ def _fake_process_band_factory(records: list, ocr_extras: dict | None = None):
 
 
 class DarkPanelCleanupTests(unittest.TestCase):
+    def test_page_cleanup_rejects_dark_text_ink_loss(self):
+        from strip.run import _dark_text_cleanup_loses_visible_ink
+
+        before = np.zeros((140, 240, 3), dtype=np.uint8)
+        after = before.copy()
+        before[50:72, 70:180] = [245, 245, 245]
+        texts = [
+            {
+                "id": "dark_001",
+                "safe_text_box": [40, 28, 205, 110],
+                "balloon_bbox": [20, 10, 220, 130],
+                "bubble_mask_source": "image_dark_bubble_mask",
+                "qa_flags": ["dark_bubble_ellipse_bbox_mask"],
+            }
+        ]
+
+        self.assertTrue(_dark_text_cleanup_loses_visible_ink(before, after, texts))
+
     def test_page_dark_panel_cleanup_rerenders_solid_black_text_region(self):
         from strip.run import _cleanup_dark_panel_page_and_rerender
 
@@ -124,16 +142,83 @@ class RunChapterSmokeTests(unittest.TestCase):
         from strip.run import _strip_band_margin_px
 
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_strip_band_margin_px("ko"), 96)
-            self.assertEqual(_strip_band_margin_px("ja"), 96)
-            self.assertEqual(_strip_band_margin_px("zh-cn"), 96)
-            self.assertEqual(_strip_band_margin_px("en"), 96)
+            self.assertEqual(_strip_band_margin_px("ko"), 160)
+            self.assertEqual(_strip_band_margin_px("ja"), 160)
+            self.assertEqual(_strip_band_margin_px("zh-cn"), 160)
+            self.assertEqual(_strip_band_margin_px("en"), 160)
 
     def test_strip_band_margin_env_override_wins(self):
         from strip.run import _strip_band_margin_px
 
         with patch.dict("os.environ", {"TRADUZAI_STRIP_BAND_MARGIN_PX": "48"}, clear=False):
             self.assertEqual(_strip_band_margin_px("ko"), 48)
+
+    def test_output_page_assignment_rewrites_stale_source_page_id(self):
+        from strip.run import _sync_record_page_identity_for_output_page
+
+        record = {
+            "id": "ocr_002",
+            "page_id": "page_002",
+            "band_id": "page_002_band_019",
+            "bbox": [314, 1, 495, 29],
+        }
+
+        synced = _sync_record_page_identity_for_output_page(record, 2)
+
+        self.assertEqual(synced["page_id"], "page_003")
+        self.assertEqual(synced["assigned_page_id"], "page_003")
+        self.assertEqual(synced["source_page_id"], "page_002")
+        self.assertEqual(synced["band_id"], "page_002_band_019")
+
+    def test_paste_band_attr_does_not_overwrite_cleaned_overlap_with_unchanged_band(self):
+        from strip.run import _paste_band_attr_into_image
+        from strip.types import Band
+
+        strip = np.full((80, 120, 3), 255, dtype=np.uint8)
+        strip[34:42, 40:90] = 12
+        first_original = strip[20:55].copy()
+        first_cleaned = first_original.copy()
+        first_cleaned[14:22, 40:90] = 255
+        second_original = strip[38:70].copy()
+        first = Band(
+            y_top=20,
+            y_bottom=55,
+            original_slice=first_original,
+            cleaned_slice=first_cleaned,
+        )
+        second = Band(
+            y_top=38,
+            y_bottom=70,
+            original_slice=second_original,
+            cleaned_slice=second_original.copy(),
+        )
+
+        result = _paste_band_attr_into_image(strip, [first, second], "cleaned_slice")
+
+        self.assertTrue(np.all(result[38:42, 40:90] == 255))
+        self.assertTrue(np.array_equal(result[60, 80], strip[60, 80]))
+
+    def test_paste_rendered_slice_overwrites_unchanged_dark_inpaint_pixels(self):
+        from strip.run import _paste_band_attr_into_image
+        from strip.types import Band
+
+        strip = np.zeros((40, 80, 3), dtype=np.uint8)
+        strip[12:16, 20:44] = 230
+        original = strip[8:28].copy()
+        rendered = original.copy()
+        rendered[4:8, 20:44] = 0
+        rendered[10:14, 28:52] = 255
+        band = Band(
+            y_top=8,
+            y_bottom=28,
+            original_slice=original,
+            rendered_slice=rendered,
+        )
+
+        result = _paste_band_attr_into_image(strip, [band], "rendered_slice")
+
+        self.assertTrue(np.all(result[12:16, 20:44] == 0))
+        self.assertTrue(np.all(result[18:22, 28:52] == 255))
 
     def test_page_cleanup_limit_mask_follows_text_geometry(self):
         from strip.run import _build_page_cleanup_limit_mask
@@ -189,6 +274,45 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertEqual(fixed_rendered[96, 145].tolist(), original[96, 145].tolist())
         self.assertEqual(fixed_clean[36, 60].tolist(), [245, 245, 245])
         self.assertEqual(fixed_rendered[32, 60].tolist(), [0, 0, 0])
+
+    def test_page_inpaint_clamp_preserves_render_bbox_when_applying_background_delta(self):
+        from strip.run import _clamp_page_inpaint_to_mask
+
+        original = np.full((120, 200, 3), 8, dtype=np.uint8)
+        original[44:78, 66:146] = [120, 120, 120]
+        original[92:106, 156:178] = [80, 80, 80]
+        clean = original.copy()
+        clean[44:78, 66:146] = [0, 0, 0]
+        clean[92:106, 156:178] = [0, 0, 0]
+        rendered = clean.copy()
+        rendered[50:70, 78:134] = [245, 245, 245]
+        text = {
+            "bbox": [66, 44, 146, 78],
+            "text_pixel_bbox": [66, 44, 146, 78],
+            "render_bbox": [78, 50, 134, 70],
+            "safe_text_box": [70, 46, 142, 76],
+            "translated": "TEXTO",
+            "original": "TEXT",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "balloon_bbox": [28, 20, 172, 98],
+        }
+        mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        mask[86:110, 150:184] = 255
+
+        with patch("vision_stack.runtime.vision_blocks_to_mask", return_value=mask):
+            fixed_clean, fixed_rendered, did_fix = _clamp_page_inpaint_to_mask(
+                original_image=original,
+                clean_image=clean,
+                rendered_image=rendered,
+                page_texts=[text],
+                inpaint_blocks=[{"bbox": [150, 86, 184, 110]}],
+            )
+
+        self.assertTrue(did_fix)
+        self.assertEqual(fixed_clean[56, 90].tolist(), original[56, 90].tolist())
+        self.assertEqual(fixed_rendered[56, 90].tolist(), rendered[56, 90].tolist())
+        self.assertEqual(fixed_rendered[56, 70].tolist(), rendered[56, 70].tolist())
+        self.assertEqual(fixed_rendered[98, 164].tolist(), original[98, 164].tolist())
 
     def test_page_inpaint_clamp_restores_balloon_outline_outside_text_geometry(self):
         from strip.run import _clamp_page_inpaint_to_mask
@@ -267,6 +391,78 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertTrue(did_fix)
         self.assertTrue(np.all(fixed_clean[30:40, 38:46] == 255))
         self.assertTrue(np.all(fixed_rendered[30:40, 38:46] == 255))
+        self.assertTrue(np.array_equal(fixed_clean[98, 156], original[98, 156]))
+
+    def test_page_inpaint_clamp_keeps_rotated_source_bbox_residual_clean(self):
+        from strip.run import _clamp_page_inpaint_to_mask
+
+        original = np.full((140, 220, 3), 255, dtype=np.uint8)
+        original[28:50, 42:58] = 12
+        original[86:104, 164:184] = 12
+        original[116:126, 196:210] = 80
+        clean = original.copy()
+        clean[24:108, 38:188] = 255
+        clean[116:126, 196:210] = 255
+        rendered = clean.copy()
+        rendered[48:72, 70:154] = 0
+        text = {
+            "bbox": [68, 42, 158, 92],
+            "text_pixel_bbox": [68, 42, 158, 92],
+            "source_bbox": [38, 24, 188, 108],
+            "rotation_deg": -28.0,
+            "line_polygons": [
+                [[72, 48], [154, 48], [154, 64], [72, 64]],
+                [[82, 76], [144, 76], [144, 92], [82, 92]],
+            ],
+            "translated": "TEXTO",
+            "original": "Use the hat",
+            "balloon_type": "white",
+        }
+
+        fixed_clean, fixed_rendered, did_fix = _clamp_page_inpaint_to_mask(
+            original_image=original,
+            clean_image=clean,
+            rendered_image=rendered,
+            page_texts=[text],
+            inpaint_blocks=[dict(text)],
+        )
+
+        self.assertTrue(did_fix)
+        self.assertTrue(np.all(fixed_clean[32:46, 44:56] == 255))
+        self.assertTrue(np.all(fixed_rendered[90:100, 168:180] == 255))
+        self.assertTrue(np.array_equal(fixed_clean[120, 202], original[120, 202]))
+
+    def test_page_inpaint_clamp_keeps_single_line_text_bbox_residual_clean(self):
+        from strip.run import _clamp_page_inpaint_to_mask
+
+        original = np.full((120, 180, 3), 255, dtype=np.uint8)
+        original[58:64, 64:126] = 12
+        original[94:104, 150:164] = 80
+        clean = original.copy()
+        clean[38:72, 52:142] = 255
+        clean[94:104, 150:164] = 255
+        rendered = clean.copy()
+        rendered[42:58, 70:120] = 0
+        text = {
+            "bbox": [52, 36, 142, 72],
+            "text_pixel_bbox": [62, 40, 132, 66],
+            "line_polygons": [[[62, 40], [132, 40], [132, 54], [62, 54]]],
+            "translated": "UFA...",
+            "original": "Phew...",
+            "balloon_type": "white",
+        }
+
+        fixed_clean, fixed_rendered, did_fix = _clamp_page_inpaint_to_mask(
+            original_image=original,
+            clean_image=clean,
+            rendered_image=rendered,
+            page_texts=[text],
+            inpaint_blocks=[dict(text)],
+        )
+
+        self.assertTrue(did_fix)
+        self.assertTrue(np.all(fixed_clean[58:64, 64:126] == 255))
+        self.assertTrue(np.all(fixed_rendered[58:64, 64:126] == 255))
         self.assertTrue(np.array_equal(fixed_clean[98, 156], original[98, 156]))
 
     def test_page_final_cleanup_skips_textured_translucent_balloons(self):
@@ -2024,6 +2220,121 @@ class RunChapterSmokeTests(unittest.TestCase):
 
             self.assertEqual(records, [1, 2, 3])
 
+    def test_run_chapter_marks_assigned_text_geometry_as_page_space(self):
+        from strip.run import run_chapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            files = _write_pages(tmp_path, 2, page_height=300, page_width=200)
+            output = tmp_path / "out"
+
+            def fake_process_band(band, **kw):
+                band.cleaned_slice = band.strip_slice.copy()
+                band.rendered_slice = band.strip_slice.copy()
+                if int(kw["source_page_number"]) == 2:
+                    band.ocr_result = {
+                        "texts": [
+                            {
+                                "id": "ocr_001",
+                                "text": "PLEASE",
+                                "translated": "POR FAVOR",
+                                "bbox": [20, 120, 120, 160],
+                                "balloon_bbox": [10, 110, 150, 190],
+                                "bubble_mask_bbox": [10, 110, 150, 190],
+                                "page_id": "page_002",
+                                "band_id": "page_002_band_001",
+                            }
+                        ],
+                        "_vision_blocks": [{"bbox": [20, 20, 120, 60], "confidence": 0.9}],
+                    }
+                else:
+                    band.ocr_result = {"texts": [], "_vision_blocks": []}
+                return band
+
+            with patch("strip.run.process_band", side_effect=fake_process_band):
+                pages = run_chapter(
+                    image_files=files,
+                    output_dir=output,
+                    target_count=2,
+                    detector=_make_detector_with_n_balloons(2, page_height=300, page_width=200),
+                    runtime=MagicMock(),
+                    translator=MagicMock(),
+                    inpainter=MagicMock(),
+                    typesetter=MagicMock(),
+                    skip_page_cleanup_rerender=True,
+                )
+
+            texts = pages[1].text_layers["texts"]
+            self.assertEqual(len(texts), 1)
+            self.assertEqual(texts[0]["bbox"], [20, 34, 120, 74])
+            self.assertEqual(texts[0]["balloon_bbox"], [10, 24, 150, 104])
+            self.assertEqual(texts[0]["coordinate_space"], "page")
+            self.assertEqual(texts[0]["source_coordinate_space"], "page")
+            self.assertEqual(texts[0]["page_id"], "page_002")
+
+    def test_run_chapter_clamps_assigned_cross_page_balloon_geometry_to_output_page(self):
+        from strip.run import run_chapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            files = _write_pages(tmp_path, 2, page_height=300, page_width=200)
+            output = tmp_path / "out"
+
+            def fake_process_band(band, **kw):
+                band.cleaned_slice = band.strip_slice.copy()
+                band.rendered_slice = band.strip_slice.copy()
+                if int(kw["source_page_number"]) == 2:
+                    band.ocr_result = {
+                        "texts": [
+                            {
+                                "id": "ocr_001",
+                                "text": "THE AMOUNT",
+                                "translated": "A QUANTIA",
+                                "bbox": [60, 280, 150, 330],
+                                "source_bbox": [60, 270, 150, 330],
+                                "text_pixel_bbox": [62, 282, 148, 322],
+                                "balloon_bbox": [0, 240, 200, 360],
+                                "bubble_mask_bbox": [0, 240, 200, 360],
+                                "bubble_inner_bbox": [50, 270, 160, 330],
+                                "page_id": "page_002",
+                                "band_id": "page_002_band_001",
+                            }
+                        ],
+                        "_vision_blocks": [
+                            {
+                                "bbox": [60, 280, 150, 330],
+                                "balloon_bbox": [0, 240, 200, 360],
+                                "bubble_mask_bbox": [0, 240, 200, 360],
+                                "bubble_inner_bbox": [50, 270, 160, 330],
+                                "confidence": 0.9,
+                            }
+                        ],
+                    }
+                else:
+                    band.ocr_result = {"texts": [], "_vision_blocks": []}
+                return band
+
+            with patch("strip.run.process_band", side_effect=fake_process_band):
+                pages = run_chapter(
+                    image_files=files,
+                    output_dir=output,
+                    target_count=2,
+                    detector=_make_detector_with_n_balloons(2, page_height=300, page_width=200),
+                    runtime=MagicMock(),
+                    translator=MagicMock(),
+                    inpainter=MagicMock(),
+                    typesetter=MagicMock(),
+                    skip_page_cleanup_rerender=True,
+                )
+
+            texts = pages[1].text_layers["texts"]
+            self.assertEqual(len(texts), 1)
+            page_height = pages[1].image.shape[0]
+            for key in ("bbox", "source_bbox", "text_pixel_bbox", "balloon_bbox", "bubble_mask_bbox", "bubble_inner_bbox"):
+                self.assertGreaterEqual(texts[0][key][1], 0, key)
+                self.assertLessEqual(texts[0][key][3], page_height, key)
+            self.assertGreaterEqual(texts[0]["balloon_bbox"][3], texts[0]["bbox"][3])
+
     def test_run_chapter_passes_precomputed_macro_ocr_page_when_enabled(self):
         from strip.run import run_chapter
 
@@ -2741,3 +3052,11 @@ class PageSpaceTypesetTests(unittest.TestCase):
                 ]
             )
         )
+
+    def test_strip_final_page_space_typeset_is_opt_in(self):
+        from strip.run import _strip_final_page_space_typeset_enabled
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(_strip_final_page_space_typeset_enabled())
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FINAL_PAGE_SPACE_TYPESET": "1"}, clear=True):
+            self.assertTrue(_strip_final_page_space_typeset_enabled())

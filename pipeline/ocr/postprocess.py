@@ -118,6 +118,8 @@ CJK_PATTERN = re.compile(
     r"[\u1100-\u11FF\u3000-\u303F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]"
 )
 
+_ASCII_ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
+
 
 class ContentClass(str, Enum):
     DIALOGUE = "dialogue"
@@ -133,7 +135,7 @@ class ContentClass(str, Enum):
     NOISE = "noise"
 
 
-SFX_INLINE_RE = re.compile(r"\bSFX\s*:\s*([A-Za-z0-9'_-]+)", re.IGNORECASE)
+SFX_INLINE_RE = re.compile(r"\bSFX(?:\s*:\s*|\s+)?([A-Za-z0-9'_-]+)", re.IGNORECASE)
 TN_RE = re.compile(r"^\s*T\s*/\s*N\s*:", re.IGNORECASE)
 URL_RE = re.compile(r"https?://|www\.|discord|patreon|mzfamily", re.IGNORECASE)
 SCANLATOR_RE = re.compile(
@@ -167,6 +169,164 @@ KOREAN_FIX = {
     "\uD130": "T",
 }
 
+
+def _norm_phrase_fragment(value: object) -> str:
+    return "".join(_ASCII_ALNUM_RE.findall(str(value or "").upper()))
+
+
+def _bbox4_or_none(value: object) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in value[:4]]
+    except Exception:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _bbox_overlap_area(a: list[int], b: list[int]) -> int:
+    return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def _nearby_phrase_candidate(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    ab = _bbox4_or_none(a.get("bbox") or a.get("source_bbox") or a.get("text_pixel_bbox"))
+    bb = _bbox4_or_none(b.get("bbox") or b.get("source_bbox") or b.get("text_pixel_bbox"))
+    if not ab or not bb:
+        return True
+    if _bbox_overlap_area(ab, bb) > 0:
+        return True
+    acx = (ab[0] + ab[2]) / 2.0
+    acy = (ab[1] + ab[3]) / 2.0
+    bcx = (bb[0] + bb[2]) / 2.0
+    bcy = (bb[1] + bb[3]) / 2.0
+    aw = max(1, ab[2] - ab[0])
+    ah = max(1, ab[3] - ab[1])
+    bw = max(1, bb[2] - bb[0])
+    bh = max(1, bb[3] - bb[1])
+    return abs(acx - bcx) <= max(aw, bw) * 1.35 and abs(acy - bcy) <= max(ah, bh) * 2.2
+
+
+def postprocess_ocr_fragments(texts: Iterable[dict[str, Any]], page_language: str = "en") -> list[dict[str, Any]]:
+    """Suppress duplicate OCR fragments that should not become render layers."""
+
+    del page_language
+    records = [dict(item or {}) for item in texts or []]
+    normalized = [_norm_phrase_fragment(item.get("text") or item.get("raw_ocr") or item.get("original")) for item in records]
+    for index, record in enumerate(records):
+        flags = list(record.get("qa_flags") or [])
+        lower_flags = {str(flag).strip().lower() for flag in flags}
+        if not ({"ocr_art_fragment_suspected", "render_on_art_suspected"} & lower_flags):
+            continue
+        current = normalized[index]
+        if len(current) < 3:
+            continue
+        for other_index, other in enumerate(records):
+            if other_index == index:
+                continue
+            candidate = normalized[other_index]
+            current_tokens = _ASCII_ALNUM_RE.findall(str(record.get("text") or record.get("raw_ocr") or "").upper())
+            token_fragment_match = bool(
+                current_tokens
+                and all(len(token) <= 2 or token in candidate for token in current_tokens)
+                and any(token in candidate for token in current_tokens)
+            )
+            if len(candidate) <= len(current) or (current not in candidate and not token_fragment_match):
+                continue
+            if not _nearby_phrase_candidate(record, other):
+                continue
+            record["skip_processing"] = True
+            record["preserve_original"] = False
+            record["route"] = "suppress"
+            record["route_action"] = "review_required"
+            record["route_reason"] = "suppressed_duplicate_phrase_fragment"
+            if "suppressed_duplicate_phrase_fragment" not in flags:
+                flags.append("suppressed_duplicate_phrase_fragment")
+            record["qa_flags"] = flags
+            break
+    return records
+
+
+def _latin_gibberish_for_cjk_visual(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact or CJK_PATTERN.search(compact):
+        return False
+    if not re.search(r"[A-Za-z]", compact):
+        return True
+    digit_symbol_count = sum(1 for ch in compact if not ch.isalpha())
+    letters = [ch.upper() for ch in compact if ch.isalpha()]
+    vowels = sum(1 for ch in letters if ch in "AEIOU")
+    vowel_ratio = vowels / float(max(1, len(letters)))
+    return digit_symbol_count >= 2 or vowel_ratio < 0.20
+
+
+def _source_language_cjk_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact or not CJK_PATTERN.search(compact):
+        return False
+    latin_letters = re.findall(r"[A-Za-z]", compact)
+    cjk_chars = CJK_PATTERN.findall(compact)
+    return len(cjk_chars) >= max(2, len(latin_letters) + 1)
+
+
+def _scanlator_text_caption(text: str) -> bool:
+    """Detect scanlator/editor captions that describe non-English art text."""
+
+    value = str(text or "").strip()
+    return bool(re.match(r"(?is)^TEXT\s*:\s*\S+", value))
+
+
+def apply_language_guards(texts: Iterable[dict[str, Any]], source_language: str = "en") -> list[dict[str, Any]]:
+    """Apply source-language visual guards after OCR, before translation/render."""
+
+    source = str(source_language or "").strip().lower()
+    records = [dict(item or {}) for item in texts or []]
+    if source not in {"en", "eng", "english"}:
+        return records
+    for record in records:
+        hint = str(record.get("visual_script_hint") or record.get("script_hint") or "").strip().lower()
+        text = str(record.get("text") or record.get("raw_ocr") or record.get("original") or "")
+        flags = list(record.get("qa_flags") or [])
+        if _source_language_cjk_text(text):
+            if "source_language_cjk_text_suppressed" not in flags:
+                flags.append("source_language_cjk_text_suppressed")
+            record["qa_flags"] = flags
+            record["skip_processing"] = True
+            record["preserve_original"] = False
+            record["route"] = "suppress"
+            record["route_action"] = "review_required"
+            record["route_reason"] = "source_language_cjk_text_suppressed"
+            continue
+        if _scanlator_text_caption(text):
+            if "scanlator_text_caption_suppressed" not in flags:
+                flags.append("scanlator_text_caption_suppressed")
+            record["qa_flags"] = flags
+            record["skip_processing"] = True
+            record["preserve_original"] = False
+            record["route"] = "suppress"
+            record["route_action"] = "review_required"
+            record["route_reason"] = "scanlator_text_caption_suppressed"
+            continue
+        if "ocr_gibberish" in flags:
+            record["qa_flags"] = flags
+            record["skip_processing"] = True
+            record["preserve_original"] = False
+            record["route"] = "suppress"
+            record["route_action"] = "review_required"
+            record["route_reason"] = "english_ocr_gibberish_suppressed"
+            continue
+        if hint in {"cjk", "korean", "hangul", "japanese", "chinese"} and _latin_gibberish_for_cjk_visual(text):
+            if "visual_cjk_suppressed" not in flags:
+                flags.append("visual_cjk_suppressed")
+            record["qa_flags"] = flags
+            record["skip_processing"] = True
+            record["preserve_original"] = False
+            record["route"] = "suppress"
+            record["route_action"] = "review_required"
+            record["route_reason"] = "visual_cjk_suppressed"
+    return records
+
 RUN_ON_WORDS = {
     "A", "ABOUT", "AFTER", "ALL", "AM", "AN", "AND", "ARE", "AS", "AT",
     "BE", "BECAUSE", "BEFORE", "BLADE", "BRAND", "BUT", "BY", "CAN",
@@ -177,6 +337,11 @@ RUN_ON_WORDS = {
     "THE", "THEIR", "THEM", "THEN", "THERE", "THEY", "THIS", "TIME",
     "TIMES", "TITLE", "TO", "WAS", "WE", "WHAT", "WHEN", "WHO", "WHY",
     "WITH", "YOU", "YOUR",
+}
+NORMAL_LONG_WORDS = {
+    "CONGRATULATIONS",
+    "SYNCHRONIZED",
+    "SYNCHRONIZATION",
 }
 
 
@@ -277,6 +442,8 @@ def has_run_on_tokens(text: str) -> bool:
     """Detects long OCR tokens that likely merged multiple English words."""
     for token in re.findall(r"\b[A-Za-z]{12,}\b", str(text or "")):
         normalized = token.upper()
+        if normalized in NORMAL_LONG_WORDS:
+            continue
         if _dictionary_split_yields_words(normalized, min_words=2):
             return True
         vowels = sum(1 for char in normalized if char in "AEIOU")
@@ -414,30 +581,13 @@ def _fix_mixed_digit_word(word: str) -> str:
     return prefix + corrected + suffix
 
 
-def _remove_stray_digits(words: list[str]) -> list[str]:
-    """Remove dígitos soltos (1-2 chars) que são artefatos de OCR em texto de mangá.
-
-    Ex: ['7', 'ACABOU'] → ['ACABOU']
-    Só remove se o texto tem outras palavras reais (letras). Não remove números
-    que parecem intencionais (3+ dígitos como '100', '999').
-    """
-    if len(words) <= 1:
-        return words
-
-    has_real_words = any(
-        any(c.isalpha() for c in w) for w in words
+def _fix_numeric_context_confusions(text: str) -> str:
+    return re.sub(
+        r"\b([1-9])\s*[aA]\b(?=\s+(?:years?|yrs?)\s+old\b)",
+        r"\g<1>4",
+        text,
+        flags=re.IGNORECASE,
     )
-    if not has_real_words:
-        return words
-
-    result = []
-    for w in words:
-        core = w.strip(".,!?;:\"'()-")
-        # Dígito solto de 1-2 chars no meio de texto = artefato OCR
-        if core.isdigit() and len(core) <= 2:
-            continue
-        result.append(w)
-    return result
 
 
 def fix_ocr_errors(text: str, idioma_origem: str = "en") -> str:
@@ -458,13 +608,11 @@ def fix_ocr_errors(text: str, idioma_origem: str = "en") -> str:
 
     # Pipe → I
     text = text.replace("|", "I")
+    text = _fix_numeric_context_confusions(text)
 
     # Corrigir palavras com dígitos misturados a letras (OCR confuso com fontes estilizadas)
     words = text.split()
     words = [_fix_mixed_digit_word(w) for w in words]
-
-    # Remover dígitos soltos que são artefatos de OCR (ex: "7" sozinho no meio de texto)
-    words = _remove_stray_digits(words)
 
     text = " ".join(words)
     return re.sub(r"\s{2,}", " ", text).strip()

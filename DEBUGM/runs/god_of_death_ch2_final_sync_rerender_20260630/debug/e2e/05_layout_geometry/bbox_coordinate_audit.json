@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "total_text_layers": 88,
+    "all_consistent": true,
+    "mixed_coordinate_space_count": 0,
+    "derived_bbox_coordinate_mismatch_count": 0,
+    "by_key": {
+      "balloon_bbox": {
+        "page": 88,
+        "band": 0,
+        "mismatch": 0
+      },
+      "bbox": {
+        "page": 88,
+        "band": 0,
+        "mismatch": 0
+      },
+      "bubble_mask_bbox": {
+        "page": 88,
+        "band": 0,
+        "mismatch": 0
+      },
+      "layout_bbox": {
+        "page": 88,
+        "band": 0,
+        "mismatch": 0
+      },
+      "text_pixel_bbox": {
+        "page": 88,
+        "band": 0,
+        "mismatch": 0
+      },
+      "_debug_safe_text_box": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "_render_debug.capacity_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "_render_debug.layout_safe_bbox": {
+        "page": 77,
+        "band": 0,
+        "mismatch": 0
+      },
+      "_render_debug.position_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "_render_debug.target_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "bubble_inner_bbox": {
+        "page": 64,
+        "band": 0,
+        "mismatch": 0
+      },
+      "capacity_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "connected_position_bboxes": {
+        "page": 16,
+        "band": 0,
+        "mismatch": 0
+      },
+      "layout_safe_bbox": {
+        "page": 77,
+        "band": 0,
+        "mismatch": 0
+      },
+      "position_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.bbox_overreach.bbox": {
+        "page": 5,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.bbox_overreach.text_geometry_bbox": {
+        "page": 5,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_text_contract_fill_mask.bbox": {
+        "page": 44,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.image_dark_panel_mask.anchor_bbox": {
+        "page": 7,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.image_dark_panel_mask.mask_bbox": {
+        "page": 7,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.layout_text_geometry_sanitized.clean_bbox": {
+        "page": 14,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.render_fit.balloon_bbox": {
+        "page": 12,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.render_fit.render_bbox": {
+        "page": 12,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.render_fit.target_bbox": {
+        "page": 12,
+        "band": 0,
+        "mismatch": 0
+      },
+      "render_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "safe_text_box": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "target_bbox": {
+        "page": 81,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.original_text_scale_min_underflow.source_bbox": {
+        "page": 33,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_panel_visual_contract_fill_mask.bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "source_bbox": {
+        "page": 39,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.band_edge_clipped_balloon_mask.bbox": {
+        "page": 26,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.image_dark_bubble_mask.anchor_bbox": {
+        "page": 41,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.image_dark_bubble_mask.mask_bbox": {
+        "page": 41,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.original_text_scale_width_limit.source_bbox": {
+        "page": 19,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_bubble_lobe_clip_rejected_undercovered_text.lobe_bbox": {
+        "page": 4,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_bubble_lobe_clip_rejected_undercovered_text.text_bbox": {
+        "page": 4,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.negative_evidence.search_bbox": {
+        "page": 7,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_compact_text_bbox_rejected_undercoverage.chosen_bbox": {
+        "page": 9,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_compact_text_bbox_rejected_undercoverage.reference_bbox": {
+        "page": 9,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_mask_region_seed_bbox_replaced.geometry_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_mask_region_seed_bbox_replaced.text_pixel_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.strict_text_geometry_polygon_replaced_by_text_bbox.polygon_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.strict_text_geometry_polygon_replaced_by_text_bbox.trusted_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_text_contract_fill_mask_rejected.mask_bbox": {
+        "page": 2,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_text_contract_fill_mask_rejected.trusted_bbox": {
+        "page": 2,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_bubble_lobe_fill_mask_clipped.clip_bbox": {
+        "page": 2,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_bubble_anchor_component_filter.target_bbox": {
+        "page": 4,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.derived_white_bubble_mask.balloon_bbox": {
+        "page": 4,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.band_edge_clipped_text_mask.bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_bubble_broad_mask_rejected.anchor_bbox": {
+        "page": 2,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_bubble_broad_mask_rejected.candidate_bbox": {
+        "page": 2,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_text_pixel_bbox_replaced_by_lobe_bbox.lobe_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_text_pixel_bbox_replaced_by_lobe_bbox.text_pixel_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.inpaint_mask_contract.source_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.short_dark_text_full_panel_bbox_rejected.anchor_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.short_dark_text_full_panel_bbox_rejected.candidate_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_bubble_mask_undercovered_text_contract.bubble_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.dark_connected_bubble_mask_undercovered_text_contract.contract_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.text_mask_undercovered_ocr_text.contract_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      },
+      "qa_metrics.text_mask_undercovered_ocr_text.source_bbox": {
+        "page": 1,
+        "band": 0,
+        "mismatch": 0
+      }
+    },
+    "band_local_in_page_context_count": 0,
+    "page_global_in_band_context_count": 0
+  },
+  "findings": []
+}

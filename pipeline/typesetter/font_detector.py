@@ -10,6 +10,8 @@ Fonte padrão para todos os textos: ComicNeue-Bold (MAIÚSCULO).
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,13 +26,12 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 SAMPLE_TEXT   = "ABCDEFGHabcdefgh123!?"
 SIMILARITY_THRESHOLD = 0.72
 DEFAULT_FONT  = "ComicNeue-Bold.ttf"
-CANDIDATE_FONTS = [
+LEGACY_CANDIDATE_FONTS = [
     "KOMIKAX_.ttf",
-    "DK Full Blast.otf",
-    "SINGLE FIGHTER.otf",
-    "Libel Suit Suit Rg.otf",
+    "Newrotic.ttf",
+    "CCDaveGibbonsLower W00 Regular.ttf",
+    "ComicNeue-Regular.ttf",
 ]
-# Hand_Of_Sean_Demo.ttf: excluida por ora
 
 
 def _resolve_font_path(fonts_dir: Path, font_name: str) -> Path | None:
@@ -38,6 +39,41 @@ def _resolve_font_path(fonts_dir: Path, font_name: str) -> Path | None:
         if candidate.name.lower() == font_name.lower():
             return candidate
     return None
+
+
+def _load_detector_fonts_from_map(fonts_dir: Path) -> list[str]:
+    font_map_path = fonts_dir / "font-map.json"
+    if not font_map_path.exists():
+        return []
+
+    try:
+        data = json.loads(font_map_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    fonts: list[str] = []
+    for entry in data.get("available", []):
+        if not isinstance(entry, dict) or not entry.get("detector", True):
+            continue
+        font_name = str(entry.get("arquivo") or "").strip()
+        if font_name and _resolve_font_path(fonts_dir, font_name):
+            fonts.append(font_name)
+    return fonts
+
+
+def _parse_env_google_font_specs() -> list["GoogleFontSpec"]:
+    raw = os.environ.get("TRADUZAI_GOOGLE_FONT_FAMILIES", "")
+    if not raw.strip():
+        return []
+
+    from typesetter.google_fonts import GoogleFontSpec
+
+    specs: list[GoogleFontSpec] = []
+    for family in raw.split(","):
+        family = family.strip()
+        if family:
+            specs.append(GoogleFontSpec(family=family))
+    return specs
 
 
 def _draw_textpath_line(
@@ -121,12 +157,24 @@ class FontDetector:
     contra fingerprints pré-computados das fontes disponíveis.
     """
 
-    def __init__(self, model_path: Path, fonts_dir: Path) -> None:
+    def __init__(
+        self,
+        model_path: Path,
+        fonts_dir: Path,
+        *,
+        enable_google_fonts: bool | None = None,
+    ) -> None:
         self._model_path = model_path
         self._fonts_dir = fonts_dir
         self._model = None
         self._device = None
         self._fingerprints: dict[str, np.ndarray] = {}
+        self._candidate_fonts: list[str] = []
+        self._enable_google_fonts = (
+            os.environ.get("TRADUZAI_ENABLE_GOOGLE_FONTS", "0") == "1"
+            if enable_google_fonts is None
+            else enable_google_fonts
+        )
         self._loaded = False
 
     def _load_model(self) -> None:
@@ -208,37 +256,64 @@ class FontDetector:
             )
             return fallback
 
+    def _discover_candidate_fonts(self) -> list[str]:
+        fonts: list[str] = []
+
+        def add(font_name: str) -> None:
+            if font_name != DEFAULT_FONT and font_name not in fonts:
+                fonts.append(font_name)
+
+        mapped_fonts = _load_detector_fonts_from_map(self._fonts_dir)
+        for font_name in mapped_fonts:
+            add(font_name)
+        if not mapped_fonts:
+            for font_name in LEGACY_CANDIDATE_FONTS:
+                if _resolve_font_path(self._fonts_dir, font_name):
+                    add(font_name)
+
+        if self._enable_google_fonts:
+            try:
+                from typesetter.google_fonts import (
+                    download_google_font_family,
+                    specs_from_font_map,
+                )
+
+                specs = specs_from_font_map(self._fonts_dir / "font-map.json")
+                specs.extend(_parse_env_google_font_specs())
+                for spec in specs:
+                    path = download_google_font_family(spec, self._fonts_dir)
+                    add(path.name)
+            except Exception:
+                pass
+
+        return fonts
+
     def _build_fingerprints(self) -> None:
-        all_fonts = [DEFAULT_FONT] + CANDIDATE_FONTS
+        self._candidate_fonts = self._discover_candidate_fonts()
+        all_fonts = [DEFAULT_FONT] + self._candidate_fonts
         for font_name in all_fonts:
             sample = self._render_font_sample(font_name)
             self._fingerprints[font_name] = self._extract_features(sample)
 
-    def detect(self, region_rgb: np.ndarray, allow_default: bool = True) -> str:
-        """Retorna o nome do arquivo de fonte mais adequado para a região.
+    def _fonts_to_compare(self) -> list[str]:
+        fonts = list(self._candidate_fonts)
+        for font_name in self._fingerprints:
+            if font_name != DEFAULT_FONT and font_name not in fonts:
+                fonts.append(font_name)
+        return fonts
 
-        Sempre retorna DEFAULT_FONT se nenhuma candidata superar o threshold.
-        """
-        if region_rgb is None or region_rgb.size < 8 * 8 * 3:
-            return DEFAULT_FONT if allow_default else CANDIDATE_FONTS[0]
+    def _fallback_candidate(self) -> str:
+        candidates = self._fonts_to_compare() or LEGACY_CANDIDATE_FONTS
+        return candidates[0]
 
-        if not self._loaded:
-            try:
-                self._load_model()
-                self._build_fingerprints()
-                self._loaded = True
-            except Exception:
-                return DEFAULT_FONT if allow_default else CANDIDATE_FONTS[0]
+    def _best_match(self, region_feats: np.ndarray) -> tuple[str, float]:
+        candidates = self._fonts_to_compare()
+        if not candidates:
+            return DEFAULT_FONT, 0.0
 
-        try:
-            region_feats = self._extract_features(region_rgb)
-        except Exception:
-            return DEFAULT_FONT if allow_default else CANDIDATE_FONTS[0]
-
-        best_font = DEFAULT_FONT if allow_default else CANDIDATE_FONTS[0]
+        best_font = candidates[0]
         best_sim = -1.0
-
-        for font_name in CANDIDATE_FONTS:
+        for font_name in candidates:
             fp = self._fingerprints.get(font_name)
             if fp is None:
                 continue
@@ -247,8 +322,39 @@ class FontDetector:
                 best_sim = sim
                 best_font = font_name
 
-        if not allow_default:
-            return best_font
-        if best_sim >= SIMILARITY_THRESHOLD:
-            return best_font
-        return DEFAULT_FONT
+        confidence = min(1.0, max(0.0, best_sim))
+        return best_font, confidence
+
+    def detect_with_score(
+        self,
+        region_rgb: np.ndarray,
+        allow_default: bool = True,
+    ) -> tuple[str, float]:
+        """Return ``(font_name, confidence)`` for the best visual match."""
+        if region_rgb is None or region_rgb.size < 8 * 8 * 3:
+            return (DEFAULT_FONT, 0.0) if allow_default else (self._fallback_candidate(), 0.0)
+
+        if not self._loaded:
+            try:
+                self._load_model()
+                self._build_fingerprints()
+                self._loaded = True
+            except Exception:
+                return (DEFAULT_FONT, 0.0) if allow_default else (self._fallback_candidate(), 0.0)
+
+        try:
+            region_feats = self._extract_features(region_rgb)
+        except Exception:
+            return (DEFAULT_FONT, 0.0) if allow_default else (self._fallback_candidate(), 0.0)
+
+        best_font, confidence = self._best_match(region_feats)
+        if allow_default and confidence < SIMILARITY_THRESHOLD:
+            return DEFAULT_FONT, confidence
+        return best_font, confidence
+
+    def detect(self, region_rgb: np.ndarray, allow_default: bool = True) -> str:
+        """Retorna o nome do arquivo de fonte mais adequado para a região.
+
+        Sempre retorna DEFAULT_FONT se nenhuma candidata superar o threshold.
+        """
+        return self.detect_with_score(region_rgb, allow_default=allow_default)[0]

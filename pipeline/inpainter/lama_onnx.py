@@ -16,7 +16,8 @@ import numpy as np
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from .mask_builder import build_mask_regions, build_region_pixel_mask
+from .mask_builder import build_inpaint_mask, build_mask_regions, build_region_pixel_mask
+from sfx.inpaint_gate import evaluate_sfx_inpaint_gate
 
 PRIMARY_MODEL_REPO = "ogkalu/lama-manga-onnx-dynamic"
 PRIMARY_MODEL_FILENAME = "lama-manga-dynamic.onnx"
@@ -28,6 +29,11 @@ _session_path = None
 _session_providers = None
 _dll_dir_handles: list[object] = []
 _prepared_runtime_dirs: tuple[str, ...] = ()
+_DEFAULT_MIN_COMPONENT_AREA = 8
+_COMPONENT_ROI_MODULO = 8
+_COMPONENT_ROI_MARGIN_RATIO = 0.22
+_COMPONENT_ROI_MIN_MARGIN = 8
+_COMPONENT_ROI_MAX_MARGIN = 64
 
 
 def resolve_windows_onnxruntime_support_dirs(package_root: str | Path | None = None) -> list[Path]:
@@ -200,15 +206,159 @@ def prepare_lama_dynamic_inputs(
     image_chw = np.transpose(image_rgb.astype(np.float32) / 255.0, (2, 0, 1))
     mask_chw = ((mask_gray > 0).astype(np.float32))[None, ...]
     original_size = (image_rgb.shape[0], image_rgb.shape[1])
-    image_chw = pad_to_modulo(image_chw, modulo=8)
-    mask_chw = pad_to_modulo(mask_chw, modulo=8)
+    image_chw = pad_to_modulo_reflect(image_chw, modulo=_COMPONENT_ROI_MODULO)
+    mask_chw = pad_to_modulo_reflect(mask_chw, modulo=_COMPONENT_ROI_MODULO)
     return image_chw[None, ...], mask_chw[None, ...], original_size
 
 
+def _normalize_modulo(value: int, modulo: int) -> int:
+    return ((value + modulo - 1) // modulo) * modulo
+
+
+def _pad_to_modulo_reflect_array(array: np.ndarray, modulo: int) -> np.ndarray:
+    if array.ndim == 1:
+        array = array[:, None, None]
+
+    height = array.shape[-2]
+    width = array.shape[-1]
+    out_h = _normalize_modulo(height, modulo)
+    out_w = _normalize_modulo(width, modulo)
+    pad_h = out_h - height
+    pad_w = out_w - width
+    if pad_h == 0 and pad_w == 0:
+        return array
+
+    if modulo <= 0:
+        raise ValueError("modulo must be positive")
+
+    if array.ndim not in (2, 3):
+        raise ValueError("array must be 2D or CHW/..")
+
+    padded = array
+    if pad_h:
+        pad_height = "reflect" if height > 1 and pad_h < height else "edge"
+        if array.ndim == 3:
+            padded = np.pad(padded, ((0, 0), (0, pad_h), (0, 0)), mode=pad_height)
+        else:
+            padded = np.pad(padded, ((0, pad_h), (0, 0)), mode=pad_height)
+
+        height = padded.shape[-2]
+
+    if pad_w:
+        pad_width = "reflect" if width > 1 and pad_w < width else "edge"
+        if padded.ndim == 3:
+            padded = np.pad(padded, ((0, 0), (0, 0), (0, pad_w)), mode=pad_width)
+        else:
+            padded = np.pad(padded, ((0, 0), (0, pad_w)), mode=pad_width)
+
+    return padded
+
+
+def pad_to_modulo_reflect(image: np.ndarray, modulo: int = 8) -> np.ndarray:
+    return _pad_to_modulo_reflect_array(image, modulo)
+
+
+def _pad_to_modulo(chw_image: np.ndarray, modulo: int = 8) -> np.ndarray:
+    _, height, width = chw_image.shape
+    out_h = _normalize_modulo(height, modulo)
+    out_w = _normalize_modulo(width, modulo)
+    pad_h = out_h - height
+    pad_w = out_w - width
+    if pad_h == 0 and pad_w == 0:
+        return chw_image
+    return np.pad(chw_image, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+
+
+def _build_component_margin(component_size: int) -> int:
+    margin = int(round(component_size * _COMPONENT_ROI_MARGIN_RATIO))
+    return int(np.clip(margin, _COMPONENT_ROI_MIN_MARGIN, _COMPONENT_ROI_MAX_MARGIN))
+
+
+def _coerce_component_mask(mask_gray: np.ndarray) -> np.ndarray:
+    if mask_gray.ndim != 2:
+        raise ValueError("component mask must be 2D")
+    return (mask_gray > 0).astype(np.uint8)
+
+
+def build_lama_component_rois(
+    image_rgb: np.ndarray,
+    mask_gray: np.ndarray,
+    *,
+    min_component_area: int = _DEFAULT_MIN_COMPONENT_AREA,
+    occupied_mask: np.ndarray | None = None,
+    margin_ratio: float | None = None,
+) -> list[dict]:
+    """Split a binary mask into component-rois and return crops ready for inpainting."""
+    if image_rgb.ndim != 3 or image_rgb.shape[2] != 3:
+        raise ValueError("image_rgb must be an HxWx3 uint8 array")
+    if image_rgb.shape[:2] != mask_gray.shape[:2]:
+        raise ValueError("image_rgb and mask must share height/width")
+
+    if margin_ratio is None:
+        margin_ratio = _COMPONENT_ROI_MARGIN_RATIO
+    binary = _coerce_component_mask(mask_gray)
+    if not np.any(binary):
+        return []
+
+    if occupied_mask is None:
+        occupied_mask = np.zeros(image_rgb.shape[:2], dtype=np.uint8)
+    if occupied_mask.shape != image_rgb.shape[:2]:
+        raise ValueError("occupied_mask shape must match image_rgb shape")
+
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    image_height, image_width = image_rgb.shape[:2]
+    jobs: list[dict] = []
+
+    for label in range(1, labels_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_component_area:
+            continue
+        x, y, w, h, _ = [int(v) for v in stats[label]]
+        if w <= 0 or h <= 0:
+            continue
+        component_mask = labels == label
+        if np.any(occupied_mask[component_mask] > 0):
+            continue
+
+        base_margin = _build_component_margin(max(w, h))
+        dynamic_margin = int(np.clip(round(max(w, h) * margin_ratio), _COMPONENT_ROI_MIN_MARGIN, _COMPONENT_ROI_MAX_MARGIN))
+        margin = max(base_margin, dynamic_margin)
+        x1 = max(0, x - margin)
+        y1 = max(0, y - margin)
+        x2 = min(image_width, x + w + margin)
+        y2 = min(image_height, y + h + margin)
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        job_crop = image_rgb[y1:y2, x1:x2].copy()
+        job_mask = (component_mask[y1:y2, x1:x2] * 255).astype(np.uint8)
+        if not np.any(job_mask):
+            continue
+
+        jobs.append(
+            {
+                "bbox": [x1, y1, x2, y2],
+                "crop": job_crop,
+                "mask": job_mask,
+                "area": area,
+            }
+        )
+        occupied_mask[component_mask] = 255
+
+    return jobs
+
+
 def build_lama_region_jobs(image_rgb: np.ndarray, texts: list[dict]) -> list[dict]:
+    if not isinstance(texts, list) or not texts:
+        return []
     regions = build_mask_regions(texts=texts, image_shape=image_rgb.shape)
     jobs: list[dict] = []
+    occupied_mask = np.zeros(image_rgb.shape[:2], dtype=np.uint8)
     for region in regions:
+        sfx_jobs = _build_safe_sfx_component_jobs(image_rgb, region, occupied_mask)
+        if sfx_jobs is not None:
+            jobs.extend(sfx_jobs)
+            continue
         mask = build_region_pixel_mask(image_rgb.shape[:2], region)
         if not np.any(mask):
             continue
@@ -265,13 +415,63 @@ def build_lama_region_jobs(image_rgb: np.ndarray, texts: list[dict]) -> list[dic
             crop_mask = balloon_mask
         if crop.size == 0 or not np.any(crop_mask):
             continue
-        jobs.append(
-            {
-                "bbox": [rx1, ry1, rx2, ry2],
-                "crop": crop,
-                "mask": crop_mask,
-            }
+
+        component_mask = np.zeros(image_rgb.shape[:2], dtype=np.uint8)
+        component_mask[ry1:ry2, rx1:rx2] = crop_mask
+        component_jobs = build_lama_component_rois(
+            image_rgb=image_rgb,
+            mask_gray=component_mask,
+            occupied_mask=occupied_mask,
+            margin_ratio=_COMPONENT_ROI_MARGIN_RATIO,
         )
+        jobs.extend(component_jobs)
+
+    return jobs
+
+
+def _is_safe_sfx_text_for_component_roi(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if str(text.get("route_action") or "").strip() != "translate_sfx_inpaint_render":
+        return False
+    sfx = text.get("sfx") if isinstance(text.get("sfx"), dict) else {}
+    if sfx.get("inpaint_allowed") is not True:
+        return False
+    evidence = text.get("mask_evidence") if isinstance(text.get("mask_evidence"), dict) else {}
+    if evidence.get("kind") != "sfx_glyph_mask":
+        return False
+    gate = evaluate_sfx_inpaint_gate(text)
+    text["sfx_inpaint_gate"] = gate
+    return bool(gate.get("allow_inpaint"))
+
+
+def _build_safe_sfx_component_jobs(
+    image_rgb: np.ndarray,
+    region: dict,
+    occupied_mask: np.ndarray,
+) -> list[dict] | None:
+    texts = [text for text in region.get("texts") or [] if isinstance(text, dict)]
+    if not texts or not any(str(text.get("route_action") or "").strip() == "translate_sfx_inpaint_render" for text in texts):
+        return None
+    jobs: list[dict] = []
+    for text in texts:
+        if not _is_safe_sfx_text_for_component_roi(text):
+            continue
+        glyph_mask = build_inpaint_mask(text, image_rgb.shape, image_rgb=image_rgb)
+        if not isinstance(glyph_mask, np.ndarray) or not np.any(glyph_mask):
+            continue
+        component_jobs = build_lama_component_rois(
+            image_rgb=image_rgb,
+            mask_gray=glyph_mask,
+            occupied_mask=occupied_mask,
+            margin_ratio=_COMPONENT_ROI_MARGIN_RATIO,
+        )
+        for job in component_jobs:
+            job["strategy"] = "lama_component_roi"
+            job["sfx_debug"] = True
+            job["sfx_id"] = str(text.get("id") or text.get("text_id") or "sfx")
+            job["band_id"] = str(text.get("band_id") or text.get("page_id") or "page")
+        jobs.extend(component_jobs)
     return jobs
 
 
@@ -414,9 +614,49 @@ def merge_inpainted_crop(
     result = base_image_rgb.copy()
     x1, y1, x2, y2 = bbox
     region = result[y1:y2, x1:x2]
-    alpha = (crop_mask.astype(np.float32) / 255.0)[..., None]
-    region[:] = (region.astype(np.float32) * (1.0 - alpha) + inpainted_crop_rgb.astype(np.float32) * alpha).clip(0, 255).astype(np.uint8)
+    if region.shape[:2] != crop_mask.shape[:2]:
+        return result
+    alpha = crop_mask > 0
+    region[alpha] = inpainted_crop_rgb[alpha]
     return result
+
+
+def _safe_debug_name(value: object) -> str:
+    text = str(value or "sfx").strip()
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in text)
+    return safe or "sfx"
+
+
+def _sfx_debug_root(ocr_data: dict, output_dir: str | Path) -> Path | None:
+    debug_root = ocr_data.get("_debug_root") or ocr_data.get("debug_root") or ocr_data.get("debug_dir")
+    if not debug_root:
+        return None
+    return Path(debug_root)
+
+
+def _write_sfx_roi_debug(
+    ocr_data: dict,
+    job: dict,
+    before_crop: np.ndarray,
+    after_crop: np.ndarray,
+    output_dir: str | Path,
+) -> None:
+    debug_root = _sfx_debug_root(ocr_data, output_dir)
+    if debug_root is None:
+        return
+    band_id = _safe_debug_name(job.get("band_id") or ocr_data.get("band_id") or ocr_data.get("page_id") or "page")
+    sfx_id = _safe_debug_name(job.get("sfx_id") or "sfx")
+    dest_dir = debug_root / "08_inpaint" / band_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    prefix = dest_dir / f"sfx_{sfx_id}"
+    mask = job.get("mask")
+    if isinstance(mask, np.ndarray):
+        Image.fromarray(np.where(mask > 0, 255, 0).astype(np.uint8)).save(f"{prefix}_mask.png")
+    Image.fromarray(before_crop.astype(np.uint8)).save(f"{prefix}_before.png")
+    Image.fromarray(after_crop.astype(np.uint8)).save(f"{prefix}_after.png")
+    if before_crop.shape == after_crop.shape:
+        diff = cv2.absdiff(before_crop.astype(np.uint8), after_crop.astype(np.uint8))
+        Image.fromarray(diff).save(f"{prefix}_diff.png")
 
 
 def inpaint_region_with_lama(session, crop_rgb: np.ndarray, crop_mask: np.ndarray) -> np.ndarray:
@@ -457,7 +697,10 @@ def run_lama_manga_inpainting(
 
         result = image_rgb.copy()
         for job in jobs:
+            before_crop = job["crop"].copy()
             inpainted_crop = inpaint_region_with_lama(session, job["crop"], job["mask"])
+            if job.get("sfx_debug"):
+                _write_sfx_roi_debug(ocr_data, job, before_crop, inpainted_crop, output_dir)
             result = merge_inpainted_crop(result, inpainted_crop, job["mask"], job["bbox"])
 
         dest = output_path / img_path.name

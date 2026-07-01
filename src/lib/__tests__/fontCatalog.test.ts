@@ -4,8 +4,10 @@ import {
   buildEditorFontCatalog,
   findEditorFontOption,
   googleFontSearchResultToOption,
+  isSystemFontValue,
   listEditorFontGroups,
   searchEditorFontGroups,
+  systemFontInfoToOption,
 } from "../fontCatalog";
 import { GOOGLE_FONTS_CATALOG } from "../googleFontsCatalog";
 
@@ -115,6 +117,22 @@ describe("editor font catalog", () => {
     ]);
   });
 
+  it("finds bundled CC Dave Gibbons with spaced and compact queries", () => {
+    expect(searchEditorFontGroups("dave")).toEqual([
+      expect.objectContaining({
+        label: "Embutidas",
+        source: "bundle",
+        options: [expect.objectContaining({ label: "CC Dave Gibbons" })],
+      }),
+    ]);
+    expect(searchEditorFontGroups("ccdave")).toEqual([
+      expect.objectContaining({
+        label: "Embutidas",
+        options: [expect.objectContaining({ value: "CCDaveGibbonsLower W00 Regular.ttf" })],
+      }),
+    ]);
+  });
+
   it("resolves Google cache filenames to cssFamily names", () => {
     expect(resolveLegacyFontFamily("GoogleFont__Bangers__regular.ttf")).toBe("Bangers");
     expect(resolveLegacyFontFamily("GoogleFont__M_PLUS_Rounded_1c__700.ttf")).toBe("M PLUS Rounded 1c");
@@ -143,5 +161,33 @@ describe("editor font catalog", () => {
 
   it("resolves dynamic Google Font cache filenames to cssFamily names", () => {
     expect(resolveLegacyFontFamily("GoogleFont__Bebas_Neue__regular.ttf")).toBe("Bebas Neue");
+  });
+
+  it("converts system font metadata into editor options", () => {
+    expect(
+      systemFontInfoToOption({
+        family: "Arial",
+        full_name: "Arial Regular",
+        filename: "SystemFont__Arial__Regular.ttf",
+        path: "C:/Windows/Fonts/arial.ttf",
+        weight: "400",
+        style: "normal",
+        monospace: false,
+      }),
+    ).toMatchObject({
+      label: "Arial",
+      value: "SystemFont__Arial__Regular.ttf",
+      cssFamily: "Arial",
+      source: "system",
+      groupLabel: "Sistema",
+    });
+  });
+
+  it("detects persisted system font option values", () => {
+    expect(isSystemFontValue("SystemFont__Arial__Regular.ttf")).toBe(true);
+    expect(findEditorFontOption("SystemFont__Arial__Regular.ttf")).toMatchObject({
+      label: "Arial",
+      source: "system",
+    });
   });
 });

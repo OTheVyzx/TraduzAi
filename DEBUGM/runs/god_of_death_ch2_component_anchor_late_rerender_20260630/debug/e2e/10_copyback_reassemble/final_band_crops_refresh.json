@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_anchor_late_rerender",
+  "stage": "copyback_reassemble",
+  "source": "translated_after_final_project_rerender",
+  "after_final_project_image_rerender": true,
+  "after_late_render_contract_repair": true,
+  "seen_count": 105,
+  "refreshed_count": 105,
+  "missing_count": 0,
+  "error_count": 0
+}

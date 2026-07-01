@@ -1,0 +1,1658 @@
+{
+  "input": "N:\\TraduzAI\\sfx",
+  "output": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2",
+  "anime_conf": 0.0107,
+  "comic_conf": 0.05,
+  "page_count": 26,
+  "total_candidates": 39,
+  "total_forced_layers": 11,
+  "total_mask_pixels": 21868,
+  "contact_sheet": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\sfx_inpaint_type_contact_sheet.png",
+  "pages": [
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221235.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\001_Captura_de_tela_2026-06-05_221235",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            64,
+            165,
+            132,
+            262
+          ],
+          "confidence": 0.6496,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\001_Captura_de_tela_2026-06-05_221235\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\001_Captura_de_tela_2026-06-05_221235\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221245.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\002_Captura_de_tela_2026-06-05_221245",
+      "candidate_count": 1,
+      "forced_layer_count": 1,
+      "mask_pixels": 283,
+      "candidates": [
+        {
+          "bbox": [
+            63,
+            14,
+            167,
+            163
+          ],
+          "confidence": 0.0627,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            63,
+            14,
+            167,
+            163
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 58,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#956959",
+            "stroke_color": "#1F1C26",
+            "stroke_width_px": 1,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 7.238,
+            "scale_x": 0.949,
+            "scale_y": 0.274,
+            "confidence": 0.4,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\002_Captura_de_tela_2026-06-05_221245\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\002_Captura_de_tela_2026-06-05_221245\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            63,
+            14,
+            167,
+            163
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 58,
+          "fit_status": "ok",
+          "render_bbox": [
+            65,
+            60,
+            160,
+            106
+          ],
+          "style": {
+            "fill_color": "#956959",
+            "stroke_color": "#1F1C26",
+            "stroke_width_px": 1,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 7.238,
+            "scale_x": 0.949,
+            "scale_y": 0.274,
+            "confidence": 0.4,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221309.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\003_Captura_de_tela_2026-06-05_221309",
+      "candidate_count": 3,
+      "forced_layer_count": 2,
+      "mask_pixels": 2961,
+      "candidates": [
+        {
+          "bbox": [
+            45,
+            87,
+            105,
+            141
+          ],
+          "confidence": 0.3116,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            167,
+            103,
+            265,
+            157
+          ],
+          "confidence": 0.0732,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            182,
+            179,
+            230,
+            224
+          ],
+          "confidence": 0.7324,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            167,
+            103,
+            265,
+            157
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1088,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#9B9AAA",
+            "stroke_color": "#1C2632",
+            "stroke_width_px": 2,
+            "glow_color": "#51636E",
+            "glow_width_px": 8,
+            "rotation_deg": 5.003,
+            "scale_x": 0.61,
+            "scale_y": 0.39,
+            "confidence": 0.66,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_003",
+          "bbox": [
+            182,
+            179,
+            230,
+            224
+          ],
+          "translated": "VRUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 116,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#404954",
+            "stroke_color": "#12171D",
+            "stroke_width_px": 2,
+            "glow_color": "#C1B9AA",
+            "glow_width_px": 8,
+            "rotation_deg": 88.709,
+            "scale_x": 5.642,
+            "scale_y": 0.1,
+            "confidence": 0.445,
+            "qa_flags": [
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\003_Captura_de_tela_2026-06-05_221309\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\003_Captura_de_tela_2026-06-05_221309\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            167,
+            103,
+            265,
+            157
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1088,
+          "fit_status": "ok",
+          "render_bbox": [
+            156,
+            89,
+            270,
+            161
+          ],
+          "style": {
+            "fill_color": "#9B9AAA",
+            "stroke_color": "#1C2632",
+            "stroke_width_px": 2,
+            "glow_color": "#51636E",
+            "glow_width_px": 8,
+            "rotation_deg": 5.003,
+            "scale_x": 0.61,
+            "scale_y": 0.39,
+            "confidence": 0.66,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_003",
+          "bbox": [
+            182,
+            179,
+            230,
+            224
+          ],
+          "translated": "VRUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 116,
+          "fit_status": "ok",
+          "render_bbox": [
+            181,
+            165,
+            227,
+            239
+          ],
+          "style": {
+            "fill_color": "#404954",
+            "stroke_color": "#12171D",
+            "stroke_width_px": 2,
+            "glow_color": "#C1B9AA",
+            "glow_width_px": 8,
+            "rotation_deg": 88.709,
+            "scale_x": 5.642,
+            "scale_y": 0.1,
+            "confidence": 0.445,
+            "qa_flags": [
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221315.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\004_Captura_de_tela_2026-06-05_221315",
+      "candidate_count": 2,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            28,
+            0,
+            186,
+            170
+          ],
+          "confidence": 0.2428,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            77,
+            420,
+            210,
+            579
+          ],
+          "confidence": 0.0108,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\004_Captura_de_tela_2026-06-05_221315\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\004_Captura_de_tela_2026-06-05_221315\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221319.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\005_Captura_de_tela_2026-06-05_221319",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            26,
+            55,
+            242,
+            220
+          ],
+          "confidence": 0.3378,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\005_Captura_de_tela_2026-06-05_221319\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\005_Captura_de_tela_2026-06-05_221319\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221322.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\006_Captura_de_tela_2026-06-05_221322",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            55,
+            109,
+            226,
+            285
+          ],
+          "confidence": 0.1486,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\006_Captura_de_tela_2026-06-05_221322\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\006_Captura_de_tela_2026-06-05_221322\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221325.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\007_Captura_de_tela_2026-06-05_221325",
+      "candidate_count": 1,
+      "forced_layer_count": 1,
+      "mask_pixels": 772,
+      "candidates": [
+        {
+          "bbox": [
+            88,
+            84,
+            143,
+            127
+          ],
+          "confidence": 0.3566,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            88,
+            84,
+            143,
+            127
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 206,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#CBF5F7",
+            "stroke_color": "#0FB6E3",
+            "stroke_width_px": 1,
+            "glow_color": "#D3D4EB",
+            "glow_width_px": 8,
+            "rotation_deg": 8.634,
+            "scale_x": 0.59,
+            "scale_y": 0.465,
+            "confidence": 0.662,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\007_Captura_de_tela_2026-06-05_221325\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\007_Captura_de_tela_2026-06-05_221325\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            88,
+            84,
+            143,
+            127
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 206,
+          "fit_status": "ok",
+          "render_bbox": [
+            75,
+            75,
+            154,
+            129
+          ],
+          "style": {
+            "fill_color": "#CBF5F7",
+            "stroke_color": "#0FB6E3",
+            "stroke_width_px": 1,
+            "glow_color": "#D3D4EB",
+            "glow_width_px": 8,
+            "rotation_deg": 8.634,
+            "scale_x": 0.59,
+            "scale_y": 0.465,
+            "confidence": 0.662,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221336.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\008_Captura_de_tela_2026-06-05_221336",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            193,
+            33,
+            261,
+            101
+          ],
+          "confidence": 0.5485,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\008_Captura_de_tela_2026-06-05_221336\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\008_Captura_de_tela_2026-06-05_221336\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221342.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\009_Captura_de_tela_2026-06-05_221342",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            84,
+            59,
+            157,
+            113
+          ],
+          "confidence": 0.1365,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\009_Captura_de_tela_2026-06-05_221342\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\009_Captura_de_tela_2026-06-05_221342\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221350.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\010_Captura_de_tela_2026-06-05_221350",
+      "candidate_count": 3,
+      "forced_layer_count": 1,
+      "mask_pixels": 659,
+      "candidates": [
+        {
+          "bbox": [
+            30,
+            19,
+            84,
+            136
+          ],
+          "confidence": 0.0733,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            222,
+            212,
+            272,
+            311
+          ],
+          "confidence": 0.0727,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            55,
+            327,
+            97,
+            403
+          ],
+          "confidence": 0.0648,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            222,
+            212,
+            272,
+            311
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 163,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#33444B",
+            "stroke_color": "#000205",
+            "stroke_width_px": 1,
+            "glow_color": "#67696B",
+            "glow_width_px": 8,
+            "rotation_deg": -60.006,
+            "scale_x": 0.989,
+            "scale_y": 0.103,
+            "confidence": 0.531,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\010_Captura_de_tela_2026-06-05_221350\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\010_Captura_de_tela_2026-06-05_221350\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            222,
+            212,
+            272,
+            311
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 163,
+          "fit_status": "ok",
+          "render_bbox": [
+            217,
+            222,
+            279,
+            296
+          ],
+          "style": {
+            "fill_color": "#33444B",
+            "stroke_color": "#000205",
+            "stroke_width_px": 1,
+            "glow_color": "#67696B",
+            "glow_width_px": 8,
+            "rotation_deg": -60.006,
+            "scale_x": 0.989,
+            "scale_y": 0.103,
+            "confidence": 0.531,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221354.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\011_Captura_de_tela_2026-06-05_221354",
+      "candidate_count": 1,
+      "forced_layer_count": 1,
+      "mask_pixels": 1189,
+      "candidates": [
+        {
+          "bbox": [
+            18,
+            30,
+            88,
+            177
+          ],
+          "confidence": 0.5446,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            18,
+            30,
+            88,
+            177
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 343,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#06131C",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "#6C8896",
+            "glow_width_px": 8,
+            "rotation_deg": -64.329,
+            "scale_x": 0.9,
+            "scale_y": 0.359,
+            "confidence": 0.509,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\011_Captura_de_tela_2026-06-05_221354\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\011_Captura_de_tela_2026-06-05_221354\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            18,
+            30,
+            88,
+            177
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 343,
+          "fit_status": "ok",
+          "render_bbox": [
+            21,
+            55,
+            94,
+            148
+          ],
+          "style": {
+            "fill_color": "#06131C",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "#6C8896",
+            "glow_width_px": 8,
+            "rotation_deg": -64.329,
+            "scale_x": 0.9,
+            "scale_y": 0.359,
+            "confidence": 0.509,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221401.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\012_Captura_de_tela_2026-06-05_221401",
+      "candidate_count": 2,
+      "forced_layer_count": 2,
+      "mask_pixels": 5546,
+      "candidates": [
+        {
+          "bbox": [
+            223,
+            19,
+            306,
+            135
+          ],
+          "confidence": 0.348,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            189,
+            222,
+            309,
+            380
+          ],
+          "confidence": 0.2681,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            223,
+            19,
+            306,
+            135
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 98,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#7D5BF5",
+            "stroke_color": "#670FC5",
+            "stroke_width_px": 1,
+            "glow_color": "#701ED7",
+            "glow_width_px": 8,
+            "rotation_deg": -12.79,
+            "scale_x": 0.581,
+            "scale_y": 0.394,
+            "confidence": 0.512,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            189,
+            222,
+            309,
+            380
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 2582,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#F2C2FA",
+            "stroke_color": "#805296",
+            "stroke_width_px": 2,
+            "glow_color": "#E7C4FC",
+            "glow_width_px": 8,
+            "rotation_deg": 60.041,
+            "scale_x": 0.659,
+            "scale_y": 0.472,
+            "confidence": 0.682,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\012_Captura_de_tela_2026-06-05_221401\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\012_Captura_de_tela_2026-06-05_221401\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_001",
+          "bbox": [
+            223,
+            19,
+            306,
+            135
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 98,
+          "fit_status": "ok",
+          "render_bbox": [
+            216,
+            38,
+            317,
+            108
+          ],
+          "style": {
+            "fill_color": "#7D5BF5",
+            "stroke_color": "#670FC5",
+            "stroke_width_px": 1,
+            "glow_color": "#701ED7",
+            "glow_width_px": 8,
+            "rotation_deg": -12.79,
+            "scale_x": 0.581,
+            "scale_y": 0.394,
+            "confidence": 0.512,
+            "qa_flags": [
+              "sfx_style_geometry_low_confidence",
+              "sfx_style_low_confidence"
+            ]
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            189,
+            222,
+            309,
+            380
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 2582,
+          "fit_status": "ok",
+          "render_bbox": [
+            185,
+            232,
+            296,
+            361
+          ],
+          "style": {
+            "fill_color": "#F2C2FA",
+            "stroke_color": "#805296",
+            "stroke_width_px": 2,
+            "glow_color": "#E7C4FC",
+            "glow_width_px": 8,
+            "rotation_deg": 60.041,
+            "scale_x": 0.659,
+            "scale_y": 0.472,
+            "confidence": 0.682,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_Akira-Bold.otf.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\013_font_probe_Akira-Bold_otf",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            20,
+            36,
+            81,
+            70
+          ],
+          "confidence": 0.6494,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\013_font_probe_Akira-Bold_otf\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\013_font_probe_Akira-Bold_otf\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_arial.ttf.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\014_font_probe_arial_ttf",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            16,
+            34,
+            135,
+            83
+          ],
+          "confidence": 0.1737,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\014_font_probe_arial_ttf\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\014_font_probe_arial_ttf\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_arialbd.ttf.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\015_font_probe_arialbd_ttf",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            16,
+            34,
+            135,
+            83
+          ],
+          "confidence": 0.1737,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\015_font_probe_arialbd_ttf\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\015_font_probe_arialbd_ttf\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_comic.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\016_font_probe_comic",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            7,
+            18,
+            89,
+            59
+          ],
+          "confidence": 0.519,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\016_font_probe_comic\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\016_font_probe_comic\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_comic.ttf.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\017_font_probe_comic_ttf",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            16,
+            42,
+            95,
+            89
+          ],
+          "confidence": 0.4458,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "recognized",
+          "recognized_text": "口",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\017_font_probe_comic_ttf\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\017_font_probe_comic_ttf\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_comicbd.ttf.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\018_font_probe_comicbd_ttf",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            17,
+            43,
+            95,
+            89
+          ],
+          "confidence": 0.4631,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\018_font_probe_comicbd_ttf\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\018_font_probe_comicbd_ttf\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_contact.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\019_font_probe_contact",
+      "candidate_count": 9,
+      "forced_layer_count": 3,
+      "mask_pixels": 10458,
+      "candidates": [
+        {
+          "bbox": [
+            20,
+            57,
+            81,
+            91
+          ],
+          "confidence": 0.6836,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            14,
+            196,
+            137,
+            252
+          ],
+          "confidence": 0.0864,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            14,
+            341,
+            135,
+            397
+          ],
+          "confidence": 0.0838,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            2,
+            432,
+            130,
+            451
+          ],
+          "confidence": 0.5115,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            5,
+            469,
+            101,
+            529
+          ],
+          "confidence": 0.3288,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            17,
+            642,
+            95,
+            689
+          ],
+          "confidence": 0.6089,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            43,
+            781,
+            165,
+            836
+          ],
+          "confidence": 0.0333,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            31,
+            924,
+            77,
+            979
+          ],
+          "confidence": 0.2642,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        },
+        {
+          "bbox": [
+            40,
+            1059,
+            166,
+            1117
+          ],
+          "confidence": 0.0206,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            14,
+            196,
+            137,
+            252
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1374,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#FFFFFF",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 0.0,
+            "scale_x": 0.63,
+            "scale_y": 0.73,
+            "confidence": 0.75,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_003",
+          "bbox": [
+            14,
+            341,
+            135,
+            397
+          ],
+          "translated": "VRUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1374,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#FFFFFF",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 0.0,
+            "scale_x": 0.63,
+            "scale_y": 0.73,
+            "confidence": 0.75,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_007",
+          "bbox": [
+            43,
+            781,
+            165,
+            836
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1536,
+          "fit_status": null,
+          "render_bbox": null,
+          "style": {
+            "fill_color": "#FFFFFF",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 0.0,
+            "scale_x": 0.629,
+            "scale_y": 0.716,
+            "confidence": 0.75,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\019_font_probe_contact\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\019_font_probe_contact\\04_typeset.png",
+      "rendered_layers": [
+        {
+          "id": "forced_sfx_002",
+          "bbox": [
+            14,
+            196,
+            137,
+            252
+          ],
+          "translated": "TAC",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1374,
+          "fit_status": "ok",
+          "render_bbox": [
+            27,
+            199,
+            120,
+            238
+          ],
+          "style": {
+            "fill_color": "#FFFFFF",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 0.0,
+            "scale_x": 0.63,
+            "scale_y": 0.73,
+            "confidence": 0.75,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_003",
+          "bbox": [
+            14,
+            341,
+            135,
+            397
+          ],
+          "translated": "VRUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1374,
+          "fit_status": "ok",
+          "render_bbox": [
+            18,
+            349,
+            127,
+            380
+          ],
+          "style": {
+            "fill_color": "#FFFFFF",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 0.0,
+            "scale_x": 0.63,
+            "scale_y": 0.73,
+            "confidence": 0.75,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        },
+        {
+          "id": "forced_sfx_007",
+          "bbox": [
+            43,
+            781,
+            165,
+            836
+          ],
+          "translated": "TUM",
+          "gate_allow_inpaint": true,
+          "gate_reason": "safe_sfx_glyph_mask",
+          "mask_pixels": 1536,
+          "fit_status": "ok",
+          "render_bbox": [
+            49,
+            783,
+            156,
+            822
+          ],
+          "style": {
+            "fill_color": "#FFFFFF",
+            "stroke_color": "",
+            "stroke_width_px": 0,
+            "glow_color": "",
+            "glow_width_px": 0,
+            "rotation_deg": 0.0,
+            "scale_x": 0.629,
+            "scale_y": 0.716,
+            "confidence": 0.75,
+            "qa_flags": []
+          },
+          "qa_flags": [
+            "sfx_visual_candidate",
+            "sfx_script_unknown",
+            "sfx_text_detector_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_default_only.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\020_font_probe_default_only",
+      "candidate_count": 0,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\020_font_probe_default_only\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\020_font_probe_default_only\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_default_or_dejavu_dejavu2.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\021_font_probe_default_or_dejavu_dejavu2",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            13,
+            32,
+            115,
+            95
+          ],
+          "confidence": 0.0679,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\021_font_probe_default_or_dejavu_dejavu2\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\021_font_probe_default_or_dejavu_dejavu2\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_dejavu.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\022_font_probe_dejavu",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            13,
+            32,
+            115,
+            95
+          ],
+          "confidence": 0.0679,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\022_font_probe_dejavu\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\022_font_probe_dejavu\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_impact_stroke.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\023_font_probe_impact_stroke",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            41,
+            40,
+            163,
+            89
+          ],
+          "confidence": 0.0732,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\023_font_probe_impact_stroke\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\023_font_probe_impact_stroke\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_Inter-Bold.ttf.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\024_font_probe_Inter-Bold_ttf",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            60,
+            34,
+            78,
+            89
+          ],
+          "confidence": 0.6774,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\024_font_probe_Inter-Bold_ttf\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\024_font_probe_Inter-Bold_ttf\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_sfx_renderer.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\025_font_probe_sfx_renderer",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            39,
+            28,
+            160,
+            80
+          ],
+          "confidence": 0.1504,
+          "visual_source": "anime_text_yolo_low_conf",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\025_font_probe_sfx_renderer\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\025_font_probe_sfx_renderer\\04_typeset.png",
+      "rendered_layers": []
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\font_probe_sfx_renderer_cv2.png",
+      "page_dir": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\026_font_probe_sfx_renderer_cv2",
+      "candidate_count": 1,
+      "forced_layer_count": 0,
+      "mask_pixels": 0,
+      "candidates": [
+        {
+          "bbox": [
+            32,
+            20,
+            164,
+            74
+          ],
+          "confidence": 0.7695,
+          "visual_source": "comic_text_detector_fallback",
+          "ocr_status": "no_confident_cjk",
+          "recognized_text": "",
+          "route_action": "review_required"
+        }
+      ],
+      "forced_layers": [],
+      "inpaint_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\026_font_probe_sfx_renderer_cv2\\03_inpaint.png",
+      "typeset_path": "N:\\TraduzAI\\sfx\\sfx_inpaint_type_probe_full_cv2\\026_font_probe_sfx_renderer_cv2\\04_typeset.png",
+      "rendered_layers": []
+    }
+  ]
+}

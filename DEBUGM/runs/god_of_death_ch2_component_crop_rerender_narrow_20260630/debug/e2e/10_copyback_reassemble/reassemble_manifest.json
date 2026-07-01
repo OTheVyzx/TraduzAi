@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_crop_rerender_narrow",
+  "stage": "copyback_reassemble",
+  "target_count": 6,
+  "rendered_page_count": 6,
+  "original_page_count": 6,
+  "clean_page_count": 6,
+  "pages": [
+    {
+      "page_number": 1,
+      "y_top": 0,
+      "y_bottom": 13068,
+      "height": 13068,
+      "width": 800
+    },
+    {
+      "page_number": 2,
+      "y_top": 13068,
+      "y_bottom": 26045,
+      "height": 12977,
+      "width": 800
+    },
+    {
+      "page_number": 3,
+      "y_top": 26045,
+      "y_bottom": 39203,
+      "height": 13158,
+      "width": 800
+    },
+    {
+      "page_number": 4,
+      "y_top": 39203,
+      "y_bottom": 52202,
+      "height": 12999,
+      "width": 800
+    },
+    {
+      "page_number": 5,
+      "y_top": 52202,
+      "y_bottom": 65296,
+      "height": 13094,
+      "width": 800
+    },
+    {
+      "page_number": 6,
+      "y_top": 65296,
+      "y_bottom": 78406,
+      "height": 13110,
+      "width": 800
+    }
+  ]
+}

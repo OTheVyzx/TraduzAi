@@ -10,11 +10,45 @@ from typing import Any
 
 
 def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
+    route_action = str(layer.get("route_action") or "").strip().lower()
+    content_class = str(layer.get("content_class") or "").strip().lower()
+    if route_action == "translate_sfx_inpaint_render" or content_class == "sfx" or isinstance(layer.get("sfx"), dict):
+        layer["tipo"] = "sfx"
+        layer["content_class"] = "sfx"
+        layer["skip_processing"] = False
+        render_policy = str(layer.get("render_policy") or "").strip().lower()
+        translate_policy = str(layer.get("translate_policy") or "").strip().lower()
+        sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
+        preserve_sfx = bool(
+            layer.get("preserve_original")
+            or render_policy in {"preserve", "preserve_original"}
+            or translate_policy == "skip_translation"
+            or sfx.get("inpaint_allowed") is False
+        )
+        if preserve_sfx:
+            layer["preserve_original"] = True
+            layer["translate_policy"] = "skip_translation"
+            layer["render_policy"] = "preserve_original"
+            layer["route_action"] = "review_required"
+            layer["route_reason"] = layer.get("route_reason") or "sfx_preserved"
+            if isinstance(sfx, dict):
+                sfx["inpaint_allowed"] = False
+                layer["sfx"] = sfx
+            return
+        layer["preserve_original"] = False
+        if str(layer.get("translate_policy") or "").strip().lower() in {"", "translate"}:
+            layer["translate_policy"] = "adapt_sfx"
+        if str(layer.get("render_policy") or "").strip().lower() in {"", "normal"}:
+            layer["render_policy"] = "sfx_style"
+        layer["route_action"] = layer.get("route_action") or "translate_sfx_inpaint_render"
+        return
     layer["tipo"] = "text"
     layer["content_class"] = "text"
     layer["balloon_type"] = ""
     layer["skip_processing"] = False
     layer["preserve_original"] = False
+    layer["translate_policy"] = "translate"
+    layer["render_policy"] = "normal"
     layer["route_action"] = layer.get("route_action") or "translate_inpaint_render"
     layer.pop("skip_reason", None)
 

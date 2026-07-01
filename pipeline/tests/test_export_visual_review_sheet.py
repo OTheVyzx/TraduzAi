@@ -125,6 +125,46 @@ def test_visual_review_sheet_exports_text_region_crops(tmp_path):
     assert (tmp_path / "review" / "assets" / "candidate_001_crop_001.jpg").exists()
 
 
+def test_visual_review_sheet_renders_sfx_review_panel(tmp_path):
+    baseline = tmp_path / "baseline"
+    candidate = tmp_path / "candidate"
+    _write_output(baseline, page_count=1)
+    _write_output(candidate, page_count=1)
+    project_path = candidate / "project.json"
+    project = json.loads(project_path.read_text(encoding="utf-8"))
+    layer = project["paginas"][0]["text_layers"][0]
+    layer.update(
+        {
+            "tipo": "sfx",
+            "content_class": "sfx",
+            "route_action": "translate_sfx_inpaint_render",
+            "original": "\ucff5",
+            "translated": "TUM",
+            "qa_flags": ["sfx_translation_unknown"],
+            "sfx": {
+                "adapted_text": "TUM",
+                "review_required": True,
+                "inpaint_allowed": False,
+                "style_confidence": 0.38,
+            },
+        }
+    )
+    project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+    result = export_visual_review_sheet(
+        baseline,
+        candidate,
+        tmp_path / "review" / "sheet.html",
+        max_pages=1,
+    )
+
+    html = (tmp_path / "review" / "sheet.html").read_text(encoding="utf-8")
+    assert result["status"] == "PASS"
+    assert "SFX" in html
+    assert "sfx_translation_unknown" in html
+    assert "inpaint_allowed" in html
+
+
 def test_visual_review_sheet_blocks_when_project_is_missing(tmp_path):
     baseline = tmp_path / "baseline"
     candidate = tmp_path / "candidate"

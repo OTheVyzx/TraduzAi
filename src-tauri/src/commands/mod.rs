@@ -7,4 +7,5 @@ pub mod project;
 pub mod project_schema;
 pub mod settings;
 pub mod storage;
+pub mod studio_lite;
 pub mod work_context;

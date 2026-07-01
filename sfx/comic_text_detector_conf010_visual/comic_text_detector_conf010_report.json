@@ -1,0 +1,213 @@
+{
+  "root": "N:\\TraduzAI\\sfx",
+  "output_dir": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual",
+  "model": "comic-text-detector",
+  "conf": 0.1,
+  "backend": "comic-text-detector",
+  "device": "cuda",
+  "model_path": "C:\\Users\\PICHAU\\.mangatl\\models\\comic-text-detector.pt",
+  "items": [
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221235.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            66,
+            173,
+            130,
+            259
+          ],
+          "confidence": 0.307373046875
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221235_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221245.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221245_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221309.png",
+      "detected_count": 2,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            47,
+            86,
+            134,
+            141
+          ],
+          "confidence": 0.175048828125
+        },
+        {
+          "index": 2,
+          "bbox": [
+            182,
+            179,
+            230,
+            224
+          ],
+          "confidence": 0.732421875
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221309_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221315.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221315_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221319.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            34,
+            59,
+            231,
+            217
+          ],
+          "confidence": 0.287109375
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221319_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221322.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            55,
+            109,
+            226,
+            285
+          ],
+          "confidence": 0.1485595703125
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221322_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221325.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            89,
+            87,
+            142,
+            125
+          ],
+          "confidence": 0.29443359375
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221325_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221336.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            196,
+            35,
+            257,
+            99
+          ],
+          "confidence": 0.468994140625
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221336_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221342.png",
+      "detected_count": 0,
+      "blocks": [],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221342_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221350.png",
+      "detected_count": 2,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            3,
+            116,
+            35,
+            164
+          ],
+          "confidence": 0.11090087890625
+        },
+        {
+          "index": 2,
+          "bbox": [
+            12,
+            316,
+            46,
+            366
+          ],
+          "confidence": 0.401611328125
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221350_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221354.png",
+      "detected_count": 1,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            21,
+            50,
+            85,
+            171
+          ],
+          "confidence": 0.310546875
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221354_comic_text_detector_conf010_overlay.png"
+    },
+    {
+      "image": "N:\\TraduzAI\\sfx\\Captura de tela 2026-06-05 221401.png",
+      "detected_count": 2,
+      "blocks": [
+        {
+          "index": 1,
+          "bbox": [
+            230,
+            51,
+            292,
+            130
+          ],
+          "confidence": 0.246337890625
+        },
+        {
+          "index": 2,
+          "bbox": [
+            191,
+            310,
+            278,
+            379
+          ],
+          "confidence": 0.150634765625
+        }
+      ],
+      "overlay": "N:\\TraduzAI\\sfx\\comic_text_detector_conf010_visual\\Captura de tela 2026-06-05 221401_comic_text_detector_conf010_overlay.png"
+    }
+  ],
+  "total_detected": 12
+}

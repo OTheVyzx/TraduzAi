@@ -662,7 +662,9 @@ fn export_gate_summary_from_project(project: &serde_json::Value) -> ExportGateSu
 }
 
 fn export_gate_summary_from_report(report: &serde_json::Value) -> ExportGateSummary {
-    let gate = report.get("export_gate").unwrap_or(&serde_json::Value::Null);
+    let gate = report
+        .get("export_gate")
+        .unwrap_or(&serde_json::Value::Null);
     let summary = report.get("summary").unwrap_or(&serde_json::Value::Null);
     let issues = gate.get("issues").or_else(|| report.get("issues"));
     export_gate_summary_from_parts(gate, summary, issues)
@@ -680,10 +682,20 @@ fn export_gate_summary_from_parts(
         .unwrap_or("PASS")
         .to_ascii_uppercase();
     let critical_issue_count = number_field(gate, &["critical_issue_count"])
-        .or_else(|| number_field(summary, &["critical_issue_count", "critical", "critical_count"]))
+        .or_else(|| {
+            number_field(
+                summary,
+                &["critical_issue_count", "critical", "critical_count"],
+            )
+        })
         .unwrap_or(0);
     let critical_flag_count = number_field(gate, &["critical_flag_count"])
-        .or_else(|| number_field(summary, &["critical_flag_count", "critical", "critical_count"]))
+        .or_else(|| {
+            number_field(
+                summary,
+                &["critical_flag_count", "critical", "critical_count"],
+            )
+        })
         .unwrap_or(critical_issue_count);
     let review_issue_count = number_field(gate, &["review_issue_count"])
         .or_else(|| number_field(summary, &["review_issue_count", "high", "warning_count"]))
@@ -926,6 +938,12 @@ pub struct RenderPreviewConfig {
     pub page_index: u32,
     pub page: serde_json::Value,
     pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenderPreviewResult {
+    pub output_path: String,
+    pub renderer_backend: String,
 }
 #[derive(Debug, Deserialize)]
 pub struct ReinpaintConfig {
@@ -1583,7 +1601,7 @@ pub async fn retypeset_page(app: AppHandle, config: RetypesetConfig) -> Result<S
 pub async fn render_preview_page(
     app: AppHandle,
     config: RenderPreviewConfig,
-) -> Result<String, String> {
+) -> Result<RenderPreviewResult, String> {
     let pf = resolve_project_json_path(&config.project_path)?;
     let extension = render_preview_extension_hint(&config.page);
     let (override_path, output_path) =
@@ -1614,6 +1632,7 @@ pub async fn render_preview_page(
     let stdout = child.stdout.take().expect("stdout not captured");
     let mut reader = BufReader::new(stdout).lines();
     let mut out = output_path.to_string_lossy().replace('\\', "/");
+    let mut renderer_backend = "python".to_string();
     while let Ok(Some(line)) = reader.next_line().await {
         if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
             if let Some(t) = msg.get("type").and_then(|t| t.as_str()) {
@@ -1635,6 +1654,11 @@ pub async fn render_preview_page(
                             .as_str()
                             .unwrap_or(&out)
                             .replace('\\', "/");
+                        if let Some(backend) =
+                            msg.get("renderer_backend").and_then(|value| value.as_str())
+                        {
+                            renderer_backend = backend.to_string();
+                        }
                     }
                     "error" => {
                         let stderr_text = collect_stderr(stderr_handle).await;
@@ -1659,11 +1683,23 @@ pub async fn render_preview_page(
         eprintln!("[EditorAction] error  render_preview status={status}");
         return Err(err);
     }
+    app.emit(
+        "render-preview-complete",
+        serde_json::json!({
+            "page_index": config.page_index,
+            "output_path": out.clone(),
+            "renderer_backend": renderer_backend.clone(),
+        }),
+    )
+    .ok();
     eprintln!(
-        "[EditorAction] success render_preview page={} out={}",
-        config.page_index, out
+        "[EditorAction] success render_preview page={} backend={} out={}",
+        config.page_index, renderer_backend, out
     );
-    Ok(out)
+    Ok(RenderPreviewResult {
+        output_path: out,
+        renderer_backend,
+    })
 }
 
 #[tauri::command]

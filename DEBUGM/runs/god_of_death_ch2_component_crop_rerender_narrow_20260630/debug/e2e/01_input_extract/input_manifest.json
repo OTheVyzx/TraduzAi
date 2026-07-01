@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_component_crop_rerender_narrow",
+  "stage": "input_extract",
+  "input_page_count": 6,
+  "strip_width": 800,
+  "strip_height": 78406,
+  "source_page_breaks": [
+    0,
+    1079,
+    18856,
+    36633,
+    54410,
+    77206,
+    78406
+  ],
+  "files": [
+    {
+      "page_number": 1,
+      "path": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_component_crop_rerender_narrow_20260630\\_tmp\\001.jpeg",
+      "strip_y_top": 0,
+      "strip_y_bottom": 1079,
+      "height": 1079
+    },
+    {
+      "page_number": 2,
+      "path": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_component_crop_rerender_narrow_20260630\\_tmp\\002.jpeg",
+      "strip_y_top": 1079,
+      "strip_y_bottom": 18856,
+      "height": 17777
+    },
+    {
+      "page_number": 3,
+      "path": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_component_crop_rerender_narrow_20260630\\_tmp\\003.jpeg",
+      "strip_y_top": 18856,
+      "strip_y_bottom": 36633,
+      "height": 17777
+    },
+    {
+      "page_number": 4,
+      "path": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_component_crop_rerender_narrow_20260630\\_tmp\\004.jpeg",
+      "strip_y_top": 36633,
+      "strip_y_bottom": 54410,
+      "height": 17777
+    },
+    {
+      "page_number": 5,
+      "path": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_component_crop_rerender_narrow_20260630\\_tmp\\005.jpeg",
+      "strip_y_top": 54410,
+      "strip_y_bottom": 77206,
+      "height": 22796
+    },
+    {
+      "page_number": 6,
+      "path": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_component_crop_rerender_narrow_20260630\\_tmp\\006.jpeg",
+      "strip_y_top": 77206,
+      "strip_y_bottom": 78406,
+      "height": 1200
+    }
+  ]
+}

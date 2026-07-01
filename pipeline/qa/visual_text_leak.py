@@ -64,9 +64,20 @@ def _has_english_leak(text: str, allowed_terms: list[str], expected_layers: list
     filtered = text
     for term in allowed_terms:
         filtered = re.sub(re.escape(term), "", filtered, flags=re.I)
+    for layer in expected_layers:
+        if _is_preserved_sfx_layer(layer):
+            for value in (layer.get("original"), layer.get("raw_ocr"), layer.get("text")):
+                token = str(value or "").strip()
+                if token:
+                    filtered = re.sub(re.escape(token), "", filtered, flags=re.I)
     return any(pattern.search(filtered) for pattern in ENGLISH_PATTERNS)
 
 
 def _layer_has_detectable_text(layer: dict[str, Any]) -> bool:
     return bool(layer.get("original") or layer.get("raw_ocr") or layer.get("text"))
+
+
+def _is_preserved_sfx_layer(layer: dict[str, Any]) -> bool:
+    kind = str(layer.get("tipo") or layer.get("content_class") or "").strip().lower()
+    return kind == "sfx" and bool(layer.get("preserve_original") or layer.get("skip_processing"))
 

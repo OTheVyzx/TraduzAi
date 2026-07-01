@@ -1,4 +1,4 @@
-import type { TextLayerStyle } from "./stores/appStore";
+import type { TextLayerStyle, TextLayerStyleOrigin } from "./stores/appStore";
 
 export const CANONICAL_FONT_FILE = "ComicNeue-Bold.ttf";
 
@@ -18,6 +18,9 @@ export const DEFAULT_TEXT_STYLE: TextLayerStyle = {
   bold: true,
   italico: false,
   rotacao: 0,
+  curva: false,
+  curva_direcao: "",
+  curva_intensidade: 0,
   alinhamento: "center",
   force_upper: false,
 };
@@ -26,6 +29,7 @@ type CanonicalizeMode = "default" | "hydrate" | "preserve-explicit";
 
 interface CanonicalizeOptions {
   mode?: CanonicalizeMode;
+  styleOrigin?: TextLayerStyleOrigin | null;
 }
 
 function normalizeHex(value: unknown) {
@@ -49,11 +53,17 @@ function isLegacyDefaultStyle(style: Partial<TextLayerStyle>) {
   );
 }
 
+function styleOriginOf(style: Partial<TextLayerStyle>, options: CanonicalizeOptions) {
+  const rawStyle = style as Partial<TextLayerStyle> & { style_origin?: unknown };
+  return typeof rawStyle.style_origin === "string" ? rawStyle.style_origin : options.styleOrigin;
+}
+
 export function canonicalizeTextStyle<T extends Partial<TextLayerStyle>>(
   style: T,
   options: CanonicalizeOptions = {},
 ): T & TextLayerStyle {
-  const shouldNormalizeLegacy = options.mode === "hydrate" && isLegacyDefaultStyle(style);
+  const sourceDetected = styleOriginOf(style, options) === "source_detected";
+  const shouldNormalizeLegacy = options.mode === "hydrate" && !sourceDetected && isLegacyDefaultStyle(style);
   const contour = shouldNormalizeLegacy ? "" : (style.contorno ?? DEFAULT_TEXT_STYLE.contorno);
   const contourPx = contour ? (style.contorno_px ?? DEFAULT_TEXT_STYLE.contorno_px) : 0;
 
@@ -76,6 +86,9 @@ export function canonicalizeTextStyle<T extends Partial<TextLayerStyle>>(
     bold: shouldNormalizeLegacy ? DEFAULT_TEXT_STYLE.bold : (style.bold ?? DEFAULT_TEXT_STYLE.bold),
     italico: style.italico ?? DEFAULT_TEXT_STYLE.italico,
     rotacao: style.rotacao ?? DEFAULT_TEXT_STYLE.rotacao,
+    curva: style.curva ?? DEFAULT_TEXT_STYLE.curva,
+    curva_direcao: style.curva_direcao ?? DEFAULT_TEXT_STYLE.curva_direcao,
+    curva_intensidade: style.curva_intensidade ?? DEFAULT_TEXT_STYLE.curva_intensidade,
     alinhamento: style.alinhamento ?? DEFAULT_TEXT_STYLE.alinhamento,
     force_upper: style.force_upper ?? DEFAULT_TEXT_STYLE.force_upper,
   };

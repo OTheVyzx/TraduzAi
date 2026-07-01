@@ -12,6 +12,24 @@ import numpy as np
 
 
 CANONICAL_AUTO_FONT = "ComicNeue-Bold.ttf"
+SOURCE_STYLE_CONFIDENCE_THRESHOLD = 0.70
+SOURCE_STYLE_SAFE_FIELDS = {
+    "fonte",
+    "cor",
+    "cor_gradiente",
+    "contorno",
+    "contorno_px",
+    "glow",
+    "glow_cor",
+    "glow_px",
+    "sombra",
+    "sombra_cor",
+    "sombra_offset",
+    "curva",
+    "curva_direcao",
+    "curva_intensidade",
+    "rotacao",
+}
 
 
 def relative_luminance(rgb: tuple[int, int, int]) -> float:
@@ -28,6 +46,26 @@ def auto_text_color_for_background(background_rgb: tuple[int, int, int]) -> str:
     return "#000000" if relative_luminance(background_rgb) >= 0.25 else "#FFFFFF"
 
 
+def _has_confident_source_style(style: dict) -> bool:
+    try:
+        confidence = float(style.get("style_confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return style.get("style_origin") == "source_detected" and confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
+
+
+def _force_black_overrides_source_style(style: dict, force_black_text: bool) -> bool:
+    if not force_black_text:
+        return False
+    if style.get("tipo") == "sfx":
+        return False
+    if style.get("glow") or style.get("contorno") or style.get("contorno_px") or style.get("cor_gradiente"):
+        return False
+
+    layout_profile = style.get("layout_profile")
+    return layout_profile in (None, "", "white_balloon")
+
+
 def normalize_auto_typesetting_style(
     style: dict | None,
     background_rgb: tuple[int, int, int],
@@ -35,6 +73,9 @@ def normalize_auto_typesetting_style(
     force_black_text: bool = False,
 ) -> dict:
     normalized = dict(style or {})
+    preserve_source_style = _has_confident_source_style(normalized)
+    force_black_overrides_source = _force_black_overrides_source_style(normalized, force_black_text)
+
     normalized["fonte"] = CANONICAL_AUTO_FONT
     normalized["cor"] = "#000000" if force_black_text else auto_text_color_for_background(background_rgb)
     normalized["cor_gradiente"] = []
@@ -46,11 +87,23 @@ def normalize_auto_typesetting_style(
     normalized["sombra"] = False
     normalized["sombra_cor"] = ""
     normalized["sombra_offset"] = [0, 0]
+    normalized["curva"] = False
+    normalized["curva_direcao"] = ""
+    normalized["curva_intensidade"] = 0.0
     normalized["bold"] = True
     normalized.setdefault("italico", False)
     normalized.setdefault("rotacao", 0)
     normalized.setdefault("alinhamento", "center")
     normalized.setdefault("force_upper", False)
+
+    if preserve_source_style:
+        source_style = style or {}
+        for field in SOURCE_STYLE_SAFE_FIELDS:
+            if field == "cor" and force_black_overrides_source:
+                continue
+            if field in source_style:
+                normalized[field] = source_style[field]
+
     return normalized
 
 

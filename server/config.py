@@ -12,6 +12,17 @@ def _split_origins(value: str) -> list[str]:
     return [origin.strip() for origin in value.split(",") if origin.strip()]
 
 
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
 @dataclass(slots=True)
 class Settings:
     env: str = field(default_factory=lambda: os.environ.get("TRADUZAI_ENV", "dev"))
@@ -47,6 +58,84 @@ class Settings:
     max_files_per_job: int = field(default_factory=lambda: int(os.environ.get("TRADUZAI_MAX_FILES_PER_JOB", "300")))
     max_zip_expanded_mb: int = field(
         default_factory=lambda: int(os.environ.get("TRADUZAI_MAX_ZIP_EXPANDED_MB", "1500"))
+    )
+    vast_api_key: str | None = field(default_factory=lambda: os.environ.get("VAST_API_KEY"))
+    vast_instance_id: str | None = field(default_factory=lambda: os.environ.get("VAST_INSTANCE_ID"))
+    vast_offer_id: str | None = field(default_factory=lambda: os.environ.get("VAST_OFFER_ID"))
+    vast_offer_auto: bool = field(default_factory=lambda: _env_flag("VAST_OFFER_AUTO", False))
+    vast_offer_limit: int = field(default_factory=lambda: int(os.environ.get("VAST_OFFER_LIMIT", "50")))
+    vast_disk_gb: int = field(default_factory=lambda: int(os.environ.get("VAST_DISK_GB", "80")))
+    vast_offer_max_dph: float = field(default_factory=lambda: float(os.environ.get("VAST_OFFER_MAX_DPH", "0.20")))
+    vast_offer_min_gpu_ram_gb: int = field(default_factory=lambda: int(os.environ.get("VAST_OFFER_MIN_GPU_RAM_GB", "16")))
+    vast_offer_min_reliability: float = field(
+        default_factory=lambda: float(os.environ.get("VAST_OFFER_MIN_RELIABILITY", "0.98"))
+    )
+    vast_offer_min_dlperf: float = field(default_factory=lambda: float(os.environ.get("VAST_OFFER_MIN_DLPERF", "5.0")))
+    vast_offer_min_direct_ports: int = field(
+        default_factory=lambda: int(os.environ.get("VAST_OFFER_MIN_DIRECT_PORTS", "1"))
+    )
+    vast_offer_min_cuda: float = field(default_factory=lambda: float(os.environ.get("VAST_OFFER_MIN_CUDA", "12.1")))
+    vast_offer_gpu_names: list[str] = field(
+        default_factory=lambda: _split_csv(os.environ.get("VAST_OFFER_GPU_NAMES", ""))
+    )
+    vast_image: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_IMAGE", "vastai/pytorch:cuda-12.1.1-auto") or None
+    )
+    vast_runtype: str = field(default_factory=lambda: os.environ.get("VAST_RUNTYPE", "jupyter_direct"))
+    vast_template_hash: str | None = field(default_factory=lambda: os.environ.get("VAST_TEMPLATE_HASH"))
+    vast_autostart: bool = field(default_factory=lambda: _env_flag("VAST_AUTOSTART", False))
+    vast_idle_stop_minutes: int = field(default_factory=lambda: int(os.environ.get("VAST_IDLE_STOP_MINUTES", "0")))
+    vast_label: str = field(default_factory=lambda: os.environ.get("VAST_LABEL", "traduzai-worker"))
+    vast_worker_api_url: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_WORKER_API_URL") or os.environ.get("TRADUZAI_PUBLIC_API_URL")
+    )
+    vast_repo_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "VAST_REPO_URL",
+            os.environ.get("TRADUZAI_REPO_URL", "https://github.com/OTheVyzx/TraduzAi.git"),
+        )
+    )
+    vast_repo_branch: str = field(
+        default_factory=lambda: os.environ.get(
+            "VAST_REPO_BRANCH",
+            os.environ.get("TRADUZAI_REPO_BRANCH", "Troca_de_motores"),
+        )
+    )
+    vast_worker_name: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_WORKER_NAME") or os.environ.get("TRADUZAI_WORKER_NAME")
+    )
+    vast_require_gpu: bool = field(default_factory=lambda: _env_flag("VAST_REQUIRE_GPU", True))
+    vast_provider: str = field(default_factory=lambda: os.environ.get("VAST_PROVIDER", "instance").strip().lower())
+    vast_serverless_endpoint_id: str | None = field(default_factory=lambda: os.environ.get("VAST_SERVERLESS_ENDPOINT_ID"))
+    vast_serverless_endpoint_name: str = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_ENDPOINT_NAME", "traduzai-serverless")
+    )
+    vast_serverless_workergroup_name: str = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_WORKERGROUP_NAME", "traduzai-worker")
+    )
+    vast_serverless_template_id: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_TEMPLATE_ID")
+    )
+    vast_serverless_template_hash: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_TEMPLATE_HASH") or os.environ.get("VAST_TEMPLATE_HASH")
+    )
+    vast_serverless_min_load: int = field(default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_MIN_LOAD", "0")))
+    vast_serverless_target_load: int = field(default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_TARGET_LOAD", "100")))
+    vast_serverless_max_load: int = field(default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_MAX_LOAD", "100")))
+    vast_serverless_cold_mult: float = field(
+        default_factory=lambda: float(os.environ.get("VAST_SERVERLESS_COLD_MULT", "2.5"))
+    )
+    vast_serverless_test_workers: int = field(
+        default_factory=lambda: int(os.environ.get("VAST_SERVERLESS_TEST_WORKERS", "0"))
+    )
+    vast_serverless_search_params: str | None = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_SEARCH_PARAMS")
+    )
+    vast_serverless_route_path: str = field(
+        default_factory=lambda: os.environ.get("VAST_SERVERLESS_ROUTE_PATH", "/run")
+    )
+    vast_serverless_route_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("VAST_SERVERLESS_ROUTE_TIMEOUT_SECONDS", "20"))
     )
 
     @property

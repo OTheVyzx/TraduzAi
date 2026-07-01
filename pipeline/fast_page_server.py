@@ -13,6 +13,7 @@ from typing import TextIO
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PipelineRunner = Callable[[str], None]
+EventCallback = Callable[[dict], None]
 WarmupRunner = Callable[..., None]
 InpaintWarmupRunner = Callable[..., None]
 PageActionOptions = dict[str, str | None]
@@ -48,14 +49,14 @@ class FastPageSession:
         self._warmed_inpaint_keys: set[tuple[str, str]] = set()
         self.session_id = session_id or f"fast-page-{uuid.uuid4().hex}"
 
-    def handle(self, request: dict) -> list[dict]:
+    def handle(self, request: dict, event_callback: EventCallback | None = None) -> list[dict]:
         request_type = request.get("type")
         if request_type == "warmup":
             return self._handle_warmup(request)
         if request_type == "warmup_inpaint":
             return self._handle_warmup_inpaint(request)
         if request_type == "process_page":
-            return self._handle_process_page(request)
+            return self._handle_process_page(request, event_callback=event_callback)
         if request_type == "editor_detect_page":
             return self._handle_editor_page_action(request, self._detect_runner, "editor_detect_page")
         if request_type == "editor_detect_boxes_page":
@@ -103,23 +104,20 @@ class FastPageSession:
             event["reused"] = True
         return [event]
 
-    def _handle_process_page(self, request: dict) -> list[dict]:
+    def _handle_process_page(self, request: dict, event_callback: EventCallback | None = None) -> list[dict]:
         config_path = write_fast_page_config(request)
         config = json.loads(config_path.read_text(encoding="utf-8"))
         work_dir = Path(config["work_dir"])
         source_page_number = source_page_number_for_request(Path(config["source_path"]))
-        captured_stdout = io.StringIO()
+        captured_stdout = PipelineEventCapture(event_callback=event_callback)
         try:
             with contextlib.redirect_stdout(captured_stdout):
                 self._pipeline_runner(str(config_path))
         except SystemExit as exc:
             raise RuntimeError(f"pipeline saiu durante process_page: {exc}") from exc
 
-        events = [
-            event
-            for event in parse_pipeline_stdout_events(captured_stdout.getvalue())
-            if event.get("type") != "complete"
-        ]
+        captured_stdout.drain()
+        events = captured_stdout.events
         artifact_events = [
             build_page_completed_event(path, work_dir, self.session_id, source_page_number=source_page_number)
             for path in collect_translated_artifacts(work_dir)
@@ -284,13 +282,24 @@ def serve_jsonl(
         if not line:
             continue
         should_shutdown = False
+        streamed_event_ids: set[int] = set()
+
+        def stream_event(event: dict) -> None:
+            if "session_id" not in event:
+                event["session_id"] = active_session.session_id
+            streamed_event_ids.add(id(event))
+            output_stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+            output_stream.flush()
+
         try:
             request = json.loads(line)
             should_shutdown = request.get("type") == "shutdown"
-            events = active_session.handle(request)
+            events = active_session.handle(request, event_callback=stream_event)
         except Exception as exc:
             events = [{"type": "error", "session_id": active_session.session_id, "message": str(exc)}]
         for event in events:
+            if id(event) in streamed_event_ids:
+                continue
             if "session_id" not in event:
                 event["session_id"] = active_session.session_id
             output_stream.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -349,6 +358,48 @@ def parse_pipeline_stdout_events(stdout_text: str) -> list[dict]:
         if isinstance(event, dict) and "type" in event:
             events.append(event)
     return events
+
+
+class PipelineEventCapture(io.TextIOBase):
+    def __init__(self, event_callback: EventCallback | None = None) -> None:
+        self._buffer = ""
+        self.events: list[dict] = []
+        self._event_callback = event_callback
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._process_line(line)
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def drain(self) -> None:
+        if self._buffer:
+            line = self._buffer
+            self._buffer = ""
+            self._process_line(line)
+
+    def _process_line(self, line: str) -> None:
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            return
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict) or "type" not in event:
+            return
+        if event.get("type") == "complete":
+            return
+        self.events.append(event)
+        if self._event_callback is not None:
+            self._event_callback(event)
 
 
 def build_page_completed_event(

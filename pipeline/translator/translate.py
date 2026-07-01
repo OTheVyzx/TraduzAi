@@ -681,6 +681,7 @@ def _postprocess(
     lang: str = "en",
 ) -> str:
     result = _review_translation_grammar_semantics(source_text, text.strip(), tipo, lang=lang)
+    result = "".join(ch for ch in result if unicodedata.category(ch) != "Cf")
     result = result.replace("\u2026", "...")
     for pattern, replacement, flags in ADAPTATIONS:
         result = re.sub(pattern, replacement, result, flags=flags)
@@ -1072,27 +1073,22 @@ def _should_block_translation_render(
     return False
 
 
-SKIP_TRANSLATION_CONTENT_CLASSES = {
-    "tn_note",
-    "url_watermark",
-    "scanlator_credit",
-    "noise",
-}
-
-
 def _should_skip_translation_item(text: dict) -> bool:
     route_action = str(text.get("route_action") or "").strip().lower()
     if route_action in ROUTE_ACTIONS:
         return not route_action_requires_translation(route_action)
-    if text.get("skip_processing"):
-        return True
-    if str(text.get("translate_policy") or "").strip().lower() == "skip_translation":
-        return True
-    content_class = str(text.get("content_class") or "").strip().lower()
-    return content_class in SKIP_TRANSLATION_CONTENT_CLASSES
+    return False
 
 
 def _source_text_before_normalization(text: dict) -> str:
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "leading_dark_lobe_duplicate_fragment_removed" in flags:
+        metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+        cleanup = metrics.get("leading_dark_lobe_duplicate_fragment_removed") if isinstance(metrics, dict) else None
+        if isinstance(cleanup, dict):
+            repaired = str(cleanup.get("to") or "").strip()
+            if repaired:
+                return repaired
     return str(text.get("raw_ocr") or text.get("original") or text.get("text") or "")
 
 
@@ -1111,6 +1107,9 @@ def _normalization_confidence_after(text: dict) -> float:
 
 def _source_text_for_translation(text: dict) -> str:
     raw = _source_text_before_normalization(text)
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "leading_dark_lobe_duplicate_fragment_removed" in flags and raw:
+        return raw
     normalized = str(text.get("normalized_text_final") or "").strip()
     normalization = text.get("normalization")
     changed = bool(isinstance(normalization, dict) and normalization.get("changed"))
@@ -1119,6 +1118,51 @@ def _source_text_for_translation(text: dict) -> str:
     if changed and normalized and _normalization_confidence_after(text) >= 0.7:
         return normalized
     return str(text.get("text") or raw)
+
+
+def _repair_translation_after_source_prefix_cleanup(text: dict, translated: str) -> tuple[str, list[str]]:
+    if not isinstance(text, dict):
+        return translated, []
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "leading_dark_lobe_duplicate_fragment_removed" not in flags:
+        return translated, []
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    cleanup = metrics.get("leading_dark_lobe_duplicate_fragment_removed") if isinstance(metrics, dict) else None
+    if not isinstance(cleanup, dict):
+        return translated, []
+    original_before = str(cleanup.get("from") or "").strip()
+    original_after = str(cleanup.get("to") or text.get("text") or text.get("original") or "").strip()
+    if not original_before or not original_after or original_before == original_after:
+        return translated, []
+    duplicate_head = original_before
+    if original_after in original_before:
+        duplicate_head = original_before.split(original_after, 1)[0].strip()
+    duplicate_tokens = {
+        token
+        for token in re.findall(r"[A-Za-z0-9']+", duplicate_head.lower())
+        if len(token) > 1
+    }
+    if len(duplicate_tokens) < 2:
+        return translated, []
+    translated_norm = re.sub(r"\s+", " ", str(translated or "").strip())
+    match = re.match(r"^(?P<head>[^.!?]{4,90}[.!?])\s*(?P<tail>.+)$", translated_norm)
+    if not match:
+        return translated, []
+    translated_head = match.group("head").strip()
+    tail = match.group("tail").strip()
+    head_tokens = {
+        token
+        for token in re.findall(r"[A-Za-z0-9']+", translated_head.lower())
+        if len(token) > 1
+    }
+    fuzzy_matches = 0
+    for token in head_tokens:
+        if any(token == src or token in src or src in token for src in duplicate_tokens):
+            fuzzy_matches += 1
+    english_leak_terms = {"space", "only", "utes", "subspace", "retention", "world", "quest", "system"}
+    if fuzzy_matches < 2 and not (head_tokens & english_leak_terms):
+        return translated, []
+    return tail, ["translation_leading_duplicate_fragment_removed"]
 
 
 def _uses_confident_normalized_text_final(text: dict) -> bool:
@@ -2587,9 +2631,11 @@ def _translate_google_single_page(
     """
     is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
 
-    from ocr.ocr_normalizer import normalize_ocr_record
+    from ocr.ocr_normalizer import normalize_ocr_record, merge_same_balloon_fragments_before_translation
 
-    texts = [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
+    texts = merge_same_balloon_fragments_before_translation(
+        [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
+    )
     if not texts:
         if progress_callback:
             progress_callback(page_idx + 1, total, f"Pagina {page_idx + 1}: sem texto")
@@ -2836,6 +2882,7 @@ def _translate_google_single_page(
             locked_final,
             tipo,
         )
+        locked_final, prefix_cleanup_flags = _repair_translation_after_source_prefix_cleanup(texts[index], locked_final)
         missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
         if missing_protected_terms:
             protection_flags = _merge_qa_flags(protection_flags, ["unrestored_placeholder"])
@@ -2852,6 +2899,7 @@ def _translate_google_single_page(
             ["entity_suspect"] if source_repairs[index] else [],
             protection_flags,
             mojibake_flags,
+            prefix_cleanup_flags,
             _translation_quality_flags(repaired_sources[index] or original, locked_final, idioma_origem),
         )
         if _should_preserve_untranslated_kana_sfx(repaired_sources[index] or original, locked_final, idioma_origem):
@@ -3001,9 +3049,11 @@ def _translate_with_ollama(
     translated_pages = []
     history_tail: list[dict] = []
     for page_idx, ocr_page in enumerate(ocr_results):
-        from ocr.ocr_normalizer import normalize_ocr_record
+        from ocr.ocr_normalizer import normalize_ocr_record, merge_same_balloon_fragments_before_translation
 
-        texts = [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
+        texts = merge_same_balloon_fragments_before_translation(
+            [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
+        )
         if not texts:
             translated_pages.append({"texts": []})
             if progress_callback:
@@ -3177,6 +3227,7 @@ def _translate_with_ollama(
                 locked_final,
                 tipo,
             )
+            locked_final, prefix_cleanup_flags = _repair_translation_after_source_prefix_cleanup(text_data, locked_final)
             missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
             if missing_protected_terms:
                 protection_flags = _merge_qa_flags(protection_flags, ["unrestored_placeholder"])
@@ -3187,6 +3238,7 @@ def _translate_with_ollama(
                 ["entity_suspect"] if entity_repairs else [],
                 protection_flags,
                 mojibake_flags,
+                prefix_cleanup_flags,
                 _translation_quality_flags(repaired_source or original, locked_final, idioma_origem),
             )
             glossary_hits = list(glossary_hits)

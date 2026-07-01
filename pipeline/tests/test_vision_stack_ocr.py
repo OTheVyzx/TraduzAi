@@ -36,6 +36,7 @@ class VisionStackOCRTests(unittest.TestCase):
         paddle_module = types.ModuleType("paddle")
         paddle_base_module = types.ModuleType("paddle.base")
         libpaddle_module = types.ModuleType("paddle.base.libpaddle")
+        paddle_module.device = SimpleNamespace(is_compiled_with_cuda=lambda: True)
         paddle_module.__path__ = []
         paddle_base_module.__path__ = []
         paddle_module.base = paddle_base_module
@@ -416,7 +417,7 @@ class VisionStackOCRTests(unittest.TestCase):
         self.assertEqual(records[0]["text"], "HELLO")
         self.assertEqual(records[0]["source_bbox"], [10, 10, 70, 34])
 
-    def test_load_paddle_ocr_falls_back_to_easyocr_when_paddle_is_unavailable(self):
+    def test_load_paddle_ocr_fails_closed_when_paddle_is_unavailable(self):
         engine = OCREngine.__new__(OCREngine)
         engine.model_name = "paddleocr"
         engine.lang = "en"
@@ -433,10 +434,70 @@ class VisionStackOCRTests(unittest.TestCase):
             if name == "paddleocr"
             else original_import(name, *args, **kwargs),
         ):
+            with self.assertRaisesRegex(RuntimeError, "PaddleOCR"):
+                OCREngine._load_paddle_ocr(engine)
+
+        self.assertEqual(engine.model_name, "paddleocr")
+        load_easyocr.assert_not_called()
+
+    def test_load_paddle_ocr_forces_gpu_when_gpu_is_required(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine.model_name = "paddleocr"
+        engine.lang = "en"
+        engine.device = type("Device", (), {"type": "cpu"})()
+        engine.half = False
+        engine.batch_size = 8
+        captured_kwargs = {}
+
+        class FakePaddleOCR:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+        paddleocr_module = types.ModuleType("paddleocr")
+        paddleocr_module.PaddleOCR = FakePaddleOCR
+        paddle_module = types.ModuleType("paddle")
+        paddle_base_module = types.ModuleType("paddle.base")
+        libpaddle_module = types.ModuleType("paddle.base.libpaddle")
+        paddle_module.device = SimpleNamespace(is_compiled_with_cuda=lambda: True)
+        paddle_module.__path__ = []
+        paddle_base_module.__path__ = []
+        paddle_module.base = paddle_base_module
+        paddle_base_module.libpaddle = libpaddle_module
+
+        with patch.dict(
+            sys.modules,
+            {
+                "paddleocr": paddleocr_module,
+                "paddle": paddle_module,
+                "paddle.base": paddle_base_module,
+                "paddle.base.libpaddle": libpaddle_module,
+            },
+        ), patch.dict("os.environ", {"TRADUZAI_REQUIRE_GPU": "1"}, clear=False):
             OCREngine._load_paddle_ocr(engine)
 
-        self.assertEqual(engine.model_name, "easyocr")
-        load_easyocr.assert_called_once()
+        self.assertEqual(engine.device.type, "cuda")
+        self.assertEqual(engine._backend, "paddleocr")
+        self.assertTrue(captured_kwargs["use_gpu"])
+
+    def test_load_paddle_ocr_does_not_fall_back_to_easyocr_when_gpu_is_required(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine.model_name = "paddleocr"
+        engine.lang = "en"
+        engine.device = type("Device", (), {"type": "cpu"})()
+        engine.half = False
+        engine.batch_size = 8
+        original_import = builtins.__import__
+
+        with patch("vision_stack.ocr.OCREngine._load_easyocr") as load_easyocr, patch(
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError(name))
+            if name == "paddle"
+            else original_import(name, *args, **kwargs),
+        ), patch.dict("os.environ", {"TRADUZAI_REQUIRE_GPU": "1"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                OCREngine._load_paddle_ocr(engine)
+
+        load_easyocr.assert_not_called()
 
     def test_load_paddle_ocr_disables_paddle_console_logs_by_default(self):
         engine, captured_kwargs = self._load_paddle_with_fake_modules()
@@ -509,6 +570,33 @@ class PaddleBlockMappingTests(unittest.TestCase):
         self.assertEqual(mapped[0]["text"], "HELLO")
         self.assertEqual(mapped[1]["text"], "")
         self.assertEqual(mapped[2]["text"], "")
+
+    def test_full_page_mapping_preserves_line_texts_for_multiline_block(self):
+        engine = self._engine_with_lines(
+            [
+                (
+                    [[42, 44], [86, 44], [86, 58], [42, 58]],
+                    ("Name", 0.91),
+                ),
+                (
+                    [[34, 72], [112, 72], [112, 86], [34, 86]],
+                    ("Resident", 0.90),
+                ),
+                (
+                    [[18, 88], [154, 88], [154, 102], [18, 102]],
+                    ("registration number", 0.89),
+                ),
+            ]
+        )
+        image = np.full((130, 360, 3), 255, dtype=np.uint8)
+        blocks = [SimpleNamespace(xyxy=(18, 40, 154, 104))]
+
+        mapped = engine._paddle_ocr_full_page_to_blocks(image, blocks)
+
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        self.assertEqual(mapped[0]["text"], "Name Resident registration number")
+        self.assertEqual(mapped[0]["line_texts"], ["Name", "Resident", "registration number"])
 
     def test_full_page_mapping_downscales_large_band_and_restores_coordinates(self):
         captured_shapes = []

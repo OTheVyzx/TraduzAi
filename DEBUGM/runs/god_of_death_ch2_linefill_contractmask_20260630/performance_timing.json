@@ -1,0 +1,237 @@
+{
+  "total_sec": 236.7167,
+  "instrumented_sec": 236.6869,
+  "unattributed_sec": 0.0298,
+  "durations_sec": {
+    "apply_runtime_profile": 0.0002,
+    "build_glossary_report": 0.0002,
+    "build_project_json": 0.3158,
+    "chapter_route_shadow": 0.0001,
+    "cleanup_temp": 0.002,
+    "context_fetch_submit": 0.0006,
+    "context_fetch_wait_merge": 0.0,
+    "copy_original_inputs": 0.0057,
+    "ensure_layer_placeholders": 0.0097,
+    "ensure_mask_evidence_contract": 0.0012,
+    "ensure_render_contract": 0.0004,
+    "ensure_route_action_contract": 0.0009,
+    "evaluate_export_gate": 1.3064,
+    "extract_source": 0.0213,
+    "final_non_bubble_panel_mask_flag_cleanup": 0.002,
+    "final_project_coordinate_audit": 0.0092,
+    "finalize_decision_trace": 0.0455,
+    "hydrate_final_project_render_metadata": 2.8642,
+    "hydrate_project_render_metadata": 0.1894,
+    "late_render_contract_repair": 0.9862,
+    "load_config": 0.0002,
+    "load_corpus": 0.0009,
+    "merge_corpus_context": 0.0,
+    "normalize_final_project_page_space_layers": 0.0358,
+    "normalize_project_render_geometry": 0.0002,
+    "post_rerender_final_visual_contract": 8.2514,
+    "propagate_debug_qa_flags": 0.5713,
+    "rerender_final_project_images": 2.3131,
+    "save_project_json": 0.1621,
+    "strip_run_chapter": 194.4106,
+    "structured_log_summary": 0.0009,
+    "sync_final_page_space_typeset": 0.0248,
+    "sync_inpaint_images": 14.4148,
+    "sync_original_images": 0.1363,
+    "visual_stack_warmup": 10.6031,
+    "write_glossary_report": 0.0004
+  },
+  "events": [
+    {
+      "stage": "load_config",
+      "seconds": 0.0002
+    },
+    {
+      "stage": "apply_runtime_profile",
+      "seconds": 0.0002
+    },
+    {
+      "stage": "load_corpus",
+      "seconds": 0.0009
+    },
+    {
+      "stage": "extract_source",
+      "seconds": 0.0213
+    },
+    {
+      "stage": "copy_original_inputs",
+      "seconds": 0.0057
+    },
+    {
+      "stage": "merge_corpus_context",
+      "seconds": 0.0
+    },
+    {
+      "stage": "context_fetch_submit",
+      "seconds": 0.0006
+    },
+    {
+      "stage": "visual_stack_warmup",
+      "seconds": 10.6031
+    },
+    {
+      "stage": "context_fetch_wait_merge",
+      "seconds": 0.0
+    },
+    {
+      "stage": "strip_run_chapter",
+      "seconds": 194.4106
+    },
+    {
+      "stage": "sync_inpaint_images",
+      "seconds": 14.4148
+    },
+    {
+      "stage": "sync_final_page_space_typeset",
+      "seconds": 0.0248
+    },
+    {
+      "stage": "sync_original_images",
+      "seconds": 0.1363
+    },
+    {
+      "stage": "ensure_layer_placeholders",
+      "seconds": 0.0097
+    },
+    {
+      "stage": "build_project_json",
+      "seconds": 0.3158
+    },
+    {
+      "stage": "normalize_project_render_geometry",
+      "seconds": 0.0002
+    },
+    {
+      "stage": "hydrate_project_render_metadata",
+      "seconds": 0.1894
+    },
+    {
+      "stage": "ensure_route_action_contract",
+      "seconds": 0.0009
+    },
+    {
+      "stage": "ensure_mask_evidence_contract",
+      "seconds": 0.0012
+    },
+    {
+      "stage": "ensure_render_contract",
+      "seconds": 0.0004
+    },
+    {
+      "stage": "propagate_debug_qa_flags",
+      "seconds": 0.5713
+    },
+    {
+      "stage": "chapter_route_shadow",
+      "seconds": 0.0001
+    },
+    {
+      "stage": "build_glossary_report",
+      "seconds": 0.0002
+    },
+    {
+      "stage": "write_glossary_report",
+      "seconds": 0.0004
+    },
+    {
+      "stage": "structured_log_summary",
+      "seconds": 0.0009
+    },
+    {
+      "stage": "normalize_final_project_page_space_layers",
+      "seconds": 0.0358
+    },
+    {
+      "stage": "hydrate_final_project_render_metadata",
+      "seconds": 2.8642
+    },
+    {
+      "stage": "final_project_coordinate_audit",
+      "seconds": 0.0092
+    },
+    {
+      "stage": "rerender_final_project_images",
+      "seconds": 2.3131
+    },
+    {
+      "stage": "final_non_bubble_panel_mask_flag_cleanup",
+      "seconds": 0.002
+    },
+    {
+      "stage": "late_render_contract_repair",
+      "seconds": 0.9862
+    },
+    {
+      "stage": "post_rerender_final_visual_contract",
+      "seconds": 8.2514
+    },
+    {
+      "stage": "evaluate_export_gate",
+      "seconds": 1.3064
+    },
+    {
+      "stage": "save_project_json",
+      "seconds": 0.1621
+    },
+    {
+      "stage": "finalize_decision_trace",
+      "seconds": 0.0455
+    },
+    {
+      "stage": "cleanup_temp",
+      "seconds": 0.002
+    }
+  ],
+  "schema_version": 1,
+  "mode": "auto",
+  "sidecar_path": "performance_timing.json",
+  "strip": {
+    "durations_sec": {
+      "strip_build": 0.3141,
+      "strip_copy_original": 0.0231,
+      "inpainter_prewarm_start": 0.0,
+      "strip_detect_balloons": 6.2501,
+      "strip_group_bands": 0.0003,
+      "strip_attach_band_slices": 0.0446,
+      "strip_debug_dump": 0.0898,
+      "scheduler_plan": 0.0248,
+      "macro_ocr_precompute_wall": 0.0,
+      "koharu_cjk_precompute_wall": 0.0,
+      "strip_process_bands_total": 175.2431,
+      "inpainter_prewarm_close": 0.0,
+      "strip_paste_cleaned": 0.5819,
+      "strip_paste_rendered": 0.5999,
+      "strip_assign_rendered": 0.0097,
+      "assemble_rendered_pages": 0.0238,
+      "assemble_original_pages": 0.0235,
+      "assemble_clean_pages": 0.0231,
+      "remap_band_metadata": 0.0115,
+      "assign_metadata_to_pages": 0.2145,
+      "finalize_page_ocr_metadata": 0.9725,
+      "summarize_band_perf": 0.0022,
+      "attach_page_profiles": 0.0465,
+      "page_cleanup_rerender": 8.6307,
+      "final_page_space_typeset": 0.0,
+      "write_translated_pages": 0.0485
+    },
+    "input_page_count": 6,
+    "strip_width": 800,
+    "strip_height": 78406,
+    "balloon_count": 186,
+    "band_count": 105,
+    "band_margin_px": 160,
+    "wall_total_sec": 194.3293,
+    "output_page_count": 6,
+    "text_count": 88,
+    "internal_unattributed_sec": 1.1511,
+    "main_sync_page_clamp_count": 6,
+    "main_final_page_space_typeset_skipped": true,
+    "main_final_page_space_typeset_skip_reason": "opt_in_disabled",
+    "main_final_page_space_typeset_count": 0,
+    "debug_final_band_crops_refreshed_count": 105
+  }
+}

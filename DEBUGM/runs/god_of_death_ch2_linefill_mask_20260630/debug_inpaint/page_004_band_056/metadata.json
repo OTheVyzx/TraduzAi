@@ -1,0 +1,167 @@
+{
+  "page_number": 4,
+  "band_index": 57,
+  "band_id": "page_004_band_056",
+  "band_y_top": 41116,
+  "text_count": 2,
+  "text_samples": [
+    {
+      "id": "negative_dark_000",
+      "trace_id": "negative_dark_000@page_004_band_056",
+      "band_id": "page_004_band_056",
+      "bbox": [
+        165,
+        9,
+        408,
+        43
+      ],
+      "text_pixel_bbox": [
+        165,
+        9,
+        408,
+        43
+      ],
+      "balloon_bbox": [
+        75,
+        0,
+        498,
+        123
+      ],
+      "bubble_mask_bbox": [
+        75,
+        0,
+        498,
+        123
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "negative_pass_promoted",
+        "dark_bubble_negative_evidence",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_bbox_refined",
+        "visual_text_only_inpaint_contract",
+        "mask_outside_balloon",
+        "mask_outside_balloon_critical",
+        "text_contract_direct_fill",
+        "fast_fill_no_glyph_evidence"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "ocr_pixels",
+        "raw_mask_pixels": 10560,
+        "expanded_mask_pixels": 45342,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    },
+    {
+      "id": "direct_paddle_reocr_001",
+      "trace_id": "direct_paddle_reocr_001@page_004_band_056",
+      "band_id": "page_004_band_056",
+      "bbox": [
+        202,
+        10,
+        546,
+        309
+      ],
+      "text_pixel_bbox": [
+        165,
+        9,
+        408,
+        43
+      ],
+      "balloon_bbox": [
+        75,
+        0,
+        498,
+        123
+      ],
+      "bubble_mask_bbox": [
+        0,
+        0,
+        647,
+        151
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "candidate_crop_direct_paddle_reocr",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "dark_bubble_recovered_text_bbox_floor",
+        "balloon_outline_components_removed",
+        "bubble_clip_preserved_raw_text",
+        "visual_text_only_inpaint_contract",
+        "band_edge_clipped_balloon_mask",
+        "negative_pass_promoted",
+        "dark_bubble_negative_evidence",
+        "dark_bubble_visual_bbox_refined",
+        "mask_outside_balloon",
+        "mask_outside_balloon_critical",
+        "dark_connected_compact_text_bbox_rejected_undercoverage",
+        "dark_connected_missing_glyph_bbox_contract",
+        "band_edge_clipped_text_mask",
+        "text_contract_direct_fill"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "component_bubble_cleaner",
+        "raw_mask_pixels": 126669,
+        "expanded_mask_pixels": 126669,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    }
+  ],
+  "vision_block_samples": [],
+  "pre_recovery_text_samples": [],
+  "initial_empty_recovery_attempts": [],
+  "recovered_initial_empty_vision_blocks_from_texts": false,
+  "remaining_inpaint_blocks": 0,
+  "engine_preset_id": "default",
+  "mask_strategy": "roi_segmentation_assisted",
+  "detector_engine_id": "default",
+  "validated_text_source_bboxes": [],
+  "rejected_text_source_bboxes": [],
+  "fast_fill_mask_pixels": 11021,
+  "raw_mask_pixels": 12570,
+  "expanded_mask_pixels": 12570,
+  "used_real_inpaint": false,
+  "fast_fill_without_raw_mask": false,
+  "used_fast_solid_fill": false,
+  "fast_solid_balloon_count": 0,
+  "fast_solid_white_count": 0,
+  "fast_solid_black_count": 0,
+  "fast_solid_colored_count": 0,
+  "used_fast_white_fill": false,
+  "fast_solid_fill_samples": [],
+  "fast_solid_rejection_reasons": {},
+  "fast_solid_fill_reject_reasons": {},
+  "unsafe_inpaint_block_count": 0,
+  "unsafe_inpaint_block_reasons": {},
+  "unsafe_inpaint_block_samples": [],
+  "connected_white_geometry_fill_count": 0,
+  "connected_white_geometry_fill_mask_pixels": 0,
+  "used_fast_local_fill": false,
+  "used_fast_dark_fill": false,
+  "used_dark_panel_fill": true,
+  "dark_panel_fill_count": 2,
+  "changed_pixels_after_inpaint": 521,
+  "post_cleanup_skipped_reason": "",
+  "changed_pixels_outside_expanded_mask": 0,
+  "changed_pixels_outside_effective_limit_mask": 0,
+  "raw_changed_outside_limit_mask": 0,
+  "cleanup_changed_outside_limit_mask": 0,
+  "final_clamped_outside_expanded_mask_pixels": 0,
+  "final_action_mask_white_cleanup_added_pixels": 0,
+  "flags": [
+    "mask_outside_balloon_critical"
+  ]
+}

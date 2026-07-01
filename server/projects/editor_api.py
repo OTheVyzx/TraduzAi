@@ -173,7 +173,7 @@ def write_mask_png(project_id: str, page_index: int, payload: BitmapPayload, use
 
 @router.post("/pages/{page_index}/actions")
 def run_page_action(project_id: str, page_index: int, payload: PageActionPayload, user: User = Depends(current_user), settings: Settings = Depends(get_settings)):
-    if payload.action not in {"detect", "ocr", "translate", "inpaint", "retypeset", "process-block"}:
+    if payload.action not in {"detect", "detect_boxes", "ocr", "translate", "inpaint", "retypeset", "process-block"}:
         raise HTTPException(status_code=422, detail="acao invalida")
     _require_project_access(project_id, user, settings)
     root = project_root(project_id, settings)

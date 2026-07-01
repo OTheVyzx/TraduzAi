@@ -1,4 +1,5 @@
 import type { PageData, ProcessRegionOverlay, TextEntry } from "./stores/appStore";
+import type { RenderPreviewResult } from "./tauri";
 
 export type PageActionName = "detect" | "detect_boxes" | "ocr" | "translate" | "inpaint";
 export type PageActionChangedAsset = "brush" | "mask" | "inpaint" | "rendered" | "preview" | "project_json";
@@ -63,6 +64,12 @@ export interface EditorBackendApi {
     layer_id?: string | null;
     visible: boolean;
   }): Promise<void>;
+  snapshotImageLayer?(config: {
+    project_path: string;
+    page_index: number;
+    layer_key: string;
+    source_path?: string | null;
+  }): Promise<string | null>;
   updateMaskRegion(config: BitmapRegionConfig): Promise<string>;
   updateBrushRegion(config: BitmapRegionConfig): Promise<string>;
   updateRecoveryRegion(config: BitmapRegionConfig): Promise<string>;
@@ -91,7 +98,7 @@ export interface EditorBackendApi {
     page_index: number;
     page: PageData;
     fingerprint: string;
-  }): Promise<string>;
+  }): Promise<RenderPreviewResult>;
   runPageActionWithOptionalMask(config: {
     project_path: string;
     page_index: number;

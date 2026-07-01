@@ -62,8 +62,11 @@ const LASSO_ENGINE_PRESET_ID = "manga" as const;
 // Chaves de camadas bitmap — "base" é imutável (nunca reescrita pelo brush/inpaint)
 export type BitmapLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" | "rendered" | "preview";
 export type MutableBitmapLayerKey = Exclude<BitmapLayerKey, "base">;
-const EDITOR_MIN_ZOOM = 0.2;
-const EDITOR_MAX_ZOOM = 10;
+export const EDITOR_MIN_ZOOM = 0.05;
+export const EDITOR_MAX_ZOOM = 10;
+export function clampEditorZoom(zoom: number) {
+  return Math.max(EDITOR_MIN_ZOOM, Math.min(EDITOR_MAX_ZOOM, zoom));
+}
 let healingBrushQueue: Promise<void> = Promise.resolve();
 let healingBrushPending = 0;
 
@@ -76,6 +79,7 @@ export interface RenderPreviewCacheEntry {
   status: RenderPreviewStatus;
   path: string | null;
   previewPath: string | null;
+  rendererBackend: string | null;
   generatedAt: number | null;
   error: string | null;
 }
@@ -189,6 +193,13 @@ function normalizeTextLayerOrder(layers: TextEntry[]) {
   return layers.map((layer, index) => ({ ...layer, order: index }));
 }
 
+function orderedMutableImageLayerKeys(page: PageData | null): ImageLayerKey[] {
+  return (Object.entries(page?.image_layers ?? {}) as [ImageLayerKey, NonNullable<PageData["image_layers"]>[ImageLayerKey]][])
+    .filter(([key, layer]) => key !== "base" && !!layer)
+    .sort(([, a], [, b]) => (a?.order ?? 0) - (b?.order ?? 0))
+    .map(([key]) => key);
+}
+
 function syncCurrentPageIntoProject(page: PageData, pageIndex: number) {
   const appStore = useAppStore.getState();
   const project = appStore.project;
@@ -196,6 +207,15 @@ function syncCurrentPageIntoProject(page: PageData, pageIndex: number) {
   const paginas = [...project.paginas];
   paginas[pageIndex] = page;
   appStore.updateProject({ paginas });
+}
+
+async function persistProjectFontAssetsIfNeeded(projectPathValue: string, page: PageData, pageIndex: number) {
+  const project = useAppStore.getState().project;
+  if (!project?.font_assets?.system || Object.keys(project.font_assets.system).length === 0) return;
+  const paginas = [...project.paginas];
+  paginas[pageIndex] = page;
+  const { saveProjectJson } = await getTauriEditorApi();
+  await saveProjectJson({ project_path: projectPathValue, project_json: { ...project, paginas } });
 }
 
 function projectPageKey(project: Project | null, pageIndex: number) {
@@ -494,11 +514,18 @@ function renderPreviewFingerprint(
     recovery: page.image_layers?.recovery,
     text_layers: materializedPage.text_layers.map((layer) => ({
       id: layer.id,
+      tipo: layer.tipo,
+      content_class: layer.content_class,
+      script: layer.script,
+      route_action: layer.route_action,
+      translation_route: layer.translation_route,
       traduzido: layer.traduzido,
       translated: layer.translated,
       bbox: layer.bbox,
       layout_bbox: layer.layout_bbox,
       balloon_bbox: layer.balloon_bbox,
+      qa_flags: layer.qa_flags,
+      sfx: layer.sfx,
       style: layer.estilo ?? layer.style,
       order: layer.order,
       visible: layer.visible ?? true,
@@ -517,6 +544,7 @@ export function getRenderPreviewStateForPage(
       status: "fresh",
       path: renderedPathForPage(page),
       previewPath: null,
+      rendererBackend: null,
       generatedAt: null,
       error: null,
     }
@@ -612,12 +640,18 @@ interface EditorState {
   setBrushSize: (size: number) => void;
   updatePendingEdit: (layerId: string, changes: Partial<TextEntry>) => void;
   updatePendingEstilo: (layerId: string, estiloChanges: Partial<TextEntry["estilo"]>) => void;
+  commitTextBbox: (layerId: string, bbox: Bbox) => ValidationResult;
   commitTextTransform: (layerId: string, before: TextTransformSnapshot, after: TextTransformSnapshot) => ValidationResult;
   currentPageKey: () => string;
   getRenderPreviewState: (pageKey: string) => RenderPreviewCacheEntry;
   markRenderPreviewStale: (pageKey: string) => void;
   markRenderPreviewRendering: (pageKey: string) => void;
-  markRenderPreviewFresh: (pageKey: string, path?: string | null, previewPath?: string | null) => void;
+  markRenderPreviewFresh: (
+    pageKey: string,
+    path?: string | null,
+    previewPath?: string | null,
+    rendererBackend?: string | null,
+  ) => void;
   markRenderPreviewError: (pageKey: string, error: string) => void;
   getStaleRenderPreviewPages: () => number[];
   renderPreviewPage: (pageKey: string) => Promise<void>;
@@ -691,6 +725,16 @@ interface EditorState {
     bbox: Bbox,
     bytes: Uint8Array,
   ) => void;
+  setWorkingImageLayerVisibility: (pageKey: string, layerKey: ImageLayerKey, visible: boolean) => void;
+  setWorkingImageLayerLocked: (pageKey: string, layerKey: ImageLayerKey, locked: boolean) => void;
+  setWorkingImageLayerProps: (
+    pageKey: string,
+    layerKey: ImageLayerKey,
+    patch: { opacity?: number },
+    touchedKeys: ("opacity")[],
+  ) => void;
+  reorderWorkingImageLayers: (pageKey: string, orderedKeys: ImageLayerKey[]) => void;
+  setWorkingImageLayerPath: (pageKey: string, layerKey: ImageLayerKey, path: string | null) => void;
   setWorkingVisibility: (pageKey: string, layerId: string, visible: boolean) => void;
   setWorkingLocked: (pageKey: string, layerId: string, locked: boolean) => void;
   setWorkingPageSnapshot: (pageKey: string, page: PageData) => void;
@@ -752,6 +796,76 @@ interface EditorState {
   addGlossaryEntry: (entry: WorkGlossaryEntry) => void;
   updateGlossaryEntry: (id: string, patch: Partial<WorkGlossaryEntry>) => void;
   removeGlossaryEntry: (id: string) => void;
+}
+
+function pageActionHistoryLabel(action: EditorPageActionName) {
+  switch (action) {
+    case "detect":
+    case "detect_boxes":
+      return "Detectar caixas";
+    case "ocr":
+      return "Refazer OCR";
+    case "translate":
+      return "Traduzir pagina";
+    case "inpaint":
+      return "Limpar fundo";
+    default:
+      return "Processar pagina";
+  }
+}
+
+function blockActionHistoryLabel(mode: "ocr" | "translate" | "inpaint") {
+  switch (mode) {
+    case "ocr":
+      return "Refazer OCR do bloco";
+    case "translate":
+      return "Traduzir bloco";
+    case "inpaint":
+      return "Limpar bloco";
+    default:
+      return "Processar bloco";
+  }
+}
+
+function recordCurrentPageSnapshotCommand(
+  state: EditorState,
+  pageKey: string,
+  beforePage: PageData | null,
+  label: string,
+  commandIdPrefix: string,
+) {
+  const afterPage = state.currentPage ? clonePageSnapshot(state.currentPage) : null;
+  if (!beforePage || !afterPage) return;
+  state.recordEditorCommand({
+    commandId: `${commandIdPrefix}-${crypto.randomUUID()}`,
+    pageKey,
+    createdAt: Date.now(),
+    type: "page-snapshot",
+    label,
+    before: beforePage,
+    after: afterPage,
+  });
+}
+
+function cloneOptionalPageSnapshot(page: PageData | null) {
+  return page ? clonePageSnapshot(page) : null;
+}
+
+async function snapshotImageLayerPath(
+  projectPath: string,
+  pageIndex: number,
+  layerKey: ImageLayerKey,
+  sourcePath: string | null,
+) {
+  if (!sourcePath) return null;
+  const api = await getTauriEditorApi();
+  if (!api.snapshotImageLayer) return sourcePath;
+  return (await api.snapshotImageLayer({
+    project_path: projectPath,
+    page_index: pageIndex,
+    layer_key: layerKey,
+    source_path: sourcePath,
+  })) ?? sourcePath;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -903,6 +1017,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     const materializedPage = materializeWorkingPage(currentPage, pendingSnapshot, structuralSnapshot);
     syncCurrentPageIntoProject(materializedPage, currentPageIndex);
+    await persistProjectFontAssetsIfNeeded(path, materializedPage, currentPageIndex);
     set((state) => ({
       currentPage: state.currentPageIndex === currentPageIndex ? materializedPage : state.currentPage,
       pendingEdits: pruneSavedPendingEdits(state.pendingEdits, pendingSnapshot),
@@ -1066,11 +1181,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
   setToolMode: (mode) => set({ toolMode: mode }),
   toggleOverlays: () => set((state) => ({ showOverlays: !state.showOverlays })),
-  setZoom: (zoom) => set({ zoom: Math.max(EDITOR_MIN_ZOOM, Math.min(EDITOR_MAX_ZOOM, zoom)) }),
+  setZoom: (zoom) => set({ zoom: clampEditorZoom(zoom) }),
   zoomIn: () =>
-    set((state) => ({ zoom: Math.max(EDITOR_MIN_ZOOM, Math.min(EDITOR_MAX_ZOOM, state.zoom + 0.15)) })),
+    set((state) => ({ zoom: clampEditorZoom(state.zoom + 0.15) })),
   zoomOut: () =>
-    set((state) => ({ zoom: Math.max(EDITOR_MIN_ZOOM, Math.min(EDITOR_MAX_ZOOM, state.zoom - 0.15)) })),
+    set((state) => ({ zoom: clampEditorZoom(state.zoom - 0.15) })),
   setPan: (offset) => set({ panOffset: offset }),
   resetViewport: () => set({ zoom: 1, panOffset: { x: 0, y: 0 } }),
   setBrushSize: (brushSize) => set({ brushSize: Math.max(4, Math.min(160, brushSize)) }),
@@ -1106,11 +1221,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     const page = get().currentPage;
     if (page && get().currentPageIndex === selection.pageIndex) {
-      const updatedPage = updateMaskLayerForSelection(page, absolutePath);
-      syncCurrentPageIntoProject(updatedPage, selection.pageIndex);
-      set({ currentPage: updatedPage });
-      get().bumpBitmapLayerVersion("mask");
-      get().markRenderPreviewStale(get().currentPageKey());
+      get().executeEditorCommand({
+        commandId: `mask-lasso-${crypto.randomUUID()}`,
+        pageKey: get().currentPageKey(),
+        createdAt: Date.now(),
+        type: "bitmap-asset-replace",
+        layerKey: "mask",
+        beforePath: page.image_layers?.mask?.path ?? null,
+        afterPath: absolutePath,
+        bbox: selection.bbox,
+      });
+      set({ activeLassoSelection: null, maskInProgress: null });
     } else {
       set({ activeLassoSelection: null });
     }
@@ -1120,22 +1241,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setEraserTarget: (target) => set({ eraserTarget: target }),
   clearMask: async () => {
     const path = projectPath();
-    const { currentPageIndex, bumpBitmapLayerVersion } = get();
+    const { currentPageIndex } = get();
     if (!path) return;
     const { writeMaskFromPng } = await getTauriEditorApi();
-    const blank = document.createElement("canvas");
-    blank.width = 1;
-    blank.height = 1;
-    const pngData = blank.toDataURL("image/png");
+    const pngData = "data:image/png;base64,";
     try {
-      await writeMaskFromPng({
+      const maskPath = await writeMaskFromPng({
         project_path: path,
         page_index: currentPageIndex,
         png_data: pngData,
         layer_key: "mask",
         op: "replace",
       });
-      bumpBitmapLayerVersion("mask");
+      const page = get().currentPage;
+      if (page) {
+        get().executeEditorCommand({
+          commandId: `mask-clear-${crypto.randomUUID()}`,
+          pageKey: get().currentPageKey(),
+          createdAt: Date.now(),
+          type: "bitmap-asset-replace",
+          layerKey: "mask",
+          beforePath: page.image_layers?.mask?.path ?? null,
+          afterPath: maskPath,
+        });
+      }
     } catch (_e) {
       // silencia falha de limpeza
     }
@@ -1148,17 +1277,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const clamped = Math.max(0, Math.min(1, opacity));
     const existingLayer = page.image_layers?.[key];
     if (!existingLayer) return;
-    const updatedPage: PageData = {
-      ...page,
-      image_layers: {
-        ...page.image_layers,
-        [key]: { ...existingLayer, opacity: clamped },
-      },
-    };
-    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
-    set({ currentPage: updatedPage });
-    get().markDirty();
-    // opacity persiste via Ctrl+S / botão Salvar
+    get().executeEditorCommand({
+      commandId: `image-opacity-${crypto.randomUUID()}`,
+      pageKey: get().currentPageKey(),
+      createdAt: Date.now(),
+      type: "edit-image-layer-props",
+      layerKey: key,
+      before: { opacity: existingLayer.opacity ?? 1 },
+      after: { opacity: clamped },
+      touchedKeys: ["opacity"],
+    });
+    return;
   },
 
   setImageLayerLocked: async (key, locked) => {
@@ -1166,33 +1295,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!page) return;
     const existingLayer = page.image_layers?.[key];
     if (!existingLayer) return;
-    const updatedPage: PageData = {
-      ...page,
-      image_layers: {
-        ...page.image_layers,
-        [key]: { ...existingLayer, locked },
-      },
-    };
-    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
-    set({ currentPage: updatedPage });
-    get().markDirty();
+    get().executeEditorCommand({
+      commandId: `image-lock-${crypto.randomUUID()}`,
+      pageKey: get().currentPageKey(),
+      createdAt: Date.now(),
+      type: "toggle-image-layer-lock",
+      layerKey: key,
+      before: existingLayer.locked ?? false,
+      after: locked,
+    });
+    return;
   },
 
   reorderImageLayers: async (orderedKeys) => {
     const page = get().currentPage;
     if (!page) return;
-    const imageLayers = { ...page.image_layers };
-    orderedKeys.forEach((key, index) => {
-      if (imageLayers[key]) {
-        imageLayers[key] = { ...imageLayers[key]!, order: index };
-      }
+    get().executeEditorCommand({
+      commandId: `image-reorder-${crypto.randomUUID()}`,
+      pageKey: get().currentPageKey(),
+      createdAt: Date.now(),
+      type: "reorder-image-layers",
+      before: orderedMutableImageLayerKeys(page),
+      after: orderedKeys.filter((key) => key !== "base" && !!page.image_layers?.[key]),
     });
-    const updatedPage: PageData = { ...page, image_layers: imageLayers };
-    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
-    set({ currentPage: updatedPage });
-    get().markDirty();
-    get().markRenderStale();
-    get().scheduleAutoFidelityRender();
+    return;
   },
 
   generateLayerThumbnail: async (key) => {
@@ -1300,6 +1426,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().scheduleAutoFidelityRender();
   },
 
+  commitTextBbox: (layerId, bbox) => {
+    const pageKey = get().currentPageKey();
+    const layer = get().getLayer(pageKey, layerId);
+    if (!layer) return { ok: false, reason: "camada nao encontrada" };
+    const before = layer.layout_bbox ?? layer.bbox;
+    if (sameBbox(before, bbox)) return { ok: false, reason: "no-op" };
+    get().setWorkingBbox(pageKey, layerId, bbox);
+    const result = get().recordEditorCommand({
+      commandId: `edit-bbox-${crypto.randomUUID()}`,
+      pageKey,
+      createdAt: Date.now(),
+      type: "edit-bbox",
+      layerId,
+      before,
+      after: bbox,
+    });
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
+    return result;
+  },
+
   commitTextTransform: (layerId, before, after) => {
     const pageKey = get().currentPageKey();
     if (!pageKey) return { ok: false, reason: "pagina invalida" };
@@ -1375,6 +1522,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             ...current,
             fingerprint: renderPreviewFingerprint(state.currentPage, state.pendingEdits, state.pendingStructuralEdits),
             status: "stale",
+            rendererBackend: current.rendererBackend,
             error: null,
           },
         },
@@ -1393,6 +1541,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             ...current,
             fingerprint: renderPreviewFingerprint(state.currentPage, state.pendingEdits, state.pendingStructuralEdits),
             status: "rendering",
+            rendererBackend: current.rendererBackend,
             error: null,
           },
         },
@@ -1400,7 +1549,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
 
-  markRenderPreviewFresh: (pageKey, path, previewPath) => {
+  markRenderPreviewFresh: (pageKey, path, previewPath, rendererBackend) => {
     if (!pageKey) return;
     set((state) => {
       const current = getRenderPreviewStateForPage(pageKey, state.currentPage, state.renderPreviewCacheByPageKey);
@@ -1413,6 +1562,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             status: "fresh",
             path: path ?? renderedPathForPage(state.currentPage),
             previewPath: previewPath ?? null,
+            rendererBackend: rendererBackend ?? current.rendererBackend,
             generatedAt: Date.now(),
             error: null,
           },
@@ -1432,6 +1582,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             ...current,
             fingerprint: renderPreviewFingerprint(state.currentPage, state.pendingEdits, state.pendingStructuralEdits),
             status: "error",
+            rendererBackend: current.rendererBackend,
             error,
           },
         },
@@ -1464,6 +1615,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           status: "rendering",
           path: renderedPathForPage(page),
           previewPath: state.renderPreviewCacheByPageKey[pageKey]?.previewPath ?? null,
+          rendererBackend: state.renderPreviewCacheByPageKey[pageKey]?.rendererBackend ?? null,
           generatedAt: state.renderPreviewCacheByPageKey[pageKey]?.generatedAt ?? null,
           error: null,
         },
@@ -1472,7 +1624,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     try {
       const { renderPreviewPage: renderPreviewPageCommand } = await getTauriEditorApi();
-      const previewPath = await renderPreviewPageCommand({
+      const preview = await renderPreviewPageCommand({
         project_path: path,
         page_index: pageIndex,
         page,
@@ -1485,7 +1637,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             fingerprint,
             status: "fresh",
             path: renderedPathForPage(page),
-            previewPath,
+            previewPath: preview.output_path,
+            rendererBackend: preview.renderer_backend,
             generatedAt: Date.now(),
             error: null,
           },
@@ -1501,6 +1654,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             status: "error",
             path: renderedPathForPage(page),
             previewPath: state.renderPreviewCacheByPageKey[pageKey]?.previewPath ?? null,
+            rendererBackend: state.renderPreviewCacheByPageKey[pageKey]?.rendererBackend ?? null,
             generatedAt: state.renderPreviewCacheByPageKey[pageKey]?.generatedAt ?? null,
             error: message,
           },
@@ -1519,13 +1673,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().markRenderPreviewRendering(pageKey);
     try {
       const { renderPreviewPage: renderPreviewPageCommand } = await getTauriEditorApi();
-      const previewPath = await renderPreviewPageCommand({
+      const preview = await renderPreviewPageCommand({
         project_path: path,
         page_index: currentPageIndex,
         page: materializedPage,
         fingerprint: previewCacheKey(fingerprint),
       });
-      get().markRenderPreviewFresh(pageKey, renderedPathForPage(currentPage), previewPath);
+      get().markRenderPreviewFresh(
+        pageKey,
+        renderedPathForPage(currentPage),
+        preview.output_path,
+        preview.renderer_backend,
+      );
       set({ lastRetypesetTime: Date.now(), viewMode: "translated" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1602,6 +1761,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return;
       }
     }
+    const pageKey = get().currentPageKey();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ activePageAction: action, pageActionError: null });
     console.log(`[EditorAction] start  ${action} page=${pageIndex}`);
     try {
@@ -1624,6 +1785,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (action === "inpaint") {
         set({ maskInProgress: null });
       }
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, pageActionHistoryLabel(action), `page-action-${action}`);
       console.log(
         `[EditorAction] success ${action} page=${pageIndex} changed=${result.changed_assets.join(",")}`,
       );
@@ -1653,6 +1815,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
 
+    const pageKey = get().currentPageKey();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ activePageAction: action, pageActionError: null });
     try {
       const { runPageActionWithOptionalMask, writeMaskFromPng } = await getTauriEditorApi();
@@ -1690,6 +1854,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
       get().markRenderPreviewStale(get().currentPageKey());
       set({ activeLassoSelection: null });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, pageActionHistoryLabel(action), `lasso-action-${action}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ pageActionError: { action, message } });
@@ -1971,6 +2136,145 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     get().markRenderPreviewStale(pageKey);
   },
 
+  setWorkingImageLayerVisibility: (pageKey, layerKey, visible) => {
+    if (pageKey !== get().currentPageKey()) return;
+    set((state) => {
+      if (!state.currentPage) return {};
+      const existing = state.currentPage.image_layers?.[layerKey];
+      const updatedPage: PageData = {
+        ...state.currentPage,
+        image_layers: {
+          ...state.currentPage.image_layers,
+          [layerKey]: {
+            key: layerKey,
+            path: existing?.path ?? null,
+            visible,
+            locked: existing?.locked ?? false,
+            opacity: existing?.opacity,
+            order: existing?.order,
+            technical: existing?.technical,
+          },
+        },
+      };
+      syncCurrentPageIntoProject(updatedPage, state.currentPageIndex);
+      return { currentPage: updatedPage };
+    });
+    get().markDirty();
+    get().markRenderPreviewStale(pageKey);
+  },
+
+  setWorkingImageLayerLocked: (pageKey, layerKey, locked) => {
+    if (pageKey !== get().currentPageKey()) return;
+    set((state) => {
+      if (!state.currentPage) return {};
+      const existing = state.currentPage.image_layers?.[layerKey];
+      const updatedPage: PageData = {
+        ...state.currentPage,
+        image_layers: {
+          ...state.currentPage.image_layers,
+          [layerKey]: {
+            key: layerKey,
+            path: existing?.path ?? null,
+            visible: existing?.visible ?? true,
+            locked,
+            opacity: existing?.opacity,
+            order: existing?.order,
+            technical: existing?.technical,
+          },
+        },
+      };
+      syncCurrentPageIntoProject(updatedPage, state.currentPageIndex);
+      return { currentPage: updatedPage };
+    });
+    get().markDirty();
+  },
+
+  setWorkingImageLayerProps: (pageKey, layerKey, patch, touchedKeys) => {
+    if (pageKey !== get().currentPageKey()) return;
+    set((state) => {
+      if (!state.currentPage) return {};
+      const existing = state.currentPage.image_layers?.[layerKey];
+      const next = {
+        key: layerKey,
+        path: existing?.path ?? null,
+        visible: existing?.visible ?? true,
+        locked: existing?.locked ?? false,
+        opacity: existing?.opacity,
+        order: existing?.order,
+        technical: existing?.technical,
+      };
+      for (const key of touchedKeys) {
+        next[key] = patch[key];
+      }
+      const updatedPage: PageData = {
+        ...state.currentPage,
+        image_layers: {
+          ...state.currentPage.image_layers,
+          [layerKey]: next,
+        },
+      };
+      syncCurrentPageIntoProject(updatedPage, state.currentPageIndex);
+      return { currentPage: updatedPage };
+    });
+    get().markDirty();
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
+  },
+
+  reorderWorkingImageLayers: (pageKey, orderedKeys) => {
+    if (pageKey !== get().currentPageKey()) return;
+    set((state) => {
+      if (!state.currentPage) return {};
+      const imageLayers = { ...state.currentPage.image_layers };
+      orderedKeys.forEach((key, index) => {
+        if (key === "base") return;
+        const existing = imageLayers[key];
+        imageLayers[key] = {
+          key,
+          path: existing?.path ?? null,
+          visible: existing?.visible ?? true,
+          locked: existing?.locked ?? false,
+          opacity: existing?.opacity,
+          order: index,
+          technical: existing?.technical,
+        };
+      });
+      const updatedPage: PageData = { ...state.currentPage, image_layers: imageLayers };
+      syncCurrentPageIntoProject(updatedPage, state.currentPageIndex);
+      return { currentPage: updatedPage };
+    });
+    get().markDirty();
+    get().markRenderStale();
+    get().scheduleAutoFidelityRender();
+  },
+
+  setWorkingImageLayerPath: (pageKey, layerKey, path) => {
+    if (pageKey !== get().currentPageKey()) return;
+    set((state) => {
+      if (!state.currentPage) return {};
+      const existing = state.currentPage.image_layers?.[layerKey];
+      const updatedPage: PageData = {
+        ...state.currentPage,
+        image_layers: {
+          ...state.currentPage.image_layers,
+          [layerKey]: {
+            key: layerKey,
+            path,
+            visible: existing?.visible ?? true,
+            locked: existing?.locked ?? false,
+            opacity: existing?.opacity,
+            order: existing?.order,
+            technical: existing?.technical,
+          },
+        },
+      };
+      syncCurrentPageIntoProject(updatedPage, state.currentPageIndex);
+      return { currentPage: updatedPage };
+    });
+    if (layerKey !== "base") get().bumpBitmapLayerVersion(layerKey as MutableBitmapLayerKey);
+    get().markRenderPreviewStale(pageKey);
+  },
+
   setWorkingVisibility: (pageKey, layerId, visible) => {
     const shouldMarkStale =
       pageKey === get().currentPageKey() &&
@@ -2191,6 +2495,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
     }
 
+    const materializedPage = materializeWorkingPage(currentPage, pendingSnapshot, structuralSnapshot);
+    await persistProjectFontAssetsIfNeeded(path, materializedPage, currentPageIndex);
+
     set((state) => ({
       pendingEdits: pruneSavedPendingEdits(state.pendingEdits, pendingSnapshot),
       pendingStructuralEdits: structuralEditsEqual(state.pendingStructuralEdits, structuralSnapshot)
@@ -2257,23 +2564,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       layer_key: layerKey,
       visible: !(layer?.visible ?? false),
     });
-    const updatedPage: PageData = {
-      ...page,
-      image_layers: {
-        ...page.image_layers,
-        [layerKey]: {
-          key: layerKey,
-          path: layer?.path ?? null,
-          visible: !(layer?.visible ?? false),
-          locked: layer?.locked ?? false,
-        },
-      },
-    };
-    syncCurrentPageIntoProject(updatedPage, get().currentPageIndex);
-    set({ currentPage: updatedPage });
-    if (layerKey === "inpaint" || layerKey === "mask" || layerKey === "brush" || layerKey === "recovery") {
-      get().markRenderPreviewStale(get().currentPageKey());
-    }
+    get().executeEditorCommand({
+      commandId: `image-visible-${crypto.randomUUID()}`,
+      pageKey: get().currentPageKey(),
+      createdAt: Date.now(),
+      type: "toggle-image-layer-visibility",
+      layerKey,
+      before: layer?.visible ?? false,
+      after: !(layer?.visible ?? false),
+    });
+    return;
   },
 
   createTextLayer: async (bbox) => {
@@ -2387,6 +2687,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return;
     }
 
+    const visibleLayerKey = layerKey === "recovery" || layerKey === "reinpaint" ? "inpaint" : layerKey;
+    const originalVisiblePath = page.image_layers?.[visibleLayerKey]?.path ?? null;
+    const beforeSnapshotPath = !optimisticPath
+      ? await snapshotImageLayerPath(path, targetPageIndex, visibleLayerKey, originalVisiblePath)
+      : null;
     const { updateBrushRegion, updateMaskRegion, updateRecoveryRegion, updateReinpaintRegion } =
       await getTauriEditorApi();
     const fn =
@@ -2414,8 +2719,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       clip_mask_png: clipMaskPng,
       dirty_bbox: dirty_bbox ?? strokeDirtyBBox(strokes, brushSize, width, height),
     });
+    const afterSnapshotPath = !optimisticPath
+      ? await snapshotImageLayerPath(path, targetPageIndex, visibleLayerKey, absolutePath)
+      : null;
 
-    const visibleLayerKey = layerKey === "recovery" || layerKey === "reinpaint" ? "inpaint" : layerKey;
     const latestProject = useAppStore.getState().project;
     if (projectPageKey(latestProject, targetPageIndex) !== targetPageKey) return;
     const stillActiveTarget = get().currentPageIndex === targetPageIndex && get().currentPageKey() === targetPageKey;
@@ -2451,6 +2758,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return;
     }
     const pageForUpdate = livePage ?? page;
+    const previousVisiblePath = pageForUpdate.image_layers?.[visibleLayerKey]?.path ?? null;
     const updatedPage: PageData = {
       ...pageForUpdate,
       image_layers: {
@@ -2483,6 +2791,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         lastRetypesetTime: Date.now(),
       });
       get().bumpBitmapLayerVersion(visibleLayerKey as MutableBitmapLayerKey);
+      const historyBeforePath = beforeSnapshotPath ?? previousVisiblePath;
+      const historyAfterPath = afterSnapshotPath ?? absolutePath;
+      if (!optimisticPath && historyBeforePath !== historyAfterPath) {
+        get().recordEditorCommand({
+          commandId: `bitmap-asset-${crypto.randomUUID()}`,
+          pageKey: targetPageKey,
+          createdAt: Date.now(),
+          type: "bitmap-asset-replace",
+          layerKey: visibleLayerKey,
+          beforePath: historyBeforePath,
+          afterPath: historyAfterPath,
+          bbox: dirty_bbox,
+        });
+      }
     }
     markTargetRenderPreviewStale(updatedPage);
   },
@@ -2530,13 +2852,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!livePage) return;
       const beforePath = result.before_inpaint_path ?? previousPath ?? "";
       const afterPath = result.inpaint_path;
+      const afterSnapshotPath =
+        (await snapshotImageLayerPath(path, targetPageIndex, "inpaint", afterPath)) ?? afterPath;
       const commandId = `bitmap-${crypto.randomUUID()}`;
       bitmapCache.set(commandId, {
         pageKey: targetPageKey,
         commandId,
         before: new TextEncoder().encode(beforePath),
-        after: new TextEncoder().encode(afterPath),
-        byteLength: beforePath.length + afterPath.length,
+        after: new TextEncoder().encode(afterSnapshotPath),
+        byteLength: beforePath.length + afterSnapshotPath.length,
       });
 
       const updatedPage: PageData = {
@@ -2609,6 +2933,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!path) return;
     const pageKey = get().currentPageKey();
     await get().commitEdits();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ isRetypesetting: true });
     try {
       const { retypesetPage } = await getTauriEditorApi();
@@ -2620,6 +2945,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
       get().bumpBitmapLayerVersion("rendered");
       set({ lastRetypesetTime: Date.now(), viewMode: "translated", showOverlays: true });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, "Renderizar pagina", "retypeset-page");
     } finally {
       set({ isRetypesetting: false });
     }
@@ -2631,6 +2957,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!path || !selectedLayerId) return;
 
     await get().commitEdits();
+    const pageKey = get().currentPageKey();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ isRetypesetting: true });
     try {
       const { processBlock } = await getTauriEditorApi();
@@ -2644,6 +2972,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(get().currentPageKey(), renderedPathForPage(get().currentPage));
       set({ lastRetypesetTime: Date.now() });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, blockActionHistoryLabel(mode), `process-block-${mode}`);
     } finally {
       set({ isRetypesetting: false });
     }
@@ -2657,6 +2986,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const layer = currentPage.text_layers.find((l: TextEntry) => l.id === selectedLayerId);
     if (!layer) return;
 
+    const pageKey = get().currentPageKey();
+    const beforePage = clonePageSnapshot(currentPage);
     // Reset layout fields to force independent rendering
     const { patchEditorTextLayer } = await getTauriEditorApi();
     await patchEditorTextLayer({
@@ -2675,6 +3006,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
 
     await get().loadCurrentPage();
+    recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, "Desconectar bloco", "disconnect-block");
   },
 
   reinpaintCurrentPage: async () => {
@@ -2682,6 +3014,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!path) return;
     const pageKey = get().currentPageKey();
     await get().commitEdits();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ isReinpainting: true });
     try {
       const { reinpaintPage } = await getTauriEditorApi();
@@ -2693,6 +3026,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get().markRenderPreviewStale(pageKey);
       get().bumpBitmapLayerVersion("inpaint");
       set({ lastRetypesetTime: Date.now(), viewMode: "inpainted" });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, "Repintar pagina", "reinpaint-page");
     } finally {
       set({ isReinpainting: false });
     }
@@ -2702,6 +3036,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const path = projectPath();
     if (!path) return;
     const pageKey = get().currentPageKey();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ isRetypesetting: true });
     try {
       const { detectPage } = await getTauriEditorApi();
@@ -2718,6 +3053,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         showOverlays: true,
         selectedLayerId: null,
       });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, "Detectar caixas", "detect-page");
     } finally {
       set({ isRetypesetting: false });
     }
@@ -2727,6 +3063,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const path = projectPath();
     if (!path) return;
     const pageKey = get().currentPageKey();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ isRetypesetting: true });
     try {
       const { ocrPage } = await getTauriEditorApi();
@@ -2738,6 +3075,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
       set({ lastRetypesetTime: Date.now(), viewMode: "translated", showOverlays: true });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, "Refazer OCR", "ocr-page");
     } finally {
       set({ isRetypesetting: false });
     }
@@ -2747,6 +3085,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const path = projectPath();
     if (!path) return;
     const pageKey = get().currentPageKey();
+    const beforePage = cloneOptionalPageSnapshot(get().currentPage);
     set({ isRetypesetting: true });
     try {
       const { translatePage } = await getTauriEditorApi();
@@ -2758,6 +3097,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       await get().loadCurrentPage();
       get().markRenderPreviewFresh(pageKey, renderedPathForPage(get().currentPage));
       set({ lastRetypesetTime: Date.now(), viewMode: "translated", showOverlays: true });
+      recordCurrentPageSnapshotCommand(get(), pageKey, beforePage, "Traduzir pagina", "translate-page");
     } finally {
       set({ isRetypesetting: false });
     }

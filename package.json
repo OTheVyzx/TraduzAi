@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/run-vite.mjs",
+    "dev:tauri": "npm run build && node scripts/run-vite.mjs preview --host 127.0.0.1 --port 1420",
     "check": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",

@@ -1,8 +1,8 @@
-import { BUNDLE_FONTS, registerImportedFont, registerRemoteFont, type FontEntry } from "./fonts";
+import { BUNDLE_FONTS, ensureEditorFontLoaded, registerImportedFont, registerRemoteFont, type FontEntry } from "./fonts";
 import { GOOGLE_FONTS_CATALOG, type GoogleFontCatalogEntry } from "./googleFontsCatalog";
-import type { CacheGoogleFontInput, GoogleFontSearchResult } from "./tauri";
+import type { CacheGoogleFontInput, GoogleFontSearchResult, SystemFontInfo } from "./tauri";
 
-export type EditorFontCatalogSource = "bundle" | "google";
+export type EditorFontCatalogSource = "bundle" | "google" | "system";
 
 export interface EditorFontOption {
   label: string;
@@ -13,6 +13,8 @@ export interface EditorFontOption {
   variants: string[];
   variant?: string;
   downloadUrl?: string;
+  localPath?: string;
+  style?: string;
 }
 
 export interface EditorFontGroup {
@@ -24,6 +26,7 @@ export interface EditorFontGroup {
 const GROUP_LABELS: Record<EditorFontCatalogSource, string> = {
   bundle: "Embutidas",
   google: "Google Fonts",
+  system: "Sistema",
 };
 
 function filenameFromPath(path: string): string {
@@ -89,6 +92,24 @@ export function googleFontSearchResultToOption(result: GoogleFontSearchResult): 
   };
 }
 
+export function isSystemFontValue(value: string): boolean {
+  return /^SystemFont__.+__.+\.(?:ttf|otf)$/i.test(value.trim());
+}
+
+export function systemFontInfoToOption(font: SystemFontInfo): EditorFontOption {
+  return {
+    label: font.family,
+    value: font.filename,
+    cssFamily: font.family,
+    source: "system",
+    groupLabel: GROUP_LABELS.system,
+    variants: [font.weight || "400"],
+    variant: font.weight || "400",
+    localPath: font.path,
+    style: font.style || "normal",
+  };
+}
+
 export function buildEditorFontCatalog({
   bundleFonts = BUNDLE_FONTS,
   googleFonts = GOOGLE_FONTS_CATALOG,
@@ -143,29 +164,45 @@ function normalizeFontSearchQuery(query: string): string {
 
 function optionMatchesSearch(option: EditorFontOption, normalizedQuery: string): boolean {
   const haystack = normalizeFontSearchQuery(`${option.label} ${option.cssFamily} ${option.value}`);
-  return haystack.includes(normalizedQuery);
+  const compactHaystack = haystack.replace(/\s+/g, "");
+  const compactQuery = normalizedQuery.replace(/\s+/g, "");
+  return haystack.includes(normalizedQuery) || (!!compactQuery && compactHaystack.includes(compactQuery));
 }
 
 export function searchEditorFontGroups(query: string): EditorFontGroup[] {
   const normalizedQuery = normalizeFontSearchQuery(query);
   if (!normalizedQuery) return listEditorFontGroups();
 
-  const googleOptions = buildEditorFontCatalog()
-    .filter((option) => option.source === "google")
-    .filter((option) => optionMatchesSearch(option, normalizedQuery));
-
-  if (googleOptions.length === 0) return [];
-  return [
-    {
-      label: GROUP_LABELS.google,
-      source: "google",
-      options: googleOptions,
-    },
-  ];
+  const options = buildEditorFontCatalog().filter((option) => optionMatchesSearch(option, normalizedQuery));
+  return (["bundle", "google"] as const)
+    .map((source) => ({
+      label: GROUP_LABELS[source],
+      source,
+      options: options.filter((option) => option.source === source),
+    }))
+    .filter((group) => group.options.length > 0);
 }
 
 export function findEditorFontOption(value: string): EditorFontOption | null {
-  return buildEditorFontCatalog().find((option) => option.value === value) ?? null;
+  const catalogOption = buildEditorFontCatalog().find((option) => option.value === value);
+  if (catalogOption) return catalogOption;
+  if (isSystemFontValue(value)) {
+    const label = value
+      .replace(/^SystemFont__/i, "")
+      .replace(/__[^.]+\.(?:ttf|otf)$/i, "")
+      .replace(/_/g, " ");
+    return {
+      label,
+      value,
+      cssFamily: label,
+      source: "system",
+      groupLabel: GROUP_LABELS.system,
+      variants: ["400"],
+      variant: "400",
+      style: "normal",
+    };
+  }
+  return null;
 }
 
 function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -174,7 +211,24 @@ function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 export async function ensureEditorFontOptionReady(value: string | EditorFontOption): Promise<EditorFontOption | null> {
   const option = typeof value === "string" ? findEditorFontOption(value) : value;
-  if (!option || option.source !== "google") return option;
+  if (!option) return option;
+  if (option.source === "system") {
+    const { resolveSystemFont } = await import("./tauri");
+    const font = await resolveSystemFont(option.value);
+    if (!font) throw new Error(`Fonte do sistema nao encontrada: ${option.label}`);
+    const weight = font.weight === "700" ? "700" : "400";
+    const style = font.style === "italic" ? "italic" : "normal";
+    try {
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const bytes = await readFile(font.path);
+      await registerImportedFont(font.family, bytesToArrayBuffer(bytes), weight, style);
+    } catch (error) {
+      console.warn("[fonts] falha ao registrar fonte do sistema por arquivo; usando fallback CSS:", error);
+      await ensureEditorFontLoaded(font.family, 32, style);
+    }
+    return { ...option, localPath: font.path, cssFamily: font.family, style, variant: weight };
+  }
+  if (option.source !== "google") return option;
   if (!option.downloadUrl) {
     throw new Error(`Fonte Google sem URL de download: ${option.label}`);
   }

@@ -5,8 +5,8 @@
   "identifier": "com.traduzai.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npm run dev:tauri",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
@@ -28,6 +28,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "../pipeline/studio_lite"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

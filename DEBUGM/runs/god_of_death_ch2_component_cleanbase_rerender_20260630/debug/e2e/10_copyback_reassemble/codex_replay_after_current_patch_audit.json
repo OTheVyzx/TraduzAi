@@ -1,0 +1,11 @@
+{
+  "pages_checked": 2,
+  "pages_rerendered": 2,
+  "rows_checked": 105,
+  "rows_rerendered": 2,
+  "positive_band_base_used": 2,
+  "stale_text_regions_scrubbed": 15,
+  "errors": [],
+  "strip_reassembled_output_rerender_allowed": true,
+  "reason": "late_render_geometry_repair_requires_translated_crop_sync"
+}

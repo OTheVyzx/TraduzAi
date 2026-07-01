@@ -1,4 +1,4 @@
-import type { PageData, Project, TextEntry, TextLayerStyle } from "./stores/appStore";
+import type { ImageLayerKey, PageData, Project, TextEntry, TextLayerStyle } from "./stores/appStore";
 
 export type Bbox = TextEntry["bbox"];
 
@@ -51,6 +51,23 @@ export type NonBatchCommand = BaseCmdMeta &
     | { type: "toggle-lock"; layerId: string; before: boolean; after: boolean }
     | { type: "reorder-layers"; before: string[]; after: string[] }
     | { type: "bitmap-stroke"; layerKey: "brush" | "mask" | "inpaint"; bbox: Bbox }
+    | { type: "toggle-image-layer-visibility"; layerKey: ImageLayerKey; before: boolean; after: boolean }
+    | { type: "toggle-image-layer-lock"; layerKey: ImageLayerKey; before: boolean; after: boolean }
+    | {
+        type: "edit-image-layer-props";
+        layerKey: ImageLayerKey;
+        before: { opacity?: number };
+        after: { opacity?: number };
+        touchedKeys: ("opacity")[];
+      }
+    | { type: "reorder-image-layers"; before: ImageLayerKey[]; after: ImageLayerKey[] }
+    | {
+        type: "bitmap-asset-replace";
+        layerKey: ImageLayerKey;
+        beforePath: string | null;
+        afterPath: string | null;
+        bbox?: Bbox;
+      }
     | { type: "page-snapshot"; label: string; before: PageData; after: PageData }
   );
 
@@ -90,6 +107,16 @@ export interface WorkingStateDraft {
     bbox: Bbox,
     bytes: Uint8Array,
   ): void;
+  setWorkingImageLayerVisibility(pageKey: string, layerKey: ImageLayerKey, visible: boolean): void;
+  setWorkingImageLayerLocked(pageKey: string, layerKey: ImageLayerKey, locked: boolean): void;
+  setWorkingImageLayerProps(
+    pageKey: string,
+    layerKey: ImageLayerKey,
+    patch: { opacity?: number },
+    touchedKeys: ("opacity")[],
+  ): void;
+  reorderWorkingImageLayers(pageKey: string, orderedKeys: ImageLayerKey[]): void;
+  setWorkingImageLayerPath(pageKey: string, layerKey: ImageLayerKey, path: string | null): void;
   setWorkingVisibility(pageKey: string, layerId: string, visible: boolean): void;
   setWorkingLocked(pageKey: string, layerId: string, locked: boolean): void;
   setWorkingPageSnapshot(pageKey: string, page: PageData): void;
@@ -211,6 +238,16 @@ export function validateCommand(
       : { ok: false, reason: "bitmap-stroke sem cache valido" };
   }
 
+  if (
+    cmd.type === "toggle-image-layer-visibility" ||
+    cmd.type === "toggle-image-layer-lock" ||
+    cmd.type === "edit-image-layer-props" ||
+    cmd.type === "reorder-image-layers" ||
+    cmd.type === "bitmap-asset-replace"
+  ) {
+    return { ok: true };
+  }
+
   if (cmd.type === "page-snapshot") {
     return { ok: true };
   }
@@ -275,6 +312,12 @@ export function commandMatchesWorkingState(cmd: EditorCommand, draft: WorkingSta
         ? { ok: true }
         : { ok: false, reason: "bitmap-stroke sem cache valido" };
     }
+    case "toggle-image-layer-visibility":
+    case "toggle-image-layer-lock":
+    case "edit-image-layer-props":
+    case "reorder-image-layers":
+    case "bitmap-asset-replace":
+      return { ok: true };
     case "page-snapshot":
       return pageSnapshotEquals(draft.getWorkingPageSnapshot(cmd.pageKey), cmd.after)
         ? { ok: true }
@@ -313,6 +356,21 @@ export function applyCommand(cmd: EditorCommand, draft: WorkingStateDraft): void
       if (entry) draft.applyWorkingBitmapRegion(cmd.pageKey, cmd.layerKey, cmd.bbox, entry.after);
       break;
     }
+    case "toggle-image-layer-visibility":
+      draft.setWorkingImageLayerVisibility(cmd.pageKey, cmd.layerKey, cmd.after);
+      break;
+    case "toggle-image-layer-lock":
+      draft.setWorkingImageLayerLocked(cmd.pageKey, cmd.layerKey, cmd.after);
+      break;
+    case "edit-image-layer-props":
+      draft.setWorkingImageLayerProps(cmd.pageKey, cmd.layerKey, cmd.after, cmd.touchedKeys);
+      break;
+    case "reorder-image-layers":
+      draft.reorderWorkingImageLayers(cmd.pageKey, cmd.after);
+      break;
+    case "bitmap-asset-replace":
+      draft.setWorkingImageLayerPath(cmd.pageKey, cmd.layerKey, cmd.afterPath);
+      break;
     case "toggle-visibility":
       draft.setWorkingVisibility(cmd.pageKey, cmd.layerId, cmd.after);
       break;
@@ -357,6 +415,21 @@ export function revertCommand(cmd: EditorCommand, draft: WorkingStateDraft): voi
       if (entry) draft.applyWorkingBitmapRegion(cmd.pageKey, cmd.layerKey, cmd.bbox, entry.before);
       break;
     }
+    case "toggle-image-layer-visibility":
+      draft.setWorkingImageLayerVisibility(cmd.pageKey, cmd.layerKey, cmd.before);
+      break;
+    case "toggle-image-layer-lock":
+      draft.setWorkingImageLayerLocked(cmd.pageKey, cmd.layerKey, cmd.before);
+      break;
+    case "edit-image-layer-props":
+      draft.setWorkingImageLayerProps(cmd.pageKey, cmd.layerKey, cmd.before, cmd.touchedKeys);
+      break;
+    case "reorder-image-layers":
+      draft.reorderWorkingImageLayers(cmd.pageKey, cmd.before);
+      break;
+    case "bitmap-asset-replace":
+      draft.setWorkingImageLayerPath(cmd.pageKey, cmd.layerKey, cmd.beforePath);
+      break;
     case "toggle-visibility":
       draft.setWorkingVisibility(cmd.pageKey, cmd.layerId, cmd.before);
       break;
@@ -509,7 +582,15 @@ function isNoOpCommand(cmd: EditorCommand): boolean {
     case "create-layer":
     case "delete-layer":
     case "bitmap-stroke":
+    case "bitmap-asset-replace":
       return false;
+    case "toggle-image-layer-visibility":
+    case "toggle-image-layer-lock":
+      return cmd.before === cmd.after;
+    case "edit-image-layer-props":
+      return cmd.touchedKeys.every((key) => cmd.before[key] === cmd.after[key]);
+    case "reorder-image-layers":
+      return arrayEquals(cmd.before, cmd.after);
     case "page-snapshot":
       return pageSnapshotEquals(cmd.before, cmd.after);
   }

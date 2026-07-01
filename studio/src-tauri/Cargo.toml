@@ -1,0 +1,28 @@
+[package]
+name = "traduzai_studio"
+version = "0.1.0"
+description = "TraduzAI Studio"
+authors = ["TraduzAI"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+dafont = { git = "https://github.com/fcoury/dafont", rev = "a00628cc56bc4831f2b6801504eb0621606a2688" }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

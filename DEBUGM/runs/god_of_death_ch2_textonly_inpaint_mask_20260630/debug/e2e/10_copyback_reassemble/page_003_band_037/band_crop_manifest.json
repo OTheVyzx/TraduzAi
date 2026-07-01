@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_textonly_inpaint_mask",
+  "stage": "copyback_reassemble",
+  "band_id": "page_003_band_037",
+  "source_page_number": 3,
+  "y_top": 26809,
+  "y_bottom": 27314,
+  "coordinate_space": "band",
+  "post_typeset": "09_typeset/page_003_band_037/post_typeset.jpg",
+  "post_copyback": "10_copyback_reassemble/page_003_band_037/post_copyback.jpg"
+}

@@ -97,6 +97,66 @@ class SplitPointMarginTests(unittest.TestCase):
 
 
 class AssembleOutputPagesTests(unittest.TestCase):
+    def test_assemble_preserves_source_page_breaks_when_target_matches_input_count(self):
+        from strip.reassemble import assemble_output_pages
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        strip_img = np.zeros((600, 20, 3), dtype=np.uint8)
+        strip_img[0:100, :, :] = 10
+        strip_img[100:400, :, :] = 80
+        strip_img[400:600, :, :] = 160
+        strip = VerticalStrip(
+            image=strip_img,
+            width=20,
+            height=600,
+            source_page_breaks=[0, 100, 400, 600],
+        )
+
+        output_pages = assemble_output_pages(strip, balloons=[], target_count=3)
+
+        self.assertEqual([(p.y_top, p.y_bottom) for p in output_pages], [(0, 100), (100, 400), (400, 600)])
+        self.assertEqual([p.image.shape[0] for p in output_pages], [100, 300, 200])
+        self.assertTrue(np.all(output_pages[0].image == 10))
+        self.assertTrue(np.all(output_pages[1].image == 80))
+        self.assertTrue(np.all(output_pages[2].image == 160))
+
+    def test_assemble_reflows_source_page_breaks_that_cut_balloon(self):
+        from strip.reassemble import assemble_output_pages
+        from strip.types import Balloon, BBox, VerticalStrip
+        import numpy as np
+
+        strip_img = np.zeros((600, 20, 3), dtype=np.uint8)
+        strip = VerticalStrip(
+            image=strip_img,
+            width=20,
+            height=600,
+            source_page_breaks=[0, 100, 400, 600],
+        )
+        balloons = [Balloon(strip_bbox=BBox(0, 390, 20, 410), confidence=0.9)]
+
+        output_pages = assemble_output_pages(strip, balloons=balloons, target_count=3)
+
+        self.assertEqual([(p.y_top, p.y_bottom) for p in output_pages], [(0, 200), (200, 358), (358, 600)])
+
+    def test_assemble_reflows_when_target_differs_from_input_count(self):
+        from strip.reassemble import assemble_output_pages
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        strip_img = np.zeros((600, 20, 3), dtype=np.uint8)
+        strip = VerticalStrip(
+            image=strip_img,
+            width=20,
+            height=600,
+            source_page_breaks=[0, 100, 400, 600],
+        )
+
+        output_pages = assemble_output_pages(strip, balloons=[], target_count=6)
+
+        self.assertEqual(len(output_pages), 6)
+        self.assertEqual([(p.y_top, p.y_bottom) for p in output_pages], [(0, 100), (100, 200), (200, 300), (300, 400), (400, 500), (500, 600)])
+
     def test_assemble_concatenated_outputs_equal_strip_image(self):
         from strip.reassemble import assemble_output_pages
         from strip.types import VerticalStrip

@@ -1,0 +1,153 @@
+{
+  "page_number": 2,
+  "band_index": 24,
+  "band_id": "page_002_band_023",
+  "band_y_top": 16404,
+  "text_count": 2,
+  "text_samples": [
+    {
+      "id": "ocr_001",
+      "trace_id": "ocr_001@page_002_band_023",
+      "band_id": "page_002_band_023",
+      "bbox": [
+        11,
+        77,
+        492,
+        462
+      ],
+      "text_pixel_bbox": [
+        68,
+        171,
+        491,
+        376
+      ],
+      "balloon_bbox": [
+        11,
+        77,
+        639,
+        480
+      ],
+      "bubble_mask_bbox": [
+        11,
+        77,
+        639,
+        480
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "dark_bubble_visual_bbox_refined",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_full_crop_reocr_replaced",
+        "isolated_side_note_line_polygons_removed",
+        "dark_bubble_sibling_line_polygons_removed",
+        "band_edge_clipped_balloon_mask",
+        "visual_text_only_inpaint_contract",
+        "dark_connected_compact_text_bbox_rejected_undercoverage",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "dark_text_contract_mask_rejected_overbroad"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "ocr_pixels",
+        "raw_mask_pixels": 12067,
+        "expanded_mask_pixels": 30912,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    },
+    {
+      "id": "direct_paddle_reocr_001",
+      "trace_id": "direct_paddle_reocr_001@page_002_band_023",
+      "band_id": "page_002_band_023",
+      "bbox": [
+        426,
+        268,
+        748,
+        379
+      ],
+      "text_pixel_bbox": [
+        426,
+        268,
+        748,
+        379
+      ],
+      "balloon_bbox": [
+        364,
+        117,
+        785,
+        480
+      ],
+      "bubble_mask_bbox": [
+        364,
+        117,
+        785,
+        480
+      ],
+      "bubble_mask_source": "image_dark_bubble_mask",
+      "bubble_mask_error": null,
+      "qa_flags": [
+        "candidate_crop_direct_paddle_reocr",
+        "dark_bubble_oval_reocr",
+        "dark_bubble_ellipse_bbox_mask",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "visual_text_only_inpaint_contract",
+        "text_contract_direct_fill"
+      ],
+      "route_action": "translate_inpaint_render",
+      "mask_evidence": {
+        "kind": "ocr_pixels",
+        "raw_mask_pixels": 6911,
+        "expanded_mask_pixels": 19260,
+        "evidence_score": 1.0,
+        "fast_fill_allowed": true,
+        "fast_fill_reject_reasons": []
+      },
+      "_band_local_bbox_normalized": null
+    }
+  ],
+  "vision_block_samples": [],
+  "pre_recovery_text_samples": [],
+  "initial_empty_recovery_attempts": [],
+  "recovered_initial_empty_vision_blocks_from_texts": false,
+  "remaining_inpaint_blocks": 0,
+  "engine_preset_id": "default",
+  "mask_strategy": "roi_segmentation_assisted",
+  "detector_engine_id": "default",
+  "validated_text_source_bboxes": [],
+  "rejected_text_source_bboxes": [],
+  "fast_fill_mask_pixels": 76343,
+  "raw_mask_pixels": 76581,
+  "expanded_mask_pixels": 76581,
+  "used_real_inpaint": false,
+  "fast_fill_without_raw_mask": false,
+  "used_fast_solid_fill": false,
+  "fast_solid_balloon_count": 0,
+  "fast_solid_white_count": 0,
+  "fast_solid_black_count": 0,
+  "fast_solid_colored_count": 0,
+  "used_fast_white_fill": false,
+  "fast_solid_fill_samples": [],
+  "fast_solid_rejection_reasons": {},
+  "fast_solid_fill_reject_reasons": {},
+  "unsafe_inpaint_block_count": 0,
+  "unsafe_inpaint_block_reasons": {},
+  "unsafe_inpaint_block_samples": [],
+  "connected_white_geometry_fill_count": 0,
+  "connected_white_geometry_fill_mask_pixels": 0,
+  "used_fast_local_fill": false,
+  "used_fast_dark_fill": false,
+  "used_dark_panel_fill": true,
+  "dark_panel_fill_count": 2,
+  "changed_pixels_after_inpaint": 76343,
+  "post_cleanup_skipped_reason": "",
+  "changed_pixels_outside_expanded_mask": 0,
+  "changed_pixels_outside_effective_limit_mask": 0,
+  "raw_changed_outside_limit_mask": 0,
+  "cleanup_changed_outside_limit_mask": 0,
+  "final_clamped_outside_expanded_mask_pixels": 0,
+  "final_action_mask_white_cleanup_added_pixels": 0,
+  "flags": []
+}

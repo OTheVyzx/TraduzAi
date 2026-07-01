@@ -1,6 +1,10 @@
 import json
+import sys
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from main import _save_project_json
 from project_writer import validate_project_consistency, write_project_json_atomic
@@ -96,3 +100,66 @@ def test_editor_save_refreshes_stale_log_summary(tmp_path):
 
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["log"]["summary"]["translated_regions"] == 1
+
+
+def test_project_writer_normalizes_sfx_policies_without_losing_sfx_metadata(tmp_path):
+    path = tmp_path / "project.json"
+    project = {
+        "paginas": [
+            {
+                "text_layers": [
+                    {
+                        "id": "sfx-1",
+                        "tipo": "text",
+                        "content_class": "sfx",
+                        "route_action": "translate_sfx_inpaint_render",
+                        "translate_policy": "translate",
+                        "render_policy": "normal",
+                        "sfx": {"source_text": "\ucff5", "adapted_text": "TUM"},
+                        "qa_flags": [],
+                    }
+                ],
+            }
+        ],
+        "estatisticas": {"total_paginas": 1},
+        "qa": {"summary": {"total": 0}},
+    }
+
+    write_project_json_atomic(path, project)
+
+    layer = json.loads(path.read_text(encoding="utf-8"))["paginas"][0]["text_layers"][0]
+    assert layer["tipo"] == "sfx"
+    assert layer["content_class"] == "sfx"
+    assert layer["translate_policy"] == "adapt_sfx"
+    assert layer["render_policy"] == "sfx_style"
+    assert layer["sfx"]["adapted_text"] == "TUM"
+
+
+def test_project_writer_removes_stale_sfx_policy_from_normal_text(tmp_path):
+    path = tmp_path / "project.json"
+    project = {
+        "paginas": [
+            {
+                "text_layers": [
+                    {
+                        "id": "text-1",
+                        "content_class": "text",
+                        "route_action": "translate_inpaint_render",
+                        "translate_policy": "adapt_sfx",
+                        "render_policy": "sfx_style",
+                        "qa_flags": [],
+                    }
+                ],
+            }
+        ],
+        "estatisticas": {"total_paginas": 1},
+        "qa": {"summary": {"total": 0}},
+    }
+
+    write_project_json_atomic(path, project)
+
+    layer = json.loads(path.read_text(encoding="utf-8"))["paginas"][0]["text_layers"][0]
+    assert layer["tipo"] == "text"
+    assert layer["content_class"] == "text"
+    assert layer["translate_policy"] == "translate"
+    assert layer["render_policy"] == "normal"

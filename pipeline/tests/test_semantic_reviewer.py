@@ -1,6 +1,7 @@
 import unittest
 
 from ocr.semantic_reviewer import semantic_refine_text
+from ocr_legacy.semantic_reviewer import semantic_refine_text as legacy_semantic_refine_text
 
 
 class SemanticReviewerTests(unittest.TestCase):
@@ -19,6 +20,14 @@ class SemanticReviewerTests(unittest.TestCase):
     def test_preserves_high_confidence_abbreviations_and_dotted_titles(self):
         reviewed = semantic_refine_text("Read Dr.Stone at the U.S.A. HQ", tipo="fala", confidence=0.96)
         self.assertEqual(reviewed, "Read Dr.Stone at the U.S.A. HQ")
+
+    def test_preserves_numeric_tokens_in_low_confidence_text(self):
+        reviewed = semantic_refine_text("Hosu 24 years old Unemployed", tipo="text", confidence=0.73)
+        self.assertEqual(reviewed, "Hosu 24 years old Unemployed")
+
+    def test_legacy_preserves_numeric_tokens_in_low_confidence_text(self):
+        reviewed = legacy_semantic_refine_text("Hosu 24 years old Unemployed", tipo="text", confidence=0.73)
+        self.assertEqual(reviewed, "Hosu 24 years old Unemployed")
 
     def test_splits_common_merged_words_before_translation(self):
         reviewed = semantic_refine_text("BYANY MEANS", tipo="narracao", confidence=0.80)

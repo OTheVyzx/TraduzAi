@@ -25,7 +25,10 @@ from translator.translate import (
     _prepare_source_text_for_translation,
     _resolve_translation_backend,
     _review_translation_grammar_semantics,
+    _repair_translation_after_source_prefix_cleanup,
     _should_skip_translation_item,
+    _source_text_before_normalization,
+    _source_text_for_translation,
     _translate_google_parallel_chunks,
     _translation_quality_flags,
     list_supported_google_languages,
@@ -41,15 +44,64 @@ class TranslateContextTests(unittest.TestCase):
         translate_module._google_health_ok = False
         translate_module._google_health_failed_at = {}
 
-    def test_should_skip_translation_item_respects_content_class(self):
-        assert _should_skip_translation_item({"content_class": "tn_note"}) is True
-        assert _should_skip_translation_item({"content_class": "scanlator_credit"}) is True
+    def test_should_skip_translation_item_ignores_legacy_skip_fields(self):
+        assert _should_skip_translation_item({"content_class": "tn_note"}) is False
+        assert _should_skip_translation_item({"content_class": "scanlator_credit"}) is False
+        assert _should_skip_translation_item({"content_class": "noise"}) is False
         assert _should_skip_translation_item({"content_class": "dialogue"}) is False
         assert _should_skip_translation_item({"content_class": "sign"}) is False
+        assert _should_skip_translation_item({"skip_processing": True}) is False
+        assert _should_skip_translation_item({"preserve_original": True}) is False
+        assert _should_skip_translation_item({"translate_policy": "skip_translation"}) is False
         assert _should_skip_translation_item({"route_action": "inpaint_only", "skip_processing": False}) is True
-        assert _should_skip_translation_item({"route_action": "preserve", "skip_processing": False}) is True
+        assert _should_skip_translation_item({"route_action": "preserve", "skip_processing": False}) is False
         assert _should_skip_translation_item({"route_action": "review_required", "skip_processing": False}) is True
         assert _should_skip_translation_item({"route_action": "translate_render_only", "skip_processing": False}) is False
+
+    def test_repair_translation_after_source_prefix_cleanup_removes_stale_dark_lobe_prefix(self):
+        text = {
+            "text": "If you exceed that time, you will return to your original world!",
+            "qa_flags": ["leading_dark_lobe_duplicate_fragment_removed"],
+            "qa_metrics": {
+                "leading_dark_lobe_duplicate_fragment_removed": {
+                    "from": "space is only utes. If you exceed that time, you will return to your original world!",
+                    "to": "If you exceed that time, you will return to your original world!",
+                }
+            },
+        }
+
+        repaired, flags = _repair_translation_after_source_prefix_cleanup(
+            text,
+            "Space is only utes. se voce ultrapassar esse tempo, voce retornara ao seu mundo original!",
+        )
+
+        self.assertEqual(
+            repaired,
+            "se voce ultrapassar esse tempo, voce retornara ao seu mundo original!",
+        )
+        self.assertEqual(flags, ["translation_leading_duplicate_fragment_removed"])
+
+    def test_source_text_before_normalization_prefers_dark_lobe_prefix_cleanup(self):
+        text = {
+            "raw_ocr": "space is only utes. If you exceed that time, you will return to your original world!",
+            "text": "If you exceed that time, you will return to your original world!",
+            "qa_flags": ["leading_dark_lobe_duplicate_fragment_removed"],
+            "qa_metrics": {
+                "leading_dark_lobe_duplicate_fragment_removed": {
+                    "from": "space is only utes. If you exceed that time, you will return to your original world!",
+                    "to": "If you exceed that time, you will return to your original world!",
+                }
+            },
+        }
+
+        self.assertEqual(
+            _source_text_before_normalization(text),
+            "If you exceed that time, you will return to your original world!",
+        )
+        self.assertEqual(
+            _source_text_for_translation(text),
+            "If you exceed that time, you will return to your original world!",
+        )
 
     def test_google_parallel_chunks_default_off_uses_single_batch_call(self):
         calls = []
@@ -191,6 +243,41 @@ class TranslateContextTests(unittest.TestCase):
         self.assertEqual(text["translated"], "VOCÊ SABE")
         self.assertIn("mojibake_in_translation", text["qa_flags"])
         self.assertEqual(text["mojibake_audit"]["suggested_fix"], "VOCÊ SABE")
+
+    def test_translate_pages_repairs_cp1250_portuguese_mojibake(self):
+        class _FakeGoogleTranslator:
+            def __init__(self, source="en", target="pt"):
+                self._translator = self
+                self.target = target
+
+            def translate(self, text: str):
+                if text == "__traduzai_probe__":
+                    return "ok"
+                return "VOC\u0118 N\u0102O TEM TR\u0118S DIAS"
+
+            def translate_batch(self, texts: list[str]) -> list[str]:
+                return ["VOC\u0118 N\u0102O TEM TR\u0118S DIAS" for _text in texts]
+
+        ocr_results = [{"texts": [{"id": "ocr_001", "text": "YOU DO NOT HAVE THREE DAYS", "tipo": "fala"}]}]
+
+        with patch("translator.translate._GoogleTranslator", _FakeGoogleTranslator):
+            with patch(
+                "translator.translate._check_ollama",
+                return_value={"running": False, "models": [], "has_translator": False},
+            ):
+                translated = translate_pages(
+                    ocr_results=ocr_results,
+                    obra="obra-teste",
+                    context={},
+                    glossario={},
+                    idioma_origem="en",
+                    idioma_destino="pt-BR",
+                )
+
+        text = translated[0]["texts"][0]
+        self.assertEqual(text["translated"], "VOCÊ NÃO TEM TRÊS DIAS")
+        self.assertIn("mojibake_in_translation", text["qa_flags"])
+        self.assertEqual(text["mojibake_audit"]["suggested_fix"], "VOCÊ NÃO TEM TRÊS DIAS")
 
     def test_translate_pages_skips_ollama_probe_when_google_is_available_by_default(self):
         class _FakeGoogleTranslator:
@@ -510,6 +597,10 @@ class TranslateContextTests(unittest.TestCase):
     def test_sfx_postprocess_keeps_uppercase(self):
         processed = _postprocess("estrondo!!", was_upper=True, tipo="sfx")
         self.assertEqual(processed, "ESTRONDO!!")
+
+    def test_postprocess_removes_zero_width_format_chars(self):
+        processed = _postprocess("Hosu \u200b\u200b24 anos desempregado", was_upper=False, tipo="text")
+        self.assertEqual(processed, "Hosu 24 anos desempregado")
 
     def test_postprocess_repairs_stutter_prefix_from_translated_word(self):
         processed = _postprocess(
@@ -1394,7 +1485,7 @@ class TranslateContextTests(unittest.TestCase):
         self.assertIn("suspected_ocr_error", flags[0])
         self.assertIn("source_script_leak", flags[1])
 
-    def test_google_translation_skip_item_does_not_gain_source_script_leak(self):
+    def test_google_translation_legacy_skip_fields_do_not_preserve_source_text(self):
         ocr_results = [
             {
                 "texts": [
@@ -1419,7 +1510,7 @@ class TranslateContextTests(unittest.TestCase):
         )
 
         item = translated[0]["texts"][0]
-        self.assertEqual(item["translated"], "\u5514\u2026\u2026")
+        self.assertNotEqual(item["translated"], "\u5514\u2026\u2026")
         self.assertNotIn("source_script_leak", item.get("qa_flags") or [])
         self.assertNotIn("translation_blocked_text", item)
 

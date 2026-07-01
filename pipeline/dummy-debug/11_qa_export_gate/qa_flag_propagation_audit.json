@@ -1,0 +1,12 @@
+{
+  "summary": {
+    "render_plan_flags": 2,
+    "mask_decision_flags": 0,
+    "inpaint_decision_flags": 0,
+    "detect_accepted_unmatched_count": 0,
+    "project_layer_flags": 0,
+    "qa_flag_not_propagated_count": 0
+  },
+  "missing_in_project": [],
+  "unmatched_detect_candidates": []
+}

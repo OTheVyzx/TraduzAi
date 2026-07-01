@@ -94,13 +94,37 @@ def _compute_split_points(
     return points
 
 
+def _source_page_breaks_are_safe(
+    source_breaks: list[int],
+    balloons: list[Balloon],
+    *,
+    balloon_visual_padding: int = 20,
+) -> bool:
+    for split_y in source_breaks[1:-1]:
+        if _is_inside_any_balloon(split_y, balloons, padding=balloon_visual_padding):
+            return False
+    return True
+
+
 def assemble_output_pages(
     strip: VerticalStrip,
     balloons: list[Balloon],
     target_count: int = 60,
 ) -> list[OutputPage]:
     """Re-fatia o strip em páginas alvo evitando cortar balões."""
-    points = _compute_split_points(strip.height, balloons, target_count)
+    source_breaks = [int(value) for value in list(strip.source_page_breaks or [])]
+    source_page_count = max(0, len(source_breaks) - 1)
+    if (
+        source_page_count > 0
+        and int(target_count or 0) == source_page_count
+        and source_breaks[0] == 0
+        and source_breaks[-1] == int(strip.height)
+        and all(source_breaks[i] < source_breaks[i + 1] for i in range(len(source_breaks) - 1))
+        and _source_page_breaks_are_safe(source_breaks, balloons)
+    ):
+        points = source_breaks
+    else:
+        points = _compute_split_points(strip.height, balloons, target_count)
     pages: list[OutputPage] = []
     for i in range(len(points) - 1):
         y0, y1 = points[i], points[i + 1]

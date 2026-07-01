@@ -38,7 +38,55 @@ ROUTE_ACTIONS_REQUIRING_EXPORT_GATE = {
     "review_required",
     "translate_inpaint_render",
     "translate_render_only",
+    "translate_sfx_inpaint_render",
 }
+SCANLATION_CREDIT_RE = re.compile(
+    r"\b(?:"
+    r"RESET\s*SCANS?|SCANSHOMEMANGA|SCANLATOR|SCANS?|UTOON|HIVE(?:TOON)?|TOON\s*\.?\s*(?:NET|NETS|NETE|net)|"
+    r"NEW\s*TOKI?|[A-Z0-9]*TOK[A-Z0-9]*|[A-Z0-9]*IOKI[A-Z0-9]*|NEWTO\w*|NEVTO\w*|NEYTO\w*|NWTOK\w*|WTOK\w*|TOKLJ?G?O|"
+    r"(?=[A-Z0-9]*\d)[A-Z0-9]{5,}\s*\.?\s*COM|"
+    r"DISCORD|PATREON|PAYPAL|KO-?FI|DEVMAX|SUPPORT\s*US|SPECIAL\s+THANKS|"
+    r"CONTACT|INVITE|RECRUITING|TRANSLATORS?|EDITORS?|TYPESETTERS?|READ\s+ON|"
+    r"FOR\s+FASTER\s+UPP?ATE|CONTENTS?\s+LAB|"
+    r"BRONZE|SILVER|GOLD|DIAMOND|PLATINUM|GOATBEARDS|DRAGENDAVE|SILICONMAGE|GUDPLAYUR|"
+    r"ALL\s+COMICS\s+ON\s+THIS\s+WEBSITE|ORIGINAL\s+VERSION|FOR\s+THE\s+ORIGINAL"
+    r")\b",
+    re.IGNORECASE,
+)
+SCANLATION_VISUAL_REVIEW_ONLY_FLAGS = {
+    "render_on_art_suspected",
+    "TEXT_CLIPPED",
+    "TEXT_OVERFLOW",
+    "render_outside_balloon",
+    "render_bbox_far_from_target_bbox",
+    "text_residual_after_inpaint",
+    "text_residual_after_inpaint_confirmed",
+    "fast_fill_unverified_residual",
+    "fast_fill_insufficient_coverage",
+    "fast_fill_no_glyph_evidence",
+    "fit_below_minimum_legible",
+    "missing_render_bbox",
+    "layout_bbox_coordinate_mismatch",
+    "mask_outside_balloon_critical",
+    "source_glyph_area_ratio_critical",
+    "mask_outside_balloon",
+    "weak_text_residual_after_inpaint",
+}
+SCANLATION_HARMLESS_CONTEXT_FLAGS = {
+    "compact_small_text_capacity",
+    "connected_lobe_boxes_missing_source_anchor_fallback",
+    "ocr_art_fragment_suspected",
+    "ocr_partial_low_confidence_fragment",
+    "ocr_run_on_suspect",
+    "rotated_text_recovery",
+    "safe_text_box_recomputed",
+    "tiny_bubble_inner_bbox_rejected",
+}
+SCANLATION_TIER_WORDS = {"BRONZE", "SILVER", "GOLD", "DIAMOND", "PLATINUM"}
+SCANLATION_CONTEXTUAL_RE = re.compile(
+    r"\b(?:WARNING|NOTICE|READ\s+THIS|OFFICIAL\s+SITE|FASTER\s+UPDATES?)\b",
+    re.IGNORECASE,
+)
 
 
 def _page_id_from_identity(identity: str) -> str | None:
@@ -68,7 +116,59 @@ def _clean_string(value: Any) -> str | None:
     return text or None
 
 
+def _layer_text_blob(layer: dict[str, Any]) -> str:
+    return " ".join(
+        str(layer.get(key) or "")
+        for key in (
+            "text",
+            "original",
+            "raw_ocr",
+            "normalized_ocr",
+            "normalized_text_final",
+            "translated",
+            "traduzido",
+        )
+    )
+
+
+def _is_strong_scanlation_credit_layer(layer: dict[str, Any]) -> bool:
+    blob = _layer_text_blob(layer)
+    if not blob.strip():
+        return False
+    matches = [str(match or "").upper().strip() for match in SCANLATION_CREDIT_RE.findall(blob)]
+    if layer.get("_scanlation_credit_context") is True and any(
+        match in SCANLATION_TIER_WORDS for match in matches
+    ):
+        return True
+    if layer.get("_scanlation_credit_context") is True and SCANLATION_CONTEXTUAL_RE.search(blob):
+        return True
+    if any(match and match not in SCANLATION_TIER_WORDS for match in matches):
+        return True
+    compact = re.sub(r"[^A-Z0-9]+", "", blob.upper())
+    return bool(
+        "RESETSCAN" in compact
+        or "SCANSHOMEMANGA" in compact
+        or "HIVETOON" in compact
+        or "HIVESCAN" in compact
+        or "PATREONCOM" in compact
+        or "DISCORDCOM" in compact
+        or "PAYPALCOM" in compact
+    )
+
+
+def _is_suppressed_scanlation_credit_layer(layer: dict[str, Any]) -> bool:
+    reason = str(layer.get("skip_reason") or layer.get("route_reason") or "").strip().lower()
+    if reason == "scanlation_credit_suppressed":
+        return True
+    return any(
+        str(flag or "").strip().lower() == "scanlation_credit_suppressed"
+        for flag in layer.get("qa_flags") or []
+    )
+
+
 def _layer_is_export_gate_candidate(layer: dict[str, Any]) -> bool:
+    if _is_suppressed_scanlation_credit_layer(layer):
+        return False
     route_action = _clean_string(layer.get("route_action"))
     if route_action:
         return (
@@ -82,6 +182,21 @@ def _layer_is_export_gate_candidate(layer: dict[str, Any]) -> bool:
         or layer.get("raw_ocr")
         or layer.get("translated")
     )
+
+
+def _sfx_inpaint_requires_review(layer: dict[str, Any]) -> bool:
+    if _clean_string(layer.get("route_action")) != "translate_sfx_inpaint_render":
+        return False
+    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
+    return sfx.get("inpaint_allowed") is False
+
+
+def _sfx_review_flags(layer: dict[str, Any]) -> list[str]:
+    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
+    flags = [str(flag) for flag in sfx.get("qa_flags") or [] if flag]
+    if "sfx_inpaint_review_required" not in flags:
+        flags.insert(0, "sfx_inpaint_review_required")
+    return list(dict.fromkeys(flags))
 
 
 def _first_list_string(value: Any) -> str | None:
@@ -142,6 +257,7 @@ def _translated_page_ref(page: dict[str, Any]) -> str | None:
 
 def _layer_qa_flags(layer: dict[str, Any]) -> set[str]:
     flags = {str(flag) for flag in layer.get("qa_flags") or [] if flag}
+    top_level_render_flags = set(flags & {"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"})
     qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
     render_fit = qa_metrics.get("render_fit") if isinstance(qa_metrics.get("render_fit"), dict) else {}
     render_fit_flags = {str(flag) for flag in render_fit.get("flags") or [] if flag}
@@ -150,6 +266,8 @@ def _layer_qa_flags(layer: dict[str, Any]) -> set[str]:
         flags.difference_update({"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"})
     if not render_fit_stale:
         flags.update(render_fit_flags)
+    if _final_render_text_flags_are_review_only(layer) and top_level_render_flags:
+        flags.difference_update(top_level_render_flags)
     flags.difference_update(IGNORED_LEGACY_FLAGS)
     if layer.get("ocr_repair_status") != "repair_failed":
         flags.discard("ocr_truncated_or_joined")
@@ -186,9 +304,14 @@ def _bbox_contains(outer: list[int] | None, inner: list[int] | None, margin: int
 
 
 def _containment_target_bboxes(layer: dict[str, Any]) -> list[list[int]]:
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    dark_bubble_metrics = qa_metrics.get("image_dark_bubble_mask") if isinstance(qa_metrics.get("image_dark_bubble_mask"), dict) else {}
+    dark_panel_metrics = qa_metrics.get("image_dark_panel_mask") if isinstance(qa_metrics.get("image_dark_panel_mask"), dict) else {}
     candidates = [
         _bbox4(layer.get("bubble_inner_bbox")),
         _bbox4(layer.get("bubble_mask_bbox")),
+        _bbox4(dark_bubble_metrics.get("mask_bbox")),
+        _bbox4(dark_panel_metrics.get("mask_bbox")),
         _bbox4(layer.get("target_bbox")),
         _bbox4(layer.get("capacity_bbox")),
         _bbox4(layer.get("layout_bbox")),
@@ -256,17 +379,29 @@ def _render_fit_evidence_is_stale(layer: dict[str, Any]) -> bool:
 
 
 def _final_render_text_flags_are_review_only(layer: dict[str, Any]) -> bool:
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    render_fit = qa_metrics.get("render_fit") if isinstance(qa_metrics.get("render_fit"), dict) else {}
     target = (
         _bbox4(layer.get("balloon_bbox"))
+        or _bbox4(render_fit.get("balloon_bbox"))
         or _bbox4(layer.get("target_bbox"))
+        or _bbox4(render_fit.get("target_bbox"))
         or _bbox4(layer.get("capacity_bbox"))
         or _bbox4(layer.get("layout_bbox"))
         or _bbox4(layer.get("bbox"))
     )
-    safe_bbox = _bbox4(layer.get("safe_text_box"))
-    render_bbox = _bbox4(layer.get("render_bbox"))
+    safe_bbox = _bbox4(layer.get("safe_text_box")) or _bbox4(render_fit.get("safe_text_box"))
+    render_bbox = _bbox4(layer.get("render_bbox")) or _bbox4(render_fit.get("render_bbox"))
     if target is None or safe_bbox is None or render_bbox is None:
         return False
+    attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
+    fit_ok = str(layer.get("fit_status") or "").strip().lower() == "ok" or any(
+        str(item.get("status") or "").strip().lower() == "ok" for item in attempts
+    )
+    if fit_ok and _bbox_contains(safe_bbox, render_bbox, margin=2):
+        return True
+    if _is_dark_bubble_or_panel_layer(layer) and _bbox_contains(safe_bbox, render_bbox, margin=2):
+        return True
     if not _bbox_contains(target, render_bbox, margin=2):
         return False
     sx1, sy1, sx2, sy2 = safe_bbox
@@ -275,6 +410,18 @@ def _final_render_text_flags_are_review_only(layer: dict[str, Any]) -> bool:
     safe_h = max(1, sy2 - sy1)
     overhang_px = max(0, sx1 - rx1, rx2 - sx2, sy1 - ry1, ry2 - sy2)
     return overhang_px <= max(8, int(round(min(safe_w, safe_h) * 0.04)))
+
+
+def _is_dark_bubble_or_panel_layer(layer: dict[str, Any]) -> bool:
+    profiles = {
+        str(layer.get("layout_profile") or "").strip().lower(),
+        str(layer.get("block_profile") or "").strip().lower(),
+        str(layer.get("background_type") or "").strip().lower(),
+    }
+    source = str(layer.get("bubble_mask_source") or layer.get("balloon_mask_source") or "").strip().lower()
+    if source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}:
+        return True
+    return bool(profiles & {"dark_bubble", "dark_panel", "colored_status_panel"})
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -292,9 +439,9 @@ def _has_real_lobe_assignment_evidence(layer: dict[str, Any]) -> bool:
 
 
 def _warning_flags_blocking_export(flags: set[str], layer: dict[str, Any]) -> set[str]:
+    if _scanlation_credit_flags_are_review_only(flags, layer):
+        return set()
     blocking = set(flags & EXPORT_BLOCKING_REVIEW_FLAGS)
-    if "lobe_assignment_low_confidence" in flags and _has_real_lobe_assignment_evidence(layer):
-        blocking.add("lobe_assignment_low_confidence")
     if "mask_outside_balloon" in flags and _render_balloon_containment_is_low(layer):
         blocking.add("mask_outside_balloon")
     return blocking
@@ -302,6 +449,17 @@ def _warning_flags_blocking_export(flags: set[str], layer: dict[str, Any]) -> se
 
 def _layer_has_confirmed_visual_damage(flags: set[str]) -> bool:
     return bool(flags & CONFIRMED_VISUAL_DAMAGE_FLAGS)
+
+
+def _scanlation_credit_flags_are_review_only(flags: set[str], layer: dict[str, Any]) -> bool:
+    if not flags:
+        return False
+    if not _is_strong_scanlation_credit_layer(layer):
+        return False
+    decision_flags = flags - SCANLATION_HARMLESS_CONTEXT_FLAGS
+    if not decision_flags:
+        return True
+    return decision_flags.issubset(SCANLATION_VISUAL_REVIEW_ONLY_FLAGS)
 
 
 def _render_geometry_contained(layer: dict[str, Any]) -> bool:
@@ -316,6 +474,31 @@ def _render_geometry_contained(layer: dict[str, Any]) -> bool:
             continue
         return True
     return False
+
+
+def _render_inside_safe_box(layer: dict[str, Any]) -> bool:
+    render_bbox = _bbox4(layer.get("render_bbox"))
+    safe_bbox = _bbox4(layer.get("safe_text_box"))
+    return bool(render_bbox is not None and safe_bbox is not None and _bbox_contains(safe_bbox, render_bbox, margin=2))
+
+
+def _rendered_background_is_white_balloon(layer: dict[str, Any]) -> bool:
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    if bool(qa_metrics.get("render_flat_balloon_background")):
+        return True
+    luma = _float_or_none(qa_metrics.get("render_balloon_background_luma"))
+    std = _float_or_none(qa_metrics.get("render_balloon_background_luma_std"))
+    return bool(luma is not None and luma >= 245.0 and (std is None or std <= 24.0))
+
+
+def _traceability_missing_entry_is_review_only(missing: dict[str, Any]) -> bool:
+    if bool(missing.get("is_review_only")):
+        return True
+    flag = str(missing.get("flag") or "").strip()
+    if flag != "fast_fill_no_glyph_evidence":
+        return False
+    source = str(missing.get("source") or "").strip()
+    return source in {"render_plan", "inpaint_decision", "mask_decision"}
 
 
 def _render_balloon_containment_is_low(layer: dict[str, Any], *, threshold: float = 0.90) -> bool:
@@ -429,7 +612,55 @@ def _microtext_render_is_upscaled(layer: dict[str, Any]) -> bool:
     return render_h > max(18, source_h * 3)
 
 
+def _render_replaces_source_text_area(layer: dict[str, Any]) -> bool:
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    render_fit = qa_metrics.get("render_fit") if isinstance(qa_metrics.get("render_fit"), dict) else {}
+    render_bbox = _bbox4(layer.get("render_bbox")) or _bbox4(render_fit.get("render_bbox"))
+    if render_bbox is None:
+        return False
+    for source_bbox in (
+        _bbox4(layer.get("text_pixel_bbox")),
+        _bbox4(layer.get("source_bbox")),
+        _bbox4(layer.get("layout_bbox")),
+        _bbox4(layer.get("bbox")),
+    ):
+        if source_bbox is None:
+            continue
+        if _bbox_contains(source_bbox, render_bbox, margin=16):
+            return True
+        source_area = _bbox_area(source_bbox)
+        render_area = _bbox_area(render_bbox)
+        if source_area <= 0 or render_area <= 0:
+            continue
+        overlap = _bbox_intersection_area(source_bbox, render_bbox)
+        if overlap >= int(min(source_area, render_area) * 0.55):
+            return True
+    return False
+
+
+def _dark_layer_render_is_contained(layer: dict[str, Any]) -> bool:
+    if not _is_dark_bubble_or_panel_layer(layer):
+        return False
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    render_fit = qa_metrics.get("render_fit") if isinstance(qa_metrics.get("render_fit"), dict) else {}
+    render_bbox = _bbox4(layer.get("render_bbox")) or _bbox4(render_fit.get("render_bbox"))
+    safe_bbox = _bbox4(layer.get("safe_text_box")) or _bbox4(render_fit.get("safe_text_box"))
+    if render_bbox is None:
+        return False
+    if safe_bbox is not None and not _bbox_contains(safe_bbox, render_bbox, margin=3):
+        return False
+    for target in _containment_target_bboxes(layer):
+        if _bbox_contains(target, render_bbox, margin=8):
+            return True
+    containment = _float_or_none(qa_metrics.get("render_balloon_containment"))
+    return bool(containment is not None and containment >= 0.90)
+
+
 def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[str, Any]) -> bool:
+    if _scanlation_credit_flags_are_review_only(flags, layer):
+        return True
+    if flag == "text_residual_after_inpaint" and _contained_dark_residual_is_review_only(layer):
+        return True
     if _layer_has_confirmed_visual_damage(flags):
         return False
     if flag == "mask_outside_balloon_critical":
@@ -437,10 +668,58 @@ def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[st
             return False
         return _render_geometry_contained(layer)
     if flag in {"bbox_overreach_critical", "fit_below_minimum_legible"}:
+        if flag == "fit_below_minimum_legible" and _translator_note_fit_is_review_only(layer):
+            return True
+        if flag == "fit_below_minimum_legible" and "compact_small_text_capacity" in flags:
+            return _render_inside_safe_box(layer)
+        if flag == "fit_below_minimum_legible" and _rendered_background_is_white_balloon(layer):
+            return _render_geometry_contained(layer) and _render_inside_safe_box(layer)
         if _microtext_render_is_upscaled(layer):
             return False
         return _is_microtext_layer(layer) and _render_geometry_contained(layer)
+    if flag == "render_on_art_suspected":
+        if _dark_layer_render_is_contained(layer):
+            return True
+        return _render_replaces_source_text_area(layer)
+    if flag == "fast_fill_no_glyph_evidence":
+        if _dark_layer_render_is_contained(layer):
+            return True
+        if layer.get("_render_metadata_group_sibling_geometry") and _render_inside_safe_box(layer):
+            return True
+        return _render_replaces_source_text_area(layer)
     return False
+
+
+def _translator_note_fit_is_review_only(layer: dict[str, Any]) -> bool:
+    text = str(layer.get("translated") or layer.get("text") or "").strip().lower()
+    if not (text.startswith("t/n:") or text.startswith("tn:") or text.startswith("n/t:")):
+        return False
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    containment = _float_or_none(qa_metrics.get("render_balloon_containment"))
+    bg_luma = _float_or_none(qa_metrics.get("render_background_luma"))
+    bg_std = _float_or_none(qa_metrics.get("render_background_luma_std"))
+    flat_bg = bool(qa_metrics.get("render_flat_balloon_background"))
+    if containment is not None and containment < 0.96:
+        return False
+    if bg_luma is not None and bg_luma < 235.0:
+        return False
+    if bg_std is not None and bg_std > 8.0:
+        return False
+    return flat_bg or bg_luma is not None
+
+
+def _contained_dark_residual_is_review_only(layer: dict[str, Any]) -> bool:
+    qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    luma = _float_or_none(qa_metrics.get("render_background_luma"))
+    luma_std = _float_or_none(qa_metrics.get("render_background_luma_std"))
+    containment = _float_or_none(qa_metrics.get("render_balloon_containment"))
+    if luma is None or luma > 96.0:
+        return False
+    if luma_std is not None and luma_std > 24.0:
+        return False
+    if containment is not None and containment < 0.90:
+        return False
+    return bool(_render_inside_safe_box(layer) or _render_geometry_contained(layer))
 
 
 def _artifact_links_for_issue(
@@ -456,6 +735,7 @@ def _artifact_links_for_issue(
         "TEXT_CLIPPED",
         "TEXT_OVERFLOW",
         "render_outside_balloon",
+        "render_outside_bubble_mask",
         "render_bbox_far_from_target_bbox",
         "render_on_art_suspected",
         "page_space_rerender_mixed_coordinates",
@@ -471,7 +751,11 @@ def _artifact_links_for_issue(
     }
     mask_flags = {
         "mask_outside_balloon_critical",
+        "source_glyph_area_ratio_critical",
         "mask_outside_balloon",
+        "bbox_fallback_bubble_mask",
+        "glyph_mask_outside_bubble",
+        "missing_real_bubble_mask",
         "fast_fill_insufficient_coverage",
         "fast_fill_unverified_residual",
         "low_inpaint_coverage",
@@ -567,6 +851,8 @@ def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> 
     status = "PASS"
     if blocking_issues:
         status = "OVERRIDDEN" if override else "BLOCK"
+    elif any(issue.get("type") == "sfx_inpaint_review" for issue in review_issues):
+        status = "REVIEW"
     return {
         "status": status,
         "allowed": status != "BLOCK",
@@ -591,6 +877,20 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
         layers = page.get("text_layers") or page.get("textos") or []
         page_number = int(page.get("numero") or page_index)
         page_id = str(page.get("page_id") or f"page_{page_number:03d}")
+        scanlation_credit_bands = {
+            (
+                _clean_string(candidate.get("band_id"))
+                or _band_id_from_identity(_clean_string(candidate.get("trace_id")) or "")
+                or ""
+            )
+            for candidate in layers
+            if isinstance(candidate, dict) and _is_strong_scanlation_credit_layer(candidate)
+        }
+        scanlation_credit_bands.discard("")
+        page_has_scanlation_credit = any(
+            isinstance(candidate, dict) and _is_strong_scanlation_credit_layer(candidate)
+            for candidate in layers
+        )
         for layer_index, layer in enumerate(layers, start=1):
             if not isinstance(layer, dict):
                 continue
@@ -608,6 +908,19 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                 or _band_id_from_identity(raw_trace_id or "")
                 or _synthetic_band_id(str(resolved_page_id), layer_index)
             )
+            policy_layer = layer
+            if (
+                band_id in scanlation_credit_bands
+                and not _is_strong_scanlation_credit_layer(layer)
+                and SCANLATION_CREDIT_RE.search(_layer_text_blob(layer))
+            ):
+                policy_layer = {**layer, "_scanlation_credit_context": True}
+            elif (
+                page_has_scanlation_credit
+                and not _is_strong_scanlation_credit_layer(layer)
+                and SCANLATION_CONTEXTUAL_RE.search(_layer_text_blob(layer))
+            ):
+                policy_layer = {**layer, "_scanlation_credit_context": True}
             trace_id = _resolve_trace_id(layer, text_id, band_id)
             translated = str(layer.get("translated") or layer.get("traduzido") or "")
             flags = _layer_qa_flags(layer)
@@ -617,7 +930,7 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
             demoted_critical_flags = {
                 flag
                 for flag in critical_flags
-                if _critical_flag_can_be_review_only(flag, flags, layer)
+                if _critical_flag_can_be_review_only(flag, flags, policy_layer)
             }
             critical_flags -= demoted_critical_flags
             warning_flags = {flag for flag in flags if severity_for_flag(flag) == "high"}
@@ -640,6 +953,16 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                 "render_bbox": layer.get("render_bbox"),
                 "qa_metrics": dict(layer.get("qa_metrics") or {}),
             }
+            if _sfx_inpaint_requires_review(layer):
+                issues.append(
+                    {
+                        **base_issue,
+                        "type": "sfx_inpaint_review",
+                        "severity": "warning",
+                        "flags": _sfx_review_flags(layer),
+                        "blocks_export": False,
+                    }
+                )
             if critical_flags:
                 artifact_links = _artifact_links_for_issue(
                     critical_flags,
@@ -659,7 +982,7 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                     }
                 )
             if warning_flags:
-                blocks_export = bool(_warning_flags_blocking_export(warning_flags, layer))
+                blocks_export = bool(_warning_flags_blocking_export(warning_flags, policy_layer))
                 artifact_links = _artifact_links_for_issue(
                     warning_flags,
                     page=page,
@@ -692,6 +1015,31 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                 "11_qa_export_gate/qa_flag_propagation_audit.json",
                 "11_qa_export_gate/qa_issues.jsonl",
             ]
+            if _traceability_missing_entry_is_review_only(missing):
+                issues.append(
+                    {
+                        "page": None,
+                        "page_id": page_id,
+                        "band_id": band_id,
+                        "layer": identity or "unresolved",
+                        "text_id": text_id or "unresolved",
+                        "text_instance_id": identity or None,
+                        "trace_id": trace_id,
+                        "coordinate_space": "debug_identity",
+                        "text": f"QA flag not propagated from {missing.get('source') or 'debug'}",
+                        "type": "needs_review",
+                        "issue_scope": "run",
+                        "severity": "warning",
+                        "flags": ["qa_flag_not_propagated"],
+                        "missing_flag": missing.get("flag"),
+                        "missing_identity": identity or None,
+                        "source": missing.get("source"),
+                        "artifact_links": artifact_links,
+                        "linked_artifacts": artifact_links,
+                        "blocks_export": False,
+                    }
+                )
+                continue
             issues.append(
                 {
                     "page": None,

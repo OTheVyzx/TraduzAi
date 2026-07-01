@@ -10,11 +10,13 @@ import {
 import { loadImageSource } from "../../../lib/imageSource";
 import { createLassoSelection, rasterizeLassoToPng } from "../../../lib/lassoSelection";
 import {
+  clampEditorZoom,
   getRenderPreviewStateForPage,
   useEditorStore,
   type TextTransformSnapshot,
 } from "../../../lib/stores/editorStore";
 import { useAppStore, type PageData, type TextEntry } from "../../../lib/stores/appStore";
+import { LayeredBitmapCanvas } from "../../../editor-shared/bitmap/layeredBitmapCanvas";
 import { createBitmapStrokePreviewOnCanvas, encodeDataUrl } from "./bitmapStrokePreview";
 import {
   applyRecoveryStrokeToCanvas,
@@ -27,6 +29,13 @@ import { mergePendingTextEntry } from "./textLayerStyleUtils";
 import { useEditorBitmapDrawing } from "./useEditorBitmapDrawing";
 
 const EMPTY_PAGES: PageData[] = [];
+const WHEEL_ZOOM_SPEED = 0.0012;
+
+type PaintPreviewOverlayHandle = {
+  begin: (point: [number, number]) => void;
+  append: (point: [number, number]) => void;
+  clear: () => void;
+};
 
 function intersectBbox(
   a: [number, number, number, number],
@@ -155,7 +164,7 @@ export function useEditorStageController() {
     start: { x: number; y: number };
     current: { x: number; y: number };
   } | null>(null);
-  const [paintStroke, setPaintStroke] = useState<[number, number][]>([]);
+  const [isPaintStrokeActive, setIsPaintStrokeActive] = useState(false);
   const [recoveryPreviewPatches, setRecoveryPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
   const [reinpaintPreviewPatches, setReinpaintPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
   const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null);
@@ -164,7 +173,11 @@ export function useEditorStageController() {
   // Ref para garantir acesso ao finishPaintStroke mais recente sem criar stale closure
   const finishPaintStrokeRef = useRef<(() => Promise<void>) | null>(null);
   const activeRecoveryPreviewIdsRef = useRef<Set<string>>(new Set());
-  const bitmapWorkingCanvasRef = useRef<Partial<Record<"brush" | "mask", HTMLCanvasElement>>>({});
+  const paintStrokeRef = useRef<[number, number][]>([]);
+  const paintPreviewOverlayRef = useRef<PaintPreviewOverlayHandle | null>(null);
+  const paintPreviewClearTimeoutRef = useRef<number | null>(null);
+  const paintPreviewPendingCommitRef = useRef(false);
+  const bitmapWorkingCanvasRef = useRef<LayeredBitmapCanvas | null>(null);
   const recoveryWorkingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sessionInpaintCacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [panSession, setPanSession] = useState<{
@@ -194,7 +207,7 @@ export function useEditorStageController() {
   useEffect(() => {
     setRecoveryPreviewPatches([]);
     setReinpaintPreviewPatches([]);
-    bitmapWorkingCanvasRef.current = {};
+    bitmapWorkingCanvasRef.current = null;
     recoveryWorkingCanvasRef.current = null;
     sessionInpaintCacheCanvasRef.current = null;
   }, [currentPageKey]);
@@ -202,6 +215,38 @@ export function useEditorStageController() {
   useEffect(() => {
     recoveryWorkingCanvasRef.current = null;
   }, [bitmapLayerVersions.inpaint, currentPage?.image_layers?.inpaint?.path]);
+
+  const cancelPendingPaintPreviewClear = () => {
+    if (paintPreviewClearTimeoutRef.current !== null) {
+      window.clearTimeout(paintPreviewClearTimeoutRef.current);
+      paintPreviewClearTimeoutRef.current = null;
+    }
+    paintPreviewPendingCommitRef.current = false;
+  };
+
+  const clearPaintPreviewOverlay = () => {
+    cancelPendingPaintPreviewClear();
+    paintPreviewOverlayRef.current?.clear();
+  };
+
+  const schedulePaintPreviewClear = (delayMs = 900) => {
+    if (paintPreviewClearTimeoutRef.current !== null) {
+      window.clearTimeout(paintPreviewClearTimeoutRef.current);
+    }
+    paintPreviewPendingCommitRef.current = true;
+    paintPreviewClearTimeoutRef.current = window.setTimeout(() => {
+      paintPreviewClearTimeoutRef.current = null;
+      paintPreviewPendingCommitRef.current = false;
+      paintPreviewOverlayRef.current?.clear();
+    }, delayMs);
+  };
+
+  useEffect(() => () => {
+    if (paintPreviewClearTimeoutRef.current !== null) {
+      window.clearTimeout(paintPreviewClearTimeoutRef.current);
+      paintPreviewClearTimeoutRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -297,28 +342,6 @@ export function useEditorStageController() {
     return () => window.removeEventListener("lasso:commit-polygon", handleCommitPolygon);
   }, []);
 
-
-  useEffect(() => {
-    const handleWheel = (event: WheelEvent) => {
-      if (!event.ctrlKey && !event.metaKey) return;
-      const node = containerRef.current;
-      if (!node) return;
-      const rect = node.getBoundingClientRect();
-      const withinStage =
-        event.clientX >= rect.left &&
-        event.clientX <= rect.right &&
-        event.clientY >= rect.top &&
-        event.clientY <= rect.bottom;
-      if (!withinStage) return;
-
-      event.preventDefault();
-      const state = useEditorStore.getState();
-      state.setZoom(state.zoom + (event.deltaY > 0 ? -0.12 : 0.12));
-    };
-    window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
-    return () => window.removeEventListener("wheel", handleWheel, true);
-  }, []);
-
   const renderPreviewState = useMemo(
     () => getRenderPreviewStateForPage(currentPageKey, currentPage, renderPreviewCacheByPageKey),
     [currentPage, currentPageKey, renderPreviewCacheByPageKey],
@@ -345,6 +368,65 @@ export function useEditorStageController() {
   const originalImage = useImageElement(originalImageSrc);
   const maskImage = useImageElement(maskOverlaySrc);
   const brushImage = useImageElement(brushOverlaySrc);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+
+      event.preventDefault();
+      const state = useEditorStore.getState();
+      const viewportRect = node.getBoundingClientRect();
+      const normalizedDeltaY =
+        event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? event.deltaY * 16
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? event.deltaY * Math.max(1, viewportRect.height)
+            : event.deltaY;
+      const nextZoom = clampEditorZoom(state.zoom * Math.exp(-normalizedDeltaY * WHEEL_ZOOM_SPEED));
+      if (nextZoom === state.zoom) return;
+
+      const imageWidth = baseImage.size.width;
+      const imageHeight = baseImage.size.height;
+      if (!imageWidth || !imageHeight || !containerSize.width) {
+        state.setZoom(nextZoom);
+        return;
+      }
+
+      const viewportWidth = node.clientWidth || viewportRect.width;
+      const fit = Math.min((containerSize.width - 48) / imageWidth, 1);
+      const currentScale = Math.max(0.05, fit * state.zoom);
+      const nextScale = Math.max(0.05, fit * nextZoom);
+      const stageCanvas = node.querySelector("canvas");
+      const stageRect = stageCanvas?.getBoundingClientRect();
+
+      const pageBaseLeft = viewportRect.left + viewportWidth / 2 - (imageWidth * currentScale) / 2;
+      const nextPageBaseLeft = viewportRect.left + viewportWidth / 2 - (imageWidth * nextScale) / 2;
+      const currentStageLeft = pageBaseLeft + state.panOffset.x;
+      const currentStageTop = stageRect?.top ?? viewportRect.top + state.panOffset.y;
+      const pageBaseTop = currentStageTop - state.panOffset.y;
+
+      const anchorImageX = (event.clientX - currentStageLeft) / currentScale;
+      const anchorImageY = (event.clientY - currentStageTop) / currentScale;
+
+      useEditorStore.setState({
+        zoom: nextZoom,
+        panOffset: {
+          x: event.clientX - nextPageBaseLeft - anchorImageX * nextScale,
+          y: event.clientY - pageBaseTop - anchorImageY * nextScale,
+        },
+      });
+    };
+    node.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => node.removeEventListener("wheel", handleWheel, true);
+  }, [baseImage.size.height, baseImage.size.width, containerSize.width]);
+
+  useEffect(() => {
+    if (!paintPreviewPendingCommitRef.current || paintStrokeRef.current.length > 0) return;
+    clearPaintPreviewOverlay();
+  }, [baseImage.image, brushImage.image, maskImage.image]);
+
   const {
     enqueueBitmapPersist,
     enqueueRecoveryPersist,
@@ -365,21 +447,35 @@ export function useEditorStageController() {
   };
 
   const getBitmapWorkingCanvas = (layerKey: "brush" | "mask") => {
-    const existing = bitmapWorkingCanvasRef.current[layerKey];
-    if (existing?.width === baseImage.size.width && existing.height === baseImage.size.height) {
-      return existing;
+    const existing = bitmapWorkingCanvasRef.current;
+    if (existing?.size.width === baseImage.size.width && existing.size.height === baseImage.size.height) {
+      const layerCanvas = existing.getLayerCanvas(layerKey);
+      if (layerCanvas) return layerCanvas as HTMLCanvasElement;
     }
 
-    const canvas = document.createElement("canvas");
-    canvas.width = baseImage.size.width;
-    canvas.height = baseImage.size.height;
-    const ctx = canvas.getContext("2d");
-    const image = layerKey === "brush" ? brushImage.image : maskImage.image;
-    if (ctx && image?.naturalWidth && image?.naturalHeight) {
-      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const layeredCanvas = new LayeredBitmapCanvas({
+      width: baseImage.size.width,
+      height: baseImage.size.height,
+      createCanvas: (width, height) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        return canvas;
+      },
+    });
+
+    if (brushImage.image?.naturalWidth && brushImage.image?.naturalHeight) {
+      layeredCanvas.drawImageToLayer("brush", brushImage.image);
+    } else {
+      layeredCanvas.ensureLayer("brush");
     }
-    bitmapWorkingCanvasRef.current[layerKey] = canvas;
-    return canvas;
+    if (maskImage.image?.naturalWidth && maskImage.image?.naturalHeight) {
+      layeredCanvas.drawImageToLayer("mask", maskImage.image);
+    } else {
+      layeredCanvas.ensureLayer("mask");
+    }
+    bitmapWorkingCanvasRef.current = layeredCanvas;
+    return layeredCanvas.getLayerCanvas(layerKey) as HTMLCanvasElement;
   };
 
   const getRecoveryWorkingCanvas = () => {
@@ -435,7 +531,7 @@ export function useEditorStageController() {
         viewportX > containerRect.width ||
         viewportY > containerRect.height
       ) {
-        if (paintStroke.length === 0) {
+        if (paintStrokeRef.current.length === 0) {
           setCursorPoint(null);
           setCursorViewportPoint(null);
         }
@@ -452,7 +548,7 @@ export function useEditorStageController() {
         event.clientY < rect.top ||
         event.clientY > rect.top + rect.height
       ) {
-        if (paintStroke.length === 0) setCursorPoint(null);
+        if (paintStrokeRef.current.length === 0) setCursorPoint(null);
         return;
       }
       const point = pointFromStageClientRect({
@@ -467,7 +563,7 @@ export function useEditorStageController() {
 
     window.addEventListener("mousemove", onMove);
     return () => window.removeEventListener("mousemove", onMove);
-  }, [toolMode, baseImage.size.width, baseImage.size.height, paintStroke.length]);
+  }, [toolMode, baseImage.size.width, baseImage.size.height, isPaintStrokeActive]);
 
   const stageScale = useMemo(() => {
     if (!baseImage.size.width || !baseImage.size.height || !containerSize.width || !containerSize.height) return 1;
@@ -486,6 +582,12 @@ export function useEditorStageController() {
   const selectedNodeName = selectedLayerId
     ? `text-layer-${selectedLayerId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
     : null;
+
+  useEffect(() => {
+    if (toolMode !== "select" && selectedLayerId) {
+      selectLayer(null);
+    }
+  }, [selectedLayerId, selectLayer, toolMode]);
 
   const commitTextLayerTransform = (
     entry: TextEntry,
@@ -533,7 +635,11 @@ export function useEditorStageController() {
       if (!point) return;
       event.cancelBubble = true;
       selectLayer(null);
-      setPaintStroke([[point.x, point.y]]);
+      const startPoint: [number, number] = [point.x, point.y];
+      cancelPendingPaintPreviewClear();
+      paintStrokeRef.current = [startPoint];
+      setIsPaintStrokeActive(true);
+      paintPreviewOverlayRef.current?.begin(startPoint);
     }
 
     if (isLassoTool) {
@@ -576,12 +682,14 @@ export function useEditorStageController() {
       setBlockDraft((draft) => (draft ? { ...draft, current: point } : null));
       return;
     }
-    if (paintStroke.length > 0) {
-      setPaintStroke((points) => {
-        const last = points[points.length - 1];
-        if (!shouldAppendStrokePoint(last, point)) return points;
-        return [...points, [point.x, point.y]];
-      });
+    if (paintStrokeRef.current.length > 0) {
+      const points = paintStrokeRef.current;
+      const last = points[points.length - 1];
+      if (last && shouldAppendStrokePoint(last, point)) {
+        const nextPoint: [number, number] = [point.x, point.y];
+        points.push(nextPoint);
+        paintPreviewOverlayRef.current?.append(nextPoint);
+      }
     }
 
     // Freehand lasso — decimação mínima de 2px para evitar pontos redundantes
@@ -614,7 +722,7 @@ export function useEditorStageController() {
   const handleStageMouseLeave = () => {
     // Manter cursor visível enquanto está pintando (stroke ativo).
     // O ponteiro visual continua via cursorViewportPoint mesmo fora da pagina.
-    if (paintStroke.length === 0) setCursorPoint(null);
+    if (paintStrokeRef.current.length === 0) setCursorPoint(null);
   };
 
   const finishBlockDraft = async () => {
@@ -630,13 +738,15 @@ export function useEditorStageController() {
   };
 
   const finishPaintStroke = async () => {
-    const stroke = paintStroke;
+    const stroke = paintStrokeRef.current;
     const strokeToolMode = toolMode;
     const strokeBrushSize = brushSize;
     const strokeBrushColor = brushColor;
     const strokeBrushOpacity = brushOpacity;
     const strokeBrushHardness = brushHardness;
-    setPaintStroke([]);
+    paintStrokeRef.current = [];
+    setIsPaintStrokeActive(false);
+    schedulePaintPreviewClear();
     if (!baseImage.size.width || !baseImage.size.height || stroke.length === 0) return;
     const basicDirtyBBox = strokeDirtyBbox({
       stroke,
@@ -869,7 +979,7 @@ export function useEditorStageController() {
   // FIX CRÍTICO: commit do stroke quando mouseup ocorre FORA do canvas Konva
   // Sem isso, soltar o mouse fora do <Stage> descarta o stroke silenciosamente.
   useEffect(() => {
-    if (paintStroke.length === 0) return;
+    if (!isPaintStrokeActive) return;
 
     const handleGlobalMouseUp = (event: MouseEvent) => {
       // Não duplicar com handler do Konva: só age fora do container do stage
@@ -879,7 +989,7 @@ export function useEditorStageController() {
 
     window.addEventListener("mouseup", handleGlobalMouseUp);
     return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
-  }, [paintStroke.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isPaintStrokeActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!isLassoTool || maskShape !== "freehand" || maskInProgress === null) return;
@@ -899,7 +1009,7 @@ export function useEditorStageController() {
       void finishBlockDraft();
       return;
     }
-    if (paintStroke.length > 0) {
+    if (paintStrokeRef.current.length > 0) {
       void finishPaintStroke();
     }
     // Freehand lasso commit ao soltar o mouse
@@ -926,9 +1036,6 @@ export function useEditorStageController() {
       return;
     }
 
-    if (event.target === event.currentTarget) {
-      selectLayer(null);
-    }
   };
 
   const handleViewportContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -971,7 +1078,6 @@ export function useEditorStageController() {
     recoveryPreviewPatches,
     reinpaintPreviewPatches,
     blockDraft,
-    paintStroke,
     layers,
     selectedLayerId,
     hoveredLayerId,
@@ -989,6 +1095,9 @@ export function useEditorStageController() {
     handleStageMouseUp,
     handleStageMouseEnter,
     handleStageMouseLeave,
+    setPaintPreviewOverlay: (handle: PaintPreviewOverlayHandle | null) => {
+      paintPreviewOverlayRef.current = handle;
+    },
     cursorPoint,
     cursorViewportPoint,
     // Fase 8 — Lasso

@@ -1,5 +1,9 @@
 import cv2
 import numpy as np
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vision_stack.cjk_segmentation_mask import (
     _recover_textlike_strokes_from_candidate,

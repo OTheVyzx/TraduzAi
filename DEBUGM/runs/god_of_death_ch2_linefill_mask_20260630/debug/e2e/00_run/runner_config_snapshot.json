@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-06-30T_ch2_linefill_mask",
+  "stage": "run",
+  "source_path": "D:\\Mihon pra pc\\downloads\\mangas\\Manhwatop (EN)\\The God of Death\\Chapter 2.cbz",
+  "work_dir": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_linefill_mask_20260630",
+  "models_dir": "N:\\TraduzAI\\pipeline\\models",
+  "obra": "Supreme Yanluo System",
+  "capitulo": "2",
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "mode": "auto",
+  "debug": true,
+  "skip_final_page_space_typeset": false,
+  "run_name": "god_of_death_ch2_linefill_mask_20260630",
+  "output_dir": "N:\\TraduzAI\\DEBUGM\\runs\\god_of_death_ch2_linefill_mask_20260630"
+}

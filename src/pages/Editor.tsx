@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -31,6 +32,7 @@ import { TypesettingBar } from "../components/editor/toolbar/TypesettingBar";
 import { ToolSidebar } from "../components/editor/toolbar/ToolSidebar";
 import { BrushOptionsInline } from "../components/editor/toolbar/BrushOptionsPopover";
 import { UndoRedoControls } from "../components/editor/toolbar/UndoRedoControls";
+import { RenderStatusBadge } from "../components/editor/toolbar/RenderStatusBadge";
 import { preloadEditorFonts } from "../lib/fonts";
 import { loadSupportedLanguages } from "../lib/tauri";
 import { getLanguageOptions, normalizeLanguageCodeForSelection } from "../lib/languages";
@@ -41,6 +43,183 @@ const VIEW_MODES = [
   { key: "translated" as const, label: "Camadas", icon: FileText, hotkey: "3" },
 ];
 
+const PAGE_ACTIONS = [
+  { key: "detect_boxes" as const, label: "Caixas", icon: Search },
+  { key: "detect" as const, label: "Detectar", icon: ScanText },
+  { key: "ocr" as const, label: "OCR", icon: FileText },
+  { key: "translate" as const, label: "Traduzir", icon: Languages },
+  { key: "inpaint" as const, label: "Inpaint", icon: Eraser },
+];
+
+function formatBbox(value: number[] | null | undefined) {
+  if (!value || value.length < 4) return "sem area";
+  return value.map((item) => Math.round(item)).join(", ");
+}
+
+function PipelineActionSidebar() {
+  const [activePanel, setActivePanel] = useState<(typeof PAGE_ACTIONS)[number]["key"] | null>(null);
+  const [confirmPageAction, setConfirmPageAction] = useState(false);
+  const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
+  const buttonRefs = useRef<Partial<Record<(typeof PAGE_ACTIONS)[number]["key"], HTMLButtonElement | null>>>({});
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const currentPage = useEditorStore((s) => s.currentPage);
+  const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
+  const activeLassoSelection = useEditorStore((s) => s.activeLassoSelection);
+  const activePageAction = useEditorStore((s) => s.activePageAction);
+  const isRetypesetting = useEditorStore((s) => s.isRetypesetting);
+  const isReinpainting = useEditorStore((s) => s.isReinpainting);
+  const isHealingBrushApplying = useEditorStore((s) => s.isHealingBrushApplying);
+  const runMaskedAction = useEditorStore((s) => s.runMaskedAction);
+  const runMaskedActionFromLasso = useEditorStore((s) => s.runMaskedActionFromLasso);
+  const reProcessBlock = useEditorStore((s) => s.reProcessBlock);
+
+  const pagePipelineBusy = isRetypesetting || isReinpainting || isHealingBrushApplying;
+  const selectedText = currentPage?.text_layers.find((layer) => layer.id === selectedLayerId) ?? null;
+  const maskLayer = currentPage?.image_layers?.mask;
+  const hasUsableMask = !!maskLayer?.path;
+  const actionConfig = PAGE_ACTIONS.find((item) => item.key === activePanel) ?? null;
+  const target =
+    activeLassoSelection
+      ? { kind: "Selecao", bbox: activeLassoSelection.bbox }
+      : selectedText && actionConfig?.key !== "detect" && actionConfig?.key !== "detect_boxes"
+        ? { kind: "Texto", bbox: selectedText.bbox }
+        : hasUsableMask && actionConfig?.key === "inpaint"
+          ? { kind: "Mascara", bbox: null }
+          : null;
+  const requiresPageConfirm = !!actionConfig && !target;
+  const disabled = pagePipelineBusy || activePageAction !== null || !actionConfig;
+
+  useEffect(() => {
+    if (!activePanel) {
+      setPopoverPos(null);
+      return;
+    }
+    const button = buttonRefs.current[activePanel];
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const panelWidth = 250;
+    setPopoverPos({
+      left: Math.max(8, rect.left - panelWidth - 10),
+      top: Math.max(8, rect.top - 2),
+    });
+  }, [activePanel]);
+
+  useEffect(() => {
+    if (!activePanel) return;
+    function onMouseDown(event: MouseEvent) {
+      const target = event.target as Node;
+      if (popoverRef.current?.contains(target)) return;
+      const activeButton = activePanel ? buttonRefs.current[activePanel] : null;
+      if (activeButton?.contains(target)) return;
+      setActivePanel(null);
+      setConfirmPageAction(false);
+    }
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [activePanel]);
+
+  async function runAction() {
+    if (!actionConfig || disabled) return;
+    if (activeLassoSelection) {
+      await runMaskedActionFromLasso(actionConfig.key);
+      setConfirmPageAction(false);
+      return;
+    }
+    if (selectedText && actionConfig.key !== "detect" && actionConfig.key !== "detect_boxes") {
+      await reProcessBlock(actionConfig.key);
+      setConfirmPageAction(false);
+      return;
+    }
+    if (!confirmPageAction) {
+      setConfirmPageAction(true);
+      return;
+    }
+    await runMaskedAction(actionConfig.key);
+    setConfirmPageAction(false);
+  }
+
+  return (
+    <div
+      data-editor-preserve-text-selection="true"
+      className="w-12 border-l border-border bg-bg-secondary/45"
+    >
+      <div className="flex w-12 flex-col items-center gap-1 px-1.5 py-2">
+        {PAGE_ACTIONS.map(({ key, label, icon: Icon }) => {
+          const selected = activePanel === key;
+          const busy = activePageAction === key;
+          return (
+            <button
+              key={key}
+              ref={(node) => {
+                buttonRefs.current[key] = node;
+              }}
+              type="button"
+              onClick={() => {
+                setActivePanel(selected ? null : key);
+                setConfirmPageAction(false);
+              }}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-smooth ${
+                selected
+                  ? "border-brand/40 bg-brand/15 text-brand"
+                  : "border-transparent text-text-muted hover:border-border hover:bg-white/[0.04] hover:text-text-primary"
+              }`}
+              title={label}
+            >
+              <Icon size={15} className={busy ? "animate-pulse" : ""} />
+            </button>
+          );
+        })}
+      </div>
+
+      {actionConfig && popoverPos &&
+        createPortal(
+        <div
+          ref={popoverRef}
+          data-editor-preserve-text-selection="true"
+          style={{ position: "fixed", left: popoverPos.left, top: popoverPos.top, zIndex: 9999 }}
+          className="w-[250px] rounded-xl border border-border bg-bg-secondary p-3 shadow-[0_8px_32px_rgba(0,0,0,0.45)] backdrop-blur-md"
+        >
+          <div className="flex items-center gap-2">
+            {(() => {
+              const Icon = actionConfig.icon;
+              return <Icon size={14} className="text-brand" />;
+            })()}
+            <p className="text-[12px] font-semibold text-text-primary">{actionConfig.label}</p>
+          </div>
+          <div className="mt-3 rounded-lg border border-border bg-bg-tertiary/35 p-2">
+            <p className="text-[10px] uppercase tracking-[0.12em] text-text-muted">Alvo</p>
+            <p className="mt-1 text-[12px] font-medium text-text-primary">
+              {target?.kind ?? "Pagina inteira"}
+            </p>
+            <p className="mt-1 font-mono text-[10px] text-text-muted">
+              {target ? formatBbox(target.bbox) : hasUsableMask && actionConfig.key === "inpaint" ? "mascara disponivel" : "sem selecao"}
+            </p>
+          </div>
+          {requiresPageConfirm && !confirmPageAction && (
+            <p className="mt-2 text-[11px] leading-relaxed text-text-muted">
+              Confirme para aplicar em toda a pagina.
+            </p>
+          )}
+          {confirmPageAction && (
+            <p className="mt-2 rounded-md border border-status-warning/25 bg-status-warning/8 px-2 py-1.5 text-[11px] text-status-warning">
+              Esta acao vai processar a pagina inteira.
+            </p>
+          )}
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => void runAction()}
+            className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-brand/30 bg-brand/12 px-2 py-1.5 text-[11px] font-medium text-brand transition-smooth hover:bg-brand/18 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {activePageAction === actionConfig.key && <Loader2 size={12} className="animate-spin" />}
+            {confirmPageAction ? "Confirmar pagina" : target ? "Executar no alvo" : "Preparar pagina"}
+          </button>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
 
 /** Controles contextuais da ferramenta Lasso (Fase 8). */
 function MaskLassoControls() {
@@ -134,9 +313,10 @@ function isEditableTarget(target: EventTarget | null) {
 export interface EditorProps {
   onBack?: () => void;
   emptyBackLabel?: string;
+  headerActions?: ReactNode;
 }
 
-export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorProps = {}) {
+export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerActions }: EditorProps = {}) {
   const navigate = useNavigate();
   const project = useAppStore((s) => s.project);
   const pipeline = useAppStore((s) => s.pipeline);
@@ -210,7 +390,6 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
     (pendingCount === 0 && renderPreviewState.status === "fresh");
   const runSelectionAwareAction = (action: Parameters<typeof runMaskedAction>[0]) =>
     activeLassoSelection ? runMaskedActionFromLasso(action) : runMaskedAction(action);
-  const activePageActionLabel = activePageAction === "detect_boxes" ? "caixas" : activePageAction;
 
   useEffect(() => {
     let disposed = false;
@@ -447,6 +626,8 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
           <div className="flex items-center gap-1.5">
             <UndoRedoControls />
             <AutoSaveIndicator />
+            <RenderStatusBadge />
+            {headerActions}
             <button
               onClick={() => void saveAndRenderCurrentPage()}
               disabled={saveDisabled}
@@ -575,22 +756,8 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
             )}
           </div>
 
-          {/* Pipeline actions */}
-          <div className="flex items-center gap-0.5 rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
-            {activePageAction !== null && (
-              <span className="px-1.5 text-[10px] font-medium text-brand animate-pulse">
-                {activePageActionLabel}...
-              </span>
-            )}
-            <button
-              disabled={pagePipelineBusy || activePageAction !== null}
-              onClick={() => void runSelectionAwareAction("detect_boxes")}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-40"
-              title="Detectar apenas caixas"
-            >
-              <Search size={12} className={activePageAction === "detect_boxes" ? "animate-pulse" : ""} />
-              <span className="hidden xl:inline">Caixas</span>
-            </button>
+          {/* Pipeline progress indicator */}
+          <div className="hidden">
             <button
               disabled={pagePipelineBusy || activePageAction !== null}
               onClick={() => void runSelectionAwareAction("detect")}
@@ -690,6 +857,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início" }: EditorP
           {/* Fase 4: ToolSidebar vertical substituindo o segmented control horizontal */}
           <ToolSidebar />
           <EditorStage />
+          <PipelineActionSidebar />
         </div>
       </div>
 
