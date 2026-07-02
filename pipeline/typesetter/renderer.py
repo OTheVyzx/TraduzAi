@@ -13115,6 +13115,51 @@ def _should_enforce_original_text_scale_contract(text_data: dict) -> bool:
     return _original_text_mask_bbox_for_scale(text_data) is not None
 
 
+def _typeset_inpaint_contract_bbox_for_scale(text_data: dict) -> tuple[list[int], str] | None:
+    flags = _qa_flags_set(text_data)
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    if not isinstance(metrics, dict):
+        return None
+    has_contract_route = bool(
+        flags
+        & {
+            "visual_text_only_inpaint_contract",
+            "text_contract_direct_fill",
+            "source_text_mask_bbox_from_inpaint_component",
+            "dark_connected_component_safe_partition",
+        }
+        or isinstance(metrics.get("text_contract_direct_fill"), dict)
+    )
+    if not has_contract_route:
+        return None
+    fill_mask = metrics.get("dark_text_contract_fill_mask")
+    if not isinstance(fill_mask, dict):
+        return None
+    bbox = _layout_bbox(fill_mask.get("bbox"))
+    if bbox is None or _bbox_area_px(bbox) < 16:
+        return None
+    return bbox, "qa_metrics.dark_text_contract_fill_mask.bbox"
+
+
+def _record_typeset_inpaint_contract_fit(text_data: dict, source_bbox: list[int], source_name: str, resolved: dict) -> None:
+    metrics = text_data.setdefault("qa_metrics", {})
+    if not isinstance(metrics, dict):
+        return
+    bbox = [int(v) for v in source_bbox]
+    metrics["typeset_inpaint_contract_bbox_used"] = {
+        "bbox": list(bbox),
+        "source": str(source_name),
+    }
+    metrics["typeset_contract_fit"] = {
+        "source_bbox": list(bbox),
+        "block_bbox": [int(round(v)) for v in resolved.get("block_bbox", [])],
+        "font_size": int(resolved.get("font_size", 0) or 0),
+        "line_count": len(resolved.get("lines") or []),
+        "line_widths": [int(width) for width in resolved.get("line_widths") or []],
+        "contract_metrics": _original_text_scale_contract_metrics(resolved, bbox),
+    }
+
+
 def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     _propagate_dark_connected_text_anchor_to_type(text_data)
     candidates: list[tuple[str, list[int]]] = []
@@ -13143,7 +13188,12 @@ def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     if _valid_scale_bbox(polygon_bbox):
         candidates.append(("line_polygons", polygon_bbox))
     if not candidates:
-        return None
+        contract = _typeset_inpaint_contract_bbox_for_scale(text_data)
+        return list(contract[0]) if contract is not None else None
+
+    contract = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    if contract is not None:
+        candidates.insert(0, (contract[1], contract[0]))
 
     anchor_ref = next(
         (
@@ -13228,6 +13278,7 @@ def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     # useful for positioning, but using a compact anchor as the scale contract
     # is what makes connected dark lobes collapse to tiny text.
     for priority_key in (
+        "qa_metrics.dark_text_contract_fill_mask.bbox",
         "source_text_mask_bbox",
         "_source_text_mask_bbox",
         "text_pixel_bbox",
@@ -13892,6 +13943,14 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
     original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    inpaint_contract = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    inpaint_contract_source = None
+    if (
+        original_scale_bbox is not None
+        and inpaint_contract is not None
+        and [int(v) for v in original_scale_bbox] == [int(v) for v in inpaint_contract[0]]
+    ):
+        inpaint_contract_source = inpaint_contract[1]
     if original_scale_bbox is not None:
         _merge_qa_flags(text_data, ["original_text_scale_size_experiment"])
     x1, y1, x2, y2 = plan["target_bbox"]
@@ -14227,6 +14286,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     }
         if trace_candidates:
             _mark_selected_render_candidate(text_data, best_candidate)
+        if inpaint_contract_source:
+            _record_typeset_inpaint_contract_fit(text_data, original_scale_bbox, inpaint_contract_source, best_candidate)
         _persist_fit_attempts(text_data, plan, text, best_candidate, font_size)
         return best_candidate
 
@@ -14375,6 +14436,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 "capacity_bbox": plan.get("capacity_bbox"),
             },
         )
+    if inpaint_contract_source:
+        _record_typeset_inpaint_contract_fit(text_data, original_scale_bbox, inpaint_contract_source, fallback)
     _persist_fit_attempts(text_data, plan, text, fallback, font_size)
     return fallback
 
