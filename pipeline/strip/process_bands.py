@@ -4681,6 +4681,73 @@ def _strip_false_trailing_dark_bubble_fragment(text: dict) -> bool:
     raw_value = str(text.get("text") or text.get("original") or text.get("raw_ocr") or "").strip()
     if not raw_value:
         return False
+    clipped_match = re.search(r"^(?P<kept>.+?[.!?])\s+(?P<tail>[A-Za-z]{1,3})\s*$", raw_value)
+    if clipped_match:
+        kept = clipped_match.group("kept").strip()
+        tail = clipped_match.group("tail").strip()
+        if len(re.sub(r"[^A-Za-z0-9]+", "", kept)) >= 12 and len(tail) <= 3:
+            polygons = list(text.get("line_polygons") or [])
+            tail_bbox: list[int] | None = None
+            if polygons:
+                last = polygons[-1]
+                xs: list[int] = []
+                ys: list[int] = []
+                for point in last:
+                    try:
+                        xs.append(int(point[0]))
+                        ys.append(int(point[1]))
+                    except Exception:
+                        continue
+                if xs and ys:
+                    tail_bbox = [min(xs), min(ys), max(xs), max(ys)]
+            changed = False
+            for key in ("text", "original", "raw_ocr", "normalized_ocr", "normalized_text_final"):
+                value = text.get(key)
+                if not isinstance(value, str):
+                    continue
+                cleaned = re.sub(r"^(.+?[.!?])\s+[A-Za-z]{1,3}\s*$", r"\1", value.strip()).strip()
+                if cleaned and cleaned != value.strip():
+                    text[key] = cleaned
+                    changed = True
+            if changed:
+                if tail_bbox is not None:
+                    tx1, ty1, tx2, ty2 = tail_bbox
+                    cleanup_bbox = [
+                        max(0, int(tx1) - 28),
+                        max(0, int(ty1) - 8),
+                        int(tx2) + 180,
+                        int(ty2) + 40,
+                    ]
+                    cleanup_payload = {
+                        "bbox": cleanup_bbox,
+                        "removed_tail": tail,
+                        "source": "trailing_short_fragment",
+                    }
+                    text["clipped_overlap_fragment_cleanup_bbox"] = dict(cleanup_payload)
+                    metrics = text.setdefault("qa_metrics", {})
+                    if isinstance(metrics, dict):
+                        metrics["clipped_overlap_fragment_cleanup_bbox"] = dict(cleanup_payload)
+                if len(polygons) >= 2:
+                    text["line_polygons"] = polygons[:-1]
+                    xs_all: list[int] = []
+                    ys_all: list[int] = []
+                    for polygon in polygons[:-1]:
+                        for point in polygon:
+                            try:
+                                xs_all.append(int(point[0]))
+                                ys_all.append(int(point[1]))
+                            except Exception:
+                                continue
+                    if xs_all and ys_all:
+                        new_bbox = [min(xs_all), min(ys_all), max(xs_all), max(ys_all)]
+                        for key in ("bbox", "source_bbox", "text_pixel_bbox", "layout_bbox"):
+                            if key in text:
+                                text[key] = list(new_bbox)
+                flags = list(text.get("qa_flags") or [])
+                if "false_dark_bubble_trailing_clipped_fragment_removed" not in flags:
+                    flags.append("false_dark_bubble_trailing_clipped_fragment_removed")
+                text["qa_flags"] = flags
+                return True
     match = re.search(
         r"^(?P<kept>.+?[.!?])\s+(?P<tail>(?:[Ww][Il1I]|[Il1]{1,2})(?:\s+(?:for|of|to|in|is|it))?)\s*$",
         raw_value,
@@ -4770,6 +4837,8 @@ def _is_dark_bubble_reocr_text(text: dict) -> bool:
 def _recovered_dark_bubble_replaces_existing(recovered: dict, existing: dict) -> bool:
     if not (_is_dark_bubble_reocr_text(recovered) and isinstance(existing, dict)):
         return False
+    if _recovered_dark_bubble_contains_existing_with_extra_lobe_text(recovered, existing):
+        return False
     if _recovered_dark_bubble_is_contaminated_by_existing_text(recovered, existing):
         return False
     existing_source = str(existing.get("bubble_mask_source") or existing.get("bubbleMaskSource") or "").strip().lower()
@@ -4797,6 +4866,61 @@ def _compact_ocr_text_for_reocr_compare(value: object) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^\s*(?:\d+\s*/\s*|[/\\|]+\s*|\d+\s+)", "", text)
     return re.sub(r"[^A-Za-z0-9]+", "", text).lower()
+
+
+def _recovered_dark_bubble_contains_existing_with_extra_lobe_text(recovered: dict, existing: dict) -> bool:
+    if not (_is_dark_bubble_reocr_text(recovered) and isinstance(existing, dict)):
+        return False
+    recovered_flags = {str(flag).strip() for flag in recovered.get("qa_flags") or [] if str(flag).strip()}
+    if "candidate_crop_direct_paddle_reocr" not in recovered_flags:
+        return False
+
+    recovered_raw = str(recovered.get("text") or recovered.get("original") or recovered.get("raw_ocr") or "").strip()
+    existing_raw = str(existing.get("text") or existing.get("original") or existing.get("raw_ocr") or "").strip()
+    recovered_compact = _compact_ocr_text_for_reocr_compare(recovered_raw)
+    existing_compact = _compact_ocr_text_for_reocr_compare(existing_raw)
+    if len(existing_compact) < 12 or len(recovered_compact) <= len(existing_compact) + 6:
+        return False
+
+    existing_index = recovered_compact.find(existing_compact)
+    if existing_index < 0:
+        return False
+    prefix_len = existing_index
+    suffix_len = len(recovered_compact) - existing_index - len(existing_compact)
+    # Same-lobe reOCR often contains an existing partial OCR plus the missing
+    # suffix. Only reject the composite pattern where text from a previous lobe
+    # appears before an otherwise complete independent OCR.
+    if prefix_len < 6:
+        return False
+    if suffix_len > max(4, int(round(len(existing_compact) * 0.20))):
+        return False
+
+    recovered_bbox = _coerce_bbox(recovered.get("text_pixel_bbox") or recovered.get("bbox") or recovered.get("source_bbox"))
+    existing_bbox = _coerce_bbox(existing.get("text_pixel_bbox") or existing.get("bbox") or existing.get("source_bbox"))
+    if recovered_bbox is None or existing_bbox is None:
+        return False
+
+    recovered_area = max(1, _bbox_area(recovered_bbox))
+    existing_area = max(1, _bbox_area(existing_bbox))
+    existing_covered = _bbox_intersection_area(recovered_bbox, existing_bbox) / float(existing_area)
+    if existing_covered < 0.72:
+        return False
+
+    _rx1, ry1, _rx2, ry2 = recovered_bbox
+    _ex1, ey1, _ex2, ey2 = existing_bbox
+    recovered_h = max(1, ry2 - ry1)
+    recovered_cy = (ry1 + ry2) / 2.0
+    existing_cy = (ey1 + ey2) / 2.0
+    vertically_separate = abs(existing_cy - recovered_cy) >= max(24.0, recovered_h * 0.18)
+    substantially_broader = recovered_area >= int(existing_area * 2.0)
+    if not (vertically_separate or substantially_broader):
+        return False
+
+    flags = list(recovered.get("qa_flags") or [])
+    if "candidate_crop_composite_contains_independent_ocr" not in flags:
+        flags.append("candidate_crop_composite_contains_independent_ocr")
+    recovered["qa_flags"] = flags
+    return True
 
 
 def _recovered_dark_bubble_is_contaminated_by_existing_text(recovered: dict, existing: dict) -> bool:
@@ -7141,6 +7265,14 @@ def _dark_bubble_full_crop_ocr_is_better(old_text: str, new_text: str) -> bool:
         and len(new_compact) >= len(old_compact) + 6
     ):
         return False
+    if old_compact and old_compact in new_compact:
+        prefix_len = new_compact.find(old_compact)
+        old_word_count = len(re.findall(r"[A-Za-z0-9]+", str(old_text or "")))
+        if prefix_len >= 4 and old_word_count >= 6:
+            prefix_raw = str(new_text or "")[: max(0, min(len(str(new_text or "")), prefix_len + 8))]
+            prefix_tokens = re.findall(r"[A-Za-z0-9]+", prefix_raw)
+            if len(prefix_tokens) <= 2:
+                return False
     if old_compact and old_compact in new_compact and new_score >= old_score + 4:
         return True
     if new_score >= max(old_score + 10, int(old_score * 1.18)):

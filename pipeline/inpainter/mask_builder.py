@@ -4357,7 +4357,82 @@ def build_glyph_text_mask(block: dict, image_shape: tuple[int, ...]) -> np.ndarr
         x1, y1, x2, y2 = text_bbox
         mask[y1:y2, x1:x2] = 255
 
+    cleanup_bbox, cleanup = _clipped_overlap_fragment_cleanup_bbox_for_block(block, image_shape)
+    if cleanup_bbox is not None:
+        x1, y1, x2, y2 = cleanup_bbox
+        mask[y1:y2, x1:x2] = 255
+        if isinstance(cleanup, dict):
+            cleanup["applied_to_glyph_mask"] = True
+
     return mask if np.any(mask) else None
+
+
+def _clipped_overlap_fragment_cleanup_bbox_for_block(
+    block: dict,
+    image_shape: tuple[int, ...],
+) -> tuple[list[int] | None, dict | None]:
+    height, width = _image_hw(image_shape)
+    metrics = block.get("qa_metrics") if isinstance(block.get("qa_metrics"), dict) else {}
+    cleanup = block.get("clipped_overlap_fragment_cleanup_bbox")
+    if not isinstance(cleanup, dict):
+        cleanup = metrics.get("clipped_overlap_fragment_cleanup_bbox") if isinstance(metrics, dict) else None
+    cleanup_bbox = cleanup.get("bbox") if isinstance(cleanup, dict) else None
+    cleanup_bbox = _normalize_bbox(cleanup_bbox, width, height)
+    if cleanup_bbox is not None:
+        return cleanup_bbox, cleanup if isinstance(cleanup, dict) else None
+
+    flags = {str(flag).strip() for flag in block.get("qa_flags") or [] if str(flag).strip()}
+    if "false_dark_bubble_trailing_clipped_fragment_removed" not in flags:
+        return None, None
+    text_bbox = (
+        _normalize_bbox(block.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(block.get("bbox"), width, height)
+        or _normalize_bbox(block.get("source_bbox"), width, height)
+    )
+    if text_bbox is None:
+        return None, None
+    bubble_bbox = (
+        _normalize_bbox(block.get("bubble_mask_bbox"), width, height)
+        or _normalize_bbox(block.get("balloon_bbox"), width, height)
+        or text_bbox
+    )
+    text_w = max(1, text_bbox[2] - text_bbox[0])
+    text_h = max(1, text_bbox[3] - text_bbox[1])
+    x1 = max(0, text_bbox[2] - max(96, int(round(text_w * 0.50))))
+    x2 = min(width, text_bbox[2] + max(180, text_w))
+    y1 = max(text_bbox[3] + max(18, int(round(text_h * 0.75))), bubble_bbox[3] - max(36, int(round(text_h * 0.50))))
+    y2 = min(height, max(y1 + max(32, int(round(text_h * 0.70))), bubble_bbox[3] + max(48, int(round(text_h * 0.80)))))
+    fallback_bbox = _normalize_bbox([x1, y1, x2, y2], width, height)
+    if fallback_bbox is None:
+        return None, None
+    cleanup_payload = {
+        "bbox": fallback_bbox,
+        "source": "fallback_from_removed_trailing_fragment_flag",
+    }
+    block["clipped_overlap_fragment_cleanup_bbox"] = cleanup_payload
+    if isinstance(metrics, dict):
+        metrics["clipped_overlap_fragment_cleanup_bbox"] = dict(cleanup_payload)
+    return fallback_bbox, cleanup_payload
+
+
+def _apply_clipped_overlap_fragment_cleanup_mask(
+    block: dict,
+    text_mask: np.ndarray,
+    image_shape: tuple[int, ...],
+) -> np.ndarray:
+    height, width = _image_hw(image_shape)
+    cleanup_bbox, cleanup = _clipped_overlap_fragment_cleanup_bbox_for_block(block, image_shape)
+    if cleanup_bbox is None:
+        return text_mask
+    x1, y1, x2, y2 = cleanup_bbox
+    cleanup_mask = np.zeros((height, width), dtype=np.uint8)
+    cleanup_mask[y1:y2, x1:x2] = 255
+    merged = cv2.bitwise_or(text_mask.astype(np.uint8), cleanup_mask)
+    if isinstance(cleanup, dict):
+        cleanup["applied_to_final_text_mask"] = True
+        cleanup["final_text_mask_pixels_before"] = int(np.count_nonzero(text_mask))
+        cleanup["final_text_mask_pixels_after"] = int(np.count_nonzero(merged))
+    return merged.astype(np.uint8)
 
 
 def _dark_bubble_recovered_text_bbox_floor(
@@ -6335,6 +6410,7 @@ def build_inpaint_mask(
     if text_mask is None:
         return None
     text_mask = text_mask.astype(np.uint8)
+    text_mask = _apply_clipped_overlap_fragment_cleanup_mask(block, text_mask, image_shape)
     if _mask_bbox_touches_crop_edge(text_mask, edge_px=2):
         _append_qa_flag(block, "band_edge_clipped_text_mask")
         metrics = block.setdefault("qa_metrics", {})

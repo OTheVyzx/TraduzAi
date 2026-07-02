@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inpainter.mask_builder import (
     _derive_card_panel_mask_from_image,
     _detach_mixed_sfx_from_white_bubble_block,
+    _apply_clipped_overlap_fragment_cleanup_mask,
     _close_visual_text_source_mask_gaps,
     _enforce_visual_text_only_inpaint_contract,
     _text_bbox_contract_mask,
@@ -18,6 +19,7 @@ from inpainter.mask_builder import (
     bbox_overreach_ratio,
     build_raw_text_mask_from_image,
     build_bubble_limited_glyph_mask,
+    build_glyph_text_mask,
     build_inpaint_mask,
     build_mask_regions,
     build_region_pixel_mask,
@@ -74,6 +76,144 @@ class MaskBuilderTests(unittest.TestCase):
         self.assertGreater(int(np.count_nonzero(interior)), int(np.count_nonzero(mask)) * 4)
         self.assertEqual(int(mask[50, 24]), 0)
         self.assertGreater(int(mask[50, 70]), 0)
+
+    def test_clipped_overlap_fragment_cleanup_bbox_is_added_to_glyph_mask(self):
+        block = {
+            "text_pixel_bbox": [20, 20, 80, 40],
+            "line_polygons": [[[20, 20], [80, 20], [80, 40], [20, 40]]],
+            "qa_metrics": {
+                "clipped_overlap_fragment_cleanup_bbox": {
+                    "bbox": [100, 70, 170, 95],
+                    "removed_tail": "Th",
+                }
+            },
+        }
+
+        mask = build_glyph_text_mask(block, (120, 200, 3))
+
+        self.assertIsNotNone(mask)
+        self.assertGreater(int(mask[30, 30]), 0)
+        self.assertGreater(int(mask[80, 120]), 0)
+        self.assertTrue(block["qa_metrics"]["clipped_overlap_fragment_cleanup_bbox"]["applied_to_glyph_mask"])
+
+    def test_clipped_overlap_fragment_cleanup_survives_final_balloon_clips(self):
+        base_mask = np.zeros((720, 640), dtype=np.uint8)
+        base_mask[451:533, 164:406] = 255
+        block = {
+            "text": "That's the power of this underworld!",
+            "bbox": [164, 451, 406, 533],
+            "source_bbox": [164, 451, 406, 533],
+            "text_pixel_bbox": [164, 451, 406, 533],
+            "line_polygons": [
+                [[179, 451], [397, 457], [397, 494], [177, 488]],
+                [[164, 499], [406, 499], [406, 533], [164, 533]],
+            ],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "block_profile": "dark_bubble",
+            "layout_profile": "dark_bubble",
+            "qa_flags": ["candidate_crop_direct_paddle_reocr", "dark_bubble_oval_reocr"],
+            "clipped_overlap_fragment_cleanup_bbox": {
+                "bbox": [321, 650, 563, 716],
+                "removed_tail": "Th",
+            },
+            "qa_metrics": {},
+        }
+
+        mask = _apply_clipped_overlap_fragment_cleanup_mask(block, base_mask, (720, 640, 3))
+
+        self.assertIsNotNone(mask)
+        self.assertGreater(int(mask[470, 190]), 0)
+        self.assertGreater(int(mask[670, 350]), 0)
+        cleanup = block["clipped_overlap_fragment_cleanup_bbox"]
+        self.assertTrue(cleanup["applied_to_final_text_mask"])
+        self.assertGreater(cleanup["final_text_mask_pixels_after"], cleanup["final_text_mask_pixels_before"])
+
+    def test_clipped_overlap_fragment_cleanup_falls_back_from_flag_when_bbox_was_dropped(self):
+        base_mask = np.zeros((720, 800), dtype=np.uint8)
+        base_mask[451:533, 164:406] = 255
+        block = {
+            "bbox": [164, 451, 406, 533],
+            "source_bbox": [164, 451, 406, 533],
+            "text_pixel_bbox": [164, 451, 406, 533],
+            "bubble_mask_bbox": [88, 221, 496, 668],
+            "qa_flags": ["false_dark_bubble_trailing_clipped_fragment_removed"],
+            "qa_metrics": {},
+        }
+
+        mask = _apply_clipped_overlap_fragment_cleanup_mask(block, base_mask, (720, 800, 3))
+
+        self.assertGreater(int(mask[470, 190]), 0)
+        self.assertGreater(int(mask[650, 350]), 0)
+        cleanup = block["clipped_overlap_fragment_cleanup_bbox"]
+        self.assertEqual(cleanup["source"], "fallback_from_removed_trailing_fragment_flag")
+        self.assertTrue(cleanup["applied_to_final_text_mask"])
+
+    def test_clipped_overlap_fragment_cleanup_fill_accumulates_dark_panel_mask(self):
+        from inpainter import _apply_clipped_overlap_fragment_cleanup_fill
+
+        image = np.full((720, 800, 3), 24, dtype=np.uint8)
+        image[650:700, 330:560] = 220
+        ocr_page = {
+            "texts": [
+                {
+                    "bbox": [164, 451, 406, 533],
+                    "source_bbox": [164, 451, 406, 533],
+                    "text_pixel_bbox": [164, 451, 406, 533],
+                    "bubble_mask_bbox": [88, 221, 496, 668],
+                    "qa_flags": ["false_dark_bubble_trailing_clipped_fragment_removed"],
+                }
+            ]
+        }
+
+        count = _apply_clipped_overlap_fragment_cleanup_fill(image, ocr_page)
+
+        self.assertEqual(count, 1)
+        self.assertLess(int(image[650, 350, 0]), 8)
+        fill_mask = ocr_page["_strip_dark_panel_fill_mask"]
+        self.assertGreater(int(fill_mask[650, 350]), 0)
+        self.assertIn("clipped_overlap_fragment_cleanup_fill", ocr_page["_strip_inpaint_decision_flags"])
+
+    def test_fast_dark_panel_fill_applies_clipped_overlap_cleanup_before_return(self):
+        from inpainter import _apply_fast_dark_panel_text_fill
+
+        image = np.full((720, 800, 3), 24, dtype=np.uint8)
+        text = {
+            "text_id": "direct_paddle_reocr_001",
+            "bbox": [164, 451, 406, 533],
+            "source_bbox": [164, 451, 406, 533],
+            "text_pixel_bbox": [164, 451, 406, 533],
+            "bubble_mask_bbox": [88, 221, 496, 668],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "line_polygons": [[[164, 451], [406, 451], [406, 533], [164, 533]]],
+            "qa_flags": ["false_dark_bubble_trailing_clipped_fragment_removed"],
+            "mask_evidence": {
+                "fast_fill_allowed": True,
+                "kind": "ocr_pixels",
+                "raw_mask_pixels": 120,
+                "expanded_mask_pixels": 160,
+            },
+        }
+        page = {"texts": [text]}
+
+        def fake_fill(source, _text):
+            filled = source.copy()
+            filled[451:533, 164:406] = 0
+            return filled
+
+        with patch("inpainter._fast_dark_panel_fill_enabled", return_value=True), patch(
+            "inpainter._image_dark_bubble_is_visually_light", return_value=False
+        ), patch("inpainter._fast_fill_mask_evidence_rejection_reason", return_value=None), patch(
+            "inpainter._fast_fill_blocking_qa_reason", return_value=None
+        ), patch("inpainter._try_dark_panel_text_fill", side_effect=fake_fill), patch(
+            "inpainter._dark_fill_mask_is_overbroad_for_text", return_value=False
+        ), patch("inpainter._block_is_covered_by_fast_fill", return_value=True):
+            result, remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [text])
+
+        self.assertEqual(stats["dark_panel_fill_count"], 1)
+        self.assertEqual(remaining, [])
+        self.assertLess(int(result[650, 350, 0]), 8)
+        self.assertGreater(int(page["_strip_dark_panel_fill_mask"][650, 350]), 0)
+        self.assertIn("clipped_overlap_fragment_cleanup_fill", page["_strip_inpaint_decision_flags"])
 
     def test_dark_connected_text_bbox_contract_uses_lobe_bbox_when_text_pixel_is_shared(self):
         block = {
