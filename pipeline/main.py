@@ -7354,6 +7354,202 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
     return audit
 
 
+def _resolve_debug_e2e_path(work_dir: Path, value: object) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if parts and parts[0].lower() == "debug":
+        return Path(work_dir) / path
+    return Path(work_dir) / "debug" / "e2e" / path
+
+
+def _clean_final_band_source_for_crop_row(root: Path, work_dir: Path, row: dict) -> tuple[Path | None, str]:
+    band_id = str(row.get("band_id") or "").strip()
+    candidates: list[tuple[Path | None, str]] = []
+    for key in ("post_copyback_path", "clean_band_path", "clean_source_path"):
+        candidates.append((_resolve_debug_e2e_path(work_dir, row.get(key)), key))
+    if band_id:
+        post_dir = root / "10_copyback_reassemble" / band_id
+        for name in ("post_copyback.jpg", "post_copyback.png", "post_copyback.jpeg"):
+            candidates.append((post_dir / name, "post_copyback_convention"))
+    candidates.append((_resolve_debug_e2e_path(work_dir, row.get("rendered_band_path")), "rendered_band_path"))
+    candidates.append((_resolve_debug_e2e_path(work_dir, row.get("final_crop_path")), "existing_final_band"))
+    for path, source in candidates:
+        if path and path.exists() and path.is_file():
+            return path, source
+    return None, ""
+
+
+def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
+    audit = {
+        "source": "clean_final_bands_after_all_rerenders",
+        "after_final_project_image_rerender": True,
+        "after_late_render_contract_repair": True,
+        "final_guard_ran_after_final_project_image_rerender": True,
+        "final_output_source": "clean_final_bands_after_all_rerenders",
+        "seen_count": 0,
+        "clean_band_source_used": 0,
+        "translated_crop_fallback_used": 0,
+        "clean_band_final_mismatch_count": 0,
+        "final_band_written_count": 0,
+        "translated_pages_recomposed_count": 0,
+        "missing_count": 0,
+        "error_count": 0,
+        "sources_by_band": {},
+    }
+    if not recorder:
+        return audit
+    try:
+        import cv2
+        import numpy as np
+
+        root = Path(work_dir) / "debug" / "e2e"
+        crops_path = root / "10_copyback_reassemble" / "final_band_crops.jsonl"
+        if not crops_path.exists():
+            audit["missing_count"] += 1
+            return audit
+        rows: list[dict] = []
+        for line in crops_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            audit["seen_count"] += 1
+            try:
+                row = json.loads(line)
+            except Exception:
+                audit["error_count"] += 1
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        page_cache: dict[str, np.ndarray] = {}
+        rows_by_page: dict[str, list[dict]] = {}
+        for row in rows:
+            band_id = str(row.get("band_id") or "").strip()
+            translated_name = str(row.get("translated_output_page") or "").strip()
+            final_path = _resolve_debug_e2e_path(Path(work_dir), row.get("final_crop_path"))
+            bbox = row.get("crop_bbox_in_translated_page")
+            if not final_path:
+                audit["missing_count"] += 1
+                continue
+            source_path, source_kind = _clean_final_band_source_for_crop_row(root, Path(work_dir), row)
+            image = cv2.imread(str(source_path), cv2.IMREAD_COLOR) if source_path else None
+            if image is None and translated_name and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                translated_path = _final_rerender_resolve_translated_path(Path(work_dir), translated_name)
+                translated_image = cv2.imread(str(translated_path), cv2.IMREAD_COLOR)
+                if translated_image is not None:
+                    try:
+                        x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
+                        h, w = translated_image.shape[:2]
+                        x1 = max(0, min(w, x1))
+                        x2 = max(0, min(w, x2))
+                        y1 = max(0, min(h, y1))
+                        y2 = max(0, min(h, y2))
+                        if x2 > x1 and y2 > y1:
+                            image = translated_image[y1:y2, x1:x2, :].copy()
+                            source_kind = "translated_after_final_project_rerender_fallback"
+                            audit["translated_crop_fallback_used"] += 1
+                    except Exception:
+                        audit["error_count"] += 1
+            if image is None:
+                audit["missing_count"] += 1
+                continue
+            if source_kind != "translated_after_final_project_rerender_fallback":
+                audit["clean_band_source_used"] += 1
+            existing = cv2.imread(str(final_path), cv2.IMREAD_COLOR)
+            if existing is None or existing.shape != image.shape or bool(np.any(existing != image)):
+                audit["clean_band_final_mismatch_count"] += 1
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            if final_rel:
+                recorder.write_image(final_rel, image, quality=100)
+                audit["final_band_written_count"] += 1
+            if band_id:
+                audit["sources_by_band"][band_id] = source_kind
+            if translated_name:
+                rows_by_page.setdefault(translated_name, []).append(row)
+
+        for translated_name, page_rows in rows_by_page.items():
+            translated_path = _final_rerender_resolve_translated_path(Path(work_dir), translated_name)
+            page_image = page_cache.get(translated_name)
+            if page_image is None:
+                page_image = cv2.imread(str(translated_path), cv2.IMREAD_COLOR)
+                if page_image is None:
+                    audit["missing_count"] += 1
+                    continue
+            page_changed = False
+            def _final_band_paste_order(item: dict) -> tuple[int, int, int]:
+                bbox = item.get("crop_bbox_in_translated_page") or [0, 0, 0, 0]
+                try:
+                    y_top = int(item.get("band_y_top", bbox[1]) or 0)
+                    y_bottom = int(item.get("band_y_bottom", bbox[3]) or 0)
+                except Exception:
+                    y_top = 0
+                    y_bottom = 0
+                _, source_kind = _clean_final_band_source_for_crop_row(root, Path(work_dir), item)
+                source_priority = 1 if str(source_kind).startswith("post_copyback") else 0
+                return (source_priority, -y_top, -y_bottom)
+
+            for row in sorted(page_rows, key=_final_band_paste_order):
+                final_path = _resolve_debug_e2e_path(Path(work_dir), row.get("final_crop_path"))
+                bbox = row.get("crop_bbox_in_translated_page")
+                final_image = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
+                if final_image is None or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
+                except Exception:
+                    audit["error_count"] += 1
+                    continue
+                h, w = page_image.shape[:2]
+                x1 = max(0, min(w, x1))
+                x2 = max(0, min(w, x2))
+                y1 = max(0, min(h, y1))
+                y2 = max(0, min(h, y2))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                target_h = y2 - y1
+                target_w = x2 - x1
+                try:
+                    final_y0 = max(
+                        0,
+                        int(round(float(row.get("output_page_y_top") or 0)))
+                        - int(round(float(row.get("band_y_top") or 0))),
+                    )
+                except Exception:
+                    final_y0 = 0
+                final_x0 = 0
+                final_slice = final_image[
+                    final_y0 : final_y0 + target_h,
+                    final_x0 : final_x0 + target_w,
+                    :,
+                ]
+                if final_slice.shape[0] != target_h or final_slice.shape[1] != target_w:
+                    final_slice = cv2.resize(final_image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                page_image[y1:y2, x1:x2, :] = final_slice
+                page_changed = True
+            if page_changed:
+                translated_path.parent.mkdir(parents=True, exist_ok=True)
+                if translated_path.suffix.lower() in {".jpg", ".jpeg"}:
+                    jpeg_params = [cv2.IMWRITE_JPEG_QUALITY, 100]
+                    sampling_flag = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR", None)
+                    sampling_444 = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444", None)
+                    if sampling_flag is not None and sampling_444 is not None:
+                        jpeg_params.extend([sampling_flag, sampling_444])
+                    cv2.imwrite(str(translated_path), page_image, jpeg_params)
+                else:
+                    cv2.imwrite(str(translated_path), page_image)
+                audit["translated_pages_recomposed_count"] += 1
+        try:
+            recorder.write_json("10_copyback_reassemble/final_band_crops_refresh.json", audit)
+        except Exception:
+            pass
+    except Exception:
+        audit["error_count"] += 1
+    return audit
+
+
 def _main_final_page_space_typeset_enabled() -> bool:
     raw = os.getenv("TRADUZAI_MAIN_FINAL_PAGE_SPACE_TYPESET", "")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
@@ -7818,19 +8014,21 @@ def _run_post_rerender_final_visual_contract(
 ) -> dict:
     should_refresh_crops = bool(after_final_project_image_rerender)
     if should_refresh_crops:
-        refresh_audit = _refresh_debug_final_band_crops_from_translated(recorder, work_dir)
+        refresh_audit = _restore_clean_final_bands_after_rerender(recorder, work_dir)
     else:
         refresh_audit = {
-            "source": "translated_after_final_project_rerender",
+            "source": "clean_final_bands_after_all_rerenders",
             "after_final_project_image_rerender": False,
             "after_late_render_contract_repair": False,
+            "final_guard_ran_after_final_project_image_rerender": False,
+            "final_output_source": "existing_final_bands_no_final_rerender",
             "seen_count": 0,
             "refreshed_count": 0,
             "missing_count": 0,
             "error_count": 0,
             "skipped_no_final_rerender": True,
         }
-    refresh_audit["source"] = "translated_after_final_project_rerender"
+    refresh_audit["source"] = str(refresh_audit.get("source") or "clean_final_bands_after_all_rerenders")
     refresh_audit["after_final_project_image_rerender"] = bool(after_final_project_image_rerender)
     refresh_audit["after_late_render_contract_repair"] = bool(after_late_render_contract_repair)
     try:

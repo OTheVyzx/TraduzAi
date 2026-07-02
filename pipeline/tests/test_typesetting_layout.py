@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -125,6 +126,91 @@ class TypesettingLayoutTests(unittest.TestCase):
         safe_cx = (plan["safe_text_box"][0] + plan["safe_text_box"][2]) / 2
         bubble_cx = (text_data["balloon_bbox"][0] + text_data["balloon_bbox"][2]) / 2
         self.assertLess(abs(safe_cx - bubble_cx), 70)
+
+    def test_dark_connected_lobe_uses_inpaint_contract_bbox_for_typeset_scale(self):
+        text_data = {
+            "id": "page_002_band_023_left_lobe",
+            "text": "You grew up at an orphanage without parents, and by your early teens, you had already set foot in the world of gangsters.",
+            "translated": "VOCE CRESCEU EM UM ORFANATO SEM PAIS E, NO INICIO DA ADOLESCENCIA, JA HAVIA COLOCADO OS PES NO MUNDO DOS GANGSTERS.",
+            "tipo": "fala",
+            "bbox": [11, 16481, 492, 16866],
+            "source_bbox": [11, 16481, 492, 16866],
+            "text_pixel_bbox": [68, 16575, 491, 16780],
+            "source_text_mask_bbox": [68, 16575, 491, 16780],
+            "_connected_source_bbox": [11, 16481, 492, 16866],
+            "target_bbox": [0, 16460, 520, 16900],
+            "balloon_bbox": [68, 16575, 491, 16780],
+            "bubble_mask_bbox": [11, 16481, 492, 16866],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "_is_lobe_subregion": True,
+            "_connected_slot_count": 2,
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+                "dark_connected_component_safe_partition",
+                "dark_bubble_connected_lobe_passthrough",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [66, 16572, 388, 16763],
+                    "mask_pixels": 61494,
+                    "source": "build_inpaint_mask_contract",
+                },
+                "text_contract_direct_fill": {
+                    "mask_pixels": 61494,
+                    "contract_mask_pixels": 61494,
+                    "fill_rgb": [0, 0, 0],
+                    "reason": "expanded_text_contract_mask",
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 48,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [0, 16460, 520, 16900],
+            "position_bbox": [30, 16500, 460, 16820],
+            "capacity_bbox": [30, 16500, 460, 16820],
+            "safe_text_box": [30, 16500, 460, 16820],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 48,
+            "max_width": 430,
+            "max_height": 320,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "ellipse",
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_EXPERIMENT_ORIGINAL_TEXT_SCALE": "0"}):
+            resolved = _resolve_text_layout(text_data, plan)
+
+        metrics = text_data["qa_metrics"]
+        self.assertEqual(
+            metrics.get("typeset_inpaint_contract_bbox_used"),
+            {"bbox": [66, 16572, 388, 16763], "source": "qa_metrics.dark_text_contract_fill_mask.bbox"},
+        )
+        self.assertEqual(metrics.get("typeset_contract_fit", {}).get("source_bbox"), [66, 16572, 388, 16763])
+        self.assertNotEqual(
+            metrics.get("typeset_contract_fit", {}).get("source_bbox"),
+            [11, 16481, 492, 16866],
+        )
+        self.assertLessEqual(resolved["font_size"], 36)
+        self.assertLessEqual(resolved["block_width"], int((388 - 66) * 1.2))
+        self.assertLessEqual(resolved["block_height"], int((16763 - 16572) * 1.6))
 
     def test_plan_text_layout_recomputes_edge_clipped_balloon_from_full_safe_area(self):
         text_data = {

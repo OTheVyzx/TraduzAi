@@ -1466,7 +1466,7 @@ class MainEmitTests(unittest.TestCase):
             self.assertTrue(np.array_equal(crop, image[2:7, 3:9]))
             self.assertTrue((debug_root / "final_band_crops_refresh.json").exists())
 
-    def test_post_rerender_visual_contract_refreshes_crops_from_translated_after_rerender(self) -> None:
+    def test_post_rerender_visual_contract_restores_translated_from_final_bands_after_rerender(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder
 
@@ -1476,20 +1476,20 @@ class MainEmitTests(unittest.TestCase):
             image = np.zeros((10, 12, 3), dtype=np.uint8)
             image[:, :] = [20, 20, 20]
             image[1:6, 2:8] = [32, 96, 220]
-            cv2.imwrite(str(translated_dir / "001.jpg"), image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            cv2.imwrite(str(translated_dir / "001.png"), image)
             debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
             final_bands = debug_root / "final_bands"
             final_bands.mkdir(parents=True)
             stale = np.zeros((5, 6, 3), dtype=np.uint8)
             stale[:, :] = [180, 20, 20]
-            cv2.imwrite(str(final_bands / "page_001_band_000.jpg"), stale, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            cv2.imwrite(str(final_bands / "page_001_band_000.png"), stale)
             (debug_root / "final_band_crops.jsonl").write_text(
                 json.dumps(
                     {
                         "band_id": "page_001_band_000",
-                        "translated_output_page": "001.jpg",
+                        "translated_output_page": "001.png",
                         "crop_bbox_in_translated_page": [2, 1, 8, 6],
-                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.png",
                         "trace_ids": ["ocr_001@page_001_band_000"],
                     }
                 )
@@ -1528,14 +1528,324 @@ class MainEmitTests(unittest.TestCase):
                 after_late_render_contract_repair=True,
             )
 
-            final_crop = cv2.imread(str(final_bands / "page_001_band_000.jpg"), cv2.IMREAD_COLOR)
-            translated = cv2.imread(str(translated_dir / "001.jpg"), cv2.IMREAD_COLOR)
-            self.assertEqual(audit["refresh"]["source"], "translated_after_final_project_rerender")
+            final_crop = cv2.imread(str(final_bands / "page_001_band_000.png"), cv2.IMREAD_COLOR)
+            translated = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertEqual(audit["refresh"]["source"], "clean_final_bands_after_all_rerenders")
             self.assertTrue(audit["refresh"]["after_final_project_image_rerender"])
             self.assertTrue(audit["refresh"]["after_late_render_contract_repair"])
-            self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - translated[1:6, 2:8].astype(np.int16)))), 8.0)
+            self.assertEqual(audit["refresh"]["final_output_source"], "clean_final_bands_after_all_rerenders")
+            self.assertEqual(audit["refresh"]["clean_band_source_used"], 1)
+            self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - stale.astype(np.int16)))), 8.0)
+            self.assertLessEqual(float(np.mean(np.abs(translated[1:6, 2:8].astype(np.int16) - stale.astype(np.int16)))), 8.0)
             self.assertTrue((root / "debug" / "e2e" / "11_qa_export_gate" / "final_rerender_visual_qa.json").exists())
             self.assertTrue((root / "debug" / "e2e" / "11_qa_export_gate" / "final_rerender_visual_qa.jsonl").exists())
+
+    def test_post_rerender_visual_contract_writes_translated_jpeg_with_low_recompression_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            page = np.zeros((18, 20, 3), dtype=np.uint8)
+            page[:, :] = [20, 20, 20]
+            cv2.imwrite(str(translated_dir / "001.jpg"), page, [cv2.IMWRITE_JPEG_QUALITY, 100])
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            band = np.zeros((8, 10, 3), dtype=np.uint8)
+            for y in range(8):
+                for x in range(10):
+                    band[y, x] = [20 + x * 7, 40 + y * 11, 180 - x * 3]
+            cv2.imwrite(str(final_bands / "page_001_band_000.jpg"), band, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.jpg",
+                        "crop_bbox_in_translated_page": [4, 5, 14, 13],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "trace_ids": ["ocr_001@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            main._run_post_rerender_final_visual_contract(
+                recorder,
+                {"paginas": [{"numero": 1, "text_layers": []}]},
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )
+
+            final_crop = cv2.imread(str(final_bands / "page_001_band_000.jpg"), cv2.IMREAD_COLOR)
+            translated = cv2.imread(str(translated_dir / "001.jpg"), cv2.IMREAD_COLOR)
+            diff = np.abs(final_crop.astype(np.int16) - translated[5:13, 4:14].astype(np.int16))
+            self.assertLessEqual(int(np.max(diff)), 12)
+
+    def test_post_rerender_visual_contract_restores_clean_sources_after_stale_rerender(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            translated = np.zeros((16, 18, 3), dtype=np.uint8)
+            translated[:, :] = [9, 9, 9]
+            translated[4:10, 5:13] = [180, 10, 10]
+            cv2.imwrite(str(translated_dir / "001.png"), translated)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            band_id = "page_002_band_023"
+            clean = np.zeros((6, 8, 3), dtype=np.uint8)
+            clean[:, :] = [11, 90, 210]
+            post_dir = debug_root / band_id
+            post_dir.mkdir(parents=True)
+            cv2.imwrite(str(post_dir / "post_copyback.png"), clean)
+            rendered_dir = root / "debug" / "e2e" / "09_typeset" / "rendered_bands"
+            rendered_dir.mkdir(parents=True)
+            cv2.imwrite(str(rendered_dir / f"{band_id}.png"), clean)
+            stale_final = np.zeros((6, 8, 3), dtype=np.uint8)
+            stale_final[:, :] = [230, 230, 230]
+            cv2.imwrite(str(final_bands / f"{band_id}.png"), stale_final)
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": band_id,
+                        "translated_output_page": "001.png",
+                        "crop_bbox_in_translated_page": [5, 4, 13, 10],
+                        "final_crop_path": f"10_copyback_reassemble/final_bands/{band_id}.png",
+                        "rendered_band_path": f"09_typeset/rendered_bands/{band_id}.png",
+                        "trace_ids": [f"ocr_001@{band_id}"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            project = {
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_traduzido": "translated/001.png",
+                        "text_layers": [
+                            {
+                                "id": "ocr_001",
+                                "text_id": "ocr_001",
+                                "trace_id": f"ocr_001@{band_id}",
+                                "band_id": band_id,
+                                "translated": "Texto limpo",
+                                "text_pixel_bbox": [6, 5, 12, 9],
+                                "render_bbox": [6, 5, 12, 9],
+                                "safe_text_box": [5, 4, 13, 10],
+                                "balloon_bbox": [5, 4, 13, 10],
+                                "qa_flags": [],
+                            }
+                        ],
+                    }
+                ]
+            }
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            audit = main._run_post_rerender_final_visual_contract(
+                recorder,
+                project,
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )
+
+            final_crop = cv2.imread(str(final_bands / f"{band_id}.png"), cv2.IMREAD_COLOR)
+            translated_after = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertTrue(np.array_equal(final_crop, clean))
+            self.assertTrue(np.array_equal(translated_after[4:10, 5:13], clean))
+            self.assertEqual(audit["refresh"]["source"], "clean_final_bands_after_all_rerenders")
+            self.assertTrue(audit["refresh"]["final_guard_ran_after_final_project_image_rerender"])
+            self.assertEqual(audit["refresh"]["clean_band_source_used"], 1)
+            self.assertEqual(audit["refresh"]["clean_band_final_mismatch_count"], 1)
+            self.assertEqual(audit["refresh"]["final_output_source"], "clean_final_bands_after_all_rerenders")
+
+    def test_post_rerender_visual_contract_prioritizes_text_bands_over_empty_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            translated = np.zeros((14, 12, 3), dtype=np.uint8)
+            translated[:, :] = [4, 4, 4]
+            cv2.imwrite(str(translated_dir / "001.png"), translated)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            rendered_dir = root / "debug" / "e2e" / "09_typeset" / "rendered_bands"
+            rendered_dir.mkdir(parents=True)
+
+            empty_band = np.zeros((6, 12, 3), dtype=np.uint8)
+            empty_band[:, :] = [180, 20, 20]
+            text_band = np.zeros((6, 12, 3), dtype=np.uint8)
+            text_band[:, :] = [20, 180, 80]
+            cv2.imwrite(str(rendered_dir / "page_003_band_045.png"), empty_band)
+            text_post_dir = debug_root / "page_003_band_046"
+            text_post_dir.mkdir(parents=True)
+            cv2.imwrite(str(text_post_dir / "post_copyback.png"), text_band)
+            cv2.imwrite(str(final_bands / "page_003_band_045.png"), empty_band)
+            cv2.imwrite(str(final_bands / "page_003_band_046.png"), text_band)
+            rows = [
+                {
+                    "band_id": "page_003_band_045",
+                    "translated_output_page": "001.png",
+                    "band_y_top": 100,
+                    "band_y_bottom": 106,
+                    "crop_bbox_in_translated_page": [0, 4, 12, 10],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_045.png",
+                    "rendered_band_path": "09_typeset/rendered_bands/page_003_band_045.png",
+                    "trace_ids": [],
+                },
+                {
+                    "band_id": "page_003_band_046",
+                    "translated_output_page": "001.png",
+                    "band_y_top": 102,
+                    "band_y_bottom": 108,
+                    "crop_bbox_in_translated_page": [0, 6, 12, 12],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_046.png",
+                    "rendered_band_path": "09_typeset/rendered_bands/page_003_band_046.png",
+                    "trace_ids": ["ocr_001@page_003_band_046"],
+                },
+            ]
+            (debug_root / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            main._run_post_rerender_final_visual_contract(
+                recorder,
+                {"paginas": [{"numero": 1, "text_layers": []}]},
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )
+
+            translated_after = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertTrue(np.array_equal(translated_after[6:10, 0:12], text_band[0:4, 0:12]))
+
+    def test_post_rerender_visual_contract_keeps_upper_post_copyback_over_lower_trace_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            page = np.zeros((14, 12, 3), dtype=np.uint8)
+            page[:, :] = [4, 4, 4]
+            cv2.imwrite(str(translated_dir / "001.png"), page)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            upper = np.zeros((6, 12, 3), dtype=np.uint8)
+            upper[:, :] = [20, 180, 80]
+            lower = np.zeros((6, 12, 3), dtype=np.uint8)
+            lower[:, :] = [180, 20, 20]
+            for band_id, image in [("page_004_band_055", upper), ("page_004_band_056", lower)]:
+                post_dir = debug_root / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+                cv2.imwrite(str(final_bands / f"{band_id}.png"), image)
+            rows = [
+                {
+                    "band_id": "page_004_band_055",
+                    "translated_output_page": "001.png",
+                    "band_y_top": 100,
+                    "band_y_bottom": 106,
+                    "crop_bbox_in_translated_page": [0, 4, 12, 10],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_004_band_055.png",
+                    "trace_ids": [],
+                },
+                {
+                    "band_id": "page_004_band_056",
+                    "translated_output_page": "001.png",
+                    "band_y_top": 102,
+                    "band_y_bottom": 108,
+                    "crop_bbox_in_translated_page": [0, 6, 12, 12],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_004_band_056.png",
+                    "trace_ids": ["ocr_002@page_004_band_056"],
+                },
+            ]
+            (debug_root / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            main._run_post_rerender_final_visual_contract(
+                recorder,
+                {"paginas": [{"numero": 1, "text_layers": []}]},
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )
+
+            translated_after = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertTrue(np.array_equal(translated_after[6:10, 0:12], upper[2:6, 0:12]))
+
+    def test_post_rerender_visual_contract_uses_visible_slice_for_page_start_clipped_band(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            page = np.zeros((8, 10, 3), dtype=np.uint8)
+            page[:, :] = [1, 1, 1]
+            cv2.imwrite(str(translated_dir / "001.png"), page)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            band_id = "page_002_band_018"
+            full_band = np.zeros((6, 10, 3), dtype=np.uint8)
+            full_band[0:2, :] = [200, 20, 20]
+            full_band[2:6, :] = [20, 180, 80]
+            post_dir = debug_root / band_id
+            post_dir.mkdir(parents=True)
+            cv2.imwrite(str(post_dir / "post_copyback.png"), full_band)
+            cv2.imwrite(str(final_bands / f"{band_id}.png"), full_band)
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": band_id,
+                        "translated_output_page": "001.png",
+                        "output_page_y_top": 102,
+                        "band_y_top": 100,
+                        "band_y_bottom": 106,
+                        "crop_bbox_in_translated_page": [0, 0, 10, 4],
+                        "final_crop_path": f"10_copyback_reassemble/final_bands/{band_id}.png",
+                        "trace_ids": ["ocr_001@page_002_band_018"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            main._run_post_rerender_final_visual_contract(
+                recorder,
+                {"paginas": [{"numero": 1, "text_layers": []}]},
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )
+
+            translated_after = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertTrue(np.array_equal(translated_after[0:4, 0:10], full_band[2:6, 0:10]))
 
     def test_post_rerender_visual_contract_keeps_final_bands_when_no_rerender_happened(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
