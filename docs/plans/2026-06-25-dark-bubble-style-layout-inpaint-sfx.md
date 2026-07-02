@@ -10,6 +10,33 @@
 
 ---
 
+## Checkpoint fix12 freeze - 2026-07-02
+
+Status: resolved and frozen under tag `checkpoint-god-of-death-ch2-fix12`.
+
+Validation source:
+- main checkpoint: `6ee11a8ba6501b9f9d47434210f6748332ea333f`
+- fix12 OCR checkpoint commit: `894f2ad7301724df71303de2a2f05b8fbe5a9c1b`
+- finalguard after rerender commit: `36801e80`
+- typeset contract bbox commit: `d6ba5d5140ebd5e9b21694a7cf494bf4358686ee`
+- run: `N:\TraduzAI_fix12_freeze_main\DEBUGM\runs\god_of_death_ch2_fix12_freeze_finalguard_typeset_contract_20260702`
+- sheet: `N:\TraduzAI_fix12_freeze_main\.codex-tmp\fix12_freeze_validation\fix12_freeze_finalguard_typeset_contract_sheet.jpg`
+
+Audits:
+- `translated_page_band_consistency_audit.json`: `passed=true`, `rows_failed=0`
+- `baseline_vs_candidate_visual_regression_audit.json`: `passed=true`, `rows_failed=0`
+- `final_band_crops_refresh.json`: `final_guard_ran_after_final_project_image_rerender=true`, `final_output_source=clean_final_bands_after_all_rerenders`, `clean_band_source_used=105`, `translated_crop_fallback_used=0`
+
+Resolved issue:
+- `page_004_band_056` residual English (`There can't be two kings in an underworld!`) is resolved by the fix12 checkpoint and remains covered by the finalguard/typeset freeze validation.
+- `page_004_band_055` companion composite-lobe residual is also covered by the same validation.
+
+Freeze note:
+- Do not change the approved guards in follow-up work unless a new task explicitly opens a separate branch from this checkpoint.
+- New visual issues should use this tag as baseline.
+
+---
+
 ### Task 1: Baseline Visual Evidence Pack
 
 **Files:**
