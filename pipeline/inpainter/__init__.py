@@ -6578,6 +6578,9 @@ def _apply_dark_panel_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple
             value = text.get(key_name)
             if value is not None:
                 filled_text_keys.add(str(value))
+    cleanup_count = _apply_clipped_overlap_fragment_cleanup_fill(result, ocr_page)
+    if cleanup_count:
+        fill_count += cleanup_count
     if fill_count:
         for collection_key in ("texts", "_vision_blocks"):
             for item in ocr_page.get(collection_key) or []:
@@ -6621,6 +6624,76 @@ def _apply_dark_panel_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple
         previous = int(ocr_page.get("_strip_dark_panel_fill_count") or 0)
         ocr_page["_strip_dark_panel_fill_count"] = previous + fill_count
     return result, fill_count
+
+
+def _clipped_overlap_fragment_cleanup_bbox_for_text(text: dict, width: int, height: int) -> list[int] | None:
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    cleanup = text.get("clipped_overlap_fragment_cleanup_bbox")
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    if not isinstance(cleanup, dict):
+        cleanup = metrics.get("clipped_overlap_fragment_cleanup_bbox") if isinstance(metrics, dict) else None
+    cleanup_bbox = cleanup.get("bbox") if isinstance(cleanup, dict) else None
+    cleanup_bbox = _normalize_bbox(cleanup_bbox, width, height)
+    if cleanup_bbox is not None:
+        return cleanup_bbox
+    if "false_dark_bubble_trailing_clipped_fragment_removed" not in flags:
+        return None
+    text_bbox = (
+        _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("bbox"), width, height)
+        or _normalize_bbox(text.get("source_bbox"), width, height)
+    )
+    if text_bbox is None:
+        return None
+    bubble_bbox = (
+        _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+        or _normalize_bbox(text.get("balloon_bbox"), width, height)
+        or text_bbox
+    )
+    text_w = max(1, text_bbox[2] - text_bbox[0])
+    text_h = max(1, text_bbox[3] - text_bbox[1])
+    x1 = max(0, text_bbox[2] - max(96, int(round(text_w * 0.50))))
+    x2 = min(width, text_bbox[2] + max(180, text_w))
+    y1 = max(text_bbox[3] + max(18, int(round(text_h * 0.75))), bubble_bbox[3] - max(36, int(round(text_h * 0.50))))
+    y2 = min(height, max(y1 + max(32, int(round(text_h * 0.70))), bubble_bbox[3] + max(48, int(round(text_h * 0.80)))))
+    return _normalize_bbox([x1, y1, x2, y2], width, height)
+
+
+def _apply_clipped_overlap_fragment_cleanup_fill(image_rgb: np.ndarray, ocr_page: dict) -> int:
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return 0
+    height, width = image_rgb.shape[:2]
+    applied = 0
+    for text in ocr_page.get("texts", []):
+        if not isinstance(text, dict) or _text_suppressed_for_inpaint(text):
+            continue
+        bbox = _clipped_overlap_fragment_cleanup_bbox_for_text(text, width, height)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        cleanup_mask = _mask_from_bbox(width, height, bbox, padding=0)
+        if not np.any(cleanup_mask):
+            continue
+        before = image_rgb.copy()
+        image_rgb[y1:y2, x1:x2] = np.array([0, 0, 0], dtype=np.uint8)
+        changed = np.any(image_rgb != before, axis=2).astype(np.uint8) * 255
+        if not np.any(changed):
+            continue
+        changed = np.maximum(changed, cleanup_mask).astype(np.uint8)
+        _accumulate_page_fill_mask(ocr_page, "_strip_dark_panel_fill_mask", changed, changed.shape[:2])
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["clipped_overlap_fragment_cleanup_fill"] = {
+                "bbox": bbox,
+                "changed_pixels": int(np.count_nonzero(changed)),
+            }
+        applied += 1
+    if applied:
+        flags = list(ocr_page.get("_strip_inpaint_decision_flags") or [])
+        if "clipped_overlap_fragment_cleanup_fill" not in flags:
+            flags.append("clipped_overlap_fragment_cleanup_fill")
+        ocr_page["_strip_inpaint_decision_flags"] = flags
+    return applied
 
 
 def _apply_fast_dark_panel_text_fill(
@@ -6840,6 +6913,25 @@ def _apply_fast_dark_panel_text_fill(
         elif _dark_fill_mask_is_overbroad_for_text(text, changed_mask):
             _reject("overbroad_dark_fill_mask")
             continue
+        cleanup_bbox = _clipped_overlap_fragment_cleanup_bbox_for_text(text, width, height)
+        if cleanup_bbox is not None:
+            cx1, cy1, cx2, cy2 = cleanup_bbox
+            cleanup_mask = _mask_from_bbox(width, height, cleanup_bbox, padding=0)
+            if np.any(cleanup_mask):
+                filled = filled.copy()
+                filled[cy1:cy2, cx1:cx2] = np.array([0, 0, 0], dtype=np.uint8)
+                changed_mask = np.maximum(changed_mask, cleanup_mask).astype(np.uint8)
+                metrics = text.setdefault("qa_metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["clipped_overlap_fragment_cleanup_fill"] = {
+                        "bbox": cleanup_bbox,
+                        "changed_pixels": int(np.count_nonzero(cleanup_mask)),
+                        "source": "fast_dark_panel_text_fill",
+                    }
+                flags = list(ocr_page.get("_strip_inpaint_decision_flags") or [])
+                if "clipped_overlap_fragment_cleanup_fill" not in flags:
+                    flags.append("clipped_overlap_fragment_cleanup_fill")
+                ocr_page["_strip_inpaint_decision_flags"] = flags
         if not any(
             _block_is_covered_by_fast_fill(block, [fill_bbox], width, height, changed_mask)
             for block in vision_blocks
@@ -10215,6 +10307,10 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     ocr_page["_strip_fast_dark_panel_fill_count"] = int(dark_fill_meta.get("dark_panel_fill_count") or 0)
     ocr_page["_strip_remaining_inpaint_blocks"] = len(vision_blocks)
+    cleanup_fill_count = _apply_clipped_overlap_fragment_cleanup_fill(working_rgb, ocr_page)
+    if cleanup_fill_count:
+        previous_count = int(ocr_page.get("_strip_fast_dark_panel_fill_count") or 0)
+        ocr_page["_strip_fast_dark_panel_fill_count"] = previous_count + cleanup_fill_count
 
     working_rgb, vision_blocks, koharu_fast_fill_mask, koharu_remaining_mask, koharu_meta = (
         _apply_koharu_bubble_fast_fill_to_blocks(working_rgb, ocr_page, vision_blocks)

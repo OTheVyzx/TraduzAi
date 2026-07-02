@@ -83,6 +83,194 @@ class BandToPageDictTests(unittest.TestCase):
         self.assertEqual(merged, 1)
         self.assertEqual(ocr_page["texts"][0]["text"], "SYSTEM MESSAGE")
 
+    def test_candidate_crop_reocr_composite_does_not_replace_independent_lower_lobe_ocr(self):
+        from strip.process_bands import _merge_candidate_crop_recovery_into_ocr_page
+
+        ocr_page = {
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text_id": "ocr_002",
+                    "text": "There can't be two kings in an underworld!",
+                    "raw_ocr": "There can't be two kings in an underworld!",
+                    "bbox": [321, 169, 544, 306],
+                    "source_bbox": [321, 169, 544, 306],
+                    "text_pixel_bbox": [321, 169, 544, 306],
+                    "line_polygons": [[[321, 169], [544, 169], [544, 306], [321, 306]]],
+                }
+            ],
+            "_vision_blocks": [],
+        }
+        recovered_page = {
+            "texts": [
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text_id": "direct_paddle_reocr_001",
+                    "text": "this underworld! There can't be two kings in an underworld!",
+                    "raw_ocr": "this underworld! There can't be two kings in an underworld!",
+                    "bbox": [202, 10, 546, 309],
+                    "source_bbox": [202, 10, 546, 309],
+                    "text_pixel_bbox": [202, 10, 546, 309],
+                    "bubble_mask_bbox": [0, 0, 647, 151],
+                    "bubble_mask_source": "image_dark_bubble_mask",
+                    "block_profile": "dark_bubble",
+                    "layout_profile": "dark_bubble",
+                    "qa_flags": ["candidate_crop_direct_paddle_reocr", "dark_bubble_oval_reocr"],
+                    "reocr_candidate_index": 0,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [0, 0, 647, 151], "reocr_candidate_index": 0}],
+        }
+
+        merged = _merge_candidate_crop_recovery_into_ocr_page(ocr_page, recovered_page)
+
+        self.assertEqual(merged, 0)
+        self.assertEqual(len(ocr_page["texts"]), 1)
+        kept = ocr_page["texts"][0]
+        self.assertEqual(kept["id"], "ocr_002")
+        self.assertEqual(kept["text_pixel_bbox"], [321, 169, 544, 306])
+        self.assertEqual(kept["text"], "There can't be two kings in an underworld!")
+
+    def test_candidate_crop_reocr_same_lobe_suffix_can_replace_partial_ocr(self):
+        from strip.process_bands import _merge_candidate_crop_recovery_into_ocr_page
+
+        ocr_page = {
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text_id": "ocr_002",
+                    "text": "You thought friendship was significant, but you were",
+                    "raw_ocr": "You thought friendship was significant, but you were",
+                    "bbox": [467, 264, 575, 346],
+                    "source_bbox": [467, 264, 575, 346],
+                    "text_pixel_bbox": [429, 270, 746, 339],
+                    "line_polygons": [[[429, 270], [746, 270], [746, 339], [429, 339]]],
+                }
+            ],
+            "_vision_blocks": [],
+        }
+        recovered_page = {
+            "texts": [
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text_id": "direct_paddle_reocr_001",
+                    "text": "You thought friendship was significant, but you were only used by your friends.",
+                    "raw_ocr": "You thought friendship was significant, but you were only used by your friends.",
+                    "bbox": [426, 268, 748, 379],
+                    "source_bbox": [426, 268, 748, 379],
+                    "text_pixel_bbox": [426, 268, 748, 379],
+                    "bubble_mask_source": "image_dark_bubble_mask",
+                    "block_profile": "dark_bubble",
+                    "layout_profile": "dark_bubble",
+                    "qa_flags": ["candidate_crop_direct_paddle_reocr", "dark_bubble_oval_reocr"],
+                    "reocr_candidate_index": 0,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [426, 268, 748, 379], "reocr_candidate_index": 0}],
+        }
+
+        merged = _merge_candidate_crop_recovery_into_ocr_page(ocr_page, recovered_page)
+
+        self.assertEqual(merged, 1)
+        self.assertEqual(len(ocr_page["texts"]), 1)
+        kept = ocr_page["texts"][0]
+        self.assertEqual(kept["id"], "direct_paddle_reocr_001")
+        self.assertIn("only used by your friends", kept["text"])
+
+    def test_candidate_crop_reocr_same_lobe_prefix_can_replace_partial_ocr(self):
+        from strip.process_bands import _merge_candidate_crop_recovery_into_ocr_page
+
+        ocr_page = {
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text_id": "ocr_002",
+                    "text": "guides the host of King Yeomra in establishing an underworld.",
+                    "raw_ocr": "guides the host of King Yeomra in establishing an underworld.",
+                    "bbox": [157, 220, 400, 295],
+                    "source_bbox": [157, 220, 400, 295],
+                    "text_pixel_bbox": [158, 216, 396, 318],
+                    "line_polygons": [
+                        [[158, 216], [396, 216], [396, 318], [158, 318]],
+                    ],
+                }
+            ],
+            "_vision_blocks": [],
+        }
+        recovered_page = {
+            "texts": [
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text_id": "direct_paddle_reocr_001",
+                    "text": "I'm a system that guides the host of King Yeomra in establishing an underworld.",
+                    "raw_ocr": "I'm a system that guides the host of King Yeomra in establishing an underworld.",
+                    "bbox": [157, 176, 396, 321],
+                    "source_bbox": [157, 176, 396, 321],
+                    "text_pixel_bbox": [157, 176, 396, 321],
+                    "line_polygons": [
+                        [[157, 176], [396, 176], [396, 202], [157, 202]],
+                        [[157, 210], [396, 210], [396, 236], [157, 236]],
+                        [[157, 244], [396, 244], [396, 270], [157, 270]],
+                        [[157, 278], [396, 278], [396, 321], [157, 321]],
+                    ],
+                    "bubble_mask_source": "image_dark_bubble_mask",
+                    "block_profile": "dark_bubble",
+                    "layout_profile": "dark_bubble",
+                    "qa_flags": ["candidate_crop_direct_paddle_reocr", "dark_bubble_oval_reocr"],
+                    "reocr_candidate_index": 0,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [120, 136, 423, 346], "reocr_candidate_index": 0}],
+        }
+
+        merged = _merge_candidate_crop_recovery_into_ocr_page(ocr_page, recovered_page)
+
+        self.assertEqual(merged, 1)
+        self.assertEqual(len(ocr_page["texts"]), 1)
+        kept = ocr_page["texts"][0]
+        self.assertEqual(kept["id"], "direct_paddle_reocr_001")
+        self.assertEqual(len(kept["line_polygons"]), 4)
+        self.assertIn("I'm a system", kept["text"])
+
+    def test_dark_bubble_full_crop_ocr_rejects_gibberish_prefix_before_existing_text(self):
+        from strip.process_bands import _dark_bubble_full_crop_ocr_is_better
+
+        old_text = "guides the host of King Yeomra in establishing an underworld."
+        new_text = "masystemtha guides the host of King Yeomra in establishing an underworld"
+
+        self.assertFalse(_dark_bubble_full_crop_ocr_is_better(old_text, new_text))
+
+    def test_trailing_clipped_dark_bubble_fragment_is_removed_but_keeps_cleanup_bbox(self):
+        from strip.process_bands import _strip_false_trailing_dark_bubble_fragment
+
+        text = {
+            "text": "That's the power of this underworld! Th",
+            "raw_ocr": "That's the power of this underworld! Th",
+            "original": "That's the power of this underworld! Th",
+            "bbox": [164, 451, 406, 676],
+            "source_bbox": [164, 451, 406, 676],
+            "text_pixel_bbox": [164, 451, 406, 676],
+            "line_polygons": [
+                [[179, 451], [397, 457], [397, 494], [177, 488]],
+                [[164, 499], [406, 499], [406, 533], [164, 533]],
+                [[349, 658], [383, 659], [382, 676], [348, 675]],
+            ],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "qa_flags": ["candidate_crop_direct_paddle_reocr", "dark_bubble_oval_reocr"],
+        }
+
+        self.assertTrue(_strip_false_trailing_dark_bubble_fragment(text))
+
+        self.assertEqual(text["text"], "That's the power of this underworld!")
+        self.assertEqual(len(text["line_polygons"]), 2)
+        self.assertEqual(text["text_pixel_bbox"], [164, 451, 406, 533])
+        self.assertEqual(text["clipped_overlap_fragment_cleanup_bbox"]["removed_tail"], "Th")
+        cleanup = text["qa_metrics"]["clipped_overlap_fragment_cleanup_bbox"]["bbox"]
+        self.assertLessEqual(cleanup[0], 321)
+        self.assertGreaterEqual(cleanup[2], 544)
+        self.assertIn("false_dark_bubble_trailing_clipped_fragment_removed", text["qa_flags"])
+
     def test_high_conf_dark_light_text_reocr_gate_allows_borderline_bright_ratio(self):
         from strip.process_bands import _candidate_crop_reocr_allows_high_conf_dark_light_text
 
