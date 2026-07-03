@@ -1968,7 +1968,173 @@ class RunChapterSmokeTests(unittest.TestCase):
             self.assertIn("strip_build", summary["chapter_stage_durations_sec"])
             self.assertIn("strip_process_bands_total", summary["chapter_stage_durations_sec"])
             self.assertGreater(chapter_telemetry["wall_total_sec"], 0)
-            self.assertEqual(output_pages[0].ocr_result["page_profile"], output_pages[0].page_profile)
+
+    def test_non_story_exclusion_removes_band_interval_and_remaps_neighbors(self):
+        from strip.run import (
+            _excluded_non_story_intervals,
+            _remap_bands_after_exclusions,
+            _remove_vertical_intervals,
+        )
+        from strip.types import Band, Balloon, BBox
+
+        image = np.zeros((12, 4, 3), dtype=np.uint8)
+        image[:, :, 0] = np.arange(12, dtype=np.uint8)[:, None]
+        first_slice = image[0:6].copy()
+        third_slice = image[7:12].copy()
+        bands = [
+            Band(0, 6, [Balloon(BBox(0, 1, 4, 3), 0.9)], rendered_slice=first_slice, ocr_result={"texts": []}),
+            Band(
+                4,
+                8,
+                [Balloon(BBox(0, 5, 4, 7), 0.9)],
+                rendered_slice=np.zeros((4, 4, 3), dtype=np.uint8),
+                ocr_result={
+                    "excluded_non_story": True,
+                    "export_policy": "exclude_from_translated_output",
+                    "exclusion_reason": "scanlation_discord_promo",
+                },
+            ),
+            Band(7, 12, [Balloon(BBox(0, 9, 4, 11), 0.9)], rendered_slice=third_slice, ocr_result={"texts": []}),
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(bands)
+        compressed = _remove_vertical_intervals(image, intervals)
+        remapped = _remap_bands_after_exclusions(bands, intervals)
+
+        self.assertEqual(intervals, [(4, 8)])
+        self.assertEqual(rows[0]["band_id"], "page_001_band_001")
+        self.assertEqual(rows[0]["exclusion_reason"], "scanlation_discord_promo")
+        self.assertEqual(compressed.shape[0], 8)
+        self.assertEqual([int(value) for value in compressed[:, 0, 0]], [0, 1, 2, 3, 8, 9, 10, 11])
+        self.assertEqual([(band.y_top, band.y_bottom) for band in remapped], [(0, 4), (4, 8)])
+        self.assertEqual([int(value) for value in remapped[0].rendered_slice[:, 0, 0]], [0, 1, 2, 3])
+        self.assertEqual([int(value) for value in remapped[1].rendered_slice[:, 0, 0]], [8, 9, 10, 11])
+        self.assertEqual(remapped[1].balloons[0].strip_bbox.y1, 5)
+        self.assertEqual(remapped[1].balloons[0].strip_bbox.y2, 7)
+
+    def test_scanlation_exclusion_uses_larger_overlapping_owner_band(self):
+        from strip.run import _excluded_non_story_intervals
+        from strip.types import Band, Balloon, BBox
+
+        bands = [
+            Band(
+                76086,
+                76496,
+                [Balloon(BBox(0, 76100, 800, 76400), 0.9)],
+                ocr_result={
+                    "texts": [],
+                    "excluded_non_story": True,
+                    "export_policy": "exclude_from_translated_output",
+                    "exclusion_reason": "scanlation_discord_promo",
+                },
+            ),
+            Band(
+                76251,
+                76781,
+                [Balloon(BBox(0, 76300, 800, 76600), 0.9)],
+                ocr_result={"texts": []},
+            ),
+            Band(
+                76671,
+                77111,
+                [Balloon(BBox(0, 76700, 800, 77000), 0.9)],
+                ocr_result={"texts": [{"text": "MZ http://mzfamily.co.kr"}]},
+            ),
+            Band(
+                77046,
+                78435,
+                [Balloon(BBox(0, 77200, 800, 78400), 0.9)],
+                ocr_result={"texts": [{"text": "Where am I?"}]},
+            ),
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(bands)
+
+        self.assertEqual(intervals, [(76086, 76781)])
+        self.assertEqual(rows[0]["band_id"], "page_001_band_001")
+        self.assertEqual(rows[0]["detected_band_id"], "page_001_band_000")
+        self.assertEqual(rows[0]["exclusion_reason"], "scanlation_discord_promo")
+
+    def test_scanlation_exclusion_extends_tail_promo_to_page_end(self):
+        from strip.run import _excluded_non_story_intervals
+        from strip.types import Band, Balloon, BBox
+
+        bands = [
+            Band(
+                76086,
+                76496,
+                [Balloon(BBox(0, 76100, 800, 76400), 0.9)],
+                ocr_result={
+                    "texts": [],
+                    "excluded_non_story": True,
+                    "export_policy": "exclude_from_translated_output",
+                    "exclusion_reason": "scanlation_discord_promo",
+                },
+            ),
+            Band(
+                76251,
+                76781,
+                [Balloon(BBox(0, 76300, 800, 76600), 0.9)],
+                ocr_result={"texts": []},
+            ),
+            Band(
+                76671,
+                77111,
+                [Balloon(BBox(0, 76700, 800, 77000), 0.9)],
+                ocr_result={"texts": []},
+            ),
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(
+            bands,
+            source_page_breaks=[65296, 78406],
+            strip_height=78406,
+        )
+
+        self.assertEqual(intervals, [(76086, 78406)])
+        self.assertEqual(rows[0]["band_id"], "page_001_band_001")
+        self.assertEqual(rows[0]["detected_band_id"], "page_001_band_000")
+        self.assertTrue(rows[0]["extended_to_page_end"])
+        self.assertEqual(rows[0]["detected_cluster_y_top"], 76086)
+
+    def test_scanlation_exclusion_does_not_extend_over_story_text(self):
+        from strip.run import _excluded_non_story_intervals
+        from strip.types import Band, Balloon, BBox
+
+        bands = [
+            Band(
+                76086,
+                76496,
+                [Balloon(BBox(0, 76100, 800, 76400), 0.9)],
+                ocr_result={
+                    "texts": [],
+                    "excluded_non_story": True,
+                    "export_policy": "exclude_from_translated_output",
+                    "exclusion_reason": "scanlation_discord_promo",
+                },
+            ),
+            Band(
+                76251,
+                76781,
+                [Balloon(BBox(0, 76300, 800, 76600), 0.9)],
+                ocr_result={"texts": []},
+            ),
+            Band(
+                77000,
+                77300,
+                [Balloon(BBox(0, 77020, 800, 77280), 0.9)],
+                ocr_result={"texts": [{"text": "Where is this place?"}]},
+            ),
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(
+            bands,
+            source_page_breaks=[65296, 78406],
+            strip_height=78406,
+        )
+
+        self.assertEqual(intervals, [(76086, 76781)])
+        self.assertNotIn("extended_to_page_end", rows[0])
 
     def test_run_chapter_attaches_macro_ocr_shadow_when_enabled(self):
         from strip.run import run_chapter

@@ -7400,6 +7400,8 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
         "missing_count": 0,
         "error_count": 0,
         "sources_by_band": {},
+        "excluded_non_story_bands": [],
+        "excluded_non_story_reasons": {},
     }
     if not recorder:
         return audit
@@ -7408,6 +7410,23 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
         import numpy as np
 
         root = Path(work_dir) / "debug" / "e2e"
+        exclusions_path = root / "10_copyback_reassemble" / "non_story_exclusions.json"
+        if exclusions_path.exists():
+            try:
+                exclusions = json.loads(exclusions_path.read_text(encoding="utf-8", errors="replace"))
+                rows = list(exclusions.get("exclusions") or [])
+                audit["excluded_non_story_bands"] = [
+                    str(row.get("band_id") or "").strip()
+                    for row in rows
+                    if str(row.get("band_id") or "").strip()
+                ]
+                audit["excluded_non_story_reasons"] = {
+                    str(row.get("band_id") or "").strip(): str(row.get("exclusion_reason") or "").strip()
+                    for row in rows
+                    if str(row.get("band_id") or "").strip()
+                }
+            except Exception:
+                audit["error_count"] += 1
         crops_path = root / "10_copyback_reassemble" / "final_band_crops.jsonl"
         if not crops_path.exists():
             audit["missing_count"] += 1

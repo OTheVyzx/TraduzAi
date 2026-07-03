@@ -3328,7 +3328,7 @@ def _candidate_crop_reocr_text_is_usable(text: dict) -> bool:
         return False
     normalized = re.sub(r"[^A-Za-z0-9:/._#-]+", " ", raw).strip().lower()
     compact_latin = re.sub(r"[^a-z0-9]+", "", raw.lower())
-    if re.search(r"https?://|www\.|discord\.gg|\.co\b|\.com\b|\.net\b|\.org\b", normalized):
+    if re.search(r"https?://|www\.|(?:d|)iscord\.gg|\.gg\b|\.co\b|\.com\b|\.net\b|\.org\b", normalized):
         return False
     if _candidate_crop_reocr_text_is_scanlation_credit(raw):
         return False
@@ -3355,6 +3355,7 @@ def _candidate_crop_reocr_text_is_scanlation_credit(raw: object) -> bool:
         "join our discord",
         "our discord",
         "discord",
+        "iscord.gg",
         "our team",
         "part of our team",
         "help us out",
@@ -3384,6 +3385,7 @@ def _candidate_crop_reocr_text_is_scanlation_credit(raw: object) -> bool:
             "secretscans",
             "supportus",
             "joinourdiscord",
+            "iscordgg",
             "partofourteam",
             "ourteam",
             "helpusout",
@@ -3420,6 +3422,19 @@ def _candidate_crop_reocr_result_has_scanlation_credit(crop_page: dict | None) -
         if _candidate_crop_reocr_text_is_scanlation_credit(raw):
             return True
     return False
+
+
+def _candidate_crop_reocr_result_scanlation_credit_texts(crop_page: dict | None) -> list[str]:
+    if not isinstance(crop_page, dict):
+        return []
+    matched: list[str] = []
+    for text in list(crop_page.get("texts") or []):
+        if not isinstance(text, dict):
+            continue
+        raw = text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
+        if _candidate_crop_reocr_text_is_scanlation_credit(raw):
+            matched.append(str(raw or ""))
+    return matched
 
 
 def _candidate_crop_reocr_text_is_system_ui_status(text: dict) -> bool:
@@ -4227,6 +4242,7 @@ def _recover_empty_ocr_with_candidate_crops(
     height, width = image.shape[:2]
     recovered_texts: list[dict] = []
     recovered_blocks: list[dict] = []
+    rejected_scanlation_credit_texts: list[str] = []
     attempts = 0
     candidate_count = 0
 
@@ -4377,7 +4393,9 @@ def _recover_empty_ocr_with_candidate_crops(
         crop_result = _call_runtime(crop, crop_page)
         if not isinstance(crop_result, dict):
             continue
-        if _candidate_crop_reocr_result_has_scanlation_credit(crop_result):
+        crop_scanlation_texts = _candidate_crop_reocr_result_scanlation_credit_texts(crop_result)
+        if crop_scanlation_texts:
+            rejected_scanlation_credit_texts.extend(crop_scanlation_texts)
             continue
         texts, blocks = _map_crop_ocr_page_to_band(
             crop_result,
@@ -4407,7 +4425,9 @@ def _recover_empty_ocr_with_candidate_crops(
                 crop,
                 idioma_origem=str(page_dict.get("idioma_origem") or page_dict.get("source_language") or "en"),
             )
-            if _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result):
+            direct_scanlation_texts = _candidate_crop_reocr_result_scanlation_credit_texts(direct_crop_result)
+            if direct_scanlation_texts:
+                rejected_scanlation_credit_texts.extend(direct_scanlation_texts)
                 direct_crop_result = {"texts": [], "_vision_blocks": [], "blocks": []}
             if has_dark_oval_bubble and not has_rect_panel_frame:
                 for direct_text in list(direct_crop_result.get("texts") or []):
@@ -4462,7 +4482,9 @@ def _recover_empty_ocr_with_candidate_crops(
                     crop,
                     idioma_origem=str(page_dict.get("idioma_origem") or page_dict.get("source_language") or "en"),
                 )
-                if _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result):
+                direct_scanlation_texts = _candidate_crop_reocr_result_scanlation_credit_texts(direct_crop_result)
+                if direct_scanlation_texts:
+                    rejected_scanlation_credit_texts.extend(direct_scanlation_texts)
                     direct_crop_result = {"texts": [], "_vision_blocks": [], "blocks": []}
                 direct_texts, direct_blocks = _map_crop_ocr_page_to_band(
                     direct_crop_result,
@@ -4514,6 +4536,18 @@ def _recover_empty_ocr_with_candidate_crops(
         "candidate_crop_reocr_attempts": int(attempts),
         "candidate_crop_reocr_recovered": int(len(recovered_texts)),
     }
+    if rejected_scanlation_credit_texts:
+        page["_ocr_stats"]["scanlation_discord_promo_detected"] = bool(
+            any(
+                _scanlation_discord_promo_text_signal(raw)[0]
+                and (
+                    _scanlation_discord_promo_text_signal(raw)[1]
+                    or _scanlation_discord_promo_text_signal(raw)[2]
+                )
+                for raw in rejected_scanlation_credit_texts
+            )
+        )
+        page["_ocr_stats"]["scanlation_credit_rejected_texts"] = rejected_scanlation_credit_texts[:8]
     return BandStageOutput(
         "ocr_candidate_recovery",
         page,
@@ -7769,6 +7803,101 @@ def _all_texts_skip_processing(page: dict) -> bool:
     return False
 
 
+def _scanlation_discord_promo_text_signal(raw: object) -> tuple[bool, bool, bool]:
+    text = str(raw or "").strip()
+    if not text:
+        return False, False, False
+    normalized = re.sub(r"[^A-Za-z0-9:/._#-]+", " ", text).strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", text.lower())
+    has_discord = bool(
+        re.search(r"\b(?:d|)iscord\.gg\b", normalized)
+        or "discordgg" in compact
+        or "iscordgg" in compact
+        or "discord" in normalized
+    )
+    has_invite = bool(
+        "join" in normalized
+        or "support us" in normalized
+        or "supportus" in compact
+        or "invite" in normalized
+    )
+    has_url = bool(
+        re.search(r"https?://|www\.|(?:d|)iscord\.gg|\.gg\b", normalized)
+        or "discordgg" in compact
+        or "iscordgg" in compact
+    )
+    return has_discord, has_invite, has_url
+
+
+def _ocr_page_is_scanlation_discord_promo_band(page: dict, band: Band) -> bool:
+    texts = [text for text in list((page or {}).get("texts") or []) if isinstance(text, dict)]
+    if not texts:
+        return False
+    signals = []
+    for text in texts:
+        raw = text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
+        signals.append(_scanlation_discord_promo_text_signal(raw))
+    has_discord = any(item[0] for item in signals)
+    has_invite = any(item[1] for item in signals)
+    has_url = any(item[2] for item in signals)
+    if not has_discord:
+        return False
+    all_credit_like = all(
+        _candidate_crop_reocr_text_is_scanlation_credit(
+            text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
+        )
+        or _scanlation_discord_promo_text_signal(
+            text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
+        )[2]
+        for text in texts
+    )
+    if not all_credit_like:
+        return False
+    if has_url and (has_invite or len(texts) <= 2):
+        return True
+    if has_discord and has_invite and len(texts) <= 6:
+        return True
+    return False
+
+
+def _mark_scanlation_discord_promo_band(page: dict, perf: dict) -> dict:
+    updated = dict(page or {})
+    flags = list(updated.get("qa_flags") or [])
+    if "scanlation_discord_promo" not in flags:
+        flags.append("scanlation_discord_promo")
+    updated["qa_flags"] = flags
+    updated["content_class"] = "scanlation_credit"
+    updated["export_policy"] = "exclude_from_translated_output"
+    updated["translate_policy"] = "skip"
+    updated["inpaint_policy"] = "skip"
+    updated["render_policy"] = "skip"
+    updated["route_action"] = "review_required"
+    updated["route_reason"] = "scanlation_discord_promo"
+    updated["excluded_non_story"] = True
+    updated["exclusion_reason"] = "scanlation_discord_promo"
+    updated["review_required"] = False
+    for text in list(updated.get("texts") or []):
+        if not isinstance(text, dict):
+            continue
+        text_flags = list(text.get("qa_flags") or [])
+        if "scanlation_discord_promo" not in text_flags:
+            text_flags.append("scanlation_discord_promo")
+        text["qa_flags"] = text_flags
+        text["content_class"] = "scanlation_credit"
+        text["export_policy"] = "exclude_from_translated_output"
+        text["translate_policy"] = "skip"
+        text["inpaint_policy"] = "skip"
+        text["render_policy"] = "skip"
+        text["skip_processing"] = True
+        text["skip_reason"] = "scanlation_discord_promo"
+        text["route_action"] = "review_required"
+        text["route_reason"] = "scanlation_discord_promo"
+        text["visible"] = False
+    perf["excluded_non_story"] = True
+    perf["exclusion_reason"] = "scanlation_discord_promo"
+    return updated
+
+
 def _smart_skip_shadow_enabled() -> bool:
     value = os.environ.get("TRADUZAI_SMART_SKIP_SHADOW", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -8095,6 +8224,27 @@ def process_band(
         _record_ocr_raw_blocks(ocr_page, band=band, band_id=band_id)
         perf["ocr_partial_dark_bubble_recovered"] = recovered_count
         perf["ocr_text_count"] = int(len(ocr_page.get("texts") or []))
+    ocr_stats = ocr_page.get("_ocr_stats") if isinstance(ocr_page, dict) else None
+    if isinstance(ocr_stats, dict) and bool(ocr_stats.get("scanlation_discord_promo_detected")):
+        original = band.original_slice if band.original_slice is not None else band.strip_slice
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf)
+        excluded_page["_vision_blocks"] = []
+        _commit_band_outputs(
+            band,
+            cleaned_slice=original,
+            rendered_slice=original,
+            ocr_result=excluded_page,
+        )
+        _record_copyback_decision(
+            band=band,
+            band_id=band_id,
+            source_page_number=source_page_number,
+            translated_page=band.ocr_result,
+            applied=False,
+            reason="excluded_non_story_scanlation_discord_promo",
+        )
+        _finish(band.ocr_result)
+        return band
     if not list(ocr_page.get("texts") or []):
         original = band.original_slice if band.original_slice is not None else band.strip_slice
         _commit_band_outputs(
@@ -8110,6 +8260,25 @@ def process_band(
             translated_page=band.ocr_result,
             applied=False,
             reason="no_texts",
+        )
+        _finish(band.ocr_result)
+        return band
+    if _ocr_page_is_scanlation_discord_promo_band(ocr_page, band):
+        original = band.original_slice if band.original_slice is not None else band.strip_slice
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf)
+        _commit_band_outputs(
+            band,
+            cleaned_slice=original,
+            rendered_slice=original,
+            ocr_result=excluded_page,
+        )
+        _record_copyback_decision(
+            band=band,
+            band_id=band_id,
+            source_page_number=source_page_number,
+            translated_page=band.ocr_result,
+            applied=False,
+            reason="excluded_non_story_scanlation_discord_promo",
         )
         _finish(band.ocr_result)
         return band
