@@ -251,6 +251,14 @@ def _band_has_story_text_for_scanlation_tail_guard(band: Band) -> bool:
         "mz",
         "family",
         "support us",
+        "recruiting",
+        "looking for",
+        "proofreader",
+        "redrawer",
+        "typesetter",
+        "translator",
+        "leave it blank",
+        "message",
         ".gg",
         "http://",
         "https://",
@@ -262,6 +270,72 @@ def _band_has_story_text_for_scanlation_tail_guard(band: Band) -> bool:
     if not re.search(r"[a-z]", joined):
         return False
     return True
+
+
+def _band_scanlation_promo_reason(band: Band) -> str | None:
+    result = getattr(band, "ocr_result", None)
+    if not isinstance(result, dict):
+        return None
+    texts = [text for text in list(result.get("texts") or []) if isinstance(text, dict)]
+    if not texts:
+        return None
+    raw_values = [
+        " ".join(
+            str(text.get(key) or "")
+            for key in ("text", "original", "raw_ocr", "normalized_ocr", "translated", "route_reason", "skip_reason")
+        )
+        for text in texts
+    ]
+    joined = " ".join(raw_values).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", joined)
+    suppressed_count = 0
+    for text in texts:
+        flags = {str(flag or "").strip().lower() for flag in list(text.get("qa_flags") or [])}
+        route_reason = str(text.get("route_reason") or text.get("skip_reason") or "").strip().lower()
+        if "scanlation_credit_suppressed" in flags or route_reason == "scanlation_credit_suppressed":
+            suppressed_count += 1
+    has_discord = "discord" in joined or "iscord" in joined or "discordgg" in compact
+    has_url = ".gg" in joined or "discordgg" in compact or "http" in joined
+    has_invite = "join" in joined or "support us" in joined
+
+    has_recruitment = any(marker in joined for marker in ("recruiting", "looking for", "hiring", "staff"))
+    has_role_or_contact = any(
+        marker in joined
+        for marker in (
+            "translator",
+            "proofreader",
+            "redrawer",
+            "typesetter",
+            "leave it blank",
+            "message",
+        )
+    )
+    has_scanlation_marker = any(marker in joined for marker in ("secret scans", "secretscans", "scanlator", "scanlation"))
+    if has_recruitment and has_role_or_contact and (has_scanlation_marker or suppressed_count >= 2 or has_discord):
+        return "scanlation_recruitment_promo"
+    if has_discord and has_url and (has_invite or len(texts) <= 4):
+        return "scanlation_discord_promo"
+    return None
+
+
+def _band_interval_overlap_ratio(band: Band, intervals: list[tuple[int, int]]) -> float:
+    y1 = int(getattr(band, "y_top", 0) or 0)
+    y2 = int(getattr(band, "y_bottom", 0) or 0)
+    height = max(0, y2 - y1)
+    if height <= 0:
+        return 0.0
+    covered = 0
+    for start, end in intervals:
+        covered += max(0, min(y2, int(end)) - max(y1, int(start)))
+    return covered / float(height)
+
+
+def _is_scanlation_promo_exclusion_reason(reason: object) -> bool:
+    return str(reason or "").strip().lower() in {
+        "scanlation_discord_promo",
+        "scanlation_recruitment_promo",
+        "scanlation_promo",
+    }
 
 
 def _resolve_scanlation_promo_exclusion_owner(
@@ -359,21 +433,22 @@ def _excluded_non_story_intervals(
     rows: list[dict] = []
     seen_band_ids: set[str] = set()
     for index, band in enumerate(bands):
-        if not _band_excluded_from_translated_output(band):
+        inferred_reason = _band_scanlation_promo_reason(band)
+        if not _band_excluded_from_translated_output(band) and not inferred_reason:
             continue
         result = getattr(band, "ocr_result", None) or {}
         source_band_id = _band_debug_id(band, index)
-        reason = result.get("exclusion_reason") or "scanlation_discord_promo"
+        reason = result.get("exclusion_reason") or inferred_reason or "scanlation_discord_promo"
         owner_band = band
         owner_index = index
-        if str(reason) == "scanlation_discord_promo":
+        if _is_scanlation_promo_exclusion_reason(reason):
             owner_band, owner_index = _resolve_scanlation_promo_exclusion_owner(bands, band, index)
         y1 = int(getattr(band, "y_top", 0) or 0)
         y2 = int(getattr(band, "y_bottom", 0) or 0)
         if owner_band is not band:
             y1 = int(getattr(owner_band, "y_top", 0) or 0)
             y2 = int(getattr(owner_band, "y_bottom", 0) or 0)
-        if str(reason) == "scanlation_discord_promo":
+        if _is_scanlation_promo_exclusion_reason(reason):
             source_y1 = int(getattr(band, "y_top", 0) or 0)
             source_y2 = int(getattr(band, "y_bottom", 0) or 0)
             if source_y2 > source_y1:
@@ -406,7 +481,7 @@ def _excluded_non_story_intervals(
             "render_policy": result.get("render_policy") or "skip",
             "exclusion_reason": reason,
         }
-        if str(reason) == "scanlation_discord_promo" and y2 != int(getattr(owner_band, "y_bottom", 0) or 0):
+        if _is_scanlation_promo_exclusion_reason(reason) and y2 != int(getattr(owner_band, "y_bottom", 0) or 0):
             row["extended_to_page_end"] = True
             row["detected_cluster_y_top"] = y1
         if band_id != source_band_id:
@@ -421,6 +496,37 @@ def _excluded_non_story_intervals(
             merged.append((y1, y2))
         else:
             merged[-1] = (merged[-1][0], max(merged[-1][1], y2))
+    for index, band in enumerate(bands):
+        band_id = _band_debug_id(band, index)
+        if band_id in seen_band_ids or _band_excluded_from_translated_output(band):
+            continue
+        if _band_interval_overlap_ratio(band, merged) < 0.90:
+            continue
+        if _band_has_story_text_for_scanlation_tail_guard(band):
+            continue
+        covering_row = None
+        by1 = int(getattr(band, "y_top", 0) or 0)
+        by2 = int(getattr(band, "y_bottom", 0) or 0)
+        for row in rows:
+            overlap = max(0, min(by2, int(row.get("y_bottom") or 0)) - max(by1, int(row.get("y_top") or 0)))
+            if overlap > 0:
+                covering_row = row
+                break
+        rows.append(
+            {
+                "band_id": band_id,
+                "y_top": by1,
+                "y_bottom": by2,
+                "content_class": "scanlation_credit",
+                "export_policy": "exclude_from_translated_output",
+                "translate_policy": "skip",
+                "inpaint_policy": "skip",
+                "render_policy": "skip",
+                "exclusion_reason": (covering_row or {}).get("exclusion_reason") or "scanlation_promo",
+                "covered_by_exclusion_band_id": (covering_row or {}).get("band_id"),
+                "covered_by_non_story_interval": True,
+            }
+        )
     return merged, rows
 
 
@@ -480,6 +586,10 @@ def _remap_bands_after_exclusions(bands: list[Band], intervals: list[tuple[int, 
     remapped: list[Band] = []
     for band in bands:
         if _band_excluded_from_translated_output(band):
+            continue
+        if _band_scanlation_promo_reason(band):
+            continue
+        if _band_interval_overlap_ratio(band, intervals) >= 0.90 and not _band_has_story_text_for_scanlation_tail_guard(band):
             continue
         old_y_top = int(getattr(band, "y_top", 0) or 0)
         y_top = _remap_y_after_exclusions(int(getattr(band, "y_top", 0) or 0), intervals)

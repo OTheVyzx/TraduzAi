@@ -2097,6 +2097,121 @@ class RunChapterSmokeTests(unittest.TestCase):
         self.assertTrue(rows[0]["extended_to_page_end"])
         self.assertEqual(rows[0]["detected_cluster_y_top"], 76086)
 
+    def test_scanlation_recruitment_exclusion_extends_tail_promo_to_page_end(self):
+        from strip.run import _excluded_non_story_intervals
+        from strip.types import Band, Balloon, BBox
+
+        bands = [
+            Band(
+                78000,
+                78420,
+                [Balloon(BBox(0, 78020, 800, 78400), 0.9)],
+                ocr_result={
+                    "texts": [],
+                    "excluded_non_story": True,
+                    "export_policy": "exclude_from_translated_output",
+                    "exclusion_reason": "scanlation_recruitment_promo",
+                },
+            ),
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(
+            bands,
+            source_page_breaks=[77000, 78450],
+            strip_height=78450,
+        )
+
+        self.assertEqual(intervals, [(78000, 78450)])
+        self.assertEqual(rows[0]["exclusion_reason"], "scanlation_recruitment_promo")
+        self.assertTrue(rows[0]["extended_to_page_end"])
+        self.assertEqual(rows[0]["detected_cluster_y_top"], 78000)
+
+    def test_scanlation_exclusion_reports_covered_duplicate_band(self):
+        from strip.run import _excluded_non_story_intervals, _remap_bands_after_exclusions
+        from strip.types import Band, Balloon, BBox
+
+        bands = [
+            Band(
+                76086,
+                77206,
+                [Balloon(BBox(0, 76100, 800, 77180), 0.9)],
+                rendered_slice=np.zeros((1120, 4, 3), dtype=np.uint8),
+                ocr_result={
+                    "texts": [],
+                    "excluded_non_story": True,
+                    "export_policy": "exclude_from_translated_output",
+                    "exclusion_reason": "scanlation_discord_promo",
+                },
+            ),
+            Band(
+                76086,
+                77315,
+                [Balloon(BBox(0, 76200, 800, 77300), 0.9)],
+                rendered_slice=np.zeros((1229, 4, 3), dtype=np.uint8),
+                ocr_result={"texts": [{"text": "WE ARE RECRUITING!"}, {"text": "AND MESSAGE LEAVE IT BLANKOO"}]},
+            ),
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(
+            bands,
+            source_page_breaks=[64405, 77286],
+            strip_height=77286,
+        )
+        remapped = _remap_bands_after_exclusions(bands, intervals)
+
+        self.assertEqual(intervals, [(76086, 77286)])
+        self.assertEqual([row["band_id"] for row in rows], ["page_001_band_000", "page_001_band_001"])
+        self.assertTrue(rows[1]["covered_by_non_story_interval"])
+        self.assertEqual(rows[1]["covered_by_exclusion_band_id"], "page_001_band_000")
+        self.assertEqual(rows[1]["exclusion_reason"], "scanlation_discord_promo")
+        self.assertEqual(remapped, [])
+
+    def test_scanlation_recruitment_export_infers_unmarked_promo_band(self):
+        from strip.run import _excluded_non_story_intervals, _remap_bands_after_exclusions
+        from strip.types import Band, Balloon, BBox
+
+        bands = [
+            Band(
+                77046,
+                78320,
+                [Balloon(BBox(0, 77046, 800, 78320), 0.9)],
+                rendered_slice=np.zeros((1274, 4, 3), dtype=np.uint8),
+                ocr_result={
+                    "texts": [
+                        {
+                            "text": "WE ARE RECRUITING!",
+                            "qa_flags": ["scanlation_credit_suppressed"],
+                            "route_reason": "scanlation_credit_suppressed",
+                        },
+                        {
+                            "text": "WE ARE LOOKING FOR KR/JP TRANSLATORS, PROOFREADERS, REDRAWERS & TYPESETTERS",
+                            "qa_flags": ["scanlation_credit_suppressed"],
+                            "route_reason": "scanlation_credit_suppressed",
+                        },
+                        {
+                            "text": "JOIN OUR DISCORD HTTPS://DISCORD.GG/XZEKN8V",
+                            "qa_flags": ["scanlation_credit_suppressed"],
+                            "route_reason": "scanlation_credit_suppressed",
+                        },
+                        {"text": "AND MESSAGE LEAVE IT BLANKOO"},
+                    ]
+                },
+            )
+        ]
+
+        intervals, rows = _excluded_non_story_intervals(
+            bands,
+            source_page_breaks=[64405, 77286],
+            strip_height=78320,
+        )
+        remapped = _remap_bands_after_exclusions(bands, intervals)
+
+        self.assertEqual(intervals, [(77046, 78320)])
+        self.assertEqual(rows[0]["band_id"], "page_001_band_000")
+        self.assertEqual(rows[0]["exclusion_reason"], "scanlation_recruitment_promo")
+        self.assertEqual(rows[0]["export_policy"], "exclude_from_translated_output")
+        self.assertEqual(remapped, [])
+
     def test_scanlation_exclusion_does_not_extend_over_story_text(self):
         from strip.run import _excluded_non_story_intervals
         from strip.types import Band, Balloon, BBox

@@ -3532,6 +3532,108 @@ class ProcessBandTests(unittest.TestCase):
             )
         )
 
+    def test_scanlation_recruitment_panel_is_non_story_promo(self):
+        from strip.process_bands import _ocr_page_is_scanlation_discord_promo_band
+        from strip.types import Band
+
+        page = {
+            "texts": [
+                {"text": "SECRET SCANS", "confidence": 0.98},
+                {"text": "WE ARE RECRUITING!", "confidence": 0.97},
+                {
+                    "text": "WE ARE LOOKING FOR KR/JP TRANSLATORS, PROOFREADERS, REDRAWERS & TYPESETTERS!",
+                    "confidence": 0.94,
+                },
+            ],
+            "_vision_blocks": [],
+        }
+        band = Band(y_top=0, y_bottom=1200)
+
+        self.assertTrue(_ocr_page_is_scanlation_discord_promo_band(page, band))
+
+    def test_recruiting_dialogue_is_not_non_story_without_promo_signals(self):
+        from strip.process_bands import _ocr_page_is_scanlation_discord_promo_band
+        from strip.types import Band
+
+        page = {
+            "texts": [
+                {
+                    "text": "The guild is recruiting soldiers, so stay alert.",
+                    "confidence": 0.94,
+                    "content_class": "dialogue",
+                }
+            ],
+            "_vision_blocks": [],
+        }
+        band = Band(y_top=0, y_bottom=240)
+
+        self.assertFalse(_ocr_page_is_scanlation_discord_promo_band(page, band))
+
+    def test_small_watermark_is_not_non_story_recruitment_promo(self):
+        from strip.process_bands import _ocr_page_is_scanlation_discord_promo_band
+        from strip.types import Band
+
+        page = {
+            "texts": [
+                {
+                    "text": "secret scans",
+                    "bbox": [640, 12, 755, 30],
+                    "confidence": 0.9,
+                    "qa_flags": ["scanlation_credit_suppressed"],
+                }
+            ],
+            "_vision_blocks": [],
+        }
+        band = Band(y_top=0, y_bottom=900)
+
+        self.assertFalse(_ocr_page_is_scanlation_discord_promo_band(page, band))
+
+    def test_sfx_is_not_non_story_recruitment_promo(self):
+        from strip.process_bands import _ocr_page_is_scanlation_discord_promo_band
+        from strip.types import Band
+
+        page = {
+            "texts": [
+                {
+                    "text": "KRAK",
+                    "tipo": "sfx",
+                    "content_class": "sfx",
+                    "confidence": 0.88,
+                }
+            ],
+            "_vision_blocks": [],
+        }
+        band = Band(y_top=0, y_bottom=500)
+
+        self.assertFalse(_ocr_page_is_scanlation_discord_promo_band(page, band))
+
+    def test_scanlation_recruitment_uses_suppressed_credit_fragments_as_evidence(self):
+        from strip.process_bands import _ocr_page_is_scanlation_discord_promo_band
+        from strip.types import Band
+
+        page = {
+            "texts": [
+                {
+                    "text": "WE ARE RECRUITING!",
+                    "qa_flags": ["scanlation_credit_suppressed"],
+                    "route_reason": "scanlation_credit_suppressed",
+                },
+                {
+                    "text": "WE ARE LOOKING FOR",
+                    "qa_flags": ["scanlation_credit_suppressed"],
+                    "route_reason": "scanlation_credit_suppressed",
+                },
+                {
+                    "text": "AND MESSAGE LEAVE IT BLANKOO",
+                    "confidence": 0.91,
+                },
+            ],
+            "_vision_blocks": [],
+        }
+        band = Band(y_top=0, y_bottom=1400)
+
+        self.assertTrue(_ocr_page_is_scanlation_discord_promo_band(page, band))
+
     def test_candidate_crop_merge_rejects_recovered_text_near_scanlation_credit(self):
         from strip.process_bands import _merge_candidate_crop_recovery_into_ocr_page
 
@@ -5693,6 +5795,213 @@ class ProcessBandTests(unittest.TestCase):
         self.assertTrue(band.ocr_result["excluded_non_story"])
         self.assertTrue(band.ocr_result["texts"][0]["skip_processing"])
         self.assertEqual(band.perf["exclusion_reason"], "scanlation_discord_promo")
+
+    def test_process_band_excludes_scanlation_recruitment_promo_without_rendering(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        import numpy as np
+
+        band = self._make_band()
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [
+                {"id": "ocr_001", "text": "SECRET SCANS", "bbox": [80, 10, 220, 26], "confidence": 0.96},
+                {"id": "ocr_002", "text": "WE ARE RECRUITING!", "bbox": [50, 30, 250, 48], "confidence": 0.96},
+                {
+                    "id": "ocr_003",
+                    "text": "WE ARE LOOKING FOR TRANSLATORS, PROOFREADERS, REDRAWERS & TYPESETTERS!",
+                    "bbox": [25, 52, 275, 84],
+                    "confidence": 0.92,
+                },
+            ],
+            "_vision_blocks": [{"bbox": [20, 4, 280, 92], "confidence": 0.95}],
+            "_ocr_stats": {},
+        }
+        translator = MagicMock()
+        translator.translate_pages.side_effect = AssertionError("scanlation recruitment promo must not translate")
+        inpainter = MagicMock()
+        typesetter = MagicMock()
+        empty_recovery = SimpleNamespace(to_page_dict=lambda: {"texts": []}, perf_updates={})
+
+        with patch("strip.process_bands._recover_empty_ocr_with_candidate_crops", return_value=empty_recovery), patch(
+            "strip.process_bands._recover_partial_dark_bubble_ocr_from_texts",
+            return_value=0,
+        ):
+            result = process_band(
+                band,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+                page_idx=0,
+            )
+
+        self.assertIs(result, band)
+        translator.translate_pages.assert_not_called()
+        inpainter.inpaint_band_image.assert_not_called()
+        typesetter.render_band_image.assert_not_called()
+        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
+        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertEqual(band.ocr_result["export_policy"], "exclude_from_translated_output")
+        self.assertEqual(band.ocr_result["exclusion_reason"], "scanlation_recruitment_promo")
+        self.assertTrue(band.ocr_result["excluded_non_story"])
+        self.assertTrue(all(text["skip_processing"] for text in band.ocr_result["texts"]))
+        self.assertEqual(band.perf["exclusion_reason"], "scanlation_recruitment_promo")
+
+    def test_process_band_excludes_scanlation_recruitment_after_review_layout(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        import numpy as np
+
+        band = self._make_band()
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [
+                {"id": "ocr_001", "text": "WE ARE RECRUITING!", "bbox": [50, 20, 250, 42], "confidence": 0.96},
+                {"id": "ocr_002", "text": "WE ARE LOOKING FOR", "bbox": [60, 46, 240, 68], "confidence": 0.96},
+                {"id": "ocr_003", "text": "AND MESSAGE LEAVE IT BLANKOO", "bbox": [40, 72, 260, 94], "confidence": 0.9},
+            ],
+            "_vision_blocks": [{"bbox": [20, 4, 280, 96], "confidence": 0.95}],
+            "_ocr_stats": {},
+        }
+        reviewed_page = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "WE ARE RECRUITING!",
+                    "bbox": [50, 20, 250, 42],
+                    "qa_flags": ["scanlation_credit_suppressed"],
+                    "route_reason": "scanlation_credit_suppressed",
+                },
+                {
+                    "id": "ocr_002",
+                    "text": "WE ARE LOOKING FOR",
+                    "bbox": [60, 46, 240, 68],
+                    "qa_flags": ["scanlation_credit_suppressed"],
+                    "route_reason": "scanlation_credit_suppressed",
+                },
+                {"id": "ocr_003", "text": "AND MESSAGE LEAVE IT BLANKOO", "bbox": [40, 72, 260, 94]},
+            ],
+            "_vision_blocks": [],
+            "_ocr_stats": {},
+        }
+        translator = MagicMock()
+        translator.translate_pages.side_effect = AssertionError("scanlation recruitment promo must not translate")
+        inpainter = MagicMock()
+        typesetter = MagicMock()
+        empty_recovery = SimpleNamespace(to_page_dict=lambda: {"texts": []}, perf_updates={})
+        reviewed = SimpleNamespace(to_page_dict=lambda: reviewed_page)
+
+        with patch("strip.process_bands._recover_empty_ocr_with_candidate_crops", return_value=empty_recovery), patch(
+            "strip.process_bands._recover_partial_dark_bubble_ocr_from_texts",
+            return_value=0,
+        ), patch("strip.process_bands._replace_dark_bubble_text_with_full_crop_ocr", return_value=0), patch(
+            "strip.process_bands._run_review_layout_stage",
+            return_value=reviewed,
+        ):
+            result = process_band(
+                band,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+                page_idx=0,
+            )
+
+        self.assertIs(result, band)
+        translator.translate_pages.assert_not_called()
+        inpainter.inpaint_band_image.assert_not_called()
+        typesetter.render_band_image.assert_not_called()
+        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
+        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertEqual(band.ocr_result["export_policy"], "exclude_from_translated_output")
+        self.assertEqual(band.ocr_result["exclusion_reason"], "scanlation_recruitment_promo")
+        self.assertEqual(band.perf["exclusion_reason"], "scanlation_recruitment_promo")
+
+    def test_process_band_excludes_scanlation_recruitment_after_post_layout_recovery(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        import numpy as np
+
+        band = self._make_band()
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [
+                {"id": "ocr_001", "text": "WE ARE RECRUITING!", "bbox": [50, 20, 250, 42], "confidence": 0.96},
+                {"id": "ocr_002", "text": "WE ARE LOOKING FOR", "bbox": [60, 46, 240, 68], "confidence": 0.96},
+            ],
+            "_vision_blocks": [{"bbox": [20, 4, 280, 96], "confidence": 0.95}],
+            "_ocr_stats": {},
+        }
+
+        def review_stage(_band, *, ocr_page, **_kwargs):
+            reviewed = dict(ocr_page)
+            reviewed["texts"] = [dict(text) for text in list(ocr_page.get("texts") or [])]
+            for text in reviewed["texts"]:
+                if text.get("text") in {"WE ARE RECRUITING!", "WE ARE LOOKING FOR"}:
+                    text["qa_flags"] = ["scanlation_credit_suppressed"]
+                    text["route_reason"] = "scanlation_credit_suppressed"
+            return SimpleNamespace(to_page_dict=lambda: reviewed)
+
+        def recover_partial(ocr_page, *args, **kwargs):
+            if kwargs.get("layout_lobes_only"):
+                ocr_page.setdefault("texts", []).append(
+                    {
+                        "id": "direct_paddle_reocr_001",
+                        "text": "AND MESSAGE LEAVE IT BLANKOO",
+                        "bbox": [40, 72, 260, 94],
+                        "confidence": 0.9,
+                    }
+                )
+                return 1
+            return 0
+
+        translator = MagicMock()
+        translator.translate_pages.side_effect = AssertionError("scanlation recruitment promo must not translate")
+        inpainter = MagicMock()
+        typesetter = MagicMock()
+        empty_recovery = SimpleNamespace(to_page_dict=lambda: {"texts": []}, perf_updates={})
+
+        with patch("strip.process_bands._recover_empty_ocr_with_candidate_crops", return_value=empty_recovery), patch(
+            "strip.process_bands._recover_partial_dark_bubble_ocr_from_texts",
+            side_effect=recover_partial,
+        ), patch("strip.process_bands._replace_dark_bubble_text_with_full_crop_ocr", return_value=0), patch(
+            "strip.process_bands._run_review_layout_stage",
+            side_effect=review_stage,
+        ):
+            result = process_band(
+                band,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+                page_idx=0,
+            )
+
+        self.assertIs(result, band)
+        translator.translate_pages.assert_not_called()
+        inpainter.inpaint_band_image.assert_not_called()
+        typesetter.render_band_image.assert_not_called()
+        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
+        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertEqual(band.ocr_result["export_policy"], "exclude_from_translated_output")
+        self.assertEqual(band.ocr_result["exclusion_reason"], "scanlation_recruitment_promo")
+        self.assertEqual(band.perf["exclusion_reason"], "scanlation_recruitment_promo")
 
     def test_process_band_excludes_discord_promo_rejected_by_crop_reocr(self):
         from types import SimpleNamespace

@@ -7829,42 +7829,115 @@ def _scanlation_discord_promo_text_signal(raw: object) -> tuple[bool, bool, bool
     return has_discord, has_invite, has_url
 
 
-def _ocr_page_is_scanlation_discord_promo_band(page: dict, band: Band) -> bool:
-    texts = [text for text in list((page or {}).get("texts") or []) if isinstance(text, dict)]
-    if not texts:
-        return False
-    signals = []
+def _scanlation_recruitment_promo_text_signal(raw: object) -> tuple[bool, bool, bool]:
+    text = str(raw or "").strip()
+    if not text:
+        return False, False, False
+    normalized = re.sub(r"[^A-Za-z0-9:/._#-]+", " ", text).strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", text.lower())
+    has_scanlator = bool(
+        "secret scans" in normalized
+        or "secretscans" in compact
+        or "scanlator" in normalized
+        or "scanlation" in normalized
+    )
+    has_recruitment = bool(
+        "recruiting" in normalized
+        or "recrutando" in normalized
+        or "hiring" in normalized
+        or "hiringjtls" in compact
+        or "looking for staff" in normalized
+        or "staff to help us release" in normalized
+        or "we are looking for" in normalized
+        or "wearelookingfor" in compact
+        or "part of our team" in normalized
+        or "partofourteam" in compact
+    )
+    has_staff_role = bool(
+        "translator" in normalized
+        or "translators" in normalized
+        or "proofreader" in normalized
+        or "proofreaders" in normalized
+        or "redrawer" in normalized
+        or "redrawers" in normalized
+        or "typesetter" in normalized
+        or "typesetters" in normalized
+        or "krjptranslators" in compact
+    )
+    return has_scanlator, has_recruitment, has_staff_role
+
+
+def _scanlation_promo_reason_for_texts(texts: list[dict], extra_texts: list[object] | None = None) -> str | None:
+    raw_values: list[object] = []
+    suppressed_credit_count = 0
     for text in texts:
-        raw = text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
-        signals.append(_scanlation_discord_promo_text_signal(raw))
-    has_discord = any(item[0] for item in signals)
-    has_invite = any(item[1] for item in signals)
-    has_url = any(item[2] for item in signals)
-    if not has_discord:
-        return False
+        if not isinstance(text, dict):
+            continue
+        raw_values.append(text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or "")
+        flags = {str(flag or "").strip().lower() for flag in list(text.get("qa_flags") or [])}
+        route_reason = str(text.get("route_reason") or text.get("skip_reason") or "").strip().lower()
+        if "scanlation_credit_suppressed" in flags or route_reason == "scanlation_credit_suppressed":
+            suppressed_credit_count += 1
+    raw_values.extend(list(extra_texts or []))
+    if not raw_values:
+        return None
+
+    discord_signals = [_scanlation_discord_promo_text_signal(raw) for raw in raw_values]
+    has_discord = any(item[0] for item in discord_signals)
+    has_invite = any(item[1] for item in discord_signals)
+    has_url = any(item[2] for item in discord_signals)
+
+    recruitment_signals = [_scanlation_recruitment_promo_text_signal(raw) for raw in raw_values]
+    has_scanlator = any(item[0] for item in recruitment_signals)
+    has_recruitment = any(item[1] for item in recruitment_signals)
+    has_staff_role = any(item[2] for item in recruitment_signals)
+    has_contact = any(
+        "leaveitblank" in re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
+        or ("message" in re.sub(r"[^a-z0-9 ]+", " ", str(raw or "").lower()) and "blank" in str(raw or "").lower())
+        for raw in raw_values
+    )
+    if suppressed_credit_count >= 2:
+        has_scanlator = True
+
+    if has_scanlator and has_recruitment and (has_staff_role or has_contact or has_discord or has_invite or has_url):
+        return "scanlation_recruitment_promo"
+
     all_credit_like = all(
-        _candidate_crop_reocr_text_is_scanlation_credit(
-            text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
-        )
-        or _scanlation_discord_promo_text_signal(
-            text.get("text") or text.get("original") or text.get("raw_ocr") or text.get("translated") or ""
-        )[2]
-        for text in texts
+        _candidate_crop_reocr_text_is_scanlation_credit(raw)
+        or _scanlation_discord_promo_text_signal(raw)[2]
+        for raw in raw_values
+        if str(raw or "").strip()
     )
     if not all_credit_like:
-        return False
-    if has_url and (has_invite or len(texts) <= 2):
-        return True
-    if has_discord and has_invite and len(texts) <= 6:
-        return True
-    return False
+        return None
+
+    if has_discord and has_url and (has_invite or len(raw_values) <= 2):
+        return "scanlation_discord_promo"
+    if has_discord and has_invite and len(raw_values) <= 8:
+        return "scanlation_discord_promo"
+    return None
 
 
-def _mark_scanlation_discord_promo_band(page: dict, perf: dict) -> dict:
+def _ocr_page_scanlation_promo_reason(page: dict, band: Band) -> str | None:
+    texts = [text for text in list((page or {}).get("texts") or []) if isinstance(text, dict)]
+    ocr_stats = (page or {}).get("_ocr_stats") if isinstance(page, dict) else None
+    rejected_texts: list[object] = []
+    if isinstance(ocr_stats, dict):
+        rejected_texts = list(ocr_stats.get("scanlation_credit_rejected_texts") or [])
+        if bool(ocr_stats.get("scanlation_discord_promo_detected")):
+            return "scanlation_discord_promo"
+    return _scanlation_promo_reason_for_texts(texts, rejected_texts)
+
+
+def _ocr_page_is_scanlation_discord_promo_band(page: dict, band: Band) -> bool:
+    return _ocr_page_scanlation_promo_reason(page, band) is not None
+
+
+def _mark_scanlation_discord_promo_band(page: dict, perf: dict, *, reason: str = "scanlation_discord_promo") -> dict:
     updated = dict(page or {})
     flags = list(updated.get("qa_flags") or [])
-    if "scanlation_discord_promo" not in flags:
-        flags.append("scanlation_discord_promo")
+    if reason not in flags:
+        flags.append(reason)
     updated["qa_flags"] = flags
     updated["content_class"] = "scanlation_credit"
     updated["export_policy"] = "exclude_from_translated_output"
@@ -7872,16 +7945,16 @@ def _mark_scanlation_discord_promo_band(page: dict, perf: dict) -> dict:
     updated["inpaint_policy"] = "skip"
     updated["render_policy"] = "skip"
     updated["route_action"] = "review_required"
-    updated["route_reason"] = "scanlation_discord_promo"
+    updated["route_reason"] = reason
     updated["excluded_non_story"] = True
-    updated["exclusion_reason"] = "scanlation_discord_promo"
+    updated["exclusion_reason"] = reason
     updated["review_required"] = False
     for text in list(updated.get("texts") or []):
         if not isinstance(text, dict):
             continue
         text_flags = list(text.get("qa_flags") or [])
-        if "scanlation_discord_promo" not in text_flags:
-            text_flags.append("scanlation_discord_promo")
+        if reason not in text_flags:
+            text_flags.append(reason)
         text["qa_flags"] = text_flags
         text["content_class"] = "scanlation_credit"
         text["export_policy"] = "exclude_from_translated_output"
@@ -7889,12 +7962,12 @@ def _mark_scanlation_discord_promo_band(page: dict, perf: dict) -> dict:
         text["inpaint_policy"] = "skip"
         text["render_policy"] = "skip"
         text["skip_processing"] = True
-        text["skip_reason"] = "scanlation_discord_promo"
+        text["skip_reason"] = reason
         text["route_action"] = "review_required"
-        text["route_reason"] = "scanlation_discord_promo"
+        text["route_reason"] = reason
         text["visible"] = False
     perf["excluded_non_story"] = True
-    perf["exclusion_reason"] = "scanlation_discord_promo"
+    perf["exclusion_reason"] = reason
     return updated
 
 
@@ -8227,7 +8300,7 @@ def process_band(
     ocr_stats = ocr_page.get("_ocr_stats") if isinstance(ocr_page, dict) else None
     if isinstance(ocr_stats, dict) and bool(ocr_stats.get("scanlation_discord_promo_detected")):
         original = band.original_slice if band.original_slice is not None else band.strip_slice
-        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf)
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf, reason="scanlation_discord_promo")
         excluded_page["_vision_blocks"] = []
         _commit_band_outputs(
             band,
@@ -8263,9 +8336,10 @@ def process_band(
         )
         _finish(band.ocr_result)
         return band
-    if _ocr_page_is_scanlation_discord_promo_band(ocr_page, band):
+    scanlation_promo_reason = _ocr_page_scanlation_promo_reason(ocr_page, band)
+    if scanlation_promo_reason:
         original = band.original_slice if band.original_slice is not None else band.strip_slice
-        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf)
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf, reason=scanlation_promo_reason)
         _commit_band_outputs(
             band,
             cleaned_slice=original,
@@ -8278,7 +8352,7 @@ def process_band(
             source_page_number=source_page_number,
             translated_page=band.ocr_result,
             applied=False,
-            reason="excluded_non_story_scanlation_discord_promo",
+            reason=f"excluded_non_story_{scanlation_promo_reason}",
         )
         _finish(band.ocr_result)
         return band
@@ -8328,6 +8402,26 @@ def process_band(
             )
             ocr_page = review_layout_stage.to_page_dict()
             _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
+    scanlation_promo_reason = _ocr_page_scanlation_promo_reason(ocr_page, band)
+    if scanlation_promo_reason:
+        original = band.original_slice if band.original_slice is not None else band.strip_slice
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf, reason=scanlation_promo_reason)
+        _commit_band_outputs(
+            band,
+            cleaned_slice=original,
+            rendered_slice=original,
+            ocr_result=excluded_page,
+        )
+        _record_copyback_decision(
+            band=band,
+            band_id=band_id,
+            source_page_number=source_page_number,
+            translated_page=band.ocr_result,
+            applied=False,
+            reason=f"excluded_non_story_{scanlation_promo_reason}",
+        )
+        _finish(band.ocr_result)
+        return band
     _normalize_dark_bubble_contracts_for_stage(ocr_page, band.strip_slice)
     dark_full_crop_replaced = _run_with_stage_lock(
         "ocr_dark_bubble_full_crop_reocr",
@@ -8356,6 +8450,26 @@ def process_band(
         ocr_page = review_layout_stage.to_page_dict()
         _normalize_dark_bubble_contracts_for_stage(ocr_page, band.strip_slice)
         _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
+    scanlation_promo_reason = _ocr_page_scanlation_promo_reason(ocr_page, band)
+    if scanlation_promo_reason:
+        original = band.original_slice if band.original_slice is not None else band.strip_slice
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf, reason=scanlation_promo_reason)
+        _commit_band_outputs(
+            band,
+            cleaned_slice=original,
+            rendered_slice=original,
+            ocr_result=excluded_page,
+        )
+        _record_copyback_decision(
+            band=band,
+            band_id=band_id,
+            source_page_number=source_page_number,
+            translated_page=band.ocr_result,
+            applied=False,
+            reason=f"excluded_non_story_{scanlation_promo_reason}",
+        )
+        _finish(band.ocr_result)
+        return band
     perf["source_style_evidence_applied"] = _apply_band_source_style_evidence(
         ocr_page,
         band.original_slice if band.original_slice is not None else band.strip_slice,
@@ -8370,6 +8484,27 @@ def process_band(
         perf["ocr_finalized_before_translate"] = finalized_before_translate
         _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
     _mark("review_layout", stage_start)
+
+    scanlation_promo_reason = _ocr_page_scanlation_promo_reason(ocr_page, band)
+    if scanlation_promo_reason:
+        original = band.original_slice if band.original_slice is not None else band.strip_slice
+        excluded_page = _mark_scanlation_discord_promo_band(ocr_page, perf, reason=scanlation_promo_reason)
+        _commit_band_outputs(
+            band,
+            cleaned_slice=original,
+            rendered_slice=original,
+            ocr_result=excluded_page,
+        )
+        _record_copyback_decision(
+            band=band,
+            band_id=band_id,
+            source_page_number=source_page_number,
+            translated_page=band.ocr_result,
+            applied=False,
+            reason=f"excluded_non_story_{scanlation_promo_reason}",
+        )
+        _finish(band.ocr_result)
+        return band
 
     if _smart_skip_shadow_enabled():
         _apply_smart_skip_shadow(ocr_page, perf)
