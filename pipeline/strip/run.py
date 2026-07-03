@@ -26,7 +26,7 @@ from strip.concat import build_strip
 from strip.detect_balloons import _inner_dark_text_evidence, detect_strip_balloons
 from strip.process_bands import _band_id_for, _page_id_for, process_band
 from strip.reassemble import assemble_output_pages
-from strip.types import Band, OutputPage, VerticalStrip
+from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 
 
 _LEGACY_DECISION_FIELDS = frozenset(
@@ -215,6 +215,336 @@ def _paste_band_attr_into_image(strip_image, bands: list, attr_name: str):
             continue
         result[y0:y1, :, :] = source
     return result
+
+
+def _band_excluded_from_translated_output(band: Band) -> bool:
+    result = getattr(band, "ocr_result", None)
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("excluded_non_story")) or (
+        str(result.get("export_policy") or "").strip().lower() == "exclude_from_translated_output"
+    )
+
+
+def _band_text_count(band: Band) -> int:
+    result = getattr(band, "ocr_result", None)
+    if not isinstance(result, dict):
+        return 0
+    return len([text for text in list(result.get("texts") or []) if isinstance(text, dict)])
+
+
+def _band_has_story_text_for_scanlation_tail_guard(band: Band) -> bool:
+    result = getattr(band, "ocr_result", None)
+    if not isinstance(result, dict):
+        return False
+    texts = [text for text in list(result.get("texts") or []) if isinstance(text, dict)]
+    if not texts:
+        return False
+    joined = " ".join(str(text.get("text") or "") for text in texts).strip().lower()
+    if not joined:
+        return False
+    scanlation_credit_markers = (
+        "discord",
+        "iscord",
+        "scan",
+        "secret",
+        "mz",
+        "family",
+        "support us",
+        ".gg",
+        "http://",
+        "https://",
+        ".com",
+        ".co.kr",
+    )
+    if any(marker in joined for marker in scanlation_credit_markers):
+        return False
+    if not re.search(r"[a-z]", joined):
+        return False
+    return True
+
+
+def _resolve_scanlation_promo_exclusion_owner(
+    bands: list[Band],
+    source_band: Band,
+    source_index: int,
+) -> tuple[Band, int]:
+    source_y1 = int(getattr(source_band, "y_top", 0) or 0)
+    source_y2 = int(getattr(source_band, "y_bottom", 0) or 0)
+    source_height = max(0, source_y2 - source_y1)
+    if source_height <= 0:
+        return source_band, source_index
+    source_center = (source_y1 + source_y2) / 2.0
+    candidates: list[tuple[int, int, int, Band, int]] = []
+    for index, band in enumerate(bands):
+        y1 = int(getattr(band, "y_top", 0) or 0)
+        y2 = int(getattr(band, "y_bottom", 0) or 0)
+        height = max(0, y2 - y1)
+        if height <= source_height:
+            continue
+        if y1 < source_y1:
+            continue
+        overlap = max(0, min(source_y2, y2) - max(source_y1, y1))
+        if overlap <= 0:
+            continue
+        if not (y1 <= source_center <= y2):
+            continue
+        if _band_text_count(band) > 0:
+            continue
+        center_delta = abs(((y1 + y2) / 2.0) - source_center)
+        candidates.append((-height, int(center_delta), index, band, index))
+    if not candidates:
+        return source_band, source_index
+    candidates.sort()
+    return candidates[0][3], candidates[0][4]
+
+
+def _page_bounds_for_y(
+    source_page_breaks: list[int] | tuple[int, ...] | None,
+    strip_height: int | None,
+    y: int,
+) -> tuple[int, int] | None:
+    breaks = sorted({int(value) for value in list(source_page_breaks or []) if int(value) >= 0})
+    if strip_height is not None and int(strip_height) > 0:
+        breaks.append(int(strip_height))
+    breaks = sorted(set(breaks))
+    if len(breaks) < 2:
+        return None
+    for index in range(len(breaks) - 1):
+        start = breaks[index]
+        end = breaks[index + 1]
+        if start <= int(y) < end:
+            return start, end
+    if int(y) >= breaks[-1]:
+        return breaks[-2], breaks[-1]
+    return breaks[0], breaks[1]
+
+
+def _scanlation_promo_tail_page_end(
+    bands: list[Band],
+    *,
+    y_start: int,
+    y_end: int,
+    source_page_breaks: list[int] | tuple[int, ...] | None,
+    strip_height: int | None,
+) -> int | None:
+    bounds = _page_bounds_for_y(source_page_breaks, strip_height, y_start)
+    if bounds is None:
+        return None
+    page_start, page_end = bounds
+    page_height = max(1, page_end - page_start)
+    if y_start < page_start + int(page_height * 0.65):
+        return None
+    for band in bands:
+        by1 = int(getattr(band, "y_top", 0) or 0)
+        by2 = int(getattr(band, "y_bottom", 0) or 0)
+        if by2 <= y_end or by1 >= page_end:
+            continue
+        if by2 > page_end:
+            continue
+        if _band_excluded_from_translated_output(band):
+            continue
+        if _band_has_story_text_for_scanlation_tail_guard(band):
+            return None
+    return page_end
+
+
+def _excluded_non_story_intervals(
+    bands: list[Band],
+    *,
+    source_page_breaks: list[int] | tuple[int, ...] | None = None,
+    strip_height: int | None = None,
+) -> tuple[list[tuple[int, int]], list[dict]]:
+    intervals: list[tuple[int, int]] = []
+    rows: list[dict] = []
+    seen_band_ids: set[str] = set()
+    for index, band in enumerate(bands):
+        if not _band_excluded_from_translated_output(band):
+            continue
+        result = getattr(band, "ocr_result", None) or {}
+        source_band_id = _band_debug_id(band, index)
+        reason = result.get("exclusion_reason") or "scanlation_discord_promo"
+        owner_band = band
+        owner_index = index
+        if str(reason) == "scanlation_discord_promo":
+            owner_band, owner_index = _resolve_scanlation_promo_exclusion_owner(bands, band, index)
+        y1 = int(getattr(band, "y_top", 0) or 0)
+        y2 = int(getattr(band, "y_bottom", 0) or 0)
+        if owner_band is not band:
+            y1 = int(getattr(owner_band, "y_top", 0) or 0)
+            y2 = int(getattr(owner_band, "y_bottom", 0) or 0)
+        if str(reason) == "scanlation_discord_promo":
+            source_y1 = int(getattr(band, "y_top", 0) or 0)
+            source_y2 = int(getattr(band, "y_bottom", 0) or 0)
+            if source_y2 > source_y1:
+                y1 = min(y1, source_y1)
+                y2 = max(y2, source_y2)
+            tail_end = _scanlation_promo_tail_page_end(
+                bands,
+                y_start=y1,
+                y_end=y2,
+                source_page_breaks=source_page_breaks,
+                strip_height=strip_height,
+            )
+            if tail_end is not None and tail_end > y2:
+                y2 = tail_end
+        if y2 <= y1:
+            continue
+        band_id = _band_debug_id(owner_band, owner_index)
+        if band_id in seen_band_ids:
+            continue
+        seen_band_ids.add(band_id)
+        intervals.append((y1, y2))
+        row = {
+            "band_id": band_id,
+            "y_top": y1,
+            "y_bottom": y2,
+            "content_class": result.get("content_class") or "scanlation_credit",
+            "export_policy": "exclude_from_translated_output",
+            "translate_policy": result.get("translate_policy") or "skip",
+            "inpaint_policy": result.get("inpaint_policy") or "skip",
+            "render_policy": result.get("render_policy") or "skip",
+            "exclusion_reason": reason,
+        }
+        if str(reason) == "scanlation_discord_promo" and y2 != int(getattr(owner_band, "y_bottom", 0) or 0):
+            row["extended_to_page_end"] = True
+            row["detected_cluster_y_top"] = y1
+        if band_id != source_band_id:
+            row["detected_band_id"] = source_band_id
+        rows.append(row)
+    if not intervals:
+        return [], rows
+    intervals.sort()
+    merged: list[tuple[int, int]] = []
+    for y1, y2 in intervals:
+        if not merged or y1 > merged[-1][1]:
+            merged.append((y1, y2))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], y2))
+    return merged, rows
+
+
+def _remap_y_after_exclusions(y: int, intervals: list[tuple[int, int]]) -> int:
+    mapped = int(y)
+    for start, end in intervals:
+        if y <= start:
+            break
+        mapped -= max(0, min(int(y), end) - start)
+    return max(0, mapped)
+
+
+def _remove_vertical_intervals(image: np.ndarray, intervals: list[tuple[int, int]]) -> np.ndarray:
+    if not intervals:
+        return image
+    height = int(image.shape[0])
+    keep = np.ones(height, dtype=bool)
+    for start, end in intervals:
+        keep[max(0, start) : min(height, end)] = False
+    if not np.any(keep):
+        return image[:0, :, :].copy()
+    return image[keep, :, :].copy()
+
+
+def _remove_band_local_excluded_rows(
+    image: np.ndarray | None,
+    *,
+    band_y_top: int,
+    intervals: list[tuple[int, int]],
+) -> np.ndarray | None:
+    if image is None or not intervals:
+        return image
+    height = int(image.shape[0])
+    keep = np.ones(height, dtype=bool)
+    for start, end in intervals:
+        local_start = max(0, int(start) - int(band_y_top))
+        local_end = min(height, int(end) - int(band_y_top))
+        if local_end > local_start:
+            keep[local_start:local_end] = False
+    if not np.any(keep):
+        return image[:0, :, :].copy()
+    return image[keep, :, :].copy()
+
+
+def _remap_bbox_y_after_exclusions(bbox: BBox, intervals: list[tuple[int, int]]) -> BBox:
+    return BBox(
+        x1=int(bbox.x1),
+        y1=_remap_y_after_exclusions(int(bbox.y1), intervals),
+        x2=int(bbox.x2),
+        y2=_remap_y_after_exclusions(int(bbox.y2), intervals),
+    )
+
+
+def _remap_bands_after_exclusions(bands: list[Band], intervals: list[tuple[int, int]]) -> list[Band]:
+    if not intervals:
+        return bands
+    remapped: list[Band] = []
+    for band in bands:
+        if _band_excluded_from_translated_output(band):
+            continue
+        old_y_top = int(getattr(band, "y_top", 0) or 0)
+        y_top = _remap_y_after_exclusions(int(getattr(band, "y_top", 0) or 0), intervals)
+        y_bottom = _remap_y_after_exclusions(int(getattr(band, "y_bottom", 0) or 0), intervals)
+        if y_bottom <= y_top:
+            continue
+        strip_slice = _remove_band_local_excluded_rows(band.strip_slice, band_y_top=old_y_top, intervals=intervals)
+        original_slice = _remove_band_local_excluded_rows(band.original_slice, band_y_top=old_y_top, intervals=intervals)
+        cleaned_slice = _remove_band_local_excluded_rows(band.cleaned_slice, band_y_top=old_y_top, intervals=intervals)
+        rendered_slice = _remove_band_local_excluded_rows(band.rendered_slice, band_y_top=old_y_top, intervals=intervals)
+        balloons = [
+            Balloon(
+                strip_bbox=_remap_bbox_y_after_exclusions(balloon.strip_bbox, intervals),
+                confidence=balloon.confidence,
+                lobe_count=balloon.lobe_count,
+                metadata=copy.deepcopy(balloon.metadata),
+            )
+            for balloon in list(getattr(band, "balloons", []) or [])
+        ]
+        remapped.append(
+            Band(
+                y_top=y_top,
+                y_bottom=y_bottom,
+                balloons=balloons,
+                strip_slice=strip_slice,
+                original_slice=original_slice,
+                cleaned_slice=cleaned_slice,
+                rendered_slice=rendered_slice,
+                ocr_result=band.ocr_result,
+                perf=dict(getattr(band, "perf", {}) or {}),
+            )
+        )
+    return remapped
+
+
+def _remap_breaks_after_exclusions(breaks: list[int], intervals: list[tuple[int, int]], new_height: int) -> list[int]:
+    if not intervals:
+        return breaks
+    remapped: list[int] = []
+    for value in list(breaks or []):
+        mapped = _remap_y_after_exclusions(int(value), intervals)
+        if not remapped or mapped > remapped[-1]:
+            remapped.append(mapped)
+    if not remapped or remapped[0] != 0:
+        remapped.insert(0, 0)
+    if remapped[-1] != int(new_height):
+        remapped.append(int(new_height))
+    return remapped
+
+
+def _write_non_story_exclusions_debug(exclusion_rows: list[dict]) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None or not exclusion_rows:
+        return
+    try:
+        recorder.write_json(
+            "10_copyback_reassemble/non_story_exclusions.json",
+            {
+                "excluded_non_story_bands": [row["band_id"] for row in exclusion_rows],
+                "excluded_count": len(exclusion_rows),
+                "exclusions": exclusion_rows,
+            },
+        )
+    except Exception:
+        return
 
 
 def _shift_bbox_y(value, delta_y: int) -> list[int] | None:
@@ -5180,25 +5510,69 @@ def run_chapter(
         with _timed(chapter_telemetry, "inpainter_prewarm_close"):
             _close_inpainter_prewarm(prewarm_handle)
 
+    exclusion_intervals, exclusion_rows = _excluded_non_story_intervals(
+        bands,
+        source_page_breaks=list(strip.source_page_breaks or []),
+        strip_height=int(strip.image.shape[0]),
+    )
+    _write_non_story_exclusions_debug(exclusion_rows)
+    if exclusion_rows:
+        chapter_telemetry["excluded_non_story_bands"] = [row["band_id"] for row in exclusion_rows]
+        chapter_telemetry["excluded_non_story_count"] = len(exclusion_rows)
+
     with _timed(chapter_telemetry, "strip_paste_cleaned"):
-        clean_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
+        clean_strip_image_full = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
     with _timed(chapter_telemetry, "strip_paste_rendered"):
-        rendered_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
+        rendered_strip_image_full = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
+    if exclusion_intervals:
+        with _timed(chapter_telemetry, "strip_remove_non_story_exclusions"):
+            output_original_strip_image = _remove_vertical_intervals(original_strip_image, exclusion_intervals)
+            clean_strip_image = _remove_vertical_intervals(clean_strip_image_full, exclusion_intervals)
+            rendered_strip_image = _remove_vertical_intervals(rendered_strip_image_full, exclusion_intervals)
+            output_bands = _remap_bands_after_exclusions(bands, exclusion_intervals)
+            output_balloons = [
+                balloon
+                for band in output_bands
+                for balloon in list(getattr(band, "balloons", []) or [])
+            ]
+            output_breaks = _remap_breaks_after_exclusions(
+                list(strip.source_page_breaks or []),
+                exclusion_intervals,
+                int(rendered_strip_image.shape[0]),
+            )
+    else:
+        output_original_strip_image = original_strip_image
+        clean_strip_image = clean_strip_image_full
+        rendered_strip_image = rendered_strip_image_full
+        output_bands = bands
+        output_balloons = balloons
+        output_breaks = list(strip.source_page_breaks)
     with _timed(chapter_telemetry, "strip_assign_rendered"):
-        strip.image[:, :, :] = rendered_strip_image
+        if strip.image.shape == rendered_strip_image.shape:
+            strip.image[:, :, :] = rendered_strip_image
 
     with _timed(chapter_telemetry, "assemble_rendered_pages"):
-        output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
+        output_pages = assemble_output_pages(
+            VerticalStrip(
+                image=rendered_strip_image,
+                width=strip.width,
+                height=int(rendered_strip_image.shape[0]),
+                source_page_breaks=list(output_breaks),
+                page_x_offsets=list(strip.page_x_offsets),
+            ),
+            output_balloons,
+            target_count=target_count,
+        )
     with _timed(chapter_telemetry, "assemble_original_pages"):
         original_pages = assemble_output_pages(
             VerticalStrip(
-                image=original_strip_image,
+                image=output_original_strip_image,
                 width=strip.width,
-                height=strip.height,
-                source_page_breaks=list(strip.source_page_breaks),
+                height=int(output_original_strip_image.shape[0]),
+                source_page_breaks=list(output_breaks),
                 page_x_offsets=list(strip.page_x_offsets),
             ),
-            balloons,
+            output_balloons,
             target_count=target_count,
         )
     with _timed(chapter_telemetry, "assemble_clean_pages"):
@@ -5206,11 +5580,11 @@ def run_chapter(
             VerticalStrip(
                 image=clean_strip_image,
                 width=strip.width,
-                height=strip.height,
-                source_page_breaks=list(strip.source_page_breaks),
+                height=int(clean_strip_image.shape[0]),
+                source_page_breaks=list(output_breaks),
                 page_x_offsets=list(strip.page_x_offsets),
             ),
-            balloons,
+            output_balloons,
             target_count=target_count,
         )
     _write_reassemble_manifest_debug(
@@ -5224,7 +5598,7 @@ def run_chapter(
     remap_started = time.perf_counter()
     all_texts: list[dict] = []
     all_vision_blocks: list[dict] = []
-    for band in bands:
+    for band in output_bands:
         if not band.ocr_result:
             continue
         b_y = band.y_top
@@ -5268,7 +5642,7 @@ def run_chapter(
         page.ocr_result = {"_vision_blocks": []}
         page.text_layers = {"texts": []}
 
-    for band_index, band in enumerate(bands, start=1):
+    for band_index, band in enumerate(output_bands, start=1):
         if not isinstance(getattr(band, "ocr_result", None), dict):
             continue
         for page in output_pages:
@@ -5348,7 +5722,7 @@ def run_chapter(
         write_layout_geometry_debug_artifacts(output_pages)
     except Exception:
         pass
-    _write_strip_detect_text_matching_debug_artifacts(strip, bands, output_pages)
+    _write_strip_detect_text_matching_debug_artifacts(strip, output_bands, output_pages)
 
     with _timed(chapter_telemetry, "summarize_band_perf"):
         strip_perf_summary = _summarize_band_perf(
@@ -5511,11 +5885,11 @@ def run_chapter(
 
     _mark_pipeline_artifacts_after_render(output_pages)
     _write_pipeline_artifacts_debug(output_pages)
-    _write_contact_sheets_debug(original_pages, output_pages, bands)
+    _write_contact_sheets_debug(original_pages, output_pages, output_bands)
 
     with _timed(chapter_telemetry, "write_translated_pages"):
         cleanup_breakdown["cleanup_save"] += _write_output_pages_jpegs(output_pages, output_dir)
-    _write_final_band_crop_debug(output_pages, bands)
+    _write_final_band_crop_debug(output_pages, output_bands)
 
     _write_page_cleanup_breakdown_debug(cleanup_breakdown)
 

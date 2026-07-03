@@ -1670,6 +1670,40 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(audit["refresh"]["clean_band_final_mismatch_count"], 1)
             self.assertEqual(audit["refresh"]["final_output_source"], "clean_final_bands_after_all_rerenders")
 
+    def test_final_band_refresh_records_excluded_non_story_bands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            debug_root.mkdir(parents=True)
+            (debug_root / "non_story_exclusions.json").write_text(
+                json.dumps(
+                    {
+                        "excluded_non_story_bands": ["page_005_band_102"],
+                        "excluded_count": 1,
+                        "exclusions": [
+                            {
+                                "band_id": "page_005_band_102",
+                                "export_policy": "exclude_from_translated_output",
+                                "exclusion_reason": "scanlation_discord_promo",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (debug_root / "final_band_crops.jsonl").write_text("", encoding="utf-8")
+
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+            audit = main._restore_clean_final_bands_after_rerender(recorder, root)
+
+            self.assertEqual(audit["excluded_non_story_bands"], ["page_005_band_102"])
+            self.assertEqual(
+                audit["excluded_non_story_reasons"],
+                {"page_005_band_102": "scanlation_discord_promo"},
+            )
+
     def test_post_rerender_visual_contract_prioritizes_text_bands_over_empty_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder

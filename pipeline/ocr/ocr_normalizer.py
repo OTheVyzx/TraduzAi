@@ -330,7 +330,14 @@ def _is_scanlation_credit(text: str) -> bool:
         return True
     if re.search(r"\b(?:REDRAWERS?|CLEANERS?|TYPESETTERS?|TRANSLATORS?|PROOFREADERS?|QUALITY\s+CHECKERS?)\b", normalized):
         return True
-    if ". COM" in normalized or normalized.endswith(".COM") or "DISCORD" in normalized:
+    if (
+        ". COM" in normalized
+        or normalized.endswith(".COM")
+        or "DISCORD" in normalized
+        or "ISCORD.GG" in normalized
+        or "ISCORD GG" in normalized
+        or "ISCORDGG" in compact
+    ):
         return True
     if "@" in text and any(token in normalized for token in (".COM", "NAVER", "GMAIL", "MAIL")):
         return True

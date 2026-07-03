@@ -3497,6 +3497,17 @@ class ProcessBandTests(unittest.TestCase):
             )
         )
 
+    def test_candidate_crop_reocr_rejects_truncated_discord_scanlation_url(self):
+        from strip.process_bands import (
+            _candidate_crop_reocr_result_has_scanlation_credit,
+            _candidate_crop_reocr_text_is_usable,
+        )
+
+        text = {"text": "iscord.gg/xzeKn8V", "confidence": 0.95}
+
+        self.assertFalse(_candidate_crop_reocr_text_is_usable(text))
+        self.assertTrue(_candidate_crop_reocr_result_has_scanlation_credit({"texts": [text]}))
+
     def test_candidate_crop_reocr_result_rejects_scanlation_credit_panel(self):
         from strip.process_bands import _candidate_crop_reocr_result_has_scanlation_credit
 
@@ -5629,6 +5640,119 @@ class ProcessBandTests(unittest.TestCase):
         self.assertEqual(band.ocr_result["_vision_blocks"], [])
         self.assertTrue(band.perf["ocr_scanlation_credit_skipped"])
         self.assertTrue(band.perf["ocr_cover_editorial_skipped"])
+
+    def test_process_band_excludes_discord_scanlation_promo_without_rendering(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        import numpy as np
+
+        band = self._make_band()
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text": "iscord.gg/xzeKn8V",
+                    "bbox": [40, 55, 260, 78],
+                    "confidence": 0.95,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [40, 55, 260, 78], "confidence": 0.95}],
+            "_ocr_stats": {},
+        }
+        translator = MagicMock()
+        inpainter = MagicMock()
+        typesetter = MagicMock()
+        empty_recovery = SimpleNamespace(to_page_dict=lambda: {"texts": []}, perf_updates={})
+
+        with patch("strip.process_bands._recover_empty_ocr_with_candidate_crops", return_value=empty_recovery), patch(
+            "strip.process_bands._recover_partial_dark_bubble_ocr_from_texts",
+            return_value=0,
+        ):
+            result = process_band(
+                band,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+                page_idx=0,
+            )
+
+        self.assertIs(result, band)
+        translator.translate_pages.assert_not_called()
+        inpainter.inpaint_band_image.assert_not_called()
+        typesetter.render_band_image.assert_not_called()
+        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
+        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertEqual(band.ocr_result["export_policy"], "exclude_from_translated_output")
+        self.assertEqual(band.ocr_result["exclusion_reason"], "scanlation_discord_promo")
+        self.assertTrue(band.ocr_result["excluded_non_story"])
+        self.assertTrue(band.ocr_result["texts"][0]["skip_processing"])
+        self.assertEqual(band.perf["exclusion_reason"], "scanlation_discord_promo")
+
+    def test_process_band_excludes_discord_promo_rejected_by_crop_reocr(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from strip.process_bands import process_band
+        import numpy as np
+
+        band = self._make_band()
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [],
+            "_vision_blocks": [],
+            "_ocr_stats": {},
+        }
+        translator = MagicMock()
+        inpainter = MagicMock()
+        typesetter = MagicMock()
+        recovery_page = {
+            "numero": 1,
+            "width": 300,
+            "height": 100,
+            "texts": [],
+            "_vision_blocks": [],
+            "_ocr_stats": {
+                "candidate_crop_reocr_candidate_count": 1,
+                "candidate_crop_reocr_attempts": 1,
+                "candidate_crop_reocr_recovered": 0,
+                "scanlation_discord_promo_detected": True,
+                "scanlation_credit_rejected_texts": ["iscord.gg/xzeKn8V"],
+            },
+        }
+        recovery = SimpleNamespace(to_page_dict=lambda: recovery_page, perf_updates={})
+
+        with patch("strip.process_bands._recover_empty_ocr_with_candidate_crops", return_value=recovery), patch(
+            "strip.process_bands._recover_partial_dark_bubble_ocr_from_texts",
+            return_value=0,
+        ):
+            result = process_band(
+                band,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+                page_idx=0,
+            )
+
+        self.assertIs(result, band)
+        translator.translate_pages.assert_not_called()
+        inpainter.inpaint_band_image.assert_not_called()
+        typesetter.render_band_image.assert_not_called()
+        self.assertTrue(np.array_equal(band.cleaned_slice, band.original_slice))
+        self.assertTrue(np.array_equal(band.rendered_slice, band.original_slice))
+        self.assertEqual(band.ocr_result["texts"], [])
+        self.assertEqual(band.ocr_result["export_policy"], "exclude_from_translated_output")
+        self.assertEqual(band.ocr_result["exclusion_reason"], "scanlation_discord_promo")
+        self.assertTrue(band.ocr_result["excluded_non_story"])
+        self.assertEqual(band.perf["exclusion_reason"], "scanlation_discord_promo")
 
     def test_process_band_runs_pipeline_when_ocr_texts_are_legacy_skip_processing(self):
         from unittest.mock import MagicMock
