@@ -13908,6 +13908,29 @@ def _apply_recovered_dark_bubble_glow_capacity(
     recovered = _recover_dark_bubble_glow_capacity_from_image(img, text_data, plan)
     if recovered is None:
         return
+    anchor = _resolve_english_anchor_bbox(text_data) or _layout_bbox(text_data.get("text_pixel_bbox") or text_data.get("bbox"))
+    if anchor is not None:
+        ax1, ay1, ax2, ay2 = [int(v) for v in anchor]
+        rx1_check, ry1_check, rx2_check, ry2_check = [int(v) for v in recovered]
+        anchor_area = max(1, _bbox_area_px(anchor))
+        anchor_cx = (float(ax1) + float(ax2)) / 2.0
+        anchor_cy = (float(ay1) + float(ay2)) / 2.0
+        contains_anchor_center = bool(
+            rx1_check <= anchor_cx <= rx2_check and ry1_check <= anchor_cy <= ry2_check
+        )
+        anchor_overlap = _bbox_intersection_area(recovered, anchor)
+        if not contains_anchor_center and anchor_overlap < int(anchor_area * 0.10):
+            _merge_qa_flags(text_data, ["dark_bubble_glow_capacity_rejected_off_anchor"])
+            metrics = text_data.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["dark_bubble_glow_capacity_rejected_off_anchor"] = {
+                    "recovered_bbox": list(recovered),
+                    "anchor_bbox": list(anchor),
+                    "anchor_overlap_pixels": int(anchor_overlap),
+                    "anchor_area": int(anchor_area),
+                    "reason": "recovered_glow_bbox_does_not_cover_text_anchor",
+                }
+            return
     rx1, ry1, rx2, ry2 = [int(v) for v in recovered]
     rw = max(1, rx2 - rx1)
     rh = max(1, ry2 - ry1)

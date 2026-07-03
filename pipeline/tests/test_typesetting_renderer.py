@@ -9889,6 +9889,54 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreaterEqual(rendered_safe[3] - rendered_safe[1], 65)
         self.assertEqual(render_data.get("layout_safe_reason"), "trusted_dark_visual_capacity")
 
+    def test_dark_bubble_glow_capacity_rejects_off_anchor_art_region(self):
+        img = Image.new("RGB", (800, 735), (0, 0, 0))
+        arr = np.array(img)
+        arr[218:354, 0:611] = [4, 54, 92]
+        img = Image.fromarray(arr)
+        text_data = {
+            "translated": "Você não pode ficar no subespaço por muito tempo.",
+            "original": "You can't stay in the subspace for long.",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [163, 391, 351, 521],
+            "source_bbox": [163, 391, 351, 521],
+            "text_pixel_bbox": [163, 391, 351, 521],
+            "target_bbox": [122, 352, 392, 560],
+            "balloon_bbox": [122, 352, 392, 560],
+            "bubble_mask_bbox": [241, 436, 351, 476],
+            "background_rgb": [2, 2, 2],
+            "qa_flags": [
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+            ],
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 34,
+                "cor": "#FFFFFF",
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [122, 352, 392, 560],
+            "position_bbox": [122, 352, 392, 560],
+            "capacity_bbox": [122, 352, 392, 560],
+            "safe_text_box": [150, 374, 364, 538],
+            "max_width": 240,
+            "max_height": 150,
+            "padding_y": 0,
+        }
+
+        renderer_mod._apply_recovered_dark_bubble_glow_capacity(img, text_data, plan)
+
+        self.assertEqual(plan["target_bbox"], [122, 352, 392, 560])
+        self.assertEqual(plan["safe_text_box"], [150, 374, 364, 538])
+        self.assertNotIn("dark_bubble_glow_capacity_recovered", text_data.get("qa_flags") or [])
+        self.assertIn("dark_bubble_glow_capacity_rejected_off_anchor", text_data.get("qa_flags") or [])
+
     def test_dark_bbox_fallback_panel_does_not_cap_font_to_short_anchor(self):
         img = Image.new("RGB", (800, 735), (0, 0, 0))
         text_data = {
