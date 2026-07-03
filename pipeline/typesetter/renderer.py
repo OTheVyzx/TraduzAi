@@ -16262,6 +16262,17 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
             if flag not in qa_flags:
                 qa_flags.append(flag)
 
+    qa_flags = _revalidate_render_on_art_suspected_after_layout(
+        text_data,
+        qa_flags,
+        qa_metrics,
+        render_bbox=render_bbox,
+        safe_text_box=safe,
+        target_bbox=target,
+        balloon_bbox=balloon_bbox,
+        render_fit_flags=render_fit_flags,
+    )
+
     if render_fit_flags:
         qa_metrics["render_fit"] = {
             "flags": list(render_fit_flags),
@@ -16864,6 +16875,105 @@ def _drop_stale_render_geometry_flags(text_data: dict) -> None:
     render_fit_flags = _render_fit_geometry_flags(text_data)
     stale_geometry_flags = _RENDER_GEOMETRY_QA_FLAGS - render_fit_flags
     text_data["qa_flags"] = [flag for flag in flags if str(flag) not in stale_geometry_flags]
+
+
+def _append_resolved_pre_render_flag(qa_metrics: dict, flag: str) -> None:
+    resolved = list(qa_metrics.get("resolved_pre_render_flags") or [])
+    if flag not in resolved:
+        resolved.append(flag)
+    qa_metrics["resolved_pre_render_flags"] = resolved
+
+
+def _revalidate_render_on_art_suspected_after_layout(
+    text_data: dict,
+    qa_flags: list,
+    qa_metrics: dict,
+    *,
+    render_bbox: list[int],
+    safe_text_box,
+    target_bbox,
+    balloon_bbox,
+    render_fit_flags: list[str],
+) -> list:
+    if "render_on_art_suspected" not in {str(flag) for flag in qa_flags}:
+        return qa_flags
+    if not _is_dark_bubble_visual_text(text_data):
+        return qa_flags
+
+    safe = _layout_bbox(safe_text_box)
+    target = _layout_bbox(target_bbox)
+    balloon = _layout_bbox(balloon_bbox)
+    render = _layout_bbox(render_bbox)
+    geometry_flags = set(render_fit_flags or [])
+    if render is None:
+        return qa_flags
+
+    try:
+        containment = float(qa_metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        containment = -1.0
+
+    try:
+        render_luma = float(qa_metrics.get("render_background_luma"))
+    except (TypeError, ValueError):
+        render_luma = None
+    try:
+        render_std = float(qa_metrics.get("render_background_luma_std"))
+    except (TypeError, ValueError):
+        render_std = None
+    try:
+        balloon_luma = float(qa_metrics.get("render_balloon_background_luma"))
+    except (TypeError, ValueError):
+        balloon_luma = None
+    try:
+        balloon_std = float(qa_metrics.get("render_balloon_background_luma_std"))
+    except (TypeError, ValueError):
+        balloon_std = None
+
+    inside_target = bool(
+        (target is not None and _bbox_contains_with_margin(target, render, margin=3))
+        or (balloon is not None and _bbox_contains_with_margin(balloon, render, margin=3))
+        or containment >= 0.95
+    )
+    dark_flat_background = bool(
+        render_luma is not None
+        and render_luma <= 80.0
+        and (render_std is None or render_std <= 32.0)
+        and (
+            balloon_luma is None
+            or (
+                balloon_luma <= 95.0
+                and (balloon_std is None or balloon_std <= 48.0)
+            )
+        )
+    )
+    clean_geometry = not geometry_flags.intersection(_RENDER_GEOMETRY_QA_FLAGS)
+    decision = "cleared" if inside_target and dark_flat_background else "kept"
+    reason = (
+        "selected_render_inside_lobe"
+        if decision == "cleared"
+        else "selected_render_not_proven_inside_lobe"
+    )
+    qa_metrics["render_on_art_suspected_revalidated"] = {
+        "decision": decision,
+        "reason": reason,
+        "render_bbox": [int(v) for v in render],
+        "safe_text_box": [int(v) for v in safe] if safe is not None else None,
+        "target_bbox": [int(v) for v in target] if target is not None else None,
+        "balloon_bbox": [int(v) for v in balloon] if balloon is not None else None,
+        "render_balloon_containment": containment if containment >= 0 else None,
+        "render_background_luma": render_luma,
+        "render_background_luma_std": render_std,
+        "render_balloon_background_luma": balloon_luma,
+        "render_balloon_background_luma_std": balloon_std,
+        "safe_text_box_contains_render": bool(safe is not None and _bbox_contains_with_margin(safe, render, margin=3)),
+        "render_geometry_clean": bool(clean_geometry),
+    }
+    if decision != "cleared":
+        return qa_flags
+
+    _append_resolved_pre_render_flag(qa_metrics, "render_on_art_suspected")
+    return [flag for flag in qa_flags if str(flag) != "render_on_art_suspected"]
 
 
 def _copy_render_debug_fields(source: dict, rendered: dict) -> None:

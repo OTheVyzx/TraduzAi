@@ -7597,6 +7597,67 @@ class TypesettingRendererTests(unittest.TestCase):
 
                 self.assertIn("render_on_art_suspected", text_data.get("qa_flags") or [])
 
+    def test_render_on_art_suspected_clears_stale_warning_for_selected_dark_lobe_render(self):
+        background = np.zeros((180, 260, 3), dtype=np.uint8)
+        text_data = {
+            "original": "You can't stay in the subspace for long.",
+            "translated": "Voce nao pode ficar no subespaco por muito tempo.",
+            "render_bbox": [78, 62, 182, 124],
+            "safe_text_box": [58, 48, 202, 138],
+            "target_bbox": [44, 35, 222, 150],
+            "balloon_bbox": [44, 35, 222, 150],
+            "bubble_mask_bbox": [44, 35, 222, 150],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "render_on_art_suspected",
+                "text_residual_after_inpaint",
+                "mask_outside_balloon",
+            ],
+        }
+        plan = {
+            "target_bbox": [44, 35, 222, 150],
+            "safe_text_box": [58, 48, 202, 138],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan, background_image=background)
+
+        self.assertNotIn("render_on_art_suspected", text_data.get("qa_flags") or [])
+        self.assertIn("text_residual_after_inpaint", text_data.get("qa_flags") or [])
+        metrics = text_data.get("qa_metrics") or {}
+        self.assertIn("render_on_art_suspected_revalidated", metrics)
+        self.assertEqual(metrics["render_on_art_suspected_revalidated"]["decision"], "cleared")
+        self.assertIn("render_on_art_suspected", metrics.get("resolved_pre_render_flags") or [])
+
+    def test_render_on_art_suspected_keeps_warning_when_selected_dark_lobe_render_exceeds_lobe(self):
+        background = np.zeros((180, 260, 3), dtype=np.uint8)
+        text_data = {
+            "original": "You can't stay in the subspace for long.",
+            "translated": "Voce nao pode ficar no subespaco por muito tempo.",
+            "render_bbox": [20, 20, 236, 160],
+            "safe_text_box": [58, 48, 202, 138],
+            "target_bbox": [44, 35, 222, 150],
+            "balloon_bbox": [44, 35, 222, 150],
+            "bubble_mask_bbox": [44, 35, 222, 150],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "background_rgb": [0, 0, 0],
+            "qa_flags": ["render_on_art_suspected"],
+        }
+        plan = {
+            "target_bbox": [44, 35, 222, 150],
+            "safe_text_box": [58, 48, 202, 138],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan, background_image=background)
+
+        self.assertIn("render_on_art_suspected", text_data.get("qa_flags") or [])
+        metrics = text_data.get("qa_metrics") or {}
+        self.assertEqual(metrics["render_on_art_suspected_revalidated"]["decision"], "kept")
+
     def test_render_text_block_uses_safe_renderer_for_project_font(self):
         img = Image.new("RGB", (320, 240), (255, 255, 255))
         text_data = {
