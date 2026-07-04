@@ -19,6 +19,7 @@ from typesetter.renderer import (
     _resolve_connected_area_weights,
     _resolve_connected_target_sizes,
     _resolve_text_layout,
+    _run_render_qa,
     _score_connected_group_candidate,
     _split_text_for_connected_balloons,
     build_render_blocks,
@@ -211,6 +212,243 @@ class TypesettingLayoutTests(unittest.TestCase):
         self.assertLessEqual(resolved["font_size"], 36)
         self.assertLessEqual(resolved["block_width"], int((388 - 66) * 1.2))
         self.assertLessEqual(resolved["block_height"], int((16763 - 16572) * 1.6))
+
+    def test_dark_panel_allows_tight_contract_when_visual_balloon_fits(self):
+        text_data = {
+            "id": "page_004_band_054",
+            "text": "Use the Evasion skill immediately",
+            "original": "Use the Evasion skill immediately",
+            "translated": "USE A HABILIDADE DE EVASAO IMEDIATAMENTE",
+            "tipo": "fala",
+            "bbox": [273, 1082, 467, 1153],
+            "source_bbox": [273, 1082, 467, 1153],
+            "text_pixel_bbox": [273, 1082, 467, 1153],
+            "source_text_mask_bbox": [273, 1082, 467, 1153],
+            "target_bbox": [269, 1087, 447, 1152],
+            "balloon_bbox": [230, 1068, 486, 1171],
+            "bubble_mask_bbox": [224, 1062, 492, 1177],
+            "bubble_mask_source": "derived_card_panel_mask",
+            "layout_profile": "dark_panel",
+            "block_profile": "dark_panel",
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "fit_below_minimum_legible",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [269, 1077, 472, 1159],
+                    "mask_pixels": 16294,
+                    "source": "raw_glyph_mask",
+                },
+                "text_contract_direct_fill": {
+                    "mask_pixels": 16294,
+                    "contract_mask_pixels": 16294,
+                    "fill_rgb": [0, 0, 0],
+                    "reason": "expanded_text_contract_mask",
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 27,
+                "cor": "#FEFCF5",
+                "contorno": "#2D2F2E",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#2E2816",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [269, 1087, 447, 1152],
+            "position_bbox": [281, 1093, 435, 1146],
+            "capacity_bbox": [281, 1093, 435, 1146],
+            "safe_text_box": [281, 1093, 435, 1146],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 27,
+            "max_width": 139,
+            "max_height": 53,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "rect",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        metrics = text_data["qa_metrics"]["typeset_contract_fit"]["contract_metrics"]
+        block_bbox = text_data["qa_metrics"]["typeset_contract_fit"]["block_bbox"]
+        source_bbox = text_data["qa_metrics"]["typeset_contract_fit"]["source_bbox"]
+        self.assertEqual(source_bbox, [269, 1077, 472, 1159])
+        self.assertGreater(metrics["height_ratio"], 1.2)
+        self.assertGreaterEqual(block_bbox[1], text_data["bubble_mask_bbox"][1] - 4)
+        self.assertLessEqual(block_bbox[3], text_data["bubble_mask_bbox"][3] + 4)
+        self.assertGreaterEqual(resolved["font_size"], 26)
+        self.assertIn(
+            "contract_bbox_tight_but_visual_balloon_fit_ok",
+            text_data["qa_metrics"],
+        )
+        text_data["render_bbox"] = [301, 1071, 435, 1163]
+        _run_render_qa(text_data, plan)
+        self.assertNotIn("TEXT_CLIPPED", text_data.get("qa_flags", []))
+        self.assertNotIn("TEXT_OVERFLOW", text_data.get("qa_flags", []))
+        self.assertNotIn("fit_below_minimum_legible", text_data.get("qa_flags", []))
+        self.assertIn("TEXT_CLIPPED", text_data["qa_metrics"]["resolved_pre_render_flags"])
+        self.assertIn("TEXT_OVERFLOW", text_data["qa_metrics"]["resolved_pre_render_flags"])
+        self.assertIn("fit_below_minimum_legible", text_data["qa_metrics"]["resolved_pre_render_flags"])
+        self.assertEqual(
+            text_data["qa_metrics"]["typeset_contract_flags_revalidated"]["reason"],
+            "contract_bbox_tight_but_visual_balloon_fit_ok",
+        )
+        self.assertNotIn("fit_below_minimum_legible", text_data.get("qa_flags", []))
+
+    def test_dark_panel_rejects_layout_outside_visual_balloon_height(self):
+        text_data = {
+            "id": "page_004_band_054",
+            "text": "Use the Evasion skill immediately",
+            "original": "Use the Evasion skill immediately",
+            "translated": "USE A HABILIDADE DE EVASAO IMEDIATAMENTE",
+            "tipo": "fala",
+            "bbox": [273, 1082, 467, 1153],
+            "source_bbox": [273, 1082, 467, 1153],
+            "text_pixel_bbox": [273, 1082, 467, 1153],
+            "source_text_mask_bbox": [273, 1082, 467, 1153],
+            "target_bbox": [269, 1087, 447, 1152],
+            "balloon_bbox": [269, 1077, 472, 1159],
+            "bubble_mask_bbox": [269, 1077, 472, 1159],
+            "bubble_mask_source": "derived_card_panel_mask",
+            "layout_profile": "dark_panel",
+            "block_profile": "dark_panel",
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "fit_below_minimum_legible",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [269, 1077, 472, 1159],
+                    "mask_pixels": 16294,
+                    "source": "raw_glyph_mask",
+                },
+                "text_contract_direct_fill": {
+                    "mask_pixels": 16294,
+                    "contract_mask_pixels": 16294,
+                    "fill_rgb": [0, 0, 0],
+                    "reason": "expanded_text_contract_mask",
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 27,
+                "cor": "#FEFCF5",
+                "contorno": "#2D2F2E",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#2E2816",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [269, 1087, 447, 1152],
+            "position_bbox": [281, 1093, 435, 1146],
+            "capacity_bbox": [281, 1093, 435, 1146],
+            "safe_text_box": [281, 1093, 435, 1146],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 27,
+            "max_width": 139,
+            "max_height": 53,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "rect",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        metrics = text_data["qa_metrics"]["typeset_contract_fit"]["contract_metrics"]
+        block_bbox = text_data["qa_metrics"]["typeset_contract_fit"]["block_bbox"]
+        source_bbox = text_data["qa_metrics"]["typeset_contract_fit"]["source_bbox"]
+        self.assertLess(metrics["height_ratio"], 1.18)
+        self.assertGreaterEqual(block_bbox[1], source_bbox[1] - 4)
+        self.assertLessEqual(block_bbox[3], source_bbox[3] + 4)
+        self.assertLess(resolved["font_size"], 27)
+        self.assertNotIn(
+            "contract_bbox_tight_but_visual_balloon_fit_ok",
+            text_data["qa_metrics"],
+        )
+        self.assertNotIn("fit_below_minimum_legible", text_data.get("qa_flags", []))
+
+    def test_dark_panel_keeps_fitting_inpaint_contract_layout_size(self):
+        text_data = {
+            "id": "dark_panel_fits_contract",
+            "text": "Mission starts",
+            "original": "Mission starts",
+            "translated": "MISSAO INICIADA",
+            "tipo": "fala",
+            "bbox": [100, 100, 280, 150],
+            "source_bbox": [100, 100, 280, 150],
+            "text_pixel_bbox": [100, 100, 280, 150],
+            "source_text_mask_bbox": [100, 100, 280, 150],
+            "target_bbox": [90, 90, 300, 170],
+            "balloon_bbox": [70, 70, 320, 190],
+            "bubble_mask_source": "derived_card_panel_mask",
+            "layout_profile": "dark_panel",
+            "block_profile": "dark_panel",
+            "qa_flags": ["visual_text_only_inpaint_contract", "text_contract_direct_fill"],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [96, 96, 284, 154],
+                    "mask_pixels": 3000,
+                    "source": "raw_glyph_mask",
+                },
+                "text_contract_direct_fill": {
+                    "mask_pixels": 3000,
+                    "contract_mask_pixels": 3000,
+                    "fill_rgb": [0, 0, 0],
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 20,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 1,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [90, 90, 300, 170],
+            "position_bbox": [100, 100, 280, 150],
+            "capacity_bbox": [100, 100, 280, 150],
+            "safe_text_box": [100, 100, 280, 150],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 20,
+            "max_width": 180,
+            "max_height": 50,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "rect",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertGreaterEqual(resolved["font_size"], 18)
+        block_bbox = text_data["qa_metrics"]["typeset_contract_fit"]["block_bbox"]
+        self.assertGreaterEqual(block_bbox[1], 70 - 8)
+        self.assertLessEqual(block_bbox[3], 190 + 8)
+        self.assertIn(
+            "contract_bbox_tight_but_visual_balloon_fit_ok",
+            text_data["qa_metrics"],
+        )
 
     def test_plan_text_layout_recomputes_edge_clipped_balloon_from_full_safe_area(self):
         text_data = {
