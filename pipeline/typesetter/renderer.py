@@ -4189,10 +4189,50 @@ def _split_line_polygons_by_large_gap(line_polygons: list) -> list[list[list]] |
     return [first, second]
 
 
+def _should_split_dark_missing_anchor_visual_lobes(text: dict) -> bool:
+    flags = _qa_flags_set(text)
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    if "connected_lobe_boxes_missing_source_anchor_fallback" not in flags:
+        return False
+    if text.get("_is_lobe_subregion") or _normalize_balloon_subregions(
+        text.get("connected_lobe_bboxes") or text.get("balloon_subregions") or []
+    ):
+        return False
+    if _split_line_polygons_by_large_gap(text.get("line_polygons") or []) is None:
+        return False
+    return True
+
+
+def _expand_visual_lobe_text_bbox(
+    bbox: list[int],
+    parent_target: list[int] | None,
+) -> list[int]:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    pad_x = max(22, int(round(width * 0.18)))
+    pad_y = max(14, int(round(height * 0.42)))
+    expanded = [x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y]
+    if parent_target is not None:
+        px1, py1, px2, py2 = [int(v) for v in parent_target]
+        expanded = [
+            max(px1, expanded[0]),
+            max(py1, expanded[1]),
+            min(px2, expanded[2]),
+            min(py2, expanded[3]),
+        ]
+    if expanded[2] <= expanded[0] or expanded[3] <= expanded[1]:
+        return [x1, y1, x2, y2]
+    return [int(v) for v in expanded]
+
+
 def _split_single_ocr_visual_lobes(text: dict) -> list[dict] | None:
     if not isinstance(text, dict):
         return None
-    if _should_use_original_text_scale_contract(text):
+    split_missing_anchor_dark_lobes = _should_split_dark_missing_anchor_visual_lobes(text)
+    if _should_use_original_text_scale_contract(text) and not split_missing_anchor_dark_lobes:
         return None
     if text.get("_render_metadata_hydrated") or text.get("_restored_from_render_plan_candidate"):
         return None
@@ -4257,19 +4297,75 @@ def _split_single_ocr_visual_lobes(text: dict) -> list[dict] | None:
         return None
 
     children: list[dict] = []
+    parent_target = (
+        _layout_bbox(text.get("target_bbox"))
+        or _layout_bbox(text.get("balloon_bbox"))
+        or _layout_bbox(text.get("bubble_mask_bbox"))
+    )
     for index, (chunk, bbox, polygons) in enumerate(zip(chunks, group_bboxes, groups)):
-        child = dict(text)
+        local_target = _expand_visual_lobe_text_bbox(bbox, parent_target) if split_missing_anchor_dark_lobes else list(bbox)
+        child = copy.deepcopy(text)
+        suffix = f"_fragment_{index + 1}"
+        for id_key in ("id", "text_id"):
+            value = str(child.get(id_key) or "").strip()
+            if value and not value.endswith(suffix):
+                child[id_key] = f"{value}{suffix}"
+        trace_value = str(child.get("trace_id") or "").strip()
+        if trace_value and not trace_value.endswith(suffix):
+            child["trace_id"] = f"{trace_value}{suffix}"
         child["translated"] = chunk.strip()
         child["traduzido"] = chunk.strip()
         child["bbox"] = list(bbox)
         child["source_bbox"] = list(bbox)
         child["text_pixel_bbox"] = list(bbox)
         child["layout_bbox"] = list(bbox)
-        child["balloon_bbox"] = list(bbox)
+        child["source_text_mask_bbox"] = list(bbox)
+        child["_source_text_mask_bbox"] = list(bbox)
+        child["source_text_anchor_bbox"] = list(bbox)
+        child["_source_text_anchor_bbox"] = list(bbox)
+        child["target_bbox"] = list(local_target)
+        child["balloon_bbox"] = list(local_target)
+        child["bubble_mask_bbox"] = list(local_target)
+        child["safe_text_box"] = list(local_target)
+        child["layout_safe_bbox"] = list(local_target)
+        child["capacity_bbox"] = list(local_target)
+        child["position_bbox"] = list(local_target)
         child["line_polygons"] = [polygon for polygon in polygons]
         child["_visual_lobe_split_parent_bbox"] = list(resolve_text_anchor_bbox(text) or text.get("bbox") or [])
         child["_visual_lobe_split_index"] = index
         child["_visual_lobe_split_count"] = 2
+        child["_is_lobe_subregion"] = True
+        child["_anchor_center_only_layout"] = True
+        child["layout_profile"] = "dark_bubble" if split_missing_anchor_dark_lobes else child.get("layout_profile")
+        child["block_profile"] = "dark_bubble" if split_missing_anchor_dark_lobes else child.get("block_profile")
+        child["layout_group_size"] = 1
+        for stale_key in (
+            "connected_lobe_bboxes",
+            "connected_position_bboxes",
+            "connected_focus_bboxes",
+            "balloon_subregions",
+            "connected_lobe_ids",
+            "connected_balloon_orientation",
+            "render_bbox",
+            "_debug_render_bbox",
+        ):
+            child.pop(stale_key, None)
+        if split_missing_anchor_dark_lobes:
+            _merge_qa_flags(
+                child,
+                [
+                    "dark_missing_anchor_visual_lobes_split",
+                    "safe_text_box_recomputed",
+                ],
+            )
+            metrics = child.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["dark_missing_anchor_visual_lobe_split"] = {
+                    "index": index,
+                    "source_bbox": list(bbox),
+                    "target_bbox": list(local_target),
+                    "reason": "connected_lobe_boxes_missing_source_anchor_fallback",
+                }
         children.append(sanitize_simple_text_geometry(child))
     return children
 

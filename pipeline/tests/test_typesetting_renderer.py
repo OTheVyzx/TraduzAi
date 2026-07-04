@@ -803,6 +803,72 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreater(capacity[3] - capacity[1], 430)
         self.assertIn("dark_lobe_visual_capacity_bbox", text_data["qa_flags"])
 
+    def test_dark_jagged_missing_lobe_anchor_splits_by_line_polygons(self):
+        text_data = {
+            "id": "page_003_band_047_like",
+            "text_id": "direct_paddle_reocr_001",
+            "translated": "Evite isso, rapidamente! e nosso inimigo!",
+            "original": "Avoid it, quickly! It's our enemy!",
+            "tipo": "fala",
+            "bbox": [89, 25, 325, 610],
+            "source_bbox": [89, 25, 325, 610],
+            "text_pixel_bbox": [89, 25, 325, 610],
+            "target_bbox": [0, 0, 538, 859],
+            "balloon_bbox": [0, 0, 538, 859],
+            "bubble_mask_bbox": [0, 0, 538, 859],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "line_polygons": [
+                [[90, 25], [325, 27], [325, 78], [89, 76]],
+                [[108, 560], [319, 565], [318, 611], [107, 606]],
+            ],
+            "qa_flags": [
+                "candidate_crop_direct_paddle_reocr",
+                "dark_bubble_oval_reocr",
+                "dark_bubble_ellipse_bbox_mask",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "connected_layout_disabled_rejected_bubble_mask",
+                "connected_lobe_boxes_missing_source_anchor_fallback",
+                "mask_outside_balloon",
+                "mask_outside_balloon_critical",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [87, 25, 330, 614],
+                    "source": "raw_glyph_mask",
+                }
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 48,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+            },
+        }
+
+        blocks = build_render_blocks([text_data])
+
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual([block["translated"] for block in blocks], ["Evite isso, rapidamente!", "e nosso inimigo!"])
+        self.assertEqual([block["id"] for block in blocks], ["page_003_band_047_like_fragment_1", "page_003_band_047_like_fragment_2"])
+        self.assertEqual(
+            [block["text_id"] for block in blocks],
+            ["direct_paddle_reocr_001_fragment_1", "direct_paddle_reocr_001_fragment_2"],
+        )
+        self.assertTrue(all("dark_missing_anchor_visual_lobes_split" in (block.get("qa_flags") or []) for block in blocks))
+        self.assertEqual(blocks[0]["source_text_mask_bbox"], [89, 25, 325, 78])
+        self.assertEqual(blocks[1]["source_text_mask_bbox"], [107, 560, 319, 611])
+        self.assertEqual(blocks[0]["qa_metrics"]["dark_missing_anchor_visual_lobe_split"]["index"], 0)
+        self.assertEqual(blocks[1]["qa_metrics"]["dark_missing_anchor_visual_lobe_split"]["index"], 1)
+        self.assertLess(blocks[0]["target_bbox"][3], 120)
+        self.assertGreater(blocks[1]["target_bbox"][1], 520)
+        self.assertLess(blocks[1]["target_bbox"][3], 640)
+        self.assertNotEqual(blocks[0]["target_bbox"], [0, 0, 538, 859])
+        self.assertNotEqual(blocks[1]["target_bbox"], [0, 0, 538, 859])
+
     def test_dark_connected_lobe_prefers_source_text_mask_bbox_for_anchor_and_scale(self):
         text_data = {
             "id": "page_005_band_078_right_lobe",
