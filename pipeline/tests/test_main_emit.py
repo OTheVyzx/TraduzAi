@@ -1830,6 +1830,75 @@ class MainEmitTests(unittest.TestCase):
             translated_after = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
             self.assertTrue(np.array_equal(translated_after[6:10, 0:12], upper[2:6, 0:12]))
 
+    def test_translated_page_band_consistency_compares_only_visible_overlap_owner_area(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            page = np.zeros((14, 12, 3), dtype=np.uint8)
+            page[:, :] = [4, 4, 4]
+            cv2.imwrite(str(translated_dir / "001.png"), page)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+
+            upper = np.zeros((6, 12, 3), dtype=np.uint8)
+            upper[:, :] = [180, 20, 20]
+            lower = np.zeros((6, 12, 3), dtype=np.uint8)
+            lower[:, :] = [20, 180, 80]
+            cv2.imwrite(str(final_bands / "page_003_band_045.png"), upper)
+            lower_post = debug_root / "page_003_band_046"
+            lower_post.mkdir(parents=True)
+            cv2.imwrite(str(lower_post / "post_copyback.png"), lower)
+            cv2.imwrite(str(final_bands / "page_003_band_046.png"), lower)
+
+            rows = [
+                {
+                    "band_id": "page_003_band_045",
+                    "translated_output_page": "001.png",
+                    "band_y_top": 100,
+                    "band_y_bottom": 106,
+                    "crop_bbox_in_translated_page": [0, 4, 12, 10],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_045.png",
+                    "trace_ids": [],
+                },
+                {
+                    "band_id": "page_003_band_046",
+                    "translated_output_page": "001.png",
+                    "band_y_top": 102,
+                    "band_y_bottom": 108,
+                    "crop_bbox_in_translated_page": [0, 6, 12, 12],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_046.png",
+                    "trace_ids": ["ocr_001@page_003_band_046"],
+                },
+            ]
+            (debug_root / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            audit = main._run_post_rerender_final_visual_contract(
+                recorder,
+                {"paginas": [{"numero": 1, "text_layers": []}]},
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )["translated_page_band_consistency"]
+
+            self.assertTrue(audit["passed"])
+            self.assertEqual(audit["rows_failed"], 0)
+            rows_by_band = {row["band_id"]: row for row in audit["rows"]}
+            self.assertEqual(rows_by_band["page_003_band_045"]["visible_pixels"], 24)
+            self.assertEqual(rows_by_band["page_003_band_045"]["ignored_overlap_pixels"], 48)
+            self.assertEqual(rows_by_band["page_003_band_045"]["overlap_owner_band_id"], "page_003_band_046")
+            self.assertEqual(rows_by_band["page_003_band_045"]["changed_gt8"], 0)
+            self.assertEqual(rows_by_band["page_003_band_046"]["visible_pixels"], 72)
+            self.assertTrue((debug_root / "translated_page_band_consistency_audit.json").exists())
+
     def test_post_rerender_visual_contract_uses_visible_slice_for_page_start_clipped_band(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder

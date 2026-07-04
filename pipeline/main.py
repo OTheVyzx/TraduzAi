@@ -7384,6 +7384,243 @@ def _clean_final_band_source_for_crop_row(root: Path, work_dir: Path, row: dict)
     return None, ""
 
 
+def _final_band_paste_order_key(root: Path, work_dir: Path, item: dict) -> tuple[int, int, int]:
+    bbox = item.get("crop_bbox_in_translated_page") or [0, 0, 0, 0]
+    try:
+        y_top = int(item.get("band_y_top", bbox[1]) or 0)
+        y_bottom = int(item.get("band_y_bottom", bbox[3]) or 0)
+    except Exception:
+        y_top = 0
+        y_bottom = 0
+    _, source_kind = _clean_final_band_source_for_crop_row(root, work_dir, item)
+    source_priority = 1 if str(source_kind).startswith("post_copyback") else 0
+    return (source_priority, -y_top, -y_bottom)
+
+
+def _read_non_story_exclusions(root: Path) -> tuple[list[str], dict[str, str], int]:
+    exclusions_path = root / "10_copyback_reassemble" / "non_story_exclusions.json"
+    if not exclusions_path.exists():
+        return [], {}, 0
+    try:
+        exclusions = json.loads(exclusions_path.read_text(encoding="utf-8", errors="replace"))
+        rows = list(exclusions.get("exclusions") or [])
+        bands = [
+            str(row.get("band_id") or "").strip()
+            for row in rows
+            if str(row.get("band_id") or "").strip()
+        ]
+        reasons = {
+            str(row.get("band_id") or "").strip(): str(row.get("exclusion_reason") or "").strip()
+            for row in rows
+            if str(row.get("band_id") or "").strip()
+        }
+        return bands, reasons, 0
+    except Exception:
+        return [], {}, 1
+
+
+def _write_translated_page_band_consistency_audit(recorder, work_dir: Path) -> dict:
+    audit = {
+        "schema_version": 1,
+        "source": "clean_final_bands_visible_area_overlap_owner",
+        "passed": False,
+        "rows_total": 0,
+        "row_count": 0,
+        "rows_failed": 0,
+        "max_allowed": 12,
+        "changed_gt8_policy": "changed_gt8 <= max(256, visible_pixels*0.002)",
+        "overlap_policy": "compare only pixels owned by this band after final paste order",
+        "excluded_non_story_bands": [],
+        "excluded_non_story_reasons": {},
+        "rows": [],
+        "error_count": 0,
+        "missing_count": 0,
+    }
+    if not recorder:
+        return audit
+    try:
+        import cv2
+        import numpy as np
+
+        root = Path(work_dir) / "debug" / "e2e"
+        excluded_bands, excluded_reasons, exclusion_errors = _read_non_story_exclusions(root)
+        audit["excluded_non_story_bands"] = excluded_bands
+        audit["excluded_non_story_reasons"] = excluded_reasons
+        audit["error_count"] += exclusion_errors
+
+        crops_path = root / "10_copyback_reassemble" / "final_band_crops.jsonl"
+        if not crops_path.exists():
+            audit["missing_count"] += 1
+            return audit
+
+        rows: list[dict] = []
+        for line in crops_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                audit["error_count"] += 1
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+
+        rows_by_page: dict[str, list[dict]] = {}
+        for row in rows:
+            translated_name = str(row.get("translated_output_page") or "").strip()
+            if translated_name:
+                rows_by_page.setdefault(translated_name, []).append(row)
+
+        audit_rows: list[dict] = []
+        for translated_name, page_rows in sorted(rows_by_page.items()):
+            translated_path = _final_rerender_resolve_translated_path(Path(work_dir), translated_name)
+            translated_image = cv2.imread(str(translated_path), cv2.IMREAD_COLOR)
+            if translated_image is None:
+                audit["missing_count"] += len(page_rows)
+                for row in page_rows:
+                    audit_rows.append(
+                        {
+                            "band_id": str(row.get("band_id") or "").strip(),
+                            "translated_output_page": translated_name,
+                            "status": "fail",
+                            "passed": False,
+                            "flags": ["missing_translated_page"],
+                        }
+                    )
+                continue
+
+            page_h, page_w = translated_image.shape[:2]
+            ordered = sorted(page_rows, key=lambda item: _final_band_paste_order_key(root, Path(work_dir), item))
+            owner = np.full((page_h, page_w), -1, dtype=np.int32)
+            clipped_bboxes: dict[int, list[int]] = {}
+            for index, row in enumerate(ordered):
+                bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+                if bbox is None:
+                    continue
+                x1 = max(0, min(page_w, bbox[0]))
+                y1 = max(0, min(page_h, bbox[1]))
+                x2 = max(0, min(page_w, bbox[2]))
+                y2 = max(0, min(page_h, bbox[3]))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                clipped_bboxes[index] = [x1, y1, x2, y2]
+                owner[y1:y2, x1:x2] = index
+
+            for index, row in enumerate(ordered):
+                band_id = str(row.get("band_id") or "").strip()
+                bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+                final_rel = str(row.get("final_crop_path") or "").strip()
+                result = {
+                    "band_id": band_id,
+                    "translated_output_page": translated_name,
+                    "crop_bbox_in_translated_page": bbox,
+                    "status": "pass",
+                    "passed": True,
+                    "flags": [],
+                    "visible_pixels": 0,
+                    "max_diff": 0,
+                    "changed_gt8": 0,
+                    "shape_mismatch": False,
+                    "final_y0_compared": 0,
+                    "overlap_policy": "overlap_owner_visible_area",
+                    "overlap_owner_band_ids": [],
+                    "ignored_overlap_pixels": 0,
+                }
+                if bbox is None or index not in clipped_bboxes:
+                    result["status"] = "fail"
+                    result["passed"] = False
+                    result["flags"] = ["missing_translated_crop"]
+                    audit_rows.append(result)
+                    continue
+
+                final_path = root / final_rel if final_rel else None
+                final_image = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
+                if final_image is None:
+                    result["status"] = "fail"
+                    result["passed"] = False
+                    result["flags"] = ["missing_final_band_crop"]
+                    audit_rows.append(result)
+                    continue
+
+                x1, y1, x2, y2 = clipped_bboxes[index]
+                target_h = y2 - y1
+                target_w = x2 - x1
+                try:
+                    final_y0 = max(
+                        0,
+                        int(round(float(row.get("output_page_y_top") or 0)))
+                        - int(round(float(row.get("band_y_top") or 0))),
+                    )
+                except Exception:
+                    final_y0 = 0
+                final_x0 = max(0, x1 - int(bbox[0]))
+                result["final_y0_compared"] = final_y0
+
+                final_slice = final_image[
+                    final_y0 : final_y0 + target_h,
+                    final_x0 : final_x0 + target_w,
+                    :,
+                ]
+                translated_slice = translated_image[y1:y2, x1:x2, :]
+                if final_slice.shape[0] != target_h or final_slice.shape[1] != target_w:
+                    result["shape_mismatch"] = True
+                    if final_slice.size == 0:
+                        result["status"] = "fail"
+                        result["passed"] = False
+                        result["flags"] = ["missing_final_band_crop"]
+                        audit_rows.append(result)
+                        continue
+                    final_slice = cv2.resize(final_image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+                visible = owner[y1:y2, x1:x2] == index
+                visible_pixels = int(visible.sum())
+                ignored = owner[y1:y2, x1:x2][~visible]
+                ignored_ids = sorted(
+                    {
+                        str(ordered[int(value)].get("band_id") or "").strip()
+                        for value in ignored.tolist()
+                        if int(value) >= 0 and int(value) < len(ordered)
+                    }
+                )
+                result["visible_pixels"] = visible_pixels
+                result["ignored_overlap_pixels"] = int((~visible).sum())
+                result["overlap_owner_band_ids"] = ignored_ids
+                if len(ignored_ids) == 1:
+                    result["overlap_owner_band_id"] = ignored_ids[0]
+
+                if visible_pixels > 0:
+                    diff = np.abs(final_slice.astype(np.int16) - translated_slice.astype(np.int16)).max(axis=2)
+                    visible_values = diff[visible]
+                    max_diff = int(visible_values.max()) if visible_values.size else 0
+                    changed_gt8 = int((visible_values > 8).sum()) if visible_values.size else 0
+                else:
+                    max_diff = 0
+                    changed_gt8 = 0
+                result["max_diff"] = max_diff
+                result["changed_gt8"] = changed_gt8
+                failed = max_diff > 12 and changed_gt8 > max(256, int(visible_pixels * 0.002))
+                if failed:
+                    result["status"] = "fail"
+                    result["passed"] = False
+                    result["flags"] = ["translated_crop_mismatch_final_band_visible_area"]
+                audit_rows.append(result)
+
+        audit["rows"] = audit_rows
+        audit["rows_total"] = len(audit_rows)
+        audit["row_count"] = len(audit_rows)
+        audit["rows_failed"] = sum(1 for row in audit_rows if not row.get("passed"))
+        audit["passed"] = audit["rows_failed"] == 0 and audit["error_count"] == 0 and audit["missing_count"] == 0
+        try:
+            recorder.write_json("10_copyback_reassemble/translated_page_band_consistency_audit.json", audit)
+        except Exception:
+            audit["error_count"] += 1
+            audit["passed"] = False
+    except Exception as exc:
+        audit["error_count"] += 1
+        audit["error"] = str(exc)
+    return audit
+
+
 def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
     audit = {
         "source": "clean_final_bands_after_all_rerenders",
@@ -7498,19 +7735,7 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
                     audit["missing_count"] += 1
                     continue
             page_changed = False
-            def _final_band_paste_order(item: dict) -> tuple[int, int, int]:
-                bbox = item.get("crop_bbox_in_translated_page") or [0, 0, 0, 0]
-                try:
-                    y_top = int(item.get("band_y_top", bbox[1]) or 0)
-                    y_bottom = int(item.get("band_y_bottom", bbox[3]) or 0)
-                except Exception:
-                    y_top = 0
-                    y_bottom = 0
-                _, source_kind = _clean_final_band_source_for_crop_row(root, Path(work_dir), item)
-                source_priority = 1 if str(source_kind).startswith("post_copyback") else 0
-                return (source_priority, -y_top, -y_bottom)
-
-            for row in sorted(page_rows, key=_final_band_paste_order):
+            for row in sorted(page_rows, key=lambda item: _final_band_paste_order_key(root, Path(work_dir), item)):
                 final_path = _resolve_debug_e2e_path(Path(work_dir), row.get("final_crop_path"))
                 bbox = row.get("crop_bbox_in_translated_page")
                 final_image = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
@@ -8056,7 +8281,8 @@ def _run_post_rerender_final_visual_contract(
     except Exception:
         pass
     qa_audit = _qa_translated_final_crops_against_layers(recorder, project_data, work_dir)
-    return {"refresh": refresh_audit, "qa": qa_audit}
+    translated_consistency_audit = _write_translated_page_band_consistency_audit(recorder, work_dir)
+    return {"refresh": refresh_audit, "qa": qa_audit, "translated_page_band_consistency": translated_consistency_audit}
 
 
 def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
