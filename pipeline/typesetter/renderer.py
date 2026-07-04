@@ -12898,6 +12898,15 @@ def _persist_fit_attempts(text_data: dict, plan: dict, text: str, resolved: dict
     minimum_attempt = _fit_attempt_for_size(text, plan, min_font_px)
 
     below_minimum = final_attempt["font_px"] < min_font_px or minimum_attempt["status"] == "overflow"
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    resolved_fit_below = metrics.get("fit_below_minimum_legible_resolved") if isinstance(metrics, dict) else None
+    if below_minimum and isinstance(resolved_fit_below, dict):
+        reason = str(resolved_fit_below.get("reason") or "")
+        if reason in {
+            "selected_layout_fits_inpaint_contract_bbox",
+            "fallback_layout_fits_inpaint_contract_bbox",
+        }:
+            below_minimum = False
     attempts: list[dict] = []
     if below_minimum:
         if initial_attempt["status"] == "overflow" and initial_attempt["font_px"] != minimum_attempt["font_px"]:
@@ -13099,6 +13108,15 @@ def _should_use_original_text_scale_contract(text_data: dict) -> bool:
 def _should_enforce_original_text_scale_contract(text_data: dict) -> bool:
     content_class = str(text_data.get("content_class") or "").strip().lower()
     if content_class == "sfx":
+        return False
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    balloon_type = str(text_data.get("balloon_type") or "").strip().lower()
+    layout_safe_reason = str(text_data.get("layout_safe_reason") or "").strip().lower()
+    bubble_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    if (
+        layout_safe_reason == "edge_clipped_white_balloon"
+        and (profile == "white_balloon" or balloon_type == "white" or bubble_source == "image_white_bubble_mask")
+    ):
         return False
     render_policy = str(text_data.get("render_policy") or "").strip().lower()
     route_action = str(text_data.get("route_action") or "").strip().lower()
@@ -13501,6 +13519,137 @@ def _original_text_scale_candidate_hard_violations(candidate: dict, source_bbox:
 
 def _original_text_scale_overflow_violations(violations: list[str]) -> list[str]:
     return [str(item) for item in violations if "_gt_" in str(item)]
+
+
+def _drop_resolved_fit_below_minimum_legible(text_data: dict, reason: str) -> None:
+    flags = list(text_data.get("qa_flags") or [])
+    if "fit_below_minimum_legible" not in {str(flag) for flag in flags}:
+        return
+    text_data["qa_flags"] = [flag for flag in flags if str(flag) != "fit_below_minimum_legible"]
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        _append_resolved_pre_render_flag(metrics, "fit_below_minimum_legible")
+        metrics["fit_below_minimum_legible_resolved"] = {
+            "reason": str(reason),
+        }
+
+
+def _typeset_inpaint_contract_block_violations(candidate: dict, source_bbox: list[int]) -> list[str]:
+    block_bbox = _layout_bbox(candidate.get("block_bbox"))
+    if block_bbox is None:
+        return ["missing_contract_block_bbox"]
+    sx1, sy1, sx2, sy2 = [int(v) for v in source_bbox]
+    bx1, by1, bx2, by2 = [int(v) for v in block_bbox]
+    source_w = max(1, sx2 - sx1)
+    source_h = max(1, sy2 - sy1)
+    # The direct-fill inpaint contract is the only reliable dark-panel text
+    # body here. Allow a few pixels for raster/outline differences, but never
+    # let layout grow into neighbor lobes or the panel border vertically.
+    vertical_tol = max(3, int(round(source_h * 0.05)))
+    horizontal_tol = max(3, int(round(source_w * 0.04)))
+    violations: list[str] = []
+    if by1 < sy1 - vertical_tol:
+        violations.append("block_above_inpaint_contract")
+    if by2 > sy2 + vertical_tol:
+        violations.append("block_below_inpaint_contract")
+    if bx1 < sx1 - horizontal_tol:
+        violations.append("block_left_of_inpaint_contract")
+    if bx2 > sx2 + horizontal_tol:
+        violations.append("block_right_of_inpaint_contract")
+    return violations
+
+
+def _typeset_inpaint_contract_visual_balloon_fit_ok(
+    text_data: dict,
+    candidate: dict,
+    source_bbox: list[int],
+) -> bool:
+    block_bbox = _layout_bbox(candidate.get("block_bbox"))
+    if block_bbox is None:
+        return False
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    derived_card = metrics.get("derived_card_panel_mask") if isinstance(metrics, dict) else None
+    image_dark = metrics.get("image_dark_bubble_mask") if isinstance(metrics, dict) else None
+    visual_candidates = [
+        ("bubble_mask_bbox", _layout_bbox(text_data.get("bubble_mask_bbox"))),
+        (
+            "qa_metrics.derived_card_panel_mask.mask_bbox",
+            _layout_bbox(derived_card.get("mask_bbox") if isinstance(derived_card, dict) else None),
+        ),
+        ("balloon_bbox", _layout_bbox(text_data.get("balloon_bbox"))),
+        (
+            "qa_metrics.image_dark_bubble_mask.mask_bbox",
+            _layout_bbox(image_dark.get("mask_bbox") if isinstance(image_dark, dict) else None),
+        ),
+        ("target_bbox", _layout_bbox(text_data.get("target_bbox"))),
+    ]
+    visual_candidates = [(name, bbox) for name, bbox in visual_candidates if bbox is not None]
+    if not visual_candidates:
+        return False
+    band_y_top = _numeric_band_y_top(text_data)
+    bx1, by1, bx2, by2 = [int(v) for v in block_bbox]
+    selected_name = ""
+    selected_bbox: list[int] | None = None
+    for visual_name, raw_visual_bbox in visual_candidates:
+        visual_bbox = [int(v) for v in raw_visual_bbox]
+        if band_y_top:
+            _sx1, sy1, _sx2, sy2 = [int(v) for v in source_bbox]
+            vx1, vy1, vx2, vy2 = [int(v) for v in visual_bbox]
+            source_h = max(1, sy2 - sy1)
+            overlaps_source_y = not (vy2 < sy1 - source_h or vy1 > sy2 + source_h)
+            if not overlaps_source_y:
+                shifted = [vx1, vy1 - band_y_top, vx2, vy2 - band_y_top]
+                _shift_x1, sy1_shifted, _shift_x2, sy2_shifted = [int(v) for v in shifted]
+                shifted_overlaps = not (sy2_shifted < sy1 - source_h or sy1_shifted > sy2 + source_h)
+                if shifted_overlaps:
+                    visual_bbox = shifted
+        vx1, vy1, vx2, vy2 = [int(v) for v in visual_bbox]
+        visual_w = max(1, vx2 - vx1)
+        visual_h = max(1, vy2 - vy1)
+        horizontal_tol = max(4, int(round(visual_w * 0.04)))
+        vertical_tol = max(4, int(round(visual_h * 0.06)))
+        fits_visual = (
+            bx1 >= vx1 - horizontal_tol
+            and bx2 <= vx2 + horizontal_tol
+            and by1 >= vy1 - vertical_tol
+            and by2 <= vy2 + vertical_tol
+        )
+        if fits_visual:
+            selected_name = visual_name
+            selected_bbox = visual_bbox
+            break
+    if selected_bbox is None:
+        return False
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["contract_bbox_tight_but_visual_balloon_fit_ok"] = {
+            "source_bbox": [int(v) for v in source_bbox],
+            "block_bbox": [int(v) for v in block_bbox],
+            "visual_bbox": [int(v) for v in selected_bbox],
+            "visual_bbox_source": selected_name,
+        }
+    return True
+
+
+def _typeset_inpaint_contract_blocking_violations(
+    candidate: dict,
+    source_bbox: list[int],
+    text_data: dict | None = None,
+) -> list[str]:
+    violations = _typeset_inpaint_contract_block_violations(candidate, source_bbox)
+    if text_data is not None and violations:
+        if _typeset_inpaint_contract_visual_balloon_fit_ok(text_data, candidate, source_bbox):
+            return []
+    return [
+        violation
+        for violation in violations
+        if violation
+        in {
+            "missing_contract_block_bbox",
+            "block_above_inpaint_contract",
+            "block_below_inpaint_contract",
+        }
+    ]
 
 
 def _apply_original_text_width_wrap_limit(text_data: dict, plan: dict, source_bbox: list[int]) -> None:
@@ -13966,6 +14115,16 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
     original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    if original_scale_bbox is not None:
+        plan_safe_reason = str(plan.get("layout_safe_reason") or "").strip().lower()
+        profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+        balloon_type = str(text_data.get("balloon_type") or "").strip().lower()
+        bubble_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+        if (
+            plan_safe_reason == "edge_clipped_white_balloon"
+            and (profile == "white_balloon" or balloon_type == "white" or bubble_source == "image_white_bubble_mask")
+        ):
+            original_scale_bbox = None
     inpaint_contract = _typeset_inpaint_contract_bbox_for_scale(text_data)
     inpaint_contract_source = None
     if (
@@ -14101,7 +14260,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             plan["line_spacing_ratio"],
         )
         if original_scale_bbox is not None and len(wrapped) > 1:
-            line_height = max(line_height, int(round(attempt_size * 1.28)))
+            min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
+            line_height = max(line_height, int(round(attempt_size * min_line_height_ratio)))
         
         total_text_height = line_height * len(wrapped)
         line_widths = [measure_text_width(font, line, attempt_size) for line in wrapped]
@@ -14191,7 +14351,29 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         }
         if original_scale_bbox is not None:
             contract_violations = _original_text_scale_candidate_hard_violations(candidate, original_scale_bbox)
+            if inpaint_contract_source:
+                inpaint_block_violations = _typeset_inpaint_contract_block_violations(candidate, original_scale_bbox)
+                contract_violations.extend(inpaint_block_violations)
+                if inpaint_block_violations and _typeset_inpaint_contract_visual_balloon_fit_ok(
+                    text_data, candidate, original_scale_bbox
+                ):
+                    candidate["inpaint_contract_visual_balloon_fit_ok"] = True
+                    contract_violations = [
+                        violation
+                        for violation in contract_violations
+                        if violation
+                        not in {
+                            "block_above_inpaint_contract",
+                            "block_below_inpaint_contract",
+                            "block_left_of_inpaint_contract",
+                            "block_right_of_inpaint_contract",
+                        }
+                    ]
             blocking_violations = _original_text_scale_overflow_violations(contract_violations)
+            if inpaint_contract_source:
+                blocking_violations.extend(
+                    _typeset_inpaint_contract_blocking_violations(candidate, original_scale_bbox, text_data)
+                )
             if blocking_violations:
                 if trace_candidates:
                     _append_render_debug_item(
@@ -14213,6 +14395,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                             "wrapped_lines": list(wrapped),
                             "source_bbox": [int(v) for v in original_scale_bbox],
                             "contract_metrics": _original_text_scale_contract_metrics(candidate, original_scale_bbox),
+                            "inpaint_contract_source": inpaint_contract_source,
                         },
                     )
                 continue
@@ -14311,6 +14494,11 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             _mark_selected_render_candidate(text_data, best_candidate)
         if inpaint_contract_source:
             _record_typeset_inpaint_contract_fit(text_data, original_scale_bbox, inpaint_contract_source, best_candidate)
+            if not _typeset_inpaint_contract_blocking_violations(best_candidate, original_scale_bbox, text_data):
+                _drop_resolved_fit_below_minimum_legible(
+                    text_data,
+                    "selected_layout_fits_inpaint_contract_bbox",
+                )
         _persist_fit_attempts(text_data, plan, text, best_candidate, font_size)
         return best_candidate
 
@@ -14334,7 +14522,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
     if original_scale_bbox is not None and len(fallback_lines) > 1:
-        fallback_line_height = max(fallback_line_height, int(round(fallback_size * 1.28)))
+        min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
+        fallback_line_height = max(fallback_line_height, int(round(fallback_size * min_line_height_ratio)))
     fallback_total_height = fallback_line_height * len(fallback_lines)
     if original_scale_bbox is not None:
         anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
@@ -14382,13 +14571,22 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         if original_scale_bbox is not None
         else []
     )
-    if original_scale_bbox is not None and _original_text_scale_overflow_violations(fallback_violations):
+    fallback_block_violations = (
+        _typeset_inpaint_contract_blocking_violations(fallback, original_scale_bbox, text_data)
+        if original_scale_bbox is not None and inpaint_contract_source
+        else []
+    )
+    if original_scale_bbox is not None and (
+        _original_text_scale_overflow_violations(fallback_violations)
+        or fallback_block_violations
+    ):
         for size in range(max(1, int(fallback_size) - 1), 0, -1):
             test_font = get_font(plan["font_name"], size)
             test_lines = wrap_text(text, test_font, plan["max_width"])
             test_line_height = get_line_height(test_font, size, plan["line_spacing_ratio"])
             if len(test_lines) > 1:
-                test_line_height = max(test_line_height, int(round(size * 1.28)))
+                min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
+                test_line_height = max(test_line_height, int(round(size * min_line_height_ratio)))
             test_total_height = test_line_height * len(test_lines)
             test_widths = [measure_text_width(test_font, line, size) for line in test_lines]
             test_start_y = (
@@ -14425,7 +14623,13 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 "height_ratio": max(1, test_total_height) / float(max(1, box_height)),
                 "score": -9999.0,
             }
-            if not _original_text_scale_candidate_violations(test_candidate, original_scale_bbox):
+            test_violations = _original_text_scale_candidate_violations(test_candidate, original_scale_bbox)
+            test_block_violations = (
+                _typeset_inpaint_contract_blocking_violations(test_candidate, original_scale_bbox, text_data)
+                if inpaint_contract_source
+                else []
+            )
+            if not test_violations and not test_block_violations:
                 fallback = test_candidate
                 fallback_size = size
                 fallback_font = test_font
@@ -14461,6 +14665,11 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         )
     if inpaint_contract_source:
         _record_typeset_inpaint_contract_fit(text_data, original_scale_bbox, inpaint_contract_source, fallback)
+        if not _typeset_inpaint_contract_blocking_violations(fallback, original_scale_bbox, text_data):
+            _drop_resolved_fit_below_minimum_legible(
+                text_data,
+                "fallback_layout_fits_inpaint_contract_bbox",
+            )
     _persist_fit_attempts(text_data, plan, text, fallback, font_size)
     return fallback
 
@@ -14685,7 +14894,8 @@ def _candidate_from_render_layout_contract(text_data: dict, plan: dict) -> dict 
         block_cx, block_cy = _bbox_center(block_bbox)
         center_dx = float(block_cx - anchor_cx)
         center_dy = float(block_cy - anchor_cy)
-        if violations or abs(center_dx) > 3.0 or abs(center_dy) > 3.0:
+        center_tolerance = 8.0 if str(contract.get("source") or "").strip().lower() else 3.0
+        if violations or abs(center_dx) > center_tolerance or abs(center_dy) > center_tolerance:
             metrics = text_data.setdefault("qa_metrics", {})
             if isinstance(metrics, dict):
                 metrics["stale_render_layout_contract_rejected"] = {
@@ -16272,6 +16482,13 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         balloon_bbox=balloon_bbox,
         render_fit_flags=render_fit_flags,
     )
+    qa_flags, render_fit_flags = _revalidate_tight_contract_typeset_flags_after_layout(
+        text_data,
+        qa_flags,
+        qa_metrics,
+        render_bbox=render_bbox,
+        render_fit_flags=render_fit_flags,
+    )
 
     if render_fit_flags:
         qa_metrics["render_fit"] = {
@@ -16974,6 +17191,64 @@ def _revalidate_render_on_art_suspected_after_layout(
 
     _append_resolved_pre_render_flag(qa_metrics, "render_on_art_suspected")
     return [flag for flag in qa_flags if str(flag) != "render_on_art_suspected"]
+
+
+def _revalidate_tight_contract_typeset_flags_after_layout(
+    text_data: dict,
+    qa_flags: list,
+    qa_metrics: dict,
+    *,
+    render_bbox: list[int],
+    render_fit_flags: list[str],
+) -> tuple[list, list[str]]:
+    tight_fit = qa_metrics.get("contract_bbox_tight_but_visual_balloon_fit_ok")
+    if not isinstance(tight_fit, dict):
+        return qa_flags, render_fit_flags
+    render = _layout_bbox(render_bbox)
+    visual = _layout_bbox(tight_fit.get("visual_bbox"))
+    contract = _layout_bbox(tight_fit.get("source_bbox"))
+    if render is None or visual is None:
+        return qa_flags, render_fit_flags
+    try:
+        containment = float(qa_metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        containment = -1.0
+    render_inside_visual = _bbox_contains_with_margin(visual, render, margin=4)
+    if containment < 0.98 or not render_inside_visual:
+        qa_metrics["typeset_contract_flags_revalidated"] = {
+            "decision": "kept",
+            "reason": "render_not_proven_inside_visual_bbox",
+            "contract_bbox": [int(v) for v in contract] if contract is not None else None,
+            "visual_bbox": [int(v) for v in visual],
+            "render_bbox": [int(v) for v in render],
+            "containment": containment if containment >= 0 else None,
+        }
+        return qa_flags, render_fit_flags
+
+    resolved_flags = [
+        flag
+        for flag in ("TEXT_CLIPPED", "TEXT_OVERFLOW", "fit_below_minimum_legible")
+        if flag in {str(item) for item in qa_flags}
+    ]
+    if not resolved_flags:
+        return qa_flags, render_fit_flags
+    for flag in resolved_flags:
+        _append_resolved_pre_render_flag(qa_metrics, flag)
+    qa_metrics["typeset_contract_flags_revalidated"] = {
+        "decision": "cleared",
+        "resolved_flags": list(resolved_flags),
+        "reason": "contract_bbox_tight_but_visual_balloon_fit_ok",
+        "contract_bbox": [int(v) for v in contract] if contract is not None else None,
+        "visual_bbox": [int(v) for v in visual],
+        "visual_bbox_source": str(tight_fit.get("visual_bbox_source") or ""),
+        "render_bbox": [int(v) for v in render],
+        "containment": containment,
+    }
+    resolved_set = set(resolved_flags)
+    return (
+        [flag for flag in qa_flags if str(flag) not in resolved_set],
+        [flag for flag in render_fit_flags if str(flag) not in {"TEXT_CLIPPED", "TEXT_OVERFLOW"}],
+    )
 
 
 def _copy_render_debug_fields(source: dict, rendered: dict) -> None:

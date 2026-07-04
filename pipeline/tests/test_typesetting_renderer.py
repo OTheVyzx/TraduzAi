@@ -4104,6 +4104,35 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIn("TEXT_OVERFLOW", evidence["flags"])
         self.assertIn("render_outside_balloon", evidence["flags"])
 
+    def test_run_render_qa_keeps_overflow_when_tight_contract_still_exceeds_visual_bbox(self):
+        text_data = {
+            "translated": "TEXTO LONGO",
+            "balloon_bbox": [100, 100, 210, 190],
+            "render_bbox": [86, 82, 252, 226],
+            "qa_flags": ["fit_below_minimum_legible"],
+            "qa_metrics": {
+                "contract_bbox_tight_but_visual_balloon_fit_ok": {
+                    "source_bbox": [118, 118, 190, 170],
+                    "visual_bbox": [100, 100, 210, 190],
+                    "visual_bbox_source": "qa_metrics.derived_card_panel_mask.mask_bbox",
+                }
+            },
+        }
+        plan = {
+            "target_bbox": [100, 100, 210, 190],
+            "safe_text_box": [112, 112, 198, 178],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertIn("TEXT_CLIPPED", text_data["qa_flags"])
+        self.assertIn("TEXT_OVERFLOW", text_data["qa_flags"])
+        self.assertIn("fit_below_minimum_legible", text_data["qa_flags"])
+        self.assertEqual(
+            text_data["qa_metrics"]["typeset_contract_flags_revalidated"]["decision"],
+            "kept",
+        )
+
     def test_run_render_qa_flags_render_outside_validated_source(self):
         text_data = {
             "translated": "TEXTO LONGO",
