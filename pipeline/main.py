@@ -2068,6 +2068,24 @@ def _merge_layer_qa_flags(layer: dict, flags: list[str]) -> None:
     layer["qa_flags"] = merged
 
 
+def _resolved_pre_render_flags(layer: dict) -> set[str]:
+    metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
+    return {
+        str(flag).strip()
+        for flag in metrics.get("resolved_pre_render_flags") or []
+        if str(flag).strip()
+    }
+
+
+def _drop_resolved_pre_render_flags(layer: dict, flags: list | set | tuple) -> list[str]:
+    resolved = _resolved_pre_render_flags(layer)
+    return [
+        str(flag).strip()
+        for flag in flags or []
+        if str(flag).strip() and str(flag).strip() not in resolved
+    ]
+
+
 def _page_text_coordinate_audit_flags(page_texts: list[dict], *, height: int, width: int) -> list[str]:
     try:
         from debug_tools.bbox import audit_bbox_coordinate_space, coordinate_audit_flags, layout_block_records
@@ -6992,6 +7010,7 @@ def _propagate_debug_qa_flags_to_project(project_data: dict) -> dict:
 
 def _filter_debug_claim_flags_for_project_layer(layer: dict, flags: set[str]) -> set[str]:
     filtered = set(flags)
+    filtered.difference_update(_resolved_pre_render_flags(layer))
     render_bbox = _optional_bbox4(layer.get("render_bbox"))
     safe_text_box = _optional_bbox4(layer.get("safe_text_box"))
     has_render_geometry = render_bbox is not None and safe_text_box is not None
@@ -7184,7 +7203,7 @@ def _project_render_plan_row(page: dict, layer: dict, page_index: int) -> dict |
         "bbox": _optional_bbox4(layer.get("bbox")),
         "content_class": layer.get("content_class"),
         "tipo": layer.get("tipo"),
-        "qa_flags": list(layer.get("qa_flags") or []),
+        "qa_flags": _drop_resolved_pre_render_flags(layer, list(layer.get("qa_flags") or [])),
         "qa_metrics": dict(layer.get("qa_metrics") or {}),
         "warnings": list(layer.get("warnings") or []),
     }

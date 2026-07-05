@@ -126,6 +126,10 @@ def _translator_note_uses_text_only_mask(
     image_rgb: np.ndarray | None,
     image_shape: tuple[int, ...],
 ) -> bool:
+    source = str(block.get("bubble_mask_source") or block.get("bubbleMaskSource") or "").strip().lower()
+    flags = {str(flag).strip() for flag in block.get("qa_flags") or [] if str(flag).strip()}
+    if source == "translator_note_text_mask" or "translator_note_text_only_mask" in flags:
+        return True
     if not _is_translator_note_block(block):
         return False
     background = _rgb_luma_chroma(block.get("background_rgb"))
@@ -6116,7 +6120,9 @@ def build_inpaint_mask(
             if isinstance(visual_card_text_mask, np.ndarray) and np.any(visual_card_text_mask)
             else dark_bubble_visual_mask.astype(np.uint8)
         )
-    skip_component_bubble_cleaner = isinstance(visual_card_text_mask, np.ndarray) and np.any(visual_card_text_mask)
+    skip_component_bubble_cleaner = translator_note_text_only_mask or (
+        isinstance(visual_card_text_mask, np.ndarray) and np.any(visual_card_text_mask)
+    )
     component_mask = None
     component_reason = "visual_card_glyph_mask"
     component_debug = None
@@ -6131,9 +6137,14 @@ def build_inpaint_mask(
     elif isinstance(block, dict):
         qa_metrics = block.setdefault("qa_metrics", {})
         if isinstance(qa_metrics, dict):
-            qa_metrics["component_bubble_cleaner_skipped_for_visual_card_mask"] = {
-                "visual_pixels": int(np.count_nonzero(visual_card_text_mask)),
-            }
+            if translator_note_text_only_mask:
+                qa_metrics["component_bubble_cleaner_skipped_for_translator_note_text_mask"] = {
+                    "text_pixels": int(np.count_nonzero(text_mask)),
+                }
+            else:
+                qa_metrics["component_bubble_cleaner_skipped_for_visual_card_mask"] = {
+                    "visual_pixels": int(np.count_nonzero(visual_card_text_mask)),
+                }
     if component_debug is not None or component_reason not in {"missing_bubble_mask", "missing_image_rgb", "missing_support_mask"}:
         _record_component_bubble_metrics(block, reason=component_reason, debug=component_debug)
     if isinstance(component_mask, np.ndarray) and np.any(component_mask):

@@ -407,6 +407,34 @@ class MaskBuilderTests(unittest.TestCase):
         self.assertLessEqual(int(xs.max()), 210)
         self.assertLessEqual((int(xs.max()) - int(xs.min())) * (int(ys.max()) - int(ys.min())), 16000)
 
+    def test_translator_note_text_only_mask_preserves_full_line_geometry(self):
+        image = np.full((380, 260, 3), 3, dtype=np.uint8)
+        block = {
+            "id": "ocr_tn_geometry_only",
+            "bbox": [39, 282, 154, 337],
+            "text_pixel_bbox": [36, 289, 178, 333],
+            "bubble_mask_source": "translator_note_text_mask",
+            "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+            "route_action": "translate_inpaint_render",
+            "line_polygons": [
+                [[29, 287], [180, 287], [180, 300], [29, 300]],
+                [[32, 304], [179, 304], [179, 317], [32, 317]],
+                [[19, 322], [191, 322], [191, 336], [19, 336]],
+            ],
+        }
+
+        mask = build_inpaint_mask(block, image.shape, image_rgb=image)
+
+        self.assertIsNotNone(mask)
+        ys, xs = np.where(mask > 0)
+        self.assertGreater(len(xs), 0)
+        self.assertLessEqual(int(xs.min()), 24)
+        self.assertGreaterEqual(int(xs.max()), 185)
+        self.assertIn(
+            "component_bubble_cleaner_skipped_for_translator_note_text_mask",
+            block.get("qa_metrics") or {},
+        )
+
     def test_dark_bubble_build_inpaint_mask_derives_image_dark_bubble_mask(self):
         image = np.zeros((160, 280, 3), dtype=np.uint8)
         cv2.ellipse(image, (140, 78), (96, 48), 0, 0, 360, (5, 7, 10), -1)

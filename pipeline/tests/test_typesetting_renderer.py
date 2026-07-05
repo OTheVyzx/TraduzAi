@@ -2564,6 +2564,106 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIn("render_on_art_suspected", text_data.get("qa_flags") or [])
         self.assertEqual((text_data.get("qa_metrics") or {}).get("render_background_luma"), 8.0)
 
+    def test_run_render_qa_revalidates_stable_translator_note_text_only_flags(self):
+        text_data = {
+            "id": "ocr_tn",
+            "translated": "T/N: EXISTE UM ROMANCE CHAMADO SEMIDEUSES E SEMI-DEMONIOS NA VIDA REAL.",
+            "bubble_mask_source": "translator_note_text_mask",
+            "source_bbox": [36, 89, 178, 133],
+            "render_bbox": [18, 94, 350, 166],
+            "qa_flags": [
+                "translator_note_text_only_mask",
+                "text_contract_direct_fill",
+                "translator_note_best_effort_render",
+                "render_on_art_suspected",
+                "mask_outside_balloon",
+                "mask_outside_balloon_critical",
+            ],
+            "_render_debug": {"font_size_final": 23},
+        }
+        plan = {
+            "target_bbox": [0, 70, 401, 190],
+            "safe_text_box": [18, 82, 383, 178],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        flags = text_data.get("qa_flags") or []
+        self.assertNotIn("render_on_art_suspected", flags)
+        self.assertNotIn("translator_note_best_effort_render", flags)
+        self.assertIn("translator_note_stable_text_only_render", flags)
+        self.assertIn("mask_outside_balloon", flags)
+        self.assertIn("mask_outside_balloon_critical", flags)
+        metrics = text_data.get("qa_metrics") or {}
+        revalidated = metrics.get("translator_note_flags_revalidated") or {}
+        self.assertEqual(revalidated.get("decision"), "intentional_text_only_note")
+        self.assertEqual(revalidated.get("reason"), "stable_translator_note_text_only_render")
+        self.assertIn("render_on_art_suspected", metrics.get("resolved_pre_render_flags") or [])
+        self.assertIn("translator_note_best_effort_render", metrics.get("resolved_pre_render_flags") or [])
+
+    def test_run_render_qa_keeps_render_on_art_without_translator_note_contract(self):
+        text_data = {
+            "id": "ocr_art",
+            "translated": "TEXTO SOBRE ARTE",
+            "render_bbox": [18, 94, 350, 166],
+            "qa_flags": ["render_on_art_suspected"],
+            "_render_debug": {"font_size_final": 23},
+        }
+        plan = {
+            "target_bbox": [0, 70, 401, 190],
+            "safe_text_box": [18, 82, 383, 178],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertIn("render_on_art_suspected", text_data.get("qa_flags") or [])
+        self.assertNotIn("translator_note_flags_revalidated", text_data.get("qa_metrics") or {})
+
+    def test_run_render_qa_keeps_translator_note_best_effort_on_dark_non_note(self):
+        text_data = {
+            "id": "ocr_dark",
+            "translated": "TEXTO NORMAL",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "render_bbox": [40, 40, 150, 88],
+            "balloon_bbox": [20, 20, 180, 120],
+            "qa_flags": ["translator_note_best_effort_render"],
+            "_render_debug": {"font_size_final": 23},
+        }
+        plan = {
+            "target_bbox": [20, 20, 180, 120],
+            "safe_text_box": [34, 34, 166, 104],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertIn("translator_note_best_effort_render", text_data.get("qa_flags") or [])
+        self.assertNotIn("translator_note_flags_revalidated", text_data.get("qa_metrics") or {})
+
+    def test_run_render_qa_revalidates_white_balloon_text_clipped_only_when_visually_contained(self):
+        text_data = {
+            "id": "ocr_white",
+            "translated": "POR QUE SOU O ANFITRIAO?",
+            "layout_profile": "white_balloon",
+            "balloon_type": "white",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "render_bbox": [507, 39, 709, 247],
+            "balloon_bbox": [427, 0, 786, 297],
+            "qa_flags": [],
+        }
+        plan = {
+            "target_bbox": [427, 0, 786, 297],
+            "safe_text_box": [510, 45, 703, 234],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        flags = text_data.get("qa_flags") or []
+        self.assertNotIn("TEXT_CLIPPED", flags)
+        self.assertNotIn("translator_note_flags_revalidated", text_data.get("qa_metrics") or {})
+        revalidated = (text_data.get("qa_metrics") or {}).get("white_balloon_flags_revalidated") or {}
+        self.assertEqual(revalidated.get("decision"), "cleared")
+
     def test_plan_text_layout_uses_bubble_inner_bbox_as_auto_safe_area(self):
         text_data = {
             "translated": "TEXTO CENTRALIZADO NO INTERIOR",
@@ -3050,6 +3150,54 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertFalse(style.get("glow"))
         self.assertEqual(style.get("contorno"), "")
         self.assertEqual(style.get("contorno_px"), 0)
+
+    def test_render_text_block_translator_note_text_mask_ignores_synthetic_tight_balloon_bbox(self):
+        img = Image.new("RGB", (520, 260), (5, 5, 6))
+        text_data = {
+            "id": "ocr_tn_text_only",
+            "original": "T/N: THERE IS A NOVEL CALLED DEMI-GODS & SEMI-DEVILS IN REAL LIFE.",
+            "translated": "T/N: EXISTE UM ROMANCE CHAMADO SEMIDEUSES E SEMI-DEMÔNIOS NA VIDA REAL.",
+            "route_action": "translate_inpaint_render",
+            "bbox": [39, 82, 154, 137],
+            "source_bbox": [36, 89, 178, 133],
+            "text_pixel_bbox": [36, 89, 178, 133],
+            "balloon_bbox": [35, 78, 158, 141],
+            "bubble_mask_bbox": [35, 78, 158, 141],
+            "bubble_mask_source": "translator_note_text_mask",
+            "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+            "layout_profile": "standard",
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 18, "cor": "#FFFFFF"},
+            "render_layout_contract": {
+                "schema_version": 1,
+                "source": "debug_render_plan_raw",
+                "translated_key": "t/n: existe um romance chamado semideuses e semi-demônios na vida real.",
+                "font_name": "ComicNeue-Bold.ttf",
+                "font_size": 6,
+                "line_height": 10,
+                "lines": ["T/N: EXISTE UM", "ROMANCE CHAMADO", "SEMIDEUSES E", "SEMI-DEMÔNIOS", "NA VIDA REAL."],
+                "positions": [[18, 76], [18, 86], [18, 96], [18, 106], [18, 116]],
+                "line_widths": [70, 82, 78, 92, 64],
+                "block_bbox": [18, 76, 110, 126],
+                "target_bbox": [0, 70, 174, 150],
+                "position_bbox": [6, 74, 168, 146],
+                "safe_text_box": [8, 76, 166, 144],
+                "coordinate_space": "page",
+            },
+        }
+
+        render_text_block(img, text_data)
+
+        self.assertNotIn("translator_note_best_effort_render", text_data.get("qa_flags") or [])
+        self.assertIn("translator_note_stable_text_only_render", text_data.get("qa_flags") or [])
+        self.assertIn("stale_render_layout_contract_rejected", text_data.get("qa_flags") or [])
+        self.assertFalse(text_data.get("_render_layout_contract_replayed"))
+        self.assertNotEqual(text_data.get("target_bbox"), [35, 78, 158, 141])
+        self.assertGreaterEqual(text_data.get("target_bbox", [0, 0, 0, 0])[2] - text_data.get("target_bbox", [0, 0, 0, 0])[0], 300)
+        self.assertNotIn("fit_below_minimum_legible", text_data.get("qa_flags") or [])
+        self.assertGreaterEqual(text_data.get("_render_debug", {}).get("font_size_final", 0), 10)
+        revalidated = (text_data.get("qa_metrics") or {}).get("translator_note_flags_revalidated") or {}
+        self.assertEqual(revalidated.get("decision"), "intentional_text_only_note")
+        self.assertEqual(revalidated.get("reason"), "stable_translator_note_text_only_render")
 
     def test_plan_text_layout_rejects_tiny_bubble_inner_bbox_for_short_white_balloon_text(self):
         text_data = {
@@ -4262,6 +4410,39 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertNotIn("TEXT_OVERFLOW", source["qa_flags"])
         self.assertNotIn("TEXT_CLIPPED", source["qa_flags"])
         self.assertIn("mask_density_high", source["qa_flags"])
+
+    def test_copy_render_debug_fields_drops_flags_resolved_by_render_qa(self):
+        source = {
+            "translated": "T/N: NOTA",
+            "qa_flags": [
+                "translator_note_text_only_mask",
+                "translator_note_best_effort_render",
+                "render_on_art_suspected",
+                "mask_outside_balloon",
+            ],
+        }
+        rendered = {
+            "render_bbox": [18, 94, 350, 166],
+            "safe_text_box": [18, 82, 383, 178],
+            "qa_flags": ["translator_note_stable_text_only_render"],
+            "qa_metrics": {
+                "resolved_pre_render_flags": [
+                    "translator_note_best_effort_render",
+                    "render_on_art_suspected",
+                ],
+                "translator_note_flags_revalidated": {
+                    "decision": "intentional_text_only_note",
+                },
+            },
+        }
+
+        renderer_mod._copy_render_debug_fields(source, rendered)
+
+        self.assertNotIn("translator_note_best_effort_render", source["qa_flags"])
+        self.assertNotIn("render_on_art_suspected", source["qa_flags"])
+        self.assertIn("translator_note_stable_text_only_render", source["qa_flags"])
+        self.assertIn("mask_outside_balloon", source["qa_flags"])
+        self.assertIn("translator_note_best_effort_render", source["qa_metrics"]["resolved_pre_render_flags"])
 
     def test_copy_render_debug_fields_keeps_render_fit_overflow_when_broad_balloon_contains_render(self):
         source = {
