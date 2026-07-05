@@ -6989,13 +6989,38 @@ def _is_translator_note_layer(text_data: dict) -> bool:
     return str(text_data.get("bubble_mask_source") or "").strip().lower() == "translator_note_text_mask"
 
 
+def _is_translator_note_text_only_mask(text_data: dict) -> bool:
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("bubbleMaskSource") or "").strip().lower()
+    return source == "translator_note_text_mask" or "translator_note_text_only_mask" in flags
+
+
 def _translator_note_target_bbox(text_data: dict, target_bbox: list[int]) -> list[int] | None:
     if not _is_translator_note_layer(text_data):
         return None
+    text_only_mask = _is_translator_note_text_only_mask(text_data)
     anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    translated_len = _compact_translated_len(text_data)
+    if text_only_mask and anchor_bbox is not None and translated_len >= 36:
+        sx1, sy1, sx2, sy2 = [int(v) for v in anchor_bbox]
+        page_w, page_h = _page_dimensions_for_layout(text_data, target_bbox)
+        desired_w = max(300, min(560, int((sx2 - sx1) * 4.4)))
+        desired_h = max(112, min(190, int((sy2 - sy1) * 2.9)))
+        cx = (sx1 + sx2) / 2.0
+        cy = (sy1 + sy2) / 2.0
+        # Hydrated page-space translator-note layers can carry only the old
+        # tight text bbox as target and no page width. Do not let that stale
+        # target become the page boundary for the recomputed note area.
+        page_w = max(page_w, int(math.ceil(cx + (desired_w / 2.0) + 16)))
+        page_h = max(page_h, int(math.ceil(cy + (desired_h / 2.0) + 16)))
+        width = min(desired_w, page_w)
+        height = min(desired_h, page_h)
+        x1, x2 = _center_span_within_bounds(cx, width, 0, page_w)
+        y1, y2 = _center_span_within_bounds(cy, height, 0, page_h)
+        if x2 > x1 and y2 > y1:
+            return [x1, y1, x2, y2]
     anchor_is_too_small = _anchor_too_tiny_for_long_translation(text_data, anchor_bbox, target_bbox)
     if not anchor_is_too_small and anchor_bbox is not None:
-        translated_len = _compact_translated_len(text_data)
         anchor_area = _bbox_area_px(anchor_bbox)
         target_area = _bbox_area_px(target_bbox)
         anchor_is_too_small = bool(translated_len >= 64 and anchor_area <= int(target_area * 0.16))
@@ -7003,7 +7028,7 @@ def _translator_note_target_bbox(text_data: dict, target_bbox: list[int]) -> lis
         return None
 
     balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
-    if balloon_bbox is not None:
+    if balloon_bbox is not None and not text_only_mask:
         bx1, by1, bx2, by2 = [int(v) for v in balloon_bbox]
         bw = max(1, bx2 - bx1)
         bh = max(1, by2 - by1)
@@ -11984,7 +12009,7 @@ def plan_text_layout(text_data: dict) -> dict:
     )
 
     style_target_size = max(10, int(estilo.get("tamanho", 24)) + target_size_delta)
-    if translator_note_target_locked:
+    if translator_note_target_locked and not _is_translator_note_text_only_mask(text_data):
         style_target_size = min(style_target_size, 12)
     original_font_size = _estimate_original_font_size_px(text_data)
     follow_original_ocr_size = _should_follow_original_ocr_size(text_data) and original_font_size is not None
@@ -14211,6 +14236,12 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
     original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    if (
+        original_scale_bbox is not None
+        and _is_translator_note_layer(text_data)
+        and str(plan.get("layout_safe_reason") or "").strip().lower() == "translator_note_target"
+    ):
+        original_scale_bbox = None
     if original_scale_bbox is not None:
         plan_safe_reason = str(plan.get("layout_safe_reason") or "").strip().lower()
         profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
@@ -14926,6 +14957,17 @@ def _persist_render_layout_contract(text_data: dict, plan: dict, resolved: dict,
 def _candidate_from_render_layout_contract(text_data: dict, plan: dict) -> dict | None:
     contract = text_data.get("render_layout_contract")
     if not isinstance(contract, dict):
+        return None
+    if (
+        _is_translator_note_layer(text_data)
+        and str(plan.get("layout_safe_reason") or "").strip().lower() == "translator_note_target"
+    ):
+        _merge_qa_flags(text_data, ["stale_render_layout_contract_rejected"])
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["stale_render_layout_contract_rejected"] = {
+                "reason": "translator_note_target_recomputed",
+            }
         return None
     if int(contract.get("schema_version", 0) or 0) != 1:
         return None
@@ -16578,11 +16620,31 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         balloon_bbox=balloon_bbox,
         render_fit_flags=render_fit_flags,
     )
+    qa_flags = _revalidate_translator_note_text_only_flags_after_layout(
+        text_data,
+        qa_flags,
+        qa_metrics,
+        render_bbox=render_bbox,
+        safe_text_box=safe,
+        target_bbox=target,
+        balloon_bbox=balloon_bbox,
+        render_fit_flags=render_fit_flags,
+    )
     qa_flags, render_fit_flags = _revalidate_tight_contract_typeset_flags_after_layout(
         text_data,
         qa_flags,
         qa_metrics,
         render_bbox=render_bbox,
+        render_fit_flags=render_fit_flags,
+    )
+    qa_flags, render_fit_flags = _revalidate_white_balloon_clipped_flag_after_layout(
+        text_data,
+        qa_flags,
+        qa_metrics,
+        render_bbox=render_bbox,
+        safe_text_box=safe,
+        target_bbox=target,
+        balloon_bbox=balloon_bbox,
         render_fit_flags=render_fit_flags,
     )
 
@@ -17289,6 +17351,84 @@ def _revalidate_render_on_art_suspected_after_layout(
     return [flag for flag in qa_flags if str(flag) != "render_on_art_suspected"]
 
 
+def _revalidate_translator_note_text_only_flags_after_layout(
+    text_data: dict,
+    qa_flags: list,
+    qa_metrics: dict,
+    *,
+    render_bbox: list[int],
+    safe_text_box,
+    target_bbox,
+    balloon_bbox,
+    render_fit_flags: list[str],
+) -> list:
+    if not _is_translator_note_text_only_mask(text_data):
+        return qa_flags
+
+    active_flags = {str(flag) for flag in qa_flags}
+    stale_note_flags = {
+        "render_on_art_suspected",
+        "translator_note_best_effort_render",
+    }.intersection(active_flags)
+    if not stale_note_flags:
+        return qa_flags
+
+    render = _layout_bbox(render_bbox)
+    safe = _layout_bbox(safe_text_box)
+    target = _layout_bbox(target_bbox)
+    balloon = _layout_bbox(balloon_bbox)
+    source = _layout_bbox(text_data.get("source_bbox") or text_data.get("text_pixel_bbox") or text_data.get("bbox"))
+    if render is None:
+        return qa_flags
+
+    render_debug = text_data.get("_render_debug") if isinstance(text_data.get("_render_debug"), dict) else {}
+    try:
+        font_size_final = int(render_debug.get("font_size_final") or text_data.get("font_size_final") or 0)
+    except (TypeError, ValueError):
+        font_size_final = 0
+    try:
+        containment = float(qa_metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        containment = None
+
+    inside_note_region = bool(
+        (safe is not None and _bbox_contains_with_margin(safe, render, margin=4))
+        or (target is not None and _bbox_contains_with_margin(target, render, margin=4))
+        or (balloon is not None and _bbox_contains_with_margin(balloon, render, margin=4))
+    )
+    geometry_blockers = {
+        str(flag)
+        for flag in render_fit_flags or []
+        if str(flag) in {"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"}
+    }
+    stable = bool(inside_note_region and font_size_final >= 10 and not geometry_blockers)
+    decision = "intentional_text_only_note" if stable else "kept"
+    reason = "stable_translator_note_text_only_render" if stable else "translator_note_render_not_proven_stable"
+    qa_metrics["translator_note_flags_revalidated"] = {
+        "decision": decision,
+        "reason": reason,
+        "resolved_flags": sorted(stale_note_flags) if stable else [],
+        "render_bbox": [int(v) for v in render],
+        "safe_text_box": [int(v) for v in safe] if safe is not None else None,
+        "target_bbox": [int(v) for v in target] if target is not None else None,
+        "balloon_bbox": [int(v) for v in balloon] if balloon is not None else None,
+        "source_bbox": [int(v) for v in source] if source is not None else None,
+        "font_size_final": font_size_final if font_size_final > 0 else None,
+        "render_balloon_containment": containment,
+        "inside_note_region": inside_note_region,
+        "render_geometry_blockers": sorted(geometry_blockers),
+    }
+    if not stable:
+        return qa_flags
+
+    for flag in sorted(stale_note_flags):
+        _append_resolved_pre_render_flag(qa_metrics, flag)
+    cleaned = [flag for flag in qa_flags if str(flag) not in stale_note_flags]
+    if "translator_note_stable_text_only_render" not in {str(flag) for flag in cleaned}:
+        cleaned.append("translator_note_stable_text_only_render")
+    return cleaned
+
+
 def _revalidate_tight_contract_typeset_flags_after_layout(
     text_data: dict,
     qa_flags: list,
@@ -17347,6 +17487,67 @@ def _revalidate_tight_contract_typeset_flags_after_layout(
     )
 
 
+def _revalidate_white_balloon_clipped_flag_after_layout(
+    text_data: dict,
+    qa_flags: list,
+    qa_metrics: dict,
+    *,
+    render_bbox: list[int],
+    safe_text_box,
+    target_bbox,
+    balloon_bbox,
+    render_fit_flags: list[str],
+) -> tuple[list, list[str]]:
+    if "TEXT_CLIPPED" not in {str(flag) for flag in qa_flags}:
+        return qa_flags, render_fit_flags
+    if _is_translator_note_text_only_mask(text_data) or not _is_white_layout_profile(text_data):
+        return qa_flags, render_fit_flags
+
+    render = _layout_bbox(render_bbox)
+    safe = _layout_bbox(safe_text_box)
+    target = _layout_bbox(target_bbox)
+    balloon = _layout_bbox(balloon_bbox)
+    if render is None:
+        return qa_flags, render_fit_flags
+    try:
+        containment = float(qa_metrics.get("render_balloon_containment"))
+    except (TypeError, ValueError):
+        containment = -1.0
+
+    visual_fit_ok = bool(
+        containment >= 0.98
+        or (target is not None and _bbox_contains_with_margin(target, render, margin=3))
+        or (balloon is not None and _bbox_contains_with_margin(balloon, render, margin=3))
+    )
+    if not visual_fit_ok:
+        qa_metrics["white_balloon_flags_revalidated"] = {
+            "decision": "kept",
+            "reason": "render_not_proven_inside_white_balloon",
+            "render_bbox": [int(v) for v in render],
+            "safe_text_box": [int(v) for v in safe] if safe is not None else None,
+            "target_bbox": [int(v) for v in target] if target is not None else None,
+            "balloon_bbox": [int(v) for v in balloon] if balloon is not None else None,
+            "containment": containment if containment >= 0 else None,
+        }
+        return qa_flags, render_fit_flags
+
+    _append_resolved_pre_render_flag(qa_metrics, "TEXT_CLIPPED")
+    qa_metrics["white_balloon_flags_revalidated"] = {
+        "decision": "cleared",
+        "reason": "white_balloon_visual_containment_ok",
+        "resolved_flags": ["TEXT_CLIPPED"],
+        "render_bbox": [int(v) for v in render],
+        "safe_text_box": [int(v) for v in safe] if safe is not None else None,
+        "target_bbox": [int(v) for v in target] if target is not None else None,
+        "balloon_bbox": [int(v) for v in balloon] if balloon is not None else None,
+        "containment": containment if containment >= 0 else None,
+    }
+    return (
+        [flag for flag in qa_flags if str(flag) != "TEXT_CLIPPED"],
+        [flag for flag in render_fit_flags if str(flag) != "TEXT_CLIPPED"],
+    )
+
+
 def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
     rendered_flags = [str(flag) for flag in rendered.get("qa_flags") or [] if str(flag).strip()]
     stale_resolved_flags: set[str] = set()
@@ -17354,6 +17555,10 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         stale_resolved_flags.add("fit_below_minimum_legible")
     if rendered.get("render_bbox") is not None and rendered.get("safe_text_box") is not None:
         stale_resolved_flags.add("missing_render_bbox")
+    rendered_metrics = rendered.get("qa_metrics") if isinstance(rendered.get("qa_metrics"), dict) else {}
+    for flag in rendered_metrics.get("resolved_pre_render_flags") or []:
+        if str(flag).strip():
+            stale_resolved_flags.add(str(flag).strip())
     if stale_resolved_flags:
         source["qa_flags"] = [
             flag

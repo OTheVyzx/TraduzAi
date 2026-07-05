@@ -1428,6 +1428,45 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(consistency["render_plan_sync"]["written_count"], 1)
             self.assertEqual(sync_audit["summary"]["written_count"], 1)
 
+    def test_project_render_plan_row_drops_resolved_pre_render_flags(self) -> None:
+        layer = {
+            "id": "ocr_002",
+            "text_id": "ocr_002",
+            "trace_id": "ocr_002@page_005_band_096",
+            "band_id": "page_005_band_096",
+            "safe_text_box": [18, 72824, 383, 72950],
+            "render_bbox": [18, 72851, 350, 72923],
+            "translated": "T/N: EXISTE UM ROMANCE",
+            "qa_flags": [
+                "translator_note_text_only_mask",
+                "translator_note_best_effort_render",
+                "render_on_art_suspected",
+                "translator_note_stable_text_only_render",
+            ],
+            "qa_metrics": {
+                "resolved_pre_render_flags": [
+                    "render_on_art_suspected",
+                    "translator_note_best_effort_render",
+                ],
+                "translator_note_flags_revalidated": {
+                    "decision": "intentional_text_only_note",
+                    "reason": "stable_translator_note_text_only_render",
+                },
+            },
+        }
+
+        row = main._project_render_plan_row({"numero": 5}, layer, 4)
+
+        self.assertIsNotNone(row)
+        self.assertNotIn("render_on_art_suspected", row["qa_flags"])
+        self.assertNotIn("translator_note_best_effort_render", row["qa_flags"])
+        self.assertIn("translator_note_text_only_mask", row["qa_flags"])
+        self.assertIn("translator_note_stable_text_only_render", row["qa_flags"])
+        self.assertEqual(
+            row["qa_metrics"]["translator_note_flags_revalidated"]["decision"],
+            "intentional_text_only_note",
+        )
+
     def test_refresh_debug_final_band_crops_uses_translated_image_pixels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder

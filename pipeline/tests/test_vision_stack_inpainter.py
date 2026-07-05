@@ -5971,6 +5971,184 @@ class VisionStackInpainterTests(unittest.TestCase):
 
         self.assertEqual(_processable_vision_blocks_for_inpaint([block]), [block])
 
+    def test_translator_note_text_mask_without_text_fields_keeps_geometry_processable(self):
+        from inpainter import _processable_vision_blocks_for_inpaint
+
+        block = {
+            "id": "ocr_tn_geometry_only",
+            "bbox": [39, 282, 154, 337],
+            "text_pixel_bbox": [36, 289, 178, 333],
+            "bubble_mask_source": "translator_note_text_mask",
+            "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+            "route_action": "translate_inpaint_render",
+            "line_polygons": [
+                [[29, 287], [180, 287], [180, 300], [29, 300]],
+                [[32, 304], [179, 304], [179, 317], [32, 317]],
+                [[19, 322], [191, 322], [191, 336], [19, 336]],
+            ],
+        }
+
+        self.assertEqual(_processable_vision_blocks_for_inpaint([block]), [block])
+
+    def test_translator_note_text_mask_stays_for_real_inpaint_not_fast_dark_fill(self):
+        from inpainter import _apply_fast_dark_panel_text_fill
+
+        image = np.zeros((140, 260, 3), dtype=np.uint8)
+        cv2.putText(image, "T/N: NOTE", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (245, 245, 245), 2, cv2.LINE_AA)
+        block = {
+            "id": "ocr_tn",
+            "text": "T/N: NOTE",
+            "bbox": [18, 42, 150, 84],
+            "text_pixel_bbox": [18, 42, 150, 84],
+            "line_polygons": [[[18, 42], [150, 42], [150, 84], [18, 84]]],
+            "bubble_mask_source": "translator_note_text_mask",
+            "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+            "route_action": "translate_inpaint_render",
+            "mask_evidence": {
+                "kind": "ocr_pixels",
+                "raw_mask_pixels": 800,
+                "expanded_mask_pixels": 1800,
+                "evidence_score": 1.0,
+                "fast_fill_allowed": True,
+                "fast_fill_reject_reasons": [],
+            },
+        }
+
+        page = {"texts": [dict(block)]}
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1"}, clear=False):
+            result, remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [dict(block)])
+
+        self.assertEqual(stats["dark_panel_fill_count"], 0)
+        self.assertEqual(stats["remaining_blocks"], 1)
+        self.assertEqual(remaining[0].get("id"), "ocr_tn")
+        self.assertIn("translator_note_text_mask_requires_real_inpaint", page["_strip_fast_dark_rejection_reasons"])
+        self.assertTrue(np.array_equal(result, image))
+
+    def test_translator_note_text_mask_augments_final_real_inpaint_mask(self):
+        from inpainter import _augment_inpaint_masks_from_texts
+
+        image = np.zeros((140, 260, 3), dtype=np.uint8)
+        cv2.putText(image, "T/N: NOTE", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (245, 245, 245), 2, cv2.LINE_AA)
+        text = {
+            "id": "ocr_tn",
+            "text": "T/N: NOTE",
+            "bbox": [18, 42, 150, 84],
+            "text_pixel_bbox": [18, 42, 150, 84],
+            "line_polygons": [[[18, 42], [150, 42], [150, 84], [18, 84]]],
+            "bubble_mask_source": "translator_note_text_mask",
+            "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+            "route_action": "translate_inpaint_render",
+        }
+        raw = np.zeros(image.shape[:2], dtype=np.uint8)
+        expanded = np.zeros_like(raw)
+
+        raw, expanded = _augment_inpaint_masks_from_texts(raw, expanded, [text], image)
+
+        self.assertGreater(int(np.count_nonzero(raw[34:94, 10:160])), 0)
+        self.assertGreater(int(np.count_nonzero(expanded[34:94, 10:160])), 0)
+
+    def test_translator_note_final_fill_uses_band_local_coordinates(self):
+        from inpainter import _apply_translator_note_dark_text_contract_fill
+
+        image = np.zeros((140, 260, 3), dtype=np.uint8)
+        image[38:92, 14:162] = (255, 255, 255)
+        page = {
+            "_band_y_top": 1000,
+            "texts": [
+                {
+                    "id": "ocr_tn",
+                    "text": "T/N: NOTE",
+                    "bbox": [18, 1042, 150, 1084],
+                    "text_pixel_bbox": [18, 1042, 150, 1084],
+                    "line_polygons": [[[18, 1042], [150, 1042], [150, 1084], [18, 1084]]],
+                    "bubble_mask_source": "translator_note_text_mask",
+                    "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+                    "route_action": "translate_inpaint_render",
+                }
+            ],
+        }
+
+        result, changed = _apply_translator_note_dark_text_contract_fill(image, page)
+
+        self.assertGreater(changed, 0)
+        self.assertLess(int(np.max(result[45:85, 24:150])), 32)
+        self.assertLess(int(np.max(result[40:90, 16:160])), 32)
+        self.assertEqual(page.get("_strip_translator_note_dark_contract_final_fill_pixels"), changed)
+
+    def test_translator_note_final_fill_uses_text_samples_when_texts_missing(self):
+        from inpainter import _apply_translator_note_dark_text_contract_fill
+
+        image = np.zeros((140, 260, 3), dtype=np.uint8)
+        image[38:92, 14:162] = (255, 255, 255)
+        page = {
+            "_band_y_top": 1000,
+            "text_samples": [
+                {
+                    "id": "ocr_tn",
+                    "text": "T/N: NOTE",
+                    "bbox": [18, 42, 150, 84],
+                    "text_pixel_bbox": [18, 42, 150, 84],
+                    "line_polygons": [[[18, 42], [150, 42], [150, 84], [18, 84]]],
+                    "bubble_mask_source": "translator_note_text_mask",
+                    "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+                    "route_action": "translate_inpaint_render",
+                }
+            ],
+        }
+
+        result, changed = _apply_translator_note_dark_text_contract_fill(image, page)
+
+        self.assertGreater(changed, 0)
+        self.assertLess(int(np.max(result[45:85, 24:150])), 32)
+        self.assertEqual(page.get("_strip_translator_note_dark_contract_final_fill_pixels"), changed)
+
+    def test_translator_note_final_fill_uses_cached_local_texts(self):
+        from inpainter import _apply_translator_note_dark_text_contract_fill
+
+        image = np.zeros((140, 260, 3), dtype=np.uint8)
+        image[38:92, 14:162] = (255, 255, 255)
+        page = {
+            "_band_y_top": 1000,
+            "_strip_inpaint_local_texts": [
+                {
+                    "id": "ocr_tn",
+                    "text": "T/N: NOTE",
+                    "bbox": [18, 42, 150, 84],
+                    "text_pixel_bbox": [18, 42, 150, 84],
+                    "line_polygons": [[[18, 42], [150, 42], [150, 84], [18, 84]]],
+                    "bubble_mask_source": "translator_note_text_mask",
+                    "qa_flags": ["translator_note_text_only_mask", "text_contract_direct_fill"],
+                    "route_action": "translate_inpaint_render",
+                }
+            ],
+            "texts": [],
+        }
+
+        result, changed = _apply_translator_note_dark_text_contract_fill(image, page)
+
+        self.assertGreater(changed, 0)
+        self.assertLess(int(np.max(result[45:85, 24:150])), 32)
+        self.assertEqual(page.get("_strip_translator_note_dark_contract_final_fill_pixels"), changed)
+
+    def test_dark_mask_component_bright_residual_fill_skips_white_components(self):
+        from inpainter import _apply_dark_mask_component_bright_residual_fill
+
+        original = np.zeros((120, 240, 3), dtype=np.uint8)
+        cleaned = original.copy()
+        cleaned[36:76, 18:118] = (255, 255, 255)
+        original[24:96, 150:224] = (255, 255, 255)
+        cleaned[24:96, 150:224] = (255, 255, 255)
+        mask = np.zeros((120, 240), dtype=np.uint8)
+        mask[30:84, 12:128] = 255
+        mask[20:100, 145:230] = 255
+
+        result, changed, count = _apply_dark_mask_component_bright_residual_fill(cleaned, original, mask)
+
+        self.assertGreater(changed, 0)
+        self.assertEqual(count, 1)
+        self.assertLess(int(np.max(result[40:70, 24:110])), 32)
+        self.assertGreater(int(np.min(result[30:90, 160:220])), 220)
+
     def test_dark_panel_text_fill_uses_contract_mask_as_direct_fill(self):
         from inpainter import _try_dark_panel_text_fill
 

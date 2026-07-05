@@ -157,7 +157,9 @@ def _translator_note_has_current_text_mask_evidence(item: dict | None) -> bool:
 
 
 def _translator_note_has_text_geometry(item: dict | None) -> bool:
-    if not _is_translator_note_item(item):
+    if not isinstance(item, dict):
+        return False
+    if not (_is_translator_note_item(item) or _translator_note_text_only_mask(item)):
         return False
     if _item_has_current_inpaint_mask_evidence(item):
         return True
@@ -3555,6 +3557,7 @@ def _apply_fast_white_balloon_fill(
     height, width = band_rgb.shape[:2]
     result = band_rgb.copy()
     filled_bboxes: list[list[int]] = []
+    filled_text_keys: set[str] = set()
     filled_mask = np.zeros((height, width), dtype=np.uint8)
 
     for text in ocr_page.get("texts", []):
@@ -5937,7 +5940,26 @@ def _try_dark_panel_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray |
         fill_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         fill_mask = cv2.dilate(text_mask, fill_kernel, iterations=1)
     contract_fill_mask = _dark_text_contract_fill_mask(text, width, height, image_rgb)
+    contract_direct_allowed = bool(
+        translator_note_text_mask
+        or qa_flags
+        & {
+            "text_contract_direct_fill",
+            "visual_text_only_inpaint_contract",
+            "weak_text_residual_after_inpaint",
+        }
+    )
+    if bubble_mask_source == "image_dark_bubble_mask" and not contract_direct_allowed:
+        contract_fill_mask = None
     if contract_fill_mask is not None:
+        if bubble_mask_source == "image_dark_bubble_mask":
+            contract_fill_mask = _clip_dark_bubble_fill_mask_to_lobe(
+                text,
+                contract_fill_mask.astype(np.uint8),
+                image_rgb.shape[:2],
+            )
+            if not np.any(contract_fill_mask):
+                return None
         visual_contract_fill_mask = _dark_panel_visual_contract_fill_mask(
             image_rgb,
             text,
@@ -6825,6 +6847,9 @@ def _apply_fast_dark_panel_text_fill(
     for text in candidate_texts:
         if not isinstance(text, dict):
             _reject("invalid_text")
+            continue
+        if _translator_note_text_only_mask(text):
+            _reject("translator_note_text_mask_requires_real_inpaint")
             continue
         if not global_fast_dark_enabled and not _auto_fast_dark_card_fill_allowed(text):
             _reject("disabled")
@@ -8881,13 +8906,46 @@ def _apply_white_residual_expanded_mask_force_fill(
 def _apply_translator_note_dark_text_contract_fill(
     cleaned_rgb: np.ndarray,
     ocr_page: dict,
+    texts_override: list[dict] | None = None,
 ) -> tuple[np.ndarray, int]:
     if not isinstance(cleaned_rgb, np.ndarray) or cleaned_rgb.ndim != 3 or not isinstance(ocr_page, dict):
         return cleaned_rgb, 0
     height, width = cleaned_rgb.shape[:2]
     result = cleaned_rgb.copy()
     changed_pixels = 0
-    for raw_text in ocr_page.get("texts") or []:
+    try:
+        band_y_top = int(ocr_page.get("_band_y_top") or 0)
+    except Exception:
+        band_y_top = 0
+    note_candidates: list[dict] = []
+    seen_note_keys: set[str] = set()
+    collections = (
+        [texts_override]
+        if isinstance(texts_override, list)
+        else [
+            ocr_page.get("_strip_inpaint_local_texts"),
+            ocr_page.get("texts"),
+            ocr_page.get("text_samples"),
+        ]
+    )
+    for collection in collections:
+        if not isinstance(collection, list):
+            continue
+        for text in collection:
+            if not isinstance(text, dict):
+                continue
+            key = str(text.get("trace_id") or text.get("id") or id(text))
+            if key in seen_note_keys:
+                continue
+            seen_note_keys.add(key)
+            note_candidates.append(dict(text))
+    local_texts = _texts_with_band_local_bboxes(
+        note_candidates,
+        width=width,
+        height=height,
+        band_y_top=band_y_top,
+    )
+    for raw_text in local_texts:
         if not isinstance(raw_text, dict):
             continue
         source = str(raw_text.get("bubble_mask_source") or raw_text.get("bubbleMaskSource") or "").strip().lower()
@@ -8908,6 +8966,38 @@ def _apply_translator_note_dark_text_contract_fill(
             except Exception:
                 fill_color = np.asarray([0, 0, 0], dtype=np.uint8)
         mask = _dark_text_contract_fill_mask(raw_text, width, height, cleaned_rgb)
+        try:
+            text_mask = build_inpaint_mask(raw_text, cleaned_rgb.shape, image_rgb=cleaned_rgb)
+        except Exception:
+            text_mask = None
+        if isinstance(text_mask, np.ndarray) and np.any(text_mask):
+            text_mask = _coerce_mask_for_shape(text_mask, (height, width))
+            mask = np.maximum(mask, text_mask).astype(np.uint8) if isinstance(mask, np.ndarray) else text_mask
+        text_bbox = _text_bbox_for_inpaint_geometry(raw_text, width, height)
+        if text_bbox is not None:
+            support_bbox = _expanded_bbox(width, height, text_bbox, padding=14) or text_bbox
+            sx1, sy1, sx2, sy2 = support_bbox
+            crop = result[sy1:sy2, sx1:sx2]
+            if crop.size:
+                crop_luma = (
+                    crop[:, :, 0].astype(np.float32) * 0.299
+                    + crop[:, :, 1].astype(np.float32) * 0.587
+                    + crop[:, :, 2].astype(np.float32) * 0.114
+                )
+                bright_residual = np.where(crop_luma >= 150.0, 255, 0).astype(np.uint8)
+                if np.any(bright_residual):
+                    bright_residual = cv2.dilate(
+                        bright_residual,
+                        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
+                        iterations=1,
+                    )
+                    residual_mask = np.zeros((height, width), dtype=np.uint8)
+                    residual_mask[sy1:sy2, sx1:sx2] = bright_residual
+                    mask = (
+                        np.maximum(mask, residual_mask).astype(np.uint8)
+                        if isinstance(mask, np.ndarray)
+                        else residual_mask
+                    )
         if not isinstance(mask, np.ndarray) or not np.any(mask):
             continue
         before = result.copy()
@@ -8919,6 +9009,92 @@ def _apply_translator_note_dark_text_contract_fill(
     if changed_pixels:
         ocr_page["_strip_translator_note_dark_contract_final_fill_pixels"] = int(changed_pixels)
     return result, changed_pixels
+
+
+def _apply_dark_mask_component_bright_residual_fill(
+    cleaned_rgb: np.ndarray,
+    original_rgb: np.ndarray,
+    action_mask: np.ndarray | None,
+) -> tuple[np.ndarray, int, int]:
+    if (
+        not isinstance(cleaned_rgb, np.ndarray)
+        or cleaned_rgb.ndim != 3
+        or not isinstance(original_rgb, np.ndarray)
+        or original_rgb.shape[:2] != cleaned_rgb.shape[:2]
+        or not isinstance(action_mask, np.ndarray)
+    ):
+        return cleaned_rgb, 0, 0
+    height, width = cleaned_rgb.shape[:2]
+    mask = _coerce_mask_for_shape(action_mask, (height, width))
+    if not np.any(mask):
+        return cleaned_rgb, 0, 0
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    if num_labels <= 1:
+        return cleaned_rgb, 0, 0
+    result = cleaned_rgb.copy()
+    total_changed = 0
+    component_count = 0
+    cleaned_luma = (
+        cleaned_rgb[:, :, 0].astype(np.float32) * 0.299
+        + cleaned_rgb[:, :, 1].astype(np.float32) * 0.587
+        + cleaned_rgb[:, :, 2].astype(np.float32) * 0.114
+    )
+    original_luma = (
+        original_rgb[:, :, 0].astype(np.float32) * 0.299
+        + original_rgb[:, :, 1].astype(np.float32) * 0.587
+        + original_rgb[:, :, 2].astype(np.float32) * 0.114
+    )
+    for label in range(1, num_labels):
+        x, y, comp_w, comp_h, area = [int(v) for v in stats[label].tolist()]
+        if area < 80 or comp_w <= 0 or comp_h <= 0:
+            continue
+        x2 = min(width, x + comp_w)
+        y2 = min(height, y + comp_h)
+        if x >= x2 or y >= y2:
+            continue
+        comp = labels[y:y2, x:x2] == label
+        comp_orig_luma = original_luma[y:y2, x:x2]
+        comp_clean_luma = cleaned_luma[y:y2, x:x2]
+        support = cv2.dilate(
+            comp.astype(np.uint8) * 255,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (9, 7)),
+            iterations=1,
+        ) > 0
+        local_orig = original_luma[y:y2, x:x2]
+        background_pixels = local_orig[support & ~comp]
+        if background_pixels.size < 12:
+            background_pixels = comp_orig_luma[~comp] if np.any(~comp) else comp_orig_luma.reshape(-1)
+        if background_pixels.size == 0:
+            continue
+        background_luma = float(np.median(background_pixels))
+        component_luma = float(np.median(comp_orig_luma[comp])) if np.any(comp) else 255.0
+        if background_luma > 96.0 or component_luma > 170.0:
+            continue
+        bright_residual = comp & (comp_clean_luma >= 150.0)
+        if not np.any(bright_residual):
+            continue
+        bright_residual = cv2.dilate(
+            bright_residual.astype(np.uint8) * 255,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
+            iterations=1,
+        ) > 0
+        fill_candidates = bright_residual & comp
+        changed = int(np.count_nonzero(fill_candidates))
+        if changed <= 0:
+            continue
+        dark_samples = result[y:y2, x:x2][support & ~comp]
+        if dark_samples.size:
+            fill_color = np.median(dark_samples.reshape(-1, 3), axis=0)
+            if float(np.max(fill_color)) > 96.0:
+                fill_color = np.asarray([0, 0, 0], dtype=np.float32)
+        else:
+            fill_color = np.asarray([0, 0, 0], dtype=np.float32)
+        local_result = result[y:y2, x:x2]
+        local_result[fill_candidates] = np.asarray(fill_color, dtype=np.uint8)
+        result[y:y2, x:x2] = local_result
+        total_changed += changed
+        component_count += 1
+    return result, total_changed, component_count
 
 
 def _record_inpaint_decision(
@@ -9082,6 +9258,12 @@ def _record_inpaint_decision(
         ),
         "final_action_mask_white_cleanup_added_pixels": int(
             ocr_page.get("_strip_final_action_mask_white_cleanup_added_pixels") or 0
+        ),
+        "dark_mask_component_bright_residual_fill_pixels": int(
+            ocr_page.get("_strip_dark_mask_component_bright_residual_fill_pixels") or 0
+        ),
+        "dark_mask_component_bright_residual_fill_count": int(
+            ocr_page.get("_strip_dark_mask_component_bright_residual_fill_count") or 0
         ),
     }
     if bool(payload["used_real_inpaint"]) and not residual.get("has_residual"):
@@ -10496,15 +10678,25 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         height=height,
         band_y_top=band_y_top,
     )
+    translator_note_fill_texts = [
+        dict(text)
+        for text in local_texts
+        if isinstance(text, dict)
+        and _translator_note_text_only_mask(text)
+        and _translator_note_has_text_geometry(text)
+        and not _text_suppressed_for_inpaint(text)
+        and not _route_action_blocks_inpaint(text)
+    ]
     original_local_text_count = len(local_texts)
     local_texts = [
         _drop_isolated_side_note_line_polygons(text)
         for text in local_texts
         if not _text_suppressed_for_inpaint(text)
         and not text.get("_fast_fill_inpaint_resolved")
-        and not _translator_note_text_only_mask(text)
+        and (not _translator_note_text_only_mask(text) or _translator_note_has_text_geometry(text))
         and not _text_has_rejected_bubble_without_glyph_evidence(text)
     ]
+    ocr_page["_strip_inpaint_local_texts"] = [dict(text) for text in local_texts]
     raw_mask = _coerce_mask_for_shape(koharu_remaining_mask, working_rgb.shape[:2])
     rebuilt_raw_mask = vision_blocks_to_mask(
         working_rgb.shape,
@@ -10604,9 +10796,21 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             )
             if not _text_suppressed_for_inpaint(text)
             and not text.get("_fast_fill_inpaint_resolved")
-            and not _translator_note_text_only_mask(text)
+            and (not _translator_note_text_only_mask(text) or _translator_note_has_text_geometry(text))
             and not _text_has_rejected_bubble_without_glyph_evidence(text)
         ]
+        late_note_fill_texts = [
+            dict(text)
+            for text in local_texts
+            if isinstance(text, dict)
+            and _translator_note_text_only_mask(text)
+            and _translator_note_has_text_geometry(text)
+            and not _text_suppressed_for_inpaint(text)
+            and not _route_action_blocks_inpaint(text)
+        ]
+        if late_note_fill_texts:
+            translator_note_fill_texts = late_note_fill_texts
+        ocr_page["_strip_inpaint_local_texts"] = [dict(text) for text in local_texts]
         raw_mask = vision_blocks_to_mask(
             working_rgb.shape,
             vision_blocks,
@@ -10741,7 +10945,11 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
         cleaned = forced
     cleaned, _ = _apply_dark_panel_text_fills(cleaned, ocr_page)
-    cleaned, _translator_note_dark_fill_pixels = _apply_translator_note_dark_text_contract_fill(cleaned, ocr_page)
+    cleaned, _translator_note_dark_fill_pixels = _apply_translator_note_dark_text_contract_fill(
+        cleaned,
+        ocr_page,
+        texts_override=translator_note_fill_texts,
+    )
     residual_check = _detect_inpaint_residual_text(
         band_rgb,
         cleaned,
@@ -11052,6 +11260,12 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
                 ocr_page["_strip_final_action_mask_white_cleanup_force_fill_pixels"] = int(force_changed_pixels)
                 ocr_page["_strip_white_residual_force_fill_limit_pixels"] = int(force_limit_pixels)
                 ocr_page["_strip_white_residual_force_fill_changed_outside"] = int(force_changed_outside)
+    cleaned, dark_component_residual_pixels, dark_component_residual_count = (
+        _apply_dark_mask_component_bright_residual_fill(cleaned, working_rgb, final_action_mask)
+    )
+    if dark_component_residual_pixels:
+        ocr_page["_strip_dark_mask_component_bright_residual_fill_pixels"] = int(dark_component_residual_pixels)
+        ocr_page["_strip_dark_mask_component_bright_residual_fill_count"] = int(dark_component_residual_count)
     cleaned, final_clamped_outside = _clamp_final_inpaint_to_expanded_mask(
         working_rgb,
         cleaned,
@@ -11059,10 +11273,20 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     if final_clamped_outside:
         ocr_page["_strip_final_clamped_outside_expanded_mask_pixels"] = int(final_clamped_outside)
-    cleaned, translator_note_final_fill_pixels = _apply_translator_note_dark_text_contract_fill(cleaned, ocr_page)
+    cleaned, translator_note_final_fill_pixels = _apply_translator_note_dark_text_contract_fill(
+        cleaned,
+        ocr_page,
+        texts_override=translator_note_fill_texts,
+    )
     if translator_note_final_fill_pixels:
         final_note_mask = np.zeros(final_action_mask.shape, dtype=np.uint8)
-        for raw_text in ocr_page.get("texts") or []:
+        local_note_texts = _texts_with_band_local_bboxes(
+            [dict(text) for text in list(ocr_page.get("texts") or []) if isinstance(text, dict)],
+            width=width,
+            height=height,
+            band_y_top=band_y_top,
+        )
+        for raw_text in local_note_texts:
             if not isinstance(raw_text, dict):
                 continue
             source = str(raw_text.get("bubble_mask_source") or raw_text.get("bubbleMaskSource") or "").strip().lower()
