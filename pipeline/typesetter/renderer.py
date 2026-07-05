@@ -14054,6 +14054,96 @@ def _apply_dark_visual_safe_width_limit(text_data: dict, plan: dict) -> None:
     _merge_qa_flags(text_data, ["dark_visual_safe_width_limited"])
 
 
+def _dark_visual_lobe_render_bounds_for_safe_overhang(text_data: dict, plan: dict) -> list[int] | None:
+    """Return the real visual lobe bounds when safe_text_box is only conservative.
+
+    Dark connected lobes often carry a safe_text_box derived from the inpaint
+    text contract. That box is useful as a first fit reference, but it can be
+    narrower than the actual lobe. For final glyph placement the lobe/target
+    bounds are the real limit; sibling lobes remain forbidden because we only
+    use this path when the target/visual bbox is already lobe-local.
+    """
+    if not isinstance(text_data, dict) or not isinstance(plan, dict):
+        return None
+    content_class = str(text_data.get("content_class") or "").strip().lower()
+    if content_class in {"sfx", "scanlation_credit", "promotional", "non_story"}:
+        return None
+    if _is_translator_note_text_only_mask(text_data):
+        return None
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profile = str(
+        text_data.get("layout_profile")
+        or text_data.get("block_profile")
+        or plan.get("layout_profile")
+        or ""
+    ).strip().lower()
+    balloon_type = str(text_data.get("balloon_type") or "").strip().lower()
+    if profile == "white_balloon" or balloon_type == "white" or source == "image_white_bubble_mask":
+        return None
+    flags = _qa_flags_set(text_data)
+    if not (
+        _uses_dark_visual_layout_contract(text_data, plan)
+        and "visual_text_only_inpaint_contract" in flags
+        and "text_contract_direct_fill" in flags
+        and (
+            "dark_bubble_connected_lobe_passthrough" in flags
+            or "dark_bubble_connected_lobes_promoted" in flags
+            or "dark_bubble_lobe_mask_bbox_preferred" in flags
+            or text_data.get("_is_lobe_subregion")
+        )
+    ):
+        return None
+
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    tight_fit = metrics.get("contract_bbox_tight_but_visual_balloon_fit_ok") if isinstance(metrics, dict) else None
+    contract_fit = metrics.get("typeset_contract_fit") if isinstance(metrics, dict) else None
+    if not isinstance(tight_fit, dict) and not isinstance(contract_fit, dict):
+        return None
+
+    safe = _layout_bbox(plan.get("safe_text_box") or text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"))
+    target = _layout_bbox(plan.get("target_bbox") or text_data.get("target_bbox"))
+    visual = _layout_bbox(tight_fit.get("visual_bbox") if isinstance(tight_fit, dict) else None)
+    if visual is None:
+        visual = target or _layout_bbox(text_data.get("bubble_mask_bbox") or text_data.get("balloon_bbox"))
+    if safe is None or visual is None:
+        return None
+
+    bounds = list(visual)
+    if target is not None:
+        intersection = _bbox_intersection(bounds, target)
+        if intersection is None:
+            return None
+        # If target is already lobe-local, clipping to it prevents spill into
+        # the sibling lobe even when a broader mask is present upstream.
+        bounds = list(intersection)
+
+    if _bbox_area_px(bounds) <= _bbox_area_px(safe):
+        return None
+
+    contract_pair = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    contract_bbox = (
+        _layout_bbox((tight_fit or {}).get("source_bbox") if isinstance(tight_fit, dict) else None)
+        or _layout_bbox((contract_fit or {}).get("source_bbox") if isinstance(contract_fit, dict) else None)
+        or (_layout_bbox(contract_pair[0]) if contract_pair else None)
+    )
+    if contract_bbox is not None:
+        cx, cy = _bbox_center(contract_bbox)
+        bx1, by1, bx2, by2 = [int(v) for v in bounds]
+        if not (bx1 <= cx <= bx2 and by1 - 24 <= cy <= by2 + 24):
+            return None
+
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_visual_lobe_safe_text_box_relaxed"] = {
+            "reason": "safe_text_box_conservative_visual_lobe_allows_ink",
+            "safe_text_box": [int(v) for v in safe],
+            "visual_lobe_bbox": [int(v) for v in bounds],
+            "target_bbox": [int(v) for v in target] if target is not None else None,
+            "contract_bbox": [int(v) for v in contract_bbox] if contract_bbox is not None else None,
+        }
+    return [int(v) for v in bounds]
+
+
 def _uses_dark_visual_layout_contract(text_data: dict, plan: dict | None = None) -> bool:
     plan = plan or {}
     flags = _qa_flags_set(text_data)
@@ -14806,14 +14896,57 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 if violation in {"width_lt_0.85x_source_text", "height_lt_0.85x_source_text"}
             ]
             if soft_violations:
-                _merge_qa_flags(text_data, ["original_text_scale_min_underflow"])
                 metrics = text_data.setdefault("qa_metrics", {})
                 if isinstance(metrics, dict):
-                    metrics["original_text_scale_min_underflow"] = {
-                        "violations": list(soft_violations),
+                    contract_metrics = _original_text_scale_contract_metrics(best_candidate, original_scale_bbox)
+                    visual_fit_ok = bool(
+                        inpaint_contract_source
+                        and _typeset_inpaint_contract_visual_balloon_fit_ok(text_data, best_candidate, original_scale_bbox)
+                    )
+                    if visual_fit_ok:
+                        metrics.pop("original_text_scale_min_underflow", None)
+                        _append_resolved_pre_render_flag(metrics, "original_text_scale_min_underflow")
+                        metrics["original_text_scale_soft_underflow_visual_fit_ok"] = {
+                            "decision": "cleared",
+                            "reason": "contract_bbox_tight_but_visual_balloon_fit_ok",
+                            "violations": list(soft_violations),
+                            "source_bbox": [int(v) for v in original_scale_bbox],
+                            "contract_metrics": contract_metrics,
+                        }
+                        text_data["qa_flags"] = [
+                            flag
+                            for flag in (text_data.get("qa_flags") or [])
+                            if str(flag) != "original_text_scale_min_underflow"
+                        ]
+                    else:
+                        _merge_qa_flags(text_data, ["original_text_scale_min_underflow"])
+                        metrics["original_text_scale_min_underflow"] = {
+                            "violations": list(soft_violations),
+                            "source_bbox": [int(v) for v in original_scale_bbox],
+                            "contract_metrics": contract_metrics,
+                        }
+            elif "original_text_scale_min_underflow" in {str(flag) for flag in (text_data.get("qa_flags") or [])}:
+                metrics = text_data.setdefault("qa_metrics", {})
+                visual_fit_ok = bool(
+                    inpaint_contract_source
+                    and _typeset_inpaint_contract_visual_balloon_fit_ok(text_data, best_candidate, original_scale_bbox)
+                )
+                if visual_fit_ok and isinstance(metrics, dict):
+                    stale_metrics = metrics.pop("original_text_scale_min_underflow", None)
+                    _append_resolved_pre_render_flag(metrics, "original_text_scale_min_underflow")
+                    metrics["original_text_scale_soft_underflow_visual_fit_ok"] = {
+                        "decision": "cleared",
+                        "reason": "selected_layout_fits_visual_balloon_bbox",
+                        "violations": [],
+                        "stale_metrics": stale_metrics,
                         "source_bbox": [int(v) for v in original_scale_bbox],
                         "contract_metrics": _original_text_scale_contract_metrics(best_candidate, original_scale_bbox),
                     }
+                    text_data["qa_flags"] = [
+                        flag
+                        for flag in (text_data.get("qa_flags") or [])
+                        if str(flag) != "original_text_scale_min_underflow"
+                    ]
         if trace_candidates:
             _mark_selected_render_candidate(text_data, best_candidate)
         if inpaint_contract_source:
@@ -16434,6 +16567,8 @@ def _render_single_text_block_unrotated(
 
     if isinstance(best_font, SafeTextPathFont):
         image_np = np.array(img)
+        effective_render_bounds = _dark_visual_lobe_render_bounds_for_safe_overhang(text_data, plan)
+        clamp_bounds = effective_render_bounds or plan.get("safe_text_box") or plan["target_bbox"]
         center_ref_bbox = _layout_bbox(plan.get("safe_text_box") or plan.get("position_bbox") or plan["target_bbox"])
         if plan.get("_position_on_capacity_bbox") or plan.get("_simple_anchor_capacity_expanded"):
             center_ref_bbox = _layout_bbox(plan.get("capacity_bbox")) or center_ref_bbox
@@ -16479,20 +16614,20 @@ def _render_single_text_block_unrotated(
             best_font,
             best_lines,
             positions,
-            plan.get("safe_text_box") or plan["target_bbox"],
+            clamp_bounds,
         )
         positions = _align_uied_positions_to_source_center(
             best_font,
             best_lines,
             positions,
             text_data,
-            plan.get("safe_text_box") or plan["target_bbox"],
+            clamp_bounds,
         )
         positions = _clamp_safe_text_positions_to_bbox(
             best_font,
             best_lines,
             positions,
-            plan.get("safe_text_box") or plan["target_bbox"],
+            clamp_bounds,
         )
         _persist_render_layout_contract(text_data, plan, resolved, positions)
 
@@ -16604,7 +16739,7 @@ def _render_single_text_block_unrotated(
     render_layer, aligned_bbox = _align_rgba_layer_to_source_text_center(
         render_layer,
         text_data,
-        plan.get("safe_text_box") or plan["target_bbox"],
+        _dark_visual_lobe_render_bounds_for_safe_overhang(text_data, plan) or plan.get("safe_text_box") or plan["target_bbox"],
     )
     if aligned_bbox:
         dx = int(aligned_bbox[0]) - min((int(px) for px, _ in positions), default=int(aligned_bbox[0]))
@@ -16701,6 +16836,16 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         overhang_px = max(0, sx1 - rx1, rx2 - sx2, sy1 - ry1, ry2 - sy2)
         if overhang_px <= 0:
             return False
+        visual_lobe_bounds = _dark_visual_lobe_render_bounds_for_safe_overhang(text_data, plan)
+        if visual_lobe_bounds and _contains_with_margin(visual_lobe_bounds, render_bbox, margin=2):
+            qa_metrics["render_safe_overhang_px"] = int(overhang_px)
+            qa_metrics["render_safe_overhang_allowed_by_visual_lobe"] = {
+                "safe_text_box": [int(v) for v in safe],
+                "visual_lobe_bbox": [int(v) for v in visual_lobe_bounds],
+                "render_bbox": [int(v) for v in render_bbox],
+                "overhang_px": int(overhang_px),
+            }
+            return True
         max_overhang = max(4, int(round(min(safe_w, safe_h) * 0.04)))
         real_target = balloon_bbox or target
         if overhang_px > max_overhang or not _contains_with_margin(real_target, render_bbox, margin=2):
@@ -16832,6 +16977,8 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         qa_flags,
         qa_metrics,
         render_bbox=render_bbox,
+        safe_text_box=safe,
+        target_bbox=target,
         render_fit_flags=render_fit_flags,
     )
     qa_flags, render_fit_flags = _revalidate_white_balloon_clipped_flag_after_layout(
@@ -17632,6 +17779,8 @@ def _revalidate_tight_contract_typeset_flags_after_layout(
     qa_metrics: dict,
     *,
     render_bbox: list[int],
+    safe_text_box,
+    target_bbox,
     render_fit_flags: list[str],
 ) -> tuple[list, list[str]]:
     tight_fit = qa_metrics.get("contract_bbox_tight_but_visual_balloon_fit_ok")
@@ -17642,6 +17791,15 @@ def _revalidate_tight_contract_typeset_flags_after_layout(
     contract = _layout_bbox(tight_fit.get("source_bbox"))
     if render is None or visual is None:
         return qa_flags, render_fit_flags
+    plan_like_bounds = _dark_visual_lobe_render_bounds_for_safe_overhang(
+        text_data,
+        {
+            "target_bbox": target_bbox or text_data.get("target_bbox") or visual,
+            "safe_text_box": safe_text_box or text_data.get("safe_text_box") or text_data.get("_debug_safe_text_box"),
+        },
+    )
+    if plan_like_bounds is not None:
+        visual = plan_like_bounds
     try:
         containment = float(qa_metrics.get("render_balloon_containment"))
     except (TypeError, ValueError):
@@ -18295,7 +18453,12 @@ def _shift_render_plan_nested_bboxes_y(value, delta_y: int):
         shifted = {}
         for key, item in value.items():
             key_str = str(key)
-            if key_str.endswith("bbox") or key_str.endswith("_bbox") or key_str in {"safe_text_box", "_debug_safe_text_box"}:
+            if key_str.endswith("bbox") or key_str.endswith("_bbox") or key_str in {
+                "safe_text_box",
+                "_debug_safe_text_box",
+                "glyph_bbox_before",
+                "glyph_bbox_after",
+            }:
                 shifted[key] = _shift_render_plan_bbox_y(item, delta_y)
             elif key_str.endswith("bboxes") and isinstance(item, list):
                 shifted[key] = [_shift_render_plan_bbox_y(candidate, delta_y) for candidate in item]
@@ -18312,7 +18475,12 @@ def _shift_render_plan_nested_bboxes_xy(value, delta_x: int, delta_y: int):
         shifted = {}
         for key, item in value.items():
             key_str = str(key)
-            if key_str.endswith("bbox") or key_str.endswith("_bbox") or key_str in {"safe_text_box", "_debug_safe_text_box"}:
+            if key_str.endswith("bbox") or key_str.endswith("_bbox") or key_str in {
+                "safe_text_box",
+                "_debug_safe_text_box",
+                "glyph_bbox_before",
+                "glyph_bbox_after",
+            }:
                 shifted[key] = _shift_render_plan_bbox_xy(item, delta_x, delta_y)
             elif key_str.endswith("bboxes") and isinstance(item, list):
                 shifted[key] = [_shift_render_plan_bbox_xy(candidate, delta_x, delta_y) for candidate in item]

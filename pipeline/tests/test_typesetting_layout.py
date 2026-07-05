@@ -384,6 +384,87 @@ class TypesettingLayoutTests(unittest.TestCase):
         )
         self.assertNotIn("fit_below_minimum_legible", text_data.get("qa_flags", []))
 
+    def test_dark_bubble_clears_soft_underflow_when_selected_layout_fits_visual_balloon(self):
+        text_data = {
+            "id": "page_002_band_026_left_lobe",
+            "text": "You were loyal to others, but to them, you were being nosy.",
+            "original": "You were loyal to others, but to them, you were being nosy.",
+            "translated": "VOCE ERA LEAL AOS OUTROS, MAS PARA ELES ESTAVA SENDO INTROMETIDO.",
+            "tipo": "fala",
+            "bbox": [129, 92, 428, 220],
+            "source_bbox": [129, 92, 428, 220],
+            "text_pixel_bbox": [132, 92, 426, 215],
+            "source_text_mask_bbox": [129, 89, 428, 217],
+            "target_bbox": [0, 0, 413, 307],
+            "balloon_bbox": [0, 0, 558, 307],
+            "bubble_mask_bbox": [0, 0, 558, 307],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "original_text_scale_min_underflow",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [129, 89, 428, 217],
+                    "mask_pixels": 38264,
+                    "source": "build_inpaint_mask_contract",
+                },
+                "image_dark_bubble_mask": {
+                    "mask_bbox": [0, 0, 558, 307],
+                    "source": "image_dark_bubble_mask",
+                },
+                "original_text_scale_min_underflow": {
+                    "violations": ["height_lt_0.85x_source_text"],
+                    "source_bbox": [129, 89, 428, 217],
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 44,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [0, 0, 413, 307],
+            "position_bbox": [29, 21, 384, 286],
+            "capacity_bbox": [29, 21, 384, 286],
+            "safe_text_box": [29, 21, 384, 286],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 44,
+            "max_width": 320,
+            "max_height": 265,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "ellipse",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertGreaterEqual(resolved["font_size"], 36)
+        self.assertIn(
+            "contract_bbox_tight_but_visual_balloon_fit_ok",
+            text_data["qa_metrics"],
+        )
+        self.assertNotIn("original_text_scale_min_underflow", text_data.get("qa_flags", []))
+        self.assertNotIn("original_text_scale_min_underflow", text_data["qa_metrics"])
+        self.assertIn("original_text_scale_min_underflow", text_data["qa_metrics"]["resolved_pre_render_flags"])
+        self.assertEqual(
+            text_data["qa_metrics"]["original_text_scale_soft_underflow_visual_fit_ok"]["decision"],
+            "cleared",
+        )
+
     def test_dark_panel_keeps_fitting_inpaint_contract_layout_size(self):
         text_data = {
             "id": "dark_panel_fits_contract",
