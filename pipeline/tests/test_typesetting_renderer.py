@@ -9263,6 +9263,157 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertLessEqual(plan["max_width"], int(round(safe_w * 0.90)))
         self.assertIn("dark_visual_safe_width_limited", text_data.get("qa_flags") or [])
 
+    def test_dark_visual_capacity_expands_within_lobe_when_contract_is_too_narrow(self):
+        text_data = {
+            "translated": "A recompensa da missão é...",
+            "original": "The quest reward is...",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [520, 4053, 646, 4120],
+            "source_bbox": [520, 4053, 646, 4120],
+            "text_pixel_bbox": [520, 4053, 646, 4120],
+            "target_bbox": [530, 4059, 644, 4128],
+            "safe_text_box": [559, 4066, 614, 4087],
+            "balloon_bbox": [557, 4059, 617, 4094],
+            "background_rgb": [2, 2, 2],
+            "qa_flags": [
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "dark_bubble_ellipse_bbox_mask",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+                "connected_lobe_boxes_missing_source_anchor_fallback",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [518, 4050, 649, 4124]},
+                "derived_card_panel_mask": {"mask_bbox": [487, 4027, 679, 4146]},
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 36,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        metric = text_data["qa_metrics"]["dark_visual_capacity_expanded_within_lobe"]
+        self.assertEqual(metric["reason"], "contract_bbox_narrower_than_visual_lobe")
+        self.assertEqual(metric["visual_lobe_bbox"], [487, 4027, 679, 4146])
+        self.assertEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
+        self.assertGreaterEqual(plan["safe_text_box"][2] - plan["safe_text_box"][0], 140)
+        self.assertGreater(plan["max_width"], 110)
+        self.assertLessEqual(plan["safe_text_box"][0], 518)
+        self.assertGreaterEqual(plan["safe_text_box"][2], 649)
+        self.assertLessEqual(resolved["block_bbox"][0], 657)
+        self.assertLessEqual(resolved["block_bbox"][2], 657)
+        self.assertLessEqual(len(resolved["lines"]), 2)
+        self.assertIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
+
+    def test_dark_visual_capacity_does_not_expand_without_reliable_visual_lobe(self):
+        text_data = {
+            "translated": "A recompensa da missão é...",
+            "original": "The quest reward is...",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [520, 4053, 646, 4120],
+            "source_bbox": [520, 4053, 646, 4120],
+            "text_pixel_bbox": [520, 4053, 646, 4120],
+            "target_bbox": [530, 4059, 644, 4128],
+            "safe_text_box": [559, 4066, 614, 4087],
+            "balloon_bbox": [557, 4059, 617, 4094],
+            "background_rgb": [2, 2, 2],
+            "qa_flags": [
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [518, 4050, 649, 4124]},
+                "derived_card_panel_mask": {"mask_bbox": [700, 4027, 820, 4146]},
+            },
+            "estilo": {"fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "tamanho": 36, "cor": "#FFFFFF"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertNotIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
+        self.assertNotEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
+
+    def test_dark_visual_capacity_does_not_expand_connected_lobe_contracts(self):
+        text_data = {
+            "translated": "Sou um sistema que orienta o exercito do Rei Yeomra.",
+            "original": "I am a system that guides...",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [66, 16572, 388, 16763],
+            "source_bbox": [66, 16572, 388, 16763],
+            "text_pixel_bbox": [66, 16572, 388, 16763],
+            "target_bbox": [20, 16520, 460, 16820],
+            "safe_text_box": [90, 16580, 330, 16730],
+            "balloon_bbox": [20, 16520, 460, 16820],
+            "connected_lobe_bboxes": [[20, 16520, 460, 16820], [430, 16560, 720, 16810]],
+            "background_rgb": [2, 2, 2],
+            "qa_flags": [
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [66, 16572, 388, 16763]},
+                "derived_card_panel_mask": {"mask_bbox": [20, 16520, 720, 16820]},
+            },
+            "estilo": {"fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "tamanho": 36, "cor": "#FFFFFF"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertNotIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
+        self.assertNotEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
+
+    def test_dark_visual_capacity_does_not_affect_white_balloon(self):
+        text_data = {
+            "translated": "Por que sou o anfitrião?",
+            "original": "Why am I the host?",
+            "tipo": "fala",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "bbox": [80, 90, 210, 140],
+            "source_bbox": [80, 90, 210, 140],
+            "text_pixel_bbox": [80, 90, 210, 140],
+            "target_bbox": [20, 20, 300, 190],
+            "safe_text_box": [48, 42, 272, 168],
+            "balloon_bbox": [20, 20, 300, 190],
+            "qa_flags": ["visual_text_only_inpaint_contract", "text_contract_direct_fill"],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [80, 90, 210, 140]},
+                "derived_card_panel_mask": {"mask_bbox": [0, 0, 320, 220]},
+            },
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 30, "cor": "#000000"},
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertNotIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
+        self.assertNotEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
+
     def test_dark_visual_white_mask_source_does_not_use_compact_small_text_capacity(self):
         text_data = {
             "translated": "A missao. recompensa e....",
