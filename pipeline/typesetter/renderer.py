@@ -8560,6 +8560,130 @@ def _dark_oval_safe_height_factor(text_data: dict) -> float:
     return 1.20
 
 
+def _dark_visual_lobe_bbox_candidates(text_data: dict) -> list[tuple[str, list[int]]]:
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    derived_card = metrics.get("derived_card_panel_mask") if isinstance(metrics.get("derived_card_panel_mask"), dict) else {}
+    image_dark = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    candidates = [
+        ("qa_metrics.derived_card_panel_mask.mask_bbox", _layout_bbox(derived_card.get("mask_bbox"))),
+        ("qa_metrics.image_dark_bubble_mask.mask_bbox", _layout_bbox(image_dark.get("mask_bbox"))),
+        ("bubble_mask_bbox", _layout_bbox(text_data.get("bubble_mask_bbox"))),
+        ("balloon_bbox", _layout_bbox(text_data.get("balloon_bbox"))),
+        ("target_bbox", _layout_bbox(text_data.get("target_bbox"))),
+    ]
+    return [(name, list(bbox)) for name, bbox in candidates if bbox is not None]
+
+
+def _maybe_expand_dark_visual_capacity_within_lobe(
+    text_data: dict,
+    target_bbox: list[int],
+    layout_safe_bbox: list[int] | None,
+) -> list[int] | None:
+    if not isinstance(text_data, dict) or layout_safe_bbox is None:
+        return None
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+    if _is_translator_note_text_only_mask(text_data) or profile == "white_balloon" or source == "image_white_bubble_mask":
+        return None
+    if text_data.get("_is_lobe_subregion") or text_data.get("connected_lobe_bboxes") or text_data.get("connected_position_bboxes"):
+        return None
+    if flags & {
+        "dark_bubble_connected_lobes_promoted",
+        "dark_bubble_connected_lobe_passthrough",
+        "partial_dark_bubble_lobe_reocr",
+    }:
+        return None
+    if not (
+        source in {"image_dark_bubble_mask", "derived_card_panel_mask"}
+        or profile in {"dark_bubble", "dark_panel"}
+        or flags
+        & {
+            "dark_bubble_ellipse_bbox_mask",
+            "dark_bubble_oval_reocr",
+            "dark_bubble_visual_glyph_mask_replaced_geometry",
+            "dark_bubble_negative_evidence",
+        }
+    ):
+        return None
+
+    contract_pair = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    if contract_pair is None:
+        return None
+    contract_bbox = _layout_bbox(contract_pair[0])
+    current_safe = _layout_bbox(layout_safe_bbox)
+    if contract_bbox is None or current_safe is None:
+        return None
+    cx = (float(contract_bbox[0]) + float(contract_bbox[2])) / 2.0
+    cy = (float(contract_bbox[1]) + float(contract_bbox[3])) / 2.0
+    contract_w = max(1, int(contract_bbox[2]) - int(contract_bbox[0]))
+    current_w = max(1, int(current_safe[2]) - int(current_safe[0]))
+    current_h = max(1, int(current_safe[3]) - int(current_safe[1]))
+    if current_h < 12:
+        return None
+
+    selected_name = ""
+    selected_visual: list[int] | None = None
+    for name, candidate in _dark_visual_lobe_bbox_candidates(text_data):
+        vx1, vy1, vx2, vy2 = [int(v) for v in candidate]
+        visual_w = max(1, vx2 - vx1)
+        visual_h = max(1, vy2 - vy1)
+        if visual_w < max(120, int(contract_w * 1.22)):
+            continue
+        if not (vx1 <= cx <= vx2 and vy1 - max(12, visual_h * 0.12) <= cy <= vy2 + max(12, visual_h * 0.12)):
+            continue
+        if _bbox_intersection_area(candidate, contract_bbox) < int(_bbox_area_px(contract_bbox) * 0.45):
+            continue
+        if current_w >= int(visual_w * 0.68):
+            continue
+        selected_name = name
+        selected_visual = [vx1, vy1, vx2, vy2]
+        break
+    if selected_visual is None:
+        return None
+
+    vx1, vy1, vx2, vy2 = selected_visual
+    visual_w = max(1, vx2 - vx1)
+    pad_x = max(8, int(round(visual_w * 0.08)))
+    usable_x1 = vx1 + pad_x
+    usable_x2 = vx2 - pad_x
+    if usable_x2 <= usable_x1:
+        return None
+    desired_w = max(current_w, min(usable_x2 - usable_x1, max(int(round(contract_w * 1.12)), int(round(visual_w * 0.76)))))
+    if desired_w <= current_w + max(8, int(round(current_w * 0.12))):
+        return None
+    ex1, ex2 = _center_span_within_bounds(cx, desired_w, usable_x1, usable_x2)
+    if ex2 <= ex1 or ex2 - ex1 <= current_w:
+        return None
+    y1 = max(int(current_safe[1]), vy1 + max(3, int(round((vy2 - vy1) * 0.035))))
+    y2 = min(int(current_safe[3]), vy2 - max(3, int(round((vy2 - vy1) * 0.035))))
+    if y2 <= y1:
+        y1, y2 = int(current_safe[1]), int(current_safe[3])
+    expanded = [int(ex1), int(y1), int(ex2), int(y2)]
+    target = _layout_bbox(target_bbox)
+    metrics = text_data.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["dark_visual_capacity_expanded_within_lobe"] = {
+            "reason": "contract_bbox_narrower_than_visual_lobe",
+            "contract_bbox": [int(v) for v in contract_bbox],
+            "visual_lobe_bbox": [int(v) for v in selected_visual],
+            "visual_lobe_bbox_source": selected_name,
+            "previous_safe_text_box": [int(v) for v in current_safe],
+            "expanded_safe_text_box": [int(v) for v in expanded],
+            "previous_max_width": int(current_w),
+            "expanded_max_width": int(ex2 - ex1),
+            "center_preserved": bool(abs(((ex1 + ex2) / 2.0) - cx) <= 1.5),
+            "target_bbox": [int(v) for v in target] if target is not None else None,
+        }
+    text_data["safe_text_box"] = list(expanded)
+    text_data["_debug_safe_text_box"] = list(expanded)
+    text_data["layout_safe_bbox"] = list(expanded)
+    text_data["layout_safe_reason"] = "dark_visual_capacity_expanded_within_lobe"
+    text_data["_dark_visual_capacity_expanded_within_lobe_force_capacity_position"] = True
+    _merge_qa_flags(text_data, ["dark_visual_capacity_expanded_within_lobe", "safe_text_box_recomputed"])
+    return expanded
+
+
 def _dark_oval_anchor_bbox(text_data: dict) -> list[int] | None:
     metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
     dark_bubble_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
@@ -11829,6 +11953,8 @@ def plan_text_layout(text_data: dict) -> dict:
         anchor_lobe_overlap = _bbox_intersection_area(anchor_bbox, layout_safe_bbox) / float(anchor_area)
         if anchor_lobe_overlap < 0.60:
             position_on_capacity_bbox = True
+    if text_data.get("_dark_visual_capacity_expanded_within_lobe_force_capacity_position"):
+        position_on_capacity_bbox = True
     if position_on_capacity_bbox:
         position_bbox = capacity_bbox
 
@@ -12466,6 +12592,23 @@ def plan_text_layout(text_data: dict) -> dict:
         layout_safe_area = {"safe_bbox": list(short_dark_anchor_safe), "reason": "short_dark_anchor_scale_preserved"}
         text_data["layout_safe_bbox"] = list(short_dark_anchor_safe)
         text_data["layout_safe_reason"] = "short_dark_anchor_scale_preserved"
+    expanded_dark_visual_lobe_safe = _maybe_expand_dark_visual_capacity_within_lobe(
+        text_data,
+        target_bbox,
+        safe_text_box,
+    )
+    if expanded_dark_visual_lobe_safe is not None:
+        safe_text_box = list(expanded_dark_visual_lobe_safe)
+        layout_safe_bbox = list(expanded_dark_visual_lobe_safe)
+        layout_safe_area = {"safe_bbox": list(expanded_dark_visual_lobe_safe), "reason": "dark_visual_capacity_expanded_within_lobe"}
+        capacity_bbox = list(expanded_dark_visual_lobe_safe)
+        position_bbox = list(expanded_dark_visual_lobe_safe)
+        cx1, cy1, cx2, cy2 = [int(v) for v in capacity_bbox]
+        capacity_width = max(1, cx2 - cx1)
+        capacity_height = max(1, cy2 - cy1)
+        computed_max_width = max(computed_max_width, max(4, int(round(capacity_width * 0.88))))
+        computed_max_height = max(computed_max_height, max(4, capacity_height - max(0, padding_y * 2)))
+        position_on_capacity_bbox = True
     final_safe_bbox = _layout_bbox(safe_text_box)
     if final_safe_bbox is not None:
         final_safe_w = max(4, int(final_safe_bbox[2]) - int(final_safe_bbox[0]))
@@ -13780,6 +13923,18 @@ def _apply_original_text_width_wrap_limit(text_data: dict, plan: dict, source_bb
     width_ratio = ORIGINAL_TEXT_SCALE_MAX_WIDTH_RATIO
     width_limit = max(8, int(round(source_w * width_ratio)))
     current = int(plan.get("max_width", width_limit) or width_limit)
+    if str(plan.get("layout_safe_reason") or "").strip().lower() == "dark_visual_capacity_expanded_within_lobe":
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["original_text_scale_width_limit_relaxed_for_visual_lobe"] = {
+                "reason": "dark_visual_capacity_expanded_within_lobe",
+                "source_bbox": [int(v) for v in source_bbox],
+                "source_width": int(source_w),
+                "max_width_kept": int(current),
+                "would_have_limited_to": int(width_limit),
+                "ratio": float(width_ratio),
+            }
+        return
     width_limit = min(width_limit, current)
     if current <= width_limit:
         return
@@ -13937,6 +14092,8 @@ def _uses_dark_visual_layout_contract(text_data: dict, plan: dict | None = None)
 
 def _expand_dark_visual_underfit_layout_capacity(text_data: dict, plan: dict) -> None:
     if not _uses_dark_visual_layout_contract(text_data, plan):
+        return
+    if str(plan.get("layout_safe_reason") or "").strip().lower() == "dark_visual_capacity_expanded_within_lobe":
         return
 
     source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
@@ -14260,6 +14417,34 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         and [int(v) for v in original_scale_bbox] == [int(v) for v in inpaint_contract[0]]
     ):
         inpaint_contract_source = inpaint_contract[1]
+    if inpaint_contract is not None:
+        expanded_dark_visual_lobe_safe = _maybe_expand_dark_visual_capacity_within_lobe(
+            text_data,
+            plan.get("target_bbox") or text_data.get("target_bbox") or text_data.get("bbox") or [0, 0, 1, 1],
+            plan.get("safe_text_box") or plan.get("layout_safe_bbox") or text_data.get("safe_text_box"),
+        )
+        if expanded_dark_visual_lobe_safe is not None:
+            plan["safe_text_box"] = list(expanded_dark_visual_lobe_safe)
+            plan["layout_safe_bbox"] = list(expanded_dark_visual_lobe_safe)
+            plan["layout_safe_reason"] = "dark_visual_capacity_expanded_within_lobe"
+            plan["capacity_bbox"] = list(expanded_dark_visual_lobe_safe)
+            plan["position_bbox"] = list(expanded_dark_visual_lobe_safe)
+            plan["_position_on_capacity_bbox"] = True
+            try:
+                search_cap = int(plan.get("_font_search_cap") or plan.get("target_size") or 0)
+            except Exception:
+                search_cap = 0
+            if search_cap > 0:
+                current_floor = int(plan.get("_font_search_floor", search_cap) or search_cap)
+                plan["_font_search_floor"] = min(current_floor, max(8, search_cap - 8))
+            capacity_width = max(1, int(expanded_dark_visual_lobe_safe[2]) - int(expanded_dark_visual_lobe_safe[0]))
+            capacity_height = max(1, int(expanded_dark_visual_lobe_safe[3]) - int(expanded_dark_visual_lobe_safe[1]))
+            plan["max_width"] = max(int(plan.get("max_width", 0) or 0), max(4, int(round(capacity_width * 0.88))))
+            padding_y = max(0, int(plan.get("padding_y", 0) or 0))
+            plan["max_height"] = max(
+                int(plan.get("max_height", 0) or 0),
+                max(4, capacity_height - max(0, padding_y * 2)),
+            )
     if original_scale_bbox is not None:
         _merge_qa_flags(text_data, ["original_text_scale_size_experiment"])
     x1, y1, x2, y2 = plan["target_bbox"]
@@ -14527,8 +14712,20 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     )
                 continue
             if contract_violations:
-                candidate["original_text_scale_underflow_violations"] = list(contract_violations)
-                _merge_qa_flags(text_data, ["original_text_scale_min_underflow"])
+                underflow_only = all("_lt_" in str(violation) for violation in contract_violations)
+                visual_fit_ok = bool(
+                    inpaint_contract_source
+                    and underflow_only
+                    and _typeset_inpaint_contract_visual_balloon_fit_ok(text_data, candidate, original_scale_bbox)
+                )
+                if visual_fit_ok:
+                    candidate["original_text_scale_soft_underflow_visual_fit_ok"] = {
+                        "violations": list(contract_violations),
+                        "reason": "contract_bbox_tight_but_visual_balloon_fit_ok",
+                    }
+                else:
+                    candidate["original_text_scale_underflow_violations"] = list(contract_violations)
+                    _merge_qa_flags(text_data, ["original_text_scale_min_underflow"])
         candidate["width_ratio"] = candidate["block_width"] / float(max(1, box_width))
         candidate["height_ratio"] = candidate["block_height"] / float(max(1, box_height))
         if original_scale_bbox is not None:
