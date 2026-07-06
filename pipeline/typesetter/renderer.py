@@ -8684,6 +8684,82 @@ def _maybe_expand_dark_visual_capacity_within_lobe(
     return expanded
 
 
+def _apply_existing_dark_connected_lobe_capacity_metric(text_data: dict, plan: dict) -> bool:
+    if not isinstance(text_data, dict) or not isinstance(plan, dict):
+        return False
+    if _is_translator_note_text_only_mask(text_data) or _is_white_layout_profile(text_data):
+        return False
+    flags = _qa_flags_set(text_data)
+    connected_evidence = bool(
+        "dark_connected_component_safe_partition" in flags
+        or "dark_bubble_connected_lobe_passthrough" in flags
+        or "dark_bubble_connected_lobes_promoted" in flags
+    )
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source and source != "image_dark_bubble_mask":
+        return False
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    expanded = metrics.get("dark_visual_capacity_expanded_within_lobe") if isinstance(metrics, dict) else None
+    if not isinstance(expanded, dict):
+        return False
+    safe = _layout_bbox(expanded.get("expanded_safe_text_box"))
+    visual = _layout_bbox(expanded.get("visual_lobe_bbox"))
+    if safe is None or visual is None:
+        return False
+    if _bbox_intersection_area(safe, visual) < int(_bbox_area_px(safe) * 0.92):
+        return False
+    current = _layout_bbox(plan.get("safe_text_box") or text_data.get("safe_text_box"))
+    if not connected_evidence and current is not None:
+        current_overlap = _bbox_intersection_area(current, visual) / float(max(1, _bbox_area_px(current)))
+        if current_overlap >= 0.80:
+            return False
+        connected_evidence = True
+    if not connected_evidence:
+        return False
+    if current is not None:
+        cur_cx, cur_cy = _bbox_center(current)
+        vx1, vy1, vx2, vy2 = [int(v) for v in visual]
+        current_center_in_visual = vx1 <= cur_cx <= vx2 and vy1 <= cur_cy <= vy2
+        current_overlap = _bbox_intersection_area(current, visual) / float(max(1, _bbox_area_px(current)))
+        safe_area = _bbox_area_px(safe)
+        current_area = _bbox_area_px(current)
+        if current_center_in_visual and current_overlap >= 0.92 and current_area >= int(safe_area * 0.82):
+            metrics["dark_connected_lobe_anchor_localized"] = {
+                "decision": "already_localized",
+                "reason": "expanded_visual_lobe_safe_already_active",
+                "old_anchor": [int(v) for v in current],
+                "new_anchor": [int(v) for v in current],
+                "visual_lobe_bbox": [int(v) for v in visual],
+                "safe_text_box": [int(v) for v in current],
+                "sibling_lobe_used": False,
+                "centered_in_own_lobe": True,
+            }
+            _merge_qa_flags(text_data, ["dark_connected_lobe_anchor_localized"])
+            return False
+    plan["safe_text_box"] = list(safe)
+    plan["layout_safe_bbox"] = list(safe)
+    plan["layout_safe_reason"] = "dark_visual_capacity_expanded_within_lobe"
+    plan["capacity_bbox"] = list(safe)
+    plan["position_bbox"] = list(safe)
+    plan["_position_on_capacity_bbox"] = True
+    text_data["safe_text_box"] = list(safe)
+    text_data["_debug_safe_text_box"] = list(safe)
+    text_data["layout_safe_bbox"] = list(safe)
+    text_data["layout_safe_reason"] = "dark_visual_capacity_expanded_within_lobe"
+    metrics["dark_connected_lobe_anchor_localized"] = {
+        "decision": "applied",
+        "reason": "expanded_visual_lobe_safe_promoted_over_stale_connected_anchor",
+        "old_anchor": [int(v) for v in current] if current is not None else None,
+        "new_anchor": [int(v) for v in safe],
+        "visual_lobe_bbox": [int(v) for v in visual],
+        "safe_text_box": [int(v) for v in safe],
+        "sibling_lobe_used": False,
+        "centered_in_own_lobe": True,
+    }
+    _merge_qa_flags(text_data, ["dark_connected_lobe_anchor_localized", "safe_text_box_recomputed"])
+    return True
+
+
 def _dark_oval_anchor_bbox(text_data: dict) -> list[int] | None:
     metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
     dark_bubble_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
@@ -14392,6 +14468,25 @@ def _recover_dark_bubble_glow_capacity_from_image(
         or "partial_dark_bubble_lobe_reocr" in flags
     ):
         return None
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    if "dark_connected_component_safe_partition" in flags:
+        dark_visual_capacity = metrics.get("dark_visual_capacity_expanded_within_lobe") if isinstance(metrics, dict) else None
+        image_dark_mask = metrics.get("image_dark_bubble_mask") if isinstance(metrics, dict) else None
+        visual_lobe = (
+            _layout_bbox(dark_visual_capacity.get("visual_lobe_bbox"))
+            if isinstance(dark_visual_capacity, dict)
+            else None
+        )
+        mask_bbox = _layout_bbox(image_dark_mask.get("mask_bbox")) if isinstance(image_dark_mask, dict) else None
+        if visual_lobe is not None or mask_bbox is not None:
+            if isinstance(metrics, dict):
+                metrics["dark_bubble_glow_capacity_rejected_connected_lobe"] = {
+                    "reason": "connected_lobe_visual_partition_already_available",
+                    "visual_lobe_bbox": list(visual_lobe) if visual_lobe is not None else None,
+                    "mask_bbox": list(mask_bbox) if mask_bbox is not None else None,
+                }
+            _merge_qa_flags(text_data, ["dark_bubble_glow_capacity_rejected_connected_lobe"])
+            return None
     profile = str(
         text_data.get("layout_profile")
         or text_data.get("block_profile")
@@ -14614,6 +14709,15 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 int(plan.get("max_height", 0) or 0),
                 max(4, capacity_height - max(0, padding_y * 2)),
             )
+    if _apply_existing_dark_connected_lobe_capacity_metric(text_data, plan):
+        capacity_width = max(1, int(plan["safe_text_box"][2]) - int(plan["safe_text_box"][0]))
+        capacity_height = max(1, int(plan["safe_text_box"][3]) - int(plan["safe_text_box"][1]))
+        plan["max_width"] = max(int(plan.get("max_width", 0) or 0), max(4, int(round(capacity_width * 0.88))))
+        padding_y = max(0, int(plan.get("padding_y", 0) or 0))
+        plan["max_height"] = max(
+            int(plan.get("max_height", 0) or 0),
+            max(4, capacity_height - max(0, padding_y * 2)),
+        )
     if original_scale_bbox is not None:
         _merge_qa_flags(text_data, ["original_text_scale_size_experiment"])
     x1, y1, x2, y2 = plan["target_bbox"]
@@ -16576,6 +16680,7 @@ def _render_single_text_block_unrotated(
         return
 
     _apply_recovered_dark_bubble_glow_capacity(img, text_data, plan)
+    _apply_existing_dark_connected_lobe_capacity_metric(text_data, plan)
 
     dark_visible_target = _dark_bubble_visible_bbox_from_overbroad_target(
         text_data,

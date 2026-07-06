@@ -9319,6 +9319,130 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertLessEqual(len(resolved["lines"]), 2)
         self.assertIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
 
+    def test_dark_connected_lobe_anchor_promotes_existing_visual_lobe_capacity(self):
+        text_data = {
+            "translated": "Eu sou chamado de 'sistema'",
+            "original": "I am called 'System'",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "source_bbox": [484, 342, 722, 384],
+            "text_pixel_bbox": [485, 345, 717, 379],
+            "target_bbox": [485, 345, 717, 379],
+            "safe_text_box": [439, 188, 536, 519],
+            "balloon_bbox": [476, 175, 775, 459],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "short_dark_anchor_center_preserved",
+                "dark_visual_capacity_expanded_within_lobe",
+                "dark_connected_component_safe_partition",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [484, 342, 722, 384]},
+                "image_dark_bubble_mask": {
+                    "source": "image_dark_bubble_mask",
+                    "shape_kind": "ellipse",
+                    "mask_bbox": [476, 175, 775, 459],
+                    "anchor_bbox": [485, 345, 717, 379],
+                },
+                "dark_visual_capacity_expanded_within_lobe": {
+                    "reason": "contract_bbox_narrower_than_visual_lobe",
+                    "contract_bbox": [484, 342, 722, 384],
+                    "visual_lobe_bbox": [476, 175, 775, 459],
+                    "visual_lobe_bbox_source": "qa_metrics.image_dark_bubble_mask.mask_bbox",
+                    "previous_safe_text_box": [439, 188, 536, 519],
+                    "expanded_safe_text_box": [500, 259, 751, 449],
+                    "previous_max_width": 97,
+                    "expanded_max_width": 251,
+                    "center_preserved": False,
+                    "target_bbox": [476, 175, 775, 459],
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 29,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [485, 345, 717, 379],
+            "safe_text_box": [439, 188, 536, 519],
+            "layout_safe_bbox": [439, 188, 536, 519],
+            "layout_safe_reason": "short_dark_anchor_scale_preserved",
+            "position_bbox": [439, 188, 536, 519],
+            "capacity_bbox": [439, 188, 536, 519],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 29,
+            "_font_search_cap": 29,
+            "_font_search_floor": 16,
+            "max_width": 85,
+            "max_height": 300,
+            "padding_y": 8,
+            "line_spacing_ratio": 0.08,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "outline_px": 1,
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertGreaterEqual(plan["safe_text_box"][0], 476)
+        self.assertLessEqual(plan["safe_text_box"][2], 775)
+        self.assertGreaterEqual(plan["position_bbox"][0], 476)
+        self.assertLessEqual(plan["position_bbox"][2], 775)
+        self.assertGreaterEqual(resolved["block_bbox"][0], 476)
+        self.assertLessEqual(resolved["block_bbox"][2], 775)
+        self.assertIn("dark_connected_lobe_anchor_localized", text_data.get("qa_flags") or [])
+        metric = text_data["qa_metrics"]["dark_connected_lobe_anchor_localized"]
+        self.assertIn(metric["decision"], {"applied", "already_localized"})
+        self.assertFalse(metric["sibling_lobe_used"])
+
+    def test_dark_connected_lobe_skips_glow_capacity_recovery_when_visual_partition_exists(self):
+        text_data = {
+            "translated": "Eu sou chamado de 'sistema'",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "target_bbox": [476, 175, 775, 459],
+            "text_pixel_bbox": [485, 345, 717, 379],
+            "bbox": [485, 345, 717, 379],
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "dark_connected_component_safe_partition",
+                "dark_visual_capacity_expanded_within_lobe",
+            ],
+            "qa_metrics": {
+                "image_dark_bubble_mask": {"mask_bbox": [476, 175, 775, 459]},
+                "dark_visual_capacity_expanded_within_lobe": {
+                    "visual_lobe_bbox": [476, 175, 775, 459],
+                    "expanded_safe_text_box": [500, 259, 751, 449],
+                },
+            },
+        }
+        plan = {
+            "target_bbox": [476, 175, 775, 459],
+            "safe_text_box": [500, 259, 751, 449],
+            "layout_safe_bbox": [500, 259, 751, 449],
+            "layout_safe_reason": "dark_visual_capacity_expanded_within_lobe",
+        }
+        img = Image.new("RGB", (800, 600), (0, 0, 0))
+
+        recovered = renderer_mod._recover_dark_bubble_glow_capacity_from_image(img, text_data, plan)
+
+        self.assertIsNone(recovered)
+        self.assertIn("dark_bubble_glow_capacity_rejected_connected_lobe", text_data.get("qa_flags") or [])
+        self.assertNotIn("dark_bubble_glow_capacity_recovered", text_data.get("qa_flags") or [])
+
     def test_dark_single_oval_short_text_prefers_larger_visual_lobe_capacity(self):
         text_data = {
             "translated": "Este e o subespaco do sistema.",
