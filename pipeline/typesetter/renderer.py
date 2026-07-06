@@ -13155,6 +13155,85 @@ def _should_prefer_largest_dark_panel_candidate(text_data: dict, plan: dict, wra
     return True
 
 
+def _should_prefer_larger_dark_single_oval_visual_candidate(
+    text_data: dict,
+    plan: dict,
+    candidate: dict,
+    wrapped: list[str],
+) -> bool:
+    """Prefer the largest safe candidate when a single dark oval has proven room.
+
+    The original-text scale contract is still the anchor/scale reference, but
+    for short text in a single dark oval the expanded visual lobe is the real
+    capacity. Without this override the area score can keep a tiny one-line
+    render just because the OCR text mask was narrow.
+    """
+    if not isinstance(text_data, dict) or not isinstance(plan, dict) or not isinstance(candidate, dict):
+        return False
+    if text_data.get("_is_lobe_subregion") or text_data.get("connected_lobe_bboxes") or text_data.get("connected_position_bboxes"):
+        return False
+    flags = _qa_flags_set(text_data)
+    if flags & {
+        "dark_bubble_connected_lobes_promoted",
+        "dark_bubble_connected_lobe_passthrough",
+        "dark_bubble_lobe_mask_bbox_preferred",
+        "partial_dark_bubble_lobe_reocr",
+    }:
+        return False
+    ignored_rejected_single_oval_flags = {
+        "dark_connected_compact_text_bbox_rejected_undercoverage",
+    }
+    for flag in flags:
+        if flag == "dark_visual_capacity_expanded_within_lobe":
+            continue
+        if flag in ignored_rejected_single_oval_flags:
+            continue
+        if "connected" in flag or "lobe" in flag or "off_anchor" in flag:
+            return False
+    if _is_translator_note_text_only_mask(text_data):
+        return False
+    content_class = str(text_data.get("content_class") or "").strip().lower()
+    if content_class in {"sfx", "scanlation_credit", "promotional", "non_story"}:
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    profile = str(
+        text_data.get("layout_profile")
+        or text_data.get("block_profile")
+        or plan.get("layout_profile")
+        or ""
+    ).strip().lower()
+    balloon_type = str(text_data.get("balloon_type") or "").strip().lower()
+    if profile == "white_balloon" or balloon_type == "white" or source == "image_white_bubble_mask":
+        return False
+    if str(plan.get("layout_safe_reason") or "").strip().lower() != "dark_visual_capacity_expanded_within_lobe":
+        return False
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    expanded = metrics.get("dark_visual_capacity_expanded_within_lobe") if isinstance(metrics, dict) else None
+    if not isinstance(expanded, dict):
+        return False
+    visual = _layout_bbox(expanded.get("visual_lobe_bbox"))
+    safe = _layout_bbox(plan.get("safe_text_box") or expanded.get("expanded_safe_text_box"))
+    render_bbox = _layout_bbox(candidate.get("block_bbox"))
+    if visual is None or safe is None or render_bbox is None:
+        return False
+    if _bbox_intersection_area(render_bbox, visual) < _bbox_area_px(render_bbox):
+        return False
+    if _bbox_intersection_area(render_bbox, safe) < _bbox_area_px(render_bbox):
+        return False
+    visual_w = max(1, int(visual[2]) - int(visual[0]))
+    visual_h = max(1, int(visual[3]) - int(visual[1]))
+    render_w = max(1, int(render_bbox[2]) - int(render_bbox[0]))
+    render_h = max(1, int(render_bbox[3]) - int(render_bbox[1]))
+    if render_w > int(visual_w * 0.74) or render_h > int(visual_h * 0.30):
+        return False
+    text_len = len(re.sub(r"\s+", "", str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or "")))
+    if text_len <= 0 or text_len > 42:
+        return False
+    if len(wrapped) > 2:
+        return False
+    return True
+
+
 def _persist_fit_attempts(text_data: dict, plan: dict, text: str, resolved: dict, initial_font_px: int) -> None:
     min_font_px = _minimum_legible_font_px(text_data, plan)
     final_attempt = _resolved_fit_attempt(resolved, plan)
@@ -14776,6 +14855,13 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 blocking_violations.extend(
                     _typeset_inpaint_contract_blocking_violations(candidate, original_scale_bbox, text_data)
                 )
+            if (
+                blocking_violations
+                and _should_prefer_larger_dark_single_oval_visual_candidate(text_data, plan, candidate, wrapped)
+            ):
+                candidate["dark_single_oval_visual_capacity_contract_relaxed"] = list(blocking_violations)
+                contract_violations = []
+                blocking_violations = []
             if blocking_violations:
                 if trace_candidates:
                     _append_render_debug_item(
@@ -14823,6 +14909,9 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             candidate["score"] = original_score - _wrapped_lines_orphan_penalty(wrapped)
             candidate["original_text_scale_metrics"] = original_metrics
             candidate["original_text_scale_preferred"] = True
+            if _should_prefer_larger_dark_single_oval_visual_candidate(text_data, plan, candidate, wrapped):
+                candidate["score"] = 11000.0 + (attempt_size * 18.0) - _wrapped_lines_orphan_penalty(wrapped)
+                candidate["dark_single_oval_visual_capacity_size_preferred"] = True
             if candidate.get("original_text_scale_underflow_violations"):
                 candidate["score"] -= 100000.0
         elif plan.get("_prefer_original_font_size") or plan.get("_follow_original_ocr_size"):
@@ -14889,6 +14978,37 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             best_candidate = candidate
 
     if best_candidate is not None:
+        if best_candidate.get("dark_single_oval_visual_capacity_size_preferred"):
+            metrics = text_data.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                expanded = metrics.get("dark_visual_capacity_expanded_within_lobe")
+                expanded_safe = None
+                visual_lobe = None
+                previous_safe = None
+                if isinstance(expanded, dict):
+                    expanded_safe = _layout_bbox(expanded.get("expanded_safe_text_box"))
+                    visual_lobe = _layout_bbox(expanded.get("visual_lobe_bbox"))
+                    previous_safe = _layout_bbox(expanded.get("previous_safe_text_box"))
+                metrics["dark_single_oval_capacity_expanded"] = {
+                    "decision": "applied",
+                    "reason": "short_text_underfit_visual_lobe_has_room",
+                    "old_font_size": int(plan.get("target_size", 0) or 0),
+                    "new_font_size": int(best_candidate.get("font_size", 0) or 0),
+                    "old_safe_text_box": [int(v) for v in previous_safe] if previous_safe is not None else None,
+                    "expanded_safe_text_box": [int(v) for v in expanded_safe] if expanded_safe is not None else list(plan.get("safe_text_box") or []),
+                    "visual_lobe_bbox": [int(v) for v in visual_lobe] if visual_lobe is not None else None,
+                    "render_bbox": [int(round(v)) for v in best_candidate.get("block_bbox", [])],
+                    "containment": float(metrics.get("render_balloon_containment", 1.0) or 1.0),
+                    "center_preserved": bool(
+                        expanded_safe is None
+                        or abs(
+                            ((float(best_candidate["block_bbox"][0]) + float(best_candidate["block_bbox"][2])) / 2.0)
+                            - ((float(expanded_safe[0]) + float(expanded_safe[2])) / 2.0)
+                        )
+                        <= max(24.0, (float(expanded_safe[2]) - float(expanded_safe[0])) * 0.18)
+                    ),
+                }
+            _merge_qa_flags(text_data, ["dark_single_oval_capacity_expanded"])
         if original_scale_bbox is not None:
             soft_violations = [
                 violation
