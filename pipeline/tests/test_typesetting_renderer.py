@@ -9352,6 +9352,103 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertNotIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
         self.assertNotEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
 
+    def test_dark_connected_lobe_safe_overhang_uses_visual_lobe_bounds(self):
+        text_data = {
+            "id": "page_002_band_026_left_lobe",
+            "translated": "VOCE ERA LEAL AOS OUTROS, MAS PARA ELES ESTAVA SENDO INTROMETIDO.",
+            "content_class": "dialogue",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "source_bbox": [129, 89, 428, 217],
+            "text_pixel_bbox": [132, 92, 426, 215],
+            "target_bbox": [0, 0, 413, 307],
+            "balloon_bbox": [0, 0, 558, 307],
+            "render_bbox": [157, 59, 400, 247],
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+                "dark_bubble_lobe_mask_bbox_preferred",
+            ],
+            "qa_metrics": {
+                "contract_bbox_tight_but_visual_balloon_fit_ok": {
+                    "source_bbox": [129, 89, 428, 217],
+                    "block_bbox": [157, 59, 400, 247],
+                    "visual_bbox": [0, 0, 413, 307],
+                    "visual_bbox_source": "bubble_mask_bbox",
+                },
+                "typeset_contract_fit": {
+                    "source_bbox": [129, 89, 428, 217],
+                    "block_bbox": [157, 59, 400, 247],
+                },
+            },
+        }
+        plan = {
+            "target_bbox": [0, 0, 413, 307],
+            "safe_text_box": [29, 21, 384, 286],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+        }
+
+        bounds = renderer_mod._dark_visual_lobe_render_bounds_for_safe_overhang(text_data, plan)
+        self.assertEqual(bounds, [0, 0, 413, 307])
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertNotIn("TEXT_CLIPPED", text_data.get("qa_flags") or [])
+        self.assertEqual(
+            text_data["qa_metrics"]["render_safe_overhang_allowed_by_visual_lobe"]["visual_lobe_bbox"],
+            [0, 0, 413, 307],
+        )
+
+    def test_dark_connected_lobe_safe_overhang_rejects_sibling_area(self):
+        text_data = {
+            "id": "dark_lobe_spills_to_sibling",
+            "translated": "VOCE ERA LEAL AOS OUTROS, MAS PARA ELES ESTAVA SENDO INTROMETIDO.",
+            "content_class": "dialogue",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "source_bbox": [129, 89, 428, 217],
+            "text_pixel_bbox": [132, 92, 426, 215],
+            "target_bbox": [0, 0, 413, 307],
+            "balloon_bbox": [0, 0, 558, 307],
+            "render_bbox": [157, 59, 430, 247],
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+                "dark_bubble_lobe_mask_bbox_preferred",
+            ],
+            "qa_metrics": {
+                "contract_bbox_tight_but_visual_balloon_fit_ok": {
+                    "source_bbox": [129, 89, 428, 217],
+                    "block_bbox": [157, 59, 430, 247],
+                    "visual_bbox": [0, 0, 558, 307],
+                    "visual_bbox_source": "bubble_mask_bbox",
+                },
+                "typeset_contract_fit": {
+                    "source_bbox": [129, 89, 428, 217],
+                    "block_bbox": [157, 59, 430, 247],
+                },
+            },
+        }
+        plan = {
+            "target_bbox": [0, 0, 413, 307],
+            "safe_text_box": [29, 21, 384, 286],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+        }
+
+        bounds = renderer_mod._dark_visual_lobe_render_bounds_for_safe_overhang(text_data, plan)
+        self.assertEqual(bounds, [0, 0, 413, 307])
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertIn("TEXT_CLIPPED", text_data.get("qa_flags") or [])
+        self.assertIn("TEXT_OVERFLOW", text_data.get("qa_flags") or [])
+
     def test_dark_visual_capacity_does_not_expand_connected_lobe_contracts(self):
         text_data = {
             "translated": "Sou um sistema que orienta o exercito do Rei Yeomra.",
