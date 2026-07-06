@@ -9319,6 +9319,108 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertLessEqual(len(resolved["lines"]), 2)
         self.assertIn("dark_visual_capacity_expanded_within_lobe", text_data.get("qa_flags") or [])
 
+    def test_dark_single_oval_short_text_prefers_larger_visual_lobe_capacity(self):
+        text_data = {
+            "translated": "Este e o subespaco do sistema.",
+            "original": "This is the system's subspace.",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [519, 3859, 690, 3982],
+            "source_bbox": [519, 3859, 690, 3982],
+            "text_pixel_bbox": [522, 3859, 687, 3974],
+            "target_bbox": [151, 3509, 773, 4048],
+            "safe_text_box": [522, 3855, 691, 3974],
+            "balloon_bbox": [0, 3224, 800, 4169],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+                "dark_connected_compact_text_bbox_rejected_undercoverage",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [519, 3856, 690, 3979]},
+                "image_dark_bubble_mask": {"mask_bbox": [0, 3224, 800, 4169]},
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 22,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
+        self.assertGreater(resolved["font_size"], 22)
+        self.assertLessEqual(resolved["block_bbox"][2], 736)
+        self.assertGreaterEqual(resolved["block_bbox"][0], 128)
+        self.assertIn("dark_single_oval_capacity_expanded", text_data.get("qa_flags") or [])
+        metric = text_data["qa_metrics"]["dark_single_oval_capacity_expanded"]
+        self.assertEqual(metric["decision"], "applied")
+        self.assertEqual(metric["reason"], "short_text_underfit_visual_lobe_has_room")
+        self.assertEqual(metric["visual_lobe_bbox"], [0, 3224, 800, 4169])
+        self.assertGreater(metric["new_font_size"], metric["old_font_size"])
+
+    def test_dark_single_oval_capacity_does_not_affect_connected_lobe_evidence(self):
+        text_data = {
+            "translated": "Voce nao pode ficar no subespaco por muito tempo.",
+            "original": "You can't stay in the subspace for long.",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [160, 59883, 355, 60019],
+            "source_bbox": [160, 59883, 355, 60019],
+            "text_pixel_bbox": [160, 59883, 355, 60019],
+            "target_bbox": [163, 59886, 351, 60016],
+            "safe_text_box": [190, 59901, 325, 60001],
+            "balloon_bbox": [40, 59735, 561, 60100],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+                "dark_bubble_lobe_clip_rejected_undercovered_text",
+                "dark_bubble_glow_capacity_rejected_off_anchor",
+                "dark_connected_component_safe_partition",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [160, 59883, 355, 60019]},
+                "image_dark_bubble_mask": {"mask_bbox": [40, 59735, 561, 60100]},
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 27,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+
+        plan = plan_text_layout(text_data)
+        _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["layout_safe_reason"], "dark_visual_capacity_expanded_within_lobe")
+        self.assertNotIn("dark_single_oval_capacity_expanded", text_data.get("qa_flags") or [])
+        self.assertNotIn("dark_single_oval_capacity_expanded", text_data.get("qa_metrics") or {})
+
     def test_dark_visual_capacity_does_not_expand_without_reliable_visual_lobe(self):
         text_data = {
             "translated": "A recompensa da missão é...",
