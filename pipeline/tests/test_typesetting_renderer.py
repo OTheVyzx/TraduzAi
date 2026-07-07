@@ -10575,6 +10575,70 @@ class TypesettingRendererTests(unittest.TestCase):
                 self.assertLessEqual(resolved["block_width"], 144)
                 self.assertLessEqual(resolved["block_height"], 64)
 
+    def test_edge_clipped_dark_reocr_anchors_tail_to_negative_evidence(self):
+        img = Image.new("RGB", (800, 739), (0, 0, 0))
+        text_data = {
+            "translated": "Inothattm ig yeomra? isso mesmo!",
+            "original": "INOTHATTM IG YEOMRA? That's right!",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "bbox": [451, 2, 704, 491],
+            "source_bbox": [451, 2, 704, 491],
+            "text_pixel_bbox": [451, 2, 704, 491],
+            "target_bbox": [413, 0, 800, 739],
+            "safe_text_box": [451, 2, 704, 491],
+            "balloon_bbox": [413, 0, 800, 739],
+            "bubble_mask_bbox": [349, 0, 694, 75],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "candidate_crop_direct_paddle_reocr",
+                "dark_bubble_oval_reocr",
+                "visual_text_only_inpaint_contract",
+                "band_edge_clipped_text_mask",
+                "bubble_clip_preserved_raw_text",
+                "text_contract_direct_fill",
+            ],
+            "qa_metrics": {
+                "negative_evidence": [
+                    {"source": "negative_detect_ocr", "bbox": [576, 457, 701, 491], "text": "That's right!"}
+                ],
+                "dark_text_contract_fill_mask": {"bbox": [441, 0, 705, 494], "source": "raw_glyph_mask"},
+            },
+            "style_origin": "auto_dark_panel_glow",
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 44,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 2,
+                "force_upper": True,
+                "alinhamento": "center",
+            },
+        }
+        text_data["style"] = dict(text_data["estilo"])
+
+        render_text_block(img, text_data)
+
+        self.assertIn("edge_clipped_dark_reocr_tail_anchored", text_data.get("qa_flags") or [])
+        self.assertNotIn("false_dark_white_style_neutralized", text_data.get("qa_flags") or [])
+        self.assertEqual(text_data.get("translated"), "isso mesmo!")
+        self.assertEqual(text_data.get("original"), "That's right!")
+        self.assertEqual(text_data.get("text_pixel_bbox"), [576, 457, 701, 491])
+        self.assertEqual(text_data.get("bubble_mask_source"), "image_dark_bubble_mask")
+        self.assertEqual(text_data.get("estilo", {}).get("cor"), "#FFFFFF")
+        self.assertEqual(text_data["qa_metrics"]["dark_text_contract_fill_mask"]["bbox"], [576, 457, 701, 491])
+        render_bbox = text_data.get("render_bbox")
+        self.assertIsNotNone(render_bbox)
+        self.assertGreaterEqual(render_bbox[0], 480)
+        self.assertGreaterEqual(render_bbox[1], 410)
+        self.assertLessEqual(render_bbox[2], 800)
+        self.assertLessEqual(render_bbox[3], 560)
+
     def test_original_text_scale_contract_skips_sfx_and_rejects_stale_replay(self):
         sfx = {
             "translated": "SFX",
