@@ -13240,15 +13240,18 @@ def _should_prefer_larger_dark_single_oval_visual_candidate(
     """Prefer the largest safe candidate when a single dark oval has proven room.
 
     The original-text scale contract is still the anchor/scale reference, but
-    for short text in a single dark oval the expanded visual lobe is the real
-    capacity. Without this override the area score can keep a tiny one-line
-    render just because the OCR text mask was narrow.
+    for text in a single dark oval the expanded visual lobe is the real
+    capacity. Without this override the area score can keep a narrow render
+    just because the OCR text mask was narrow.
     """
     if not isinstance(text_data, dict) or not isinstance(plan, dict) or not isinstance(candidate, dict):
         return False
     if text_data.get("_is_lobe_subregion") or text_data.get("connected_lobe_bboxes") or text_data.get("connected_position_bboxes"):
         return False
     flags = _qa_flags_set(text_data)
+    text_len = len(re.sub(r"\s+", "", str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or "")))
+    if text_len <= 0:
+        return False
     if flags & {
         "dark_bubble_connected_lobes_promoted",
         "dark_bubble_connected_lobe_passthrough",
@@ -13259,10 +13262,16 @@ def _should_prefer_larger_dark_single_oval_visual_candidate(
     ignored_rejected_single_oval_flags = {
         "dark_connected_compact_text_bbox_rejected_undercoverage",
     }
+    ignored_long_text_single_oval_flags = {
+        "connected_layout_disabled_rejected_bubble_mask",
+        "connected_lobe_boxes_missing_source_anchor_fallback",
+    }
     for flag in flags:
         if flag == "dark_visual_capacity_expanded_within_lobe":
             continue
         if flag in ignored_rejected_single_oval_flags:
+            continue
+        if flag in ignored_long_text_single_oval_flags and text_len > 42:
             continue
         if "connected" in flag or "lobe" in flag or "off_anchor" in flag:
             return False
@@ -13302,11 +13311,43 @@ def _should_prefer_larger_dark_single_oval_visual_candidate(
     render_h = max(1, int(render_bbox[3]) - int(render_bbox[1]))
     if render_w > int(visual_w * 0.74) or render_h > int(visual_h * 0.30):
         return False
-    text_len = len(re.sub(r"\s+", "", str(text_data.get("translated") or text_data.get("traduzido") or text_data.get("text") or "")))
-    if text_len <= 0 or text_len > 42:
+    if text_len <= 42:
+        if len(wrapped) > 2:
+            return False
+        candidate["dark_single_oval_visual_capacity_reason"] = "short_text_underfit_visual_lobe_has_room"
+        return True
+    if text_len > 96:
         return False
-    if len(wrapped) > 2:
+    if len(wrapped) < 2 or len(wrapped) > 4:
         return False
+    source_bbox = _layout_bbox(
+        text_data.get("source_bbox")
+        or text_data.get("text_pixel_bbox")
+        or text_data.get("bbox")
+    )
+    if source_bbox is None:
+        return False
+    source_w = max(1, int(source_bbox[2]) - int(source_bbox[0]))
+    source_h = max(1, int(source_bbox[3]) - int(source_bbox[1]))
+    safe_w = max(1, int(safe[2]) - int(safe[0]))
+    safe_h = max(1, int(safe[3]) - int(safe[1]))
+    if safe_h > int(round(source_h * 1.08)):
+        return False
+    if safe_w > int(round(source_w * 1.34)):
+        return False
+    if visual_h < int(safe_h * 2.35):
+        return False
+    if safe_w < int(source_w * 1.16):
+        return False
+    if render_w < int(source_w * 0.96):
+        return False
+    if render_w < int(safe_w * 0.68):
+        return False
+    source_cx, _source_cy = _bbox_center(source_bbox)
+    render_cx, _render_cy = _bbox_center(render_bbox)
+    if abs(float(render_cx) - float(source_cx)) > max(22.0, float(safe_w) * 0.12):
+        return False
+    candidate["dark_single_oval_visual_capacity_reason"] = "long_text_visual_lobe_width_has_room"
     return True
 
 
@@ -15093,9 +15134,13 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     expanded_safe = _layout_bbox(expanded.get("expanded_safe_text_box"))
                     visual_lobe = _layout_bbox(expanded.get("visual_lobe_bbox"))
                     previous_safe = _layout_bbox(expanded.get("previous_safe_text_box"))
+                capacity_reason = str(
+                    best_candidate.get("dark_single_oval_visual_capacity_reason")
+                    or "short_text_underfit_visual_lobe_has_room"
+                )
                 metrics["dark_single_oval_capacity_expanded"] = {
                     "decision": "applied",
-                    "reason": "short_text_underfit_visual_lobe_has_room",
+                    "reason": capacity_reason,
                     "old_font_size": int(plan.get("target_size", 0) or 0),
                     "new_font_size": int(best_candidate.get("font_size", 0) or 0),
                     "old_safe_text_box": [int(v) for v in previous_safe] if previous_safe is not None else None,
