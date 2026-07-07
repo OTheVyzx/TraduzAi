@@ -7132,6 +7132,185 @@ def _bbox_area_px(bbox: list[int]) -> int:
     return max(1, (int(bbox[2]) - int(bbox[0])) * (int(bbox[3]) - int(bbox[1])))
 
 
+def _translated_tail_after_edge_clipped_prefix(translated: str) -> str | None:
+    text = _normalize_render_text(translated)
+    if not text:
+        return None
+    split_at = max(text.rfind("?"), text.rfind("？"))
+    if split_at < 0:
+        return None
+    tail = _normalize_render_text(text[split_at + 1 :])
+    if not tail:
+        return None
+    compact_tail = re.sub(r"\s+", "", tail)
+    compact_text = re.sub(r"\s+", "", text)
+    if len(compact_tail) < 4 or len(compact_tail) > 80:
+        return None
+    if len(compact_tail) >= int(max(1, len(compact_text)) * 0.75):
+        return None
+    return tail
+
+
+def _apply_edge_clipped_dark_reocr_tail_anchor(text_data: dict, img: Image.Image | None = None) -> bool:
+    """Route a mixed edge-clipped dark reOCR layer back to its real dark text.
+
+    Candidate crop reOCR can sometimes merge a clipped white-balloon fragment
+    at the top edge of a band with a valid dark-bubble line lower in the band.
+    In those cases the inpaint is already clean, but rendering the merged OCR
+    text puts garbage over art.  When the layer has separate negative/dark text
+    evidence, anchor rendering to that evidence and keep only the translated
+    tail that belongs to it.
+    """
+
+    if not isinstance(text_data, dict) or str(text_data.get("content_class") or "").strip().lower() == "sfx":
+        return False
+    if _is_translator_note_layer(text_data):
+        return False
+    flags = _qa_flags_set(text_data)
+    required = {"candidate_crop_direct_paddle_reocr", "dark_bubble_oval_reocr"}
+    if not required.issubset(flags):
+        return False
+    if "band_edge_clipped_text_mask" not in flags and "bubble_clip_preserved_raw_text" not in flags:
+        return False
+    metrics = text_data.get("qa_metrics")
+    if not isinstance(metrics, dict):
+        return False
+    negative_items = metrics.get("negative_evidence")
+    if not isinstance(negative_items, list) or not negative_items:
+        return False
+    source_bbox = _layout_bbox(text_data.get("source_bbox") or text_data.get("text_pixel_bbox") or text_data.get("bbox"))
+    if source_bbox is None:
+        return False
+    sx1, sy1, sx2, sy2 = [int(v) for v in source_bbox]
+    source_w = max(1, sx2 - sx1)
+    source_h = max(1, sy2 - sy1)
+    if sy1 > 8:
+        return False
+
+    best_evidence: tuple[list[int], str] | None = None
+    best_score = -1
+    for item in negative_items:
+        if not isinstance(item, dict):
+            continue
+        evidence_bbox = _layout_bbox(item.get("bbox"))
+        evidence_text = _normalize_render_text(str(item.get("text") or ""))
+        if evidence_bbox is None or not evidence_text:
+            continue
+        ex1, ey1, ex2, ey2 = [int(v) for v in evidence_bbox]
+        ev_w = max(1, ex2 - ex1)
+        ev_h = max(1, ey2 - ey1)
+        if _bbox_intersection_area(source_bbox, evidence_bbox) <= 0:
+            continue
+        if ey1 < sy1 + int(source_h * 0.55):
+            continue
+        if _bbox_area_px(evidence_bbox) >= int(_bbox_area_px(source_bbox) * 0.45):
+            continue
+        text_score = 30 if re.search(r"[A-Za-z]", evidence_text) else 0
+        punctuation_score = 20 if re.search(r"[.!?]$", evidence_text) else 0
+        score = int(ey1 - sy1) + ev_w + ev_h + text_score + punctuation_score
+        if score > best_score:
+            best_score = score
+            best_evidence = (evidence_bbox, evidence_text)
+    if best_evidence is None:
+        return False
+
+    evidence_bbox, evidence_text = best_evidence
+    translated_tail = _translated_tail_after_edge_clipped_prefix(
+        str(text_data.get("translated") or text_data.get("traduzido") or "")
+    )
+    if translated_tail is None:
+        return False
+    original_text = str(text_data.get("original") or text_data.get("text") or "")
+    if evidence_text.lower() not in original_text.lower() and "bubble_clip_preserved_raw_text" not in flags:
+        return False
+
+    ex1, ey1, ex2, ey2 = [int(v) for v in evidence_bbox]
+    ev_w = max(1, ex2 - ex1)
+    ev_h = max(1, ey2 - ey1)
+    image_w = int(getattr(img, "width", 0) or text_data.get("page_width") or max(sx2, ex2))
+    image_h = int(getattr(img, "height", 0) or text_data.get("page_height") or max(sy2, ey2))
+    pad_x = max(28, int(round(ev_w * 0.75)))
+    pad_y = max(20, int(round(ev_h * 1.25)))
+    target = [
+        max(0, ex1 - pad_x),
+        max(0, ey1 - pad_y),
+        min(image_w, ex2 + pad_x),
+        min(image_h, ey2 + pad_y),
+    ]
+    if target[2] <= target[0] or target[3] <= target[1]:
+        return False
+    safe = _inset_bbox_for_text(target, ratio=0.10, min_px=8)
+
+    metrics["edge_clipped_dark_reocr_tail_anchor"] = {
+        "source_bbox_before": list(source_bbox),
+        "evidence_bbox": list(evidence_bbox),
+        "target_bbox": list(target),
+        "safe_text_box": list(safe),
+        "original_before": original_text,
+        "translated_before": str(text_data.get("translated") or text_data.get("traduzido") or ""),
+        "evidence_text": evidence_text,
+        "translated_tail": translated_tail,
+    }
+    contract = metrics.get("dark_text_contract_fill_mask")
+    if isinstance(contract, dict):
+        contract["bbox_before_edge_clipped_tail_anchor"] = list(_layout_bbox(contract.get("bbox")) or [])
+        contract["bbox"] = list(evidence_bbox)
+        contract["source"] = "edge_clipped_dark_reocr_tail_anchor.negative_evidence"
+
+    text_data["original"] = evidence_text
+    text_data["text"] = evidence_text
+    text_data["translated"] = translated_tail
+    text_data["traduzido"] = translated_tail
+    for key in ("bbox", "source_bbox", "text_pixel_bbox", "ocr_text_bbox", "source_text_mask_bbox", "_source_text_mask_bbox"):
+        text_data[key] = list(evidence_bbox)
+    text_data["line_polygons"] = [
+        [[ex1, ey1], [ex2, ey1], [ex2, ey2], [ex1, ey2]],
+    ]
+    for key in ("target_bbox", "layout_bbox", "balloon_bbox", "bubble_mask_bbox"):
+        text_data[key] = list(target)
+    text_data["safe_text_box"] = list(safe)
+    text_data["_debug_safe_text_box"] = list(safe)
+    text_data["layout_safe_bbox"] = list(safe)
+    text_data["layout_safe_reason"] = "edge_clipped_dark_reocr_tail_anchor"
+    text_data["bubble_mask_source"] = "image_dark_bubble_mask"
+    text_data["balloon_mask_source"] = "image_dark_bubble_mask"
+    text_data["style_origin"] = "auto_dark_panel_glow"
+    text_data["background_rgb"] = [0, 0, 0]
+    for style_key in ("estilo", "style"):
+        if isinstance(text_data.get(style_key), dict):
+            style = dict(text_data.get(style_key) or {})
+            style["cor"] = "#FFFFFF"
+            style["contorno"] = style.get("contorno") or "#061D26"
+            style["contorno_px"] = max(1, int(style.get("contorno_px", 0) or 0))
+            style["glow"] = True
+            style["glow_cor"] = style.get("glow_cor") or "#67D8FF"
+            style["glow_px"] = max(2, int(style.get("glow_px", 0) or 0))
+            text_data[style_key] = style
+    stale_false_dark_flags = {
+        "false_light_bubble_dark_fill_blocked",
+        "false_light_dark_bubble_promoted_to_white",
+        "false_dark_white_style_neutralized",
+        "false_dark_white_text_anchor_preserved",
+    }
+    text_data["qa_flags"] = [
+        flag
+        for flag in (text_data.get("qa_flags") or [])
+        if str(flag).strip() not in stale_false_dark_flags
+    ]
+    for stale_key in (
+        "position_bbox",
+        "capacity_bbox",
+        "render_bbox",
+        "_debug_render_bbox",
+        "fit_status",
+        "layout_fit_result",
+        "_render_debug",
+    ):
+        text_data.pop(stale_key, None)
+    _merge_qa_flags(text_data, ["edge_clipped_dark_reocr_tail_anchored", "safe_text_box_recomputed"])
+    return True
+
+
 def _bubble_inner_bbox_valid_for_bubble_mask(text_data: dict, bubble_bbox: list[int]) -> bool:
     inner_bbox = _layout_bbox(text_data.get("bubble_inner_bbox"))
     if inner_bbox is None:
@@ -17568,6 +17747,9 @@ def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None,
             _merge_qa_flags(text_data, ["same_balloon_duplicate_sentence_removed"])
     text_data["translated"] = text
     text_data.update(normalize_text_geometry(text_data))
+    if _apply_edge_clipped_dark_reocr_tail_anchor(text_data, img):
+        text = _normalize_render_text(text_data.get("translated") or text_data.get("traduzido") or "")
+        text_data["translated"] = text
     _clear_stale_dark_panel_visual_render_geometry(text_data)
     qa_flags = {str(flag).strip().lower() for flag in (text_data.get("qa_flags") or [])}
     needs_review_fallback = bool(
