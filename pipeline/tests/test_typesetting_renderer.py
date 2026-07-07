@@ -9497,6 +9497,79 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(metric["visual_lobe_bbox"], [0, 3224, 800, 4169])
         self.assertGreater(metric["new_font_size"], metric["old_font_size"])
 
+    def test_dark_single_oval_long_text_uses_visual_lobe_width_capacity(self):
+        text_data = {
+            "translated": "Criterios de conclusao da missao: estabeleca um submundo de nivel 1.",
+            "original": "Quest completion criteria: establish a level 1 underworld.",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [82, 179, 365, 284],
+            "source_bbox": [82, 179, 365, 284],
+            "text_pixel_bbox": [82, 179, 365, 284],
+            "target_bbox": [0, 66, 464, 413],
+            "safe_text_box": [89, 182, 358, 281],
+            "balloon_bbox": [0, 66, 464, 413],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_bubble_visual_glyph_mask_replaced_geometry",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "source_text_mask_bbox_from_inpaint_component",
+                "connected_layout_disabled_rejected_bubble_mask",
+                "connected_lobe_boxes_missing_source_anchor_fallback",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [78, 175, 370, 286]},
+                "image_dark_bubble_mask": {
+                    "source": "image_dark_bubble_mask",
+                    "shape_kind": "ellipse",
+                    "mask_bbox": [0, 66, 464, 413],
+                    "anchor_bbox": [82, 179, 365, 284],
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 29,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+
+        plan = {
+            "layout_safe_reason": "dark_visual_capacity_expanded_within_lobe",
+            "safe_text_box": [48, 182, 401, 281],
+        }
+        text_data["qa_metrics"]["dark_visual_capacity_expanded_within_lobe"] = {
+            "reason": "contract_bbox_narrower_than_visual_lobe",
+            "contract_bbox": [78, 175, 370, 286],
+            "visual_lobe_bbox": [0, 66, 464, 413],
+            "expanded_safe_text_box": [48, 182, 401, 281],
+        }
+        candidate = {
+            "block_bbox": [74, 182, 374, 281],
+            "block_width": 300,
+            "block_height": 99,
+            "font_size": 29,
+        }
+
+        preferred = renderer_mod._should_prefer_larger_dark_single_oval_visual_candidate(
+            text_data,
+            plan,
+            candidate,
+            ["Criterios de conclusao da missao:", "estabeleca um", "submundo de nivel 1."],
+        )
+
+        self.assertTrue(preferred)
+        self.assertEqual(candidate["dark_single_oval_visual_capacity_reason"], "long_text_visual_lobe_width_has_room")
+
     def test_dark_single_oval_capacity_does_not_affect_connected_lobe_evidence(self):
         text_data = {
             "translated": "Voce nao pode ficar no subespaco por muito tempo.",
