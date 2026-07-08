@@ -19242,6 +19242,108 @@ def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) ->
     return (0, 0, 0)
 
 
+def _record_white_sfx_cleanup_metric(text: dict, key: str, payload: dict) -> None:
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics[key] = payload
+
+
+def _should_skip_sfx_white_bubble_cleanup(img: Image.Image, text: dict, bbox: list[int]) -> bool:
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    layout_profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    block_profile = str(text.get("block_profile") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    content_class = str(text.get("content_class") or text.get("tipo") or "").strip().lower()
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if content_class == "sfx" or route_action == "translate_sfx_inpaint_render":
+        return False
+    if flags & {"translator_note_text_only_mask", "visual_text_only_inpaint_contract", "text_contract_direct_fill"}:
+        return False
+    is_white_bubble = source == "image_white_bubble_mask" or layout_profile in {"white_balloon", "speech_balloon"} or block_profile in {"white_balloon", "speech_balloon"}
+    if not is_white_bubble:
+        return False
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    original = str(text.get("original") or text.get("text") or "").strip()
+    style = text.get("estilo") or text.get("style") or {}
+    if not isinstance(style, dict):
+        style = {}
+    sfx_like = (
+        len(translated) <= 28
+        and (
+            "!" in translated
+            or "!" in original
+            or (bool(style.get("bold")) and bool(style.get("italico") or style.get("italic")) and bool(style.get("force_upper")))
+        )
+    )
+    if not sfx_like:
+        return False
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        x1 = max(0, min(img.width, x1))
+        x2 = max(0, min(img.width, x2))
+        y1 = max(0, min(img.height, y1))
+        y2 = max(0, min(img.height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return False
+        sample = np.asarray(img.crop((x1, y1, x2, y2)).convert("RGB"), dtype=np.uint8)
+        flat = sample.reshape(-1, 3)
+        if not flat.size:
+            return False
+        luma = flat.astype(np.float32).mean(axis=1)
+        sample_mean = float(luma.mean())
+        sample_std = float(luma.std())
+        light_ratio = float((luma >= 238.0).sum()) / float(luma.shape[0])
+        old_background = text.get("background_rgb")
+        old_background_luma: float | None = None
+        if isinstance(old_background, (list, tuple)) and len(old_background) >= 3:
+            try:
+                old_rgb = [float(v) for v in old_background[:3]]
+                old_background_luma = sum(old_rgb) / 3.0
+            except Exception:
+                old_background_luma = None
+        if old_background_luma is None or old_background_luma >= 238.0:
+            return False
+        sample_payload = {
+            "sample_bbox": [x1, y1, x2, y2],
+            "sample_luma_mean": sample_mean,
+            "sample_luma_std": sample_std,
+            "sample_light_ratio": light_ratio,
+            "old_background_luma": old_background_luma,
+            "old_background": old_background,
+        }
+        if sample_mean < 238.0 or sample_std > 10.0 or light_ratio < 0.92:
+            _record_white_sfx_cleanup_metric(
+                text,
+                "sfx_white_bubble_background_removal_rejected",
+                {
+                    "decision": "rejected",
+                    "reason": "background_required_for_legibility",
+                    **sample_payload,
+                },
+            )
+            return False
+        _record_white_sfx_cleanup_metric(
+            text,
+            "sfx_white_bubble_background_removed",
+            {
+                "decision": "applied",
+                "reason": "after_inpaint_white_background_trusted_no_rect_cleanup",
+                "style_profile": {
+                    "bold": bool(style.get("bold")),
+                    "italic": bool(style.get("italico") or style.get("italic")),
+                    "force_upper": bool(style.get("force_upper")),
+                },
+                "render_bbox": text.get("render_bbox"),
+                "safe_text_box": text.get("safe_text_box"),
+                "source_bbox": text.get("source_text_mask_bbox") or text.get("text_pixel_bbox"),
+                **sample_payload,
+            },
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], ocr_page: dict | None = None) -> bool:
     if not texts:
         return False
@@ -19274,6 +19376,8 @@ def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], 
         x2 = min(img.width, x2 + pad)
         y2 = min(img.height, y2 + pad)
         if x2 <= x1 or y2 <= y1:
+            continue
+        if _should_skip_sfx_white_bubble_cleanup(img, text, [x1, y1, x2, y2]):
             continue
         fill = _cleanup_fill_rgb_for_text(img, text, [x1, y1, x2, y2])
         draw.rectangle((x1, y1, x2, y2), fill=fill)
