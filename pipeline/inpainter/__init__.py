@@ -1273,6 +1273,8 @@ def _auto_fast_dark_card_fill_allowed(text: dict) -> bool:
         return False
     if _text_suppressed_for_inpaint(text) or not _route_action_allows_local_dark_panel_fill(text):
         return False
+    if _white_sfx_bubble_requires_real_inpaint(text):
+        return False
     bubble_mask_source = str(text.get("bubble_mask_source") or "").strip().lower()
     qa_flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
     evidence = text.get("mask_evidence")
@@ -4103,6 +4105,52 @@ def _text_is_white_balloon_context(text: dict) -> bool:
     return bool(background is not None and background[0] >= 228.0 and background[1] <= 18.0)
 
 
+def _white_sfx_bubble_requires_real_inpaint(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source != "image_white_bubble_mask":
+        return False
+    if not _text_is_white_balloon_context(text):
+        return False
+    if _text_has_dark_visual_context(text):
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if flags & {
+        "mask_outside_balloon",
+        "mask_outside_balloon_critical",
+        "bubble_clip_preserved_raw_text",
+        "balloon_outline_components_removed",
+    }:
+        return False
+    evidence = text.get("mask_evidence")
+    if not (
+        isinstance(evidence, dict)
+        and evidence.get("fast_fill_allowed") is True
+        and str(evidence.get("kind") or "").strip().lower() == "ocr_pixels"
+        and int(evidence.get("raw_mask_pixels") or 0) > 0
+    ):
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox") or text.get("bbox")):
+        return False
+    text_values = [
+        str(text.get(key) or "").strip()
+        for key in ("text", "original", "raw_ocr", "normalized_ocr", "translated", "traduzido")
+        if str(text.get(key) or "").strip()
+    ]
+    compact_len = min((len(re.sub(r"\s+", "", value)) for value in text_values), default=0)
+    joined = " ".join(text_values)
+    style = text.get("estilo") if isinstance(text.get("estilo"), dict) else {}
+    styled_sfx = bool(
+        style.get("bold")
+        and (style.get("italico") or style.get("italic"))
+        and style.get("force_upper")
+    )
+    if compact_len == 0:
+        return True
+    return bool(compact_len <= 34 and ("!" in joined or styled_sfx))
+
+
 def _unsafe_white_balloon_requires_real_inpaint(text: dict) -> bool:
     if not isinstance(text, dict) or not _text_is_white_balloon_context(text):
         return False
@@ -4138,6 +4186,8 @@ def _is_false_white_card_candidate(image_rgb: np.ndarray, text: dict) -> bool:
         return False
     source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
     if source != "image_white_bubble_mask":
+        return False
+    if _white_sfx_bubble_requires_real_inpaint(text):
         return False
     flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
     evidence = text.get("mask_evidence")
@@ -6850,6 +6900,9 @@ def _apply_fast_dark_panel_text_fill(
             continue
         if _translator_note_text_only_mask(text):
             _reject("translator_note_text_mask_requires_real_inpaint")
+            continue
+        if _white_sfx_bubble_requires_real_inpaint(text):
+            _reject("white_sfx_bubble_requires_real_inpaint")
             continue
         if not global_fast_dark_enabled and not _auto_fast_dark_card_fill_allowed(text):
             _reject("disabled")
