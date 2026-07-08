@@ -8939,6 +8939,101 @@ def _apply_existing_dark_connected_lobe_capacity_metric(text_data: dict, plan: d
     return True
 
 
+def _apply_dark_connected_lobe_metric_safe_box(text_data: dict, plan: dict) -> bool:
+    if not isinstance(text_data, dict) or not isinstance(plan, dict):
+        return False
+    if _is_translator_note_text_only_mask(text_data) or _is_white_layout_profile(text_data):
+        return False
+    flags = _qa_flags_set(text_data)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source in {"image_white_bubble_mask", "derived_white_bubble_mask", "white_bubble_mask"}:
+        return False
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    replacement = (
+        metrics.get("dark_connected_text_pixel_bbox_replaced_by_lobe_bbox")
+        if isinstance(metrics.get("dark_connected_text_pixel_bbox_replaced_by_lobe_bbox"), dict)
+        else None
+    )
+    if not replacement:
+        return False
+    if "dark_connected_component_safe_partition" not in flags:
+        dark_mask = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+        if not dark_mask:
+            return False
+    lobe = _layout_bbox(replacement.get("lobe_bbox"))
+    if lobe is None:
+        return False
+    current_safe = _layout_bbox(plan.get("safe_text_box") or text_data.get("safe_text_box"))
+    if current_safe is None:
+        return False
+    target = _layout_bbox(plan.get("target_bbox") or text_data.get("target_bbox") or text_data.get("balloon_bbox"))
+    if target is None:
+        return False
+    lobe_area = max(1, _bbox_area_px(lobe))
+    overlap = _bbox_intersection_area(lobe, target)
+    if overlap < int(lobe_area * 0.70):
+        return False
+    lx1, ly1, lx2, ly2 = [int(v) for v in lobe]
+    sx1, sy1, sx2, sy2 = [int(v) for v in current_safe]
+    tx1, ty1, tx2, ty2 = [int(v) for v in target]
+    lobe_w = max(1, lx2 - lx1)
+    lobe_h = max(1, ly2 - ly1)
+    safe_w = max(1, sx2 - sx1)
+    safe_h = max(1, sy2 - sy1)
+    if safe_w < int(lobe_w * 1.35) and safe_h < int(lobe_h * 1.55):
+        return False
+
+    pad_x = max(14, int(round(lobe_w * 0.34)))
+    pad_y_top = max(10, int(round(lobe_h * 0.24)))
+    pad_y_bottom = max(12, int(round(lobe_h * 0.34)))
+    candidate = [
+        max(tx1, lx1 - pad_x),
+        max(ty1, ly1 - pad_y_top),
+        min(tx2, lx2 + pad_x),
+        min(ty2, ly2 + pad_y_bottom),
+    ]
+    candidate = _layout_bbox(candidate)
+    if candidate is None:
+        return False
+    if _bbox_intersection_area(candidate, target) < int(_bbox_area_px(candidate) * 0.96):
+        return False
+    if _bbox_area_px(candidate) >= int(_bbox_area_px(current_safe) * 0.92):
+        return False
+    cx, cy = _bbox_center(lobe)
+    if not (candidate[0] <= cx <= candidate[2] and candidate[1] <= cy <= candidate[3]):
+        return False
+
+    old_safe = list(current_safe)
+    for key in ("target_bbox", "safe_text_box", "layout_safe_bbox", "capacity_bbox", "position_bbox"):
+        plan[key] = list(candidate)
+    plan["layout_safe_reason"] = "dark_connected_lobe_metric_safe_box"
+    plan["_position_on_capacity_bbox"] = True
+    plan["max_width"] = max(4, int(round((candidate[2] - candidate[0]) * 0.88)))
+    padding_y = max(0, int(plan.get("padding_y", 0) or 0))
+    plan["max_height"] = max(4, (candidate[3] - candidate[1]) - max(0, padding_y * 2))
+    text_data["safe_text_box"] = list(candidate)
+    text_data["_debug_safe_text_box"] = list(candidate)
+    text_data["target_bbox"] = list(candidate)
+    text_data["layout_safe_bbox"] = list(candidate)
+    text_data["layout_safe_reason"] = "dark_connected_lobe_metric_safe_box"
+    for key in ("source_text_mask_bbox", "_source_text_mask_bbox", "source_text_anchor_bbox", "_source_text_anchor_bbox"):
+        text_data[key] = list(lobe)
+    stale_contract = text_data.pop("render_layout_contract", None)
+    metrics["dark_connected_lobe_final_fit_repaired"] = {
+        "decision": "applied",
+        "reason": "local_lobe_metric_replaces_stale_pair_safe_box",
+        "old_safe_text_box": [int(v) for v in old_safe],
+        "new_safe_text_box": [int(v) for v in candidate],
+        "visual_lobe_bbox": [int(v) for v in lobe],
+        "target_bbox": [int(v) for v in target],
+        "sibling_lobe_used": False,
+        "final_band_path_confirmed": False,
+        "stale_render_layout_contract_removed": bool(isinstance(stale_contract, dict)),
+    }
+    _merge_qa_flags(text_data, ["dark_connected_lobe_final_fit_repaired", "safe_text_box_recomputed"])
+    return True
+
+
 def _dark_oval_anchor_bbox(text_data: dict) -> list[int] | None:
     metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
     dark_bubble_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
@@ -13798,6 +13893,52 @@ def _typeset_inpaint_contract_bbox_for_scale(text_data: dict) -> tuple[list[int]
     return bbox, "qa_metrics.dark_text_contract_fill_mask.bbox"
 
 
+def _dark_connected_local_anchor_should_override_scale_contract(
+    text_data: dict,
+    anchor_bbox: list[int] | None,
+    contract_bbox: list[int] | None,
+) -> bool:
+    if anchor_bbox is None or contract_bbox is None:
+        return False
+    if _is_translator_note_text_only_mask(text_data) or _is_white_layout_profile(text_data):
+        return False
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    flags = _qa_flags_set(text_data)
+    if not (
+        flags
+        & {
+            "dark_connected_component_safe_partition",
+            "dark_connected_lobe_anchor_component_filtered",
+            "broad_connected_bubble_mask_rejected",
+            "dark_connected_lobe_mask_rebuilt_from_glyphs",
+            "partial_dark_bubble_lobe_reocr",
+        }
+    ):
+        return False
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    if not isinstance(metrics.get("layout_text_geometry_sanitized"), dict) and not isinstance(
+        metrics.get("dark_connected_bubble_broad_mask_rejected"), dict
+    ):
+        return False
+    anchor_area = max(1, _bbox_area_px(anchor_bbox))
+    contract_area = max(1, _bbox_area_px(contract_bbox))
+    if anchor_area >= int(contract_area * 0.72):
+        return False
+    if _bbox_intersection_area(anchor_bbox, contract_bbox) < int(anchor_area * 0.82):
+        return False
+    ax1, ay1, ax2, ay2 = [int(v) for v in anchor_bbox]
+    cx1, cy1, cx2, cy2 = [int(v) for v in contract_bbox]
+    anchor_w = max(1, ax2 - ax1)
+    anchor_h = max(1, ay2 - ay1)
+    contract_w = max(1, cx2 - cx1)
+    contract_h = max(1, cy2 - cy1)
+    if anchor_w >= int(contract_w * 0.82) and anchor_h >= int(contract_h * 0.82):
+        return False
+    return True
+
+
 def _record_typeset_inpaint_contract_fit(text_data: dict, source_bbox: list[int], source_name: str, resolved: dict) -> None:
     metrics = text_data.setdefault("qa_metrics", {})
     if not isinstance(metrics, dict):
@@ -13849,8 +13990,32 @@ def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
         return list(contract[0]) if contract is not None else None
 
     contract = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    contract_deferred_for_local_lobe = False
     if contract is not None:
-        candidates.insert(0, (contract[1], contract[0]))
+        anchor_candidate = next(
+            (
+                bbox
+                for key, bbox in candidates
+                if key in {"source_text_anchor_bbox", "_source_text_anchor_bbox", "_connected_source_bbox"}
+            ),
+            None,
+        )
+        contract_deferred_for_local_lobe = _dark_connected_local_anchor_should_override_scale_contract(
+            text_data,
+            anchor_candidate,
+            contract[0],
+        )
+        if not contract_deferred_for_local_lobe:
+            candidates.insert(0, (contract[1], contract[0]))
+        else:
+            metrics = text_data.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["dark_connected_local_anchor_overrode_scale_contract"] = {
+                    "anchor_bbox": [int(v) for v in anchor_candidate],
+                    "contract_bbox": [int(v) for v in contract[0]],
+                    "reason": "local_anchor_compact_within_broad_connected_contract",
+                }
+            _merge_qa_flags(text_data, ["dark_connected_local_anchor_scale_contract"])
 
     anchor_ref = next(
         (
@@ -13902,6 +14067,12 @@ def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     )
 
     def _candidate_under_covers_geometry(key: str, bbox: list[int]) -> bool:
+        if contract_deferred_for_local_lobe and key in {
+            "source_text_anchor_bbox",
+            "_source_text_anchor_bbox",
+            "_connected_source_bbox",
+        }:
+            return False
         keys_that_can_undercover = {
             "source_text_anchor_bbox",
             "_source_text_anchor_bbox",
@@ -13934,19 +14105,36 @@ def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     # For size, prefer the real glyph/mask geometry. Anchor bboxes are still
     # useful for positioning, but using a compact anchor as the scale contract
     # is what makes connected dark lobes collapse to tiny text.
-    for priority_key in (
-        "qa_metrics.dark_text_contract_fill_mask.bbox",
-        "source_text_mask_bbox",
-        "_source_text_mask_bbox",
-        "text_pixel_bbox",
-        "ocr_text_bbox",
-        "line_polygons",
-        "source_text_anchor_bbox",
-        "_source_text_anchor_bbox",
-    ):
+    if contract_deferred_for_local_lobe:
+        scale_priority_keys = (
+            "source_text_anchor_bbox",
+            "_source_text_anchor_bbox",
+            "_connected_source_bbox",
+            "source_text_mask_bbox",
+            "_source_text_mask_bbox",
+            "text_pixel_bbox",
+            "ocr_text_bbox",
+            "line_polygons",
+        )
+    else:
+        scale_priority_keys = (
+            "qa_metrics.dark_text_contract_fill_mask.bbox",
+            "source_text_mask_bbox",
+            "_source_text_mask_bbox",
+            "text_pixel_bbox",
+            "ocr_text_bbox",
+            "line_polygons",
+            "source_text_anchor_bbox",
+            "_source_text_anchor_bbox",
+        )
+
+    for priority_key in scale_priority_keys:
         for key, bbox in candidates:
             if key == priority_key and not _candidate_under_covers_geometry(key, bbox):
                 return bbox
+
+    if contract is not None and contract_deferred_for_local_lobe:
+        candidates.append((contract[1], contract[0]))
 
     pixel_like = [
         (key, bbox)
@@ -14876,6 +15064,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     _expand_dark_visual_underfit_layout_capacity(text_data, plan)
     _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
+    _apply_dark_connected_lobe_metric_safe_box(text_data, plan)
     original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
     if (
         original_scale_bbox is not None
@@ -14929,6 +15118,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 int(plan.get("max_height", 0) or 0),
                 max(4, capacity_height - max(0, padding_y * 2)),
             )
+            _apply_dark_connected_lobe_metric_safe_box(text_data, plan)
     if _apply_existing_dark_connected_lobe_capacity_metric(text_data, plan):
         capacity_width = max(1, int(plan["safe_text_box"][2]) - int(plan["safe_text_box"][0]))
         capacity_height = max(1, int(plan["safe_text_box"][3]) - int(plan["safe_text_box"][1]))
@@ -19344,6 +19534,48 @@ def _should_skip_sfx_white_bubble_cleanup(img: Image.Image, text: dict, bbox: li
         return False
 
 
+def _should_skip_dark_connected_lobe_rect_cleanup(text: dict, bbox: list[int]) -> bool:
+    if not isinstance(text, dict):
+        return False
+    if _is_translator_note_text_only_mask(text) or _is_white_layout_profile(text):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    flags = _qa_flags_set(text)
+    connected_flags = {
+        "dark_connected_component_safe_partition",
+        "dark_connected_lobe_anchor_component_filtered",
+        "broad_connected_bubble_mask_rejected",
+        "dark_connected_lobe_mask_rebuilt_from_glyphs",
+        "dark_connected_lobe_final_fit_repaired",
+        "dark_connected_local_anchor_scale_contract",
+        "connected_lobe_boxes_missing_source_anchor_fallback",
+    }
+    if not (flags & connected_flags):
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    has_lobe_evidence = bool(
+        isinstance(metrics.get("dark_connected_bubble_broad_mask_rejected"), dict)
+        or isinstance(metrics.get("dark_connected_lobe_final_fit_repaired"), dict)
+        or isinstance(metrics.get("dark_connected_local_anchor_overrode_scale_contract"), dict)
+        or isinstance(metrics.get("dark_connected_text_pixel_bbox_replaced_by_lobe_bbox"), dict)
+    )
+    if not has_lobe_evidence:
+        return False
+    # These connected bubbles already reached typeset after the real inpaint
+    # pass. A rectangular cleanup fill can cover the bridge/glow between lobes,
+    # so keep the inpainted balloon as the trusted background and render text
+    # only.
+    metrics["dark_connected_lobe_rect_cleanup_skipped"] = {
+        "decision": "skipped",
+        "reason": "preserve_connected_lobe_glow_and_bridge",
+        "cleanup_bbox": [int(v) for v in bbox],
+    }
+    _merge_qa_flags(text, ["dark_connected_lobe_rect_cleanup_skipped"])
+    return True
+
+
 def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], ocr_page: dict | None = None) -> bool:
     if not texts:
         return False
@@ -19376,6 +19608,8 @@ def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], 
         x2 = min(img.width, x2 + pad)
         y2 = min(img.height, y2 + pad)
         if x2 <= x1 or y2 <= y1:
+            continue
+        if _should_skip_dark_connected_lobe_rect_cleanup(text, [x1, y1, x2, y2]):
             continue
         if _should_skip_sfx_white_bubble_cleanup(img, text, [x1, y1, x2, y2]):
             continue

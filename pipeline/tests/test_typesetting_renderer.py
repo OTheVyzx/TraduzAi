@@ -9443,6 +9443,184 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIn("dark_bubble_glow_capacity_rejected_connected_lobe", text_data.get("qa_flags") or [])
         self.assertNotIn("dark_bubble_glow_capacity_recovered", text_data.get("qa_flags") or [])
 
+    def test_dark_connected_lobe_metric_replaces_stale_pair_safe_box(self):
+        text_data = {
+            "translated": "A retenção do subespaço é de apenas cinco minutos.",
+            "original": "The subspace retention is only five minutes.",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [237, 183, 677, 399],
+            "source_bbox": [237, 183, 677, 399],
+            "text_pixel_bbox": [237, 183, 677, 399],
+            "target_bbox": [83, 96, 744, 755],
+            "safe_text_box": [129, 142, 698, 709],
+            "balloon_bbox": [237, 183, 677, 399],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_oval_reocr",
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_connected_component_safe_partition",
+                "connected_lobe_boxes_missing_source_anchor_fallback",
+                "visual_text_only_inpaint_contract",
+            ],
+            "qa_metrics": {
+                "dark_connected_text_pixel_bbox_replaced_by_lobe_bbox": {
+                    "text_pixel_bbox": [237, 183, 677, 399],
+                    "lobe_bbox": [129, 172, 313, 299],
+                    "text_area": 95040,
+                    "lobe_area": 23368,
+                    "overlap": 8816,
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 35,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+        plan = {
+            "target_bbox": [83, 96, 744, 755],
+            "safe_text_box": [129, 142, 698, 709],
+            "layout_safe_bbox": [129, 142, 698, 709],
+            "layout_safe_reason": "trusted_dark_visual_capacity",
+            "position_bbox": [129, 142, 698, 709],
+            "capacity_bbox": [129, 142, 698, 709],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 35,
+            "_font_search_cap": 35,
+            "_font_search_floor": 16,
+            "max_width": 500,
+            "max_height": 540,
+            "padding_y": 8,
+            "line_spacing_ratio": 0.08,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "outline_px": 1,
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["layout_safe_reason"], "dark_connected_lobe_metric_safe_box")
+        self.assertLess(plan["safe_text_box"][2], 430)
+        self.assertLess(plan["safe_text_box"][3], 380)
+        self.assertGreaterEqual(resolved["block_bbox"][0], plan["safe_text_box"][0])
+        self.assertLessEqual(resolved["block_bbox"][2], plan["safe_text_box"][2])
+        self.assertIn("dark_connected_lobe_final_fit_repaired", text_data.get("qa_flags") or [])
+        metric = text_data["qa_metrics"]["dark_connected_lobe_final_fit_repaired"]
+        self.assertEqual(metric["decision"], "applied")
+        self.assertFalse(metric["sibling_lobe_used"])
+
+    def test_dark_connected_lobe_scale_prefers_local_anchor_over_broad_contract(self):
+        text_data = {
+            "translated": "Se você ultrapassar esse tempo, você retornará ao seu mundo original!",
+            "original": "If you exceed that time, you will return to your original world!",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "bbox": [237, 183, 677, 399],
+            "source_bbox": [237, 183, 677, 399],
+            "text_pixel_bbox": [237, 183, 677, 399],
+            "source_text_anchor_bbox": [398, 268, 680, 400],
+            "_source_text_anchor_bbox": [398, 268, 680, 400],
+            "target_bbox": [360, 136, 709, 585],
+            "safe_text_box": [360, 136, 709, 585],
+            "balloon_bbox": [237, 183, 677, 399],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_oval_reocr",
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_connected_component_safe_partition",
+                "dark_connected_lobe_anchor_component_filtered",
+                "broad_connected_bubble_mask_rejected",
+                "dark_connected_lobe_mask_rebuilt_from_glyphs",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "render_text_mask_cleanup",
+            ],
+            "qa_metrics": {
+                "layout_text_geometry_sanitized": {
+                    "clean_bbox": [398, 271, 680, 400],
+                },
+                "dark_connected_bubble_broad_mask_rejected": {
+                    "candidate_bbox": [128, 172, 681, 403],
+                    "anchor_bbox": [398, 268, 680, 400],
+                },
+                "dark_text_contract_fill_mask": {
+                    "bbox": [226, 179, 681, 403],
+                    "mask_pixels": 43744,
+                    "source": "raw_glyph_mask",
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 48,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+
+        scale_bbox = renderer_mod._original_text_mask_bbox_for_scale(text_data)
+
+        self.assertEqual(scale_bbox, [398, 268, 680, 400])
+        self.assertIn("dark_connected_local_anchor_scale_contract", text_data.get("qa_flags") or [])
+        metric = text_data["qa_metrics"]["dark_connected_local_anchor_overrode_scale_contract"]
+        self.assertEqual(metric["anchor_bbox"], [398, 268, 680, 400])
+        self.assertEqual(metric["contract_bbox"], [226, 179, 681, 403])
+
+    def test_dark_connected_lobe_rect_cleanup_preserves_inpainted_bridge(self):
+        img = Image.new("RGB", (240, 160), (4, 6, 8))
+        draw = ImageDraw.Draw(img)
+        draw.line((40, 80, 200, 80), fill=(20, 180, 220), width=4)
+        before = img.copy()
+        text_data = {
+            "translated": "SE VOCÊ ULTRAPASSAR ESSE TEMPO",
+            "original": "If you exceed that time",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "source_text_mask_bbox": [50, 60, 190, 104],
+            "text_pixel_bbox": [50, 60, 190, 104],
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "render_text_mask_cleanup",
+                "dark_connected_component_safe_partition",
+                "dark_connected_lobe_anchor_component_filtered",
+                "broad_connected_bubble_mask_rejected",
+                "dark_connected_lobe_mask_rebuilt_from_glyphs",
+            ],
+            "qa_metrics": {
+                "dark_connected_bubble_broad_mask_rejected": {
+                    "candidate_bbox": [20, 50, 220, 116],
+                    "anchor_bbox": [130, 64, 204, 104],
+                },
+            },
+            "estilo": {"glow_px": 3, "outline_width": 1},
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text_data], {})
+
+        self.assertFalse(changed)
+        self.assertIsNone(ImageChops.difference(before, img).getbbox())
+        self.assertIn("dark_connected_lobe_rect_cleanup_skipped", text_data.get("qa_flags") or [])
+        metric = text_data["qa_metrics"]["dark_connected_lobe_rect_cleanup_skipped"]
+        self.assertEqual(metric["decision"], "skipped")
+
     def test_dark_single_oval_short_text_prefers_larger_visual_lobe_capacity(self):
         text_data = {
             "translated": "Este e o subespaco do sistema.",
