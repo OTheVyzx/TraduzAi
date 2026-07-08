@@ -4904,6 +4904,66 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertTrue(np.array_equal(dark_result, image))
         self.assertTrue(np.array_equal(fast_result, image))
 
+    def test_white_sfx_bubble_with_ocr_evidence_requires_real_inpaint(self):
+        from inpainter import _apply_fast_dark_panel_text_fill
+
+        image = np.full((360, 800, 3), 255, dtype=np.uint8)
+        points = np.array(
+            [
+                [258, 76],
+                [318, 86],
+                [365, 60],
+                [415, 84],
+                [480, 72],
+                [520, 126],
+                [592, 152],
+                [540, 198],
+                [584, 256],
+                [490, 246],
+                [432, 292],
+                [382, 236],
+                [304, 252],
+                [322, 194],
+                [252, 164],
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(image, [points], (255, 255, 255))
+        cv2.polylines(image, [points], True, (16, 16, 16), 2, cv2.LINE_AA)
+        cv2.putText(image, "EVASION!", (322, 178), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (0, 0, 0), 3, cv2.LINE_AA)
+        text = {
+            "id": "ocr_001",
+            "trace_id": "ocr_001@page_004_band_065",
+            "text": "EVASION!",
+            "bbox": [312, 160, 526, 206],
+            "text_pixel_bbox": [322, 161, 515, 205],
+            "line_polygons": [[[320, 160], [517, 160], [517, 206], [320, 206]]],
+            "balloon_bbox": [265, 147, 573, 219],
+            "bubble_mask_bbox": [256, 73, 591, 284],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "balloon_type": "white",
+            "route_action": "translate_inpaint_render",
+            "estilo": {"bold": True, "italico": True, "force_upper": True},
+            "mask_evidence": {
+                "kind": "ocr_pixels",
+                "raw_mask_pixels": 2513,
+                "expanded_mask_pixels": 5606,
+                "evidence_score": 1.0,
+                "fast_fill_allowed": True,
+                "fast_fill_reject_reasons": [],
+            },
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)]}
+
+        result, remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [dict(text)])
+
+        self.assertEqual(stats["dark_panel_fill_count"], 0)
+        self.assertFalse(page.get("_strip_used_dark_panel_fill"))
+        self.assertEqual(len(remaining), 1)
+        self.assertTrue(np.array_equal(result, image))
+
     def test_unsafe_contour_bubble_context_blocks_dark_panel_fill(self):
         from inpainter import _apply_dark_panel_text_fills, _apply_fast_dark_panel_text_fill
 
