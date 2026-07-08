@@ -11944,5 +11944,88 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertGreater(img.getpixel((80, 42))[0], 220)
 
+    def test_render_band_text_mask_cleanup_skips_rect_for_clean_white_jagged_sfx_like_bubble(self):
+        img = Image.new("RGB", (180, 100), (255, 255, 255))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "EVASAO!",
+            "original": "EVASION!",
+            "source_text_mask_bbox": [45, 30, 135, 58],
+            "safe_text_box": [45, 30, 135, 58],
+            "background_rgb": [208, 208, 208],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "estilo": {"bold": True, "italico": True, "force_upper": True},
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertGreater(img.getpixel((90, 44))[0], 245)
+        self.assertNotIn("qa_flags", text)
+        metrics = text["qa_metrics"]["sfx_white_bubble_background_removed"]
+        self.assertEqual(metrics["decision"], "applied")
+        self.assertEqual(metrics["reason"], "after_inpaint_white_background_trusted_no_rect_cleanup")
+
+    def test_render_band_text_mask_cleanup_keeps_dark_panel_fill_black_for_sfx_like_text(self):
+        img = Image.new("RGB", (180, 100), (0, 0, 0))
+        for x in range(45, 135):
+            for y in range(30, 58):
+                img.putpixel((x, y), (245, 245, 245))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "EVASAO!",
+            "original": "EVASION!",
+            "source_text_mask_bbox": [45, 30, 135, 58],
+            "background_rgb": [208, 208, 208],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "estilo": {"bold": True, "italico": True, "force_upper": True},
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertTrue(changed)
+        self.assertLess(img.getpixel((90, 44))[0], 20)
+        self.assertNotIn("sfx_white_bubble_background_removed", text.get("qa_metrics", {}))
+
+    def test_render_band_text_mask_cleanup_does_not_use_white_sfx_rule_for_translator_note(self):
+        img = Image.new("RGB", (180, 100), (255, 255, 255))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "T/N: NOTA!",
+            "source_text_mask_bbox": [45, 30, 135, 58],
+            "background_rgb": [208, 208, 208],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+            "qa_flags": ["translator_note_text_only_mask"],
+            "estilo": {"bold": True, "italico": True, "force_upper": True},
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertTrue(changed)
+        self.assertEqual(img.getpixel((90, 44)), (208, 208, 208))
+        self.assertNotIn("sfx_white_bubble_background_removed", text.get("qa_metrics", {}))
+
+    def test_render_band_text_mask_cleanup_keeps_near_white_background_for_white_sfx_like_bubble(self):
+        img = Image.new("RGB", (180, 100), (255, 255, 255))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "CALE-SE!",
+            "original": "Shut UP!",
+            "source_text_mask_bbox": [45, 30, 135, 58],
+            "background_rgb": [254, 254, 254],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+            "estilo": {"bold": True, "italico": True, "force_upper": True},
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertTrue(changed)
+        self.assertEqual(img.getpixel((90, 44)), (254, 254, 254))
+        self.assertNotIn("sfx_white_bubble_background_removed", text.get("qa_metrics", {}))
+
 if __name__ == "__main__":
     unittest.main()
