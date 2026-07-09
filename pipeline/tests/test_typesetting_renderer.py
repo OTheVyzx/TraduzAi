@@ -9518,6 +9518,96 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(metric["decision"], "applied")
         self.assertFalse(metric["sibling_lobe_used"])
 
+    def test_dark_connected_lobe_local_fit_repairs_broad_visual_mask_capacity(self):
+        text_data = {
+            "translated": "Você cresceu em um orfanato sem pais e, no início da adolescência, já havia colocado os pés no mundo dos gangsters. apenas",
+            "original": "You grew up at an orphanage without parents, and by your early teens, you had already set foot in the world of gangsters.",
+            "tipo": "fala",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "balloon_mask_source": "image_dark_bubble_mask",
+            "bbox": [68, 171, 491, 376],
+            "source_bbox": [68, 171, 491, 376],
+            "text_pixel_bbox": [68, 171, 491, 376],
+            "source_text_mask_bbox": [66, 168, 388, 359],
+            "_source_text_mask_bbox": [66, 168, 388, 359],
+            "target_bbox": [11, 77, 639, 480],
+            "balloon_bbox": [11, 77, 639, 480],
+            "bubble_mask_bbox": [11, 77, 639, 480],
+            "safe_text_box": [68, 171, 491, 376],
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "dark_bubble_visual_bbox_refined",
+                "dark_bubble_ellipse_bbox_mask",
+                "dark_bubble_full_crop_reocr_replaced",
+                "dark_connected_lobes_repaired_from_visual_mask",
+                "trusted_dark_visual_capacity_target",
+                "dark_visual_underfit_capacity_expanded",
+                "dark_visual_safe_width_limited",
+                "dark_connected_mask_region_seed_bbox_replaced",
+                "dark_connected_text_anchor_propagated_to_type",
+                "source_text_mask_bbox_from_inpaint_component",
+                "dark_connected_component_safe_partition",
+                "dark_panel_style_grouped",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [66, 168, 388, 359],
+                    "mask_pixels": 61494,
+                    "source": "build_inpaint_mask_contract",
+                },
+                "image_dark_bubble_mask": {
+                    "mask_bbox": [11, 77, 639, 480],
+                    "anchor_bbox": [68, 171, 491, 376],
+                    "shape_kind": "ellipse",
+                },
+                "dark_connected_compact_text_bbox_rejected_undercoverage": {
+                    "chosen_bbox": [68, 171, 491, 376],
+                    "reference_bbox": [11, 77, 492, 462],
+                    "chosen_area": 86715,
+                    "reference_area": 185185,
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+                "tamanho": 48,
+                "cor": "#FFFFFF",
+                "contorno": "#061D26",
+                "contorno_px": 1,
+                "glow": True,
+                "glow_cor": "#67D8FF",
+                "glow_px": 3,
+                "force_upper": True,
+            },
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertEqual(plan["layout_safe_reason"], "dark_connected_lobe_local_fit_repaired")
+        self.assertEqual(plan["safe_text_box"], [68, 171, 491, 376])
+        self.assertLess(resolved["font_size"], 40)
+        self.assertLessEqual(resolved["block_bbox"][2], 491)
+        self.assertGreaterEqual(resolved["block_bbox"][0], 68)
+        self.assertIn("dark_connected_lobe_local_fit_repaired", text_data.get("qa_flags") or [])
+        metric = text_data["qa_metrics"]["dark_connected_lobe_local_fit_repaired"]
+        self.assertEqual(metric["decision"], "applied")
+        self.assertFalse(metric["sibling_lobe_used"])
+        self.assertTrue(metric["bridge_or_glow_preserved"])
+        rebalance = text_data["qa_metrics"]["dark_connected_lobe_local_fit_rebalanced"]
+        self.assertEqual(rebalance["decision"], "applied")
+        self.assertEqual(rebalance["visual_lobe_bbox"], [68, 171, 491, 376])
+        self.assertGreaterEqual(rebalance["position_bbox"][0], 68)
+        self.assertLessEqual(rebalance["position_bbox"][2], 388)
+        self.assertLessEqual(rebalance["composition_width_limit"], 322)
+        self.assertGreater(rebalance["new_line_count"], 3)
+        self.assertTrue(rebalance["center_preserved"])
+        self.assertTrue(rebalance["max_width_limited_for_bridge"])
+        self.assertFalse(rebalance["sibling_lobe_used"])
+
     def test_dark_connected_lobe_scale_prefers_local_anchor_over_broad_contract(self):
         text_data = {
             "translated": "Se você ultrapassar esse tempo, você retornará ao seu mundo original!",

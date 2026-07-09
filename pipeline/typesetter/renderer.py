@@ -9034,6 +9034,188 @@ def _apply_dark_connected_lobe_metric_safe_box(text_data: dict, plan: dict) -> b
     return True
 
 
+def _apply_dark_connected_lobe_local_fit_repair(text_data: dict, plan: dict) -> bool:
+    if not isinstance(text_data, dict) or not isinstance(plan, dict):
+        return False
+    if _is_translator_note_text_only_mask(text_data) or _is_white_layout_profile(text_data):
+        return False
+    flags = _qa_flags_set(text_data)
+    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    dark_mask_metric = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
+    source = str(
+        text_data.get("bubble_mask_source")
+        or text_data.get("balloon_mask_source")
+        or dark_mask_metric.get("source")
+        or ""
+    ).strip().lower()
+    if source != "image_dark_bubble_mask":
+        return False
+    if "dark_connected_lobes_repaired_from_visual_mask" not in flags:
+        return False
+    has_local_partition = bool(
+        "dark_connected_component_safe_partition" in flags
+        or "dark_connected_text_anchor_propagated_to_type" in flags
+        or isinstance(dark_mask_metric.get("anchor_bbox"), (list, tuple))
+    )
+    if not has_local_partition:
+        return False
+    if "dark_visual_underfit_capacity_expanded" not in flags:
+        return False
+    compact_reject = metrics.get("dark_connected_compact_text_bbox_rejected_undercoverage")
+    if not isinstance(compact_reject, dict):
+        return False
+    contract_pair = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    contract_source = "typeset_inpaint_contract_bbox_for_scale"
+    if contract_pair is None:
+        fill_mask = metrics.get("dark_text_contract_fill_mask") if isinstance(metrics.get("dark_text_contract_fill_mask"), dict) else {}
+        fallback_contract = _layout_bbox(fill_mask.get("bbox"))
+        if fallback_contract is None or _bbox_area_px(fallback_contract) < 16:
+            return False
+        contract = fallback_contract
+        contract_source = "qa_metrics.dark_text_contract_fill_mask.bbox"
+    else:
+        contract = _layout_bbox(contract_pair[0])
+        contract_source = str(contract_pair[1] or contract_source)
+    current_safe = _layout_bbox(plan.get("safe_text_box") or text_data.get("safe_text_box"))
+    current_target = _layout_bbox(plan.get("target_bbox") or text_data.get("target_bbox") or text_data.get("balloon_bbox"))
+    chosen = _layout_bbox(compact_reject.get("chosen_bbox"))
+    if contract is None or current_safe is None or current_target is None:
+        return False
+    contract_area = max(1, _bbox_area_px(contract))
+    current_area = max(1, _bbox_area_px(current_safe))
+    target_area = max(1, _bbox_area_px(current_target))
+    if current_area < int(contract_area * 1.22) and target_area < int(contract_area * 1.45):
+        return False
+    if _bbox_intersection_area(current_target, contract) < int(contract_area * 0.72):
+        return False
+
+    cx1, cy1, cx2, cy2 = [int(v) for v in contract]
+    cw = max(1, cx2 - cx1)
+    ch = max(1, cy2 - cy1)
+    pad_x = max(8, min(24, int(round(cw * 0.06))))
+    pad_y = max(5, min(14, int(round(ch * 0.05))))
+    local = [cx1 - pad_x, cy1 - pad_y, cx2 + pad_x, cy2 + pad_y]
+    visual_local = None
+    if chosen is not None and _bbox_intersection_area(chosen, contract) >= int(contract_area * 0.80):
+        bx1, by1, bx2, by2 = [int(v) for v in chosen]
+        visual_local = [
+            max(bx1, cx1 - pad_x),
+            max(by1, cy1 - pad_y),
+            min(bx2, cx2 + max(pad_x, int(round(cw * 0.32)))),
+            min(by2, cy2 + max(pad_y, int(round(ch * 0.09)))),
+        ]
+        if _bbox_area_px(visual_local) >= int(contract_area * 1.18):
+            local = visual_local
+    local = _layout_bbox(local)
+    if local is None:
+        return False
+    clipped_local = _bbox_intersection(local, current_target)
+    if clipped_local is not None and _bbox_area_px(clipped_local) >= int(_bbox_area_px(local) * 0.82):
+        local = list(clipped_local)
+    if _bbox_area_px(local) >= int(current_area * 0.92):
+        return False
+    if _bbox_intersection_area(local, current_target) < int(_bbox_area_px(local) * 0.96):
+        return False
+
+    old_safe = list(current_safe)
+    old_target = list(current_target)
+    old_render = _layout_bbox(plan.get("render_bbox") or text_data.get("render_bbox"))
+    for key in ("target_bbox", "safe_text_box", "layout_safe_bbox", "capacity_bbox", "position_bbox"):
+        plan[key] = list(local)
+    plan["layout_safe_reason"] = "dark_connected_lobe_local_fit_repaired"
+    plan["_position_on_capacity_bbox"] = True
+    local_w = max(4, int(local[2]) - int(local[0]))
+    local_h = max(4, int(local[3]) - int(local[1]))
+    padding_y = max(0, int(plan.get("padding_y", 0) or 0))
+    translated_text = str(text_data.get("translated") or text_data.get("text") or "").strip()
+    long_text_rebalance = len(translated_text) >= 90 and local_h >= int(local_w * 0.45)
+    if long_text_rebalance:
+        padding_y = min(padding_y, 8)
+        plan["padding_y"] = padding_y
+    if long_text_rebalance:
+        # The local lobe bbox is the hard safety limit, but the composition
+        # shape must stay anchored to the original text block.  Using the whole
+        # lobe width makes long left-lobe copy drift toward the bridge/sibling.
+        contract_w = max(4, int(contract[2]) - int(contract[0]))
+        fit_width_limit = max(
+            4,
+            int(
+                round(
+                    min(
+                        local_w * 0.69,
+                        max(contract_w * 0.88, local_w * 0.66),
+                    )
+                )
+            ),
+        )
+    else:
+        fit_width_limit = max(4, int(round(local_w * 0.90)))
+    plan["max_width"] = min(int(plan.get("max_width", local_w) or local_w), fit_width_limit)
+    visual_height_limit = max(4, local_h - max(0, padding_y * 2))
+    if long_text_rebalance:
+        plan["max_height"] = visual_height_limit
+    else:
+        plan["max_height"] = min(int(plan.get("max_height", local_h) or local_h), visual_height_limit)
+    position_local = list(local)
+    if long_text_rebalance:
+        source_cx, _source_cy = _bbox_center(contract)
+        half_width = max(2, int(round(plan["max_width"] / 2.0)))
+        px1 = max(int(local[0]), int(round(source_cx)) - half_width)
+        px2 = min(int(local[2]), int(round(source_cx)) + half_width)
+        if px2 - px1 >= max(12, int(plan["max_width"] * 0.72)):
+            position_local = [px1, int(local[1]), px2, int(local[3])]
+            plan["position_bbox"] = list(position_local)
+            plan["capacity_bbox"] = list(position_local)
+    text_data["target_bbox"] = list(local)
+    text_data["safe_text_box"] = list(local)
+    text_data["_debug_safe_text_box"] = list(local)
+    text_data["layout_safe_bbox"] = list(local)
+    text_data["position_bbox"] = list(position_local)
+    text_data["capacity_bbox"] = list(position_local)
+    text_data["layout_safe_reason"] = "dark_connected_lobe_local_fit_repaired"
+    metrics["dark_connected_lobe_local_fit_repaired"] = {
+        "decision": "applied",
+        "reason": "broad_connected_visual_bbox_caused_low_containment",
+        "old_safe_text_box": [int(v) for v in old_safe],
+        "new_safe_text_box": [int(v) for v in local],
+        "old_target_bbox": [int(v) for v in old_target],
+        "new_target_bbox": [int(v) for v in local],
+        "old_render_bbox": [int(v) for v in old_render] if old_render is not None else None,
+        "new_render_bbox": None,
+        "old_containment": metrics.get("render_balloon_containment"),
+        "new_containment": None,
+        "contract_bbox": [int(v) for v in contract],
+        "contract_source": contract_source,
+        "sibling_lobe_used": False,
+        "bridge_or_glow_preserved": True,
+    }
+    if long_text_rebalance:
+        metrics["dark_connected_lobe_local_fit_rebalanced"] = {
+            "decision": "applied",
+            "reason": "local_fit_contained_but_underused_visual_lobe",
+            "old_font_size": None,
+            "new_font_size": None,
+            "old_line_count": None,
+            "new_line_count": None,
+            "source_text_center": [float(v) for v in _bbox_center(contract)],
+            "new_render_center": None,
+            "center_preserved": None,
+            "safe_text_box": [int(v) for v in local],
+            "position_bbox": [int(v) for v in position_local],
+            "visual_lobe_bbox": [int(v) for v in chosen] if chosen is not None else [int(v) for v in local],
+            "render_bbox": None,
+            "containment": None,
+            "composition_width_limit": int(fit_width_limit),
+            "max_width_limited_for_bridge": True,
+            "sibling_lobe_used": False,
+            "bridge_or_glow_preserved": True,
+        }
+    _merge_qa_flags(text_data, ["dark_connected_lobe_local_fit_repaired", "safe_text_box_recomputed"])
+    if long_text_rebalance:
+        _merge_qa_flags(text_data, ["dark_connected_lobe_local_fit_rebalanced"])
+    return True
+
+
 def _dark_oval_anchor_bbox(text_data: dict) -> list[int] | None:
     metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
     dark_bubble_metrics = metrics.get("image_dark_bubble_mask") if isinstance(metrics.get("image_dark_bubble_mask"), dict) else {}
@@ -15128,6 +15310,27 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             int(plan.get("max_height", 0) or 0),
             max(4, capacity_height - max(0, padding_y * 2)),
         )
+    if _apply_dark_connected_lobe_local_fit_repair(text_data, plan):
+        original_scale_bbox = None
+        inpaint_contract_source = None
+        local_fit_metric = text_data.get("qa_metrics", {}).get("dark_connected_lobe_local_fit_repaired")
+        if isinstance(local_fit_metric, dict):
+            local_fit_metric["original_scale_contract_suppressed"] = True
+        capacity_width = max(1, int(plan["safe_text_box"][2]) - int(plan["safe_text_box"][0]))
+        capacity_height = max(1, int(plan["safe_text_box"][3]) - int(plan["safe_text_box"][1]))
+        plan["max_width"] = min(int(plan.get("max_width", capacity_width) or capacity_width), max(4, int(round(capacity_width * 0.90))))
+        padding_y = max(0, int(plan.get("padding_y", 0) or 0))
+        if isinstance(text_data.get("qa_metrics", {}).get("dark_connected_lobe_local_fit_rebalanced"), dict):
+            padding_y = min(padding_y, 8)
+            plan["padding_y"] = padding_y
+        visual_height_limit = max(4, capacity_height - max(0, padding_y * 2))
+        if isinstance(text_data.get("qa_metrics", {}).get("dark_connected_lobe_local_fit_rebalanced"), dict):
+            plan["max_height"] = visual_height_limit
+        else:
+            plan["max_height"] = min(
+                int(plan.get("max_height", capacity_height) or capacity_height),
+                visual_height_limit,
+            )
     if original_scale_bbox is not None:
         _merge_qa_flags(text_data, ["original_text_scale_size_experiment"])
     x1, y1, x2, y2 = plan["target_bbox"]
@@ -15587,6 +15790,34 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     ]
         if trace_candidates:
             _mark_selected_render_candidate(text_data, best_candidate)
+        local_fit_metric = text_data.get("qa_metrics", {}).get("dark_connected_lobe_local_fit_repaired")
+        if isinstance(local_fit_metric, dict) and local_fit_metric.get("decision") == "applied":
+            local_fit_metric["new_render_bbox"] = [int(round(v)) for v in best_candidate.get("block_bbox", [])]
+            local_fit_metric["new_containment"] = text_data.get("qa_metrics", {}).get("render_balloon_containment")
+            local_fit_metric["font_size_final"] = int(best_candidate.get("font_size", 0) or 0)
+            local_fit_metric["line_count"] = len(best_candidate.get("lines") or [])
+        local_rebalance_metric = text_data.get("qa_metrics", {}).get("dark_connected_lobe_local_fit_rebalanced")
+        if isinstance(local_rebalance_metric, dict) and local_rebalance_metric.get("decision") == "applied":
+            local_rebalance_metric["new_font_size"] = int(best_candidate.get("font_size", 0) or 0)
+            local_rebalance_metric["new_line_count"] = len(best_candidate.get("lines") or [])
+            block_bbox = [int(round(v)) for v in best_candidate.get("block_bbox", [])]
+            local_rebalance_metric["render_bbox"] = block_bbox
+            if block_bbox:
+                render_center = _bbox_center(block_bbox)
+                source_center = local_rebalance_metric.get("source_text_center")
+                local_rebalance_metric["new_render_center"] = [float(v) for v in render_center]
+                if isinstance(source_center, (list, tuple)) and len(source_center) >= 2:
+                    local_rebalance_metric["center_error_px"] = [
+                        float(render_center[0]) - float(source_center[0]),
+                        float(render_center[1]) - float(source_center[1]),
+                    ]
+                    local_rebalance_metric["center_preserved"] = (
+                        abs(float(render_center[0]) - float(source_center[0]))
+                        <= max(18.0, best_candidate.get("font_size", 0) * 0.75)
+                        and abs(float(render_center[1]) - float(source_center[1]))
+                        <= max(24.0, best_candidate.get("font_size", 0) * 1.0)
+                    )
+            local_rebalance_metric["containment"] = text_data.get("qa_metrics", {}).get("render_balloon_containment")
         if inpaint_contract_source:
             _record_typeset_inpaint_contract_fit(text_data, original_scale_bbox, inpaint_contract_source, best_candidate)
             if not _typeset_inpaint_contract_blocking_violations(best_candidate, original_scale_bbox, text_data):
