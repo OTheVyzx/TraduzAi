@@ -9443,6 +9443,131 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIn("dark_bubble_glow_capacity_rejected_connected_lobe", text_data.get("qa_flags") or [])
         self.assertNotIn("dark_bubble_glow_capacity_recovered", text_data.get("qa_flags") or [])
 
+    def test_dark_connected_right_lobe_rebalances_underused_pair_capacity(self):
+        text_data = {
+            "translated": "Você deve construir rapidamente um novo submundo!",
+            "original": "You must quickly build a new underworld!",
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "target_bbox": [345, 421, 783, 716],
+            "safe_text_box": [185, 473, 741, 664],
+            "balloon_bbox": [345, 421, 783, 716],
+            "text_pixel_bbox": [449, 512, 679, 633],
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "dark_bubble_lobe_clip_rejected_undercovered_text",
+                "dark_visual_capacity_expanded_within_lobe",
+                "text_contract_direct_fill",
+                "dark_bubble_negative_evidence",
+                "dark_bubble_oval_reocr",
+                "dark_bubble_ellipse_bbox_mask",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {"bbox": [447, 509, 682, 636]},
+                "typeset_inpaint_contract_bbox_used": {
+                    "bbox": [447, 509, 682, 636],
+                    "source": "qa_metrics.dark_text_contract_fill_mask.bbox",
+                },
+
+                "image_dark_bubble_mask": {
+                    "source": "image_dark_bubble_mask",
+                    "mask_bbox": [68, 233, 800, 694],
+                },
+                "dark_visual_capacity_expanded_within_lobe": {
+                    "reason": "contract_bbox_narrower_than_visual_lobe",
+                    "contract_bbox": [447, 509, 682, 636],
+                    "visual_lobe_bbox": [68, 233, 800, 694],
+                    "visual_lobe_bbox_source": "qa_metrics.image_dark_bubble_mask.mask_bbox",
+                    "previous_safe_text_box": [430, 473, 697, 664],
+                    "expanded_safe_text_box": [185, 473, 741, 664],
+                    "previous_max_width": 267,
+                    "expanded_max_width": 556,
+                    "center_preserved": False,
+                    "target_bbox": [345, 421, 783, 716],
+                },
+            },
+        }
+        plan = {
+            "target_bbox": [345, 421, 783, 716],
+            "safe_text_box": [185, 473, 741, 664],
+            "layout_safe_bbox": [185, 473, 741, 664],
+            "layout_safe_reason": "dark_visual_capacity_expanded_within_lobe",
+            "position_bbox": [185, 473, 741, 664],
+            "capacity_bbox": [185, 473, 741, 664],
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "target_size": 17,
+            "_font_search_cap": 17,
+            "_font_search_floor": 8,
+            "max_width": 489,
+            "max_height": 175,
+            "padding_y": 8,
+            "line_spacing_ratio": 0.08,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "outline_px": 0,
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertGreater(resolved["font_size"], 17)
+        self.assertGreaterEqual(len(resolved["lines"]), 2)
+        self.assertGreaterEqual(resolved["block_bbox"][0], 425)
+        self.assertLessEqual(resolved["block_bbox"][2], 745)
+        self.assertEqual(plan["layout_safe_reason"], "dark_connected_right_lobe_capacity_rebalanced")
+        metric = text_data["qa_metrics"]["dark_connected_right_lobe_capacity_rebalanced"]
+        self.assertEqual(metric["decision"], "applied")
+        self.assertFalse(metric["sibling_lobe_used"])
+        self.assertTrue(metric["bridge_or_glow_preserved"])
+
+    def test_dark_connected_right_lobe_rebalance_does_not_affect_white_balloon(self):
+        text_data = {
+            "translated": "Você deve construir rapidamente um novo submundo!",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "target_bbox": [345, 421, 783, 716],
+            "safe_text_box": [185, 473, 741, 664],
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "dark_bubble_lobe_clip_rejected_undercovered_text",
+                "dark_visual_capacity_expanded_within_lobe",
+                "text_contract_direct_fill",
+            ],
+            "qa_metrics": {
+                "dark_visual_capacity_expanded_within_lobe": {
+                    "previous_safe_text_box": [430, 473, 697, 664],
+                    "expanded_safe_text_box": [185, 473, 741, 664],
+                    "contract_bbox": [447, 509, 682, 636],
+                    "center_preserved": False,
+                    "target_bbox": [345, 421, 783, 716],
+                }
+            },
+        }
+        plan = {
+            "target_bbox": [345, 421, 783, 716],
+            "safe_text_box": [185, 473, 741, 664],
+            "layout_safe_bbox": [185, 473, 741, 664],
+            "layout_safe_reason": "white_balloon",
+            "position_bbox": [185, 473, 741, 664],
+            "capacity_bbox": [185, 473, 741, 664],
+            "font_name": "ComicNeue-Bold.ttf",
+            "target_size": 17,
+            "_font_search_cap": 17,
+            "_font_search_floor": 8,
+            "max_width": 489,
+            "max_height": 175,
+            "padding_y": 8,
+            "line_spacing_ratio": 0.08,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "outline_px": 0,
+        }
+
+        _resolve_text_layout(text_data, plan)
+
+        self.assertNotIn("dark_connected_right_lobe_capacity_rebalanced", text_data.get("qa_flags") or [])
+        self.assertNotIn("dark_connected_right_lobe_capacity_rebalanced", text_data.get("qa_metrics") or {})
+
     def test_dark_connected_lobe_metric_replaces_stale_pair_safe_box(self):
         text_data = {
             "translated": "A retenção do subespaço é de apenas cinco minutos.",
