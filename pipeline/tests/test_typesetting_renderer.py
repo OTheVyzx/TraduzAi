@@ -9834,7 +9834,11 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIsNone(ImageChops.difference(before, img).getbbox())
         self.assertIn("dark_connected_lobe_rect_cleanup_skipped", text_data.get("qa_flags") or [])
         metric = text_data["qa_metrics"]["dark_connected_lobe_rect_cleanup_skipped"]
-        self.assertEqual(metric["decision"], "skipped")
+        self.assertEqual(metric["decision"], "applied")
+        self.assertEqual(metric["reason"], "text_mask_bbox_cleanup_would_cover_connected_lobe_glow")
+        self.assertEqual(metric["fill_rgb"], [0, 0, 0])
+        self.assertTrue(metric["connected_lobe_evidence"])
+        self.assertTrue(metric["after_inpaint_preserved"])
 
     def test_dark_single_oval_short_text_prefers_larger_visual_lobe_capacity(self):
         text_data = {
@@ -12381,6 +12385,52 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertLess(img.getpixel((90, 44))[0], 20)
         self.assertNotIn("sfx_white_bubble_background_removed", text.get("qa_metrics", {}))
+
+    def test_render_band_text_mask_cleanup_skips_dark_connected_lobe_glow_bridge(self):
+        img = Image.new("RGB", (220, 140), (0, 0, 0))
+        for x in range(70, 166):
+            for y in range(54, 88):
+                img.putpixel((x, y), (245, 245, 245))
+        img.putpixel((168, 91), (32, 180, 220))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "MESMO ASSIM, VOCE AINDA ESTA DISPOSTO",
+            "source_text_mask_bbox": [72, 56, 164, 86],
+            "text_pixel_bbox": [72, 56, 164, 86],
+            "background_rgb": [0, 0, 0],
+            "layout_profile": "dark_bubble",
+            "block_profile": "dark_bubble",
+            "qa_flags": [
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+                "dark_bubble_lobe_mask_bbox_preferred",
+                "dark_visual_underfit_capacity_expanded",
+                "visual_text_only_inpaint_contract",
+                "text_contract_direct_fill",
+                "dark_panel_style_grouped",
+                "visual_card_font_fallback",
+                "auto_dark_panel_glow_fallback",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [70, 54, 166, 88],
+                    "mask_pixels": 3264,
+                    "source": "build_inpaint_mask_contract",
+                }
+            },
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((168, 91)), (32, 180, 220))
+        self.assertIn("dark_connected_lobe_rect_cleanup_skipped", text["qa_flags"])
+        metric = text["qa_metrics"]["dark_connected_lobe_rect_cleanup_skipped"]
+        self.assertEqual(metric["decision"], "applied")
+        self.assertEqual(metric["reason"], "text_mask_bbox_cleanup_would_cover_connected_lobe_glow")
+        self.assertEqual(metric["fill_rgb"], [0, 0, 0])
+        self.assertTrue(metric["connected_lobe_evidence"])
+        self.assertTrue(metric["after_inpaint_preserved"])
 
     def test_render_band_text_mask_cleanup_does_not_use_white_sfx_rule_for_translator_note(self):
         img = Image.new("RGB", (180, 100), (255, 255, 255))
