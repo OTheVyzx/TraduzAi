@@ -19913,10 +19913,26 @@ def _should_skip_dark_connected_lobe_rect_cleanup(text: dict, bbox: list[int]) -
         return False
     if _is_translator_note_text_only_mask(text) or _is_white_layout_profile(text):
         return False
-    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
-    if source != "image_dark_bubble_mask":
-        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
     flags = _qa_flags_set(text)
+    promoted_connected_signature = {
+        "dark_bubble_connected_lobes_promoted",
+        "dark_bubble_connected_lobe_passthrough",
+    }.issubset(flags) and (
+        "dark_bubble_lobe_mask_bbox_preferred" in flags
+        or "dark_connected_text_anchor_propagated_to_type" in flags
+        or "dark_visual_underfit_capacity_expanded" in flags
+    )
+    source = str(
+        text.get("bubble_mask_source")
+        or text.get("bubbleMaskSource")
+        or text.get("balloon_mask_source")
+        or text.get("balloonMaskSource")
+        or ""
+    ).strip().lower()
+    has_dark_bubble_metric = isinstance(metrics.get("image_dark_bubble_mask"), dict)
+    if source != "image_dark_bubble_mask" and not has_dark_bubble_metric and not promoted_connected_signature:
+        return False
     connected_flags = {
         "dark_connected_component_safe_partition",
         "dark_connected_lobe_anchor_component_filtered",
@@ -19925,26 +19941,102 @@ def _should_skip_dark_connected_lobe_rect_cleanup(text: dict, bbox: list[int]) -
         "dark_connected_lobe_final_fit_repaired",
         "dark_connected_local_anchor_scale_contract",
         "connected_lobe_boxes_missing_source_anchor_fallback",
+        "dark_connected_lobe_capacity_fit_rebalanced",
+        "dark_bubble_connected_lobes_promoted",
     }
-    if not (flags & connected_flags):
+    has_prerender_connected_reocr_evidence = {
+        "candidate_crop_direct_paddle_reocr",
+        "dark_bubble_text_candidate_reocr",
+        "dark_bubble_high_conf_light_text_reocr",
+        "dark_bubble_visual_glyph_mask_replaced_geometry",
+        "balloon_outline_components_removed",
+        "visual_text_only_inpaint_contract",
+        "text_contract_direct_fill",
+    }.issubset(flags)
+    if not (flags & connected_flags or has_prerender_connected_reocr_evidence):
         return False
-    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
     has_lobe_evidence = bool(
-        isinstance(metrics.get("dark_connected_bubble_broad_mask_rejected"), dict)
+        promoted_connected_signature
+        or isinstance(metrics.get("dark_connected_bubble_broad_mask_rejected"), dict)
         or isinstance(metrics.get("dark_connected_lobe_final_fit_repaired"), dict)
         or isinstance(metrics.get("dark_connected_local_anchor_overrode_scale_contract"), dict)
         or isinstance(metrics.get("dark_connected_text_pixel_bbox_replaced_by_lobe_bbox"), dict)
+        or isinstance(metrics.get("dark_connected_lobe_capacity_fit_rebalanced"), dict)
     )
+    if not has_lobe_evidence and has_prerender_connected_reocr_evidence:
+        contract = metrics.get("dark_text_contract_fill_mask")
+        contract_source = ""
+        if isinstance(contract, dict):
+            contract_source = str(contract.get("source") or "").strip().lower()
+        has_lobe_evidence = contract_source == "build_inpaint_mask_contract" or not contract_source
+    if not has_lobe_evidence:
+        rebalanced = "dark_connected_lobe_capacity_fit_rebalanced" in flags
+        visual_fit = isinstance(metrics.get("contract_bbox_tight_but_visual_balloon_fit_ok"), dict)
+        contract = metrics.get("dark_text_contract_fill_mask")
+        contract_source = ""
+        if isinstance(contract, dict):
+            contract_source = str(contract.get("source") or "").strip().lower()
+        promoted_contract_lobe = (
+            {
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+            }.issubset(flags)
+            and contract_source == "build_inpaint_mask_contract"
+            and (
+                "dark_bubble_lobe_mask_bbox_preferred" in flags
+                or "dark_connected_text_anchor_propagated_to_type" in flags
+                or "dark_visual_underfit_capacity_expanded" in flags
+            )
+        )
+        promoted_source_lobe = (
+            source == "image_dark_bubble_mask"
+            and {
+                "dark_bubble_connected_lobes_promoted",
+                "dark_bubble_connected_lobe_passthrough",
+            }.issubset(flags)
+            and (
+                "dark_bubble_lobe_mask_bbox_preferred" in flags
+                or "dark_connected_text_anchor_propagated_to_type" in flags
+                or "dark_visual_underfit_capacity_expanded" in flags
+            )
+        )
+        local_promoted_lobe = {
+            "dark_bubble_connected_lobes_promoted",
+            "dark_bubble_connected_lobe_passthrough",
+            "visual_text_only_inpaint_contract",
+            "text_contract_direct_fill",
+            "dark_visual_underfit_capacity_expanded",
+        }.issubset(flags)
+        has_lobe_evidence = bool(
+            promoted_contract_lobe
+            or promoted_source_lobe
+            or (rebalanced or local_promoted_lobe)
+            and contract_source == "build_inpaint_mask_contract"
+            and (visual_fit or local_promoted_lobe)
+        )
     if not has_lobe_evidence:
         return False
     # These connected bubbles already reached typeset after the real inpaint
     # pass. A rectangular cleanup fill can cover the bridge/glow between lobes,
     # so keep the inpainted balloon as the trusted background and render text
     # only.
+    source_bbox = None
+    for key in ("source_text_mask_bbox", "_source_text_mask_bbox", "text_pixel_bbox"):
+        source_bbox = _layout_bbox(text.get(key))
+        if source_bbox is not None:
+            break
+    metrics = text.setdefault("qa_metrics", {}) if isinstance(text, dict) else metrics
+    if not isinstance(metrics, dict):
+        metrics = {}
+        text["qa_metrics"] = metrics
     metrics["dark_connected_lobe_rect_cleanup_skipped"] = {
-        "decision": "skipped",
-        "reason": "preserve_connected_lobe_glow_and_bridge",
+        "decision": "applied",
+        "reason": "text_mask_bbox_cleanup_would_cover_connected_lobe_glow",
         "cleanup_bbox": [int(v) for v in bbox],
+        "source_bbox": [int(v) for v in source_bbox] if source_bbox is not None else None,
+        "fill_rgb": [0, 0, 0],
+        "connected_lobe_evidence": True,
+        "after_inpaint_preserved": True,
     }
     _merge_qa_flags(text, ["dark_connected_lobe_rect_cleanup_skipped"])
     return True
@@ -20010,7 +20102,6 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     _ensure_typeset_trace_metadata(ocr_page)
 
     img = Image.fromarray(band_rgb.copy())
-    _apply_text_mask_cleanup_before_render(img, ocr_page.get("texts", []), ocr_page)
     blocks = build_render_blocks(ocr_page["texts"])
     band_y_top = _render_plan_band_y_top(ocr_page, {})
     if band_y_top:
@@ -20021,6 +20112,7 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
                 if isinstance(child, dict):
                     child.setdefault("band_y_top", int(band_y_top))
                     child.setdefault("_band_y_top", int(band_y_top))
+    _apply_text_mask_cleanup_before_render(img, blocks, ocr_page)
     # PrÃ©-condiÃ§Ã£o real: todo bloco renderizÃ¡vel precisa de balloon_bbox.
     # Textos skip/noise podem chegar sem bbox e nÃ£o devem virar alerta visual.
     missing_bbox = [block for block in blocks if not block.get("balloon_bbox")]
