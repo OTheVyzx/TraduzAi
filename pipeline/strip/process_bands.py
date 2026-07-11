@@ -2417,11 +2417,18 @@ def _record_unsafe_mask_contracts(
                 else "glyph_mask_contract_confirmed"
             )
             text_id = _text_id_for(text, index)
+            logical_group_key, logical_group_trace_ids = _logical_mask_contract_group(
+                text,
+                text_id=text_id,
+                band_id=band_id,
+            )
             payload = {
                 "page_id": page_id,
                 "band_id": band_id,
                 "text_id": text_id,
                 "trace_id": str(text.get("trace_id") or _trace_id_for(text_id, band_id)),
+                "logical_group_key": logical_group_key,
+                "logical_group_trace_ids": logical_group_trace_ids,
                 "raw_ocr": text.get("raw_ocr") or text.get("original") or text.get("text") or "",
                 "bbox": copy.deepcopy(text.get("bbox") or text.get("text_pixel_bbox") or []),
                 "qa_flags": _unique_string_list(text.get("qa_flags")),
@@ -2441,6 +2448,25 @@ def _record_unsafe_mask_contracts(
                 recorder.write_jsonl("warnings/unsafe_mask_contracts.jsonl", payload)
     except Exception:
         return
+
+
+def _logical_mask_contract_group(text: dict, *, text_id: str, band_id: str) -> tuple[str, list[str]]:
+    """Return the existing OCR provenance group used for a mask audit row.
+
+    A merged continuation carries every source trace. Distinct visual lobes
+    retain distinct provenance after the lobe-repair path, so this metadata is
+    only observational until a later group-level recovery policy is proven.
+    """
+    trace_ids = _unique_string_list(text.get("source_trace_ids") or text.get("_source_trace_ids"))
+    for source_text_id in _unique_string_list(text.get("source_text_ids") or text.get("_source_text_ids")):
+        trace_id = _trace_id_for(source_text_id, band_id)
+        if trace_id not in trace_ids:
+            trace_ids.append(trace_id)
+    own_trace_id = str(text.get("trace_id") or _trace_id_for(text_id, band_id))
+    if not trace_ids:
+        trace_ids = [own_trace_id]
+    trace_ids = sorted(trace_ids)
+    return f"{band_id}::{'|'.join(trace_ids)}", trace_ids
 
 
 def _record_copyback_decision(

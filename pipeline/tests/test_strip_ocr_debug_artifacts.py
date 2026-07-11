@@ -530,6 +530,10 @@ def test_unsafe_mask_contract_warning_records_trace_and_contract(tmp_path):
                     "trace_id": "ocr_002@page_004_band_036",
                     "original": "WHERE ARE YOU GOING?",
                     "bbox": [11, 22, 88, 46],
+                    "source_trace_ids": [
+                        "ocr_002@page_004_band_036",
+                        "ocr_001@page_004_band_036",
+                    ],
                     "qa_flags": ["visual_text_only_inpaint_missing_glyph_source"],
                     "qa_metrics": {
                         "glyph_mask_contract": {
@@ -590,6 +594,10 @@ def test_unsafe_mask_contract_warning_records_trace_and_contract(tmp_path):
         assert rows[0]["reason"] == "glyph_mask_contract_missing"
         assert rows[0]["raw_mask_rejected_overbroad"] is True
         assert rows[0]["action"] == "audit_only_no_render_or_inpaint_change"
+        assert rows[0]["logical_group_trace_ids"] == [
+            "ocr_001@page_004_band_036",
+            "ocr_002@page_004_band_036",
+        ]
         assert rows[1]["trace_id"] == "ocr_003@page_004_band_036"
         assert rows[1]["contract_kind"] == "missing"
         assert rows[2]["trace_id"] == "ocr_005@page_004_band_036"
