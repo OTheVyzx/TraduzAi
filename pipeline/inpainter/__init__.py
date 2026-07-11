@@ -9087,6 +9087,78 @@ def _detect_inpaint_residual_text(
         return {"has_residual": False, "score": 0.0, "flags": [f"residual_check_failed:{type(exc).__name__}"]}
 
 
+def _record_post_inpaint_glyph_residuals(
+    original_rgb: np.ndarray,
+    cleaned_rgb: np.ndarray,
+    ocr_page: dict,
+) -> list[dict]:
+    """Attribute confirmed residuals to glyph-supported texts, never to a whole band."""
+
+    if (
+        not isinstance(original_rgb, np.ndarray)
+        or not isinstance(cleaned_rgb, np.ndarray)
+        or original_rgb.shape != cleaned_rgb.shape
+        or original_rgb.ndim != 3
+        or not isinstance(ocr_page, dict)
+    ):
+        return []
+    try:
+        from qa.inpaint_residual import detect_residual_text
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    for index, text in enumerate(_processable_texts_for_inpaint(ocr_page)):
+        try:
+            raw_mask = build_raw_text_mask_from_image(dict(text), original_rgb, original_rgb.shape)
+        except Exception:
+            raw_mask = None
+        if raw_mask is None or not np.any(raw_mask):
+            continue
+        glyph_region = expand_text_mask(np.where(raw_mask > 0, 255, 0).astype(np.uint8), expand_px=2)
+        try:
+            residual = detect_residual_text(
+                original_rgb,
+                cleaned_rgb,
+                glyph_region,
+                include_unchanged_dark=True,
+                include_light_residual=True,
+            )
+        except Exception:
+            continue
+        if not residual.get("has_residual"):
+            continue
+
+        text_id = str(text.get("id") or text.get("text_id") or f"ocr_{index:03d}")
+        trace_id = str(text.get("trace_id") or text_id)
+        payload = {
+            "text_id": text_id,
+            "trace_id": trace_id,
+            "source": "raw_glyph_mask_expand2",
+            "raw_mask_pixels": int(np.count_nonzero(raw_mask)),
+            "region_mask_pixels": int(np.count_nonzero(glyph_region)),
+            "has_residual": True,
+            "score": float(residual.get("score") or 0.0),
+            "flags": [str(flag) for flag in residual.get("flags") or [] if str(flag).strip()],
+            "dark_residual_pixels": int(residual.get("dark_residual_pixels") or 0),
+            "light_residual_pixels": int(residual.get("light_residual_pixels") or 0),
+            "colored_residual_pixels": int(residual.get("colored_residual_pixels") or 0),
+        }
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["post_inpaint_glyph_residual"] = payload
+        flags = text.setdefault("qa_flags", [])
+        if isinstance(flags, list) and "glyph_confirmed_residual_after_inpaint" not in flags:
+            flags.append("glyph_confirmed_residual_after_inpaint")
+        rows.append(payload)
+
+    if rows:
+        ocr_page["_strip_post_inpaint_glyph_residuals"] = rows
+    else:
+        ocr_page.pop("_strip_post_inpaint_glyph_residuals", None)
+    return rows
+
+
 def _light_residual_contrast(gray: np.ndarray) -> np.ndarray:
     if gray.size == 0:
         return np.zeros_like(gray, dtype=np.float32)
@@ -11645,6 +11717,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
                 final_note_mask = np.maximum(final_note_mask, _mask_from_bbox(width, height, bbox, padding=10))
         if np.any(final_note_mask):
             final_action_mask = np.maximum(final_action_mask, final_note_mask.astype(np.uint8))
+    _record_post_inpaint_glyph_residuals(band_rgb, cleaned, ocr_page)
     _clear_resolved_current_inpaint_flags(
         ocr_page,
         final_residual_check=final_residual_check,

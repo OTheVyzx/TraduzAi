@@ -709,6 +709,52 @@ def test_inpaint_residual_warning_groups_preserved_unsafe_glyph_texts(tmp_path):
         bind_recorder(None)
 
 
+def test_inpaint_residual_warning_records_confirmed_glyph_residual_without_preserving_group(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_004",
+                    "trace_id": "ocr_004@page_004_band_036",
+                    "original": "RESIDUAL SOURCE",
+                    "bbox": [11, 52, 88, 76],
+                    "qa_flags": ["glyph_confirmed_residual_after_inpaint"],
+                    "qa_metrics": {
+                        "post_inpaint_glyph_residual": {
+                            "has_residual": True,
+                            "score": 0.042,
+                            "source": "raw_glyph_mask_expand2",
+                            "raw_mask_pixels": 244,
+                            "region_mask_pixels": 512,
+                            "dark_residual_pixels": 48,
+                            "light_residual_pixels": 0,
+                            "colored_residual_pixels": 0,
+                        }
+                    },
+                }
+            ],
+        }
+
+        _record_inpaint_residual_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["warning_type"] == "confirmed_glyph_residual"
+        assert rows[0]["residual_text_ids"] == ["ocr_004"]
+        assert rows[0]["fallback"] == "pending_safe_recovery"
+        assert rows[0]["preserve_original"] is False
+    finally:
+        bind_recorder(None)
+
+
 def test_process_band_emits_unsafe_mask_contract_warning_after_inpaint(tmp_path):
     class ContractReportingInpainter:
         def inpaint_band_image(self, image_rgb, page):

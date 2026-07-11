@@ -5385,6 +5385,49 @@ class VisionStackInpainterTests(unittest.TestCase):
             {"glyph_fill_residual_after_local_redetect": 1},
         )
 
+    def test_post_inpaint_glyph_residuals_are_attributed_to_the_matching_text_only(self):
+        import inpainter
+        from inpainter import _record_post_inpaint_glyph_residuals
+
+        original = np.full((90, 180, 3), 255, dtype=np.uint8)
+        original[24:42, 22:72] = 0
+        original[24:42, 108:158] = 0
+        cleaned = original.copy()
+        cleaned[24:42, 108:158] = 255
+        residual_text = {
+            "id": "ocr_residual",
+            "trace_id": "ocr_residual@page_001_band_001",
+            "text": "SOURCE",
+            "bbox": [18, 18, 78, 48],
+            "text_pixel_bbox": [18, 18, 78, 48],
+            "line_polygons": [[[18, 18], [78, 18], [78, 48], [18, 48]]],
+            "route_action": "translate_inpaint_render",
+        }
+        cleared_text = {
+            "id": "ocr_cleared",
+            "trace_id": "ocr_cleared@page_001_band_001",
+            "text": "CLEARED",
+            "bbox": [104, 18, 164, 48],
+            "text_pixel_bbox": [104, 18, 164, 48],
+            "line_polygons": [[[104, 18], [164, 18], [164, 48], [104, 48]]],
+            "route_action": "translate_inpaint_render",
+        }
+        page = {"texts": [residual_text, cleared_text]}
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", side_effect=lambda text, *_args: (
+            np.where(
+                np.indices(original.shape[:2])[1] < 90,
+                255 if text["id"] == "ocr_residual" else 0,
+                0 if text["id"] == "ocr_residual" else 255,
+            ).astype(np.uint8)
+        )):
+            rows = _record_post_inpaint_glyph_residuals(original, cleaned, page)
+
+        self.assertEqual([row["text_id"] for row in rows], ["ocr_residual"])
+        self.assertIn("glyph_confirmed_residual_after_inpaint", residual_text["qa_flags"])
+        self.assertNotIn("glyph_confirmed_residual_after_inpaint", cleared_text.get("qa_flags") or [])
+        self.assertTrue(residual_text["qa_metrics"]["post_inpaint_glyph_residual"]["has_residual"])
+
     def test_derived_card_panel_fast_fill_requires_global_opt_in_without_background_metadata(self):
         from inpainter import _apply_fast_dark_panel_text_fill
 

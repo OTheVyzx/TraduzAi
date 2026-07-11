@@ -2565,6 +2565,58 @@ def _record_inpaint_residual_warnings(
             group["preserve_original"] = True
             group["skip_processing"] = True
             group["trace_ids"] = trace_ids
+            group["warning_type"] = "preserved_unsafe_glyph_fallback"
+            recorder.write_jsonl("warnings/inpaint_residual_blocks.jsonl", group)
+
+        confirmed_groups: dict[str, dict] = {}
+        for index, text in enumerate(list((page or {}).get("texts") or [])):
+            if not isinstance(text, dict):
+                continue
+            metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+            residual = metrics.get("post_inpaint_glyph_residual") if isinstance(metrics, dict) else {}
+            if not isinstance(residual, dict) or not bool(residual.get("has_residual")):
+                continue
+            flags = _unique_string_list(text.get("qa_flags"))
+            if "glyph_confirmed_residual_after_inpaint" not in flags:
+                continue
+            text_id = _text_id_for(text, index)
+            logical_group_key, logical_group_trace_ids = _logical_mask_contract_group(
+                text,
+                text_id=text_id,
+                band_id=band_id,
+            )
+            group = confirmed_groups.setdefault(
+                logical_group_key,
+                {
+                    "page_id": page_id,
+                    "band_id": band_id,
+                    "logical_group_key": logical_group_key,
+                    "logical_group_trace_ids": logical_group_trace_ids,
+                    "residual_text_ids": [],
+                    "trace_ids": [],
+                    "bboxes": [],
+                    "qa_flags": [],
+                    "residual_metrics": [],
+                },
+            )
+            group["residual_text_ids"].append(text_id)
+            group["trace_ids"].append(str(text.get("trace_id") or _trace_id_for(text_id, band_id)))
+            group["bboxes"].append(copy.deepcopy(text.get("bbox") or text.get("text_pixel_bbox") or []))
+            group["qa_flags"].extend(flags)
+            group["residual_metrics"].append(copy.deepcopy(residual))
+
+        for group in confirmed_groups.values():
+            group["residual_text_ids"] = sorted({value for value in group["residual_text_ids"] if value})
+            group["trace_ids"] = sorted({value for value in group.pop("trace_ids") if value})
+            group["qa_flags"] = sorted({value for value in group["qa_flags"] if value})
+            group["is_continuation_group"] = len(group["logical_group_trace_ids"]) > 1
+            group["partial_group_render_forbidden"] = bool(group["is_continuation_group"])
+            group["warning_type"] = "confirmed_glyph_residual"
+            group["fallback"] = "pending_safe_recovery"
+            group["action"] = "warning_only_pipeline_completed"
+            group["source"] = "post_inpaint_glyph_residual"
+            group["preserve_original"] = False
+            group["skip_processing"] = False
             recorder.write_jsonl("warnings/inpaint_residual_blocks.jsonl", group)
     except Exception:
         return
