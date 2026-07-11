@@ -18,7 +18,12 @@ from strip.run import (
     _write_output_pages_after_lossless_debug,
     run_chapter,
 )
-from strip.process_bands import _band_to_page_dict, _record_ocr_raw_blocks, process_band
+from strip.process_bands import (
+    _band_to_page_dict,
+    _record_ocr_raw_blocks,
+    _record_unsafe_mask_contracts,
+    process_band,
+)
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
 
@@ -511,6 +516,137 @@ def test_ocr_confidence_audit_counts_only_lost_available_confidence():
     assert audit["summary"]["blocks_with_available_confidence"] == 2
     assert audit["summary"]["blocks_with_confidence_zero"] == 1
     assert audit["by_band"][0]["text_id"] == "ocr_002"
+
+
+def test_unsafe_mask_contract_warning_records_trace_and_contract(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "trace_id": "ocr_002@page_004_band_036",
+                    "original": "WHERE ARE YOU GOING?",
+                    "bbox": [11, 22, 88, 46],
+                    "qa_flags": ["visual_text_only_inpaint_missing_glyph_source"],
+                    "qa_metrics": {
+                        "glyph_mask_contract": {
+                            "kind": "missing",
+                            "sources": [],
+                            "raw_mask_rejected_overbroad": True,
+                            "raw_mask_dense_in_text_bbox": False,
+                            "geometry_pixels": 832,
+                            "final_mask_pixels": 832,
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_003",
+                    "original": "LEGACY FALLBACK WITHOUT CONTRACT",
+                    "bbox": [96, 22, 180, 46],
+                },
+                {
+                    "id": "ocr_004",
+                    "original": "GLYPH-SAFE TEXT",
+                    "bbox": [11, 52, 88, 76],
+                    "qa_metrics": {
+                        "glyph_mask_contract": {
+                            "kind": "glyph_confirmed",
+                            "sources": ["raw_text_mask"],
+                            "geometry_pixels": 128,
+                            "final_mask_pixels": 144,
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_005",
+                    "original": "EMPTY FINAL MASK",
+                    "bbox": [96, 52, 180, 76],
+                    "qa_metrics": {
+                        "glyph_mask_contract": {
+                            "kind": "glyph_confirmed",
+                            "sources": ["raw_text_mask"],
+                            "geometry_pixels": 0,
+                            "final_mask_pixels": 0,
+                        }
+                    },
+                },
+            ],
+        }
+
+        _record_unsafe_mask_contracts(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "unsafe_mask_contracts.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 3
+        assert rows[0]["trace_id"] == "ocr_002@page_004_band_036"
+        assert rows[0]["contract_kind"] == "missing"
+        assert rows[0]["reason"] == "glyph_mask_contract_missing"
+        assert rows[0]["raw_mask_rejected_overbroad"] is True
+        assert rows[0]["action"] == "audit_only_no_render_or_inpaint_change"
+        assert rows[1]["trace_id"] == "ocr_003@page_004_band_036"
+        assert rows[1]["contract_kind"] == "missing"
+        assert rows[2]["trace_id"] == "ocr_005@page_004_band_036"
+        assert rows[2]["reason"] == "glyph_mask_contract_empty_final_mask"
+        assert rows[2]["empty_final_mask"] is True
+        audit_path = tmp_path / "debug" / "e2e" / "warnings" / "mask_contract_audit.jsonl"
+        audit_rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        assert len(audit_rows) == 4
+        assert audit_rows[2]["trace_id"] == "ocr_004@page_004_band_036"
+        assert audit_rows[2]["is_unsafe"] is False
+        assert audit_rows[2]["reason"] == "glyph_mask_contract_confirmed"
+    finally:
+        bind_recorder(None)
+
+
+def test_process_band_emits_unsafe_mask_contract_warning_after_inpaint(tmp_path):
+    class ContractReportingInpainter:
+        def inpaint_band_image(self, image_rgb, page):
+            page["texts"][0]["qa_metrics"] = {
+                "glyph_mask_contract": {
+                    "kind": "geometry_only",
+                    "sources": [],
+                    "geometry_pixels": 640,
+                    "final_mask_pixels": 640,
+                }
+            }
+            return np.array(image_rgb, copy=True)
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[Balloon(BBox(10, 112, 50, 140), confidence=0.87)],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+
+        process_band(
+            band,
+            runtime=FakeRuntime(),
+            translator=FakeTranslator(),
+            inpainter=ContractReportingInpainter(),
+            typesetter=FakeTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "unsafe_mask_contracts.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["band_id"] == "page_001_band_000"
+        assert rows[0]["contract_kind"] == "geometry_only"
+        assert rows[0]["action"] == "audit_only_no_render_or_inpaint_change"
+    finally:
+        bind_recorder(None)
 
 
 def test_process_band_writes_ocr_raw_blocks_jsonl_with_confidence_and_trace(tmp_path):

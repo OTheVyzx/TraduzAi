@@ -1017,6 +1017,37 @@ class MaskBuilderTests(unittest.TestCase):
         self.assertIn("raw_text_mask", contract.get("sources", []))
         self.assertEqual(text.get("mask_evidence", {}).get("contract_kind"), "glyph_confirmed")
 
+    def test_build_inpaint_mask_marks_empty_final_mask_as_missing_contract(self):
+        text = {
+            "bbox": [10, 10, 150, 150],
+            "text_pixel_bbox": [58, 58, 102, 104],
+            "line_polygons": [
+                [[60, 60], [100, 60], [100, 78], [60, 78]],
+                [[65, 84], [95, 84], [95, 102], [65, 102]],
+            ],
+            "balloon_bbox": [10, 10, 150, 150],
+        }
+        raw = np.zeros((160, 160), dtype=np.uint8)
+        raw[62:74, 64:96] = 255
+        raw[86:98, 68:92] = 255
+
+        with (
+            patch("inpainter.mask_builder.build_raw_text_mask_from_image", return_value=raw),
+            patch(
+                "inpainter.mask_builder._apply_clipped_overlap_fragment_cleanup_mask",
+                return_value=np.zeros((160, 160), dtype=np.uint8),
+            ),
+        ):
+            mask = build_inpaint_mask(text, (160, 160, 3), image_rgb=np.full((160, 160, 3), 245, dtype=np.uint8))
+
+        self.assertIsNotNone(mask)
+        contract = text.get("qa_metrics", {}).get("glyph_mask_contract", {})
+        self.assertEqual(contract.get("kind"), "missing")
+        self.assertEqual(contract.get("sources"), [])
+        self.assertEqual(contract.get("candidate_sources"), ["raw_text_mask"])
+        self.assertEqual(contract.get("final_mask_pixels"), 0)
+        self.assertEqual(text.get("mask_evidence", {}).get("contract_kind"), "missing")
+
     def test_build_inpaint_mask_marks_dense_raw_text_box_as_geometry_only_contract(self):
         text = {
             "bbox": [10, 10, 150, 150],

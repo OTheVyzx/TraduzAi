@@ -6486,10 +6486,17 @@ def build_inpaint_mask(
     if isinstance(dark_bbox_mask, np.ndarray) and np.any(dark_bbox_mask):
         glyph_contract_sources.append("dark_text_pixels")
 
+    final_mask_pixels = int(np.count_nonzero(text_mask))
     # Line polygons and text bboxes are useful geometry, but they are not proof
     # that the pixels inside them are actual glyphs. Keep that distinction in
-    # the audit contract before future safety gates act on it.
-    glyph_contract_kind = "glyph_confirmed" if glyph_contract_sources else "geometry_only"
+    # the audit contract before future safety gates act on it. A candidate
+    # source is not a usable contract when cleanup leaves no final mask.
+    candidate_glyph_contract_sources = list(glyph_contract_sources)
+    if final_mask_pixels <= 0:
+        glyph_contract_kind = "missing"
+        glyph_contract_sources = []
+    else:
+        glyph_contract_kind = "glyph_confirmed" if glyph_contract_sources else "geometry_only"
     evidence = consolidate_mask_evidence(
         block,
         kind=(
@@ -6498,7 +6505,7 @@ def build_inpaint_mask(
             else "ocr_pixels" if isinstance(raw_text_mask, np.ndarray) and np.any(raw_text_mask) else "clipped_line_polygon"
         ),
         raw_mask_pixels=int(np.count_nonzero(raw_text_mask)) if isinstance(raw_text_mask, np.ndarray) else int(np.count_nonzero(text_mask)),
-        expanded_mask_pixels=int(np.count_nonzero(text_mask)),
+        expanded_mask_pixels=final_mask_pixels,
         evidence_score=1.0,
         fast_fill_reject_reasons=_dark_text_without_balloon_fast_fill_reject_reasons(block, image_shape),
     )
@@ -6511,11 +6518,12 @@ def build_inpaint_mask(
         metrics["glyph_mask_contract"] = {
             "kind": glyph_contract_kind,
             "sources": list(glyph_contract_sources),
+            "candidate_sources": candidate_glyph_contract_sources,
             "raw_mask_rejected_overbroad": bool(raw_mask_rejected_overbroad),
             "raw_mask_dense_in_text_bbox": bool(raw_mask_dense_in_text_bbox),
             "raw_mask_text_bbox_coverage": round(float(raw_mask_text_bbox_coverage), 6),
             "geometry_pixels": int(np.count_nonzero(geometry_mask)) if isinstance(geometry_mask, np.ndarray) else 0,
-            "final_mask_pixels": int(np.count_nonzero(text_mask)),
+            "final_mask_pixels": final_mask_pixels,
         }
     return text_mask
 

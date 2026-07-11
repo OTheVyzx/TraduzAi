@@ -2356,6 +2356,93 @@ def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
         return
 
 
+def _record_unsafe_mask_contracts(
+    page: dict,
+    *,
+    band_id: str,
+    source_page_number: int | None = None,
+) -> None:
+    """Write audit-only warnings for text whose mask lacks glyph evidence.
+
+    The inpaint stage owns the final mask contract.  This recorder deliberately
+    runs after that stage and never changes a mask, render decision, or OCR
+    payload.  Future recovery policy must operate on logical text/lobe groups,
+    not on these rows individually.
+    """
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+
+    try:
+        page_number = _source_page_number_from_page(page, source_page_number)
+        page_id = _page_id_for(page_number)
+        for index, text in enumerate(list((page or {}).get("texts") or [])):
+            if not isinstance(text, dict):
+                continue
+            metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+            contract = metrics.get("glyph_mask_contract") if isinstance(metrics.get("glyph_mask_contract"), dict) else {}
+            evidence = text.get("mask_evidence") if isinstance(text.get("mask_evidence"), dict) else {}
+            # Some legacy/fallback routes do not persist a contract at all.
+            # Treat that absence as unsafe rather than silently excluding it
+            # from the recovery audit.
+            contract_kind = str(contract.get("kind") or evidence.get("contract_kind") or "missing").strip()
+            raw_mask_rejected_overbroad = bool(
+                contract.get("raw_mask_rejected_overbroad")
+                or evidence.get("raw_mask_rejected_overbroad")
+            )
+            raw_mask_dense_in_text_bbox = bool(
+                contract.get("raw_mask_dense_in_text_bbox")
+                or evidence.get("raw_mask_dense_in_text_bbox")
+            )
+            final_mask_pixels = int(contract.get("final_mask_pixels") or 0)
+            empty_final_mask = contract_kind == "glyph_confirmed" and final_mask_pixels <= 0
+            is_unsafe = contract_kind in {"missing", "geometry_only"} or (
+                raw_mask_rejected_overbroad or raw_mask_dense_in_text_bbox
+            ) or empty_final_mask
+            reason = (
+                "glyph_mask_contract_missing"
+                if contract_kind == "missing"
+                else "glyph_mask_contract_geometry_only"
+                if contract_kind == "geometry_only"
+                else "raw_mask_rejected_overbroad"
+                if raw_mask_rejected_overbroad
+                else "raw_mask_dense_in_text_bbox"
+                if raw_mask_dense_in_text_bbox
+                else "glyph_mask_contract_empty_final_mask"
+                if empty_final_mask
+                else "glyph_mask_contract_confirmed"
+            )
+            text_id = _text_id_for(text, index)
+            payload = {
+                "page_id": page_id,
+                "band_id": band_id,
+                "text_id": text_id,
+                "trace_id": str(text.get("trace_id") or _trace_id_for(text_id, band_id)),
+                "raw_ocr": text.get("raw_ocr") or text.get("original") or text.get("text") or "",
+                "bbox": copy.deepcopy(text.get("bbox") or text.get("text_pixel_bbox") or []),
+                "qa_flags": _unique_string_list(text.get("qa_flags")),
+                "contract_kind": contract_kind or "unknown",
+                "contract_sources": copy.deepcopy(contract.get("sources") or evidence.get("glyph_sources") or []),
+                "geometry_pixels": int(contract.get("geometry_pixels") or 0),
+                "final_mask_pixels": final_mask_pixels,
+                "empty_final_mask": empty_final_mask,
+                "raw_mask_rejected_overbroad": raw_mask_rejected_overbroad,
+                "raw_mask_dense_in_text_bbox": raw_mask_dense_in_text_bbox,
+                "is_unsafe": bool(is_unsafe),
+                "reason": reason,
+                "action": "audit_only_no_render_or_inpaint_change",
+            }
+            recorder.write_jsonl("warnings/mask_contract_audit.jsonl", payload)
+            if is_unsafe:
+                recorder.write_jsonl("warnings/unsafe_mask_contracts.jsonl", payload)
+    except Exception:
+        return
+
+
 def _record_copyback_decision(
     *,
     band: Band,
@@ -8582,6 +8669,11 @@ def process_band(
     )
     cleaned = inpaint_stage.to_image()
     perf.update(dict(inpaint_stage.perf_updates))
+    _record_unsafe_mask_contracts(
+        translated_page,
+        band_id=band_id,
+        source_page_number=source_page_number,
+    )
     typeset_stage = _run_with_stage_lock(
         "typeset",
         typeset_stage_lock,
