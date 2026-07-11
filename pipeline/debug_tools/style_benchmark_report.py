@@ -130,7 +130,17 @@ def write_run_reports(run_dir: Path, manifest: dict[str, Any], records: list[dic
         "".join(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n" for record in records),
         encoding="utf-8",
     )
-    summary = {"schema_version": 2, "score": score_benchmark(manifest, records)}
+    v2_records = []
+    for record in records:
+        v2 = record.get("style_evidence_v2")
+        attributes = v2.get("attributes") if isinstance(v2, dict) else None
+        if isinstance(attributes, dict):
+            v2_records.append({**record, "attributes": attributes})
+    summary = {
+        "schema_version": 2,
+        "score": score_benchmark(manifest, records),
+        "score_v2_shadow": score_benchmark(manifest, v2_records),
+    }
     (run_dir / "style_benchmark_summary.json").write_text(
         json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
