@@ -4739,6 +4739,25 @@ def _should_skip_unverified_merged_fragment(text: dict) -> bool:
     flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
     if "same_balloon_fragment_merged" not in flags:
         return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    glyph_contract = metrics.get("glyph_mask_contract") if isinstance(metrics, dict) else None
+    glyph_confirmed = bool(
+        isinstance(glyph_contract, dict)
+        and str(glyph_contract.get("kind") or "").strip().lower() == "glyph_confirmed"
+        and int(glyph_contract.get("final_mask_pixels") or 0) > 0
+    )
+    residual = metrics.get("post_inpaint_glyph_residual") if isinstance(metrics, dict) else None
+    has_confirmed_residual = bool(isinstance(residual, dict) and residual.get("has_residual") is True)
+    if (
+        "same_balloon_spatial_continuation_merged" in flags
+        and "ocr_split_spatial_line_clusters" in flags
+        and glyph_confirmed
+        and not has_confirmed_residual
+        and "raw_text_evidence_missing" not in flags
+    ):
+        # A split spatial body is rejoined only after both pieces have glyph
+        # evidence. This is not the unsafe broad merge the fallback guards.
+        return False
     source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
     translated = str(text.get("translated") or text.get("traduzido") or text.get("text") or "").strip()
     if (

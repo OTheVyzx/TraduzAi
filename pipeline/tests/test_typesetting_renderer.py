@@ -12491,5 +12491,35 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(img.getpixel((90, 44)), (254, 254, 254))
         self.assertNotIn("sfx_white_bubble_background_removed", text.get("qa_metrics", {}))
 
+    def test_spatial_continuation_merge_with_glyph_contract_is_renderable(self):
+        text = {
+            "translated": "TAMBÉM NÃO HÁ NÚMERO DE IDENTIFICAÇÃO.",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "qa_flags": [
+                "same_balloon_fragment_merged",
+                "same_balloon_spatial_continuation_merged",
+                "ocr_split_spatial_line_clusters",
+                "fast_fill_no_glyph_evidence",
+            ],
+            "qa_metrics": {
+                "glyph_mask_contract": {
+                    "kind": "glyph_confirmed",
+                    "sources": ["raw_text_mask"],
+                    "final_mask_pixels": 12995,
+                }
+            },
+        }
+
+        self.assertFalse(renderer_mod._should_skip_unverified_merged_fragment(text))
+
+    def test_unverified_merged_fragment_without_spatial_glyph_contract_stays_skipped(self):
+        text = {
+            "translated": "TEXTO SEM EVIDÊNCIA",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "qa_flags": ["same_balloon_fragment_merged", "fast_fill_no_glyph_evidence"],
+        }
+
+        self.assertTrue(renderer_mod._should_skip_unverified_merged_fragment(text))
+
 if __name__ == "__main__":
     unittest.main()

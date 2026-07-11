@@ -874,6 +874,7 @@ def merge_same_balloon_fragments_before_translation(texts: list[dict[str, Any]])
             merged_records[partition[0]] = merged
             consumed.update(partition[1:])
 
+    _merge_spatial_line_cluster_continuations(records, consumed, merged_records)
     _merge_same_band_joined_word_fragments(records, consumed, merged_records)
     _merge_same_band_dependent_fragments(records, consumed, merged_records)
 
@@ -989,6 +990,77 @@ def _same_balloon_spatial_body_partitions(records: list[dict[str, Any]], ordered
         partition.sort(key=lambda item: _record_reading_order(records[item]))
     result.sort(key=lambda partition: _record_reading_order(records[partition[0]]))
     return result
+
+
+def _source_text_has_open_continuation(record: dict[str, Any]) -> bool:
+    text = _normalize_spaces(_record_source_text_for_merge(record))
+    if not text:
+        return False
+    return not bool(re.search(r"[.!?…](?:['\")\]]+)?$", text))
+
+
+def _record_is_spatial_continuation_candidate(record: dict[str, Any]) -> bool:
+    if _record_should_not_merge_for_translation(record):
+        return False
+    if _record_has_spatial_line_cluster(record):
+        return False
+    content_class = str(record.get("content_class") or "").strip().lower()
+    return content_class not in {"sfx", "watermark", "scanlation_credit", "promotional", "non_story"}
+
+
+def _merge_spatial_line_cluster_continuations(
+    records: list[dict[str, Any]],
+    consumed: set[int],
+    merged_records: dict[int, dict[str, Any]],
+) -> None:
+    """Join an open spatial child only to its adjacent continuation body.
+
+    A broad OCR assignment may be split into two real speech bodies. The lower
+    body can still have a separate final line assigned to a tighter detector
+    box, which gives it a different bubble mask. Merge that line only when it
+    is geometrically part of the same spatial body and the first phrase is
+    grammatically open; unrelated nearby bubbles remain separate.
+    """
+    by_band: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        if index in consumed or index in merged_records:
+            continue
+        band_id = _record_band_id(record)
+        if band_id:
+            by_band.setdefault(band_id, []).append(index)
+
+    for indexes in by_band.values():
+        ordered = sorted(indexes, key=lambda item: _record_reading_order(records[item]))
+        for anchor_index in ordered:
+            if anchor_index in consumed or anchor_index in merged_records:
+                continue
+            anchor = records[anchor_index]
+            if not _record_has_spatial_line_cluster(anchor) or not _source_text_has_open_continuation(anchor):
+                continue
+            anchor_order = _record_reading_order(anchor)
+            candidates = [
+                candidate_index
+                for candidate_index in ordered
+                if candidate_index not in consumed
+                and candidate_index not in merged_records
+                and candidate_index != anchor_index
+                and _record_reading_order(records[candidate_index]) >= anchor_order
+                and _record_is_spatial_continuation_candidate(records[candidate_index])
+                and _record_matches_spatial_body(records[candidate_index], anchor)
+            ]
+            if len(candidates) != 1:
+                continue
+            continuation_index = candidates[0]
+            group = [anchor, records[continuation_index]]
+            merged = _merge_same_balloon_fragment_group(group, merge_path="spatial_line_cluster_continuation")
+            if merged is None:
+                continue
+            flags = list(merged.get("qa_flags") or [])
+            if "same_balloon_spatial_continuation_merged" not in flags:
+                flags.append("same_balloon_spatial_continuation_merged")
+            merged["qa_flags"] = flags
+            merged_records[anchor_index] = merged
+            consumed.add(continuation_index)
 
 
 def _bbox_area_for_merge(bbox: list[int] | None) -> int:

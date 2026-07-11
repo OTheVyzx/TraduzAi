@@ -424,6 +424,54 @@ def test_same_balloon_merge_partitions_spatial_line_clusters_before_translation(
     assert "same_balloon_fragment_merged" in merged[1]["qa_flags"]
 
 
+def test_spatial_line_cluster_merges_adjacent_continuation_across_different_bubble_masks():
+    records = [
+        {
+            "id": "ocr_001_spatial_cluster_01",
+            "trace_id": "ocr_001_spatial_cluster_01@page_029_band_116",
+            "band_id": "page_029_band_116",
+            "bubble_mask_bbox": [187, 2186, 538, 2369],
+            "text": "DON'T HAVE ONE, I WAS ABANDONED.",
+            "bbox": [240, 2220, 485, 2335],
+            "text_pixel_bbox": [240, 2220, 485, 2335],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 1,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [240, 2220, 485, 2335],
+        },
+        {
+            "id": "ocr_001_spatial_cluster_02",
+            "trace_id": "ocr_001_spatial_cluster_02@page_029_band_116",
+            "band_id": "page_029_band_116",
+            "bubble_mask_bbox": [35, 2428, 456, 2616],
+            "text": "NO IDENTIFICATION NUMBER",
+            "bbox": [99, 2463, 392, 2581],
+            "text_pixel_bbox": [99, 2463, 392, 2581],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 2,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [99, 2463, 392, 2581],
+        },
+        {
+            "id": "ocr_002",
+            "trace_id": "ocr_002@page_029_band_116",
+            "band_id": "page_029_band_116",
+            "bubble_mask_bbox": [142, 2579, 346, 2634],
+            "text": "Either.",
+            "bbox": [94, 2468, 393, 2619],
+            "text_pixel_bbox": [173, 2591, 315, 2622],
+        },
+    ]
+
+    merged = merge_same_balloon_fragments_before_translation(records)
+
+    assert len(merged) == 2
+    assert merged[0]["text"] == "DON'T HAVE ONE, I WAS ABANDONED."
+    assert merged[1]["text"] == "NO IDENTIFICATION NUMBER Either."
+    assert merged[1]["source_text_ids"] == ["ocr_001_spatial_cluster_02", "ocr_002"]
+    assert "same_balloon_spatial_continuation_merged" in merged[1]["qa_flags"]
+
+
 def test_joined_ocr_is_repaired_before_review_flag_survives():
     assert hasattr(ocr_normalizer, "repair_ocr_truncated_or_joined")
     repair_ocr_truncated_or_joined = ocr_normalizer.repair_ocr_truncated_or_joined
