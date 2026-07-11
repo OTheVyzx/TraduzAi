@@ -73,6 +73,22 @@ def _ocr_fallback_shadow_limit(default: int = 1) -> int:
     return max(0, _env_int("TRADUZAI_OCR_FALLBACK_SHADOW_MAX", default))
 
 
+def _raw_ocr_output_is_empty(value) -> bool:
+    if value is None:
+        return True
+    if torch.is_tensor(value):
+        return value.numel() == 0
+    if isinstance(value, np.ndarray):
+        return value.size == 0
+    if isinstance(value, (str, bytes)):
+        return len(value) == 0
+    if isinstance(value, dict):
+        return not value or all(_raw_ocr_output_is_empty(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return not value or all(_raw_ocr_output_is_empty(item) for item in value)
+    return False
+
+
 def _attach_rotated_text_metadata(record: dict) -> dict:
     return normalize_rotated_text_metadata(record)
 
@@ -698,6 +714,37 @@ class OCREngine:
     # API pública
     # ------------------------------------------------------------------
 
+    def _record_raw_model_execution(self, raw_output) -> None:
+        from qa.runtime_fingerprint import record_engine_event
+
+        requested_engine = getattr(
+            self,
+            "_requested_model",
+            getattr(self, "model_name", ""),
+        )
+        resolved_engine = getattr(self, "model_name", requested_engine)
+        fallback_used = resolved_engine != requested_engine
+        record_engine_event(
+            stage="ocr",
+            requested_engine=requested_engine,
+            resolved_engine=resolved_engine,
+            backend=self,
+            execution_status="succeeded",
+            result_status=(
+                "empty" if _raw_ocr_output_is_empty(raw_output) else "accepted"
+            ),
+            fallback_used=fallback_used,
+            fallback_reason=(
+                "resolved_engine_differs_from_request" if fallback_used else ""
+            ),
+            execution_context="chapter",
+        )
+
+    def _run_paddle_ocr_raw(self, image: np.ndarray, *, cls: bool = False):
+        result = self._model.ocr(image, det=True, rec=True, cls=bool(cls))
+        self._record_raw_model_execution(result)
+        return result
+
     def recognize_batch(self, crops: list[np.ndarray]) -> list[str]:
         """
         Reconhece texto em múltiplas imagens recortadas.
@@ -1077,6 +1124,7 @@ class OCREngine:
                 do_sample=False,
             )
 
+        self._record_raw_model_execution(generated_ids)
         texts = self._tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         return [t.strip() for t in texts]
 
@@ -1092,7 +1140,7 @@ class OCREngine:
 
     def _recognize_single_paddle(self, crop: np.ndarray, *, cls: bool = False) -> str:
         try:
-            result = self._model.ocr(crop, det=True, rec=True, cls=bool(cls))
+            result = self._run_paddle_ocr_raw(crop, cls=cls)
             if result and result[0]:
                 lines = [line[1][0] for line in result[0] if line and line[1]]
                 return " ".join(lines).strip()
@@ -1373,7 +1421,7 @@ class OCREngine:
         if rotated is None or inverse_matrix is None:
             return []
         try:
-            result = self._model.ocr(rotated, det=True, rec=True, cls=False)
+            result = self._run_paddle_ocr_raw(rotated, cls=False)
         except Exception as exc:
             logger.debug("OCR deskew para texto inclinado falhou: %s", exc)
             return []
@@ -1456,7 +1504,7 @@ class OCREngine:
                 scale_x = scaled_w / float(max(1, input_w))
                 scale_y = scaled_h / float(max(1, input_h))
         try:
-            result = self._model.ocr(model_input, det=True, rec=True, cls=False)
+            result = self._run_paddle_ocr_raw(model_input, cls=False)
         except Exception as exc:
             logger.warning("PaddleOCR full-page falhou; fallback por crop: %s", exc)
             return None
@@ -1623,7 +1671,7 @@ class OCREngine:
         for rotation_deg in rotations:
             rotated = _rotate_orthogonal(page_rgb, int(rotation_deg))
             try:
-                result = self._model.ocr(rotated, det=True, rec=True, cls=False)
+                result = self._run_paddle_ocr_raw(rotated, cls=False)
             except Exception as exc:
                 logger.debug("PaddleOCR rotated-page recovery falhou (%s): %s", rotation_deg, exc)
                 continue

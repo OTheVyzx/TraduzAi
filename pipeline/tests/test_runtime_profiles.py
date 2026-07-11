@@ -32,6 +32,8 @@ def test_runtime_profile_defaults_to_balanced_with_automatic_pipeline_defaults()
     assert "TRADUZAI_MACRO_OCR" not in decision.env_defaults
     assert decision.env_defaults["TRADUZAI_GOOGLE_PARALLEL_CHUNKS"] == "1"
     assert decision.env_defaults["TRADUZAI_GOOGLE_TRANSLATE_WORKERS"] == "3"
+    assert decision.visual_pipeline_flags["runtime_fingerprint_v2"] is False
+    assert decision.visual_pipeline_flags["visual_baseline_lossless_v2"] is False
 
 
 def test_performance_profile_keeps_smart_skip_blocked_until_gate_passes():

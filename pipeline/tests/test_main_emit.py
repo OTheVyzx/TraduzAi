@@ -5,6 +5,7 @@ import tempfile
 import json
 import importlib
 import contextlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1467,6 +1468,58 @@ class MainEmitTests(unittest.TestCase):
             "intentional_text_only_note",
         )
 
+    def test_final_project_render_plan_updates_canonical_text_metrics(self) -> None:
+        from debug_tools import DebugRecorder
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"TRADUZAI_FLAG_VISUAL_BASELINE_LOSSLESS_V2": "1"},
+            clear=False,
+        ):
+            recorder = DebugRecorder(Path(tmp), enabled=True, run_id="run-test")
+            project = {
+                "paginas": [
+                    {
+                        "numero": 3,
+                        "text_layers": [
+                            {
+                                "id": "ocr_001",
+                                "text_id": "ocr_001",
+                                "text_instance_id": "instance-001",
+                                "trace_id": "ocr_001@page_003_band_042",
+                                "band_id": "page_003_band_042",
+                                "render_bbox": [350, 11300, 530, 11310],
+                                "safe_text_box": [343, 11293, 538, 11317],
+                                "_render_debug": {
+                                    "font_size_final": 31,
+                                    "wrapped_lines": ["OLA", "MUNDO"],
+                                },
+                                "qa_metrics": {"render_balloon_containment": 0.98},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            main._write_debug_render_plan_final_from_project(recorder, project)
+            recorder.finalize()
+
+            canonical = json.loads(
+                (
+                    Path(tmp)
+                    / "debug"
+                    / "e2e"
+                    / "00_run"
+                    / "canonical_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(canonical["text_metric_count"], 1)
+            metric = canonical["text_metrics"][0]
+            self.assertEqual(metric["metric_id"], "instance-001")
+            self.assertEqual(metric["font_size_final"], 31)
+            self.assertEqual(metric["line_count"], 2)
+            self.assertEqual(metric["render_balloon_containment"], 0.98)
+
     def test_refresh_debug_final_band_crops_uses_translated_image_pixels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder
@@ -1627,7 +1680,11 @@ class MainEmitTests(unittest.TestCase):
             self.assertLessEqual(int(np.max(diff)), 12)
 
     def test_post_rerender_visual_contract_restores_clean_sources_after_stale_rerender(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"TRADUZAI_FLAG_VISUAL_BASELINE_LOSSLESS_V2": "1"},
+            clear=False,
+        ):
             from debug_tools import DebugRecorder
 
             root = Path(tmp)
@@ -1708,6 +1765,23 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(audit["refresh"]["clean_band_source_used"], 1)
             self.assertEqual(audit["refresh"]["clean_band_final_mismatch_count"], 1)
             self.assertEqual(audit["refresh"]["final_output_source"], "clean_final_bands_after_all_rerenders")
+            recorder.finalize()
+            canonical = json.loads(
+                (
+                    root
+                    / "debug"
+                    / "e2e"
+                    / "00_run"
+                    / "canonical_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            by_key = {entry["key"]: entry for entry in canonical["entries"]}
+            self.assertIn("final_band:page_002:page_002_band_023", by_key)
+            self.assertIn("page:page_001:", by_key)
+            self.assertEqual(
+                by_key["final_band:page_002:page_002_band_023"]["buffer_color_space"],
+                "bgr",
+            )
 
     def test_final_band_refresh_records_excluded_non_story_bands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

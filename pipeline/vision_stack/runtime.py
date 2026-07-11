@@ -125,6 +125,73 @@ _KOHARU_CJK_OCR_STEPS = [
 _KOHARU_CJK_LANGS = {"japan", "korean", "ch", "chinese_cht"}
 
 
+def _record_runtime_engine_fingerprint(
+    *,
+    stage: str,
+    requested_engine: object,
+    resolved_engine: object,
+    backend: object | None,
+    fallback_reason: str = "",
+    model_path: str | Path | None = None,
+    model_revision: object = "",
+    feature_flags: dict[str, Any] | None = None,
+    execution_confirmed: bool = False,
+    execution_status: str = "",
+    result_status: str = "",
+    fallback_used: bool = False,
+    execution_context: str = "chapter",
+) -> dict[str, Any]:
+    """Record resolution separately from confirmed execution."""
+
+    if not _env_flag("TRADUZAI_FLAG_RUNTIME_FINGERPRINT_V2", False):
+        return {}
+    from qa.runtime_fingerprint import record_engine_event
+
+    resolved_status = "resolved" if resolved_engine is not None else "unavailable"
+    status = str(execution_status or "").strip()
+    if not status:
+        status = "succeeded" if execution_confirmed else (
+            "not_needed" if resolved_engine is None else "not_started"
+        )
+    output_status = str(result_status or "").strip() or (
+        "accepted" if status == "succeeded" else "not_produced"
+    )
+    return record_engine_event(
+        stage=stage,
+        requested_engine=requested_engine,
+        resolved_engine=resolved_engine,
+        backend=backend,
+        execution_status=status,
+        result_status=output_status,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
+        resolution_status=resolved_status,
+        resolution_reason=fallback_reason if not execution_confirmed else "",
+        execution_context=execution_context,
+        model_path=model_path,
+        model_revision=model_revision,
+        feature_flags=feature_flags,
+    )
+
+
+def _resolved_model_for_backend(requested: str, backend: object | None) -> str | None:
+    if backend is None:
+        return None
+    backend_id = str(getattr(backend, "_backend", "") or "").strip()
+    if backend_id in {
+        "contour-fallback",
+        "paddle-det",
+        "simple_lama",
+        "lama_direct",
+        "lama_manga_pk",
+        "lama_onnx_cuda",
+        "lama_onnx_tensorrt",
+        "opencv",
+    }:
+        return backend_id.replace("_", "-")
+    return str(requested or backend_id).strip() or backend_id or None
+
+
 def _resolve_runtime_engine_preset(engine_preset_id: str = "", idioma_origem: str = "en") -> EnginePreset:
     config = {
         "engine_preset_id": engine_preset_id,
@@ -266,13 +333,27 @@ def _ocr_run_on_guard_enabled() -> bool:
 
 def _get_font_detector():
     global _font_detector
+    requested_engine = "yuzumarker-font-detection"
     if _font_detector is not None:
+        _record_runtime_engine_fingerprint(
+            stage="font_detector",
+            requested_engine=requested_engine,
+            resolved_engine=requested_engine,
+            backend=_font_detector,
+        )
         return _font_detector
     model_path = _find_hf_model(
         "fffonion/yuzumarker-font-detection",
         "yuzumarker-font-detection.safetensors",
     )
     if model_path is None:
+        _record_runtime_engine_fingerprint(
+            stage="font_detector",
+            requested_engine=requested_engine,
+            resolved_engine=None,
+            backend=None,
+            fallback_reason="model_not_found",
+        )
         return None
     fonts_dir = Path(__file__).parent.parent.parent / "fonts"
     try:
@@ -280,7 +361,22 @@ def _get_font_detector():
         _font_detector = FontDetector(model_path, fonts_dir)
     except Exception as exc:
         logger.warning("FontDetector não carregado: %s", exc)
+        _record_runtime_engine_fingerprint(
+            stage="font_detector",
+            requested_engine=requested_engine,
+            resolved_engine=None,
+            backend=None,
+            fallback_reason=f"load_failed:{type(exc).__name__}",
+            model_path=model_path,
+        )
         return None
+    _record_runtime_engine_fingerprint(
+        stage="font_detector",
+        requested_engine=requested_engine,
+        resolved_engine=requested_engine,
+        backend=_font_detector,
+        model_path=model_path,
+    )
     return _font_detector
 
 _detector = None
@@ -1904,6 +2000,12 @@ def _get_detector(profile: str = "quality", model: str = "comic-text-detector"):
                     half=True,
                 )
                 _detector_model = desired_model
+    _record_runtime_engine_fingerprint(
+        stage="detector",
+        requested_engine=desired_model,
+        resolved_engine=_resolved_model_for_backend(desired_model, _detector),
+        backend=_detector,
+    )
     return _detector
 
 
@@ -2242,6 +2344,12 @@ def _get_ocr_engine(profile: str = "quality", lang: str = "en"):
                     half=True,
                     lang=lang,
                 )
+    _record_runtime_engine_fingerprint(
+        stage="ocr",
+        requested_engine=desired_model,
+        resolved_engine=getattr(_ocr_engine, "model_name", desired_model),
+        backend=_ocr_engine,
+    )
     return _ocr_engine
 
 
@@ -2259,6 +2367,12 @@ def _get_inpainter(profile: str = "quality", model: str = "aot-inpainting"):
                     half=True,
                 )
                 _inpainter_model = desired_model
+    _record_runtime_engine_fingerprint(
+        stage="inpainter",
+        requested_engine=desired_model,
+        resolved_engine=_resolved_model_for_backend(desired_model, _inpainter),
+        backend=_inpainter,
+    )
     return _inpainter
 
 
@@ -2340,8 +2454,16 @@ def _bubble_segmenter_model_for_page(ocr_data: dict | None) -> str:
 
 def _get_text_segmenter_for_page(ocr_data: dict | None, profile: str = "quality"):
     global _text_segmenter, _text_segmenter_model
+    requested_engine = str(_page_engine_preset_dict(ocr_data).get("segmenter") or "").strip()
     desired_model = _segmenter_model_for_page(ocr_data)
     if desired_model != "manga-text-segmentation-2025":
+        _record_runtime_engine_fingerprint(
+            stage="segmenter",
+            requested_engine=requested_engine,
+            resolved_engine=None,
+            backend=None,
+            fallback_reason="unsupported_preset_engine",
+        )
         return None
 
     if _text_segmenter is None or _text_segmenter_model != desired_model:
@@ -2359,14 +2481,35 @@ def _get_text_segmenter_for_page(ocr_data: dict | None, profile: str = "quality"
                     logger.warning("Manga-Text-Segmentation-2025 indisponivel; usando fallback geometrico: %s", exc)
                     _text_segmenter = None
                     _text_segmenter_model = ""
+                    _record_runtime_engine_fingerprint(
+                        stage="segmenter",
+                        requested_engine=requested_engine,
+                        resolved_engine=None,
+                        backend=None,
+                        fallback_reason=f"load_failed:{type(exc).__name__}",
+                    )
                     return None
+    _record_runtime_engine_fingerprint(
+        stage="segmenter",
+        requested_engine=requested_engine,
+        resolved_engine=_text_segmenter_model or desired_model,
+        backend=_text_segmenter,
+    )
     return _text_segmenter
 
 
 def _get_bubble_segmenter_for_page(ocr_data: dict | None, profile: str = "quality"):
     global _bubble_segmenter, _bubble_segmenter_model
+    requested_engine = str(_page_engine_preset_dict(ocr_data).get("bubble_segmenter") or "").strip()
     desired_model = _bubble_segmenter_model_for_page(ocr_data)
     if desired_model != "speech-bubble-segmentation":
+        _record_runtime_engine_fingerprint(
+            stage="bubble_segmenter",
+            requested_engine=requested_engine,
+            resolved_engine=None,
+            backend=None,
+            fallback_reason="unsupported_preset_engine",
+        )
         return None
 
     if _bubble_segmenter is None or _bubble_segmenter_model != desired_model:
@@ -2377,7 +2520,20 @@ def _get_bubble_segmenter_for_page(ocr_data: dict | None, profile: str = "qualit
                 # to real BubbleMask evidence while keeping call sites wired.
                 _bubble_segmenter = None
                 _bubble_segmenter_model = ""
+                _record_runtime_engine_fingerprint(
+                    stage="bubble_segmenter",
+                    requested_engine=requested_engine,
+                    resolved_engine=None,
+                    backend=None,
+                    fallback_reason="runtime_unavailable",
+                )
                 return None
+    _record_runtime_engine_fingerprint(
+        stage="bubble_segmenter",
+        requested_engine=requested_engine,
+        resolved_engine=_bubble_segmenter_model or desired_model,
+        backend=_bubble_segmenter,
+    )
     return _bubble_segmenter
 
 
@@ -2506,9 +2662,40 @@ def _call_inpainter(
     if force_no_tiling:
         kwargs["force_no_tiling"] = True
     try:
-        return inpainter.inpaint(image_np, mask, **kwargs)
+        result = inpainter.inpaint(image_np, mask, **kwargs)
     except TypeError:
-        return inpainter.inpaint(image_np, mask, batch_size=batch_size)
+        result = inpainter.inpaint(image_np, mask, batch_size=batch_size)
+    requested = str(
+        getattr(inpainter, "_requested_model", "")
+        or globals().get("_inpainter_model")
+        or "aot-inpainting"
+    )
+    resolved = _resolved_model_for_backend(requested, inpainter)
+    fallback_used = bool(
+        resolved
+        and resolved != requested
+        and str(getattr(inpainter, "_backend", "") or "").strip()
+        in {
+            "simple_lama",
+            "lama_direct",
+            "lama_manga_pk",
+            "lama_onnx_cuda",
+            "lama_onnx_tensorrt",
+            "opencv",
+        }
+    )
+    _record_runtime_engine_fingerprint(
+        stage="inpainter",
+        requested_engine=requested,
+        resolved_engine=resolved,
+        backend=inpainter,
+        execution_confirmed=True,
+        result_status="accepted" if isinstance(result, np.ndarray) and result.size else "empty",
+        fallback_used=fallback_used,
+        fallback_reason="alternate_backend_executed" if fallback_used else "",
+        execution_context="chapter",
+    )
+    return result
 
 
 def _block_should_skip_inpaint_mask(block: dict | None) -> bool:

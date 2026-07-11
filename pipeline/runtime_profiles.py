@@ -30,6 +30,8 @@ VISUAL_PIPELINE_FLAGS: dict[str, bool | str] = {
     "name_lock": True,
     "connected_balloon_v2": False,
     "rotated_text_v2": False,
+    "runtime_fingerprint_v2": False,
+    "visual_baseline_lossless_v2": False,
 }
 
 ROTATED_TEXT_POLICY: dict[str, dict[str, Any]] = {

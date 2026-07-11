@@ -347,6 +347,20 @@ class FontDetector:
         except Exception:
             return (DEFAULT_FONT, 0.0) if allow_default else (self._fallback_candidate(), 0.0)
 
+        from qa.runtime_fingerprint import record_engine_event
+
+        record_engine_event(
+            stage="font_detector",
+            requested_engine="yuzumarker-font-detection",
+            resolved_engine="yuzumarker-font-detection",
+            backend=self._model if self._model is not None else self,
+            execution_status="succeeded",
+            result_status="accepted",
+            fallback_used=False,
+            model_path=self._model_path,
+            execution_context="chapter",
+        )
+
         best_font, confidence = self._best_match(region_feats)
         if allow_default and confidence < SIMILARITY_THRESHOLD:
             return DEFAULT_FONT, confidence

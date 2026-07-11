@@ -2049,6 +2049,149 @@ def _band_debug_id(band: Band, fallback_index: int) -> str:
     return _band_id_for(1, fallback_index)
 
 
+def _output_page_crop_for_band(
+    output_pages: list[OutputPage],
+    band: Band,
+) -> tuple[int, OutputPage, np.ndarray, np.ndarray, int, int] | None:
+    best_page_index = None
+    best_overlap = 0
+    band_y_top = int(getattr(band, "y_top", 0) or 0)
+    band_y_bottom = int(getattr(band, "y_bottom", 0) or 0)
+    for page_index, page in enumerate(output_pages):
+        overlap = max(
+            0,
+            min(band_y_bottom, int(getattr(page, "y_bottom", 0) or 0))
+            - max(band_y_top, int(getattr(page, "y_top", 0) or 0)),
+        )
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_page_index = page_index
+    if best_page_index is None or best_overlap <= 0:
+        return None
+
+    page = output_pages[best_page_index]
+    image = getattr(page, "image", None)
+    if not isinstance(image, np.ndarray) or image.ndim < 2 or image.size == 0:
+        return None
+    page_y_top = int(getattr(page, "y_top", 0) or 0)
+    crop_y1 = max(0, band_y_top - page_y_top)
+    crop_y2 = min(int(image.shape[0]), band_y_bottom - page_y_top)
+    if crop_y2 <= crop_y1:
+        return None
+    crop = image[crop_y1:crop_y2, :, :]
+    if crop.size == 0:
+        return None
+    return best_page_index, page, image, crop, crop_y1, crop_y2
+
+
+def _stitch_output_band_crop(output_pages: list[OutputPage], band: Band) -> np.ndarray | None:
+    band_y_top = int(getattr(band, "y_top", 0) or 0)
+    band_y_bottom = int(getattr(band, "y_bottom", 0) or 0)
+    valid_pages: list[tuple[OutputPage, np.ndarray, int, int]] = []
+    for page in output_pages:
+        image = getattr(page, "image", None)
+        if not isinstance(image, np.ndarray) or image.ndim < 2 or image.size == 0:
+            continue
+        page_y_top = int(getattr(page, "y_top", 0) or 0)
+        page_y_bottom = min(
+            int(getattr(page, "y_bottom", page_y_top + image.shape[0]) or 0),
+            page_y_top + int(image.shape[0]),
+        )
+        if page_y_bottom > page_y_top:
+            valid_pages.append((page, image, page_y_top, page_y_bottom))
+    if not valid_pages:
+        return None
+
+    visible_y_top = max(band_y_top, min(item[2] for item in valid_pages))
+    visible_y_bottom = min(band_y_bottom, max(item[3] for item in valid_pages))
+    height = visible_y_bottom - visible_y_top
+    if height <= 0:
+        return None
+
+    canvas: np.ndarray | None = None
+    covered = np.zeros(height, dtype=bool)
+    for _page, image, page_y_top, page_y_bottom in valid_pages:
+        overlap_y1 = max(visible_y_top, page_y_top)
+        overlap_y2 = min(visible_y_bottom, page_y_bottom)
+        if overlap_y2 <= overlap_y1:
+            continue
+        if canvas is None:
+            canvas = np.empty((height, *image.shape[1:]), dtype=image.dtype)
+        if image.shape[1:] != canvas.shape[1:] or image.dtype != canvas.dtype:
+            return None
+
+        source_y1 = overlap_y1 - page_y_top
+        source_y2 = overlap_y2 - page_y_top
+        target_y1 = overlap_y1 - visible_y_top
+        target_y2 = overlap_y2 - visible_y_top
+        uncovered = ~covered[target_y1:target_y2]
+        if not np.any(uncovered):
+            continue
+        canvas[target_y1:target_y2][uncovered] = image[source_y1:source_y2][uncovered]
+        covered[target_y1:target_y2][uncovered] = True
+
+    if canvas is None or not bool(np.all(covered)):
+        return None
+    return canvas
+
+
+def _write_lossless_visual_baseline(output_pages: list[OutputPage], bands: list[Band]) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None:
+        return
+    canonical_enabled = str(
+        os.getenv("TRADUZAI_FLAG_VISUAL_BASELINE_LOSSLESS_V2", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not canonical_enabled:
+        return
+    try:
+        page_ids = [f"page_{page_index + 1:03d}" for page_index in range(len(output_pages))]
+        band_ids = [_band_debug_id(band, band_index) for band_index, band in enumerate(bands)]
+        recorder.set_canonical_expected_coverage(page_ids=page_ids, band_ids=band_ids)
+        text_metrics: list[dict] = []
+        for page_index, page in enumerate(output_pages):
+            image = getattr(page, "image", None)
+            if isinstance(image, np.ndarray) and image.ndim >= 2 and image.size:
+                recorder.write_canonical_image(
+                    "page",
+                    image,
+                    page_id=f"page_{page_index + 1:03d}",
+                    color_space="bgr",
+                )
+            for text in _page_texts_from_text_layers(getattr(page, "text_layers", None)):
+                metric = dict(text)
+                metric.setdefault("page_id", f"page_{page_index + 1:03d}")
+                text_metrics.append(metric)
+        recorder.record_canonical_text_metrics(text_metrics)
+        for band_index, band in enumerate(bands):
+            crop = _stitch_output_band_crop(output_pages, band)
+            if crop is None:
+                continue
+            band_id = _band_debug_id(band, band_index)
+            page_id = (
+                band_id.split("_band_", 1)[0]
+                if "_band_" in band_id
+                else "page_unknown"
+            )
+            recorder.write_canonical_image(
+                "final_band",
+                crop,
+                page_id=page_id,
+                band_id=band_id,
+                color_space="bgr",
+            )
+    except Exception as exc:
+        recorder.event(
+            "00_run",
+            "lossless_visual_baseline_failed",
+            {
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return
+
+
 def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Band]) -> None:
     recorder = _get_debug_recorder()
     if recorder is None:
@@ -2065,34 +2208,13 @@ def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Ban
             if isinstance(rendered, np.ndarray) and rendered.size:
                 recorder.write_image(rendered_rel, rendered, quality=92)
 
-            best_page_index = None
-            best_overlap = 0
             band_y_top = int(getattr(band, "y_top", 0) or 0)
             band_y_bottom = int(getattr(band, "y_bottom", 0) or 0)
-            for page_index, page in enumerate(output_pages):
-                overlap = max(
-                    0,
-                    min(band_y_bottom, int(getattr(page, "y_bottom", 0) or 0))
-                    - max(band_y_top, int(getattr(page, "y_top", 0) or 0)),
-                )
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_page_index = page_index
-            if best_page_index is None or best_overlap <= 0:
+            crop_record = _output_page_crop_for_band(output_pages, band)
+            if crop_record is None:
                 continue
-
-            page = output_pages[best_page_index]
-            image = getattr(page, "image", None)
-            if not isinstance(image, np.ndarray) or image.ndim < 2 or image.size == 0:
-                continue
+            best_page_index, page, image, crop, crop_y1, crop_y2 = crop_record
             page_y_top = int(getattr(page, "y_top", 0) or 0)
-            crop_y1 = max(0, band_y_top - page_y_top)
-            crop_y2 = min(int(image.shape[0]), band_y_bottom - page_y_top)
-            if crop_y2 <= crop_y1:
-                continue
-            crop = image[crop_y1:crop_y2, :, :]
-            if crop.size == 0:
-                continue
 
             final_rel = f"10_copyback_reassemble/final_bands/{band_id}.jpg"
             recorder.write_image(final_rel, crop, quality=92)
@@ -2264,6 +2386,15 @@ def _write_output_pages_jpegs(output_pages: list[OutputPage], output_dir: Path, 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="traduzai-image-io") as pool:
         futures = [pool.submit(_write_jpeg_timed, page.path, page.image, quality=quality) for page in output_pages]
         return sum(future.result() for future in futures)
+
+
+def _write_output_pages_after_lossless_debug(
+    output_pages: list[OutputPage],
+    bands: list[Band],
+    output_dir: Path,
+) -> float:
+    _write_lossless_visual_baseline(output_pages, bands)
+    return _write_output_pages_jpegs(output_pages, output_dir)
 
 
 def _page_final_near_text_cleanup_enabled() -> bool:
@@ -5998,7 +6129,11 @@ def run_chapter(
     _write_contact_sheets_debug(original_pages, output_pages, output_bands)
 
     with _timed(chapter_telemetry, "write_translated_pages"):
-        cleanup_breakdown["cleanup_save"] += _write_output_pages_jpegs(output_pages, output_dir)
+        cleanup_breakdown["cleanup_save"] += _write_output_pages_after_lossless_debug(
+            output_pages,
+            output_bands,
+            output_dir,
+        )
     _write_final_band_crop_debug(output_pages, output_bands)
 
     _write_page_cleanup_breakdown_debug(cleanup_breakdown)

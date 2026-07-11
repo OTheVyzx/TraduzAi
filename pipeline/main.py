@@ -7223,6 +7223,7 @@ def _project_render_plan_row(page: dict, layer: dict, page_index: int) -> dict |
         row["line_height"] = render_debug.get("line_height")
     if render_debug.get("wrapped_lines"):
         row["wrapped_lines"] = list(render_debug.get("wrapped_lines") or [])
+        row["line_count"] = len(row["wrapped_lines"])
     render_contract = layer.get("render_layout_contract") if isinstance(layer.get("render_layout_contract"), dict) else None
     if isinstance(render_contract, dict):
         row["render_layout_contract"] = copy.deepcopy(render_contract)
@@ -7230,6 +7231,16 @@ def _project_render_plan_row(page: dict, layer: dict, page_index: int) -> dict |
         row.setdefault("font_size_final", render_contract.get("font_size"))
         row.setdefault("line_height", render_contract.get("line_height"))
         row.setdefault("wrapped_lines", list(render_contract.get("lines") or []))
+        if row.get("wrapped_lines"):
+            row.setdefault("line_count", len(row["wrapped_lines"]))
+    qa_metrics = row.get("qa_metrics") if isinstance(row.get("qa_metrics"), dict) else {}
+    for metric_name in (
+        "render_balloon_containment",
+        "render_outside_balloon",
+        "fit_status",
+    ):
+        if metric_name in qa_metrics:
+            row.setdefault(metric_name, copy.deepcopy(qa_metrics[metric_name]))
     for field in ("style_origin", "style_confidence", "style_source"):
         if field in layer:
             row[field] = copy.deepcopy(layer.get(field))
@@ -7297,6 +7308,10 @@ def _write_debug_render_plan_final_from_project(recorder, project_data: dict) ->
     audit["summary"]["written_count"] = len(rows)
     audit["missing_identity"] = missing_identity
     audit["missing_mask_contract"] = missing_mask_contract
+    try:
+        recorder.record_canonical_text_metrics(rows, replace_existing=True)
+    except Exception:
+        pass
     _write_debug_jsonl_replace(recorder, "09_typeset/render_plan_final.jsonl", rows)
     try:
         recorder.write_json("09_typeset/render_plan_final_sync.json", audit)
@@ -7699,6 +7714,26 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
                 continue
             if isinstance(row, dict):
                 rows.append(row)
+        expected_band_ids = [
+            str(row.get("band_id") or "").strip()
+            for row in rows
+            if str(row.get("band_id") or "").strip()
+        ]
+        expected_page_ids: list[str] = []
+        for row in rows:
+            try:
+                page_number = int(row.get("output_page_number") or 0)
+            except Exception:
+                page_number = 0
+            if page_number <= 0:
+                stem = Path(str(row.get("translated_output_page") or "")).stem
+                page_number = int(stem) if stem.isdigit() else 0
+            if page_number > 0:
+                expected_page_ids.append(f"page_{page_number:03d}")
+        recorder.set_canonical_expected_coverage(
+            page_ids=expected_page_ids,
+            band_ids=expected_band_ids,
+        )
         page_cache: dict[str, np.ndarray] = {}
         rows_by_page: dict[str, list[dict]] = {}
         for row in rows:
@@ -7738,6 +7773,14 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
                 audit["clean_band_final_mismatch_count"] += 1
             final_rel = str(row.get("final_crop_path") or "").strip()
             if final_rel:
+                page_id = band_id.split("_band_", 1)[0] if "_band_" in band_id else "page_unknown"
+                recorder.write_canonical_image(
+                    "final_band",
+                    image,
+                    page_id=page_id,
+                    band_id=band_id,
+                    color_space="bgr",
+                )
                 recorder.write_image(final_rel, image, quality=100)
                 audit["final_band_written_count"] += 1
             if band_id:
@@ -7793,6 +7836,20 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
                 page_image[y1:y2, x1:x2, :] = final_slice
                 page_changed = True
             if page_changed:
+                try:
+                    page_number = int((page_rows[0] or {}).get("output_page_number") or 0)
+                except Exception:
+                    page_number = 0
+                if page_number <= 0:
+                    stem = Path(translated_name).stem
+                    page_number = int(stem) if stem.isdigit() else 0
+                if page_number > 0:
+                    recorder.write_canonical_image(
+                        "page",
+                        page_image,
+                        page_id=f"page_{page_number:03d}",
+                        color_space="bgr",
+                    )
                 translated_path.parent.mkdir(parents=True, exist_ok=True)
                 if translated_path.suffix.lower() in {".jpg", ".jpeg"}:
                     jpeg_params = [cv2.IMWRITE_JPEG_QUALITY, 100]
