@@ -678,6 +678,28 @@ class TextDetector:
                 blocks = self._parse_paddle_detection(results, orig_h, orig_w, target_size)
 
         blocks.sort(key=lambda b: (b.y1 // 100, -(b.x1)))
+        from qa.runtime_fingerprint import record_engine_event
+
+        resolved_engine = (
+            self._backend
+            if self._backend in {"contour-fallback", "paddle-det"}
+            else self._model_type
+        )
+        fallback_used = resolved_engine != self._model_type
+        record_engine_event(
+            stage="detector",
+            requested_engine=self._model_type,
+            resolved_engine=resolved_engine,
+            backend=self,
+            execution_status="succeeded",
+            result_status="accepted" if blocks else "empty",
+            fallback_used=fallback_used,
+            fallback_reason=(
+                "resolved_engine_differs_from_request" if fallback_used else ""
+            ),
+            model_path=self._model_path,
+            execution_context="chapter",
+        )
         return blocks
 
     def _detect_contour_fallback(self, img_rgb: np.ndarray) -> list[TextBlock]:

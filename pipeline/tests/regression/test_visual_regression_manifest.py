@@ -233,13 +233,18 @@ def _manifest_report_row(manifest_path: Path) -> list[str]:
     ]
 
 
-def write_visual_regression_report(manifest_paths: list[Path] | None = None) -> Path:
+def write_visual_regression_report(
+    manifest_paths: list[Path] | None = None,
+    *,
+    output_path: Path | None = None,
+) -> Path:
     manifest_paths = manifest_paths or _manifest_paths()
     report_manifest_paths = [path for path in manifest_paths if path.name != "ci_visual_smoke.json"]
     if not report_manifest_paths:
         report_manifest_paths = manifest_paths
     rows = [_manifest_report_row(path) for path in report_manifest_paths]
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    report_path = Path(output_path) if output_path is not None else REPORT_PATH
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Visual Regression Report",
         "",
@@ -251,8 +256,8 @@ def write_visual_regression_report(manifest_paths: list[Path] | None = None) -> 
     for row in rows:
         escaped = [cell.replace("|", "\\|") for cell in row]
         lines.append("| " + " | ".join(escaped) + " |")
-    REPORT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return REPORT_PATH
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
 
 
 def validate_manifest(manifest: dict, manifest_path: Path) -> None:
@@ -317,7 +322,7 @@ def validate_manifest(manifest: dict, manifest_path: Path) -> None:
         )
 
     for artifact in manifest["sample_artifacts"]:
-        crop_path = run_path / artifact["crop_path"]
+        crop_path = _resolve_run_artifact_path(run_path, artifact["crop_path"])
         _require(crop_path.exists(), f"{manifest_path} missing sample artifact: {crop_path}")
 
 
@@ -326,10 +331,15 @@ def test_visual_regression_manifest(manifest_path: Path):
     validate_manifest(_load_manifest(manifest_path), manifest_path)
 
 
-def test_visual_regression_report_is_generated():
-    report_path = write_visual_regression_report(_manifest_paths())
+def test_visual_regression_report_is_generated(tmp_path: Path):
+    tracked_report_before = REPORT_PATH.read_bytes()
+    report_path = write_visual_regression_report(
+        _manifest_paths(),
+        output_path=tmp_path / "visual_regression_report.md",
+    )
 
     content = report_path.read_text(encoding="utf-8")
+    assert REPORT_PATH.read_bytes() == tracked_report_before
     assert "| Chapter | Pages | Flags before/current | Flags after/target | Final status | Needs review | Evidence |" in content
     expected_run_id = "ci_visual_smoke" if _running_in_ci() else "one_second_ch2"
     assert expected_run_id in content
@@ -436,9 +446,63 @@ def test_missing_expected_issue_class_fails_with_required_message(tmp_path: Path
 
 def _resolve_run_path(raw_path: str, manifest_path: Path) -> Path:
     run_path = Path(raw_path)
+    _require(not str(raw_path).startswith("\\\\"), "run_path must not be UNC")
+    _require(
+        not (run_path.drive and not run_path.is_absolute()),
+        "run_path must not be drive-relative",
+    )
     if run_path.is_absolute():
-        return run_path
+        return run_path.resolve()
     return (manifest_path.parent / run_path).resolve()
+
+
+def _resolve_run_artifact_path(run_root: Path, raw_path: str) -> Path:
+    artifact_path = Path(str(raw_path or ""))
+    _require(
+        bool(str(raw_path or "").strip())
+        and not artifact_path.is_absolute()
+        and not artifact_path.drive
+        and not artifact_path.root,
+        "sample artifact path must stay inside run_path",
+    )
+    resolved_root = run_root.resolve()
+    candidate = (resolved_root / artifact_path).resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise AssertionError("sample artifact path must stay inside run_path") from exc
+    return candidate
+
+
+@pytest.mark.parametrize(
+    "raw_path",
+    [
+        "../outside.png",
+        "..\\outside.png",
+        r"C:\outside.png",
+        r"C:relative.png",
+        r"\rooted\outside.png",
+        r"\\server\share\outside.png",
+    ],
+)
+def test_manifest_artifact_path_cannot_escape_run_root(tmp_path: Path, raw_path: str):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+
+    with pytest.raises(AssertionError, match="must stay inside run_path"):
+        _resolve_run_artifact_path(run_root, raw_path)
+
+
+def test_manifest_artifact_path_accepts_nested_relative_path(tmp_path: Path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+
+    resolved = _resolve_run_artifact_path(
+        run_root,
+        "debug/e2e/09_typeset/page_001.png",
+    )
+
+    assert resolved == (run_root / "debug" / "e2e" / "09_typeset" / "page_001.png").resolve()
 
 
 def test_pages_of_interest_requires_corresponding_debug_e2e_artifact(tmp_path: Path):

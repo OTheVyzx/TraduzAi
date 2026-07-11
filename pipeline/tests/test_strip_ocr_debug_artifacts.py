@@ -9,7 +9,14 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from debug_tools import DebugRecorder, bind_recorder
-from strip.run import _candidate_matches_band_text_bbox, run_chapter
+from strip.run import (
+    _candidate_matches_band_text_bbox,
+    _stitch_output_band_crop,
+    _write_lossless_visual_baseline,
+    _write_final_band_crop_debug,
+    _write_output_pages_after_lossless_debug,
+    run_chapter,
+)
 from strip.process_bands import _band_to_page_dict, process_band
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
@@ -254,6 +261,69 @@ def test_run_chapter_writes_pr16_debug_artifacts(tmp_path):
         assert final_crop["translated_output_page"] == "001.jpg"
         assert final_crop["crop_bbox_in_translated_page"] == [0, 0, 120, 166]
         assert final_crop["final_crop_path"] == "10_copyback_reassemble/final_bands/page_001_band_000.jpg"
+    finally:
+        bind_recorder(None)
+
+
+def test_final_band_debug_writes_lossless_canonical_page_and_band(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADUZAI_FLAG_VISUAL_BASELINE_LOSSLESS_V2", "1")
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page_image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        page_image[20:40, 10:50, :] = 17
+        page = OutputPage(y_top=0, y_bottom=80, image=page_image)
+        band = Band(
+            y_top=0,
+            y_bottom=80,
+            rendered_slice=page_image.copy(),
+            ocr_result={"_band_id": "page_001_band_000"},
+        )
+
+        _write_lossless_visual_baseline([page], [band])
+        recorder.finalize()
+
+        root = tmp_path / "debug" / "e2e" / "00_run"
+        canonical = json.loads((root / "canonical_manifest.json").read_text(encoding="utf-8"))
+        assert [entry["key"] for entry in canonical["entries"]] == [
+            "final_band:page_001:page_001_band_000",
+            "page:page_001:",
+        ]
+        assert (root / "canonical_pages" / "page_001.png").exists()
+        assert (root / "canonical_final_bands" / "page_001_band_000.png").exists()
+    finally:
+        bind_recorder(None)
+
+
+def test_lossless_visual_baseline_records_failure_without_interrupting_pipeline(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("TRADUZAI_FLAG_VISUAL_BASELINE_LOSSLESS_V2", "1")
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = OutputPage(
+            y_top=0,
+            y_bottom=20,
+            image=np.zeros((20, 12, 3), dtype=np.uint8),
+        )
+        band = Band(y_top=0, y_bottom=20, ocr_result={"_band_id": "page_001_band_000"})
+        monkeypatch.setattr(
+            recorder,
+            "write_canonical_image",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk unavailable")),
+        )
+
+        _write_lossless_visual_baseline([page], [band])
+
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "debug" / "e2e" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        failure = next(event for event in events if event["action"] == "lossless_visual_baseline_failed")
+        assert failure["error_type"] == "RuntimeError"
+        assert failure["error"] == "disk unavailable"
     finally:
         bind_recorder(None)
 
@@ -576,6 +646,67 @@ def test_inpaint_block_enrichment_copies_trace_identity_from_text_layer():
     assert enriched["band_id"] == "page_002_band_019"
     assert enriched["text_id"] == "ocr_001"
     assert enriched["trace_id"] == "ocr_001@page_002_band_019"
+
+
+def test_output_jpeg_write_runs_after_lossless_final_band_debug(monkeypatch, tmp_path):
+    from strip import run
+
+    calls: list[str] = []
+    monkeypatch.setattr(run, "_write_lossless_visual_baseline", lambda _pages, _bands: calls.append("lossless"))
+    monkeypatch.setattr(
+        run,
+        "_write_output_pages_jpegs",
+        lambda _pages, _output_dir: calls.append("jpeg") or 0.25,
+    )
+
+    elapsed = _write_output_pages_after_lossless_debug([], [], tmp_path)
+
+    assert elapsed == 0.25
+    assert calls == ["lossless", "jpeg"]
+
+
+def test_lossless_band_crop_stitches_all_cross_page_segments():
+    upper = OutputPage(
+        y_top=0,
+        y_bottom=60,
+        image=np.full((60, 8, 3), 11, dtype=np.uint8),
+    )
+    lower = OutputPage(
+        y_top=60,
+        y_bottom=120,
+        image=np.full((60, 8, 3), 29, dtype=np.uint8),
+    )
+    band = Band(y_top=40, y_bottom=80, ocr_result={"_band_id": "page_001_band_000"})
+
+    stitched = _stitch_output_band_crop([upper, lower], band)
+
+    assert stitched is not None
+    assert stitched.shape == (40, 8, 3)
+    assert np.all(stitched[:20] == 11)
+    assert np.all(stitched[20:] == 29)
+
+
+def test_lossless_band_crop_clamps_nominal_band_to_visible_page_union():
+    page = OutputPage(
+        y_top=0,
+        y_bottom=50,
+        image=np.full((50, 8, 3), 17, dtype=np.uint8),
+    )
+    band = Band(y_top=-12, y_bottom=70, ocr_result={"_band_id": "page_001_band_000"})
+
+    stitched = _stitch_output_band_crop([page], band)
+
+    assert stitched is not None
+    assert stitched.shape == (50, 8, 3)
+    assert np.all(stitched == 17)
+
+
+def test_lossless_band_crop_rejects_internal_page_gap():
+    upper = OutputPage(y_top=0, y_bottom=40, image=np.full((40, 8, 3), 11, dtype=np.uint8))
+    lower = OutputPage(y_top=50, y_bottom=100, image=np.full((50, 8, 3), 29, dtype=np.uint8))
+    band = Band(y_top=20, y_bottom=80, ocr_result={"_band_id": "page_001_band_000"})
+
+    assert _stitch_output_band_crop([upper, lower], band) is None
 
 
 def test_build_page_result_preserves_raw_confidence_and_text_id_for_debug():

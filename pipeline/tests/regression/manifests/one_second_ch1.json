@@ -45,9 +45,9 @@
       "waiver_id": "debug_2026_05_26_one_second_ch1_review_flags",
       "flag": "known_review_flags",
       "scope": "debug_only",
-      "reason": "fixture records known visual review classes while the target is PASS or REVIEW after fixes",
-      "expires": "2026-06-15",
-      "approved_by": "codex-r4.3"
+      "reason": "R0 review confirms inherited debug-only review classes; revalidate during the R7 cross-chapter gate",
+      "expires": "2026-08-10",
+      "approved_by": "codex-r0-baseline-2026-07-10"
     }
   ],
   "recorded_at": "2026-05-26",
