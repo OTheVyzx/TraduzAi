@@ -195,6 +195,38 @@ def test_audit_requires_accepted_ocr_to_render_or_have_an_explicit_suppression_r
     assert audit["summary"]["passed"] is False
 
 
+def test_audit_marks_risky_multi_source_merge_for_review_without_changing_ownership():
+    project = _project(
+        [
+            {
+                "id": "ocr_001",
+                "trace_id": "ocr_001@page_003_band_035",
+                "source_trace_ids": [
+                    "ocr_001@page_003_band_035",
+                    "ocr_002@page_003_band_035",
+                ],
+                "band_id": "page_003_band_035",
+                "bbox": [100, 400, 500, 700],
+                "translated": "COMBINED TEXT FROM DISTINCT BODIES.",
+                "render_bbox": [80, 350, 700, 800],
+                "qa_flags": ["same_balloon_fragment_merged", "TEXT_OVERFLOW", "render_outside_balloon"],
+            }
+        ]
+    )
+
+    audit = build_text_identity_audit(project)
+
+    assert audit["summary"]["multi_source_review_required"] == 1
+    review = audit["review_required"][0]
+    assert review["text_instance_id"] == "page_003_text_001"
+    assert review["source_trace_ids"] == [
+        "ocr_001@page_003_band_035",
+        "ocr_002@page_003_band_035",
+    ]
+    assert review["risk_flags"] == ["same_balloon_fragment_merged", "TEXT_OVERFLOW", "render_outside_balloon"]
+    assert audit["instances"][0]["owner_layer_id"] == "ocr_001"
+
+
 def test_audit_writer_creates_only_the_shadow_audit_artifact(tmp_path):
     output = write_text_identity_audit(
         tmp_path / "debug" / "e2e" / "05_layout_geometry",
