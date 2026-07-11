@@ -5300,7 +5300,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(page["_strip_unsafe_white_balloon_fill_rejections"], {"missing_raw_glyph_evidence": 1})
         self.assertTrue(text["skip_processing"])
         self.assertTrue(text["preserve_original"])
-        self.assertEqual(text["route_action"], "review_required")
+        self.assertEqual(text["route_action"], "preserve_original")
 
     def test_unsafe_white_balloon_missing_glyphs_preserves_provenance_continuation_group(self):
         import inpainter
@@ -5379,7 +5379,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertTrue(np.array_equal(result, image))
         self.assertTrue(text["preserve_original"])
-        self.assertEqual(text["route_action"], "review_required")
+        self.assertEqual(text["route_action"], "preserve_original")
         self.assertEqual(
             page["_strip_unsafe_white_balloon_fill_rejections"],
             {"glyph_fill_residual_after_local_redetect": 1},

@@ -4983,7 +4983,36 @@ def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
             break
 
 
+_UNSAFE_WHITE_GLYPH_PRESERVATION_REASONS = {
+    "missing_raw_glyph_evidence",
+    "missing_safe_balloon_limit",
+    "raw_glyph_mask_outside_safe_balloon_limit",
+    "glyph_fill_residual_after_local_redetect",
+}
+
+
+def _is_unsafe_white_glyph_preservation(text: dict) -> bool:
+    """Return whether an unsafe glyph-only cleanup must keep the source untouched."""
+
+    if str(text.get("route_action") or "").strip().lower() != "preserve_original":
+        return False
+    if str(text.get("render_policy") or "").strip().lower() != "preserve_original":
+        return False
+    if not (bool(text.get("skip_processing")) and bool(text.get("preserve_original"))):
+        return False
+    if str(text.get("route_reason") or "").strip().lower() not in _UNSAFE_WHITE_GLYPH_PRESERVATION_REASONS:
+        return False
+    flags = {str(flag or "").strip().lower() for flag in text.get("qa_flags") or []}
+    if "unsafe_white_glyph_evidence_missing" not in flags:
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    fill = metrics.get("unsafe_white_balloon_glyph_fill") if isinstance(metrics, dict) else {}
+    return isinstance(fill, dict) and str(fill.get("decision") or "").strip().lower() == "preserved_original"
+
+
 def _neutralize_removed_render_decision_fields(text: dict) -> dict:
+    if _is_unsafe_white_glyph_preservation(text):
+        return text
     route_action = str(text.get("route_action") or "").strip().lower()
     content_class = str(text.get("content_class") or "").strip().lower()
     if route_action == "translate_sfx_inpaint_render" or content_class == "sfx":
@@ -5253,6 +5282,9 @@ def _is_art_fragment_review(text: dict) -> bool:
 
 
 def _prepare_special_content_render_block(text: dict) -> dict | None:
+    if _is_unsafe_white_glyph_preservation(text):
+        text["visible"] = False
+        return None
     _neutralize_removed_render_decision_fields(text)
     if _is_suppressed_scanlation_credit(text):
         text["visible"] = False

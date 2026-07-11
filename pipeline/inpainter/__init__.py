@@ -6333,7 +6333,7 @@ def _preserve_unsafe_white_balloon_source(ocr_page: dict, text: dict, reason: st
             item["preserve_original"] = True
             item["render_policy"] = "preserve_original"
             item["translate_policy"] = "skip_translation"
-            item["route_action"] = "review_required"
+            item["route_action"] = "preserve_original"
             item["route_reason"] = reason
             flags = item.setdefault("qa_flags", [])
             if isinstance(flags, list) and "unsafe_white_glyph_evidence_missing" not in flags:

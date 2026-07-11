@@ -2155,6 +2155,35 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(layer["render_policy"], "preserve_original")
         self.assertTrue(layer["skip_processing"])
 
+    def test_build_render_blocks_skips_unsafe_white_glyph_preservation(self):
+        layer = {
+            "id": "ocr_unsafe",
+            "text": "UNVERIFIED",
+            "translated": "NAO DEVE SOBREPOR",
+            "route_action": "preserve_original",
+            "route_reason": "glyph_fill_residual_after_local_redetect",
+            "render_policy": "preserve_original",
+            "skip_processing": True,
+            "preserve_original": True,
+            "qa_flags": ["unsafe_white_glyph_evidence_missing"],
+            "qa_metrics": {
+                "unsafe_white_balloon_glyph_fill": {
+                    "decision": "preserved_original",
+                    "reason": "glyph_fill_residual_after_local_redetect",
+                }
+            },
+            "bbox": [20, 20, 180, 90],
+            "balloon_bbox": [10, 10, 200, 110],
+            "layout_profile": "white_balloon",
+        }
+
+        blocks = build_render_blocks([layer])
+
+        self.assertEqual(blocks, [])
+        self.assertTrue(layer["preserve_original"])
+        self.assertEqual(layer["route_action"], "preserve_original")
+        self.assertFalse(layer["visible"])
+
     def test_build_render_blocks_ignores_legacy_decision_fields_without_route_action(self):
         text = {
             "id": "ocr_legacy_fields",
