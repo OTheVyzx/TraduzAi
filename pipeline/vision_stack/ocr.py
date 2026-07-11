@@ -73,6 +73,82 @@ def _ocr_fallback_shadow_limit(default: int = 1) -> int:
     return max(0, _env_int("TRADUZAI_OCR_FALLBACK_SHADOW_MAX", default))
 
 
+def _ocr_assignment_audit_enabled() -> bool:
+    return _env_bool("TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2", False)
+
+
+def _bbox_union(bboxes: list[list[int]]) -> list[int] | None:
+    if not bboxes:
+        return None
+    return [
+        min(bbox[0] for bbox in bboxes),
+        min(bbox[1] for bbox in bboxes),
+        max(bbox[2] for bbox in bboxes),
+        max(bbox[3] for bbox in bboxes),
+    ]
+
+
+def _bbox_area(bbox: list[int] | None) -> int:
+    if not bbox or len(bbox) != 4:
+        return 0
+    return max(0, int(bbox[2]) - int(bbox[0])) * max(0, int(bbox[3]) - int(bbox[1]))
+
+
+def _build_ocr_assignment_audit(block_bbox: list[int], lines: list[dict]) -> dict:
+    assigned_lines = []
+    line_bboxes = []
+    for entry in lines:
+        bbox = entry.get("line_bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        normalized_bbox = [int(value) for value in bbox]
+        line_bboxes.append(normalized_bbox)
+        assigned_lines.append(
+            {
+                "line_bbox": normalized_bbox,
+                "text": str(entry.get("text") or ""),
+                "confidence": float(entry.get("confidence") or 0.0),
+                "assignment_score": round(float(entry.get("assignment_score") or 0.0), 6),
+            }
+        )
+
+    line_heights = [max(1, bbox[3] - bbox[1]) for bbox in line_bboxes]
+    vertical_gaps = [
+        max(0, line_bboxes[index + 1][1] - line_bboxes[index][3])
+        for index in range(max(0, len(line_bboxes) - 1))
+    ]
+    median_height = float(np.median(line_heights)) if line_heights else 0.0
+    max_gap = max(vertical_gaps, default=0)
+    max_gap_ratio = max_gap / max(1.0, median_height)
+    union_bbox = _bbox_union(line_bboxes)
+    block_area = _bbox_area(block_bbox)
+    union_area = _bbox_area(union_bbox)
+    union_to_block_area_ratio = union_area / max(1, block_area)
+
+    suspicious = False
+    reason = "spatially_coherent"
+    if len(line_bboxes) >= 2 and max_gap_ratio >= 4.0:
+        suspicious = True
+        reason = "large_vertical_gap"
+    elif union_to_block_area_ratio > 1.15:
+        suspicious = True
+        reason = "line_union_exceeds_detector_block"
+
+    return {
+        "block_bbox": [int(value) for value in block_bbox],
+        "assigned_line_count": len(assigned_lines),
+        "assigned_lines": assigned_lines,
+        "line_union_bbox": union_bbox,
+        "median_line_height": round(median_height, 3),
+        "vertical_gaps": vertical_gaps,
+        "max_vertical_gap": max_gap,
+        "max_vertical_gap_over_median_height": round(max_gap_ratio, 3),
+        "line_union_to_block_area_ratio": round(union_to_block_area_ratio, 3),
+        "suspicious": suspicious,
+        "reason": reason,
+    }
+
+
 def _raw_ocr_output_is_empty(value) -> bool:
     if value is None:
         return True
@@ -1589,6 +1665,7 @@ class OCREngine:
                         "text": str(text).strip(),
                         "line_polygon": normalized_polygon,
                         "confidence": float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0,
+                        "assignment_score": best_score,
                     }
                 )
 
@@ -1596,6 +1673,12 @@ class OCREngine:
         non_empty = 0
         for block_index, lines in enumerate(assigned):
             lines.sort(key=lambda entry: (entry["line_bbox"][1], entry["line_bbox"][0]))
+            assignment_audit = None
+            if _ocr_assignment_audit_enabled():
+                assignment_audit = _build_ocr_assignment_audit(
+                    original_block_bboxes[block_index],
+                    lines,
+                )
             deskew_recovered = False
             pre_recovery_polygons = [entry["line_polygon"] for entry in lines if entry.get("line_polygon")]
             pre_recovery_rotation = infer_rotation_deg_from_line_polygons(pre_recovery_polygons)
@@ -1637,6 +1720,8 @@ class OCREngine:
             if deskew_recovered:
                 record["ocr_recovery"] = "skewed_block_deskew"
                 record["qa_flags"] = ["skewed_text_deskew_recovery"]
+            if assignment_audit is not None:
+                record["_ocr_assignment_audit"] = assignment_audit
             texts.append(
                 record
             )

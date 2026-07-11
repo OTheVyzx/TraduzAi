@@ -35,6 +35,7 @@ def test_runtime_profile_defaults_to_balanced_with_automatic_pipeline_defaults()
     assert decision.visual_pipeline_flags["runtime_fingerprint_v2"] is False
     assert decision.visual_pipeline_flags["visual_baseline_lossless_v2"] is False
     assert decision.visual_pipeline_flags["page_scene_identity_v2"] is False
+    assert decision.visual_pipeline_flags["ocr_assignment_audit_v2"] is False
 
 
 def test_performance_profile_keeps_smart_skip_blocked_until_gate_passes():

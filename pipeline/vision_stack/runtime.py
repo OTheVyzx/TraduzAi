@@ -12556,6 +12556,9 @@ def build_page_result(
             "block_profile": block_profile,
             "qa_flags": qa_flags,
         }
+        assignment_audit = raw_record.get("_ocr_assignment_audit")
+        if isinstance(assignment_audit, dict):
+            text_entry["_ocr_assignment_audit"] = copy.deepcopy(assignment_audit)
         _apply_uied_layout_metadata_from_block(text_entry, block)
         if False and force_review_low_confidence_fragment and not credit_name_list:
             apply_route_action(

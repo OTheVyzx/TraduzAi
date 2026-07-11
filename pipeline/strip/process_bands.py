@@ -2314,6 +2314,18 @@ def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
                 "03_ocr/ocr_raw_blocks.jsonl",
                 {key: value for key, value in payload.items() if value is not None},
             )
+            assignment_audit = text.get("_ocr_assignment_audit")
+            if isinstance(assignment_audit, dict):
+                recorder.write_jsonl(
+                    "03_ocr/ocr_line_assignment_audit.jsonl",
+                    {
+                        "text_id": text_id,
+                        "page_id": page_id,
+                        "band_id": band_id,
+                        "trace_id": str(text.get("trace_id") or _trace_id_for(text_id, band_id)),
+                        **copy.deepcopy(assignment_audit),
+                    },
+                )
     except Exception:
         return
 

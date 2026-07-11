@@ -12,12 +12,13 @@ from debug_tools import DebugRecorder, bind_recorder
 from strip.run import (
     _candidate_matches_band_text_bbox,
     _stitch_output_band_crop,
+    _write_strip_detect_text_matching_debug_artifacts,
     _write_lossless_visual_baseline,
     _write_final_band_crop_debug,
     _write_output_pages_after_lossless_debug,
     run_chapter,
 )
-from strip.process_bands import _band_to_page_dict, process_band
+from strip.process_bands import _band_to_page_dict, _record_ocr_raw_blocks, process_band
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
 
@@ -124,6 +125,53 @@ def test_candidate_text_matching_rejects_edge_overlap_from_next_balloon():
 
     assert _candidate_matches_band_text_bbox(candidate_bbox, top_balloon_text)
     assert not _candidate_matches_band_text_bbox(candidate_bbox, lower_balloon_text)
+
+
+def test_ocr_assignment_audit_records_geometryless_same_band_fallback(monkeypatch, tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        monkeypatch.setenv("TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2", "1")
+        strip = VerticalStrip(
+            image=np.full((240, 160, 3), 255, dtype=np.uint8),
+            width=160,
+            height=240,
+            source_page_breaks=[0, 240],
+            page_x_offsets=[0],
+        )
+        band = Band(
+            y_top=0,
+            y_bottom=240,
+            balloons=[Balloon(BBox(100, 100, 150, 150), confidence=0.9)],
+            strip_slice=np.full((240, 160, 3), 255, dtype=np.uint8),
+        )
+        page = OutputPage(
+            y_top=0,
+            y_bottom=240,
+            image=np.full((240, 160, 3), 255, dtype=np.uint8),
+            text_layers={
+                "texts": [
+                    {
+                        "id": "ocr_001",
+                        "text_id": "ocr_001",
+                        "trace_id": "ocr_001@page_001_band_000",
+                        "band_id": "page_001_band_000",
+                        "bbox": [10, 10, 50, 40],
+                        "text_pixel_bbox": [10, 10, 50, 40],
+                    }
+                ]
+            },
+        )
+
+        _write_strip_detect_text_matching_debug_artifacts(strip, [band], [page])
+
+        audit_path = tmp_path / "debug" / "e2e" / "03_ocr" / "ocr_candidate_assignment_audit.jsonl"
+        audit_payload = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+        assert audit_payload["suspicious"] is True
+        assert audit_payload["reason"] == "same_band_fallback_without_geometry"
+        assert audit_payload["matched_trace_ids"] == ["ocr_001@page_001_band_000"]
+    finally:
+        bind_recorder(None)
 
 
 def test_run_chapter_writes_bands_manifest_with_stable_ids(tmp_path):
@@ -507,6 +555,53 @@ def test_process_band_writes_ocr_raw_blocks_jsonl_with_confidence_and_trace(tmp_
         assert decision["text_ids"] == ["ocr_001"]
         assert decision["trace_ids"] == ["ocr_001@page_001_band_000"]
         assert decision["trace_ids_in_band"] == ["ocr_001@page_001_band_000"]
+    finally:
+        bind_recorder(None)
+
+
+def test_ocr_assignment_audit_debug_is_emitted_without_changing_raw_ocr_payload(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+        page = {
+            "_page_id": "page_001",
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "UPPER LOWER",
+                    "bbox": [10, 12, 80, 60],
+                    "source_bbox": [10, 12, 80, 60],
+                    "trace_id": "ocr_001@page_001_band_000",
+                    "_ocr_assignment_audit": {
+                        "block_bbox": [8, 8, 90, 70],
+                        "assigned_line_count": 2,
+                        "suspicious": True,
+                        "reason": "large_vertical_gap",
+                    },
+                }
+            ],
+            "_vision_blocks": [],
+        }
+
+        _record_ocr_raw_blocks(page, band=band, band_id="page_001_band_000")
+
+        raw_path = tmp_path / "debug" / "e2e" / "03_ocr" / "ocr_raw_blocks.jsonl"
+        raw_payload = json.loads(raw_path.read_text(encoding="utf-8").splitlines()[0])
+        assert raw_payload["raw_ocr"] == "UPPER LOWER"
+        assert "_ocr_assignment_audit" not in raw_payload
+
+        audit_path = tmp_path / "debug" / "e2e" / "03_ocr" / "ocr_line_assignment_audit.jsonl"
+        audit_payload = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+        assert audit_payload["trace_id"] == "ocr_001@page_001_band_000"
+        assert audit_payload["suspicious"] is True
+        assert audit_payload["reason"] == "large_vertical_gap"
     finally:
         bind_recorder(None)
 

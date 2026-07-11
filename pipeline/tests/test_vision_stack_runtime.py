@@ -3303,6 +3303,11 @@ class VisionStackRuntimeTests(unittest.TestCase):
             ],
             "text_pixel_bbox": [35, 24, 61, 42],
             "bbox": [30, 18, 78, 42],
+            "_ocr_assignment_audit": {
+                "assigned_line_count": 2,
+                "suspicious": True,
+                "reason": "large_vertical_gap",
+            },
         }
 
         page = build_page_result(
@@ -3320,6 +3325,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertFalse(text["skip_processing"])
         self.assertEqual(text["line_polygons"], rich_item["line_polygons"])
         self.assertEqual(text["text_pixel_bbox"], rich_item["text_pixel_bbox"])
+        self.assertEqual(text["_ocr_assignment_audit"], rich_item["_ocr_assignment_audit"])
         vision_block = page["_vision_blocks"][0]
         self.assertEqual(vision_block["line_polygons"], rich_item["line_polygons"])
         self.assertEqual(vision_block["text_pixel_bbox"], rich_item["text_pixel_bbox"])

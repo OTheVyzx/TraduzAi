@@ -1366,6 +1366,15 @@ def _candidate_matches_band_text_bbox(candidate_bbox: list[int], text: dict) -> 
     return overlap_ratio >= 0.20 and _bbox_center_inside(candidate_bbox, text_bbox)
 
 
+def _ocr_assignment_audit_enabled() -> bool:
+    return str(os.getenv("TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _write_strip_detect_text_matching_debug_artifacts(
     strip: VerticalStrip,
     bands: list[Band],
@@ -1456,6 +1465,21 @@ def _write_strip_detect_text_matching_debug_artifacts(
                     "02_strip_detect/candidate_text_matching.jsonl",
                     row,
                 )
+                if _ocr_assignment_audit_enabled() and match_reason == "same_band_fallback":
+                    recorder.write_jsonl(
+                        "03_ocr/ocr_candidate_assignment_audit.jsonl",
+                        {
+                            "candidate_id": candidate_id,
+                            "page_id": page_id,
+                            "band_id": band_id,
+                            "candidate_bbox_page": bbox_page,
+                            "matched_text_ids": matched_text_ids,
+                            "matched_trace_ids": matched_trace_ids,
+                            "band_text_count": len(band_texts),
+                            "suspicious": True,
+                            "reason": "same_band_fallback_without_geometry",
+                        },
+                    )
         _enrich_detect_candidates_with_text_matches(recorder, match_rows)
     except Exception:
         return

@@ -33,6 +33,7 @@ VISUAL_PIPELINE_FLAGS: dict[str, bool | str] = {
     "runtime_fingerprint_v2": False,
     "visual_baseline_lossless_v2": False,
     "page_scene_identity_v2": False,
+    "ocr_assignment_audit_v2": False,
 }
 
 ROTATED_TEXT_POLICY: dict[str, dict[str, Any]] = {
