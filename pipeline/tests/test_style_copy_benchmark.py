@@ -1,30 +1,18 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 import cv2
 
+from debug_tools import style_copy_score
 from typesetter.style_extractor import IMPACT_FONT_CHOICES, extract_text_style_evidence
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "style_copy_atlas"
-GENERATOR_PATH = FIXTURE_DIR / "generate_style_copy_atlas.py"
-
-
-def _load_generator():
-    spec = importlib.util.spec_from_file_location("style_copy_atlas_generator", GENERATOR_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _atlas_cases():
-    generator = _load_generator()
-    generator.generate()
     manifest = json.loads((FIXTURE_DIR / "style_copy_manifest.json").read_text(encoding="utf-8"))
     atlas_bgr = cv2.imread(str(FIXTURE_DIR / manifest["image"]), cv2.IMREAD_COLOR)
     assert atlas_bgr is not None
@@ -87,3 +75,19 @@ def test_style_copy_atlas_extraction_matches_expected_contract():
             failures.append(f"{case_id}: curve detection should be disabled")
 
     assert not failures, "\n".join(failures)
+
+
+def test_baseline_paths_only_read_the_tracked_atlas():
+    tracked_paths = (
+        FIXTURE_DIR / "style_copy_atlas.png",
+        FIXTURE_DIR / "style_copy_manifest.json",
+    )
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tracked_paths}
+
+    cases = list(_atlas_cases())
+    score = style_copy_score.score_synthetic(FIXTURE_DIR)
+
+    assert len(cases) == 14
+    assert score["cases"] == score["passed"] == 14
+    after = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tracked_paths}
+    assert after == before
