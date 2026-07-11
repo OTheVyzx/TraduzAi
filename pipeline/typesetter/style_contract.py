@@ -99,7 +99,11 @@ def _effect(
     return _unknown("insufficient_effect_confidence")
 
 
-def style_evidence_v2_from_v1(v1_evidence: dict[str, Any]) -> StyleEvidenceV2:
+def style_evidence_v2_from_v1(
+    v1_evidence: dict[str, Any],
+    *,
+    font_match: dict[str, Any] | None = None,
+) -> StyleEvidenceV2:
     """Adapt legacy evidence without claiming default/fallback values were observed."""
     source = str(v1_evidence.get("source") or "none")
     text_present = source not in {"", "none"}
@@ -114,6 +118,19 @@ def style_evidence_v2_from_v1(v1_evidence: dict[str, Any]) -> StyleEvidenceV2:
     fill = _observed(text_color, v1_evidence.get("text_color_confidence")) if text_color else _unknown("no_fill_evidence")
     font_name = str(v1_evidence.get("font_name") or "")
     font = _observed(font_name, v1_evidence.get("font_confidence")) if font_name else _unknown("no_font_evidence")
+    if isinstance(font_match, dict):
+        matched_value = str(font_match.get("value") or "")
+        if matched_value and matched_value != "unknown":
+            ranked = [item for item in font_match.get("top_k", []) if isinstance(item, dict)]
+            font = StyleAttributeEvidenceV2(
+                value=matched_value,
+                confidence=_bounded_confidence(font_match.get("confidence")),
+                top_k=tuple(str(item.get("font_name")) for item in ranked if item.get("font_name")),
+                margin=_bounded_confidence(font_match.get("margin")),
+                abstention_reason=str(font_match.get("abstention_reason") or ""),
+            )
+        elif font_match.get("abstention_reason"):
+            font = _unknown(str(font_match["abstention_reason"]))
     stroke_color = str(v1_evidence.get("stroke_color") or "")
     stroke_width = int(v1_evidence.get("stroke_width_px") or 0)
     stroke = (

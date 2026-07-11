@@ -76,3 +76,35 @@ def test_v2_keeps_attribute_confidence_top_k_margin_and_abstention_reason():
         "color": "#2C7FFF",
         "width_px": 4,
     }
+
+
+def test_v2_uses_calibrated_font_match_without_changing_legacy_attributes():
+    evidence = style_evidence_v2_from_v1(
+        {
+            "source": "pixel_analysis",
+            "text_color": "#FFFFFF",
+            "text_color_confidence": 0.8,
+            "font_name": "ComicNeue-Bold.ttf",
+            "font_confidence": 1.0,
+        },
+        font_match={
+            "abstention_reason": "low_top_k_margin",
+            "confidence": 0.19,
+            "margin": 0.02,
+            "status": "family",
+            "top_k": [
+                {"font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf", "similarity": 0.81},
+                {"font_name": "ComicNeue-Bold.ttf", "similarity": 0.79},
+            ],
+            "value": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+        },
+    )
+
+    font = evidence.to_dict()["attributes"]["font_name"]
+    assert font == {
+        "abstention_reason": "low_top_k_margin",
+        "confidence": 0.19,
+        "margin": 0.02,
+        "top_k": ["LeagueGothic-Regular-VariableFont_wdth.ttf", "ComicNeue-Bold.ttf"],
+        "value": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+    }
