@@ -9309,6 +9309,9 @@ def _run_pipeline(config_path: str):
     emit_progress("typeset", 100, 98, message="Finalizando projeto...")
     with pipeline_timing.measure("build_project_json"):
         project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
+    with pipeline_timing.measure("page_scene_identity_shadow"):
+        page_scene_identity_audit = _run_page_scene_identity_shadow(project_data, work_dir)
+        project_data.setdefault("qa", {})["page_scene_identity_v2"] = page_scene_identity_audit
     with pipeline_timing.measure("normalize_project_render_geometry"):
         synced_render_bboxes = _normalize_project_render_balloon_bboxes(project_data)
         if synced_render_bboxes:
@@ -13146,6 +13149,31 @@ def _normalize_final_project_page_space_layers(project_data: dict) -> dict:
         "layers_checked": layers_checked,
         "layers_changed": layers_changed,
     }
+
+
+def _run_page_scene_identity_shadow(project_data: dict, work_dir: Path) -> dict:
+    """Emit the R1 page-space owner audit without modifying renderable layers."""
+    try:
+        from runtime_profiles import resolve_visual_pipeline_flags
+
+        enabled = bool(resolve_visual_pipeline_flags().get("page_scene_identity_v2", False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        return {"enabled": False, "written": False}
+    from qa.text_identity_audit import build_text_identity_audit, write_text_identity_audit
+
+    audit = build_text_identity_audit(project_data)
+    try:
+        target = write_text_identity_audit(work_dir / "debug" / "e2e" / "05_layout_geometry", project_data)
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "summary": audit["summary"],
+            "written": False,
+        }
+    return {"enabled": True, "summary": audit["summary"], "written": True, "path": str(target)}
 
 
 def _page_has_final_renderable_text(page: dict) -> bool:
