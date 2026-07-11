@@ -24,7 +24,15 @@ if TYPE_CHECKING:
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 SAMPLE_TEXT   = "ABCDEFGHabcdefgh123!?"
+FINGERPRINT_SAMPLES = (
+    ("ABCDEFGH123!?", "abcdefgh123!?", 36, 28),
+    ("MANGA STYLE", "round narrow", 42, 25),
+    ("WMWM IIl1", "AaBb 0987", 30, 32),
+)
 SIMILARITY_THRESHOLD = 0.72
+TOP_K_FONT_CANDIDATES = 3
+EXACT_FONT_MARGIN_THRESHOLD = 0.04
+FULL_FONT_MARGIN = 0.08
 DEFAULT_FONT  = "ComicNeue-Bold.ttf"
 LEGACY_CANDIDATE_FONTS = [
     "KOMIKAX_.ttf",
@@ -125,6 +133,8 @@ def _render_font_sample_textpath(
     upper_line: str,
     lower_line: str,
     canvas_size: int = 224,
+    upper_font_size: int = 36,
+    lower_font_size: int = 28,
 ) -> np.ndarray:
     oversample = 2
     scaled_size = int(canvas_size * oversample)
@@ -134,7 +144,7 @@ def _render_font_sample_textpath(
         canvas,
         upper_line,
         font_path=font_path,
-        font_size=36 * oversample,
+        font_size=upper_font_size * oversample,
         origin_x=12 * oversample,
         top_y=60 * oversample,
     )
@@ -142,12 +152,44 @@ def _render_font_sample_textpath(
         canvas,
         lower_line,
         font_path=font_path,
-        font_size=28 * oversample,
+        font_size=lower_font_size * oversample,
         origin_x=12 * oversample,
         top_y=110 * oversample,
     )
 
     return cv2.resize(canvas, (canvas_size, canvas_size), interpolation=cv2.INTER_AREA)
+
+
+def _normalize_font_region(region_rgb: np.ndarray, *, canvas_size: int = 224) -> np.ndarray:
+    """Center a glyph-like foreground crop without changing the legacy detector path."""
+    if region_rgb is None or region_rgb.ndim < 3 or region_rgb.shape[2] < 3:
+        return np.full((canvas_size, canvas_size, 3), 255, dtype=np.uint8)
+    rgb = region_rgb[:, :, :3].astype(np.uint8, copy=False)
+    height, width = rgb.shape[:2]
+    if height < 2 or width < 2:
+        return cv2.resize(rgb, (canvas_size, canvas_size), interpolation=cv2.INTER_AREA)
+    border = np.concatenate((rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]), axis=0).astype(np.float32)
+    background = np.median(border, axis=0)
+    foreground = np.linalg.norm(rgb.astype(np.float32) - background, axis=2) > 28.0
+    ys, xs = np.where(foreground)
+    if len(xs) < 8:
+        return cv2.resize(rgb, (canvas_size, canvas_size), interpolation=cv2.INTER_AREA)
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+    padding = max(2, int(round(max(x2 - x1, y2 - y1) * 0.08)))
+    x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
+    x2, y2 = min(width, x2 + padding), min(height, y2 + padding)
+    crop = rgb[y1:y2, x1:x2]
+    if crop.size == 0:
+        return cv2.resize(rgb, (canvas_size, canvas_size), interpolation=cv2.INTER_AREA)
+    crop_height, crop_width = crop.shape[:2]
+    scale = min((canvas_size - 16) / max(1, crop_width), (canvas_size - 16) / max(1, crop_height))
+    resized = cv2.resize(crop, (max(1, round(crop_width * scale)), max(1, round(crop_height * scale))), interpolation=cv2.INTER_AREA)
+    canvas = np.full((canvas_size, canvas_size, 3), 255, dtype=np.uint8)
+    top = (canvas_size - resized.shape[0]) // 2
+    left = (canvas_size - resized.shape[1]) // 2
+    canvas[top : top + resized.shape[0], left : left + resized.shape[1]] = resized
+    return canvas
 
 
 class FontDetector:
@@ -169,6 +211,7 @@ class FontDetector:
         self._model = None
         self._device = None
         self._fingerprints: dict[str, np.ndarray] = {}
+        self._fingerprint_samples: dict[str, list[np.ndarray]] = {}
         self._candidate_fonts: list[str] = []
         self._enable_google_fonts = (
             os.environ.get("TRADUZAI_ENABLE_GOOGLE_FONTS", "0") == "1"
@@ -231,9 +274,14 @@ class FontDetector:
             vec /= norm
         return vec
 
-    def _render_font_sample(self, font_name: str) -> np.ndarray:
-        upper_line = SAMPLE_TEXT.upper()
-        lower_line = SAMPLE_TEXT.lower()
+    def _render_font_sample(
+        self,
+        font_name: str,
+        upper_line: str = SAMPLE_TEXT.upper(),
+        lower_line: str = SAMPLE_TEXT.lower(),
+        upper_font_size: int = 36,
+        lower_font_size: int = 28,
+    ) -> np.ndarray:
         font_path = _resolve_font_path(self._fonts_dir, font_name)
         try:
             return _render_font_sample_textpath(
@@ -241,6 +289,8 @@ class FontDetector:
                 upper_line=upper_line,
                 lower_line=lower_line,
                 canvas_size=224,
+                upper_font_size=upper_font_size,
+                lower_font_size=lower_font_size,
             )
         except Exception:
             fallback = np.full((224, 224, 3), 255, dtype=np.uint8)
@@ -292,8 +342,24 @@ class FontDetector:
         self._candidate_fonts = self._discover_candidate_fonts()
         all_fonts = [DEFAULT_FONT] + self._candidate_fonts
         for font_name in all_fonts:
-            sample = self._render_font_sample(font_name)
-            self._fingerprints[font_name] = self._extract_features(sample)
+            samples = [
+                self._extract_features(
+                    self._render_font_sample(
+                        font_name,
+                        upper_line=upper_line,
+                        lower_line=lower_line,
+                        upper_font_size=upper_font_size,
+                        lower_font_size=lower_font_size,
+                    )
+                )
+                for upper_line, lower_line, upper_font_size, lower_font_size in FINGERPRINT_SAMPLES
+            ]
+            aggregate = np.mean(np.stack(samples), axis=0).astype(np.float32)
+            norm = float(np.linalg.norm(aggregate))
+            if norm > 0:
+                aggregate /= norm
+            self._fingerprint_samples[font_name] = samples
+            self._fingerprints[font_name] = aggregate
 
     def _fonts_to_compare(self) -> list[str]:
         fonts = list(self._candidate_fonts)
@@ -324,6 +390,88 @@ class FontDetector:
 
         confidence = min(1.0, max(0.0, best_sim))
         return best_font, confidence
+
+    def _rank_candidates(self, region_feats: np.ndarray) -> list[tuple[str, float]]:
+        ranked = []
+        for font_name in self._fonts_to_compare():
+            fingerprint = self._fingerprints.get(font_name)
+            if fingerprint is None:
+                continue
+            ranked.append((font_name, float(np.dot(region_feats, fingerprint))))
+        return sorted(ranked, key=lambda item: (-item[1], item[0]))
+
+    def detect_with_evidence(self, region_rgb: np.ndarray) -> dict[str, object]:
+        """Return calibrated top-k evidence for S3 shadow evaluation only."""
+        if region_rgb is None or region_rgb.size < 8 * 8 * 3:
+            return {
+                "abstention_reason": "region_too_small",
+                "confidence": 0.0,
+                "margin": 0.0,
+                "status": "unknown",
+                "top_k": [],
+                "value": "unknown",
+            }
+        if not self._loaded:
+            try:
+                self._load_model()
+                self._build_fingerprints()
+                self._loaded = True
+            except Exception:
+                return {
+                    "abstention_reason": "model_unavailable",
+                    "confidence": 0.0,
+                    "margin": 0.0,
+                    "status": "unknown",
+                    "top_k": [],
+                    "value": "unknown",
+                }
+        try:
+            region_feats = self._extract_features(_normalize_font_region(region_rgb))
+        except Exception:
+            return {
+                "abstention_reason": "feature_extraction_failed",
+                "confidence": 0.0,
+                "margin": 0.0,
+                "status": "unknown",
+                "top_k": [],
+                "value": "unknown",
+            }
+        ranked = self._rank_candidates(region_feats)
+        top_k = [
+            {"font_name": font_name, "similarity": round(max(0.0, min(1.0, score)), 4)}
+            for font_name, score in ranked[:TOP_K_FONT_CANDIDATES]
+        ]
+        if not ranked:
+            return {
+                "abstention_reason": "no_candidate_fonts",
+                "confidence": 0.0,
+                "margin": 0.0,
+                "status": "unknown",
+                "top_k": top_k,
+                "value": "unknown",
+            }
+        best_font, best_score = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+        margin = max(0.0, best_score - runner_up)
+        if best_score < SIMILARITY_THRESHOLD:
+            return {
+                "abstention_reason": "similarity_below_threshold",
+                "confidence": 0.0,
+                "margin": round(margin, 4),
+                "status": "unknown",
+                "top_k": top_k,
+                "value": "unknown",
+            }
+        status = "exact" if margin >= EXACT_FONT_MARGIN_THRESHOLD else "family"
+        confidence = max(0.0, min(1.0, best_score * min(1.0, margin / FULL_FONT_MARGIN)))
+        return {
+            "abstention_reason": "" if status == "exact" else "low_top_k_margin",
+            "confidence": round(confidence, 4),
+            "margin": round(margin, 4),
+            "status": status,
+            "top_k": top_k,
+            "value": best_font,
+        }
 
     def detect_with_score(
         self,

@@ -17,6 +17,8 @@ import cv2
 import numpy as np
 
 from typesetter.style_extractor import extract_text_style_evidence
+from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.style_policy import style_evidence_v2_shadow_policy
 
 
 CARD_W = 360
@@ -235,6 +237,7 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                     skipped=True,
                     reason=_style_scan_skip_reason(layer),
                 )
+            evidence_v2 = style_evidence_v2_from_v1(evidence)
             records.append(
                 {
                     "page": page_index,
@@ -244,6 +247,8 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                     "bbox": [x1, y1, x2, y2],
                     **applied_fields,
                     **evidence,
+                    "style_evidence_v2": evidence_v2.to_dict(),
+                    "style_evidence_v2_shadow_policy": style_evidence_v2_shadow_policy(evidence_v2),
                 }
             )
     return records

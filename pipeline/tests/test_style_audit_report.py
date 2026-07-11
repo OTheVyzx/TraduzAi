@@ -76,6 +76,9 @@ def test_style_audit_report_separates_detected_evidence_from_applied_style(tmp_p
     assert records[0]["applied_gradient"] is False
     assert records[0]["applied_glow"] is False
     assert records[0]["applied_stroke_color"] == ""
+    assert records[0]["style_evidence_v2"]["schema_version"] == 2
+    assert records[0]["style_evidence_v2"]["attributes"]["fill"]["value"] == "#FFFFFF"
+    assert records[0]["style_evidence_v2_shadow_policy"]["apply_to_renderer"] is False
 
 
 def test_style_audit_report_skips_unapplied_sfx_visual_review_candidates(tmp_path, monkeypatch):
