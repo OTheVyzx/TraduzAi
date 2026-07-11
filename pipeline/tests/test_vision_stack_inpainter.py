@@ -5340,6 +5340,51 @@ class VisionStackInpainterTests(unittest.TestCase):
             self.assertTrue(item["preserve_original"])
             self.assertEqual(item["render_policy"], "preserve_original")
 
+    def test_unsafe_white_balloon_preserves_source_when_glyph_fill_still_has_residual(self):
+        import inpainter
+        from inpainter import _apply_unsafe_white_balloon_text_fills
+
+        image = np.full((130, 260, 3), [210, 216, 224], dtype=np.uint8)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (35, 35, 35), 2)
+        image[48:66, 84:112] = [12, 12, 12]
+        image[70:88, 144:184] = [12, 12, 12]
+        raw_glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        raw_glyph_mask[48:66, 84:112] = 255
+        residual_glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        residual_glyph_mask[70:88, 144:184] = 255
+        text = {
+            "id": "ocr_unsafe",
+            "text_id": "ocr_unsafe",
+            "text": "TWO LINES",
+            "bbox": [66, 36, 198, 96],
+            "text_pixel_bbox": [66, 36, 198, 96],
+            "line_polygons": [[[66, 36], [198, 36], [198, 96], [66, 96]]],
+            "balloon_bbox": [28, 18, 232, 114],
+            "bubble_mask_bbox": [28, 18, 232, 114],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_type": "white",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "route_action": "translate_inpaint_render",
+        }
+        page = {"texts": [text]}
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=raw_glyph_mask), patch.object(
+            inpainter,
+            "_unsafe_white_balloon_dark_glyph_supplement",
+            side_effect=[np.zeros(image.shape[:2], dtype=np.uint8), residual_glyph_mask],
+        ):
+            result, count = _apply_unsafe_white_balloon_text_fills(image, page)
+
+        self.assertEqual(count, 0)
+        self.assertTrue(np.array_equal(result, image))
+        self.assertTrue(text["preserve_original"])
+        self.assertEqual(text["route_action"], "review_required")
+        self.assertEqual(
+            page["_strip_unsafe_white_balloon_fill_rejections"],
+            {"glyph_fill_residual_after_local_redetect": 1},
+        )
+
     def test_derived_card_panel_fast_fill_requires_global_opt_in_without_background_metadata(self):
         from inpainter import _apply_fast_dark_panel_text_fill
 

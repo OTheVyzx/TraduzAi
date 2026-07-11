@@ -6497,6 +6497,31 @@ def _apply_unsafe_white_balloon_text_fills(image_rgb: np.ndarray, ocr_page: dict
             }
         before = result.copy()
         result[fill_mask > 0] = np.asarray([255, 255, 255], dtype=np.uint8)
+        residual_glyph_mask = _unsafe_white_balloon_dark_glyph_supplement(
+            result,
+            text,
+            effective_limit_mask,
+        )
+        residual_glyph_pixels = int(np.count_nonzero(residual_glyph_mask))
+        if residual_glyph_pixels >= max(24, int(round(max(1, raw_pixels) * 0.06))):
+            result = before
+            reason = "glyph_fill_residual_after_local_redetect"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            rejection_samples.append({
+                "text_id": str(text.get("id") or text.get("text_id") or ""),
+                "trace_id": str(text.get("trace_id") or ""),
+                "reason": reason,
+                "residual_glyph_pixels": residual_glyph_pixels,
+            })
+            _preserve_unsafe_white_balloon_source(ocr_page, text, reason)
+            metrics = text.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["unsafe_white_balloon_glyph_fill"] = {
+                    "decision": "preserved_original",
+                    "reason": reason,
+                    "residual_glyph_pixels": residual_glyph_pixels,
+                }
+            continue
         if not np.any(np.any(result != before, axis=2)):
             continue
         fill_count += 1
