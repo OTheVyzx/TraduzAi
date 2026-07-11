@@ -2326,6 +2326,18 @@ def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
                         **copy.deepcopy(assignment_audit),
                     },
                 )
+            merge_audit = text.get("_ocr_cluster_merge_audit")
+            if isinstance(merge_audit, dict):
+                recorder.write_jsonl(
+                    "03_ocr/ocr_cluster_merge_audit.jsonl",
+                    {
+                        "text_id": text_id,
+                        "page_id": page_id,
+                        "band_id": band_id,
+                        "trace_id": str(text.get("trace_id") or _trace_id_for(text_id, band_id)),
+                        **copy.deepcopy(merge_audit),
+                    },
+                )
     except Exception:
         return
 

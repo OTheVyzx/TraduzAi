@@ -38,6 +38,7 @@ from vision_stack.runtime import (
     _attach_sfx_visual_candidates,
     _apply_white_text_overlay,
     _build_refined_bbox_mask,
+    _build_ocr_cluster_merge_audit,
     _build_post_cleanup_limit_mask,
     _clustered_inpaint_crop_windows,
     _build_koharu_worker_page_result,
@@ -903,6 +904,37 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(merged_texts), 2)
         self.assertEqual(len(merged_blocks), 2)
+
+    def test_merge_ocr_clusters_audits_low_confidence_crop_fallback_contamination(self):
+        texts = [
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "text": "OF COURSE. THAT OUTDATED THIRD-RATE MARTIAL ART I KNEW COULDN'T POSSIBLY HAVE SUCH POWER.",
+                "bbox": [73, 160, 425, 356],
+                "text_pixel_bbox": [78, 174, 422, 350],
+                "line_polygons": [[[78, 174], [422, 174], [422, 350], [78, 350]]],
+                "confidence": 0.951,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "full_page_lines"},
+            },
+            {
+                "id": "ocr_003",
+                "text_id": "ocr_003",
+                "text": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+                "bbox": [235, 232, 720, 997],
+                "text_pixel_bbox": [235, 232, 720, 997],
+                "confidence": 0.57,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "crop_fallback"},
+            },
+        ]
+        audit = _build_ocr_cluster_merge_audit(texts)
+        self.assertTrue(audit["suspicious"])
+        self.assertEqual(audit["reason"], "low_confidence_crop_fallback_dominates_geometry")
+        self.assertEqual(audit["source_count"], 2)
 
     def test_merge_ocr_clusters_keeps_p23_broad_container_and_lower_fragments_separate(self):
         page_texts = [

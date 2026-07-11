@@ -585,6 +585,11 @@ def test_ocr_assignment_audit_debug_is_emitted_without_changing_raw_ocr_payload(
                         "suspicious": True,
                         "reason": "large_vertical_gap",
                     },
+                    "_ocr_cluster_merge_audit": {
+                        "source_count": 2,
+                        "suspicious": True,
+                        "reason": "low_confidence_crop_fallback_dominates_geometry",
+                    },
                 }
             ],
             "_vision_blocks": [],
@@ -602,6 +607,11 @@ def test_ocr_assignment_audit_debug_is_emitted_without_changing_raw_ocr_payload(
         assert audit_payload["trace_id"] == "ocr_001@page_001_band_000"
         assert audit_payload["suspicious"] is True
         assert audit_payload["reason"] == "large_vertical_gap"
+
+        merge_path = tmp_path / "debug" / "e2e" / "03_ocr" / "ocr_cluster_merge_audit.jsonl"
+        merge_payload = json.loads(merge_path.read_text(encoding="utf-8").splitlines()[0])
+        assert merge_payload["source_count"] == 2
+        assert merge_payload["reason"] == "low_confidence_crop_fallback_dominates_geometry"
     finally:
         bind_recorder(None)
 

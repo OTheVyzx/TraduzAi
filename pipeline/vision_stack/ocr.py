@@ -135,6 +135,7 @@ def _build_ocr_assignment_audit(block_bbox: list[int], lines: list[dict]) -> dic
         reason = "line_union_exceeds_detector_block"
 
     return {
+        "assignment_mode": "full_page_lines",
         "block_bbox": [int(value) for value in block_bbox],
         "assigned_line_count": len(assigned_lines),
         "assigned_lines": assigned_lines,
@@ -1037,6 +1038,16 @@ class OCREngine:
             if isinstance(texts[index], dict):
                 updated = dict(texts[index])
                 updated["text"] = recovered
+                if _ocr_assignment_audit_enabled() and str(recovered or "").strip():
+                    updated["_ocr_assignment_audit"] = {
+                        "assignment_mode": "crop_fallback",
+                        "block_bbox": list(self._block_bbox(blocks[index])),
+                        "assigned_line_count": 0,
+                        "assigned_lines": [],
+                        "line_union_bbox": None,
+                        "suspicious": False,
+                        "reason": "crop_fallback_recovered",
+                    }
                 texts[index] = updated
             else:
                 texts[index] = recovered
