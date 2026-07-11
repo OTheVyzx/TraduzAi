@@ -2645,8 +2645,6 @@ def _koharu_style_fast_white_evidence_rejection_reason(
 
     if not isinstance(text, dict) or not isinstance(text_fill_mask, np.ndarray):
         return "missing_koharu_text_evidence"
-    if text.get("line_polygons"):
-        return ""
     if image_rgb.size == 0 or text_fill_mask.size == 0 or not np.any(text_fill_mask):
         return "missing_koharu_text_evidence"
     try:
@@ -3342,9 +3340,28 @@ def _apply_fast_solid_balloon_fill(
             _reject(clip_rejection or "text_mask_outside_bubble")
             continue
         raw_mask_pixels = int(np.count_nonzero(text_fill_mask))
+        evidence_rejection = _koharu_style_fast_white_evidence_rejection_reason(
+            band_rgb,
+            text,
+            text_fill_mask,
+        )
+        if evidence_rejection:
+            mask_evidence = consolidate_mask_evidence(
+                text,
+                kind="clipped_line_polygon" if mask_source == "line_geometry" else "none",
+                raw_mask_pixels=raw_mask_pixels if mask_source == "line_geometry" else 0,
+                expanded_mask_pixels=raw_mask_pixels if mask_source == "line_geometry" else 0,
+                evidence_score=0.0,
+                fast_fill_reject_reasons=[evidence_rejection],
+            )
+            _propagate_mask_evidence_decision_flags(ocr_page, text, mask_evidence)
+            _reject(evidence_rejection)
+            continue
+        # A line polygon is only a candidate area. It becomes fast-fillable after
+        # the independent image-pixel check above confirms overlapping glyphs.
         mask_evidence = consolidate_mask_evidence(
             text,
-            kind="glyph_segmentation" if mask_source == "line_geometry" else "ocr_pixels",
+            kind="ocr_pixels",
             raw_mask_pixels=raw_mask_pixels,
             expanded_mask_pixels=raw_mask_pixels,
             evidence_score=1.0,
@@ -3353,14 +3370,6 @@ def _apply_fast_solid_balloon_fill(
         rejection_reason = _fast_solid_rejection_reason(text)
         if rejection_reason:
             _reject(rejection_reason)
-            continue
-        evidence_rejection = _koharu_style_fast_white_evidence_rejection_reason(
-            band_rgb,
-            text,
-            text_fill_mask,
-        )
-        if evidence_rejection:
-            _reject(evidence_rejection)
             continue
         fill_color, metadata = _sample_solid_fill_color_for_mask(band_rgb, text_fill_mask, balloon_limit)
         metadata["text_id"] = str(text.get("id") or text.get("text_id") or text.get("trace_id") or "")
@@ -4208,6 +4217,14 @@ def _is_false_white_card_candidate(image_rgb: np.ndarray, text: dict) -> bool:
         }
         or has_fast_ocr_evidence
     ):
+        return False
+    if _white_bubble_interior_looks_plain(image_rgb, text):
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["false_white_card_rejected_plain_interior"] = {
+                "source": "image_white_bubble_mask",
+                "reason": "plain_white_interior_excluding_text_and_outline",
+            }
         return False
     return not _text_region_looks_plain_white(image_rgb, text)
 
@@ -6267,6 +6284,116 @@ def _unsafe_white_balloon_limit_mask(
     return _safe_real_bubble_interior_mask(mask, width, height, erode_px=3)
 
 
+def _unsafe_white_balloon_identity_keys(text: dict) -> set[str]:
+    """Return stable provenance keys without treating nearby lobes as one group."""
+
+    if not isinstance(text, dict):
+        return set()
+    keys: set[str] = set()
+    for field_name in (
+        "source_trace_ids",
+        "_source_trace_ids",
+        "source_text_ids",
+        "_source_text_ids",
+    ):
+        value = text.get(field_name)
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            normalized = str(item or "").strip()
+            if normalized:
+                keys.add(f"source:{normalized}")
+                keys.add(f"identity:{normalized}")
+    for field_name in ("trace_id", "text_instance_id", "text_id", "id"):
+        normalized = str(text.get(field_name) or "").strip()
+        if normalized:
+            keys.add(f"self:{normalized}")
+            keys.add(f"identity:{normalized}")
+    return keys
+
+
+def _preserve_unsafe_white_balloon_source(ocr_page: dict, text: dict, reason: str) -> None:
+    """Keep an unsafe text group intact when no glyph-tight cleanup is possible."""
+
+    identity_keys = _unsafe_white_balloon_identity_keys(text)
+    collections = (
+        ocr_page.get("texts") or [],
+        ocr_page.get("_vision_blocks") or [],
+        ocr_page.get("_strip_unsafe_inpaint_block_samples") or [],
+    )
+    for collection in collections:
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            item_keys = _unsafe_white_balloon_identity_keys(item)
+            if item is not text and identity_keys and not (identity_keys & item_keys):
+                continue
+            if item is not text and not identity_keys:
+                continue
+            item["skip_processing"] = True
+            item["preserve_original"] = True
+            item["render_policy"] = "preserve_original"
+            item["translate_policy"] = "skip_translation"
+            item["route_action"] = "review_required"
+            item["route_reason"] = reason
+            flags = item.setdefault("qa_flags", [])
+            if isinstance(flags, list) and "unsafe_white_glyph_evidence_missing" not in flags:
+                flags.append("unsafe_white_glyph_evidence_missing")
+            metrics = item.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["unsafe_white_balloon_glyph_fill"] = {
+                    "decision": "preserved_original",
+                    "reason": reason,
+                }
+
+
+def _unsafe_white_balloon_dark_glyph_supplement(
+    image_rgb: np.ndarray,
+    text: dict,
+    limit_mask: np.ndarray,
+) -> np.ndarray:
+    """Redetect dark glyph pixels locally; geometry remains a support, never a fill."""
+
+    height, width = image_rgb.shape[:2]
+    support_mask = _text_geometry_mask(width, height, text)
+    if support_mask is None or not np.any(support_mask):
+        text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+        if text_bbox is None:
+            return np.zeros((height, width), dtype=np.uint8)
+        support_mask = _mask_from_bbox(width, height, text_bbox, padding=0)
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    chroma = np.max(image_rgb, axis=2).astype(np.int16) - np.min(image_rgb, axis=2).astype(np.int16)
+    dark_neutral_pixels = (gray <= 176) & (chroma <= 60)
+    return np.where(
+        dark_neutral_pixels & (support_mask > 0) & (limit_mask > 0),
+        255,
+        0,
+    ).astype(np.uint8)
+
+
+def _unsafe_white_balloon_effective_limit_mask(
+    text: dict,
+    limit_mask: np.ndarray,
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, str, float]:
+    """Reject an undercovered bubble mask as a clip, while retaining glyph-only fill."""
+
+    support_mask = _text_geometry_mask(width, height, text)
+    if support_mask is None or not np.any(support_mask):
+        text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+        if text_bbox is None:
+            return limit_mask, "trusted_safe_balloon_limit", 1.0
+        support_mask = _mask_from_bbox(width, height, text_bbox, padding=0)
+    support_pixels = int(np.count_nonzero(support_mask))
+    if support_pixels <= 0:
+        return limit_mask, "trusted_safe_balloon_limit", 1.0
+    inside_pixels = int(np.count_nonzero((support_mask > 0) & (limit_mask > 0)))
+    coverage = float(inside_pixels) / float(support_pixels)
+    if coverage < 0.82:
+        return np.full((height, width), 255, dtype=np.uint8), "glyph_only_unbounded_by_undercovered_limit", coverage
+    return limit_mask, "trusted_safe_balloon_limit", coverage
+
+
 def _apply_unsafe_white_balloon_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple[np.ndarray, int]:
     if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(ocr_page, dict):
         return image_rgb, 0
@@ -6276,6 +6403,9 @@ def _apply_unsafe_white_balloon_text_fills(image_rgb: np.ndarray, ocr_page: dict
     seen_bboxes: set[tuple[int, int, int, int]] = set()
     filled_bboxes: list[list[int]] = []
     filled_text_keys: set[str] = set()
+    rejection_reasons: dict[str, int] = {}
+    fill_samples: list[dict] = []
+    rejection_samples: list[dict] = []
     candidates = [
         item
         for item in list(ocr_page.get("texts") or [])
@@ -6286,37 +6416,118 @@ def _apply_unsafe_white_balloon_text_fills(image_rgb: np.ndarray, ocr_page: dict
         and not _is_false_white_card_candidate(image_rgb, item)
     ]
     for text in candidates:
-        text_mask = _text_geometry_mask(width, height, text)
-        if text_mask is None or not np.any(text_mask):
-            text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
-            if text_bbox is None:
-                continue
-            text_mask = _mask_from_bbox(width, height, text_bbox, padding=1)
-        bbox = _bbox_from_binary_mask(text_mask)
+        raw_mask = build_raw_text_mask_from_image(dict(text), image_rgb, image_rgb.shape)
+        if raw_mask is None or not np.any(raw_mask):
+            reason = "missing_raw_glyph_evidence"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            rejection_samples.append({
+                "text_id": str(text.get("id") or text.get("text_id") or ""),
+                "trace_id": str(text.get("trace_id") or ""),
+                "reason": reason,
+            })
+            _preserve_unsafe_white_balloon_source(ocr_page, text, reason)
+            continue
+        raw_mask = np.where(raw_mask > 0, 255, 0).astype(np.uint8)
+        limit_mask = _unsafe_white_balloon_limit_mask(ocr_page, text, width, height)
+        if limit_mask is None or not np.any(limit_mask):
+            reason = "missing_safe_balloon_limit"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            rejection_samples.append({
+                "text_id": str(text.get("id") or text.get("text_id") or ""),
+                "trace_id": str(text.get("trace_id") or ""),
+                "reason": reason,
+            })
+            _preserve_unsafe_white_balloon_source(ocr_page, text, reason)
+            continue
+        effective_limit_mask, limit_strategy, safe_limit_coverage = _unsafe_white_balloon_effective_limit_mask(
+            text,
+            limit_mask,
+            width,
+            height,
+        )
+        local_dark_mask = _unsafe_white_balloon_dark_glyph_supplement(image_rgb, text, effective_limit_mask)
+        raw_pixels = int(np.count_nonzero(raw_mask))
+        local_dark_pixels = int(np.count_nonzero(local_dark_mask))
+        supplement_mask = cv2.bitwise_and(local_dark_mask, cv2.bitwise_not(raw_mask))
+        supplement_pixels = int(np.count_nonzero(supplement_mask))
+        use_local_dark_supplement = bool(
+            supplement_pixels >= max(24, int(round(max(1, raw_pixels) * 0.12)))
+            and local_dark_pixels > raw_pixels
+        )
+        glyph_mask = cv2.bitwise_or(raw_mask, local_dark_mask) if use_local_dark_supplement else raw_mask
+        bbox = _bbox_from_binary_mask(glyph_mask)
         if bbox is None:
             continue
         bbox_key = tuple(int(v) for v in bbox)
         if bbox_key in seen_bboxes:
             continue
         seen_bboxes.add(bbox_key)
-        limit_mask = _unsafe_white_balloon_limit_mask(ocr_page, text, width, height)
-        if limit_mask is None or not np.any(limit_mask):
-            continue
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        expanded = cv2.dilate(np.where(text_mask > 0, 255, 0).astype(np.uint8), kernel, iterations=1)
-        fill_mask = cv2.bitwise_and(expanded, np.where(limit_mask > 0, 255, 0).astype(np.uint8))
+        expanded = expand_text_mask(glyph_mask, expand_px=4)
+        fill_mask = cv2.bitwise_and(expanded, np.where(effective_limit_mask > 0, 255, 0).astype(np.uint8))
         if not np.any(fill_mask):
+            reason = "raw_glyph_mask_outside_safe_balloon_limit"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            rejection_samples.append({
+                "text_id": str(text.get("id") or text.get("text_id") or ""),
+                "trace_id": str(text.get("trace_id") or ""),
+                "reason": reason,
+            })
+            _preserve_unsafe_white_balloon_source(ocr_page, text, reason)
             continue
+        consolidate_mask_evidence(
+            text,
+            kind="ocr_pixels",
+            raw_mask_pixels=int(np.count_nonzero(glyph_mask)),
+            expanded_mask_pixels=int(np.count_nonzero(fill_mask)),
+            evidence_score=1.0,
+        )
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["unsafe_white_balloon_glyph_fill"] = {
+                "decision": "filled",
+                "source": "raw_glyph_mask_plus_local_dark_pixels" if use_local_dark_supplement else "raw_glyph_mask",
+                "raw_mask_pixels": raw_pixels,
+                "local_dark_pixels": local_dark_pixels,
+                "local_dark_supplement_pixels": supplement_pixels if use_local_dark_supplement else 0,
+                "glyph_mask_pixels": int(np.count_nonzero(glyph_mask)),
+                "expanded_mask_pixels": int(np.count_nonzero(fill_mask)),
+                "bbox": [int(value) for value in bbox],
+                "limit_strategy": limit_strategy,
+                "safe_limit_coverage": round(float(safe_limit_coverage), 6),
+            }
         before = result.copy()
         result[fill_mask > 0] = np.asarray([255, 255, 255], dtype=np.uint8)
         if not np.any(np.any(result != before, axis=2)):
             continue
         fill_count += 1
         filled_bboxes.append(bbox)
+        fill_samples.append({
+            "text_id": str(text.get("id") or text.get("text_id") or ""),
+            "trace_id": str(text.get("trace_id") or ""),
+            "source": "raw_glyph_mask_plus_local_dark_pixels" if use_local_dark_supplement else "raw_glyph_mask",
+            "raw_mask_pixels": raw_pixels,
+            "glyph_mask_pixels": int(np.count_nonzero(glyph_mask)),
+            "expanded_mask_pixels": int(np.count_nonzero(fill_mask)),
+            "limit_strategy": limit_strategy,
+            "safe_limit_coverage": round(float(safe_limit_coverage), 6),
+            "bbox": [int(value) for value in bbox],
+        })
         for key_name in ("id", "text_id", "trace_id", "text_instance_id"):
             value = text.get(key_name)
             if value is not None:
                 filled_text_keys.add(str(value))
+    if rejection_reasons:
+        ocr_page["_strip_unsafe_white_balloon_fill_rejections"] = rejection_reasons
+    else:
+        ocr_page.pop("_strip_unsafe_white_balloon_fill_rejections", None)
+    if fill_samples:
+        ocr_page["_strip_unsafe_white_balloon_fill_samples"] = fill_samples
+    else:
+        ocr_page.pop("_strip_unsafe_white_balloon_fill_samples", None)
+    if rejection_samples:
+        ocr_page["_strip_unsafe_white_balloon_fill_rejection_samples"] = rejection_samples
+    else:
+        ocr_page.pop("_strip_unsafe_white_balloon_fill_rejection_samples", None)
     if fill_count:
         ocr_page["_strip_unsafe_white_balloon_fill_count"] = int(fill_count)
         ocr_page["_strip_used_fast_white_fill"] = True
@@ -8646,6 +8857,49 @@ def _text_region_looks_plain_white(image_rgb: np.ndarray, text: dict) -> bool:
     return float(np.median(pixels)) >= 238.0 and float(np.std(pixels)) <= 8.0
 
 
+def _white_bubble_interior_looks_plain(image_rgb: np.ndarray, text: dict) -> bool:
+    """Check a detected white-bubble interior without treating its outline as text."""
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0 or not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source != "image_white_bubble_mask":
+        return False
+    height, width = image_rgb.shape[:2]
+    balloon_bbox = _normalize_bbox(text.get("bubble_mask_bbox") or text.get("balloon_bbox"), width, height)
+    if balloon_bbox is None:
+        return False
+    x1, y1, x2, y2 = balloon_bbox
+    inner_pad = max(8, min(24, int(round(min(x2 - x1, y2 - y1) * 0.08))))
+    interior_bbox = _expanded_bbox(width, height, balloon_bbox, padding=-inner_pad)
+    if interior_bbox is None:
+        return False
+    ix1, iy1, ix2, iy2 = interior_bbox
+    sample_mask = np.zeros((height, width), dtype=np.uint8)
+    sample_mask[iy1:iy2, ix1:ix2] = 255
+    text_mask = _text_geometry_mask(width, height, text)
+    if isinstance(text_mask, np.ndarray) and np.any(text_mask):
+        exclusion = cv2.dilate(
+            (text_mask > 0).astype(np.uint8) * 255,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)),
+            iterations=1,
+        )
+        sample_mask = cv2.bitwise_and(sample_mask, cv2.bitwise_not(exclusion))
+    else:
+        text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+        if text_bbox is not None:
+            sample_mask = cv2.bitwise_and(sample_mask, cv2.bitwise_not(_mask_from_bbox(width, height, text_bbox, padding=8)))
+    if int(np.count_nonzero(sample_mask)) < 64:
+        return False
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    pixels = gray[sample_mask > 0].astype(np.float32)
+    if pixels.size < 64:
+        return False
+    return bool(
+        float(np.median(pixels)) >= 242.0
+        and float(np.mean(pixels >= 225.0)) >= 0.68
+    )
+
+
 def _page_has_nonwhite_text_for_light_residual(ocr_page: dict | None, image_rgb: np.ndarray | None = None) -> bool:
     if not isinstance(ocr_page, dict):
         return False
@@ -9262,6 +9516,10 @@ def _record_inpaint_decision(
         "fast_solid_black_count": int(ocr_page.get("_strip_fast_solid_black_count") or 0),
         "fast_solid_colored_count": int(ocr_page.get("_strip_fast_solid_colored_count") or 0),
         "used_fast_white_fill": bool(ocr_page.get("_strip_used_fast_white_fill")),
+        "unsafe_white_balloon_fill_count": int(ocr_page.get("_strip_unsafe_white_balloon_fill_count") or 0),
+        "unsafe_white_balloon_fill_rejections": ocr_page.get("_strip_unsafe_white_balloon_fill_rejections") or {},
+        "unsafe_white_balloon_fill_samples": ocr_page.get("_strip_unsafe_white_balloon_fill_samples") or [],
+        "unsafe_white_balloon_fill_rejection_samples": ocr_page.get("_strip_unsafe_white_balloon_fill_rejection_samples") or [],
         "connected_white_geometry_fill_count": int(ocr_page.get("_strip_connected_white_geometry_fill_count") or 0),
         "connected_white_geometry_fill_mask_pixels": int(
             ocr_page.get("_strip_connected_white_geometry_fill_mask_pixels") or 0
@@ -9642,6 +9900,10 @@ def _write_strip_inpaint_debug(
         "fast_solid_black_count": int(ocr_page.get("_strip_fast_solid_black_count") or 0),
         "fast_solid_colored_count": int(ocr_page.get("_strip_fast_solid_colored_count") or 0),
         "used_fast_white_fill": bool(ocr_page.get("_strip_used_fast_white_fill")),
+        "unsafe_white_balloon_fill_count": int(ocr_page.get("_strip_unsafe_white_balloon_fill_count") or 0),
+        "unsafe_white_balloon_fill_rejections": ocr_page.get("_strip_unsafe_white_balloon_fill_rejections") or {},
+        "unsafe_white_balloon_fill_samples": ocr_page.get("_strip_unsafe_white_balloon_fill_samples") or [],
+        "unsafe_white_balloon_fill_rejection_samples": ocr_page.get("_strip_unsafe_white_balloon_fill_rejection_samples") or [],
         "fast_solid_fill_samples": ocr_page.get("_strip_fast_solid_fill_samples") or [],
         "fast_solid_rejection_reasons": ocr_page.get("_strip_fast_solid_rejection_reasons") or {},
         "fast_solid_fill_reject_reasons": ocr_page.get("_strip_fast_solid_fill_reject_reasons") or {},

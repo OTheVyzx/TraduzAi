@@ -1722,6 +1722,67 @@ class VisionStackInpainterTests(unittest.TestCase):
 
         self.assertIsNone(_try_dark_panel_text_fill(image, text))
 
+    def test_fast_dark_fill_keeps_real_white_bubble_with_colored_outline_for_real_inpaint(self):
+        from inpainter import _apply_fast_dark_panel_text_fill
+
+        image = np.full((180, 280, 3), [182, 190, 198], dtype=np.uint8)
+        octagon = np.asarray(
+            [[84, 24], [196, 24], [244, 72], [214, 150], [66, 150], [36, 72]],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(image, [octagon], (255, 255, 255))
+        cv2.polylines(image, [octagon], True, (66, 130, 166), 5, cv2.LINE_AA)
+        lines = [
+            (92, 54, "IF YOU"),
+            (74, 82, "SHOW A"),
+            (68, 110, "SYMPTOM"),
+        ]
+        polygons = []
+        for x, y, value in lines:
+            cv2.putText(image, value, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (8, 8, 8), 2, cv2.LINE_AA)
+            polygons.append([[x - 4, y - 20], [x + 104, y - 20], [x + 104, y + 5], [x - 4, y + 5]])
+        text = {
+            "id": "ocr_001",
+            "text_id": "ocr_001",
+            "text": "IF YOU SHOW A SYMPTOM",
+            "bbox": [36, 24, 244, 150],
+            "text_pixel_bbox": [64, 34, 208, 116],
+            "line_polygons": polygons,
+            "balloon_bbox": [36, 24, 244, 150],
+            "bubble_mask_bbox": [36, 24, 244, 150],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_type": "white",
+            "layout_profile": "white_balloon",
+            "tipo": "fala",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["mask_outside_balloon"],
+            "mask_evidence": {
+                "kind": "ocr_pixels",
+                "raw_mask_pixels": 1400,
+                "expanded_mask_pixels": 3400,
+                "evidence_score": 1.0,
+                "fast_fill_allowed": True,
+                "fast_fill_reject_reasons": [],
+            },
+        }
+        page = {"texts": [dict(text)]}
+        blocks = [dict(text)]
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "1",
+            },
+            clear=False,
+        ):
+            result, remaining, stats = _apply_fast_dark_panel_text_fill(image, page, blocks)
+
+        self.assertTrue(np.array_equal(result, image))
+        self.assertEqual(stats["dark_panel_fill_count"], 0)
+        self.assertEqual(remaining, blocks)
+        self.assertIn("unsafe_white_balloon_context", page["_strip_fast_dark_rejection_reasons"])
+
     def test_dark_panel_fill_does_not_treat_unsafe_white_bubble_as_card(self):
         from inpainter import _apply_dark_panel_text_fills
 
@@ -3276,7 +3337,53 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertIn("fast_fill_insufficient_coverage", page.get("_strip_inpaint_decision_flags", []))
         self.assertEqual(page["_strip_fast_solid_rejection_reasons"], {"fast_fill_insufficient_coverage": 1})
 
-    def test_fast_solid_fill_keeps_block_when_coverage_is_too_low(self):
+    def test_fast_solid_fill_rejects_line_geometry_without_raw_glyph_evidence(self):
+        import inpainter
+        from inpainter import _apply_fast_solid_balloon_fill
+
+        image = np.full((140, 240, 3), 190, dtype=np.uint8)
+        cv2.ellipse(image, (120, 70), (80, 44), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (120, 70), (80, 44), 0, 0, 360, (0, 0, 0), 2)
+        image[58:74, 76:164] = 8
+        text = {
+            "id": "ocr_001",
+            "text_id": "ocr_001",
+            "bubble_id": "bubble_001",
+            "text": "UNVERIFIED",
+            "bbox": [68, 50, 172, 84],
+            "text_pixel_bbox": [76, 58, 164, 74],
+            "line_polygons": [[[76, 58], [164, 58], [164, 74], [76, 74]]],
+            "balloon_bbox": [40, 24, 200, 116],
+            "balloon_type": "white",
+            "layout_profile": "white_balloon",
+            "tipo": "fala",
+            "skip_processing": False,
+            "mask_evidence": _allowed_mask_evidence(),
+        }
+        page = {"texts": [text], "_vision_blocks": [dict(text)]}
+        _attach_real_bubble_mask(page, image.shape)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_FAST_SOLID_INPAINT": "1",
+                "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "0",
+            },
+            clear=False,
+        ), patch.object(inpainter, "build_raw_text_mask_from_image", return_value=None):
+            result, remaining, stats = _apply_fast_solid_balloon_fill(image, page, list(page["_vision_blocks"]))
+
+        self.assertTrue(np.array_equal(result, image))
+        self.assertEqual(stats["solid_balloon_count"], 0)
+        self.assertEqual(remaining, page["_vision_blocks"])
+        self.assertEqual(page["_strip_fast_solid_rejection_reasons"], {"missing_koharu_text_evidence": 1})
+        evidence = page["texts"][0]["mask_evidence"]
+        self.assertEqual(evidence["contract_kind"], "geometry_only")
+        self.assertFalse(evidence["fast_fill_allowed"])
+
+    def test_fast_solid_fill_keeps_block_when_line_geometry_lacks_raw_evidence(self):
         from inpainter import _apply_fast_solid_balloon_fill
 
         image = np.full((160, 300, 3), 255, dtype=np.uint8)
@@ -3310,8 +3417,9 @@ class VisionStackInpainterTests(unittest.TestCase):
 
         self.assertEqual(stats["solid_balloon_count"], 0)
         self.assertEqual(len(remaining), 1)
-        self.assertIn("fast_fill_insufficient_coverage", page.get("_strip_inpaint_decision_flags", []))
-        self.assertEqual(page["_strip_fast_solid_rejection_reasons"], {"fast_fill_insufficient_coverage": 1})
+        self.assertNotIn("fast_fill_insufficient_coverage", page.get("_strip_inpaint_decision_flags", []))
+        self.assertEqual(page["_strip_fast_solid_rejection_reasons"], {"missing_koharu_text_evidence": 1})
+        self.assertEqual(page["texts"][0]["mask_evidence"]["contract_kind"], "geometry_only")
 
     def test_fast_solid_fill_rejects_bbox_only_bubble_reference(self):
         from inpainter import _apply_fast_solid_balloon_fill
@@ -5043,6 +5151,194 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertLess(after_text_dark, int(before_text_dark * 0.30))
         self.assertGreater(after_outline_dark, int(before_outline_dark * 0.85))
+
+    def test_unsafe_white_balloon_fill_uses_raw_glyph_mask_not_line_geometry(self):
+        import inpainter
+        from inpainter import _apply_unsafe_white_balloon_text_fills
+
+        image = np.full((130, 260, 3), [210, 216, 224], dtype=np.uint8)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (35, 35, 35), 2)
+        image[54:72, 112:156] = [12, 12, 12]
+        image[58:68, 76:92] = [212, 36, 42]
+        raw_glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        raw_glyph_mask[54:72, 112:156] = 255
+        text = {
+            "id": "ocr_unsafe",
+            "text_id": "ocr_unsafe",
+            "text": "VERIFIED",
+            "bbox": [66, 42, 194, 88],
+            "text_pixel_bbox": [66, 42, 194, 88],
+            "line_polygons": [[[66, 42], [194, 42], [194, 88], [66, 88]]],
+            "balloon_bbox": [28, 18, 232, 114],
+            "bubble_mask_bbox": [28, 18, 232, 114],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "balloon_type": "white",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "route_action": "translate_inpaint_render",
+        }
+        page = {"texts": [text]}
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=raw_glyph_mask):
+            result, count = _apply_unsafe_white_balloon_text_fills(image, page)
+
+        self.assertEqual(count, 1)
+        self.assertTrue(np.all(result[58:68, 76:92] == image[58:68, 76:92]))
+        self.assertGreater(int(np.count_nonzero(np.any(result[54:72, 112:156] != image[54:72, 112:156], axis=2))), 0)
+
+    def test_unsafe_white_balloon_fill_recovers_incomplete_raw_glyph_coverage(self):
+        import inpainter
+        from inpainter import _apply_unsafe_white_balloon_text_fills
+
+        image = np.full((130, 260, 3), [210, 216, 224], dtype=np.uint8)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (35, 35, 35), 2)
+        image[48:66, 84:112] = [12, 12, 12]
+        image[70:88, 144:184] = [12, 12, 12]
+        image[56:68, 46:60] = [212, 36, 42]
+        partial_raw_glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        partial_raw_glyph_mask[48:66, 84:112] = 255
+        text = {
+            "id": "ocr_unsafe",
+            "text_id": "ocr_unsafe",
+            "text": "TWO LINES",
+            "bbox": [66, 36, 198, 96],
+            "text_pixel_bbox": [66, 36, 198, 96],
+            "line_polygons": [[[66, 36], [198, 36], [198, 96], [66, 96]]],
+            "balloon_bbox": [28, 18, 232, 114],
+            "bubble_mask_bbox": [28, 18, 232, 114],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_type": "white",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "route_action": "translate_inpaint_render",
+        }
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=partial_raw_glyph_mask):
+            result, count = _apply_unsafe_white_balloon_text_fills(image, {"texts": [text]})
+
+        self.assertEqual(count, 1)
+        self.assertTrue(np.all(result[48:66, 84:112] == [255, 255, 255]))
+        self.assertTrue(np.all(result[70:88, 144:184] == [255, 255, 255]))
+        self.assertTrue(np.all(result[56:68, 46:60] == image[56:68, 46:60]))
+        self.assertEqual(
+            text["qa_metrics"]["unsafe_white_balloon_glyph_fill"]["source"],
+            "raw_glyph_mask_plus_local_dark_pixels",
+        )
+
+    def test_unsafe_white_balloon_fill_does_not_clip_glyphs_to_undercovered_bubble_limit(self):
+        import inpainter
+        from inpainter import _apply_unsafe_white_balloon_text_fills
+
+        image = np.full((130, 260, 3), [210, 216, 224], dtype=np.uint8)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (130, 66), (102, 48), 0, 0, 360, (35, 35, 35), 2)
+        image[48:66, 84:112] = [12, 12, 12]
+        image[70:88, 144:184] = [12, 12, 12]
+        raw_glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        raw_glyph_mask[48:66, 84:112] = 255
+        raw_glyph_mask[70:88, 144:184] = 255
+        text = {
+            "id": "ocr_unsafe",
+            "text_id": "ocr_unsafe",
+            "text": "TWO LINES",
+            "bbox": [66, 36, 198, 96],
+            "text_pixel_bbox": [66, 36, 198, 96],
+            "line_polygons": [[[66, 36], [198, 36], [198, 96], [66, 96]]],
+            "balloon_bbox": [28, 18, 232, 114],
+            "bubble_mask_bbox": [28, 18, 146, 114],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_type": "white",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "route_action": "translate_inpaint_render",
+        }
+
+        page = {"texts": [text]}
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=raw_glyph_mask):
+            result, count = _apply_unsafe_white_balloon_text_fills(image, page)
+
+        self.assertEqual(count, 1)
+        self.assertTrue(np.all(result[48:66, 84:112] == [255, 255, 255]))
+        self.assertTrue(np.all(result[70:88, 144:184] == [255, 255, 255]))
+        self.assertEqual(
+            text["qa_metrics"]["unsafe_white_balloon_glyph_fill"]["limit_strategy"],
+            "glyph_only_unbounded_by_undercovered_limit",
+        )
+        self.assertEqual(
+            page["_strip_unsafe_white_balloon_fill_samples"][0]["limit_strategy"],
+            "glyph_only_unbounded_by_undercovered_limit",
+        )
+
+    def test_unsafe_white_balloon_fill_preserves_source_without_raw_glyph_evidence(self):
+        import inpainter
+        from inpainter import _apply_unsafe_white_balloon_text_fills
+
+        image = np.full((110, 220, 3), 255, dtype=np.uint8)
+        cv2.ellipse(image, (110, 54), (82, 38), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (110, 54), (82, 38), 0, 0, 360, (24, 24, 24), 2)
+        image[44:62, 74:150] = 10
+        text = {
+            "id": "ocr_unsafe",
+            "text_id": "ocr_unsafe",
+            "text": "UNVERIFIED",
+            "bbox": [58, 34, 164, 76],
+            "text_pixel_bbox": [74, 44, 150, 62],
+            "line_polygons": [[[58, 34], [164, 34], [164, 76], [58, 76]]],
+            "balloon_bbox": [28, 16, 192, 94],
+            "bubble_mask_bbox": [28, 16, 192, 94],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "balloon_type": "white",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "route_action": "translate_inpaint_render",
+        }
+        page = {"texts": [text]}
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=None):
+            result, count = _apply_unsafe_white_balloon_text_fills(image, page)
+
+        self.assertEqual(count, 0)
+        self.assertTrue(np.array_equal(result, image))
+        self.assertEqual(page["_strip_unsafe_white_balloon_fill_rejections"], {"missing_raw_glyph_evidence": 1})
+        self.assertTrue(text["skip_processing"])
+        self.assertTrue(text["preserve_original"])
+        self.assertEqual(text["route_action"], "review_required")
+
+    def test_unsafe_white_balloon_missing_glyphs_preserves_provenance_continuation_group(self):
+        import inpainter
+        from inpainter import _apply_unsafe_white_balloon_text_fills
+
+        image = np.full((110, 220, 3), 255, dtype=np.uint8)
+        candidate = {
+            "id": "owner",
+            "text_id": "owner",
+            "trace_id": "owner@page_001_band_001",
+            "source_trace_ids": ["owner@page_001_band_001", "continuation@page_001_band_001"],
+            "text": "ONE CONTINUED SENTENCE",
+            "bbox": [58, 34, 164, 76],
+            "text_pixel_bbox": [74, 44, 150, 62],
+            "line_polygons": [[[58, 34], [164, 34], [164, 76], [58, 76]]],
+            "balloon_bbox": [28, 16, 192, 94],
+            "bubble_mask_bbox": [28, 16, 192, 94],
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_type": "white",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "route_action": "translate_inpaint_render",
+        }
+        owner = {"id": "owner", "text_id": "owner", "trace_id": "owner@page_001_band_001"}
+        continuation = {
+            "id": "continuation",
+            "text_id": "continuation",
+            "trace_id": "continuation@page_001_band_001",
+        }
+        page = {"texts": [owner, continuation], "_vision_blocks": [candidate]}
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=None):
+            _result, count = _apply_unsafe_white_balloon_text_fills(image, page)
+
+        self.assertEqual(count, 0)
+        for item in (owner, continuation, candidate):
+            self.assertTrue(item["skip_processing"])
+            self.assertTrue(item["preserve_original"])
+            self.assertEqual(item["render_policy"], "preserve_original")
 
     def test_derived_card_panel_fast_fill_requires_global_opt_in_without_background_metadata(self):
         from inpainter import _apply_fast_dark_panel_text_fill
