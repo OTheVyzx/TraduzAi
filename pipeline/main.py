@@ -7463,6 +7463,9 @@ def _write_translated_page_band_consistency_audit(recorder, work_dir: Path) -> d
         "rows_failed": 0,
         "max_allowed": 12,
         "changed_gt8_policy": "changed_gt8 <= max(256, visible_pixels*0.002)",
+        "structural_blur_sigma": 1.2,
+        "structural_max_allowed": 12,
+        "structural_changed_gt8_policy": "structural_changed_gt8 <= max(64, visible_pixels*0.00005)",
         "overlap_policy": "compare only pixels owned by this band after final paste order",
         "excluded_non_story_bands": [],
         "excluded_non_story_reasons": {},
@@ -7554,6 +7557,9 @@ def _write_translated_page_band_consistency_audit(recorder, work_dir: Path) -> d
                     "visible_pixels": 0,
                     "max_diff": 0,
                     "changed_gt8": 0,
+                    "structural_max_diff": 0,
+                    "structural_changed_gt8": 0,
+                    "jpeg_recompression_tolerated": False,
                     "shape_mismatch": False,
                     "final_y0_compared": 0,
                     "overlap_policy": "overlap_owner_visible_area",
@@ -7627,12 +7633,30 @@ def _write_translated_page_band_consistency_audit(recorder, work_dir: Path) -> d
                     visible_values = diff[visible]
                     max_diff = int(visible_values.max()) if visible_values.size else 0
                     changed_gt8 = int((visible_values > 8).sum()) if visible_values.size else 0
+                    structural_diff = np.abs(
+                        cv2.GaussianBlur(final_slice, (0, 0), 1.2).astype(np.int16)
+                        - cv2.GaussianBlur(translated_slice, (0, 0), 1.2).astype(np.int16)
+                    ).max(axis=2)
+                    structural_values = structural_diff[visible]
+                    structural_max_diff = int(structural_values.max()) if structural_values.size else 0
+                    structural_changed_gt8 = int((structural_values > 8).sum()) if structural_values.size else 0
                 else:
                     max_diff = 0
                     changed_gt8 = 0
+                    structural_max_diff = 0
+                    structural_changed_gt8 = 0
                 result["max_diff"] = max_diff
                 result["changed_gt8"] = changed_gt8
-                failed = max_diff > 12 and changed_gt8 > max(256, int(visible_pixels * 0.002))
+                result["structural_max_diff"] = structural_max_diff
+                result["structural_changed_gt8"] = structural_changed_gt8
+                raw_mismatch = max_diff > 12 and changed_gt8 > max(256, int(visible_pixels * 0.002))
+                structural_mismatch = structural_max_diff > 12 and structural_changed_gt8 > max(
+                    64,
+                    int(visible_pixels * 0.00005),
+                )
+                failed = raw_mismatch and structural_mismatch
+                if raw_mismatch and not structural_mismatch:
+                    result["jpeg_recompression_tolerated"] = True
                 if failed:
                     result["status"] = "fail"
                     result["passed"] = False
