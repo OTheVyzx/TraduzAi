@@ -936,6 +936,55 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(audit["reason"], "low_confidence_crop_fallback_dominates_geometry")
         self.assertEqual(audit["source_count"], 2)
 
+    @patch.dict(os.environ, {"TRADUZAI_FLAG_OCR_CLUSTER_MERGE_GUARD_V2": "1"}, clear=False)
+    def test_merge_ocr_clusters_quarantines_risky_crop_fallback_without_touching_primary(self):
+        page_texts = [
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "text": "OF COURSE. THAT OUTDATED THIRD-RATE MARTIAL ART I KNEW COULDN'T POSSIBLY HAVE SUCH POWER.",
+                "bbox": [73, 160, 425, 356],
+                "text_pixel_bbox": [78, 174, 422, 350],
+                "line_polygons": [[[78, 174], [422, 174], [422, 350], [78, 350]]],
+                "confidence": 0.951,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "full_page_lines"},
+            },
+            {
+                "id": "ocr_003",
+                "text_id": "ocr_003",
+                "text": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+                "bbox": [235, 232, 720, 997],
+                "text_pixel_bbox": [235, 232, 720, 997],
+                "confidence": 0.57,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "crop_fallback"},
+            },
+        ]
+        vision_blocks = [{"bbox": text["bbox"], "confidence": text["confidence"]} for text in page_texts]
+
+        with (
+            patch(
+                "inpainter.mask_builder.build_mask_regions",
+                return_value=[{"texts": page_texts, "bbox": [40, 120, 760, 1040]}],
+            ),
+            patch("vision_stack.runtime._should_merge_ocr_cluster", return_value=True),
+            patch("vision_stack.runtime._ocr_cluster_merge_veto_reason", return_value=None),
+        ):
+            result_texts, result_blocks = _merge_ocr_clusters(page_texts, vision_blocks, (1100, 760, 3), page_number=7)
+
+        self.assertEqual(len(result_texts), 2)
+        self.assertEqual(result_texts[0]["text"], page_texts[0]["text"])
+        self.assertNotIn("_ocr_assignment_quarantine", result_texts[0])
+        quarantined = result_texts[1]
+        self.assertTrue(quarantined["skip_processing"])
+        self.assertTrue(quarantined["preserve_original"])
+        self.assertEqual(quarantined["route_action"], "review_required")
+        self.assertEqual(quarantined["route_reason"], "ocr_low_confidence_crop_fallback_quarantined")
+        self.assertEqual(result_blocks[1]["render_policy"], "preserve_original")
+
     def test_merge_ocr_clusters_keeps_p23_broad_container_and_lower_fragments_separate(self):
         page_texts = [
             {

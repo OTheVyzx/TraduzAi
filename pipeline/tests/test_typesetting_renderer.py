@@ -561,6 +561,48 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual({block["id"] for block in blocks}, {"direct_paddle_reocr_001", "ocr_001"})
         self.assertFalse(any("same_balloon_fragment_merged" in block.get("qa_flags", []) for block in blocks))
 
+    def test_quarantined_crop_fallback_is_not_reconciled_or_rendered(self):
+        primary = {
+            "id": "ocr_001",
+            "text_id": "ocr_001",
+            "trace_id": "ocr_001@page_007_band_074",
+            "band_id": "page_007_band_074",
+            "translated": "CLARO. AQUELA ARTE MARCIAL NAO PODERIA TER TAL PODER.",
+            "original": "OF COURSE. THAT OUTDATED MARTIAL ART COULDN'T HAVE SUCH POWER.",
+            "bbox": [73, 160, 425, 356],
+            "text_pixel_bbox": [78, 174, 422, 350],
+            "balloon_bbox": [40, 120, 760, 1040],
+            "bubble_mask_bbox": [40, 120, 760, 1040],
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+        }
+        quarantined = {
+            "id": "ocr_003",
+            "text_id": "ocr_003",
+            "trace_id": "ocr_003@page_007_band_074",
+            "band_id": "page_007_band_074",
+            "translated": "HIND NHIL ART EU SABIA QUE OSSIVELMENTE TINHA PODER.",
+            "original": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+            "bbox": [235, 232, 720, 847],
+            "text_pixel_bbox": [235, 232, 720, 847],
+            "balloon_bbox": [40, 120, 760, 1040],
+            "bubble_mask_bbox": [40, 120, 760, 1040],
+            "_ocr_assignment_quarantine": {"reason": "low_confidence_crop_fallback_dominates_geometry"},
+            "qa_flags": ["ocr_low_confidence_crop_fallback_quarantined"],
+            "skip_processing": True,
+            "preserve_original": True,
+            "translate_policy": "skip_translation",
+            "render_policy": "preserve_original",
+            "route_action": "review_required",
+        }
+
+        blocks = build_render_blocks([primary, quarantined])
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["id"], "ocr_001")
+        self.assertNotIn("HIND NHIL", blocks[0]["translated"])
+        self.assertNotIn("same_balloon_fragment_merged", blocks[0].get("qa_flags") or [])
+
     def test_dark_connected_lobes_repair_from_full_visual_mask(self):
         text = {
             "id": "direct_paddle_reocr_001",

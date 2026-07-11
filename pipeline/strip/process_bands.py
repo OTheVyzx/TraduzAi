@@ -2338,6 +2338,20 @@ def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
                         **copy.deepcopy(merge_audit),
                     },
                 )
+            quarantine = text.get("_ocr_assignment_quarantine")
+            if isinstance(quarantine, dict):
+                recorder.write_jsonl(
+                    "warnings/ocr_assignment_quarantines.jsonl",
+                    {
+                        "text_id": text_id,
+                        "page_id": page_id,
+                        "band_id": band_id,
+                        "trace_id": str(text.get("trace_id") or _trace_id_for(text_id, band_id)),
+                        "raw_ocr": text.get("raw_ocr") or text.get("original") or text.get("text") or "",
+                        "reason": "ocr_low_confidence_crop_fallback_quarantined",
+                        **copy.deepcopy(quarantine),
+                    },
+                )
     except Exception:
         return
 

@@ -4929,11 +4929,19 @@ def _linked_duplicate_child(parent: dict, child: dict) -> bool:
     return _text_duplicate_signal(parent, child)
 
 
+def _is_ocr_assignment_quarantined(text: dict) -> bool:
+    return isinstance(text.get("_ocr_assignment_quarantine"), dict) or (
+        "ocr_low_confidence_crop_fallback_quarantined" in _qa_flags_set(text)
+    )
+
+
 def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
     if len(texts) < 2:
         return
     for parent in texts:
         if not isinstance(parent, dict):
+            continue
+        if _is_ocr_assignment_quarantined(parent):
             continue
         parent_route_action = str(parent.get("route_action") or "").strip().lower()
         parent_render_policy = str(parent.get("render_policy") or "").strip().lower()
@@ -4949,6 +4957,8 @@ def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
             continue
         for child in texts:
             if child is parent or not isinstance(child, dict):
+                continue
+            if _is_ocr_assignment_quarantined(child):
                 continue
             child_route_action = str(child.get("route_action") or "").strip().lower()
             child_render_policy = str(child.get("render_policy") or "").strip().lower()
@@ -6245,6 +6255,8 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
     blocks = []
     for text in texts:
         if text.get("_skip_render_duplicate_child_parent"):
+            continue
+        if _is_ocr_assignment_quarantined(text):
             continue
         if _should_skip_dark_connected_combined_fragment(text, texts):
             text["visible"] = False

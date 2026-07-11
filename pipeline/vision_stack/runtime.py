@@ -5756,49 +5756,52 @@ def _ocr_assignment_audit_enabled() -> bool:
     }
 
 
-def _build_ocr_cluster_merge_audit(texts: list[dict]) -> dict:
-    sources = []
-    for text in texts:
-        bbox = _coerce_bbox(text.get("bbox")) or _text_fragment_bbox(text) or [0, 0, 0, 0]
-        assignment = text.get("_ocr_assignment_audit")
-        assignment = assignment if isinstance(assignment, dict) else {}
-        sources.append(
-            {
-                "text_id": str(text.get("text_id") or text.get("id") or ""),
-                "bbox": [int(value) for value in bbox],
-                "area": int(_bbox_area_safe(bbox)),
-                "confidence": round(float(text.get("confidence") or 0.0), 4),
-                "assignment_mode": str(assignment.get("assignment_mode") or "unknown"),
-                "has_line_geometry": bool(text.get("line_polygons")),
-            }
-        )
-
-    trusted = [
-        source
-        for source in sources
-        if source["assignment_mode"] == "full_page_lines"
-        and source["confidence"] >= 0.80
-        and source["has_line_geometry"]
-    ]
-    suspicious_sources = [
-        source
-        for source in sources
-        if source["assignment_mode"] == "crop_fallback" and source["confidence"] <= 0.65
-    ]
-    suspicious = False
-    reason = "cluster_merge_observed"
-    if trusted and suspicious_sources:
-        trusted_area = max(source["area"] for source in trusted)
-        if any(source["area"] >= trusted_area * 2.5 for source in suspicious_sources):
-            suspicious = True
-            reason = "low_confidence_crop_fallback_dominates_geometry"
-
-    return {
-        "source_count": len(sources),
-        "sources": sources,
-        "suspicious": suspicious,
-        "reason": reason,
+def _ocr_cluster_merge_guard_enabled() -> bool:
+    return str(os.getenv("TRADUZAI_FLAG_OCR_CLUSTER_MERGE_GUARD_V2", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
+
+
+def _build_ocr_cluster_merge_audit(texts: list[dict]) -> dict:
+    try:
+        from ocr.merge_guard import build_merge_risk_audit
+    except ImportError:
+        from ..ocr.merge_guard import build_merge_risk_audit
+    return build_merge_risk_audit(texts, merge_stage="runtime_ocr_cluster")
+
+
+def _mark_ocr_assignment_quarantined(
+    text: dict,
+    block: dict,
+    *,
+    audit: dict,
+) -> None:
+    """Keep uncertain fallback pixels untouched while preserving a debug trail."""
+
+    flags = list(text.get("qa_flags") or [])
+    if "ocr_low_confidence_crop_fallback_quarantined" not in flags:
+        flags.append("ocr_low_confidence_crop_fallback_quarantined")
+    text["qa_flags"] = flags
+    text["_ocr_assignment_quarantine"] = copy.deepcopy(audit)
+    text["needs_review"] = False
+    text["skip_processing"] = True
+    text["preserve_original"] = True
+    text["translate_policy"] = "skip_translation"
+    text["render_policy"] = "preserve_original"
+    text["route_action"] = "review_required"
+    text["route_reason"] = "ocr_low_confidence_crop_fallback_quarantined"
+
+    block["qa_flags"] = list(flags)
+    block["_ocr_assignment_quarantine"] = copy.deepcopy(audit)
+    block["skip_processing"] = True
+    block["preserve_original"] = True
+    block["translate_policy"] = "skip_translation"
+    block["render_policy"] = "preserve_original"
+    block["route_action"] = "review_required"
+    block["route_reason"] = "ocr_low_confidence_crop_fallback_quarantined"
 
 
 def _append_qa_flag(text: dict, flag: str) -> None:
@@ -5937,6 +5940,30 @@ def _merge_ocr_clusters(
 
         ordered_texts = [page_texts[idx] for idx in ordered_indices]
         ordered_blocks = [vision_blocks[idx] for idx in ordered_indices]
+        merge_audit = _build_ocr_cluster_merge_audit(ordered_texts)
+        if _ocr_cluster_merge_guard_enabled() and merge_audit.get("suspicious"):
+            try:
+                from ocr.merge_guard import weak_source_ids_from_risk_audit
+            except ImportError:
+                from ..ocr.merge_guard import weak_source_ids_from_risk_audit
+            weak_ids = weak_source_ids_from_risk_audit(merge_audit)
+            quarantined = 0
+            for text, block in zip(ordered_texts, ordered_blocks):
+                text_id = str(text.get("text_id") or text.get("id") or "").strip()
+                if text_id not in weak_ids:
+                    continue
+                _mark_ocr_assignment_quarantined(text, block, audit=merge_audit)
+                quarantined += 1
+            if quarantined:
+                record_decision(
+                    stage="ocr",
+                    action="preserve_original",
+                    reason="ocr_low_confidence_crop_fallback_quarantined",
+                    page=page_number,
+                    bbox=region_bbox,
+                    details={**merge_audit, "quarantined_count": quarantined},
+                )
+                continue
         merged_bbox = ordered_texts[0].get("bbox", [0, 0, 0, 0])
         merged_pixel_bbox = ordered_texts[0].get("text_pixel_bbox", merged_bbox)
         merged_source_bbox = (
@@ -5999,7 +6026,7 @@ def _merge_ocr_clusters(
             }
         )
         if _ocr_assignment_audit_enabled():
-            merged_text["_ocr_cluster_merge_audit"] = _build_ocr_cluster_merge_audit(ordered_texts)
+            merged_text["_ocr_cluster_merge_audit"] = merge_audit
         if any(str(item.get("route_action") or "").strip().lower() == "review_required" for item in ordered_texts) or (
             "ocr_partial_low_confidence_fragment" in merged_text["qa_flags"]
         ):

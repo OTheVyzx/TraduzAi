@@ -7,6 +7,11 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 try:
+    from ocr.merge_guard import build_merge_risk_audit
+except ImportError:
+    from .merge_guard import build_merge_risk_audit
+
+try:
     from ocr.text_router import ROUTE_ACTIONS, apply_route_action
     from ocr.postprocess import (
         is_ocr_truncated_or_joined,
@@ -680,6 +685,20 @@ def normalize_ocr_record(record: dict[str, Any], glossary: dict[str, str] | None
     updated = dict(record)
     updated.update(normalized)
     updated["normalized_text_final"] = normalized["normalized_ocr"]
+    if isinstance(updated.get("_ocr_assignment_quarantine"), dict):
+        flags = list(updated.get("qa_flags") or [])
+        if "ocr_low_confidence_crop_fallback_quarantined" not in flags:
+            flags.append("ocr_low_confidence_crop_fallback_quarantined")
+        updated["qa_flags"] = flags
+        updated["text"] = raw
+        updated["needs_review"] = False
+        updated["skip_processing"] = True
+        updated["preserve_original"] = True
+        updated["translate_policy"] = "skip_translation"
+        updated["render_policy"] = "preserve_original"
+        updated["route_action"] = "review_required"
+        updated["route_reason"] = "ocr_low_confidence_crop_fallback_quarantined"
+        return updated
     normalize_rotated_text_metadata(updated)
     _strip_removed_legacy_decision_metadata(updated)
     visual_review_reason = _visual_evidence_review_reason(updated, normalized["normalized_ocr"])
@@ -841,7 +860,7 @@ def merge_same_balloon_fragments_before_translation(texts: list[dict[str, Any]])
         group = [records[index] for index in ordered]
         if not _same_balloon_fragment_group_should_merge(group):
             continue
-        merged = _merge_same_balloon_fragment_group(group)
+        merged = _merge_same_balloon_fragment_group(group, merge_path="same_balloon_geometry")
         if merged is None:
             continue
         merged_records[ordered[0]] = merged
@@ -888,6 +907,8 @@ def _record_band_id(record: dict[str, Any]) -> str:
 
 
 def _record_should_not_merge_for_translation(record: dict[str, Any]) -> bool:
+    if isinstance(record.get("_ocr_assignment_quarantine"), dict):
+        return True
     action = str(record.get("route_action") or "").strip().lower()
     if action in {"preserve", "merged_into_primary", "suppress"}:
         return True
@@ -1046,7 +1067,7 @@ def _merge_same_band_joined_word_fragments(
                 probe += 1
             if len(group_indexes) > 1:
                 group = [records[index] for index in group_indexes]
-                merged = _merge_same_balloon_fragment_group(group)
+                merged = _merge_same_balloon_fragment_group(group, merge_path="same_band_joined_word")
                 if merged is not None:
                     flags = list(merged.get("qa_flags") or [])
                     if "same_band_joined_word_fragment_merged" not in flags:
@@ -1112,7 +1133,7 @@ def _merge_same_band_dependent_fragments(
                 probe += 1
             if len(group_indexes) > 1:
                 group = [records[index] for index in group_indexes]
-                merged = _merge_same_balloon_fragment_group(group)
+                merged = _merge_same_balloon_fragment_group(group, merge_path="same_band_dependent")
                 if merged is not None:
                     flags = list(merged.get("qa_flags") or [])
                     if "same_band_dependent_fragment_merged" not in flags:
@@ -1232,7 +1253,11 @@ def _same_band_fragment_geometry_is_close(group: list[dict[str, Any]]) -> bool:
     return True
 
 
-def _merge_same_balloon_fragment_group(group: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _merge_same_balloon_fragment_group(
+    group: list[dict[str, Any]],
+    *,
+    merge_path: str,
+) -> dict[str, Any] | None:
     if not group:
         return None
     primary = dict(group[0])
@@ -1327,8 +1352,24 @@ def _merge_same_balloon_fragment_group(group: list[dict[str, Any]]) -> dict[str,
         "is_gibberish": _is_gibberish(repaired),
         "confidence_after_estimate": max(0.7, confidence),
     }
+    if _ocr_assignment_audit_enabled():
+        primary["_ocr_normalizer_merge_audit"] = build_merge_risk_audit(
+            group,
+            merge_stage="pretranslation_ocr_normalizer",
+            merge_path=merge_path,
+        )
     return primary
 
+
+def _ocr_assignment_audit_enabled() -> bool:
+    try:
+        from runtime_profiles import resolve_visual_pipeline_flags
+    except ImportError:
+        try:
+            from pipeline.runtime_profiles import resolve_visual_pipeline_flags
+        except ImportError:
+            return False
+    return bool(resolve_visual_pipeline_flags().get("ocr_assignment_audit_v2", False))
 
 def _drop_leading_duplicate_fragment_parts(raw_parts: list[str]) -> list[str]:
     repaired: list[str] = []
