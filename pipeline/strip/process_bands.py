@@ -2485,6 +2485,91 @@ def _record_unsafe_mask_contracts(
         return
 
 
+def _record_inpaint_residual_warnings(
+    page: dict,
+    *,
+    band_id: str,
+    source_page_number: int | None = None,
+) -> None:
+    """Record source-preserving unsafe glyph fallbacks without changing the run."""
+
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+
+    try:
+        page_number = _source_page_number_from_page(page, source_page_number)
+        page_id = _page_id_for(page_number)
+        grouped: dict[str, dict] = {}
+        for index, text in enumerate(list((page or {}).get("texts") or [])):
+            if not isinstance(text, dict):
+                continue
+            metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+            fill = metrics.get("unsafe_white_balloon_glyph_fill") if isinstance(metrics, dict) else {}
+            if not isinstance(fill, dict) or str(fill.get("decision") or "").strip().lower() != "preserved_original":
+                continue
+            flags = _unique_string_list(text.get("qa_flags"))
+            if "unsafe_white_glyph_evidence_missing" not in flags:
+                continue
+            if str(text.get("route_action") or "").strip().lower() != "preserve_original":
+                continue
+            if str(text.get("render_policy") or "").strip().lower() != "preserve_original":
+                continue
+            if not (bool(text.get("skip_processing")) and bool(text.get("preserve_original"))):
+                continue
+
+            text_id = _text_id_for(text, index)
+            logical_group_key, logical_group_trace_ids = _logical_mask_contract_group(
+                text,
+                text_id=text_id,
+                band_id=band_id,
+            )
+            group = grouped.setdefault(
+                logical_group_key,
+                {
+                    "page_id": page_id,
+                    "band_id": band_id,
+                    "logical_group_key": logical_group_key,
+                    "logical_group_trace_ids": logical_group_trace_ids,
+                    "preserved_text_ids": [],
+                    "trace_ids": [],
+                    "bboxes": [],
+                    "reasons": [],
+                    "qa_flags": [],
+                },
+            )
+            group["preserved_text_ids"].append(text_id)
+            group["trace_ids"].append(str(text.get("trace_id") or _trace_id_for(text_id, band_id)))
+            group["bboxes"].append(copy.deepcopy(text.get("bbox") or text.get("text_pixel_bbox") or []))
+            reason = str(fill.get("reason") or text.get("route_reason") or "unsafe_glyph_fallback").strip()
+            if reason:
+                group["reasons"].append(reason)
+            group["qa_flags"].extend(flags)
+
+        for group in grouped.values():
+            trace_ids = sorted({value for value in group.pop("trace_ids") if value})
+            group["preserved_text_ids"] = sorted({value for value in group["preserved_text_ids"] if value})
+            group["reasons"] = sorted({value for value in group["reasons"] if value})
+            group["qa_flags"] = sorted({value for value in group["qa_flags"] if value})
+            group["is_continuation_group"] = len(group["logical_group_trace_ids"]) > 1
+            group["partial_group_render_forbidden"] = bool(group["is_continuation_group"])
+            group["fallback"] = "preserve_original_no_render"
+            group["action"] = "warning_only_pipeline_completed"
+            group["source"] = "unsafe_white_balloon_glyph_fill"
+            group["route_action"] = "preserve_original"
+            group["render_policy"] = "preserve_original"
+            group["preserve_original"] = True
+            group["skip_processing"] = True
+            group["trace_ids"] = trace_ids
+            recorder.write_jsonl("warnings/inpaint_residual_blocks.jsonl", group)
+    except Exception:
+        return
+
+
 def _logical_mask_contract_group(text: dict, *, text_id: str, band_id: str) -> tuple[str, list[str]]:
     """Return the existing OCR provenance group used for a mask audit row.
 
@@ -8731,6 +8816,11 @@ def process_band(
     cleaned = inpaint_stage.to_image()
     perf.update(dict(inpaint_stage.perf_updates))
     _record_unsafe_mask_contracts(
+        translated_page,
+        band_id=band_id,
+        source_page_number=source_page_number,
+    )
+    _record_inpaint_residual_warnings(
         translated_page,
         band_id=band_id,
         source_page_number=source_page_number,

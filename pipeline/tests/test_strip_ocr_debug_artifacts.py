@@ -21,6 +21,7 @@ from strip.run import (
 from strip.process_bands import (
     _band_to_page_dict,
     _record_ocr_raw_blocks,
+    _record_inpaint_residual_warnings,
     _record_unsafe_mask_contracts,
     process_band,
 )
@@ -622,6 +623,92 @@ def test_unsafe_mask_contract_warning_records_trace_and_contract(tmp_path):
         bind_recorder(None)
 
 
+def test_inpaint_residual_warning_groups_preserved_unsafe_glyph_texts(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "trace_id": "ocr_001@page_004_band_036",
+                    "source_trace_ids": [
+                        "ocr_001@page_004_band_036",
+                        "ocr_002@page_004_band_036",
+                    ],
+                    "original": "CONTINUED SOURCE",
+                    "bbox": [11, 22, 88, 46],
+                    "route_action": "preserve_original",
+                    "route_reason": "missing_raw_glyph_evidence",
+                    "render_policy": "preserve_original",
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "qa_flags": ["unsafe_white_glyph_evidence_missing"],
+                    "qa_metrics": {
+                        "unsafe_white_balloon_glyph_fill": {
+                            "decision": "preserved_original",
+                            "reason": "missing_raw_glyph_evidence",
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_002",
+                    "trace_id": "ocr_002@page_004_band_036",
+                    "source_trace_ids": [
+                        "ocr_001@page_004_band_036",
+                        "ocr_002@page_004_band_036",
+                    ],
+                    "original": "CONTINUED SOURCE",
+                    "bbox": [96, 22, 180, 46],
+                    "route_action": "preserve_original",
+                    "route_reason": "missing_raw_glyph_evidence",
+                    "render_policy": "preserve_original",
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "qa_flags": ["unsafe_white_glyph_evidence_missing"],
+                    "qa_metrics": {
+                        "unsafe_white_balloon_glyph_fill": {
+                            "decision": "preserved_original",
+                            "reason": "missing_raw_glyph_evidence",
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_003",
+                    "trace_id": "ocr_003@page_004_band_036",
+                    "original": "SAFE FILL",
+                    "bbox": [11, 52, 88, 76],
+                    "qa_metrics": {
+                        "unsafe_white_balloon_glyph_fill": {
+                            "decision": "filled",
+                        }
+                    },
+                },
+            ],
+        }
+
+        _record_inpaint_residual_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["logical_group_trace_ids"] == [
+            "ocr_001@page_004_band_036",
+            "ocr_002@page_004_band_036",
+        ]
+        assert rows[0]["preserved_text_ids"] == ["ocr_001", "ocr_002"]
+        assert rows[0]["reasons"] == ["missing_raw_glyph_evidence"]
+        assert rows[0]["fallback"] == "preserve_original_no_render"
+        assert rows[0]["partial_group_render_forbidden"] is True
+    finally:
+        bind_recorder(None)
+
+
 def test_process_band_emits_unsafe_mask_contract_warning_after_inpaint(tmp_path):
     class ContractReportingInpainter:
         def inpaint_band_image(self, image_rgb, page):
@@ -662,6 +749,55 @@ def test_process_band_emits_unsafe_mask_contract_warning_after_inpaint(tmp_path)
         assert rows[0]["band_id"] == "page_001_band_000"
         assert rows[0]["contract_kind"] == "geometry_only"
         assert rows[0]["action"] == "audit_only_no_render_or_inpaint_change"
+    finally:
+        bind_recorder(None)
+
+
+def test_process_band_emits_preserved_inpaint_residual_warning_after_inpaint(tmp_path):
+    class PreservingInpainter:
+        def inpaint_band_image(self, image_rgb, page):
+            text = page["texts"][0]
+            text["route_action"] = "preserve_original"
+            text["route_reason"] = "missing_raw_glyph_evidence"
+            text["render_policy"] = "preserve_original"
+            text["skip_processing"] = True
+            text["preserve_original"] = True
+            text["qa_flags"] = ["unsafe_white_glyph_evidence_missing"]
+            text["qa_metrics"] = {
+                "unsafe_white_balloon_glyph_fill": {
+                    "decision": "preserved_original",
+                    "reason": "missing_raw_glyph_evidence",
+                }
+            }
+            return np.array(image_rgb, copy=True)
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[Balloon(BBox(10, 112, 50, 140), confidence=0.87)],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+
+        process_band(
+            band,
+            runtime=FakeRuntime(),
+            translator=FakeTranslator(),
+            inpainter=PreservingInpainter(),
+            typesetter=FakeTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["band_id"] == "page_001_band_000"
+        assert rows[0]["fallback"] == "preserve_original_no_render"
+        assert rows[0]["action"] == "warning_only_pipeline_completed"
     finally:
         bind_recorder(None)
 
