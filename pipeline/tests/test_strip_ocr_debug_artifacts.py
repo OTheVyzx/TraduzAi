@@ -609,6 +609,15 @@ def test_unsafe_mask_contract_warning_records_trace_and_contract(tmp_path):
         assert audit_rows[2]["trace_id"] == "ocr_004@page_004_band_036"
         assert audit_rows[2]["is_unsafe"] is False
         assert audit_rows[2]["reason"] == "glyph_mask_contract_confirmed"
+        recovery_path = tmp_path / "debug" / "e2e" / "warnings" / "mask_contract_recovery_plan.jsonl"
+        recovery_rows = [json.loads(line) for line in recovery_path.read_text(encoding="utf-8").splitlines()]
+        assert len(recovery_rows) == 3
+        continuation_plan = next(
+            row for row in recovery_rows if row["logical_group_key"] == rows[0]["logical_group_key"]
+        )
+        assert continuation_plan["is_continuation_group"] is True
+        assert continuation_plan["recommended_recovery"] == "group_local_glyph_redetect_then_preserve_group"
+        assert continuation_plan["partial_group_render_forbidden"] is True
     finally:
         bind_recorder(None)
 

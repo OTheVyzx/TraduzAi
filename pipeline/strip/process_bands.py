@@ -2380,6 +2380,7 @@ def _record_unsafe_mask_contracts(
     try:
         page_number = _source_page_number_from_page(page, source_page_number)
         page_id = _page_id_for(page_number)
+        unsafe_payloads: list[dict] = []
         for index, text in enumerate(list((page or {}).get("texts") or [])):
             if not isinstance(text, dict):
                 continue
@@ -2446,6 +2447,40 @@ def _record_unsafe_mask_contracts(
             recorder.write_jsonl("warnings/mask_contract_audit.jsonl", payload)
             if is_unsafe:
                 recorder.write_jsonl("warnings/unsafe_mask_contracts.jsonl", payload)
+                unsafe_payloads.append(payload)
+
+        grouped_payloads: dict[str, list[dict]] = {}
+        for payload in unsafe_payloads:
+            grouped_payloads.setdefault(str(payload["logical_group_key"]), []).append(payload)
+        for logical_group_key, payloads in grouped_payloads.items():
+            trace_ids = sorted(
+                {
+                    trace_id
+                    for payload in payloads
+                    for trace_id in payload.get("logical_group_trace_ids") or []
+                    if str(trace_id).strip()
+                }
+            )
+            is_continuation_group = len(trace_ids) > 1
+            recorder.write_jsonl(
+                "warnings/mask_contract_recovery_plan.jsonl",
+                {
+                    "page_id": page_id,
+                    "band_id": band_id,
+                    "logical_group_key": logical_group_key,
+                    "logical_group_trace_ids": trace_ids,
+                    "unsafe_text_ids": [str(payload["text_id"]) for payload in payloads],
+                    "unsafe_reasons": sorted({str(payload["reason"]) for payload in payloads}),
+                    "is_continuation_group": is_continuation_group,
+                    "recommended_recovery": (
+                        "group_local_glyph_redetect_then_preserve_group"
+                        if is_continuation_group
+                        else "local_glyph_redetect_then_preserve_original"
+                    ),
+                    "partial_group_render_forbidden": is_continuation_group,
+                    "action": "plan_only_no_render_or_inpaint_change",
+                },
+            )
     except Exception:
         return
 
