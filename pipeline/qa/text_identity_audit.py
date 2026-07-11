@@ -17,7 +17,12 @@ def build_text_identity_audit(project_data: dict[str, Any]) -> dict[str, Any]:
         if instance["lifecycle"] == "ocr_accepted"
     )
     missing_owner = sum(1 for instance in instances if not instance["owner_layer_id"] or not instance["owner_band_id"])
-    duplicate_owner_ids = len(instances) - len({instance["owner_layer_id"] for instance in instances if instance["owner_layer_id"]})
+    owner_keys = {
+        (instance["page_id"], instance["owner_band_id"], instance["owner_layer_id"])
+        for instance in instances
+        if instance["owner_layer_id"] and instance["owner_band_id"]
+    }
+    duplicate_owner_ids = len(instances) - len(owner_keys)
     summary = {
         "accepted_without_terminal_lifecycle": accepted_without_terminal,
         "duplicate_owner_layer_ids": duplicate_owner_ids,

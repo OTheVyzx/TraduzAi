@@ -141,6 +141,40 @@ def test_two_distinct_reading_order_components_in_one_balloon_stay_separate():
     assert {item["container_id"] for item in instances} == {"page_003_container_001"}
 
 
+def test_reused_local_ocr_ids_in_distinct_bands_do_not_form_one_identity():
+    project = _project(
+        [
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "trace_id": "ocr_001@page_003_band_035",
+                "source_text_ids": ["ocr_001"],
+                "band_id": "page_003_band_035",
+                "bbox": [100, 400, 300, 470],
+                "translated": "FIRST DIALOGUE.",
+            },
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "trace_id": "ocr_001@page_003_band_036",
+                "source_text_ids": ["ocr_001"],
+                "band_id": "page_003_band_036",
+                "bbox": [100, 720, 300, 790],
+                "translated": "SECOND DIALOGUE.",
+            },
+        ]
+    )
+
+    instances = build_visual_text_instances(project)
+
+    assert len(instances) == 2
+    assert {item["owner_band_id"] for item in instances} == {
+        "page_003_band_035",
+        "page_003_band_036",
+    }
+    assert build_text_identity_audit(project)["summary"]["duplicate_owner_layer_ids"] == 0
+
+
 def test_audit_requires_accepted_ocr_to_render_or_have_an_explicit_suppression_reason():
     project = _project(
         [

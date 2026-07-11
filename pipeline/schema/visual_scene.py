@@ -77,13 +77,21 @@ def _normalize_text(value: str) -> str:
 
 
 def _identity_tokens(layer: dict[str, Any]) -> set[str]:
-    tokens = {
-        str(layer.get(key) or "").strip()
-        for key in ("trace_id", "text_id", "id")
-        if str(layer.get(key) or "").strip()
-    }
-    for key in ("source_trace_ids", "_source_trace_ids", "source_text_ids", "_source_text_ids"):
-        tokens.update(str(value).strip() for value in layer.get(key) or [] if str(value).strip())
+    """Return page-stable identity evidence, never local OCR labels.
+
+    Labels such as ``ocr_001`` are intentionally reused by every band.  They
+    become valid ownership evidence only once qualified as ``trace@band``.
+    """
+    tokens: set[str] = set()
+    trace_id = str(layer.get("trace_id") or "").strip()
+    if "@" in trace_id:
+        tokens.add(trace_id)
+    for key in ("source_trace_ids", "_source_trace_ids"):
+        tokens.update(
+            value
+            for value in (str(item).strip() for item in layer.get(key) or [])
+            if "@" in value
+        )
     return tokens
 
 
