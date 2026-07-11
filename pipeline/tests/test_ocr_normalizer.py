@@ -373,6 +373,57 @@ def test_dark_connected_lobes_do_not_merge_before_translation():
     assert "same_balloon_fragment_merged" not in (merged[0].get("qa_flags") or [])
 
 
+def test_same_balloon_merge_partitions_spatial_line_clusters_before_translation():
+    common = {
+        "bubble_mask_bbox": [160, 192, 583, 677],
+        "balloon_bbox": [0, 192, 709, 822],
+        "band_id": "page_028_band_109",
+    }
+    records = [
+        {
+            **common,
+            "id": "ocr_001_spatial_cluster_01",
+            "trace_id": "ocr_001_spatial_cluster_01@page_028_band_109",
+            "text": "I CAN'T FEEL ANYTHING.",
+            "bbox": [128, 333, 384, 404],
+            "text_pixel_bbox": [128, 333, 384, 404],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 1,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [128, 333, 384, 404],
+        },
+        {
+            **common,
+            "id": "ocr_001_spatial_cluster_02",
+            "trace_id": "ocr_001_spatial_cluster_02@page_028_band_109",
+            "text": "PHEROMONES, MENTAL",
+            "bbox": [254, 524, 488, 589],
+            "text_pixel_bbox": [254, 524, 488, 589],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 2,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [254, 524, 488, 589],
+        },
+        {
+            **common,
+            "id": "ocr_002",
+            "trace_id": "ocr_002@page_028_band_109",
+            "text": "SYNCHRONIZATION, EMOTIONS.",
+            "bbox": [224, 598, 519, 659],
+            "text_pixel_bbox": [224, 598, 519, 659],
+        },
+    ]
+
+    merged = merge_same_balloon_fragments_before_translation(records)
+
+    assert len(merged) == 2
+    assert merged[0]["text"] == "I CAN'T FEEL ANYTHING."
+    assert merged[0]["id"] == "ocr_001_spatial_cluster_01"
+    assert merged[1]["text"] == "PHEROMONES, MENTAL SYNCHRONIZATION, EMOTIONS."
+    assert merged[1]["source_text_ids"] == ["ocr_001_spatial_cluster_02", "ocr_002"]
+    assert "same_balloon_fragment_merged" in merged[1]["qa_flags"]
+
+
 def test_joined_ocr_is_repaired_before_review_flag_survives():
     assert hasattr(ocr_normalizer, "repair_ocr_truncated_or_joined")
     repair_ocr_truncated_or_joined = ocr_normalizer.repair_ocr_truncated_or_joined

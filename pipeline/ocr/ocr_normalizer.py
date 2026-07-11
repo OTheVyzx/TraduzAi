@@ -857,14 +857,22 @@ def merge_same_balloon_fragments_before_translation(texts: list[dict[str, Any]])
         if len(indexes) < 2:
             continue
         ordered = sorted(indexes, key=lambda item: _record_reading_order(records[item]))
-        group = [records[index] for index in ordered]
-        if not _same_balloon_fragment_group_should_merge(group):
-            continue
-        merged = _merge_same_balloon_fragment_group(group, merge_path="same_balloon_geometry")
-        if merged is None:
-            continue
-        merged_records[ordered[0]] = merged
-        consumed.update(ordered[1:])
+        for partition in _same_balloon_spatial_body_partitions(records, ordered):
+            if len(partition) < 2:
+                continue
+            group = [records[index] for index in partition]
+            if not _same_balloon_fragment_group_should_merge(group):
+                continue
+            merged = _merge_same_balloon_fragment_group(group, merge_path="same_balloon_geometry")
+            if merged is None:
+                continue
+            if any(_record_has_spatial_line_cluster(item) for item in group):
+                flags = list(merged.get("qa_flags") or [])
+                if "same_balloon_spatial_body_partition_merged" not in flags:
+                    flags.append("same_balloon_spatial_body_partition_merged")
+                merged["qa_flags"] = flags
+            merged_records[partition[0]] = merged
+            consumed.update(partition[1:])
 
     _merge_same_band_joined_word_fragments(records, consumed, merged_records)
     _merge_same_band_dependent_fragments(records, consumed, merged_records)
@@ -918,6 +926,69 @@ def _record_should_not_merge_for_translation(record: dict[str, Any]) -> bool:
     if not text or CJK_LETTER_PATTERN.search(text):
         return True
     return not bool(re.search(r"[A-Za-z]", text))
+
+
+def _record_has_spatial_line_cluster(record: dict[str, Any]) -> bool:
+    return bool(
+        str(record.get("_spatial_line_cluster_parent_id") or "").strip()
+        and int(record.get("_spatial_line_cluster_count") or 0) >= 2
+    )
+
+
+def _spatial_body_bbox(record: dict[str, Any]) -> list[int] | None:
+    return (
+        _record_bbox4(record.get("_spatial_text_body_bbox"))
+        or _record_stable_text_bbox(record)
+    )
+
+
+def _record_matches_spatial_body(record: dict[str, Any], body_record: dict[str, Any]) -> bool:
+    body_bbox = _spatial_body_bbox(body_record)
+    record_bbox = _record_stable_text_bbox(record)
+    if body_bbox is None or record_bbox is None:
+        return False
+    overlap = _bbox_overlap_area(body_bbox, record_bbox)
+    min_area = max(1, min(_bbox_area_for_merge(body_bbox), _bbox_area_for_merge(record_bbox)))
+    if overlap / float(min_area) >= 0.20:
+        return True
+    vertical_gap = max(0, max(body_bbox[1], record_bbox[1]) - min(body_bbox[3], record_bbox[3]))
+    horizontal_overlap = min(body_bbox[2], record_bbox[2]) - max(body_bbox[0], record_bbox[0])
+    min_width = max(1, min(body_bbox[2] - body_bbox[0], record_bbox[2] - record_bbox[0]))
+    max_height = max(1, body_bbox[3] - body_bbox[1], record_bbox[3] - record_bbox[1])
+    return horizontal_overlap >= int(min_width * 0.25) and vertical_gap <= max(24, int(max_height * 0.65))
+
+
+def _same_balloon_spatial_body_partitions(records: list[dict[str, Any]], ordered: list[int]) -> list[list[int]]:
+    """Partition a same-balloon merge group around explicit spatial OCR bodies.
+
+    A broad detector crop may contain two actual speech bodies. Split children
+    carry an explicit body marker; unsplit fragments may join one child only
+    when they are geometrically adjacent to that same body.
+    """
+    spatial_indexes = [index for index in ordered if _record_has_spatial_line_cluster(records[index])]
+    if not spatial_indexes:
+        return [ordered]
+
+    partitions: dict[int, list[int]] = {index: [index] for index in spatial_indexes}
+    standalone: list[list[int]] = []
+    for index in ordered:
+        if index in partitions:
+            continue
+        matches = [
+            body_index
+            for body_index in spatial_indexes
+            if _record_matches_spatial_body(records[index], records[body_index])
+        ]
+        if len(matches) == 1:
+            partitions[matches[0]].append(index)
+        else:
+            standalone.append([index])
+
+    result = list(partitions.values()) + standalone
+    for partition in result:
+        partition.sort(key=lambda item: _record_reading_order(records[item]))
+    result.sort(key=lambda partition: _record_reading_order(records[partition[0]]))
+    return result
 
 
 def _bbox_area_for_merge(bbox: list[int] | None) -> int:

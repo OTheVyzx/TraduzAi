@@ -1795,6 +1795,80 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(first["_render_target_source"], "validated_text_source")
         self.assertIn("ocr_split_validated_sources", first["qa_flags"])
 
+    def test_reconcile_ocr_splits_widely_separated_line_clusters_without_segment_sources(self):
+        from vision_stack.runtime import _reconcile_ocr_with_validated_sources
+
+        page = {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "trace_id": "ocr_001@page_028_band_109",
+                    "band_id": "page_028_band_109",
+                    "text": "I CAN'T FEEL ANYTHING. PHEROMONES, MENTAL",
+                    "original": "I CAN'T FEEL ANYTHING. PHEROMONES, MENTAL",
+                    "bbox": [127, 310, 505, 655],
+                    "source_bbox": [127, 310, 505, 655],
+                    "text_pixel_bbox": [128, 333, 488, 589],
+                    "line_texts": [
+                        "I CAN'T FEEL",
+                        "ANYTHING.",
+                        "PHEROMONES,",
+                        "MENTAL",
+                    ],
+                    "line_polygons": [
+                        [[128, 333], [384, 333], [384, 360], [128, 360]],
+                        [[162, 373], [358, 373], [358, 404], [162, 404]],
+                        [[254, 524], [488, 527], [487, 554], [254, 551]],
+                        [[307, 561], [433, 561], [433, 589], [307, 589]],
+                    ],
+                    "tipo": "fala",
+                }
+            ],
+            "_vision_blocks": [],
+        }
+
+        result = _reconcile_ocr_with_validated_sources(page)
+
+        self.assertEqual(len(result["texts"]), 2)
+        upper, lower = result["texts"]
+        self.assertEqual(upper["id"], "ocr_001_spatial_cluster_01")
+        self.assertEqual(lower["id"], "ocr_001_spatial_cluster_02")
+        self.assertEqual(upper["trace_id"], "ocr_001_spatial_cluster_01@page_028_band_109")
+        self.assertEqual(upper["text"], "I CAN'T FEEL ANYTHING.")
+        self.assertEqual(lower["text"], "PHEROMONES, MENTAL")
+        self.assertEqual(upper["text_pixel_bbox"], [128, 333, 385, 405])
+        self.assertEqual(lower["text_pixel_bbox"], [254, 524, 489, 590])
+        self.assertEqual(upper["source_text_ids"], ["ocr_001_spatial_cluster_01"])
+        self.assertEqual(lower["source_text_ids"], ["ocr_001_spatial_cluster_02"])
+        self.assertEqual(upper["_spatial_line_cluster_parent_id"], "ocr_001")
+        self.assertIn("ocr_split_spatial_line_clusters", upper["qa_flags"])
+
+    def test_reconcile_ocr_keeps_normally_spaced_multiline_body_together(self):
+        from vision_stack.runtime import _reconcile_ocr_with_validated_sources
+
+        page = {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "FIRST LINE SECOND LINE THIRD LINE",
+                    "bbox": [80, 80, 340, 190],
+                    "text_pixel_bbox": [80, 80, 340, 190],
+                    "line_texts": ["FIRST LINE", "SECOND LINE", "THIRD LINE"],
+                    "line_polygons": [
+                        [[80, 80], [340, 80], [340, 104], [80, 104]],
+                        [[82, 116], [338, 116], [338, 140], [82, 140]],
+                        [[84, 152], [336, 152], [336, 176], [84, 176]],
+                    ],
+                }
+            ],
+            "_vision_blocks": [],
+        }
+
+        result = _reconcile_ocr_with_validated_sources(page)
+
+        self.assertEqual(len(result["texts"]), 1)
+        self.assertNotIn("ocr_split_spatial_line_clusters", result["texts"][0].get("qa_flags") or [])
+
     def test_get_ocr_engine_is_thread_safe_during_prewarm(self):
         import vision_stack.runtime as runtime
 
