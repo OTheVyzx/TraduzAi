@@ -1094,6 +1094,32 @@ def _shift_bbox_list_to_band_local(raw_bboxes, *, width: int, height: int, band_
     return shifted or None
 
 
+def _record_declares_band_local_geometry(record: dict) -> bool:
+    """Return whether a stage has already established band-local geometry.
+
+    A bbox in the lower half of a tall band can also numerically look like a
+    strip/page bbox.  The geometry heuristic remains useful for legacy payloads
+    without a contract, but it must not rewrite records that the band pipeline
+    has already declared local.
+    """
+
+    if not isinstance(record, dict):
+        return False
+    for key in (
+        "_geometry_coordinate_space",
+        "geometry_coordinate_space",
+        "_coordinate_space",
+        "coordinate_space",
+        "source_coordinate_space",
+    ):
+        value = str(record.get(key) or "").strip().lower()
+        if value in {"band", "band_local", "local"}:
+            return True
+        if value in {"page", "page_cleanup_crop", "cleanup_crop", "crop"}:
+            return False
+    return False
+
+
 def _texts_with_band_local_bboxes(texts: list[dict], *, width: int, height: int, band_y_top: int) -> list[dict]:
     if band_y_top <= 0:
         return texts
@@ -1112,6 +1138,9 @@ def _texts_with_band_local_bboxes(texts: list[dict], *, width: int, height: int,
         if not isinstance(text, dict):
             continue
         item = dict(text)
+        if _record_declares_band_local_geometry(item):
+            normalized.append(item)
+            continue
         shifted_any = False
         for field in bbox_fields:
             shifted = _shift_bbox_to_band_local(item.get(field), width=width, height=height, band_y_top=band_y_top)

@@ -1616,6 +1616,123 @@ def _page_id_from_page_number(page: dict) -> str | None:
     return f"page_{number:03d}"
 
 
+def _cross_page_rehome_direct_identity_keys(layer: dict) -> set[str]:
+    keys: set[str] = set()
+    band_id = str(layer.get("band_id") or "").strip()
+    for field in ("trace_id", "text_instance_id", "id", "text_id", "_original_text_id"):
+        value = str(layer.get(field) or "").strip()
+        if not value:
+            continue
+        keys.add(value)
+        if band_id and "@" not in value:
+            keys.add(f"{value}@{band_id}")
+    return keys
+
+
+def _cross_page_rehome_geometry_score(left: dict, right: dict) -> float:
+    """Return a conservative source-geometry match score for page rehoming."""
+
+    left_boxes = [
+        _optional_bbox4(left.get(key))
+        for key in ("text_pixel_bbox", "source_bbox", "bbox", "layout_bbox", "render_bbox", "target_bbox")
+    ]
+    right_boxes = [
+        _optional_bbox4(right.get(key))
+        for key in ("text_pixel_bbox", "source_bbox", "bbox", "layout_bbox", "render_bbox", "target_bbox")
+    ]
+    best = 0.0
+    for left_bbox in left_boxes:
+        if left_bbox is None:
+            continue
+        for right_bbox in right_boxes:
+            if right_bbox is None:
+                continue
+            overlap = _bbox_overlap_ratio4(left_bbox, right_bbox)
+            iou = _bbox_iou(left_bbox, right_bbox)
+            best = max(best, overlap * 1000.0 + iou * 100.0)
+    return best
+
+
+def _select_cross_page_rehome_primary(incoming: dict, candidates: list[dict]) -> tuple[dict | None, dict]:
+    """Select the matching layer, never the merely longest layer in a band."""
+
+    incoming_direct_keys = _cross_page_rehome_direct_identity_keys(incoming)
+    ranked: list[tuple[int, float, int, dict]] = []
+    for candidate in candidates:
+        direct_match = bool(incoming_direct_keys.intersection(_cross_page_rehome_direct_identity_keys(candidate)))
+        geometry_score = _cross_page_rehome_geometry_score(incoming, candidate)
+        # A direct trace/text identity is sufficient. Geometry-only fallback is
+        # reserved for old merged records that predate stable trace IDs.
+        if not direct_match and geometry_score < 550.0:
+            continue
+        ranked.append(
+            (
+                1 if direct_match else 0,
+                geometry_score,
+                1 if candidate.get("visible", True) is not False else 0,
+                candidate,
+            )
+        )
+    if not ranked:
+        return None, {"decision": "unresolved", "reason": "no_identity_or_geometry_match"}
+    ranked.sort(key=lambda item: (-item[0], -item[1], -item[2]))
+    direct_match, geometry_score, _visible, primary = ranked[0]
+    if len(ranked) > 1:
+        next_direct, next_geometry, _next_visible, _next = ranked[1]
+        if direct_match == next_direct and abs(geometry_score - next_geometry) < 0.001:
+            return None, {"decision": "unresolved", "reason": "ambiguous_identity_geometry_match"}
+    return primary, {
+        "decision": "matched",
+        "strategy": "direct_identity" if direct_match else "geometry_fallback",
+        "geometry_score": round(geometry_score, 6),
+    }
+
+
+def _mutable_project_page_text_layers(page: dict) -> list[dict]:
+    layers = page.get("text_layers")
+    if isinstance(layers, list):
+        return layers
+    if isinstance(layers, dict):
+        nested = layers.get("texts")
+        if isinstance(nested, list):
+            return nested
+    legacy = page.get("textos")
+    if isinstance(legacy, list):
+        return legacy
+    page["text_layers"] = []
+    return page["text_layers"]
+
+
+def _move_cross_page_band_layer_as_standalone(
+    layer: dict,
+    destination: dict,
+    *,
+    band_page_id: str,
+    reason: str,
+) -> None:
+    moved_layer = copy.deepcopy(layer)
+    moved_layer["visible"] = True
+    moved_layer["render_policy"] = "normal"
+    moved_layer["route_action"] = "translate_inpaint_render"
+    moved_layer["page_id"] = band_page_id
+    moved_layer["page_number"] = destination.get("numero")
+    moved_layer.pop("merged_into_trace_id", None)
+    moved_layer.pop("merged_into_text_id", None)
+    _merge_layer_qa_flags(moved_layer, ["cross_page_band_rehomed"])
+    qa_metrics = moved_layer.setdefault("qa_metrics", {})
+    if isinstance(qa_metrics, dict):
+        qa_metrics["cross_page_band_rehome_match"] = {
+            "decision": "moved_standalone",
+            "reason": reason,
+        }
+    _mutable_project_page_text_layers(destination).append(moved_layer)
+
+    layer["visible"] = False
+    layer["render_policy"] = "rehomed_to_destination"
+    layer["route_action"] = "rehomed_to_destination"
+    _merge_layer_qa_flags(layer, ["cross_page_band_rehomed"])
+
+
 def _rehome_cross_page_band_layers(project_data: dict) -> int:
     """Move text payload from layers restored onto the wrong page to the page owning their band."""
 
@@ -1636,6 +1753,8 @@ def _rehome_cross_page_band_layers(project_data: dict) -> int:
         for layer in _project_page_text_layers(page):
             if not isinstance(layer, dict):
                 continue
+            if str(layer.get("render_policy") or "").strip() == "rehomed_to_destination":
+                continue
             band_id = str(layer.get("band_id") or "").strip()
             band_page_id = _page_id_from_band_id(band_id)
             if not band_page_id or band_page_id == current_page_id:
@@ -1650,18 +1769,32 @@ def _rehome_cross_page_band_layers(project_data: dict) -> int:
                 and str(candidate.get("render_policy") or "") != "merged_into_primary"
             ]
             if not destination_layers:
+                _move_cross_page_band_layer_as_standalone(
+                    layer,
+                    destination,
+                    band_page_id=band_page_id,
+                    reason="destination_has_no_layer_for_band",
+                )
+                moved += 1
                 continue
-            primary = max(
-                destination_layers,
-                key=lambda candidate: (
-                    1 if candidate.get("visible", True) is not False else 0,
-                    len(_normalized_merge_text(_translated_text_for_merge(candidate))),
-                    _bbox_area4(_optional_bbox4(candidate.get("safe_text_box")) or _optional_bbox4(candidate.get("render_bbox")) or [0, 0, 0, 0]),
-                ),
-            )
+            primary, rehome_match = _select_cross_page_rehome_primary(layer, destination_layers)
+            if primary is None:
+                _move_cross_page_band_layer_as_standalone(
+                    layer,
+                    destination,
+                    band_page_id=band_page_id,
+                    reason=str(rehome_match.get("reason") or "no_safe_existing_layer_match"),
+                )
+                moved += 1
+                continue
+            primary_metrics = primary.setdefault("qa_metrics", {})
+            if isinstance(primary_metrics, dict):
+                primary_metrics["cross_page_band_rehome_match"] = rehome_match
             incoming_text = _translated_text_for_merge(layer)
             primary_text = _translated_text_for_merge(primary)
             if incoming_text and (
+                rehome_match.get("strategy") == "direct_identity"
+                or
                 not primary_text
                 or _normalized_merge_text(primary_text) in _normalized_merge_text(incoming_text)
                 or len(_normalized_merge_text(incoming_text)) > len(_normalized_merge_text(primary_text))

@@ -2173,6 +2173,234 @@ def _trace_metadata_payload(page: dict | None, *, band_id: str, source_page_numb
     return {key: value for key, value in payload.items() if value not in (None, [], "")}
 
 
+def _trace_metadata_text_bbox(record: dict) -> list[int] | None:
+    direct_bbox = _coerce_bbox(
+        record.get("text_pixel_bbox")
+        or record.get("ocr_text_bbox")
+        or record.get("source_bbox")
+        or record.get("bbox")
+        or record.get("layout_bbox")
+    )
+    if direct_bbox is not None:
+        return direct_bbox
+    merged_bboxes = [
+        bbox
+        for value in (record.get("_merged_source_bboxes") or record.get("merged_source_bboxes") or [])
+        for bbox in [_coerce_bbox(value)]
+        if bbox is not None
+    ]
+    if not merged_bboxes:
+        return None
+    return [
+        min(bbox[0] for bbox in merged_bboxes),
+        min(bbox[1] for bbox in merged_bboxes),
+        max(bbox[2] for bbox in merged_bboxes),
+        max(bbox[3] for bbox in merged_bboxes),
+    ]
+
+
+def _restore_authoritative_band_identity(page: dict, page_dict: dict) -> dict:
+    """Keep stage results bound to the source page and strip that invoked them.
+
+    OCR/runtime adapters may return a zero-based ``numero`` from their internal
+    page window. That value is not allowed to replace the one-based source page
+    identity used by strip layout and page-space conversion.
+    """
+
+    if not isinstance(page, dict) or not isinstance(page_dict, dict):
+        return page
+    repairs: list[dict] = []
+    for key in ("numero", "width", "height", "_band_id", "_band_y_top", "_band_index", "_source_page_number"):
+        if key not in page_dict or page_dict.get(key) is None:
+            continue
+        expected = copy.deepcopy(page_dict[key])
+        previous = page.get(key)
+        if previous not in (None, "") and previous != expected:
+            repairs.append({"key": key, "previous": previous, "expected": expected})
+        page[key] = expected
+    source_page_number = _source_page_number_from_page(page)
+    page_id = _page_id_for(source_page_number)
+    if page_id:
+        page["_page_id"] = page_id
+    if repairs:
+        existing = [item for item in page.get("_band_identity_repairs") or [] if isinstance(item, dict)]
+        page["_band_identity_repairs"] = existing + repairs
+    return page
+
+
+def _trace_metadata_block_bbox(record: dict) -> list[int] | None:
+    # ``bbox`` is detector-owned and remains stable when trace metadata is
+    # refreshed. Fields copied from a text record can be stale after a prior
+    # recovery pass, so they are deliberately lower priority here.
+    return _coerce_bbox(
+        record.get("bbox")
+        or record.get("source_bbox")
+        or record.get("text_pixel_bbox")
+        or record.get("layout_bbox")
+    )
+
+
+def _trace_metadata_identity_tokens(record: dict) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("trace_id", "text_id", "id", "_original_trace_id", "_original_text_id"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            tokens.add(value)
+    return tokens
+
+
+def _trace_metadata_record_text(record: dict) -> str:
+    return str(
+        record.get("raw_ocr")
+        or record.get("original")
+        or record.get("text")
+        or record.get("normalized_ocr")
+        or ""
+    ).strip()
+
+
+def _match_vision_blocks_to_texts_for_trace_metadata(
+    texts: list[dict],
+    blocks: list[dict],
+) -> dict[int, tuple[int, dict]]:
+    """Return a one-to-one block/text match without relying on list order.
+
+    Candidate-crop re-OCR can append a text record after detector blocks were
+    emitted. Pairing both lists by index then rotates semantic IDs across
+    unrelated regions. Geometry is authoritative when available; identity or
+    OCR text is only a fallback when geometry is genuinely unavailable.
+    """
+
+    candidates: list[tuple[float, int, int, dict]] = []
+    for text_index, text in enumerate(texts):
+        text_bbox = _trace_metadata_text_bbox(text)
+        text_tokens = _trace_metadata_identity_tokens(text)
+        text_value = _trace_metadata_record_text(text)
+        for block_index, block in enumerate(blocks):
+            block_bbox = _trace_metadata_block_bbox(block)
+            block_tokens = _trace_metadata_identity_tokens(block)
+            identity_match = bool(text_tokens.intersection(block_tokens))
+            text_similarity = _text_similarity(text_value, _trace_metadata_record_text(block))
+
+            overlap_min = 0.0
+            iou = 0.0
+            if text_bbox is not None and block_bbox is not None:
+                overlap_min = _bbox_overlap_min_ratio(text_bbox, block_bbox)
+                iou = _bbox_iou(text_bbox, block_bbox)
+                if overlap_min < 0.50 and iou < 0.35:
+                    # Existing IDs can be stale after a previous positional
+                    # assignment. Never let them override incompatible pixels.
+                    continue
+                score = overlap_min * 1000.0 + iou * 100.0
+                strategy = "geometry"
+            elif identity_match:
+                score = 25.0
+                strategy = "identity_without_geometry"
+            elif text_similarity >= 0.97:
+                score = 15.0
+                strategy = "exact_text_without_geometry"
+            else:
+                continue
+
+            if identity_match:
+                score += 5.0
+            score += text_similarity
+            candidates.append(
+                (
+                    score,
+                    text_index,
+                    block_index,
+                    {
+                        "decision": "matched",
+                        "strategy": strategy,
+                        "overlap_min_ratio": round(overlap_min, 6),
+                        "iou": round(iou, 6),
+                        "identity_match": identity_match,
+                        "text_similarity": round(text_similarity, 6),
+                    },
+                )
+            )
+
+    assigned_texts: set[int] = set()
+    assigned_blocks: set[int] = set()
+    matched: dict[int, tuple[int, dict]] = {}
+    for _score, text_index, block_index, decision in sorted(
+        candidates,
+        key=lambda item: (-item[0], -item[3]["overlap_min_ratio"], -item[3]["iou"], item[1], item[2]),
+    ):
+        if text_index in assigned_texts or block_index in assigned_blocks:
+            continue
+        assigned_texts.add(text_index)
+        assigned_blocks.add(block_index)
+        matched[block_index] = (text_index, decision)
+    return matched
+
+
+def _attach_text_trace_metadata_to_vision_block(
+    block: dict,
+    text: dict,
+    *,
+    band_id: str,
+    page_id: str,
+    assignment: dict,
+) -> None:
+    text_id = str(text.get("text_id") or text.get("id") or "").strip()
+    block["text_id"] = text_id
+    block["band_id"] = band_id
+    if page_id:
+        block["page_id"] = page_id
+    block["trace_id"] = text["trace_id"]
+    block["_trace_metadata_assignment"] = copy.deepcopy(assignment)
+    for key in (
+        "source_text_ids",
+        "source_trace_ids",
+        "_source_trace_ids",
+        "_merged_source_bboxes",
+        "merged_source_bboxes",
+        "merge_reason",
+        "rotation_deg",
+        "rotation_source",
+        "qa_flags",
+        "allow_broad_bbox_text_search",
+        "balloon_type",
+        "block_profile",
+        "line_polygons",
+        "text_pixel_bbox",
+        "source_bbox",
+        "balloon_bbox",
+        "background_rgb",
+        "layout_bbox",
+        "content_class",
+        "skip_processing",
+        "preserve_original",
+        "render_policy",
+        "route_action",
+        "route_reason",
+        "bubble_mask_source",
+        "bubbleMaskSource",
+        "bubble_mask_bbox",
+        "bubbleMaskBbox",
+        "bubble_inner_bbox",
+        "bubbleInnerBbox",
+        "bubble_id",
+        "bubbleId",
+        "bubble_mask_error",
+        "bubbleMaskError",
+        "card_panel_text_context",
+        "mask_evidence",
+    ):
+        if text.get(key) not in (None, [], ""):
+            block[key] = copy.deepcopy(text[key])
+    confidence_raw = _confidence_value(text.get("confidence_raw"), text.get("confidence"), text.get("ocr_confidence"))
+    block_confidence_raw = _confidence_value(
+        block.get("confidence_raw"),
+        block.get("confidence"),
+        confidence_raw,
+    )
+    if block_confidence_raw is not None:
+        block["confidence_raw"] = block_confidence_raw
+
+
 def _attach_ocr_trace_metadata(page: dict, *, band_id: str) -> dict:
     if not isinstance(page, dict) or not band_id:
         return page
@@ -2202,60 +2430,32 @@ def _attach_ocr_trace_metadata(page: dict, *, band_id: str) -> dict:
         confidence_raw = _confidence_value(text.get("confidence_raw"), text.get("confidence"), text.get("ocr_confidence"))
         if confidence_raw is not None:
             text["confidence_raw"] = confidence_raw
-        if index < len(blocks):
-            block = blocks[index]
-            block["text_id"] = text_id
-            block["band_id"] = band_id
-            if page_id:
-                block["page_id"] = page_id
-            block["trace_id"] = text["trace_id"]
-            for key in (
-                "source_text_ids",
-                "source_trace_ids",
-                "_source_trace_ids",
-                "_merged_source_bboxes",
-                "merged_source_bboxes",
-                "merge_reason",
-                "rotation_deg",
-                "rotation_source",
-                "qa_flags",
-                "allow_broad_bbox_text_search",
-                "balloon_type",
-                "block_profile",
-                "line_polygons",
-                "text_pixel_bbox",
-                "source_bbox",
-                "balloon_bbox",
-                "background_rgb",
-                "layout_bbox",
-                "content_class",
-                "skip_processing",
-                "preserve_original",
-                "render_policy",
-                "route_action",
-                "route_reason",
-                "bubble_mask_source",
-                "bubbleMaskSource",
-                "bubble_mask_bbox",
-                "bubbleMaskBbox",
-                "bubble_inner_bbox",
-                "bubbleInnerBbox",
-                "bubble_id",
-                "bubbleId",
-                "bubble_mask_error",
-                "bubbleMaskError",
-                "card_panel_text_context",
-                "mask_evidence",
-            ):
-                if text.get(key) not in (None, [], ""):
-                    block[key] = copy.deepcopy(text[key])
-            block_confidence_raw = _confidence_value(
-                block.get("confidence_raw"),
-                block.get("confidence"),
-                confidence_raw,
+    matched_blocks = _match_vision_blocks_to_texts_for_trace_metadata(texts, blocks)
+    unresolved_blocks: list[dict] = []
+    for block_index, block in enumerate(blocks):
+        matched = matched_blocks.get(block_index)
+        if matched is None:
+            block["_trace_metadata_assignment"] = {
+                "decision": "unresolved",
+                "reason": "no_safe_one_to_one_geometry_match",
+            }
+            unresolved_blocks.append(
+                {
+                    "block_index": block_index,
+                    "bbox": _trace_metadata_block_bbox(block),
+                    "existing_text_id": str(block.get("text_id") or block.get("id") or "").strip(),
+                }
             )
-            if block_confidence_raw is not None:
-                block["confidence_raw"] = block_confidence_raw
+            continue
+        text_index, assignment = matched
+        _attach_text_trace_metadata_to_vision_block(
+            block,
+            texts[text_index],
+            band_id=band_id,
+            page_id=page_id,
+            assignment=assignment,
+        )
+    page["_trace_metadata_assignment_unresolved_blocks"] = unresolved_blocks
     page["texts"] = texts
     page["_vision_blocks"] = blocks
     page["_band_id"] = band_id
@@ -2354,6 +2554,94 @@ def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
                 )
     except Exception:
         return
+
+
+_GEOMETRY_PROVENANCE_BBOX_KEYS = (
+    "bbox",
+    "source_bbox",
+    "text_pixel_bbox",
+    "layout_bbox",
+    "balloon_bbox",
+    "bubble_mask_bbox",
+    "bubble_inner_bbox",
+    "target_bbox",
+    "position_bbox",
+    "capacity_bbox",
+    "layout_safe_bbox",
+    "safe_text_box",
+    "render_bbox",
+)
+
+
+def _record_geometry_stage_provenance(
+    page: dict,
+    *,
+    stage: str,
+    band: Band,
+    band_id: str,
+) -> None:
+    """Emit per-text geometry snapshots around mutable band-local stages.
+
+    All processing inside ``process_band`` is band-local.  OCR adapters and
+    recovery passes sometimes carry page-local metadata from a different
+    output page, so an image can be rendered at a valid-looking but unrelated
+    local position.  These records make a later coordinate shift attributable
+    without changing the runtime decision.
+    """
+
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+    try:
+        page_band_y_top = int(page.get("_band_y_top") or 0)
+    except Exception:
+        page_band_y_top = 0
+    expected_band_y_top = int(getattr(band, "y_top", 0) or 0)
+    source_page_number = _source_page_number_from_page(page)
+    page_id = _page_id_for(source_page_number)
+    for index, text in enumerate(list((page or {}).get("texts") or [])):
+        if not isinstance(text, dict):
+            continue
+        text_id = _text_id_for(text, index)
+        bboxes = {
+            key: bbox
+            for key in _GEOMETRY_PROVENANCE_BBOX_KEYS
+            if (bbox := _coerce_bbox(text.get(key))) is not None
+        }
+        text_band_y_values: dict[str, int] = {}
+        for key in ("band_y_top", "_band_y_top", "strip_band_y_top", "_strip_band_y_top"):
+            try:
+                value = text.get(key)
+                if value not in (None, ""):
+                    text_band_y_values[key] = int(value)
+            except Exception:
+                continue
+        try:
+            recorder.write_jsonl(
+                "warnings/geometry_stage_provenance.jsonl",
+                {
+                    "stage": str(stage),
+                    "page_id": page_id,
+                    "band_id": str(band_id),
+                    "text_id": text_id,
+                    "trace_id": str(text.get("trace_id") or _trace_id_for(text_id, band_id)),
+                    "coordinate_space": str(text.get("coordinate_space") or ""),
+                    "source_coordinate_space": str(text.get("source_coordinate_space") or ""),
+                    "page_band_y_top": page_band_y_top,
+                    "expected_band_y_top": expected_band_y_top,
+                    "text_band_y_values": text_band_y_values,
+                    "page_numero": page.get("numero"),
+                    "text_page_id": text.get("page_id"),
+                    "text_band_id": text.get("band_id"),
+                    "bboxes": bboxes,
+                },
+            )
+        except Exception:
+            return
 
 
 def _record_unsafe_mask_contracts(
@@ -8059,6 +8347,23 @@ def _run_inpaint_stage(
 ) -> BandImageStageOutput:
     compat_text_fields = _legacy_decision_fields_by_record(translated_page.get("texts"))
     page_for_inpaint = _without_legacy_decision_fields_for_stage(translated_page)
+    # Every record produced inside process_band is measured against the current
+    # band slice.  Mark that contract explicitly so the inpainter never treats
+    # a valid lower-band bbox as a strip/page bbox merely because both numeric
+    # interpretations fit a tall band.
+    page_for_inpaint["_geometry_coordinate_space"] = "band"
+    for list_key in ("texts", "_vision_blocks", "_bubble_regions"):
+        for record in list(page_for_inpaint.get(list_key) or []):
+            if not isinstance(record, dict):
+                continue
+            explicit_space = ""
+            for key in ("coordinate_space", "source_coordinate_space", "_coordinate_space"):
+                value = str(record.get(key) or "").strip().lower()
+                if value:
+                    explicit_space = value
+                    break
+            if explicit_space not in {"page", "page_cleanup_crop", "cleanup_crop", "crop"}:
+                record["_geometry_coordinate_space"] = "band"
     if band_index is not None:
         page_for_inpaint["_band_index"] = int(band_index)
     elif "_band_index" not in page_for_inpaint:
@@ -8517,10 +8822,7 @@ def process_band(
             work_title_user_provided=work_title_user_provided,
         ),
     )
-    ocr_page = ocr_stage.to_page_dict()
-    for key in ("numero", "width", "height", "_band_id", "_band_y_top", "_band_index", "_source_page_number"):
-        if (key not in ocr_page or ocr_page.get(key) in (None, "")) and key in page_dict:
-            ocr_page[key] = page_dict[key]
+    ocr_page = _restore_authoritative_band_identity(ocr_stage.to_page_dict(), page_dict)
     band_id = str(page_dict.get("_band_id") or band_id)
     _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
     _record_ocr_raw_blocks(ocr_page, band=band, band_id=band_id)
@@ -8597,10 +8899,7 @@ def process_band(
         recovered_page = recovery_stage.to_page_dict()
         perf.update(dict(recovery_stage.perf_updates))
         if list(recovered_page.get("texts") or []):
-            ocr_page = recovered_page
-            for key in ("numero", "width", "height", "_band_id", "_band_y_top", "_band_index", "_source_page_number"):
-                if (key not in ocr_page or ocr_page.get(key) in (None, "")) and key in page_dict:
-                    ocr_page[key] = page_dict[key]
+            ocr_page = _restore_authoritative_band_identity(recovered_page, page_dict)
             _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
             _record_ocr_raw_blocks(ocr_page, band=band, band_id=band_id)
             perf["ocr_text_count"] = int(len(ocr_page.get("texts") or []))
@@ -8623,9 +8922,7 @@ def process_band(
         perf.update(dict(recovery_stage.perf_updates))
         merged_recovered = _merge_candidate_crop_recovery_into_ocr_page(ocr_page, recovered_page)
         if merged_recovered > 0:
-            for key in ("numero", "width", "height", "_band_id", "_band_y_top", "_band_index", "_source_page_number"):
-                if (key not in ocr_page or ocr_page.get(key) in (None, "")) and key in page_dict:
-                    ocr_page[key] = page_dict[key]
+            _restore_authoritative_band_identity(ocr_page, page_dict)
             _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
             _record_ocr_raw_blocks(ocr_page, band=band, band_id=band_id)
             perf["ocr_candidate_crop_merged_recovered"] = int(merged_recovered)
@@ -8657,9 +8954,7 @@ def process_band(
     )
     recovered_count = int(partial_dark_recovered or 0)
     if recovered_count > 0:
-        for key in ("numero", "width", "height", "_band_id", "_band_y_top", "_band_index", "_source_page_number"):
-            if (key not in ocr_page or ocr_page.get(key) in (None, "")) and key in page_dict:
-                ocr_page[key] = page_dict[key]
+        _restore_authoritative_band_identity(ocr_page, page_dict)
         _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
         _record_ocr_raw_blocks(ocr_page, band=band, band_id=band_id)
         perf["ocr_partial_dark_bubble_recovered"] = recovered_count
@@ -8725,6 +9020,12 @@ def process_band(
         return band
     if _smart_skip_real_enabled():
         _apply_smart_skip_real(ocr_page, perf)
+    _record_geometry_stage_provenance(
+        ocr_page,
+        stage="before_review_layout",
+        band=band,
+        band_id=band_id,
+    )
     # Qualidade: Revisão contextual e enriquecimento de layout (SFX vs Fala, Balões Conectados)
     stage_start = time.perf_counter()
     review_layout_stage = _run_review_layout_stage(
@@ -8735,8 +9036,14 @@ def process_band(
         layout_page_image_bgr=layout_page_image_bgr,
         layout_page_y_top=layout_page_y_top,
     )
-    ocr_page = review_layout_stage.to_page_dict()
+    ocr_page = _restore_authoritative_band_identity(review_layout_stage.to_page_dict(), page_dict)
     _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
+    _record_geometry_stage_provenance(
+        ocr_page,
+        stage="after_review_layout",
+        band=band,
+        band_id=band_id,
+    )
     if list(ocr_page.get("texts") or []):
         post_layout_dark_recovered = _run_with_stage_lock(
             "ocr_post_layout_dark_lobe_recovery",
@@ -8767,7 +9074,7 @@ def process_band(
                 layout_page_image_bgr=layout_page_image_bgr,
                 layout_page_y_top=layout_page_y_top,
             )
-            ocr_page = review_layout_stage.to_page_dict()
+            ocr_page = _restore_authoritative_band_identity(review_layout_stage.to_page_dict(), page_dict)
             _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
     scanlation_promo_reason = _ocr_page_scanlation_promo_reason(ocr_page, band)
     if scanlation_promo_reason:
@@ -8814,7 +9121,7 @@ def process_band(
             layout_page_image_bgr=layout_page_image_bgr,
             layout_page_y_top=layout_page_y_top,
         )
-        ocr_page = review_layout_stage.to_page_dict()
+        ocr_page = _restore_authoritative_band_identity(review_layout_stage.to_page_dict(), page_dict)
         _normalize_dark_bubble_contracts_for_stage(ocr_page, band.strip_slice)
         _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
     scanlation_promo_reason = _ocr_page_scanlation_promo_reason(ocr_page, band)
@@ -8876,6 +9183,12 @@ def process_band(
     if _smart_skip_shadow_enabled():
         _apply_smart_skip_shadow(ocr_page, perf)
 
+    _record_geometry_stage_provenance(
+        ocr_page,
+        stage="before_translate",
+        band=band,
+        band_id=band_id,
+    )
     stage_start = time.perf_counter()
     translate_stage = _run_translate_stage(
         ocr_page,
@@ -8892,8 +9205,14 @@ def process_band(
     )
     _mark("translate", stage_start)
 
-    translated_page = translate_stage.to_page_dict()
+    translated_page = _restore_authoritative_band_identity(translate_stage.to_page_dict(), page_dict)
     _attach_ocr_trace_metadata(translated_page, band_id=band_id)
+    _record_geometry_stage_provenance(
+        translated_page,
+        stage="after_translate",
+        band=band,
+        band_id=band_id,
+    )
     if callable(ordered_context_after_translate_callback):
         ordered_context_after_translate_callback(copy.deepcopy(translated_page))
 
@@ -8911,6 +9230,12 @@ def process_band(
     )
     cleaned = inpaint_stage.to_image()
     perf.update(dict(inpaint_stage.perf_updates))
+    _record_geometry_stage_provenance(
+        translated_page,
+        stage="after_inpaint",
+        band=band,
+        band_id=band_id,
+    )
     _record_unsafe_mask_contracts(
         translated_page,
         band_id=band_id,
@@ -8934,6 +9259,12 @@ def process_band(
             typesetter=typesetter,
             translated_page=translated_page,
         ),
+    )
+    _record_geometry_stage_provenance(
+        translated_page,
+        stage="after_typeset",
+        band=band,
+        band_id=band_id,
     )
     stage_start = time.perf_counter()
     copy_back_stage = _run_copy_back_stage(

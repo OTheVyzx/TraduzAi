@@ -195,6 +195,35 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertTrue(normalized[0]["_band_local_bbox_normalized"])
         self.assertEqual(texts[0]["bbox"], [73, 304, 118, 314])
 
+    def test_band_local_text_bbox_normalization_preserves_explicit_local_lower_band_geometry(self):
+        from inpainter import _texts_with_band_local_bboxes
+
+        texts = [
+            {
+                "_geometry_coordinate_space": "band",
+                "bbox": [110, 1254, 635, 1312],
+                "text_pixel_bbox": [153, 1259, 447, 1293],
+                "balloon_bbox": [86, 1230, 659, 1336],
+                "line_polygons": [
+                    [[153, 1259], [447, 1259], [447, 1270], [153, 1270]],
+                    [[153, 1280], [447, 1280], [447, 1293], [153, 1293]],
+                ],
+            }
+        ]
+
+        normalized = _texts_with_band_local_bboxes(
+            texts,
+            width=800,
+            height=1472,
+            band_y_top=1224,
+        )
+
+        self.assertEqual(normalized[0]["bbox"], [110, 1254, 635, 1312])
+        self.assertEqual(normalized[0]["text_pixel_bbox"], [153, 1259, 447, 1293])
+        self.assertEqual(normalized[0]["balloon_bbox"], [86, 1230, 659, 1336])
+        self.assertEqual(normalized[0]["line_polygons"], texts[0]["line_polygons"])
+        self.assertNotIn("_band_local_bbox_normalized", normalized[0])
+
     def test_fallback_vision_blocks_preserve_source_and_balloon_bbox(self):
         from inpainter import _build_fallback_vision_blocks
 

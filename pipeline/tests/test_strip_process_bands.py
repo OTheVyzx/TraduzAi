@@ -681,6 +681,87 @@ class BandToPageDictTests(unittest.TestCase):
         self.assertEqual(block["bubble_id"], "page_006_band_107_bubble_001")
         self.assertTrue(block["card_panel_text_context"])
 
+    def test_attach_ocr_trace_metadata_matches_out_of_order_vision_blocks_by_geometry(self):
+        from strip.process_bands import _attach_ocr_trace_metadata
+
+        page = {
+            "numero": 5,
+            "texts": [
+                {"id": "ocr_004", "text": "POINTS AND QUESTS", "bbox": [559, 497, 699, 578]},
+                {"id": "ocr_006", "text": "WITH MY CURRENT STRENGTH", "bbox": [536, 661, 713, 735]},
+                {"id": "ocr_007", "text": "WANDERING GHOSTS", "bbox": [136, 671, 257, 735]},
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text": "OTHER THAN THE INCOME",
+                    "bbox": [195, 162, 367, 226],
+                },
+            ],
+            # Candidate crop re-OCR can be appended after the original OCR records,
+            # while vision blocks keep detector order. Positional pairing corrupts
+            # every semantic owner in this cycle.
+            "_vision_blocks": [
+                {"bbox": [195, 162, 367, 226]},
+                {"bbox": [559, 497, 699, 578]},
+                {"bbox": [536, 661, 713, 735]},
+                {"bbox": [136, 671, 257, 735]},
+            ],
+        }
+
+        _attach_ocr_trace_metadata(page, band_id="page_005_band_006")
+
+        self.assertEqual(
+            [block["text_id"] for block in page["_vision_blocks"]],
+            ["direct_paddle_reocr_001", "ocr_004", "ocr_006", "ocr_007"],
+        )
+        self.assertEqual(
+            [block["trace_id"] for block in page["_vision_blocks"]],
+            [
+                "direct_paddle_reocr_001@page_005_band_006",
+                "ocr_004@page_005_band_006",
+                "ocr_006@page_005_band_006",
+                "ocr_007@page_005_band_006",
+            ],
+        )
+
+    def test_restore_authoritative_band_identity_overrides_stale_runtime_page_number(self):
+        from strip.process_bands import _restore_authoritative_band_identity
+
+        page = {
+            "numero": 2,
+            "width": 800,
+            "height": 1472,
+            "_source_page_number": 2,
+            "_band_id": "page_002_band_003",
+            "_band_y_top": 403,
+            "_band_index": 3,
+        }
+        page_dict = {
+            "numero": 3,
+            "width": 800,
+            "height": 1472,
+            "_source_page_number": 3,
+            "_band_id": "page_003_band_003",
+            "_band_y_top": 1224,
+            "_band_index": 3,
+        }
+
+        _restore_authoritative_band_identity(page, page_dict)
+
+        self.assertEqual(page["numero"], 3)
+        self.assertEqual(page["_source_page_number"], 3)
+        self.assertEqual(page["_band_id"], "page_003_band_003")
+        self.assertEqual(page["_band_y_top"], 1224)
+        self.assertEqual(page["_band_index"], 3)
+        self.assertEqual(
+            page["_band_identity_repairs"],
+            [
+                {"key": "numero", "previous": 2, "expected": 3},
+                {"key": "_band_id", "previous": "page_002_band_003", "expected": "page_003_band_003"},
+                {"key": "_band_y_top", "previous": 403, "expected": 1224},
+                {"key": "_source_page_number", "previous": 2, "expected": 3},
+            ],
+        )
+
     def test_dark_bubble_reocr_rejects_cross_lobe_text_bbox(self):
         from strip.process_bands import _filter_dark_bubble_reocr_to_balloon
 
@@ -3052,6 +3133,45 @@ class ProcessBandTests(unittest.TestCase):
             self.assertNotIn(key, captured["page"]["_vision_blocks"][0])
         self.assertTrue(translated_page["texts"][0]["skip_processing"])
         self.assertEqual(translated_page["texts"][0]["tipo"], "sfx")
+
+    def test_inpaint_stage_marks_current_band_geometry_as_local(self):
+        from strip.process_bands import _run_inpaint_stage
+        from strip.types import Band
+        import numpy as np
+
+        band = Band(
+            y_top=1224,
+            y_bottom=2696,
+            strip_slice=np.full((1472, 800, 3), 255, dtype=np.uint8),
+        )
+        translated_page = {
+            "numero": 3,
+            "texts": [
+                {
+                    "id": "ocr_010",
+                    "bbox": [110, 1254, 635, 1312],
+                    "text_pixel_bbox": [153, 1259, 447, 1293],
+                }
+            ],
+            "_vision_blocks": [{"id": "ocr_010", "bbox": [110, 1254, 635, 1312]}],
+        }
+        captured = {}
+
+        class CapturingInpainter:
+            def inpaint_band_image(self, image, page):
+                captured["page"] = page
+                return image.copy()
+
+        _run_inpaint_stage(
+            band,
+            inpainter=CapturingInpainter(),
+            translated_page=translated_page,
+            source_page_number=3,
+        )
+
+        self.assertEqual(captured["page"]["_geometry_coordinate_space"], "band")
+        self.assertEqual(captured["page"]["texts"][0]["_geometry_coordinate_space"], "band")
+        self.assertEqual(captured["page"]["_vision_blocks"][0]["_geometry_coordinate_space"], "band")
 
     def test_typeset_stage_does_not_receive_legacy_decision_fields(self):
         from strip.process_bands import _run_typeset_stage

@@ -213,6 +213,96 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(correct["render_bbox"], [275, 16138, 547, 16321])
         self.assertTrue(correct["_cross_page_band_rehomed_geometry"])
 
+    def test_rehome_cross_page_band_layer_does_not_merge_into_unrelated_longer_sibling(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 2,
+                    "text_layers": [
+                        {
+                            "id": "ocr_004",
+                            "text_id": "ocr_004",
+                            "trace_id": "ocr_004@page_002_band_019",
+                            "band_id": "page_002_band_019",
+                            "visible": True,
+                            "translated": "TEXTO MAIS LONGO DE OUTRO BALÃO",
+                            "text_pixel_bbox": [80, 300, 250, 380],
+                            "target_bbox": [60, 280, 270, 400],
+                        },
+                        {
+                            "id": "ocr_006",
+                            "text_id": "ocr_006",
+                            "trace_id": "ocr_006@page_002_band_019",
+                            "band_id": "page_002_band_019",
+                            "visible": True,
+                            "translated": "TEXTO CURTO ORIGINAL",
+                            "text_pixel_bbox": [500, 640, 700, 720],
+                            "target_bbox": [480, 620, 720, 740],
+                        },
+                    ],
+                },
+                {
+                    "numero": 3,
+                    "text_layers": [
+                        {
+                            "id": "ocr_006",
+                            "text_id": "ocr_006",
+                            "trace_id": "ocr_006@page_002_band_019",
+                            "band_id": "page_002_band_019",
+                            "visible": True,
+                            "translated": "TEXTO CURTO CORRIGIDO",
+                            "text_pixel_bbox": [500, 640, 700, 720],
+                            "target_bbox": [480, 620, 720, 740],
+                        }
+                    ],
+                },
+            ]
+        }
+
+        moved = main._rehome_cross_page_band_layers(project)
+
+        points_layer, strength_layer = project["paginas"][0]["text_layers"]
+        misplaced = project["paginas"][1]["text_layers"][0]
+        self.assertEqual(moved, 1)
+        self.assertEqual(points_layer["translated"], "TEXTO MAIS LONGO DE OUTRO BALÃO")
+        self.assertEqual(strength_layer["translated"], "TEXTO CURTO CORRIGIDO")
+        self.assertFalse(misplaced["visible"])
+        self.assertEqual(misplaced["merged_into_trace_id"], "ocr_006@page_002_band_019")
+
+    def test_rehome_cross_page_band_layer_moves_standalone_layer_when_destination_has_no_band_layer(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 2,
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "text_id": "ocr_001",
+                            "trace_id": "ocr_001@page_003_band_013",
+                            "band_id": "page_003_band_013",
+                            "visible": True,
+                            "translated": "TEXTO QUE PERTENCE À PÁGINA 3",
+                            "text_pixel_bbox": [120, 340, 410, 460],
+                            "target_bbox": [100, 320, 430, 480],
+                        }
+                    ],
+                },
+                {"numero": 3, "text_layers": []},
+            ]
+        }
+
+        moved = main._rehome_cross_page_band_layers(project)
+
+        misplaced = project["paginas"][0]["text_layers"][0]
+        destination_layers = project["paginas"][1]["text_layers"]
+        self.assertEqual(moved, 1)
+        self.assertFalse(misplaced["visible"])
+        self.assertEqual(misplaced["render_policy"], "rehomed_to_destination")
+        self.assertEqual(len(destination_layers), 1)
+        self.assertEqual(destination_layers[0]["trace_id"], "ocr_001@page_003_band_013")
+        self.assertEqual(destination_layers[0]["translated"], "TEXTO QUE PERTENCE À PÁGINA 3")
+        self.assertIn("cross_page_band_rehomed", destination_layers[0]["qa_flags"])
+
     def test_scrub_project_local_auxiliary_bboxes_removes_band_local_render_plan_fields(self) -> None:
         project = {
             "paginas": [
