@@ -1888,6 +1888,27 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
             block_identities = _identity_values(current)
             text_identities = _identity_values(best_text)
             matched_by_geometry = block_bbox is not None
+            identity_geometry_conflict = bool(
+                matched_by_geometry
+                and block_identities
+                and text_identities
+                and not (block_identities & text_identities)
+            )
+            if identity_geometry_conflict:
+                previous_identity = {
+                    key: current.get(key)
+                    for key in ("id", "text_id", "trace_id", "text_instance_id")
+                    if current.get(key) not in (None, "")
+                }
+                metrics = current.setdefault("qa_metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["vision_block_identity_geometry_conflict"] = {
+                        "block_identity": previous_identity,
+                        "geometry_text_id": best_text.get("id") or best_text.get("text_id"),
+                        "overlap": round(float(best_score), 6),
+                        "decision": "audit_only_keep_existing_processing",
+                    }
+                current["_inpaint_identity_geometry_conflict"] = True
             preserve_current_mask_evidence = _item_has_current_inpaint_mask_evidence(current)
             for key in (
                 "bbox",
@@ -1943,24 +1964,6 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
             coherent_text_bbox = _text_bbox_for_inpaint_geometry(current, width, height)
             if coherent_text_bbox is not None:
                 current["text_pixel_bbox"] = coherent_text_bbox
-            if matched_by_geometry and block_identities and text_identities and not (block_identities & text_identities):
-                previous_identity = {
-                    key: current.get(key)
-                    for key in ("id", "text_id", "trace_id", "text_instance_id")
-                    if current.get(key) not in (None, "")
-                }
-                for key in ("id", "text_id", "trace_id", "text_instance_id"):
-                    value = best_text.get(key)
-                    if value not in (None, ""):
-                        current[key] = copy.deepcopy(value)
-                metrics = current.setdefault("qa_metrics", {})
-                if isinstance(metrics, dict):
-                    metrics["vision_block_identity_rebound_to_geometry"] = {
-                        "previous_identity": previous_identity,
-                        "matched_text_id": best_text.get("id") or best_text.get("text_id"),
-                        "overlap": round(float(best_score), 6),
-                    }
-                _append_qa_flag_to_item(current, "vision_block_identity_rebound_to_geometry")
             if len(matched_texts) > 1:
                 merged_polygons = _merge_unique_line_polygons(matched_texts)
                 if merged_polygons:
@@ -2008,6 +2011,9 @@ def _append_missing_text_inpaint_blocks(
         if not isinstance(text, dict):
             continue
         text_ids = _identity_values(text)
+        is_translator_note_recovery = _translator_note_text_only_mask(text)
+        if not is_translator_note_recovery:
+            continue
         if text_ids and text_ids & existing_ids:
             continue
         if (
@@ -9132,15 +9138,74 @@ def _record_post_inpaint_glyph_residuals(
         return []
 
     rows: list[dict] = []
-    residual_candidates: list[dict] = []
+    row_by_identity: dict[str, int] = {}
+    passive_candidates = _processable_texts_for_inpaint(ocr_page)
+    strong_candidates: list[dict] = list(passive_candidates)
+    known_candidate_ids = {id(text) for text in strong_candidates}
     for text in list(ocr_page.get("texts") or []):
-        if not isinstance(text, dict) or _text_suppressed_for_inpaint(text):
+        if not isinstance(text, dict) or id(text) in known_candidate_ids or _text_suppressed_for_inpaint(text):
             continue
         flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
-        if _route_action_blocks_inpaint(text) and "render_on_art_suspected" not in flags:
+        if "render_on_art_suspected" in flags:
+            strong_candidates.append(text)
+
+    # Preserve the existing passive diagnostic signal.  Older layout paths use
+    # this flag as evidence, while only the strict raw-glyph check below can
+    # turn a residual into a source-preservation action.
+    for index, text in enumerate(passive_candidates):
+        try:
+            raw_mask = build_raw_text_mask_from_image(dict(text), original_rgb, original_rgb.shape)
+        except Exception:
+            raw_mask = None
+        if raw_mask is None or not np.any(raw_mask):
             continue
-        residual_candidates.append(text)
-    for index, text in enumerate(residual_candidates):
+        try:
+            glyph_region = expand_text_mask(np.where(raw_mask > 0, 255, 0).astype(np.uint8), expand_px=2)
+            residual = detect_residual_text(
+                original_rgb,
+                cleaned_rgb,
+                glyph_region,
+                include_unchanged_dark=True,
+                include_light_residual=True,
+            )
+        except Exception:
+            continue
+        if not residual.get("has_residual"):
+            continue
+
+        text_id = str(text.get("id") or text.get("text_id") or f"ocr_{index:03d}")
+        trace_id = str(text.get("trace_id") or text_id)
+        payload = {
+            "text_id": text_id,
+            "trace_id": trace_id,
+            "source": "raw_glyph_mask_expand2",
+            "raw_mask_pixels": int(np.count_nonzero(raw_mask)),
+            "region_mask_pixels": int(np.count_nonzero(glyph_region)),
+            "has_residual": True,
+            "fallback_eligible": False,
+            "confirmation": "diagnostic_unverified",
+            "score": float(residual.get("score") or 0.0),
+            "flags": [str(flag) for flag in residual.get("flags") or [] if str(flag).strip()],
+            "dark_residual_pixels": int(residual.get("dark_residual_pixels") or 0),
+            "light_residual_pixels": int(residual.get("light_residual_pixels") or 0),
+            "colored_residual_pixels": int(residual.get("colored_residual_pixels") or 0),
+        }
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["post_inpaint_glyph_residual"] = payload
+        flags = text.setdefault("qa_flags", [])
+        if isinstance(flags, list) and "glyph_confirmed_residual_after_inpaint" not in flags:
+            flags.append("glyph_confirmed_residual_after_inpaint")
+        row_by_identity[trace_id] = len(rows)
+        rows.append(payload)
+
+    # A source-preservation fallback requires strong overlap with the raw glyph
+    # pixels and an explicit text-on-art route.  Ordinary bubble text keeps the
+    # passive diagnostic above; a false positive must never suppress it.
+    for index, text in enumerate(strong_candidates):
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        if "render_on_art_suspected" not in flags:
+            continue
         try:
             raw_mask = build_raw_text_mask_from_image(dict(text), original_rgb, original_rgb.shape)
         except Exception:
@@ -9192,7 +9257,12 @@ def _record_post_inpaint_glyph_residuals(
         text["render_policy"] = "preserve_original"
         text["route_action"] = "review_required"
         text["route_reason"] = "confirmed_source_glyph_residual"
-        rows.append(payload)
+        prior_index = row_by_identity.get(trace_id)
+        if prior_index is None:
+            row_by_identity[trace_id] = len(rows)
+            rows.append(payload)
+        else:
+            rows[prior_index] = payload
 
     if rows:
         ocr_page["_strip_post_inpaint_glyph_residuals"] = rows
@@ -10766,6 +10836,26 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         width,
         height,
     )
+    identity_conflicts: list[dict] = []
+    for block in vision_blocks:
+        if not isinstance(block, dict) or not bool(block.get("_inpaint_identity_geometry_conflict")):
+            continue
+        metrics = block.get("qa_metrics") if isinstance(block.get("qa_metrics"), dict) else {}
+        conflict = metrics.get("vision_block_identity_geometry_conflict") if isinstance(metrics, dict) else None
+        if not isinstance(conflict, dict):
+            continue
+        identity_conflicts.append(
+            {
+                "text_id": block.get("id") or block.get("text_id"),
+                "trace_id": block.get("trace_id"),
+                "bbox": copy.deepcopy(block.get("bbox") or block.get("text_pixel_bbox") or []),
+                **copy.deepcopy(conflict),
+            }
+        )
+    if identity_conflicts:
+        ocr_page["_strip_inpaint_identity_geometry_conflicts"] = identity_conflicts
+    else:
+        ocr_page.pop("_strip_inpaint_identity_geometry_conflicts", None)
     promoted_before = len(vision_blocks)
     vision_blocks = _append_missing_text_inpaint_blocks(
         vision_blocks,

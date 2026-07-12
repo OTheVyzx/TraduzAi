@@ -20,6 +20,7 @@ from strip.run import (
 )
 from strip.process_bands import (
     _band_to_page_dict,
+    _record_inpaint_identity_geometry_conflict_warnings,
     _record_ocr_raw_blocks,
     _record_inpaint_residual_warnings,
     _record_unsafe_mask_contracts,
@@ -751,6 +752,41 @@ def test_inpaint_residual_warning_records_confirmed_glyph_residual_without_prese
         assert rows[0]["residual_text_ids"] == ["ocr_004"]
         assert rows[0]["fallback"] == "pending_safe_recovery"
         assert rows[0]["preserve_original"] is False
+    finally:
+        bind_recorder(None)
+
+
+def test_inpaint_identity_geometry_conflict_warning_is_audit_only(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "_strip_inpaint_identity_geometry_conflicts": [
+                {
+                    "text_id": "ocr_004",
+                    "trace_id": "ocr_004@page_004_band_036",
+                    "bbox": [11, 52, 88, 76],
+                    "block_identity": {"id": "ocr_004"},
+                    "geometry_text_id": "ocr_009",
+                    "overlap": 0.93,
+                    "decision": "audit_only_keep_existing_processing",
+                }
+            ],
+        }
+
+        _record_inpaint_identity_geometry_conflict_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_identity_geometry_conflicts.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["decision"] == "audit_only_keep_existing_processing"
+        assert rows[0]["recommended_recovery"] == "resolve_ocr_owner_before_inpaint"
+        assert rows[0]["action"] == "warning_only_pipeline_completed"
     finally:
         bind_recorder(None)
 

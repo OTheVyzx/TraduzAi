@@ -2624,6 +2624,48 @@ def _record_inpaint_residual_warnings(
         return
 
 
+def _record_inpaint_identity_geometry_conflict_warnings(
+    page: dict,
+    *,
+    band_id: str,
+    source_page_number: int | None = None,
+) -> None:
+    """Record detector/OCR identity conflicts without changing the render path."""
+
+    try:
+        from debug_tools import get_recorder
+    except Exception:
+        return
+    recorder = get_recorder()
+    if not recorder or not getattr(recorder, "enabled", False):
+        return
+    try:
+        page_number = _source_page_number_from_page(page, source_page_number)
+        page_id = _page_id_for(page_number)
+        for conflict in list((page or {}).get("_strip_inpaint_identity_geometry_conflicts") or []):
+            if not isinstance(conflict, dict):
+                continue
+            text_id = str(conflict.get("text_id") or "")
+            recorder.write_jsonl(
+                "warnings/inpaint_identity_geometry_conflicts.jsonl",
+                {
+                    "page_id": page_id,
+                    "band_id": band_id,
+                    "text_id": text_id,
+                    "trace_id": str(conflict.get("trace_id") or _trace_id_for(text_id, band_id)),
+                    "bbox": copy.deepcopy(conflict.get("bbox") or []),
+                    "block_identity": copy.deepcopy(conflict.get("block_identity") or {}),
+                    "geometry_text_id": conflict.get("geometry_text_id"),
+                    "overlap": conflict.get("overlap"),
+                    "decision": str(conflict.get("decision") or "audit_only_keep_existing_processing"),
+                    "recommended_recovery": "resolve_ocr_owner_before_inpaint",
+                    "action": "warning_only_pipeline_completed",
+                },
+            )
+    except Exception:
+        return
+
+
 def _logical_mask_contract_group(text: dict, *, text_id: str, band_id: str) -> tuple[str, list[str]]:
     """Return the existing OCR provenance group used for a mask audit row.
 
@@ -8875,6 +8917,11 @@ def process_band(
         source_page_number=source_page_number,
     )
     _record_inpaint_residual_warnings(
+        translated_page,
+        band_id=band_id,
+        source_page_number=source_page_number,
+    )
+    _record_inpaint_identity_geometry_conflict_warnings(
         translated_page,
         band_id=band_id,
         source_page_number=source_page_number,

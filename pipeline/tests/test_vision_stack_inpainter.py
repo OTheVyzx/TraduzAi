@@ -5449,7 +5449,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertFalse(_is_strong_raw_glyph_residual(weak_expanded_art, raw_mask_pixels=8725))
         self.assertTrue(_is_strong_raw_glyph_residual(strong_unprocessed_text, raw_mask_pixels=3194))
 
-    def test_geometry_rebind_recovers_missing_safe_bubble_without_promoting_text_on_art(self):
+    def test_geometry_identity_conflict_quarantines_stale_block_without_unverified_promotion(self):
         import inpainter
         from inpainter import _append_missing_text_inpaint_blocks, _enrich_vision_blocks_from_texts_for_inpaint
 
@@ -5457,6 +5457,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         safe_bubble = {
             "id": "ocr_safe",
             "trace_id": "ocr_safe@page_001_band_001",
+            "translated": "SAFE TRANSLATION",
             "bbox": [12, 18, 72, 48],
             "text_pixel_bbox": [18, 24, 66, 42],
             "line_polygons": [[[18, 24], [66, 24], [66, 42], [18, 42]]],
@@ -5472,6 +5473,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         geometric_owner = {
             "id": "ocr_other",
             "trace_id": "ocr_other@page_001_band_001",
+            "translated": "OTHER TRANSLATION",
             "bbox": [90, 18, 150, 48],
             "text_pixel_bbox": [96, 24, 144, 42],
             "line_polygons": [[[96, 24], [144, 24], [144, 42], [96, 42]]],
@@ -5503,6 +5505,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         stale_vision_block = {
             "id": "ocr_safe",
             "trace_id": "ocr_safe@page_001_band_001",
+            "translated": "SAFE TRANSLATION",
             "bbox": [90, 18, 150, 48],
             "text_pixel_bbox": [96, 24, 144, 42],
             "line_polygons": [[[96, 24], [144, 24], [144, 42], [96, 42]]],
@@ -5525,9 +5528,15 @@ class VisionStackInpainterTests(unittest.TestCase):
                 image_rgb=image,
             )
 
-        self.assertEqual([block["id"] for block in blocks], ["ocr_other", "ocr_safe"])
-        self.assertIn("vision_block_identity_rebound_to_geometry", blocks[0]["qa_flags"])
-        self.assertIn("missing_text_promoted_to_inpaint_block", blocks[1]["qa_flags"])
+        stale = blocks[0]
+
+        self.assertEqual(stale["id"], "ocr_safe")
+        self.assertEqual(stale["translated"], "SAFE TRANSLATION")
+        self.assertTrue(stale["_inpaint_identity_geometry_conflict"])
+        self.assertNotIn("skip_processing", stale)
+        self.assertIn("vision_block_identity_geometry_conflict", stale["qa_metrics"])
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(any(block.get("_promoted_missing_text_inpaint_block") for block in blocks))
 
     def test_derived_card_panel_fast_fill_requires_global_opt_in_without_background_metadata(self):
         from inpainter import _apply_fast_dark_panel_text_fill
