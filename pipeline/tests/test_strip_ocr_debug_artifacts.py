@@ -755,6 +755,59 @@ def test_inpaint_residual_warning_records_confirmed_glyph_residual_without_prese
         bind_recorder(None)
 
 
+def test_inpaint_residual_warning_records_applied_source_preservation_fallback(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_004",
+                    "trace_id": "ocr_004@page_004_band_036",
+                    "original": "RESIDUAL SOURCE",
+                    "bbox": [11, 52, 88, 76],
+                    "preserve_original": True,
+                    "skip_processing": True,
+                    "qa_flags": [
+                        "glyph_confirmed_residual_after_inpaint",
+                        "confirmed_source_glyph_residual_preserved",
+                    ],
+                    "qa_metrics": {
+                        "post_inpaint_glyph_residual": {
+                            "has_residual": True,
+                            "fallback_eligible": True,
+                            "confirmation": "strong_raw_glyph_overlap",
+                            "score": 0.155604,
+                            "source": "raw_glyph_mask",
+                            "raw_mask_pixels": 3194,
+                            "region_mask_pixels": 3194,
+                            "dark_residual_pixels": 497,
+                            "light_residual_pixels": 0,
+                            "colored_residual_pixels": 3,
+                        }
+                    },
+                }
+            ],
+        }
+
+        _record_inpaint_residual_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["fallback"] == "preserve_original_no_render"
+        assert rows[0]["action"] == "warning_only_pipeline_completed"
+        assert rows[0]["preserve_original"] is True
+        assert rows[0]["skip_processing"] is True
+    finally:
+        bind_recorder(None)
+
+
 def test_process_band_emits_unsafe_mask_contract_warning_after_inpaint(tmp_path):
     class ContractReportingInpainter:
         def inpaint_band_image(self, image_rgb, page):

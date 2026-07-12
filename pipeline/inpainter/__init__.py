@@ -1885,6 +1885,9 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                         best_score = 1.0
                         break
         if best_text is not None and best_score >= 0.35:
+            block_identities = _identity_values(current)
+            text_identities = _identity_values(best_text)
+            matched_by_geometry = block_bbox is not None
             preserve_current_mask_evidence = _item_has_current_inpaint_mask_evidence(current)
             for key in (
                 "bbox",
@@ -1940,6 +1943,24 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
             coherent_text_bbox = _text_bbox_for_inpaint_geometry(current, width, height)
             if coherent_text_bbox is not None:
                 current["text_pixel_bbox"] = coherent_text_bbox
+            if matched_by_geometry and block_identities and text_identities and not (block_identities & text_identities):
+                previous_identity = {
+                    key: current.get(key)
+                    for key in ("id", "text_id", "trace_id", "text_instance_id")
+                    if current.get(key) not in (None, "")
+                }
+                for key in ("id", "text_id", "trace_id", "text_instance_id"):
+                    value = best_text.get(key)
+                    if value not in (None, ""):
+                        current[key] = copy.deepcopy(value)
+                metrics = current.setdefault("qa_metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["vision_block_identity_rebound_to_geometry"] = {
+                        "previous_identity": previous_identity,
+                        "matched_text_id": best_text.get("id") or best_text.get("text_id"),
+                        "overlap": round(float(best_score), 6),
+                    }
+                _append_qa_flag_to_item(current, "vision_block_identity_rebound_to_geometry")
             if len(matched_texts) > 1:
                 merged_polygons = _merge_unique_line_polygons(matched_texts)
                 if merged_polygons:
@@ -1994,6 +2015,9 @@ def _append_missing_text_inpaint_blocks(
             or _route_action_blocks_inpaint(text)
             or _text_has_rejected_bubble_without_glyph_evidence(text)
         ):
+            continue
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        if "render_on_art_suspected" in flags:
             continue
         if _translator_note_text_only_mask(text) and not _translator_note_has_text_geometry(text):
             continue
@@ -9108,25 +9132,33 @@ def _record_post_inpaint_glyph_residuals(
         return []
 
     rows: list[dict] = []
-    for index, text in enumerate(_processable_texts_for_inpaint(ocr_page)):
+    residual_candidates: list[dict] = []
+    for text in list(ocr_page.get("texts") or []):
+        if not isinstance(text, dict) or _text_suppressed_for_inpaint(text):
+            continue
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        if _route_action_blocks_inpaint(text) and "render_on_art_suspected" not in flags:
+            continue
+        residual_candidates.append(text)
+    for index, text in enumerate(residual_candidates):
         try:
             raw_mask = build_raw_text_mask_from_image(dict(text), original_rgb, original_rgb.shape)
         except Exception:
             raw_mask = None
         if raw_mask is None or not np.any(raw_mask):
             continue
-        glyph_region = expand_text_mask(np.where(raw_mask > 0, 255, 0).astype(np.uint8), expand_px=2)
         try:
             residual = detect_residual_text(
                 original_rgb,
                 cleaned_rgb,
-                glyph_region,
+                raw_mask,
                 include_unchanged_dark=True,
                 include_light_residual=True,
             )
         except Exception:
             continue
-        if not residual.get("has_residual"):
+        raw_mask_pixels = int(np.count_nonzero(raw_mask))
+        if not _is_strong_raw_glyph_residual(residual, raw_mask_pixels=raw_mask_pixels):
             continue
 
         text_id = str(text.get("id") or text.get("text_id") or f"ocr_{index:03d}")
@@ -9134,10 +9166,12 @@ def _record_post_inpaint_glyph_residuals(
         payload = {
             "text_id": text_id,
             "trace_id": trace_id,
-            "source": "raw_glyph_mask_expand2",
-            "raw_mask_pixels": int(np.count_nonzero(raw_mask)),
-            "region_mask_pixels": int(np.count_nonzero(glyph_region)),
+            "source": "raw_glyph_mask",
+            "raw_mask_pixels": raw_mask_pixels,
+            "region_mask_pixels": raw_mask_pixels,
             "has_residual": True,
+            "fallback_eligible": True,
+            "confirmation": "strong_raw_glyph_overlap",
             "score": float(residual.get("score") or 0.0),
             "flags": [str(flag) for flag in residual.get("flags") or [] if str(flag).strip()],
             "dark_residual_pixels": int(residual.get("dark_residual_pixels") or 0),
@@ -9150,6 +9184,14 @@ def _record_post_inpaint_glyph_residuals(
         flags = text.setdefault("qa_flags", [])
         if isinstance(flags, list) and "glyph_confirmed_residual_after_inpaint" not in flags:
             flags.append("glyph_confirmed_residual_after_inpaint")
+        if isinstance(flags, list) and "confirmed_source_glyph_residual_preserved" not in flags:
+            flags.append("confirmed_source_glyph_residual_preserved")
+        text["visible"] = False
+        text["preserve_original"] = True
+        text["skip_processing"] = True
+        text["render_policy"] = "preserve_original"
+        text["route_action"] = "review_required"
+        text["route_reason"] = "confirmed_source_glyph_residual"
         rows.append(payload)
 
     if rows:
@@ -9157,6 +9199,32 @@ def _record_post_inpaint_glyph_residuals(
     else:
         ocr_page.pop("_strip_post_inpaint_glyph_residuals", None)
     return rows
+
+
+def _is_strong_raw_glyph_residual(residual: dict | None, *, raw_mask_pixels: int) -> bool:
+    """Return true only when retained pixels strongly follow the raw glyph support."""
+
+    if not isinstance(residual, dict) or not bool(residual.get("has_residual")):
+        return False
+    try:
+        score = float(residual.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    try:
+        dark_pixels = int(residual.get("dark_residual_pixels") or 0)
+    except (TypeError, ValueError):
+        dark_pixels = 0
+    try:
+        light_pixels = int(residual.get("light_residual_pixels") or 0)
+    except (TypeError, ValueError):
+        light_pixels = 0
+    try:
+        colored_pixels = int(residual.get("colored_residual_pixels") or 0)
+    except (TypeError, ValueError):
+        colored_pixels = 0
+    retained_pixels = max(0, dark_pixels) + max(0, light_pixels) + max(0, colored_pixels)
+    required_pixels = max(24, int(max(1, raw_mask_pixels) * 0.04))
+    return bool(score >= 0.08 and retained_pixels >= required_pixels)
 
 
 def _light_residual_contrast(gray: np.ndarray) -> np.ndarray:

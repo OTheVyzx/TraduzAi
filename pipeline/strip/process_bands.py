@@ -2597,6 +2597,8 @@ def _record_inpaint_residual_warnings(
                     "bboxes": [],
                     "qa_flags": [],
                     "residual_metrics": [],
+                    "preserve_original": False,
+                    "skip_processing": False,
                 },
             )
             group["residual_text_ids"].append(text_id)
@@ -2604,6 +2606,8 @@ def _record_inpaint_residual_warnings(
             group["bboxes"].append(copy.deepcopy(text.get("bbox") or text.get("text_pixel_bbox") or []))
             group["qa_flags"].extend(flags)
             group["residual_metrics"].append(copy.deepcopy(residual))
+            group["preserve_original"] = bool(group["preserve_original"] or text.get("preserve_original"))
+            group["skip_processing"] = bool(group["skip_processing"] or text.get("skip_processing"))
 
         for group in confirmed_groups.values():
             group["residual_text_ids"] = sorted({value for value in group["residual_text_ids"] if value})
@@ -2612,11 +2616,9 @@ def _record_inpaint_residual_warnings(
             group["is_continuation_group"] = len(group["logical_group_trace_ids"]) > 1
             group["partial_group_render_forbidden"] = bool(group["is_continuation_group"])
             group["warning_type"] = "confirmed_glyph_residual"
-            group["fallback"] = "pending_safe_recovery"
+            group["fallback"] = "preserve_original_no_render" if group["preserve_original"] else "pending_safe_recovery"
             group["action"] = "warning_only_pipeline_completed"
             group["source"] = "post_inpaint_glyph_residual"
-            group["preserve_original"] = False
-            group["skip_processing"] = False
             recorder.write_jsonl("warnings/inpaint_residual_blocks.jsonl", group)
     except Exception:
         return

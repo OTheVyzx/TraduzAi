@@ -12521,5 +12521,26 @@ class TypesettingRendererTests(unittest.TestCase):
 
         self.assertTrue(renderer_mod._should_skip_unverified_merged_fragment(text))
 
+    def test_confirmed_source_residual_preserves_original_instead_of_overlaying_translation(self):
+        text = {
+            "translated": "TRADUÇÃO QUE NÃO PODE SOBREPOR A FONTE",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["glyph_confirmed_residual_after_inpaint", "render_on_art_suspected"],
+            "qa_metrics": {
+                "post_inpaint_glyph_residual": {
+                    "has_residual": True,
+                    "fallback_eligible": True,
+                    "confirmation": "strong_raw_glyph_overlap",
+                }
+            },
+        }
+
+        self.assertIsNone(renderer_mod._prepare_special_content_render_block(text))
+        self.assertFalse(text["visible"])
+        self.assertTrue(text["preserve_original"])
+        self.assertEqual(text["render_policy"], "preserve_original")
+        self.assertEqual(text["route_action"], "review_required")
+        self.assertEqual(text["route_reason"], "confirmed_source_glyph_residual")
+
 if __name__ == "__main__":
     unittest.main()

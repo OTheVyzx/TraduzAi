@@ -5300,9 +5300,34 @@ def _is_art_fragment_review(text: dict) -> bool:
     )
 
 
+def _has_confirmed_source_glyph_residual(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "glyph_confirmed_residual_after_inpaint" not in flags:
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    residual = metrics.get("post_inpaint_glyph_residual") if isinstance(metrics, dict) else None
+    return bool(
+        isinstance(residual, dict)
+        and residual.get("has_residual") is True
+        and residual.get("fallback_eligible") is True
+        and str(residual.get("confirmation") or "").strip() == "strong_raw_glyph_overlap"
+    )
+
+
 def _prepare_special_content_render_block(text: dict) -> dict | None:
     if _is_unsafe_white_glyph_preservation(text):
         text["visible"] = False
+        return None
+    if _has_confirmed_source_glyph_residual(text):
+        _merge_qa_flags(text, ["confirmed_source_glyph_residual_preserved"])
+        text["visible"] = False
+        text["preserve_original"] = True
+        text["skip_processing"] = True
+        text["render_policy"] = "preserve_original"
+        text["route_action"] = "review_required"
+        text["route_reason"] = "confirmed_source_glyph_residual"
         return None
     _neutralize_removed_render_decision_fields(text)
     if _is_suppressed_scanlation_credit(text):
