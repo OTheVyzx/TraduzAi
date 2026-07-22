@@ -56,7 +56,7 @@ describe("StudioLibraryHome", () => {
       ...createEmptyLibrary(),
       selectedWorkId: work.id,
       works: [work],
-      preferences: { chapterView: "grid" as const, thumbnailSize: 192 },
+      preferences: { chapterView: "grid" as const, thumbnailSize: 192, trackingLanguage: "en" },
     };
     const html = renderToStaticMarkup(createElement(StudioLibraryHome, {
       document,

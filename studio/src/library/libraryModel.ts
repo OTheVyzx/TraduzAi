@@ -27,6 +27,26 @@ export interface ExternalWorkLink {
   mangaDexId?: string;
   canonicalUrl?: string;
   manualStatusOverride?: PublicationStatus | null;
+  tracking?: WorkTrackingCache;
+}
+
+export interface ExternalTrackingSnapshot {
+  provider: string;
+  providerId: string;
+  title: string;
+  status: PublicationStatus;
+  remoteChapterCount: number | null;
+  latestChapter: string | null;
+  coverUrl: string | null;
+  siteUrl: string | null;
+  fetchedAt: string;
+}
+
+export interface WorkTrackingCache {
+  snapshots: ExternalTrackingSnapshot[];
+  fetchedAt: string;
+  expiresAt: string;
+  lastError: string | null;
 }
 
 export interface LibraryWork {
@@ -46,6 +66,7 @@ export interface StudioLibrary {
   preferences: {
     chapterView: "grid" | "list";
     thumbnailSize: number;
+    trackingLanguage: string;
   };
 }
 
@@ -107,12 +128,60 @@ function normalizeExternalLink(value: unknown): ExternalWorkLink {
       : typeof override === "string" && PUBLICATION_STATUSES.has(override as PublicationStatus)
         ? (override as PublicationStatus)
         : undefined;
+  const tracking = normalizeTrackingCache(value.tracking);
 
   return {
     ...(anilistId === undefined ? {} : { anilistId }),
     ...(mangaDexId === undefined ? {} : { mangaDexId }),
     ...(canonicalUrl === undefined ? {} : { canonicalUrl }),
     ...(manualStatusOverride === undefined ? {} : { manualStatusOverride }),
+    ...(tracking === undefined ? {} : { tracking }),
+  };
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  return asOptionalString(value) ?? null;
+}
+
+function normalizeTrackingSnapshot(value: unknown): ExternalTrackingSnapshot | null {
+  if (!isRecord(value)) return null;
+  const provider = asOptionalString(value.provider);
+  const providerId = asOptionalString(value.providerId);
+  const title = asOptionalString(value.title);
+  const fetchedAt = asOptionalString(value.fetchedAt);
+  if (!provider || !providerId || !title || !fetchedAt) return null;
+
+  return {
+    provider,
+    providerId,
+    title,
+    status: normalizePublicationStatus(value.status),
+    remoteChapterCount: typeof value.remoteChapterCount === "number" && Number.isFinite(value.remoteChapterCount)
+      ? Math.max(0, value.remoteChapterCount)
+      : null,
+    latestChapter: normalizeNullableString(value.latestChapter),
+    coverUrl: normalizeNullableString(value.coverUrl),
+    siteUrl: normalizeNullableString(value.siteUrl),
+    fetchedAt,
+  };
+}
+
+function normalizeTrackingCache(value: unknown): WorkTrackingCache | undefined {
+  if (!isRecord(value)) return undefined;
+  const fetchedAt = asOptionalString(value.fetchedAt);
+  const expiresAt = asOptionalString(value.expiresAt);
+  if (!fetchedAt || !expiresAt) return undefined;
+  const snapshots = Array.isArray(value.snapshots)
+    ? value.snapshots
+        .map(normalizeTrackingSnapshot)
+        .filter((snapshot): snapshot is ExternalTrackingSnapshot => snapshot !== null)
+    : [];
+
+  return {
+    snapshots,
+    fetchedAt,
+    expiresAt,
+    lastError: normalizeNullableString(value.lastError),
   };
 }
 
@@ -178,6 +247,7 @@ export function createEmptyLibrary(): StudioLibrary {
     preferences: {
       chapterView: "grid",
       thumbnailSize: DEFAULT_THUMBNAIL_SIZE,
+      trackingLanguage: "en",
     },
   };
 }
@@ -204,6 +274,7 @@ export function normalizeLibrary(value: unknown): StudioLibrary {
     preferences: {
       chapterView: preferences.chapterView === "list" ? "list" : "grid",
       thumbnailSize: Math.min(MAX_THUMBNAIL_SIZE, Math.max(MIN_THUMBNAIL_SIZE, rawThumbnailSize)),
+      trackingLanguage: asOptionalString(preferences.trackingLanguage) ?? "en",
     },
   };
 }

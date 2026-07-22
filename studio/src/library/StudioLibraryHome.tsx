@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, LoaderCircle } from "lucide-react";
+import { AlertTriangle, Bell, LoaderCircle } from "lucide-react";
 import traduzaiLogoUrl from "../../../traduzaistudiologo.svg";
 import {
   openCoverImageDialog,
@@ -12,6 +12,9 @@ import {
   type PreparedManualPage,
 } from "../backend/projectDialog";
 import type { AddLibraryWorkInput, LibraryStoreStatus } from "../store/libraryStore";
+import { LinkWorkDialog } from "../tracking/LinkWorkDialog";
+import { UpdatesView } from "../tracking/UpdatesView";
+import { createTrackingCache, TRACKING_CACHE_TTL_MS, type WorkTrackingSnapshot } from "../tracking/workTracking";
 import { AttachProjectDialog, type ProjectAttachmentDraft } from "./AttachProjectDialog";
 import type { StudioLibrary } from "./libraryModel";
 import { ChapterBrowser } from "./ChapterBrowser";
@@ -38,6 +41,7 @@ export function StudioLibraryHome({
   onOpenChapter,
   onSetChapterView,
   onSetThumbnailSize,
+  onSetTrackingLanguage,
   initialSelectedChapterPath = null,
 }: {
   document: StudioLibrary;
@@ -61,6 +65,7 @@ export function StudioLibraryHome({
   onOpenChapter: (projectPath: string) => void;
   onSetChapterView: (view: "grid" | "list") => void;
   onSetThumbnailSize: (size: number) => void;
+  onSetTrackingLanguage?: (language: string) => void;
   initialSelectedChapterPath?: string | null;
 }) {
   const [workQuery, setWorkQuery] = useState("");
@@ -75,7 +80,10 @@ export function StudioLibraryHome({
   const [editingWorkId, setEditingWorkId] = useState<string | null>(null);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [createChapterDialogOpen, setCreateChapterDialogOpen] = useState(false);
+  const [linkWorkId, setLinkWorkId] = useState<string | null>(null);
+  const [updatesOpen, setUpdatesOpen] = useState(false);
   const [missingProjectPaths, setMissingProjectPaths] = useState<Set<string>>(new Set());
+  const linkingWork = document.works.find((work) => work.id === linkWorkId) ?? null;
   useEffect(() => {
     setSelectedChapterId(
       selectedWork?.chapters.find((chapter) => chapter.projectPath === initialSelectedChapterPath)?.id ?? null,
@@ -135,6 +143,29 @@ export function StudioLibraryHome({
     setSelectedChapterId(null);
   };
 
+  const linkTrackingSource = async (snapshot: WorkTrackingSnapshot) => {
+    if (!linkingWork) return;
+    const previousSnapshots = linkingWork.external.tracking?.snapshots ?? [];
+    const snapshots = [
+      ...previousSnapshots.filter((candidate) => candidate.provider !== snapshot.provider),
+      snapshot,
+    ];
+    await onSaveWork({
+      id: linkingWork.id,
+      title: linkingWork.title,
+      aliases: linkingWork.aliases,
+      coverPath: linkingWork.coverPath,
+      publicationStatus: linkingWork.external.manualStatusOverride ?? snapshot.status,
+      external: {
+        ...linkingWork.external,
+        ...(snapshot.provider === "anilist" ? { anilistId: Number(snapshot.providerId) } : {}),
+        ...(snapshot.provider === "mangadex" ? { mangaDexId: snapshot.providerId } : {}),
+        ...(snapshot.siteUrl ? { canonicalUrl: snapshot.siteUrl } : {}),
+        tracking: createTrackingCache(snapshots, new Date(), TRACKING_CACHE_TTL_MS),
+      },
+    });
+  };
+
   return (
     <main className="studio-home">
       <div className="studio-library-topbar">
@@ -171,6 +202,12 @@ export function StudioLibraryHome({
               setWorkDialogOpen(true);
             } : undefined}
           />
+
+          <div className="flex justify-end border-b border-zinc-800 px-5 py-2">
+            <button type="button" className="inline-flex items-center gap-2 rounded border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800" onClick={() => setUpdatesOpen(true)}>
+              <Bell size={14} /> Atualizações
+            </button>
+          </div>
 
           {recoveryAvailable && (
             <div className="studio-library-recovery" role="status">
@@ -211,6 +248,30 @@ export function StudioLibraryHome({
         onSave={onSaveWork}
         onRemove={onRemoveWork}
         onChooseCover={openCoverImageDialog}
+        onLinkTracking={editingWorkId ? () => {
+          setWorkDialogOpen(false);
+          setLinkWorkId(editingWorkId);
+        } : undefined}
+      />
+
+      <LinkWorkDialog
+        open={Boolean(linkingWork)}
+        work={linkingWork}
+        onClose={() => setLinkWorkId(null)}
+        onConfirm={linkTrackingSource}
+      />
+
+      <UpdatesView
+        open={updatesOpen}
+        works={document.works}
+        trackingLanguage={document.preferences.trackingLanguage}
+        onClose={() => setUpdatesOpen(false)}
+        onOpenWork={(workId) => {
+          onSelectWork(workId);
+          setUpdatesOpen(false);
+        }}
+        onPersistWork={onSaveWork}
+        onSetTrackingLanguage={onSetTrackingLanguage}
       />
 
       {selectedWork && (

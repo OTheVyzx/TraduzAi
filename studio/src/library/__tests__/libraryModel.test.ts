@@ -59,6 +59,53 @@ describe("libraryModel", () => {
       publicationStatus: "unknown",
       chapters: [],
     });
-    expect(document.preferences).toEqual({ chapterView: "grid", thumbnailSize: 240 });
+    expect(document.preferences).toEqual({ chapterView: "grid", thumbnailSize: 240, trackingLanguage: "en" });
+  });
+
+  it("persists only normalized tracking snapshots and the configured source language", () => {
+    const document = normalizeLibrary({
+      works: [{
+        id: "work-1",
+        title: "Obra",
+        publicationStatus: "releasing",
+        external: {
+          mangaDexId: "uuid",
+          tracking: {
+            fetchedAt: "2026-07-22T12:00:00Z",
+            expiresAt: "2026-07-22T12:30:00Z",
+            lastError: null,
+            rawResponse: { shouldDisappear: true },
+            snapshots: [{
+              provider: "mangadex",
+              providerId: "uuid",
+              title: "Obra",
+              status: "ongoing",
+              remoteChapterCount: 12,
+              latestChapter: "10.5",
+              coverUrl: null,
+              siteUrl: "https://mangadex.org/title/uuid",
+              fetchedAt: "2026-07-22T12:00:00Z",
+              rawChapterFeed: [1, 2, 3],
+            }],
+          },
+        },
+        chapters: [],
+      }],
+      preferences: { trackingLanguage: "ko" },
+    });
+
+    expect(document.preferences.trackingLanguage).toBe("ko");
+    expect(document.works[0].external.tracking?.snapshots[0]).toEqual({
+      provider: "mangadex",
+      providerId: "uuid",
+      title: "Obra",
+      status: "unknown",
+      remoteChapterCount: 12,
+      latestChapter: "10.5",
+      coverUrl: null,
+      siteUrl: "https://mangadex.org/title/uuid",
+      fetchedAt: "2026-07-22T12:00:00Z",
+    });
+    expect(document.works[0].external.tracking).not.toHaveProperty("rawResponse");
   });
 });

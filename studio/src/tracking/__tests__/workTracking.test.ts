@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { PublicationStatus } from "../../library/libraryModel";
 import {
+  createTrackingCache,
+  hasRemoteChapterUpdate,
+  isTrackingCacheStale,
   normalizeTrackingSnapshot,
   normalizeTrackingStatus,
+  resolveTrackingStatus,
   searchTrackingWorks,
   syncTrackingWork,
   type TrackingInvoke,
@@ -14,6 +18,10 @@ const STATUS_CASES: Array<[string, PublicationStatus]> = [
   ["FINISHED", "completed"],
   ["CANCELLED", "cancelled"],
   ["NOT_YET_RELEASED", "not_yet_released"],
+  ["ongoing", "releasing"],
+  ["hiatus", "hiatus"],
+  ["completed", "completed"],
+  ["cancelled", "cancelled"],
 ];
 
 describe("workTracking", () => {
@@ -34,6 +42,7 @@ describe("workTracking", () => {
       title: "Solo Leveling",
       status: "FINISHED",
       remoteChapterCount: 200,
+      latestChapter: "200",
       coverUrl: "https://s4.anilist.co/file/cover.jpg",
       siteUrl: "https://anilist.co/manga/105398",
       fetchedAt: "2026-07-22T12:00:00Z",
@@ -44,6 +53,7 @@ describe("workTracking", () => {
       title: "Solo Leveling",
       status: "completed",
       remoteChapterCount: 200,
+      latestChapter: "200",
       coverUrl: "https://s4.anilist.co/file/cover.jpg",
       siteUrl: "https://anilist.co/manga/105398",
       fetchedAt: "2026-07-22T12:00:00Z",
@@ -60,6 +70,7 @@ describe("workTracking", () => {
         title: "Solo Leveling",
         status: "RELEASING",
         remoteChapterCount: null,
+        latestChapter: null,
         coverUrl: null,
         siteUrl: "https://anilist.co/manga/105398",
         fetchedAt: "2026-07-22T12:00:00Z",
@@ -78,7 +89,7 @@ describe("workTracking", () => {
       },
       {
         command: "studio_sync_tracking_work",
-        args: { anilistId: 105398, mangaDexId: null },
+        args: { anilistId: 105398, mangaDexId: null, trackingLanguage: "en" },
       },
     ]);
   });
@@ -88,5 +99,62 @@ describe("workTracking", () => {
 
     await expect(searchTrackingWorks(" ", "anilist", invoke)).rejects.toThrow("Informe o nome da obra");
     await expect(syncTrackingWork({}, invoke)).rejects.toThrow("Vincule a obra");
+  });
+
+  it("detects decimal and special chapters without treating duplicate labels as updates", () => {
+    expect(hasRemoteChapterUpdate(["10", "10.25"], "10.5")).toBe(true);
+    expect(hasRemoteChapterUpdate(["10", "Extra"], "Extra")).toBe(false);
+    expect(hasRemoteChapterUpdate(["10"], "Especial de verao")).toBe(true);
+  });
+
+  it("keeps a manual status visually authoritative while exposing provider conflict", () => {
+    const result = resolveTrackingStatus("unknown", "hiatus", [
+      normalizeTrackingSnapshot({
+        provider: "anilist",
+        providerId: "10",
+        title: "Obra",
+        status: "FINISHED",
+        remoteChapterCount: 20,
+        latestChapter: "20",
+        coverUrl: null,
+        siteUrl: null,
+        fetchedAt: "2026-07-22T12:00:00Z",
+      }),
+      normalizeTrackingSnapshot({
+        provider: "mangadex",
+        providerId: "uuid",
+        title: "Obra",
+        status: "ongoing",
+        remoteChapterCount: 20,
+        latestChapter: "20",
+        coverUrl: null,
+        siteUrl: null,
+        fetchedAt: "2026-07-22T12:00:00Z",
+      }),
+    ]);
+
+    expect(result.status).toBe("hiatus");
+    expect(result.source).toBe("manual");
+    expect(result.hasConflict).toBe(true);
+  });
+
+  it("marks an expired normalized cache as stale while retaining its snapshots", () => {
+    const snapshot = normalizeTrackingSnapshot({
+      provider: "mangadex",
+      providerId: "uuid",
+      title: "Obra",
+      status: "ongoing",
+      remoteChapterCount: 11,
+      latestChapter: "10.5",
+      coverUrl: null,
+      siteUrl: "https://mangadex.org/title/uuid",
+      fetchedAt: "2026-07-22T12:00:00Z",
+      raw: { discarded: true },
+    });
+    const cache = createTrackingCache([snapshot], new Date("2026-07-22T12:00:00Z"), 30 * 60 * 1000);
+
+    expect(isTrackingCacheStale(cache, new Date("2026-07-22T12:31:00Z"))).toBe(true);
+    expect(cache.snapshots).toEqual([snapshot]);
+    expect(cache).not.toHaveProperty("raw");
   });
 });

@@ -34,6 +34,7 @@ export interface LibraryStoreState {
   relinkChapter(workId: string, chapterId: string, projectPath: string): Promise<void>;
   setChapterView(view: "grid" | "list"): Promise<void>;
   setThumbnailSize(size: number): Promise<void>;
+  setTrackingLanguage(language: string): Promise<void>;
 }
 
 function errorMessage(error: unknown): string {
@@ -168,6 +169,15 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
         await persist({
           ...current,
           preferences: { ...current.preferences, thumbnailSize: size },
+        });
+      },
+
+      setTrackingLanguage: async (language) => {
+        const current = get().document;
+        const normalized = language.trim().toLocaleLowerCase("en-US") || "en";
+        await persist({
+          ...current,
+          preferences: { ...current.preferences, trackingLanguage: normalized },
         });
       },
     };

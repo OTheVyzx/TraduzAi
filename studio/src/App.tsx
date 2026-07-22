@@ -168,6 +168,7 @@ export function App() {
       initialSelectedChapterPath={lastOpenedChapterPath}
       onSetChapterView={(view) => void library.setChapterView(view)}
       onSetThumbnailSize={(size) => void library.setThumbnailSize(size)}
+      onSetTrackingLanguage={(language) => void library.setTrackingLanguage(language)}
     />
   );
 }

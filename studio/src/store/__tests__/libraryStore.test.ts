@@ -170,10 +170,11 @@ describe("libraryStore", () => {
     await store.getState().addWork({ id: "work-1", title: "Obra renomeada", aliases: [] });
     await store.getState().setChapterView("list");
     await store.getState().setThumbnailSize(220);
+    await store.getState().setTrackingLanguage("KO");
 
     expect(backend.document.works[0].chapters[0].label).toBe("1");
     expect(backend.document.works[0].title).toBe("Obra renomeada");
-    expect(backend.document.preferences).toEqual({ chapterView: "list", thumbnailSize: 220 });
+    expect(backend.document.preferences).toEqual({ chapterView: "list", thumbnailSize: 220, trackingLanguage: "ko" });
   });
 
   it("renames and removes a work without touching its attached chapter files", async () => {
