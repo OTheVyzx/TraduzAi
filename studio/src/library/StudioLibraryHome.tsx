@@ -3,13 +3,19 @@ import { AlertTriangle, LoaderCircle } from "lucide-react";
 import traduzaiLogoUrl from "../../../traduzaistudiologo.svg";
 import {
   openCoverImageDialog,
+  openManualChapterArchiveDialog,
+  openManualChapterFolderDialog,
   openProjectForAttachment,
   projectPathExists,
+  saveProjectDialog,
+  type ManualChapterCreationInput,
+  type PreparedManualPage,
 } from "../backend/projectDialog";
 import type { AddLibraryWorkInput, LibraryStoreStatus } from "../store/libraryStore";
 import { AttachProjectDialog, type ProjectAttachmentDraft } from "./AttachProjectDialog";
 import type { StudioLibrary } from "./libraryModel";
 import { ChapterBrowser } from "./ChapterBrowser";
+import { CreateChapterDialog } from "./CreateChapterDialog";
 import { LibraryToolbar } from "./LibraryToolbar";
 import { WorkDialog } from "./WorkDialog";
 import { WorkLibrarySidebar } from "./WorkLibrarySidebar";
@@ -24,6 +30,7 @@ export function StudioLibraryHome({
   onSaveWork,
   onRemoveWork,
   onAttachChapter,
+  onCreateManualChapter,
   onRemoveChapter,
   onRelinkChapter,
   onImportProject,
@@ -41,6 +48,11 @@ export function StudioLibraryHome({
   onSaveWork: (input: AddLibraryWorkInput) => void | Promise<void>;
   onRemoveWork: (workId: string) => void | Promise<void>;
   onAttachChapter: (workId: string, draft: ProjectAttachmentDraft) => void | Promise<void>;
+  onCreateManualChapter: (
+    workId: string,
+    input: ManualChapterCreationInput,
+    preparedPages?: PreparedManualPage[] | null,
+  ) => Promise<void>;
   onRemoveChapter: (workId: string, chapterId: string) => void | Promise<void>;
   onRelinkChapter: (workId: string, chapterId: string, projectPath: string) => void | Promise<void>;
   onImportProject: () => void;
@@ -55,6 +67,7 @@ export function StudioLibraryHome({
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
   const [editingWorkId, setEditingWorkId] = useState<string | null>(null);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
+  const [createChapterDialogOpen, setCreateChapterDialogOpen] = useState(false);
   const [missingProjectPaths, setMissingProjectPaths] = useState<Set<string>>(new Set());
   const selectedWork = useMemo(
     () => document.works.find((work) => work.id === document.selectedWorkId) ?? null,
@@ -176,7 +189,7 @@ export function StudioLibraryHome({
               onSelectChapter={setSelectedChapterId}
               onOpenChapter={onOpenChapter}
               onImportProject={onImportProject}
-              onAddChapter={() => setAttachDialogOpen(true)}
+              onAddChapter={() => setCreateChapterDialogOpen(true)}
               missingProjectPaths={missingProjectPaths}
               onRelinkChapter={(chapterId) => void relinkChapter(chapterId)}
               onRemoveChapter={(chapterId) => void removeChapterReference(chapterId)}
@@ -197,13 +210,28 @@ export function StudioLibraryHome({
       />
 
       {selectedWork && (
-        <AttachProjectDialog
-          open={attachDialogOpen}
-          work={selectedWork}
-          onChooseProject={chooseAttachment}
-          onClose={() => setAttachDialogOpen(false)}
-          onConfirm={(draft) => onAttachChapter(selectedWork.id, draft)}
-        />
+        <>
+          <CreateChapterDialog
+            open={createChapterDialogOpen}
+            work={selectedWork}
+            onChooseFolder={openManualChapterFolderDialog}
+            onChooseArchive={openManualChapterArchiveDialog}
+            onChooseDestination={saveProjectDialog}
+            onAttachExisting={() => {
+              setCreateChapterDialogOpen(false);
+              setAttachDialogOpen(true);
+            }}
+            onClose={() => setCreateChapterDialogOpen(false)}
+            onCreate={(input, preparedPages) => onCreateManualChapter(selectedWork.id, input, preparedPages)}
+          />
+          <AttachProjectDialog
+            open={attachDialogOpen}
+            work={selectedWork}
+            onChooseProject={chooseAttachment}
+            onClose={() => setAttachDialogOpen(false)}
+            onConfirm={(draft) => onAttachChapter(selectedWork.id, draft)}
+          />
+        </>
       )}
     </main>
   );

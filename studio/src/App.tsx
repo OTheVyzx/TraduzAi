@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import { useStore } from "zustand";
 import { StudioLibraryHome } from "./library/StudioLibraryHome";
+import { createManualChapterFromImages } from "./backend/projectDialog";
 import { createDefaultLibraryBackend } from "./library/libraryBackend";
 import type { StudioProject } from "./project/studioProject";
 import { createLibraryStore } from "./store/libraryStore";
@@ -34,6 +35,18 @@ function projectChapterLabel(project: StudioProject, projectPath: string): strin
   }
   const normalized = projectPath.replace(/\\/g, "/").replace(/\/project\.json$/i, "");
   return normalized.split("/").filter(Boolean).at(-1) ?? "1";
+}
+
+function catalogCoverPath(projectPath: string, coverPath?: string | null): string | null {
+  if (!coverPath) return null;
+  if (/^(data|blob|asset|file):/i.test(coverPath) || /^https?:\/\//i.test(coverPath) || /^[A-Za-z]:[\\/]/.test(coverPath)) {
+    return coverPath;
+  }
+  const normalizedProjectPath = projectPath.replace(/\\/g, "/");
+  const projectDirectory = normalizedProjectPath.toLocaleLowerCase("en-US").endsWith(".json")
+    ? normalizedProjectPath.slice(0, normalizedProjectPath.lastIndexOf("/"))
+    : normalizedProjectPath;
+  return `${projectDirectory}/${coverPath.replace(/\\/g, "/")}`;
 }
 
 export function App() {
@@ -81,7 +94,7 @@ export function App() {
         id: stableId("chapter", projectPath.toLocaleLowerCase("en-US")),
         label: projectChapterLabel(project, projectPath),
         projectPath,
-        coverPath: project.paginas[0]?.arquivo_original ?? null,
+        coverPath: catalogCoverPath(projectPath, project.paginas[0]?.arquivo_original),
         pageCount: project.paginas.length,
         completedPages: 0,
         workflowStatus: "editing",
@@ -124,6 +137,22 @@ export function App() {
         workflowStatus: "editing",
         lastOpenedAt: null,
       })}
+      onCreateManualChapter={async (workId, input, preparedPages) => {
+        const result = await createManualChapterFromImages(input, undefined, preparedPages);
+        await library.upsertChapter(workId, {
+          id: stableId("chapter", input.projectJsonPath.toLocaleLowerCase("en-US")),
+          label: input.chapterLabel,
+          title: input.chapterTitle,
+          projectPath: input.projectJsonPath,
+          coverPath: catalogCoverPath(input.projectJsonPath, result.project.paginas[0]?.arquivo_original),
+          pageCount: result.project.paginas.length,
+          completedPages: 0,
+          workflowStatus: "pending",
+          lastOpenedAt: new Date().toISOString(),
+        });
+        await library.selectWork(workId);
+        await loadProject(input.projectJsonPath);
+      }}
       onRemoveChapter={(workId, chapterId) => library.removeChapter(workId, chapterId)}
       onRelinkChapter={(workId, chapterId, path) => library.relinkChapter(workId, chapterId, path)}
       onImportProject={() => void openProjectFromDialog()}
