@@ -7780,7 +7780,7 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertLess(float(np.mean(filled)), 40.0)
 
     def test_translucent_white_balloon_profile_blocks_dark_panel_route(self):
-        from inpainter import _apply_dark_panel_text_fills
+        from inpainter import _apply_dark_panel_text_fills, _fast_local_rejection_reason, _fast_white_rejection_reason
 
         image = np.full((100, 180, 3), 32, dtype=np.uint8)
         gradient = np.tile(np.linspace(210, 245, 120, dtype=np.uint8), (70, 1))
@@ -7802,6 +7802,8 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(text["layout_profile"], "translucent_balloon")
         self.assertEqual(text["block_profile"], "translucent_balloon")
         self.assertIn("translucent_balloon", text["qa_metrics"])
+        self.assertEqual(_fast_white_rejection_reason(text), "translucent_balloon")
+        self.assertEqual(_fast_local_rejection_reason(text), "translucent_balloon")
 
 
 if __name__ == "__main__":

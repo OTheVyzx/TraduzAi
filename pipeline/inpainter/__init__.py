@@ -209,6 +209,8 @@ def _route_action_allows_local_dark_panel_fill(text: dict) -> bool:
         return False
     if _text_suppressed_for_inpaint(text):
         return False
+    if str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower() == "translucent_balloon":
+        return False
     if not _route_action_blocks_inpaint(text):
         return True
     route_reason = str(text.get("route_reason") or "").strip().lower()
@@ -1719,6 +1721,8 @@ def _fast_white_rejection_reason(text: dict) -> str:
         return "invalid_text"
     if _route_action_blocks_inpaint(text):
         return "route_action_no_inpaint"
+    if str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower() == "translucent_balloon":
+        return "translucent_balloon"
     qa_reason = _fast_fill_blocking_qa_reason(text, include_evidence_derived=False)
     if qa_reason:
         return qa_reason
@@ -3822,6 +3826,8 @@ def _fast_local_rejection_reason(text: dict) -> str:
         return "invalid_text"
     if _route_action_blocks_inpaint(text):
         return "route_action_no_inpaint"
+    if str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower() == "translucent_balloon":
+        return "translucent_balloon"
     qa_reason = _fast_fill_blocking_qa_reason(text)
     if qa_reason:
         return qa_reason
