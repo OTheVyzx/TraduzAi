@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { FileDown } from "lucide-react";
 import { Editor } from "../../../src/pages/Editor";
 import type { EditorSceneVisualNode } from "../../../src/components/editor/stage/editorSceneVisual";
 import { useAppStore, useEditorStore, type Project, type TextLayerStyle } from "../../../src/editor-shared";
+import type { TextEntry } from "../../../src/lib/stores/appStore";
 import { createLegacyEditorBackendAdapter } from "../backend/editorBackendCompat";
 import { getStudioEditorBackend } from "../backend/editorBackend";
 import { downloadStudioPagePsd } from "../export/psd";
-import type { StudioPage, StudioProject, StudioScene } from "../project/studioProject";
+import type { StudioPage, StudioProject, StudioScene, StudioTextLayer } from "../project/studioProject";
 import { projectStudioSceneToPage, useStudioSceneStore } from "../store/studioSceneStore";
 import { configureEditorBackend, type EditorBackendApi } from "../shims/currentEditorBackend";
 import { StudioLayersTree } from "./layers/StudioLayersTree";
@@ -26,7 +27,16 @@ import { runStudioAutosaveCycle } from "../autosave/recovery";
 import { useStudioProjectStore } from "../store/projectStore";
 import { reconcileStudioEditorPage } from "./sharedEditorProjectSync";
 import type { StudioWorkspace } from "./studioWorkspace";
-import type { ReactNode } from "react";
+import { TranslationQueuePanel, type TranslationTarget } from "../translation/TranslationQueuePanel";
+import {
+  StudioTranslationWorkspace,
+  createTranslationPatch,
+  findAdjacentTranslationTarget,
+  findNextPendingTranslationTarget,
+  translationTargetRequiresPageChange,
+  translationUsesStudioComposite,
+} from "../translation/StudioTranslationWorkspace";
+import { resolveTranslationStatus, type TranslationQueueFilter } from "../translation/translationQueue";
 
 const DEFAULT_TEXT_STYLE: TextLayerStyle = {
   fonte: "Comic Neue",
@@ -163,9 +173,14 @@ export function StudioSharedEditor({
   const commitEdits = useEditorStore((state) => state.commitEdits);
   const editorPage = useEditorStore((state) => state.currentPage);
   const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
+  const viewMode = useEditorStore((state) => state.viewMode);
+  const pendingEdits = useEditorStore((state) => state.pendingEdits);
+  const updatePendingEdit = useEditorStore((state) => state.updatePendingEdit);
   const scene = useStudioSceneStore((state) => state.scene);
   const primaryNodeId = useStudioSceneStore((state) => state.primaryNodeId);
   const [isExportingPsd, setIsExportingPsd] = useState(false);
+  const [translationFilter, setTranslationFilter] = useState<TranslationQueueFilter>("all");
+  const [isConfirmingTranslation, setIsConfirmingTranslation] = useState(false);
   const initializedProjectPath = useRef<string | null>(null);
   const recoverySnapshot = useStudioProjectStore((state) => state.recoverySnapshot);
   const restoreRecovery = useStudioProjectStore((state) => state.restoreRecovery);
@@ -195,6 +210,10 @@ export function StudioSharedEditor({
       editorState.dirty,
     ));
   }, [appProject, projectPath, resetEditor]);
+
+  useEffect(() => {
+    useStudioProjectStore.getState().setCurrentPageIndex(currentPageIndex);
+  }, [currentPageIndex]);
 
   useEffect(() => {
     if (recoverySnapshot) return;
@@ -233,6 +252,28 @@ export function StudioSharedEditor({
   }, [projectPath, recoverySnapshot]);
 
   const currentPage = project.paginas[currentPageIndex] ?? project.paginas[0] ?? null;
+  const translationProject = useMemo<StudioProject>(() => {
+    if (!editorPage) return project;
+    const workingLayers = editorPage.text_layers.map((baseLayer) => {
+      const edit = pendingEdits[baseLayer.id] as Partial<StudioTextLayer> | undefined;
+      const merged = { ...baseLayer, ...edit } as unknown as StudioTextLayer;
+      const translated = String(edit?.translated ?? edit?.traduzido ?? merged.translated ?? merged.traduzido ?? "");
+      return { ...merged, translated, traduzido: translated };
+    });
+    return {
+      ...project,
+      paginas: project.paginas.map((page, pageIndex) => pageIndex === currentPageIndex ? {
+        ...page,
+        text_layers: workingLayers,
+        textos: workingLayers,
+      } : page),
+    };
+  }, [currentPageIndex, editorPage, pendingEdits, project]);
+  const selectedTranslationLayer = useMemo(() => {
+    if (!selectedLayerId) return null;
+    return translationProject.paginas[currentPageIndex]?.text_layers.find((layer) => layer.id === selectedLayerId) ?? null;
+  }, [currentPageIndex, selectedLayerId, translationProject]);
+  const showStudioComposite = workspace === "editing" || translationUsesStudioComposite(viewMode);
   const primaryNode = scene?.nodes.find((node) => node.id === primaryNodeId) ?? null;
   const selectionTargetNode = primaryNode
     && (primaryNode.kind === "raster" || primaryNode.kind === "generated")
@@ -353,6 +394,7 @@ export function StudioSharedEditor({
   const navigateToChapterLayer = useCallback(async (pageIndex: number, layerId: string) => {
     const editorState = useEditorStore.getState();
     if (editorState.dirty) await editorState.flushAutoSave();
+    useStudioProjectStore.getState().setCurrentPageIndex(pageIndex);
     await editorState.setCurrentPage(pageIndex);
     useEditorStore.getState().selectLayer(layerId);
   }, []);
@@ -360,8 +402,71 @@ export function StudioSharedEditor({
   const changeStudioPage = useCallback(async (pageIndex: number) => {
     const editorState = useEditorStore.getState();
     if (editorState.dirty) await editorState.flushAutoSave();
+    useStudioProjectStore.getState().setCurrentPageIndex(pageIndex);
     await useEditorStore.getState().setCurrentPage(pageIndex);
   }, []);
+
+  const selectTranslationTarget = useCallback(async (target: TranslationTarget) => {
+    if (!translationTargetRequiresPageChange(currentPageIndex, target)) {
+      useEditorStore.getState().selectLayer(target.layerId);
+      return;
+    }
+    await navigateToChapterLayer(target.pageIndex, target.layerId);
+  }, [currentPageIndex, navigateToChapterLayer]);
+
+  const updateTranslationLayer = useCallback((patch: Partial<StudioTextLayer>) => {
+    if (!selectedLayerId) return;
+    updatePendingEdit(selectedLayerId, patch as unknown as Partial<TextEntry>);
+  }, [selectedLayerId, updatePendingEdit]);
+
+  const confirmTranslationAndAdvance = useCallback(async () => {
+    if (!selectedTranslationLayer || isConfirmingTranslation) return;
+    const layerId = selectedTranslationLayer.id;
+    const patch = createTranslationPatch({
+      translated: selectedTranslationLayer.translated,
+      type: selectedTranslationLayer.tipo ?? "fala",
+      notes: selectedTranslationLayer.translation_notes ?? "",
+      status: resolveTranslationStatus(selectedTranslationLayer),
+    });
+    const navigationProject = structuredClone(translationProject);
+    const navigationLayer = navigationProject.paginas[currentPageIndex]?.text_layers.find((layer) => layer.id === layerId);
+    if (navigationLayer) Object.assign(navigationLayer, patch);
+    const nextTarget = findNextPendingTranslationTarget(navigationProject, currentPageIndex, layerId);
+
+    setIsConfirmingTranslation(true);
+    try {
+      const editorState = useEditorStore.getState();
+      editorState.updatePendingEdit(layerId, patch as unknown as Partial<TextEntry>);
+      await editorState.commitEdits();
+      const projectStore = useStudioProjectStore.getState();
+      projectStore.setCurrentPageIndex(currentPageIndex);
+      await projectStore.patchCurrentTextLayer(layerId, patch);
+      if (nextTarget) await selectTranslationTarget(nextTarget);
+    } finally {
+      setIsConfirmingTranslation(false);
+    }
+  }, [currentPageIndex, isConfirmingTranslation, selectTranslationTarget, selectedTranslationLayer, translationProject]);
+
+  const navigateTranslationBlock = useCallback(async (direction: "next" | "previous") => {
+    const target = findAdjacentTranslationTarget(translationProject, currentPageIndex, selectedLayerId, direction);
+    if (target) await selectTranslationTarget(target);
+  }, [currentPageIndex, selectTranslationTarget, selectedLayerId, translationProject]);
+
+  const updateProjectGlossary = useCallback(async (glossary: Record<string, string>) => {
+    const editorState = useEditorStore.getState();
+    if (editorState.dirty) await editorState.flushAutoSave();
+    const latestProject = await getStudioEditorBackend().loadProject({ project_path: projectPath });
+    useStudioProjectStore.setState({
+      project: {
+        ...latestProject,
+        work_context: {
+          ...(latestProject.work_context ?? {}),
+          glossary,
+        },
+      },
+    });
+    await useStudioProjectStore.getState().saveProject();
+  }, [projectPath]);
 
   const attachCurrentSelectionMask = useCallback(async () => {
     const editorState = useEditorStore.getState();
@@ -425,25 +530,47 @@ export function StudioSharedEditor({
       )}
       <Editor
         mode="studio"
+        toolProfile={workspace === "translation" ? "studio-translation" : "studio"}
         onBack={onBack}
         emptyBackLabel="Voltar ao Studio"
         workspaceSwitcher={workspaceSwitcher}
-        layersPanel={<StudioLayersTree onSelectTextLayer={selectSceneTextLayer} />}
+        pagesPanel={workspace === "translation" ? (
+          <TranslationQueuePanel
+            project={translationProject}
+            filter={translationFilter}
+            currentPageIndex={currentPageIndex}
+            selectedLayerId={selectedLayerId}
+            onFilterChange={setTranslationFilter}
+            onSelectTarget={selectTranslationTarget}
+          />
+        ) : undefined}
+        layersPanel={workspace === "translation" ? (
+          <StudioTranslationWorkspace
+            project={translationProject}
+            layer={selectedTranslationLayer}
+            onChange={updateTranslationLayer}
+            onConfirmNext={confirmTranslationAndAdvance}
+            onNavigateBlock={navigateTranslationBlock}
+            onUpdateGlossary={updateProjectGlossary}
+            isSaving={isConfirmingTranslation}
+          />
+        ) : <StudioLayersTree onSelectTextLayer={selectSceneTextLayer} />}
         selectionTargetNodeId={selectionTargetNode?.id ?? null}
         selectionTargetLabel={selectionTargetLabel}
         onAttachSelectionMask={attachCurrentSelectionMask}
         bitmapCompositeSource={
-          bitmapComposite?.pageKey === `${projectPath}::${currentPageIndex}` ? bitmapComposite.source : null
+          showStudioComposite && bitmapComposite?.pageKey === `${projectPath}::${currentPageIndex}`
+            ? bitmapComposite.source
+            : null
         }
         sceneVisualNodes={
-          bitmapComposite?.pageKey === `${projectPath}::${currentPageIndex}` ? bitmapComposite.visualNodes : null
+          showStudioComposite && bitmapComposite?.pageKey === `${projectPath}::${currentPageIndex}`
+            ? bitmapComposite.visualNodes
+            : null
         }
         onRequestPageChange={changeStudioPage}
-        headerActions={
+        headerActions={workspace === "editing" ? (
           <>
-            <span className="studio-sr-only" data-workspace={workspace}>
-              Área atual: {workspace === "translation" ? "Tradução" : "Edição"}
-            </span>
             <ChapterToolsPanel
               project={project}
               currentPageIndex={currentPageIndex}
@@ -470,7 +597,7 @@ export function StudioSharedEditor({
               Salvar em PSD
             </button>
           </>
-        }
+        ) : undefined}
       />
     </MemoryRouter>
   );

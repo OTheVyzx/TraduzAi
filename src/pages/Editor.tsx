@@ -37,7 +37,13 @@ import { RenderStatusBadge } from "../components/editor/toolbar/RenderStatusBadg
 import { preloadEditorFonts } from "../lib/fonts";
 import { loadSupportedLanguages } from "../lib/tauri";
 import { getLanguageOptions, normalizeLanguageCodeForSelection } from "../lib/languages";
-import { resolveEditorCapabilities, type EditorMode } from "../components/editor/editorMode";
+import {
+  editorToolsForMode,
+  editorViewLabelForMode,
+  isEditorViewAvailable,
+  resolveEditorCapabilities,
+  type EditorMode,
+} from "../components/editor/editorMode";
 import { withLassoSelectionModifiers } from "../lib/lassoSelection";
 
 const VIEW_MODES = [
@@ -392,8 +398,10 @@ export interface EditorProps {
   emptyBackLabel?: string;
   headerActions?: ReactNode;
   workspaceSwitcher?: ReactNode;
+  pagesPanel?: ReactNode;
   layersPanel?: ReactNode;
   mode?: EditorMode;
+  toolProfile?: EditorMode;
   selectionTargetNodeId?: string | null;
   selectionTargetLabel?: string | null;
   onAttachSelectionMask?: () => void | Promise<void>;
@@ -407,8 +415,10 @@ export function Editor({
   emptyBackLabel = "Voltar ao início",
   headerActions,
   workspaceSwitcher,
+  pagesPanel,
   layersPanel,
   mode = "traduzai",
+  toolProfile = mode,
   selectionTargetNodeId = null,
   selectionTargetLabel = null,
   onAttachSelectionMask,
@@ -417,7 +427,8 @@ export function Editor({
   onRequestPageChange,
 }: EditorProps = {}) {
   const navigate = useNavigate();
-  const capabilities = resolveEditorCapabilities(mode);
+  const capabilities = resolveEditorCapabilities(toolProfile);
+  const visibleTools = useMemo(() => new Set(editorToolsForMode(toolProfile)), [toolProfile]);
   const project = useAppStore((s) => s.project);
   const pipeline = useAppStore((s) => s.pipeline);
   const updateProject = useAppStore((s) => s.updateProject);
@@ -479,6 +490,7 @@ export function Editor({
     Object.keys(pendingStructuralEdits.deleted).length +
     (pendingStructuralEdits.order ? 1 : 0);
   const pagePipelineBusy = isRetypesetting || isReinpainting || isHealingBrushApplying;
+  const hasInpaintLayer = Boolean(currentPage?.image_layers?.inpaint?.path);
   const pageKey = currentPageKey();
   const renderPreviewState = useMemo(
     () => getRenderPreviewStateForPage(pageKey, currentPage, renderPreviewCacheByPageKey),
@@ -506,6 +518,14 @@ export function Editor({
       disposed = true;
     };
   }, [capabilities.showSourceLanguage]);
+
+  useEffect(() => {
+    if (!visibleTools.has(toolMode)) setToolMode("select");
+  }, [setToolMode, toolMode, visibleTools]);
+
+  useEffect(() => {
+    if (!isEditorViewAvailable(toolProfile, viewMode, hasInpaintLayer)) setViewMode("original");
+  }, [hasInpaintLayer, setViewMode, toolProfile, viewMode]);
 
   const saveAndRenderCurrentPage = async () => {
     const targetPageKey = currentPageKey();
@@ -562,25 +582,25 @@ export function Editor({
           redoEditor();
           return;
         }
-        if (event.key === "1") setViewMode("original");
-        if (event.key === "2") setViewMode("inpainted");
-        if (event.key === "3") setViewMode("translated");
-        if (event.key.toLowerCase() === "v") setToolMode("select");
-        if (event.key.toLowerCase() === "t") setToolMode("block");
-        if (event.key.toLowerCase() === "b") setToolMode("brush");
-        if (capabilities.showPipelineActions && event.key.toLowerCase() === "r") setToolMode("repairBrush");
-        if (capabilities.showPipelineActions && event.key.toLowerCase() === "i") setToolMode("reinpaintBrush");
-        if (event.key.toLowerCase() === "e") setToolMode("eraser");
-        if (event.key.toLowerCase() === "l") setToolMode("mask");
-        if (capabilities.showPipelineActions && event.key.toLowerCase() === "p") setToolMode("process");
+        if (event.key === "1" && isEditorViewAvailable(toolProfile, "original", hasInpaintLayer)) setViewMode("original");
+        if (event.key === "2" && isEditorViewAvailable(toolProfile, "inpainted", hasInpaintLayer)) setViewMode("inpainted");
+        if (event.key === "3" && isEditorViewAvailable(toolProfile, "translated", hasInpaintLayer)) setViewMode("translated");
+        if (event.key.toLowerCase() === "v" && visibleTools.has("select")) setToolMode("select");
+        if (event.key.toLowerCase() === "t" && visibleTools.has("block")) setToolMode("block");
+        if (event.key.toLowerCase() === "b" && visibleTools.has("brush")) setToolMode("brush");
+        if (event.key.toLowerCase() === "r" && visibleTools.has("repairBrush")) setToolMode("repairBrush");
+        if (event.key.toLowerCase() === "i" && visibleTools.has("reinpaintBrush")) setToolMode("reinpaintBrush");
+        if (event.key.toLowerCase() === "e" && visibleTools.has("eraser")) setToolMode("eraser");
+        if (event.key.toLowerCase() === "l" && visibleTools.has("mask")) setToolMode("mask");
+        if (event.key.toLowerCase() === "p" && visibleTools.has("process")) setToolMode("process");
         // Tab: cicla alvo da borracha quando eraser ativo
         if (event.key === "Tab" && toolMode === "eraser") {
           event.preventDefault();
           setEraserTarget(eraserTarget === "brush" || eraserTarget === null ? "mask" : "brush");
         }
         // Legacy aliases
-        if (event.key.toLowerCase() === "n") setToolMode("brush");
-        if (event.key.toLowerCase() === "m") setToolMode("mask");
+        if (event.key.toLowerCase() === "n" && visibleTools.has("brush")) setToolMode("brush");
+        if (event.key.toLowerCase() === "m" && visibleTools.has("mask")) setToolMode("mask");
         if (event.key.toLowerCase() === "o") toggleOverlays();
         if (event.key === "=" || event.key === "+") {
           event.preventDefault();
@@ -614,6 +634,7 @@ export function Editor({
       }
       // Fase 1.2: atalhos de fallback para preview/render que perderam o botão
       if (
+        capabilities.showPipelineActions &&
         (event.ctrlKey || event.metaKey) &&
         event.shiftKey &&
         event.key.toLowerCase() === "r"
@@ -622,6 +643,7 @@ export function Editor({
         void forceFidelityRender();
       }
       if (
+        capabilities.showPipelineActions &&
         (event.ctrlKey || event.metaKey) &&
         event.shiftKey &&
         event.key.toLowerCase() === "p"
@@ -644,16 +666,19 @@ export function Editor({
     renderPreviewPage,
     resetViewport,
     selectedLayerId,
+    hasInpaintLayer,
     requestPageChange,
     setEraserTarget,
     setToolMode,
     setViewMode,
     toggleOverlays,
     toolMode,
+    toolProfile,
     totalPages,
     undoEditor,
     zoomIn,
     zoomOut,
+    visibleTools,
   ]);
 
   const currentPageSummary = useMemo(() => {
@@ -679,8 +704,11 @@ export function Editor({
   }
 
   return (
-    <div className="flex h-screen bg-bg-primary">
-      <PageThumbnails />
+    <div
+      className="flex h-screen bg-bg-primary"
+      data-editor-preserve-text-selection={toolProfile === "studio-translation" ? "true" : undefined}
+    >
+      {pagesPanel ?? <PageThumbnails />}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ── Row 1: Header ── */}
@@ -733,7 +761,9 @@ export function Editor({
 
           {/* Undo/Redo + indicador "Não salvo" + Salvar manual + descartar */}
           <div className="flex items-center gap-1.5">
-            {workspaceSwitcher}
+            {workspaceSwitcher ? (
+              <div data-editor-preserve-text-selection="true">{workspaceSwitcher}</div>
+            ) : null}
             <UndoRedoControls />
             <AutoSaveIndicator />
             <RenderStatusBadge />
@@ -762,22 +792,27 @@ export function Editor({
         <div className="flex items-center gap-2 border-b border-border bg-bg-primary px-3 py-1.5">
           {/* View modes — segmented control */}
           <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
-            {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-view-${key}`}
-                onClick={() => setViewMode(key)}
-                className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-smooth ${
-                  viewMode === key
-                    ? "bg-brand/15 text-brand shadow-sm"
-                    : "text-text-muted hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={12} />
-                {label}
-              </button>
-            ))}
+            {VIEW_MODES.map(({ key, icon: Icon, hotkey }) => {
+              const label = editorViewLabelForMode(toolProfile, key);
+              const available = isEditorViewAvailable(toolProfile, key, hasInpaintLayer);
+              return (
+                <button
+                  key={key}
+                  data-testid={`editor-view-${key}`}
+                  onClick={() => setViewMode(key)}
+                  disabled={!available}
+                  className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-smooth disabled:cursor-not-allowed disabled:opacity-30 ${
+                    viewMode === key
+                      ? "bg-brand/15 text-brand shadow-sm"
+                      : "text-text-muted hover:text-text-primary"
+                  }`}
+                  title={available ? `${label} (${hotkey})` : "Camada limpa indisponível nesta página"}
+                >
+                  <Icon size={12} />
+                  {label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="h-4 w-px bg-border" />
@@ -933,7 +968,7 @@ export function Editor({
         </div>
 
         {/* ── Row 3: TypesettingBar — só quando texto selecionado (Fase 4) ── */}
-        <TypesettingBar />
+        {capabilities.showTypesettingControls && <TypesettingBar />}
 
         {/* Banner de erro de ação pipeline (Fase 0 - sem falhas silenciosas) */}
         {capabilities.showPipelineActions && pageActionError && (
@@ -974,9 +1009,10 @@ export function Editor({
         {/* ── Canvas area: ToolSidebar + Stage ── */}
         <div className="flex min-h-0 flex-1">
           {/* Fase 4: ToolSidebar vertical substituindo o segmented control horizontal */}
-          <ToolSidebar mode={mode} />
+          <ToolSidebar mode={toolProfile} />
           <EditorStage
             mode={mode}
+            showFloatingTextEditor={toolProfile !== "studio-translation"}
             selectionTargetNodeId={selectionTargetNodeId}
             bitmapCompositeSource={bitmapCompositeSource}
             sceneVisualNodes={sceneVisualNodes}

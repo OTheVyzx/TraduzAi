@@ -18,11 +18,32 @@ export function StudioWorkspaceSwitcher({
   onChange: (workspace: StudioWorkspace) => void;
 }) {
   return (
-    <div className="studio-workspace-switcher" aria-label="Área de trabalho">
-      <button type="button" aria-pressed={workspace === "translation"} onClick={() => onChange("translation")}>
+    <div
+      className="flex items-center rounded-lg border border-border bg-bg-tertiary/35 p-0.5"
+      aria-label="Área de trabalho"
+    >
+      <button
+        type="button"
+        aria-pressed={workspace === "translation"}
+        onClick={() => onChange("translation")}
+        className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+          workspace === "translation"
+            ? "bg-accent-cyan/15 text-accent-cyan shadow-sm"
+            : "text-text-muted hover:bg-white/[0.04] hover:text-text-primary"
+        }`}
+      >
         <Languages size={12} /> Tradução
       </button>
-      <button type="button" aria-pressed={workspace === "editing"} onClick={() => onChange("editing")}>
+      <button
+        type="button"
+        aria-pressed={workspace === "editing"}
+        onClick={() => onChange("editing")}
+        className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition-smooth ${
+          workspace === "editing"
+            ? "bg-accent-cyan/15 text-accent-cyan shadow-sm"
+            : "text-text-muted hover:bg-white/[0.04] hover:text-text-primary"
+        }`}
+      >
         <Paintbrush size={12} /> Edição
       </button>
     </div>

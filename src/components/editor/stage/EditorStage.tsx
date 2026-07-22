@@ -477,11 +477,13 @@ export function EditorStage({
   selectionTargetNodeId = null,
   bitmapCompositeSource = null,
   sceneVisualNodes = null,
+  showFloatingTextEditor = true,
 }: {
   mode?: EditorMode;
   selectionTargetNodeId?: string | null;
   bitmapCompositeSource?: string | null;
   sceneVisualNodes?: EditorSceneVisualNode[] | null;
+  showFloatingTextEditor?: boolean;
 }) {
   const e2e = isE2E();
   const controller = useEditorStageController({ mode, selectionTargetNodeId, bitmapCompositeSource });
@@ -760,7 +762,7 @@ export function EditorStage({
 
       {/* Status badges (StageStatusBadge removido — canvas é WYSIWYG) */}
       {/* Fase 5: FloatingTextEditor — painel flutuante para edição rápida */}
-      {selectedLayerId && (
+      {showFloatingTextEditor && selectedLayerId && (
         <Suspense fallback={null}>
           <FloatingTextEditor
             stageScale={stageScale}
