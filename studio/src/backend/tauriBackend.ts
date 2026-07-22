@@ -1,17 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { importStudioProject, toTraduzAiV2Compat } from "../project/adapters";
 import type { ImageLayerKey, StudioProject, StudioTextLayer } from "../project/studioProject";
-import type {
+import {
   BitmapLayerKey,
   BitmapRegionConfig,
+  DeleteGeneratedAssetsConfig,
   EditorPagePayload,
+  GeneratedAssetConfig,
   StudioEditorBackend,
   StudioLiteDetectResult,
   StudioLiteDetection,
   StudioLiteInpaintResult,
   StudioLiteModelStatus,
+  runSerializedStudioProjectMutation,
 } from "./editorBackend";
 import { MemoryStudioEditorBackend } from "./memoryBackend";
+import type { FluxGenerateConfig, FluxGenerateResult, FluxProviderStatus } from "../ai/fluxContract";
+import { parseStudioRecoverySnapshot, type StudioRecoverySnapshot } from "../autosave/recovery";
 
 function isMemoryPath(projectPath: string) {
   return projectPath.startsWith("memory://");
@@ -101,12 +106,44 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
   }
 
   async saveProjectJson(config: { project_path: string; project_json: StudioProject }): Promise<void> {
+    await runSerializedStudioProjectMutation(config.project_path, () => this.saveProjectJsonDirect(config));
+  }
+
+  async mutateProject<T>(config: {
+    project_path: string;
+    mutate: (project: StudioProject) => T | Promise<T>;
+  }): Promise<{ project: StudioProject; result: T }> {
+    return runSerializedStudioProjectMutation(config.project_path, async () => {
+      const draft = await this.loadProject({ project_path: config.project_path });
+      const result = await config.mutate(draft);
+      await this.saveProjectJsonDirect({ project_path: config.project_path, project_json: draft });
+      const project = normalizeProject(draft);
+      return { project, result };
+    });
+  }
+
+  private async saveProjectJsonDirect(config: { project_path: string; project_json: StudioProject }): Promise<void> {
     await invoke("studio_save_project", {
       config: {
         project_path: config.project_path,
         project_json: toTraduzAiV2Compat(config.project_json),
       },
     });
+  }
+
+  async saveRecoverySnapshot(config: { project_path: string; snapshot: StudioRecoverySnapshot }): Promise<void> {
+    const snapshot = parseStudioRecoverySnapshot(config.snapshot, config.project_path);
+    if (!snapshot) throw new Error("Snapshot de recuperacao pertence a outro projeto ou esta corrompido");
+    await invoke("studio_save_recovery_snapshot", { config: { ...config, snapshot } });
+  }
+
+  async loadRecoverySnapshot(config: { project_path: string }): Promise<StudioRecoverySnapshot | null> {
+    const raw = await invoke<unknown>("studio_load_recovery_snapshot", { config });
+    return parseStudioRecoverySnapshot(raw, config.project_path);
+  }
+
+  async clearRecoverySnapshot(config: { project_path: string }): Promise<void> {
+    await invoke("studio_clear_recovery_snapshot", { config });
   }
 
   async loadEditorPage(config: { project_path: string; page_index: number }): Promise<EditorPagePayload> {
@@ -127,13 +164,17 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
     page_index: number;
     layout_bbox: [number, number, number, number];
   }): Promise<StudioTextLayer> {
-    const project = await this.loadProject({ project_path: config.project_path });
-    const page = pageAt(project, config.page_index);
-    const layer = createTextLayer(page.text_layers.length, config.layout_bbox);
-    page.text_layers.push(layer);
-    syncTextAliases(page);
-    await this.saveProjectJson({ project_path: config.project_path, project_json: project });
-    return layer;
+    const { result } = await this.mutateProject({
+      project_path: config.project_path,
+      mutate: (project) => {
+        const page = pageAt(project, config.page_index);
+        const layer = createTextLayer(page.text_layers.length, config.layout_bbox);
+        page.text_layers.push(layer);
+        syncTextAliases(page);
+        return JSON.parse(JSON.stringify(layer)) as StudioTextLayer;
+      },
+    });
+    return result;
   }
 
   async patchEditorTextLayer(config: {
@@ -142,31 +183,38 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
     layer_id: string;
     patch: Record<string, unknown>;
   }): Promise<StudioTextLayer> {
-    const project = await this.loadProject({ project_path: config.project_path });
-    const page = pageAt(project, config.page_index);
-    const index = page.text_layers.findIndex((layer) => layer.id === config.layer_id);
-    if (index < 0) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
-    const next = { ...page.text_layers[index], ...config.patch } as StudioTextLayer;
-    const translated = next.translated || next.traduzido || "";
-    next.translated = translated;
-    next.traduzido = translated;
-    const style = Object.keys(next.style ?? {}).length > 0 ? next.style : next.estilo;
-    next.style = style ?? {};
-    next.estilo = style ?? {};
-    page.text_layers[index] = next;
-    syncTextAliases(page);
-    await this.saveProjectJson({ project_path: config.project_path, project_json: project });
-    return next;
+    const { result } = await this.mutateProject({
+      project_path: config.project_path,
+      mutate: (project) => {
+        const page = pageAt(project, config.page_index);
+        const index = page.text_layers.findIndex((layer) => layer.id === config.layer_id);
+        if (index < 0) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
+        const next = { ...page.text_layers[index], ...config.patch } as StudioTextLayer;
+        const translated = next.translated ?? next.traduzido ?? "";
+        next.translated = translated;
+        next.traduzido = translated;
+        const style = Object.keys(next.style ?? {}).length > 0 ? next.style : next.estilo;
+        next.style = style ?? {};
+        next.estilo = style ?? {};
+        page.text_layers[index] = next;
+        syncTextAliases(page);
+        return JSON.parse(JSON.stringify(next)) as StudioTextLayer;
+      },
+    });
+    return result;
   }
 
   async deleteEditorTextLayer(config: { project_path: string; page_index: number; layer_id: string }): Promise<void> {
-    const project = await this.loadProject({ project_path: config.project_path });
-    const page = pageAt(project, config.page_index);
-    const next = page.text_layers.filter((layer) => layer.id !== config.layer_id);
-    if (next.length === page.text_layers.length) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
-    page.text_layers = next.map((layer, index) => ({ ...layer, order: index }));
-    syncTextAliases(page);
-    await this.saveProjectJson({ project_path: config.project_path, project_json: project });
+    await this.mutateProject({
+      project_path: config.project_path,
+      mutate: (project) => {
+        const page = pageAt(project, config.page_index);
+        const next = page.text_layers.filter((layer) => layer.id !== config.layer_id);
+        if (next.length === page.text_layers.length) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
+        page.text_layers = next.map((layer, index) => ({ ...layer, order: index }));
+        syncTextAliases(page);
+      },
+    });
   }
 
   async setEditorLayerVisibility(config: {
@@ -177,36 +225,62 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
     layer_id?: string | null;
     visible: boolean;
   }): Promise<void> {
-    const project = await this.loadProject({ project_path: config.project_path });
-    const page = pageAt(project, config.page_index);
-    if (config.layer_kind === "image") {
-      const key = config.layer_key;
-      if (!key) throw new Error("layer_key e obrigatorio para camada de imagem");
-      const layer = page.image_layers[key] ?? { key, path: null, locked: false, visible: true };
-      page.image_layers[key] = { ...layer, visible: config.visible };
-    } else {
-      const layer = page.text_layers.find((item) => item.id === config.layer_id);
-      if (!layer) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
-      layer.visible = config.visible;
-      syncTextAliases(page);
-    }
-    await this.saveProjectJson({ project_path: config.project_path, project_json: project });
+    await this.mutateProject({
+      project_path: config.project_path,
+      mutate: (project) => {
+        const page = pageAt(project, config.page_index);
+        if (config.layer_kind === "image") {
+          const key = config.layer_key;
+          if (!key) throw new Error("layer_key e obrigatorio para camada de imagem");
+          const layer = page.image_layers[key] ?? { key, path: null, locked: false, visible: true };
+          page.image_layers[key] = { ...layer, visible: config.visible };
+        } else {
+          const layer = page.text_layers.find((item) => item.id === config.layer_id);
+          if (!layer) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
+          layer.visible = config.visible;
+          syncTextAliases(page);
+        }
+      },
+    });
   }
 
   async updateBitmapLayer(config: BitmapRegionConfig): Promise<string> {
     const path = await invoke<string>("studio_write_bitmap_layer", { config });
-    const project = await this.loadProject({ project_path: config.project_path });
-    const page = pageAt(project, config.page_index);
-    const key: BitmapLayerKey = config.layer_key;
-    page.image_layers[key] = {
-      key,
-      path,
-      visible: true,
-      locked: page.image_layers[key]?.locked === true,
-    };
-    if (key === "rendered") page.arquivo_traduzido = path;
-    await this.saveProjectJson({ project_path: config.project_path, project_json: project });
+    await this.mutateProject({
+      project_path: config.project_path,
+      mutate: (project) => {
+        const page = pageAt(project, config.page_index);
+        const key: BitmapLayerKey = config.layer_key;
+        page.image_layers[key] = {
+          key,
+          path,
+          visible: true,
+          locked: page.image_layers[key]?.locked === true,
+        };
+        if (key === "rendered") page.arquivo_traduzido = path;
+      },
+    });
     return resolveProjectAssetPath(config.project_path, path) ?? path;
+  }
+
+  async saveGeneratedAsset(config: GeneratedAssetConfig): Promise<string> {
+    return invoke<string>("studio_write_generated_asset", { config });
+  }
+
+  async deleteGeneratedAssets(config: DeleteGeneratedAssetsConfig): Promise<void> {
+    await invoke("studio_delete_generated_assets", { config });
+  }
+
+  async fluxProviderStatus(): Promise<FluxProviderStatus> {
+    return invoke<FluxProviderStatus>("studio_flux_status");
+  }
+
+  async generateFluxFill(config: FluxGenerateConfig): Promise<FluxGenerateResult> {
+    return invoke<FluxGenerateResult>("studio_flux_generate", { config });
+  }
+
+  async cancelFluxFill(jobId: string): Promise<boolean> {
+    return invoke<boolean>("studio_flux_cancel", { config: { job_id: jobId } });
   }
 
   async studioLiteModelStatus(): Promise<StudioLiteModelStatus> {
@@ -280,17 +354,20 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
     path: string | null | undefined,
   ) {
     if (!path) return;
-    const project = await this.loadProject({ project_path: projectPath });
-    const page = pageAt(project, pageIndex);
-    page.image_layers[key] = {
-      ...(page.image_layers[key] ?? {}),
-      key,
-      path,
-      visible: true,
-      locked: page.image_layers[key]?.locked === true,
-    };
-    if (key === "rendered") page.arquivo_traduzido = path;
-    await this.saveProjectJson({ project_path: projectPath, project_json: project });
+    await this.mutateProject({
+      project_path: projectPath,
+      mutate: (project) => {
+        const page = pageAt(project, pageIndex);
+        page.image_layers[key] = {
+          ...(page.image_layers[key] ?? {}),
+          key,
+          path,
+          visible: true,
+          locked: page.image_layers[key]?.locked === true,
+        };
+        if (key === "rendered") page.arquivo_traduzido = path;
+      },
+    });
   }
 
   private async studioLiteImagePath(projectPath: string, pageIndex: number, preferInpaint: boolean) {
@@ -340,6 +417,25 @@ export class HybridStudioEditorBackend implements StudioEditorBackend {
     return this.backendFor(config.project_path).saveProjectJson(config);
   }
 
+  mutateProject<T>(config: {
+    project_path: string;
+    mutate: (project: StudioProject) => T | Promise<T>;
+  }) {
+    return this.backendFor(config.project_path).mutateProject(config);
+  }
+
+  saveRecoverySnapshot(config: { project_path: string; snapshot: StudioRecoverySnapshot }) {
+    return this.backendFor(config.project_path).saveRecoverySnapshot(config);
+  }
+
+  loadRecoverySnapshot(config: { project_path: string }) {
+    return this.backendFor(config.project_path).loadRecoverySnapshot(config);
+  }
+
+  clearRecoverySnapshot(config: { project_path: string }) {
+    return this.backendFor(config.project_path).clearRecoverySnapshot(config);
+  }
+
   loadEditorPage(config: { project_path: string; page_index: number }) {
     return this.backendFor(config.project_path).loadEditorPage(config);
   }
@@ -378,6 +474,27 @@ export class HybridStudioEditorBackend implements StudioEditorBackend {
 
   updateBitmapLayer(config: BitmapRegionConfig) {
     return this.backendFor(config.project_path).updateBitmapLayer(config);
+  }
+
+  saveGeneratedAsset(config: GeneratedAssetConfig) {
+    return this.backendFor(config.project_path).saveGeneratedAsset(config);
+  }
+
+  deleteGeneratedAssets(config: DeleteGeneratedAssetsConfig) {
+    return this.backendFor(config.project_path).deleteGeneratedAssets(config);
+  }
+
+  fluxProviderStatus() {
+    return this.tauriBackend?.fluxProviderStatus() ?? this.memoryBackend.fluxProviderStatus();
+  }
+
+  generateFluxFill(config: FluxGenerateConfig) {
+    if (!this.tauriBackend) return this.memoryBackend.generateFluxFill(config);
+    return this.tauriBackend.generateFluxFill(config);
+  }
+
+  cancelFluxFill(jobId: string) {
+    return this.tauriBackend?.cancelFluxFill(jobId) ?? this.memoryBackend.cancelFluxFill(jobId);
   }
 
   studioLiteModelStatus() {

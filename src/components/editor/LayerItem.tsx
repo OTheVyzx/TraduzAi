@@ -28,9 +28,15 @@ interface LayerItemProps {
   entry: NormalizedTextLayer;
   index: number;
   hasEdits?: boolean;
+  showProcessingActions?: boolean;
 }
 
-export function LayerItem({ entry, index, hasEdits = false }: LayerItemProps) {
+export function LayerItem({
+  entry,
+  index,
+  hasEdits = false,
+  showProcessingActions = true,
+}: LayerItemProps) {
   const rowRef = useRef<HTMLDivElement>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<"ocr" | "translate" | "inpaint" | null>(null);
@@ -160,63 +166,69 @@ export function LayerItem({ entry, index, hasEdits = false }: LayerItemProps) {
                 {entry.confidencePercent}%
               </span>
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-1">
-              <button
-                disabled={pendingAction !== null}
-                className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={(event) => handleBlockAction(event, "ocr")}
-                title="Refazer OCR deste texto"
-              >
-                <ScanText size={11} />
-                OCR
-              </button>
-              <button
-                disabled={pendingAction !== null}
-                className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={(event) => handleBlockAction(event, "translate")}
-                title="Traduzir este texto"
-              >
-                <Languages size={11} />
-                Traduzir
-              </button>
-              <button
-                disabled={pendingAction !== null}
-                className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={(event) => handleBlockAction(event, "inpaint")}
-                title="Limpar fundo deste texto"
-              >
-                <Eraser size={11} />
-                Limpar
-              </button>
-              {isSelected && (
-                <>
-                  <button
-                    disabled={!hasEdits || pendingAction !== null}
-                    className="ml-auto inline-flex items-center gap-1 rounded border border-status-success/25 bg-status-success/8 px-1.5 py-1 text-[10px] text-status-success transition-smooth hover:bg-status-success/12 disabled:cursor-not-allowed disabled:opacity-35"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void commitEdits();
-                    }}
-                    title="Salvar alteracoes deste texto"
-                  >
-                    <Check size={11} />
-                    Salvar
-                  </button>
-                  <button
-                    disabled={pendingAction !== null}
-                    className="inline-flex items-center gap-1 rounded border border-status-error/25 bg-status-error/8 px-1.5 py-1 text-[10px] text-status-error transition-smooth hover:bg-status-error/12 disabled:cursor-not-allowed disabled:opacity-35"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void deleteSelectedLayer();
-                    }}
-                    title="Excluir texto selecionado"
-                  >
-                    <Trash2 size={11} />
-                    Excluir
-                  </button>
-                </>
-              )}
-            </div>
+            {(showProcessingActions || isSelected) && (
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                {showProcessingActions && (
+                  <>
+                    <button
+                      disabled={pendingAction !== null}
+                      className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={(event) => handleBlockAction(event, "ocr")}
+                      title="Refazer OCR deste texto"
+                    >
+                      <ScanText size={11} />
+                      OCR
+                    </button>
+                    <button
+                      disabled={pendingAction !== null}
+                      className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={(event) => handleBlockAction(event, "translate")}
+                      title="Traduzir este texto"
+                    >
+                      <Languages size={11} />
+                      Traduzir
+                    </button>
+                    <button
+                      disabled={pendingAction !== null}
+                      className="inline-flex items-center gap-1 rounded border border-border bg-bg-tertiary/45 px-1.5 py-1 text-[10px] text-text-secondary transition-smooth hover:border-brand/30 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={(event) => handleBlockAction(event, "inpaint")}
+                      title="Limpar fundo deste texto"
+                    >
+                      <Eraser size={11} />
+                      Limpar
+                    </button>
+                  </>
+                )}
+                {isSelected && (
+                  <>
+                    <button
+                      disabled={!hasEdits || pendingAction !== null}
+                      className="ml-auto inline-flex items-center gap-1 rounded border border-status-success/25 bg-status-success/8 px-1.5 py-1 text-[10px] text-status-success transition-smooth hover:bg-status-success/12 disabled:cursor-not-allowed disabled:opacity-35"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void commitEdits();
+                      }}
+                      title="Salvar alteracoes deste texto"
+                    >
+                      <Check size={11} />
+                      Salvar
+                    </button>
+                    <button
+                      disabled={pendingAction !== null}
+                      className="inline-flex items-center gap-1 rounded border border-status-error/25 bg-status-error/8 px-1.5 py-1 text-[10px] text-status-error transition-smooth hover:bg-status-error/12 disabled:cursor-not-allowed disabled:opacity-35"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteSelectedLayer();
+                      }}
+                      title="Excluir texto selecionado"
+                    >
+                      <Trash2 size={11} />
+                      Excluir
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {actionError && (
               <p className="mt-1 text-[10px] leading-tight text-status-error">{actionError}</p>
             )}

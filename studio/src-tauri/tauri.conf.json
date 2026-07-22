@@ -29,7 +29,8 @@
     "active": false,
     "targets": "all",
     "resources": [
-      "../../pipeline/studio_lite"
+      "../../pipeline/studio_lite",
+      "../flux_adapter"
     ]
   },
   "plugins": {

@@ -13,6 +13,7 @@ interface BitmapStrokePreviewConfig {
   hardness?: number;
   erase: boolean;
   clipPolygon?: [number, number][];
+  clipMaskImage?: CanvasImageSource;
 }
 
 export interface BitmapStrokePreviewResult {
@@ -148,6 +149,39 @@ export function createBitmapStrokePreviewOnCanvas(
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   const beforeDataUrl = canvas.toDataURL("image/png");
+
+  if (config.clipMaskImage) {
+    const overlay = document.createElement("canvas");
+    overlay.width = canvas.width;
+    overlay.height = canvas.height;
+    const overlayContext = overlay.getContext("2d");
+    if (!overlayContext) return null;
+
+    overlayContext.save();
+    overlayContext.globalCompositeOperation = "source-over";
+    if (config.erase || config.layerKey === "mask") {
+      overlayContext.strokeStyle = "#ffffff";
+      drawStrokePasses(overlayContext, config.stroke, config.brushSize, 1, config.hardness);
+    } else {
+      overlayContext.strokeStyle = config.color || "#000000";
+      drawStrokePasses(overlayContext, config.stroke, config.brushSize, config.opacity, config.hardness);
+    }
+    overlayContext.globalAlpha = 1;
+    overlayContext.globalCompositeOperation = "destination-in";
+    overlayContext.drawImage(config.clipMaskImage, 0, 0, canvas.width, canvas.height);
+    overlayContext.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = config.erase ? "destination-out" : "source-over";
+    ctx.drawImage(overlay, 0, 0);
+    ctx.restore();
+    return {
+      layerKey: config.layerKey,
+      beforeDataUrl,
+      afterDataUrl: canvas.toDataURL("image/png"),
+    };
+  }
 
   ctx.save();
   clipToPolygon(ctx, config.clipPolygon);

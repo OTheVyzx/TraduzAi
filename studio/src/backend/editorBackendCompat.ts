@@ -152,6 +152,117 @@ function requirePngData(config: LegacyBitmapRegionConfig, layer: string) {
   return config.png_data;
 }
 
+const editorBaseProjects = new WeakMap<StudioEditorBackend, Map<string, StudioProject>>();
+
+function cloneValue<T>(value: T): T {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function valuesEqual(left: unknown, right: unknown) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function projectBasesFor(backend: StudioEditorBackend) {
+  let projects = editorBaseProjects.get(backend);
+  if (!projects) {
+    projects = new Map();
+    editorBaseProjects.set(backend, projects);
+  }
+  return projects;
+}
+
+function applyChangedRecordFields(
+  base: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  latest: Record<string, unknown>,
+  context: string,
+) {
+  for (const key of new Set([...Object.keys(base), ...Object.keys(incoming)])) {
+    const baseHas = Object.prototype.hasOwnProperty.call(base, key);
+    const incomingHas = Object.prototype.hasOwnProperty.call(incoming, key);
+    const latestHas = Object.prototype.hasOwnProperty.call(latest, key);
+    const baseValue = base[key];
+    const incomingValue = incoming[key];
+    const latestValue = latest[key];
+    if (baseHas === incomingHas && valuesEqual(baseValue, incomingValue)) continue;
+    if (latestHas === incomingHas && valuesEqual(latestValue, incomingValue)) continue;
+    if (latestHas !== baseHas || !valuesEqual(latestValue, baseValue)) {
+      throw new Error(`${context} mudou no campo ${key}; salve ou recarregue antes de repetir a alteracao estrutural`);
+    }
+    if (incomingHas) latest[key] = cloneValue(incomingValue);
+    else delete latest[key];
+  }
+}
+
+function applyLegacyEditorProjectDelta(base: StudioProject, incoming: StudioProject, latest: StudioProject) {
+  if (base.paginas.length !== incoming.paginas.length || latest.paginas.length !== base.paginas.length) {
+    throw new Error("A quantidade de paginas mudou durante a edicao estrutural");
+  }
+  incoming.paginas.forEach((incomingPage, pageIndex) => {
+    const basePage = base.paginas[pageIndex];
+    const latestPage = latest.paginas[pageIndex];
+    if (!basePage || !latestPage) throw new Error(`Pagina ${pageIndex + 1} indisponivel para salvar estrutura`);
+    const baseById = new Map(basePage.text_layers.map((layer) => [layer.id, layer]));
+    const incomingById = new Map(incomingPage.text_layers.map((layer) => [layer.id, layer]));
+    const latestById = new Map(latestPage.text_layers.map((layer) => [layer.id, layer]));
+    const baseOrder = basePage.text_layers.map((layer) => layer.id);
+    const incomingOrder = incomingPage.text_layers.map((layer) => layer.id);
+    const latestOrder = latestPage.text_layers.map((layer) => layer.id);
+    const structureChanged = !valuesEqual(baseOrder, incomingOrder);
+    if (structureChanged && !valuesEqual(latestOrder, baseOrder) && !valuesEqual(latestOrder, incomingOrder)) {
+      throw new Error(`A estrutura da pagina ${pageIndex + 1} mudou em outra operacao`);
+    }
+
+    for (const [layerId, baseLayer] of baseById) {
+      const incomingLayer = incomingById.get(layerId);
+      const latestLayer = latestById.get(layerId);
+      if (!incomingLayer) {
+        if (latestLayer && !valuesEqual(latestLayer, baseLayer)) {
+          throw new Error(`A camada ${layerId} mudou antes de ser removida`);
+        }
+        continue;
+      }
+      if (!latestLayer) throw new Error(`A camada ${layerId} foi removida em outra operacao`);
+      applyChangedRecordFields(
+        baseLayer as unknown as Record<string, unknown>,
+        incomingLayer as unknown as Record<string, unknown>,
+        latestLayer as unknown as Record<string, unknown>,
+        `A camada ${layerId}`,
+      );
+    }
+
+    for (const [layerId, incomingLayer] of incomingById) {
+      if (baseById.has(layerId)) continue;
+      const latestLayer = latestById.get(layerId);
+      if (latestLayer && !valuesEqual(latestLayer, incomingLayer)) {
+        throw new Error(`A nova camada ${layerId} conflita com outra operacao`);
+      }
+    }
+
+    if (structureChanged && !valuesEqual(latestOrder, incomingOrder)) {
+      const nextLayers = incomingOrder.map((layerId) => {
+        const existing = latestById.get(layerId);
+        if (existing) return existing;
+        const created = incomingById.get(layerId);
+        if (!created) throw new Error(`Camada estrutural ausente: ${layerId}`);
+        return cloneValue(created);
+      });
+      latestPage.text_layers = nextLayers;
+    }
+    latestPage.textos = latestPage.text_layers;
+  });
+
+  if (!valuesEqual(base.font_assets, incoming.font_assets)) {
+    if (!valuesEqual(latest.font_assets, incoming.font_assets)) {
+      if (!valuesEqual(latest.font_assets, base.font_assets)) {
+        throw new Error("Os recursos de fonte mudaram em outra operacao");
+      }
+      latest.font_assets = cloneValue(incoming.font_assets);
+    }
+  }
+}
+
 function toBitmapConfig(
   config: LegacyBitmapRegionConfig,
   layer_key: BitmapRegionConfig["layer_key"],
@@ -188,29 +299,43 @@ function sanitizeMaskLeakedIntoInpaint(page: StudioPage): StudioPage {
 }
 
 async function ensureRecoveryMetadata(backend: StudioEditorBackend, projectPath: string, pageIndex: number) {
-  const project = await backend.loadProject({ project_path: projectPath });
-  const page = project.paginas[pageIndex];
-  if (!page) return;
-  const existing = page.image_layers.recovery;
-  page.image_layers.recovery = {
-    key: "recovery",
-    path: existing?.path ?? null,
-    visible: false,
-    locked: existing?.locked === true,
-    opacity: existing?.opacity,
-    order: existing?.order,
-    technical: true,
-  };
-  await backend.saveProjectJson({ project_path: projectPath, project_json: project });
+  await backend.mutateProject({
+    project_path: projectPath,
+    mutate: (project) => {
+      const page = project.paginas[pageIndex];
+      if (!page) return;
+      const existing = page.image_layers.recovery;
+      page.image_layers.recovery = {
+        key: "recovery",
+        path: existing?.path ?? null,
+        visible: false,
+        locked: existing?.locked === true,
+        opacity: existing?.opacity,
+        order: existing?.order,
+        technical: true,
+      };
+    },
+  });
 }
 
 export function createLegacyEditorBackendAdapter(backend: StudioEditorBackend): LegacyEditorBackendApi {
+  const baseProjects = projectBasesFor(backend);
   return {
     saveProjectJson: async ({ project_path, project_json }) => {
-      await backend.saveProjectJson({ project_path, project_json: project_json as StudioProject });
+      const incoming = project_json as StudioProject;
+      const base = baseProjects.get(project_path);
+      if (!base) throw new Error("Base do editor indisponivel; recarregue a pagina antes de salvar alteracoes estruturais");
+      const { project } = await backend.mutateProject({
+        project_path,
+        mutate: (latest) => {
+          applyLegacyEditorProjectDelta(base, incoming, latest);
+        },
+      });
+      baseProjects.set(project_path, cloneValue(project));
     },
     loadEditorPage: async (config) => {
       const payload = await backend.loadEditorPage(config);
+      baseProjects.set(config.project_path, cloneValue(payload.project));
       return {
         ...payload,
         page: sanitizeMaskLeakedIntoInpaint(payload.page),
@@ -264,24 +389,28 @@ export function createLegacyEditorBackendAdapter(backend: StudioEditorBackend): 
         dirty_bbox: config.bbox ?? null,
       }),
     healInpaintRegion: async (config) => {
-      const project = await backend.loadProject({ project_path: config.project_path });
-      const page = project.paginas[config.page_index];
-      if (!page) throw new Error(`Pagina nao encontrada: ${config.page_index}`);
-      const before = page.image_layers.inpaint?.path ?? null;
-      const inpaintPath = before ?? page.image_layers.base?.path ?? page.arquivo_original ?? page.arquivo_traduzido ?? "";
-      if (!inpaintPath) throw new Error("Imagem base indisponivel para preservar camada inpaint no Studio");
-      page.image_layers.inpaint = {
-        ...(page.image_layers.inpaint ?? {}),
-        key: "inpaint",
-        path: inpaintPath,
-        visible: true,
-        locked: page.image_layers.inpaint?.locked === true,
-      };
-      await backend.saveProjectJson({ project_path: config.project_path, project_json: project });
+      const { result } = await backend.mutateProject({
+        project_path: config.project_path,
+        mutate: (project) => {
+          const page = project.paginas[config.page_index];
+          if (!page) throw new Error(`Pagina nao encontrada: ${config.page_index}`);
+          const before = page.image_layers.inpaint?.path ?? null;
+          const inpaintPath = before ?? page.image_layers.base?.path ?? page.arquivo_original ?? page.arquivo_traduzido ?? "";
+          if (!inpaintPath) throw new Error("Imagem base indisponivel para preservar camada inpaint no Studio");
+          page.image_layers.inpaint = {
+            ...(page.image_layers.inpaint ?? {}),
+            key: "inpaint",
+            path: inpaintPath,
+            visible: true,
+            locked: page.image_layers.inpaint?.locked === true,
+          };
+          return { before, inpaintPath };
+        },
+      });
       return {
         page_index: config.page_index,
-        inpaint_path: inpaintPath,
-        before_inpaint_path: before,
+        inpaint_path: result.inpaintPath,
+        before_inpaint_path: result.before,
         bbox: config.bbox,
       };
     },

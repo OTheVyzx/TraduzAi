@@ -7,6 +7,7 @@ import {
   FileText,
   Folder,
   Image as ImageIcon,
+  Layers as LayersIcon,
   Lock,
   LockOpen,
   Search,
@@ -15,13 +16,24 @@ import {
 import { useAppStore, type PageData } from "../../lib/stores/appStore";
 import { useEditorStore } from "../../lib/stores/editorStore";
 import { buildEditorScene, searchTextLayers, type NormalizedTextLayer } from "../../lib/editorScene";
+import { resolveEditorCapabilities, type EditorMode } from "./editorMode";
 import { LayerItem } from "./LayerItem";
+
+const STUDIO_IMAGE_LAYER_LABELS = {
+  base: "Original",
+  mask: "Máscara",
+  inpaint: "Limpeza",
+  brush: "Pintura",
+  recovery: "Recuperação",
+  rendered: "Resultado",
+} as const;
 
 function pageTextCount(page: PageData | undefined) {
   return (page?.text_layers ?? page?.textos ?? []).length;
 }
 
-export function LayersPanel() {
+export function LayersPanel({ mode = "traduzai" }: { mode?: EditorMode }) {
+  const capabilities = resolveEditorCapabilities(mode);
   const projectPages = useAppStore((s) => s.project?.paginas ?? []);
   const currentPage = useEditorStore((s) => s.currentPage);
   const currentPageIndex = useEditorStore((s) => s.currentPageIndex);
@@ -91,8 +103,14 @@ export function LayersPanel() {
       <div className="border-b border-border px-4 py-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Wand2 size={13} className="text-brand" />
-            <span className="text-[13px] font-semibold tracking-tight">Textos</span>
+            {capabilities.useProfessionalLayersPresentation ? (
+              <LayersIcon size={13} className="text-brand" />
+            ) : (
+              <Wand2 size={13} className="text-brand" />
+            )}
+            <span className="text-[13px] font-semibold tracking-tight">
+              {capabilities.useProfessionalLayersPresentation ? "Camadas" : "Textos"}
+            </span>
             <span className="rounded-full bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-mono text-text-muted">
               {filteredTextLayers.length}/{scene.textLayers.length}
             </span>
@@ -103,7 +121,7 @@ export function LayersPanel() {
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Buscar texto..."
+            placeholder={capabilities.useProfessionalLayersPresentation ? "Buscar camada..." : "Buscar texto..."}
             className="w-full rounded-lg border border-border bg-bg-tertiary/50 py-1.5 pl-7 pr-3 text-[11px] text-text-primary outline-none transition-smooth placeholder:text-text-muted focus:border-brand/30 focus:bg-bg-tertiary"
           />
         </div>
@@ -128,7 +146,9 @@ export function LayersPanel() {
                 >
                   <div className="min-w-0">
                     <p className="truncate text-[11px] font-medium text-text-secondary">
-                      Camada {layer.key}
+                      {capabilities.useProfessionalLayersPresentation
+                        ? STUDIO_IMAGE_LAYER_LABELS[layer.key]
+                        : `Camada ${layer.key}`}
                     </p>
                     <p className="text-[10px] text-text-muted">{layer.hasContent ? status : "sem conteudo"}</p>
                   </div>
@@ -211,7 +231,13 @@ export function LayersPanel() {
                     ) : isActivePage ? (
                       <div className="space-y-0.5">
                         {pageLayers.map((entry, index) => (
-                          <LayerItem key={entry.id} entry={entry} index={index + 1} hasEdits={entry.id in pendingEdits} />
+                          <LayerItem
+                            key={entry.id}
+                            entry={entry}
+                            index={index + 1}
+                            hasEdits={entry.id in pendingEdits}
+                            showProcessingActions={capabilities.showBlockProcessingActions}
+                          />
                         ))}
                       </div>
                     ) : (

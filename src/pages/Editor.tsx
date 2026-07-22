@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import {
@@ -23,7 +23,8 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../lib/stores/appStore";
 import { EditorStage } from "../components/editor/stage/EditorStage";
-import { LayersPanel } from "../components/editor/LayersPanel";
+import type { EditorSceneVisualNode } from "../components/editor/stage/editorSceneVisual";
+import { EditorLayersPanelSlot } from "../components/editor/EditorLayersPanelSlot";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
 import { getRenderPreviewStateForPage, useEditorStore } from "../lib/stores/editorStore";
 import { ZoomControls } from "../components/editor/toolbar/ZoomControls";
@@ -36,6 +37,14 @@ import { RenderStatusBadge } from "../components/editor/toolbar/RenderStatusBadg
 import { preloadEditorFonts } from "../lib/fonts";
 import { loadSupportedLanguages } from "../lib/tauri";
 import { getLanguageOptions, normalizeLanguageCodeForSelection } from "../lib/languages";
+import {
+  editorToolsForMode,
+  editorViewLabelForMode,
+  isEditorViewAvailable,
+  resolveEditorCapabilities,
+  type EditorMode,
+} from "../components/editor/editorMode";
+import { withLassoSelectionModifiers } from "../lib/lassoSelection";
 
 const VIEW_MODES = [
   { key: "original" as const, label: "Original", icon: Image, hotkey: "1" },
@@ -222,7 +231,17 @@ function PipelineActionSidebar() {
 }
 
 /** Controles contextuais da ferramenta Lasso (Fase 8). */
-function MaskLassoControls() {
+function MaskLassoControls({
+  mode,
+  selectionTargetNodeId,
+  selectionTargetLabel,
+  onAttachSelectionMask,
+}: {
+  mode: EditorMode;
+  selectionTargetNodeId?: string | null;
+  selectionTargetLabel?: string | null;
+  onAttachSelectionMask?: () => void | Promise<void>;
+}) {
   const maskShape = useEditorStore((s) => s.maskShape);
   const maskOp = useEditorStore((s) => s.maskOp);
   const setMaskShape = useEditorStore((s) => s.setMaskShape);
@@ -231,6 +250,12 @@ function MaskLassoControls() {
   const activeLassoSelection = useEditorStore((s) => s.activeLassoSelection);
   const applyLassoSelectionToMask = useEditorStore((s) => s.applyLassoSelectionToMask);
   const setActiveLassoSelection = useEditorStore((s) => s.setActiveLassoSelection);
+
+  const updateStudioSelection = (patch: { feather?: number; expansion?: number; targetNodeId?: string | null }) => {
+    const selection = useEditorStore.getState().activeLassoSelection;
+    if (!selection) return;
+    setActiveLassoSelection(withLassoSelectionModifiers(selection, patch));
+  };
 
   return (
     <div className="flex items-center gap-2">
@@ -248,6 +273,48 @@ function MaskLassoControls() {
           </button>
         ))}
       </div>
+
+      {mode === "studio" && activeLassoSelection && (
+        <div className="flex items-center gap-1 rounded-lg border border-border bg-bg-tertiary/30 px-1.5 py-0.5">
+          <label className="flex items-center gap-1 text-[10px] text-text-muted" title="Suavização da borda da seleção">
+            Suavizar
+            <input
+              type="number"
+              min={0}
+              max={128}
+              value={activeLassoSelection.feather ?? 0}
+              onChange={(event) => updateStudioSelection({ feather: Number(event.target.value) })}
+              className="w-12 rounded border border-border bg-bg-primary px-1 py-0.5 font-mono text-[10px] text-text-primary"
+              aria-label="Feather da seleção"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-text-muted" title="Valor positivo expande; negativo contrai">
+            Expandir
+            <input
+              type="number"
+              min={-256}
+              max={256}
+              value={activeLassoSelection.expansion ?? 0}
+              onChange={(event) => updateStudioSelection({ expansion: Number(event.target.value) })}
+              className="w-12 rounded border border-border bg-bg-primary px-1 py-0.5 font-mono text-[10px] text-text-primary"
+              aria-label="Expandir ou contrair seleção"
+            />
+          </label>
+        </div>
+      )}
+
+      {mode === "studio" && (
+        <div
+          className={`max-w-[160px] truncate rounded-lg border px-2 py-1 text-[10px] ${
+            selectionTargetNodeId
+              ? "border-accent-cyan/25 bg-accent-cyan/8 text-accent-cyan"
+              : "border-status-warning/25 bg-status-warning/8 text-status-warning"
+          }`}
+          title={selectionTargetLabel ?? "Selecione uma camada na árvore"}
+        >
+          Alvo: {selectionTargetLabel ?? "selecione uma camada"}
+        </div>
+      )}
 
       {/* Op toggle */}
       <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
@@ -276,6 +343,22 @@ function MaskLassoControls() {
 
       {activeLassoSelection && (
         <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
+          {mode === "studio" && onAttachSelectionMask && (
+            <button
+              type="button"
+              disabled={!selectionTargetNodeId}
+              onClick={() => {
+                updateStudioSelection({ targetNodeId: selectionTargetNodeId ?? null });
+                void Promise.resolve(onAttachSelectionMask()).catch((error) => {
+                  console.error("Falha ao criar máscara de camada:", error);
+                });
+              }}
+              className="rounded-md px-2 py-1 text-[10px] font-medium text-brand transition-smooth hover:bg-brand/10 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Vincular a seleção como máscara não destrutiva da camada-alvo"
+            >
+              Máscara da camada
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void applyLassoSelectionToMask()}
@@ -314,10 +397,38 @@ export interface EditorProps {
   onBack?: () => void;
   emptyBackLabel?: string;
   headerActions?: ReactNode;
+  workspaceSwitcher?: ReactNode;
+  pagesPanel?: ReactNode;
+  layersPanel?: ReactNode;
+  mode?: EditorMode;
+  toolProfile?: EditorMode;
+  selectionTargetNodeId?: string | null;
+  selectionTargetLabel?: string | null;
+  onAttachSelectionMask?: () => void | Promise<void>;
+  bitmapCompositeSource?: string | null;
+  sceneVisualNodes?: EditorSceneVisualNode[] | null;
+  onRequestPageChange?: (pageIndex: number) => void | Promise<void>;
 }
 
-export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerActions }: EditorProps = {}) {
+export function Editor({
+  onBack,
+  emptyBackLabel = "Voltar ao início",
+  headerActions,
+  workspaceSwitcher,
+  pagesPanel,
+  layersPanel,
+  mode = "traduzai",
+  toolProfile = mode,
+  selectionTargetNodeId = null,
+  selectionTargetLabel = null,
+  onAttachSelectionMask,
+  bitmapCompositeSource = null,
+  sceneVisualNodes = null,
+  onRequestPageChange,
+}: EditorProps = {}) {
   const navigate = useNavigate();
+  const capabilities = resolveEditorCapabilities(toolProfile);
+  const visibleTools = useMemo(() => new Set(editorToolsForMode(toolProfile)), [toolProfile]);
   const project = useAppStore((s) => s.project);
   const pipeline = useAppStore((s) => s.pipeline);
   const updateProject = useAppStore((s) => s.updateProject);
@@ -379,6 +490,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
     Object.keys(pendingStructuralEdits.deleted).length +
     (pendingStructuralEdits.order ? 1 : 0);
   const pagePipelineBusy = isRetypesetting || isReinpainting || isHealingBrushApplying;
+  const hasInpaintLayer = Boolean(currentPage?.image_layers?.inpaint?.path);
   const pageKey = currentPageKey();
   const renderPreviewState = useMemo(
     () => getRenderPreviewStateForPage(pageKey, currentPage, renderPreviewCacheByPageKey),
@@ -392,6 +504,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
     activeLassoSelection ? runMaskedActionFromLasso(action) : runMaskedAction(action);
 
   useEffect(() => {
+    if (!capabilities.showSourceLanguage) return;
     let disposed = false;
     loadSupportedLanguages()
       .then((languages) => {
@@ -404,13 +517,28 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [capabilities.showSourceLanguage]);
+
+  useEffect(() => {
+    if (!visibleTools.has(toolMode)) setToolMode("select");
+  }, [setToolMode, toolMode, visibleTools]);
+
+  useEffect(() => {
+    if (!isEditorViewAvailable(toolProfile, viewMode, hasInpaintLayer)) setViewMode("original");
+  }, [hasInpaintLayer, setViewMode, toolProfile, viewMode]);
 
   const saveAndRenderCurrentPage = async () => {
     const targetPageKey = currentPageKey();
     await commitEdits();
     await renderPreviewPage(targetPageKey);
   };
+  const requestPageChange = useCallback(async (pageIndex: number) => {
+    if (onRequestPageChange) {
+      await onRequestPageChange(pageIndex);
+      return;
+    }
+    await setCurrentPage(pageIndex);
+  }, [onRequestPageChange, setCurrentPage]);
   const handleBack = () => {
     if (onBack) {
       onBack();
@@ -454,25 +582,25 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
           redoEditor();
           return;
         }
-        if (event.key === "1") setViewMode("original");
-        if (event.key === "2") setViewMode("inpainted");
-        if (event.key === "3") setViewMode("translated");
-        if (event.key.toLowerCase() === "v") setToolMode("select");
-        if (event.key.toLowerCase() === "t") setToolMode("block");
-        if (event.key.toLowerCase() === "b") setToolMode("brush");
-        if (event.key.toLowerCase() === "r") setToolMode("repairBrush");
-        if (event.key.toLowerCase() === "i") setToolMode("reinpaintBrush");
-        if (event.key.toLowerCase() === "e") setToolMode("eraser");
-        if (event.key.toLowerCase() === "l") setToolMode("mask");
-        if (event.key.toLowerCase() === "p") setToolMode("process");
+        if (event.key === "1" && isEditorViewAvailable(toolProfile, "original", hasInpaintLayer)) setViewMode("original");
+        if (event.key === "2" && isEditorViewAvailable(toolProfile, "inpainted", hasInpaintLayer)) setViewMode("inpainted");
+        if (event.key === "3" && isEditorViewAvailable(toolProfile, "translated", hasInpaintLayer)) setViewMode("translated");
+        if (event.key.toLowerCase() === "v" && visibleTools.has("select")) setToolMode("select");
+        if (event.key.toLowerCase() === "t" && visibleTools.has("block")) setToolMode("block");
+        if (event.key.toLowerCase() === "b" && visibleTools.has("brush")) setToolMode("brush");
+        if (event.key.toLowerCase() === "r" && visibleTools.has("repairBrush")) setToolMode("repairBrush");
+        if (event.key.toLowerCase() === "i" && visibleTools.has("reinpaintBrush")) setToolMode("reinpaintBrush");
+        if (event.key.toLowerCase() === "e" && visibleTools.has("eraser")) setToolMode("eraser");
+        if (event.key.toLowerCase() === "l" && visibleTools.has("mask")) setToolMode("mask");
+        if (event.key.toLowerCase() === "p" && visibleTools.has("process")) setToolMode("process");
         // Tab: cicla alvo da borracha quando eraser ativo
         if (event.key === "Tab" && toolMode === "eraser") {
           event.preventDefault();
           setEraserTarget(eraserTarget === "brush" || eraserTarget === null ? "mask" : "brush");
         }
         // Legacy aliases
-        if (event.key.toLowerCase() === "n") setToolMode("brush");
-        if (event.key.toLowerCase() === "m") setToolMode("mask");
+        if (event.key.toLowerCase() === "n" && visibleTools.has("brush")) setToolMode("brush");
+        if (event.key.toLowerCase() === "m" && visibleTools.has("mask")) setToolMode("mask");
         if (event.key.toLowerCase() === "o") toggleOverlays();
         if (event.key === "=" || event.key === "+") {
           event.preventDefault();
@@ -490,11 +618,11 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
 
       if (event.key === "ArrowLeft" && event.altKey && currentPageIndex > 0) {
         event.preventDefault();
-        void setCurrentPage(currentPageIndex - 1);
+        void requestPageChange(currentPageIndex - 1);
       }
       if (event.key === "ArrowRight" && event.altKey && currentPageIndex < totalPages - 1) {
         event.preventDefault();
-        void setCurrentPage(currentPageIndex + 1);
+        void requestPageChange(currentPageIndex + 1);
       }
       if ((event.key === "Delete" || event.key === "Backspace") && selectedLayerId && !isTyping) {
         event.preventDefault();
@@ -506,6 +634,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
       }
       // Fase 1.2: atalhos de fallback para preview/render que perderam o botão
       if (
+        capabilities.showPipelineActions &&
         (event.ctrlKey || event.metaKey) &&
         event.shiftKey &&
         event.key.toLowerCase() === "r"
@@ -514,6 +643,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
         void forceFidelityRender();
       }
       if (
+        capabilities.showPipelineActions &&
         (event.ctrlKey || event.metaKey) &&
         event.shiftKey &&
         event.key.toLowerCase() === "p"
@@ -528,6 +658,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
   }, [
     currentPageIndex,
     currentPageKey,
+    capabilities.showPipelineActions,
     deleteSelectedLayer,
     eraserTarget,
     forceFidelityRender,
@@ -535,16 +666,19 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
     renderPreviewPage,
     resetViewport,
     selectedLayerId,
-    setCurrentPage,
+    hasInpaintLayer,
+    requestPageChange,
     setEraserTarget,
     setToolMode,
     setViewMode,
     toggleOverlays,
     toolMode,
+    toolProfile,
     totalPages,
     undoEditor,
     zoomIn,
     zoomOut,
+    visibleTools,
   ]);
 
   const currentPageSummary = useMemo(() => {
@@ -570,8 +704,11 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
   }
 
   return (
-    <div className="flex h-screen bg-bg-primary">
-      <PageThumbnails />
+    <div
+      className="flex h-screen bg-bg-primary"
+      data-editor-preserve-text-selection={toolProfile === "studio-translation" ? "true" : undefined}
+    >
+      {pagesPanel ?? <PageThumbnails />}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ── Row 1: Header ── */}
@@ -602,7 +739,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
           {/* Page navigation */}
           <div className="flex items-center gap-1 rounded-lg border border-border bg-bg-tertiary/40 px-1 py-0.5">
             <button
-              onClick={() => void setCurrentPage(Math.max(0, currentPageIndex - 1))}
+              onClick={() => void requestPageChange(Math.max(0, currentPageIndex - 1))}
               disabled={currentPageIndex === 0}
               className="rounded p-1 text-text-muted transition-smooth hover:text-text-primary disabled:opacity-25"
               title="Página anterior (Alt+←)"
@@ -613,7 +750,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
               {currentPageIndex + 1}/{totalPages}
             </span>
             <button
-              onClick={() => void setCurrentPage(Math.min(totalPages - 1, currentPageIndex + 1))}
+              onClick={() => void requestPageChange(Math.min(totalPages - 1, currentPageIndex + 1))}
               disabled={currentPageIndex >= totalPages - 1}
               className="rounded p-1 text-text-muted transition-smooth hover:text-text-primary disabled:opacity-25"
               title="Próxima página (Alt+→)"
@@ -624,6 +761,9 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
 
           {/* Undo/Redo + indicador "Não salvo" + Salvar manual + descartar */}
           <div className="flex items-center gap-1.5">
+            {workspaceSwitcher ? (
+              <div data-editor-preserve-text-selection="true">{workspaceSwitcher}</div>
+            ) : null}
             <UndoRedoControls />
             <AutoSaveIndicator />
             <RenderStatusBadge />
@@ -652,22 +792,27 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
         <div className="flex items-center gap-2 border-b border-border bg-bg-primary px-3 py-1.5">
           {/* View modes — segmented control */}
           <div className="flex items-center rounded-lg border border-border bg-bg-tertiary/30 p-0.5">
-            {VIEW_MODES.map(({ key, label, icon: Icon, hotkey }) => (
-              <button
-                key={key}
-                data-testid={`editor-view-${key}`}
-                onClick={() => setViewMode(key)}
-                className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-smooth ${
-                  viewMode === key
-                    ? "bg-brand/15 text-brand shadow-sm"
-                    : "text-text-muted hover:text-text-primary"
-                }`}
-                title={`${label} (${hotkey})`}
-              >
-                <Icon size={12} />
-                {label}
-              </button>
-            ))}
+            {VIEW_MODES.map(({ key, icon: Icon, hotkey }) => {
+              const label = editorViewLabelForMode(toolProfile, key);
+              const available = isEditorViewAvailable(toolProfile, key, hasInpaintLayer);
+              return (
+                <button
+                  key={key}
+                  data-testid={`editor-view-${key}`}
+                  onClick={() => setViewMode(key)}
+                  disabled={!available}
+                  className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-smooth disabled:cursor-not-allowed disabled:opacity-30 ${
+                    viewMode === key
+                      ? "bg-brand/15 text-brand shadow-sm"
+                      : "text-text-muted hover:text-text-primary"
+                  }`}
+                  title={available ? `${label} (${hotkey})` : "Camada limpa indisponível nesta página"}
+                >
+                  <Icon size={12} />
+                  {label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="h-4 w-px bg-border" />
@@ -688,7 +833,14 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
           {/* Brush options — contextual quando ferramenta brush ativa (Fase 7: inclui color picker) */}
           {toolMode === "brush" && <BrushOptionsInline />}
           {/* Máscara Lasso options — Fase 8 */}
-          {toolMode === "mask" && <MaskLassoControls />}
+          {toolMode === "mask" && (
+            <MaskLassoControls
+              mode={mode}
+              selectionTargetNodeId={selectionTargetNodeId}
+              selectionTargetLabel={selectionTargetLabel}
+              onAttachSelectionMask={onAttachSelectionMask}
+            />
+          )}
           {/* Brush size simples para repairBrush/reinpaintBrush/eraser */}
           {(toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") && (
             <div className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1">
@@ -729,32 +881,34 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
 
           <div className="flex-1" />
 
-          <div
-            className="hidden items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/30 px-2 py-1 md:flex"
-            title="Idioma de origem usado por Detectar e OCR"
-          >
-            <Globe2 size={12} className="text-accent-cyan" />
-            <span className="text-[10px] font-medium text-text-muted">Origem</span>
-            <select
-              data-testid="editor-source-language-select"
-              aria-label="Idioma de origem do OCR"
-              value={sourceLanguageValue}
-              disabled={!project}
-              onChange={(event) => updateProject({ idioma_origem: event.target.value })}
-              className="max-w-[150px] rounded-md border border-transparent bg-transparent py-0.5 pl-1 pr-5 text-[11px] font-medium text-text-primary outline-none transition-smooth hover:border-white/10 focus:border-brand/40"
+          {capabilities.showSourceLanguage && (
+            <div
+              className="hidden items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary/30 px-2 py-1 md:flex"
+              title="Idioma de origem usado por Detectar e OCR"
             >
-              {supportedLanguages.map((language) => (
-                <option key={language.code} value={language.code} className="bg-bg-primary text-text-primary">
-                  {language.label} ({language.code})
-                </option>
-              ))}
-            </select>
-            {selectedSourceLanguage?.ocr_strategy === "best_effort" && (
-              <span className="hidden rounded-md bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning xl:inline">
-                OCR exp.
-              </span>
-            )}
-          </div>
+              <Globe2 size={12} className="text-accent-cyan" />
+              <span className="text-[10px] font-medium text-text-muted">Origem</span>
+              <select
+                data-testid="editor-source-language-select"
+                aria-label="Idioma de origem do OCR"
+                value={sourceLanguageValue}
+                disabled={!project}
+                onChange={(event) => updateProject({ idioma_origem: event.target.value })}
+                className="max-w-[150px] rounded-md border border-transparent bg-transparent py-0.5 pl-1 pr-5 text-[11px] font-medium text-text-primary outline-none transition-smooth hover:border-white/10 focus:border-brand/40"
+              >
+                {supportedLanguages.map((language) => (
+                  <option key={language.code} value={language.code} className="bg-bg-primary text-text-primary">
+                    {language.label} ({language.code})
+                  </option>
+                ))}
+              </select>
+              {selectedSourceLanguage?.ocr_strategy === "best_effort" && (
+                <span className="hidden rounded-md bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning xl:inline">
+                  OCR exp.
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Pipeline progress indicator */}
           <div className="hidden">
@@ -797,7 +951,7 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
           </div>
 
           {/* Pipeline progress indicator */}
-          {(isRetypesetting || isReinpainting || isHealingBrushApplying) && (
+          {capabilities.showPipelineActions && (isRetypesetting || isReinpainting || isHealingBrushApplying) && (
             <div className="flex items-center gap-1.5 rounded-lg bg-brand/8 px-2.5 py-1 border border-brand/15">
               <Loader2 size={11} className="text-brand animate-spin" />
               <span className="text-[10px] text-brand font-medium truncate max-w-[100px]">
@@ -814,10 +968,10 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
         </div>
 
         {/* ── Row 3: TypesettingBar — só quando texto selecionado (Fase 4) ── */}
-        <TypesettingBar />
+        {capabilities.showTypesettingControls && <TypesettingBar />}
 
         {/* Banner de erro de ação pipeline (Fase 0 - sem falhas silenciosas) */}
-        {pageActionError && (
+        {capabilities.showPipelineActions && pageActionError && (
           <div className="flex items-start gap-2 border-b border-status-error/30 bg-status-error/10 px-3 py-2">
             <span className="mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-status-error/20 text-[10px] font-bold text-status-error">
               !
@@ -855,13 +1009,19 @@ export function Editor({ onBack, emptyBackLabel = "Voltar ao início", headerAct
         {/* ── Canvas area: ToolSidebar + Stage ── */}
         <div className="flex min-h-0 flex-1">
           {/* Fase 4: ToolSidebar vertical substituindo o segmented control horizontal */}
-          <ToolSidebar />
-          <EditorStage />
-          <PipelineActionSidebar />
+          <ToolSidebar mode={toolProfile} />
+          <EditorStage
+            mode={mode}
+            showFloatingTextEditor={toolProfile !== "studio-translation"}
+            selectionTargetNodeId={selectionTargetNodeId}
+            bitmapCompositeSource={bitmapCompositeSource}
+            sceneVisualNodes={sceneVisualNodes}
+          />
+          {capabilities.showPipelineActions && <PipelineActionSidebar />}
         </div>
       </div>
 
-      <LayersPanel />
+      <EditorLayersPanelSlot mode={mode} panel={layersPanel} />
     </div>
   );
 }

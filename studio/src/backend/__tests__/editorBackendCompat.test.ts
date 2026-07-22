@@ -33,6 +33,69 @@ describe("createLegacyEditorBackendAdapter", () => {
     expect(patched.traduzido).toBe("C");
   });
 
+  it("merges structural text saves over the latest scene instead of restoring a stale scene", async () => {
+    const { backend, compat } = backendWithProject();
+    const staleEditorProject = (await compat.loadEditorPage({ project_path: "memory://compat", page_index: 0 })).project!;
+    staleEditorProject.paginas[0].text_layers[0].translated = "Estrutural";
+    staleEditorProject.paginas[0].text_layers[0].traduzido = "Estrutural";
+    staleEditorProject.paginas[0].textos = staleEditorProject.paginas[0].text_layers;
+    await backend.mutateProject({
+      project_path: "memory://compat",
+      mutate: (latest) => {
+        latest.paginas[0].studio_scene.nodes[0].name = "Cena mais recente";
+      },
+    });
+
+    await compat.saveProjectJson({ project_path: "memory://compat", project_json: staleEditorProject });
+
+    const saved = await backend.loadProject({ project_path: "memory://compat" });
+    expect(saved.paginas[0].text_layers[0].translated).toBe("Estrutural");
+    expect(saved.paginas[0].studio_scene.nodes[0].name).toBe("Cena mais recente");
+  });
+
+  it("applies only the structural delta and preserves a concurrent chapter style", async () => {
+    const { backend, compat } = backendWithProject();
+    const incoming = (await compat.loadEditorPage({ project_path: "memory://compat", page_index: 0 })).project!;
+    incoming.paginas[0].text_layers.push({
+      ...incoming.paginas[0].text_layers[0],
+      id: "created-locally",
+      translated: "Nova",
+      traduzido: "Nova",
+      order: 1,
+    });
+    incoming.paginas[0].textos = incoming.paginas[0].text_layers;
+    await backend.patchEditorTextLayer({
+      project_path: "memory://compat",
+      page_index: 0,
+      layer_id: "a",
+      patch: { style: { fonte: "Wild" }, estilo: { fonte: "Wild" } },
+    });
+
+    await compat.saveProjectJson({ project_path: "memory://compat", project_json: incoming });
+
+    const saved = await backend.loadProject({ project_path: "memory://compat" });
+    expect(saved.paginas[0].text_layers.map((layer) => layer.id)).toEqual(["a", "created-locally"]);
+    expect(saved.paginas[0].text_layers[0].style).toMatchObject({ fonte: "Wild" });
+  });
+
+  it("rejects a structural save that would overwrite a newer edit in the same field", async () => {
+    const { backend, compat } = backendWithProject();
+    const incoming = (await compat.loadEditorPage({ project_path: "memory://compat", page_index: 0 })).project!;
+    incoming.paginas[0].text_layers[0].translated = "Edicao estrutural";
+    incoming.paginas[0].text_layers[0].traduzido = "Edicao estrutural";
+    await backend.patchEditorTextLayer({
+      project_path: "memory://compat",
+      page_index: 0,
+      layer_id: "a",
+      patch: { translated: "Edicao mais recente" },
+    });
+
+    await expect(compat.saveProjectJson({ project_path: "memory://compat", project_json: incoming }))
+      .rejects.toThrow("mudou no campo");
+    expect((await backend.loadProject({ project_path: "memory://compat" })).paginas[0].text_layers[0].translated)
+      .toBe("Edicao mais recente");
+  });
+
   it("maps brush/mask/recovery/reinpaint calls to Studio bitmap layers", async () => {
     const { backend, compat } = backendWithProject();
     const base = {

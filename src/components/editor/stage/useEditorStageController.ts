@@ -8,7 +8,12 @@ import {
   strokeDirtyBbox,
 } from "../../../lib/editorStroke";
 import { loadImageSource } from "../../../lib/imageSource";
-import { createLassoSelection, rasterizeLassoToPng } from "../../../lib/lassoSelection";
+import {
+  combineLassoSelections,
+  createLassoSelection,
+  lassoSelectionEffectiveBbox,
+  rasterizeLassoSelectionToCanvas,
+} from "../../../lib/lassoSelection";
 import {
   clampEditorZoom,
   getRenderPreviewStateForPage,
@@ -24,9 +29,16 @@ import {
   type RecoveryStrokePreviewPatch,
 } from "./recoveryComposite";
 import { createHealingBrushMaskPngDataUrl, paddedStrokeBBox } from "./healingBrushMask";
-import { displayImagePathForMode, isFaithfulPreviewMode, originalImagePath } from "./renderModeUtils";
+import {
+  displayImagePathForMode,
+  isFaithfulPreviewMode,
+  isStudioBitmapCompositeActive,
+  originalImagePath,
+  visibleBitmapOverlayPath,
+} from "./renderModeUtils";
 import { mergePendingTextEntry } from "./textLayerStyleUtils";
 import { useEditorBitmapDrawing } from "./useEditorBitmapDrawing";
+import type { EditorMode } from "../editorMode";
 
 const EMPTY_PAGES: PageData[] = [];
 const WHEEL_ZOOM_SPEED = 0.0012;
@@ -118,7 +130,15 @@ function preventContextMenu(event: MouseEvent) {
   event.preventDefault();
 }
 
-export function useEditorStageController() {
+export function useEditorStageController({
+  mode = "traduzai",
+  selectionTargetNodeId = null,
+  bitmapCompositeSource = null,
+}: {
+  mode?: EditorMode;
+  selectionTargetNodeId?: string | null;
+  bitmapCompositeSource?: string | null;
+} = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const projectPages = useAppStore((state) => state.project?.paginas ?? EMPTY_PAGES);
   const currentPage = useEditorStore((state) => state.currentPage);
@@ -350,17 +370,20 @@ export function useEditorStageController() {
     () => displayImagePathForMode(currentPage, viewMode, renderPreviewState),
     [currentPage, renderPreviewState, viewMode],
   );
+  const studioCompositePath = isStudioBitmapCompositeActive(mode, viewMode, bitmapCompositeSource)
+    ? bitmapCompositeSource
+    : null;
 
   const originalImageSrc = useObjectUrl(originalImagePath(currentPage), "image/png", 0);
-  const baseImageSrc = useObjectUrl(displayImagePath, "image/png", lastRetypesetTime);
+  const baseImageSrc = useObjectUrl(studioCompositePath ?? displayImagePath, "image/png", lastRetypesetTime);
   // Usar versão dedicada por camada para garantir re-load imediato após stroke
   const maskOverlaySrc = useObjectUrl(
-    currentPage?.image_layers?.mask?.visible ? currentPage.image_layers.mask.path : null,
+    visibleBitmapOverlayPath(currentPage, "mask"),
     "image/png",
     bitmapLayerVersions.mask ?? 0,
   );
   const brushOverlaySrc = useObjectUrl(
-    currentPage?.image_layers?.brush?.visible ? currentPage.image_layers.brush.path : null,
+    visibleBitmapOverlayPath(currentPage, "brush"),
     "image/png",
     bitmapLayerVersions.brush ?? 0,
   );
@@ -647,7 +670,10 @@ export function useEditorStageController() {
       if (!point) return;
       event.cancelBubble = true;
       selectLayer(null);
-      if (activeLassoSelection?.pageKey === currentPageKey) return;
+      if (
+        activeLassoSelection?.pageKey === currentPageKey
+        && (mode !== "studio" || maskOp === "replace")
+      ) return;
 
       if (maskShape === "freehand") {
         // Inicia traço freehand
@@ -766,13 +792,19 @@ export function useEditorStageController() {
         : basicDirtyBBox;
     const strokeSelection = activeLassoSelection?.pageKey === currentPageKey ? activeLassoSelection : null;
     const dirty_bbox = strokeSelection
-      ? intersectBbox(strokeDirtyBBox, strokeSelection.bbox, baseImage.size.width, baseImage.size.height)
+      ? intersectBbox(
+          strokeDirtyBBox,
+          lassoSelectionEffectiveBbox(strokeSelection),
+          baseImage.size.width,
+          baseImage.size.height,
+        )
       : strokeDirtyBBox;
     if (!dirty_bbox) return;
     const clipPolygon = strokeSelection?.points;
-    const clipMaskPng = strokeSelection
-      ? rasterizeLassoToPng(strokeSelection.points, strokeSelection.width, strokeSelection.height)
-      : undefined;
+    const clipMaskCanvas = strokeSelection
+      ? rasterizeLassoSelectionToCanvas(strokeSelection)
+      : null;
+    const clipMaskPng = clipMaskCanvas?.toDataURL("image/png");
     if (strokeSelection && !clipMaskPng) return;
     const payload = {
       width: baseImage.size.width,
@@ -899,7 +931,8 @@ export function useEditorStageController() {
       opacity: strokeBrushOpacity,
       hardness: strokeBrushHardness,
       erase,
-      clipPolygon,
+      clipPolygon: clipMaskCanvas ? undefined : clipPolygon,
+      clipMaskImage: clipMaskCanvas ?? undefined,
     });
 
     if (preview) {
@@ -950,13 +983,24 @@ export function useEditorStageController() {
     const w = baseImage.size.width;
     const h = baseImage.size.height;
     const state = useEditorStore.getState();
-    const selection = createLassoSelection({
+    const nextSelection = createLassoSelection({
       pageKey: state.currentPageKey(),
       pageIndex: state.currentPageIndex,
       points,
       width: w,
       height: h,
+      ...(mode === "studio"
+        ? {
+            id: `selection:${crypto.randomUUID()}`,
+            feather: 0,
+            expansion: 0,
+            targetNodeId: selectionTargetNodeId,
+          }
+        : {}),
     });
+    const selection = mode === "studio"
+      ? combineLassoSelections(state.activeLassoSelection, nextSelection, state.maskOp)
+      : nextSelection;
     setMaskInProgress(null);
     setActiveLassoSelection(selection);
     if (state.toolMode === "process") {

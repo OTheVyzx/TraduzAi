@@ -321,14 +321,20 @@ fn studio_lite_worker_script(app: &AppHandle, root: &Path) -> Result<PathBuf, St
     }
     let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
     for candidate in [
-        resource_dir.join("pipeline").join("studio_lite").join("worker.py"),
+        resource_dir
+            .join("pipeline")
+            .join("studio_lite")
+            .join("worker.py"),
         resource_dir.join("studio_lite").join("worker.py"),
     ] {
         if candidate.exists() {
             return Ok(candidate);
         }
     }
-    Ok(resource_dir.join("pipeline").join("studio_lite").join("worker.py"))
+    Ok(resource_dir
+        .join("pipeline")
+        .join("studio_lite")
+        .join("worker.py"))
 }
 
 fn python_program(root: &Path) -> String {
@@ -356,7 +362,12 @@ fn python_program(root: &Path) -> String {
 
 fn project_root(_app: &AppHandle) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    if cwd.join("pipeline").join("studio_lite").join("worker.py").exists() {
+    if cwd
+        .join("pipeline")
+        .join("studio_lite")
+        .join("worker.py")
+        .exists()
+    {
         return Ok(cwd);
     }
     if let Some(parent) = cwd.parent() {
@@ -500,9 +511,21 @@ fn output_path_from_response(
         .or_else(|| value.get("mask_path"))
         .or_else(|| value.get("inpaint_path"))
         .or_else(|| value.get("path"))
-        .or_else(|| value.get("result").and_then(|result| result.get("output_path")))
-        .or_else(|| value.get("result").and_then(|result| result.get("mask_path")))
-        .or_else(|| value.get("result").and_then(|result| result.get("inpaint_path")))
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(|result| result.get("output_path"))
+        })
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(|result| result.get("mask_path"))
+        })
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(|result| result.get("inpaint_path"))
+        })
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
     else {

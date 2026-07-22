@@ -1,0 +1,21 @@
+{
+  "data": {
+    "Media": {
+      "id": 105398,
+      "title": {
+        "userPreferred": "Solo Leveling",
+        "english": "Solo Leveling",
+        "romaji": "Ore dake Level Up na Ken",
+        "native": "나 혼자만 레벨업"
+      },
+      "status": "FINISHED",
+      "chapters": 200,
+      "updatedAt": 1753185600,
+      "coverImage": {
+        "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/large/bx105398.jpg",
+        "large": "https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/b105398.jpg"
+      },
+      "siteUrl": "https://anilist.co/manga/105398"
+    }
+  }
+}

@@ -15,6 +15,7 @@ import {
   textForLayer,
 } from "./textLayerStyleUtils";
 import { ensureEditorFontLoaded } from "../../../lib/fonts";
+import { fontStyleForResolvedTextStyle, resolveEditorTextStyle } from "../../../lib/editorTextStyleResolver";
 
 export function EditorTextLayer({
   entry,
@@ -52,13 +53,18 @@ export function EditorTextLayer({
   const bbox = entry.layout_bbox ?? entry.bbox;
   const rect = bboxToRect(bbox);
   const style = styleForLayer(entry);
+  const resolvedStyle = resolveEditorTextStyle(style);
+  const professionalStyle = resolvedStyle.source === "studio";
   const showFrame = selected || hovered || showGuides;
   const text = textForLayer(entry);
   const rotation = normalizeRotationDegrees(style.rotacao);
   const displayedRotation = normalizeRotationDegrees(draftRotation ?? rotation);
   const nodeName = `text-layer-${entry.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-  const fontFamily = fontFamilyFromStyle(style);
-  const fontStyle = fontStyleFromStyle(style);
+  const fontFamily = professionalStyle ? resolvedStyle.typography.fontFamily : fontFamilyFromStyle(style);
+  const fontStyle = professionalStyle ? fontStyleForResolvedTextStyle(resolvedStyle) : fontStyleFromStyle(style);
+  const requestedFontSize = professionalStyle ? resolvedStyle.typography.fontSize : style.tamanho;
+  const textAlign = professionalStyle ? resolvedStyle.typography.align : style.alinhamento;
+  const lineHeight = professionalStyle ? resolvedStyle.typography.lineHeight : EDITOR_TEXT_LINE_HEIGHT;
   const textBoxWidth = Math.max(1, rect.width - 16);
   const textBoxHeight = Math.max(1, rect.height - 12);
   const fontSize = useMemo(
@@ -67,15 +73,26 @@ export function EditorTextLayer({
         text,
         fontFamily,
         fontStyle,
-        maxFontSize: Math.max(8, style.tamanho),
-        maxWidth: textBoxWidth,
-        maxHeight: textBoxHeight,
+        maxFontSize: Math.max(8, requestedFontSize),
+        maxWidth: professionalStyle ? textBoxWidth * 100 / resolvedStyle.typography.horizontalScale : textBoxWidth,
+        maxHeight: professionalStyle ? textBoxHeight * 100 / resolvedStyle.typography.verticalScale : textBoxHeight,
       }),
-    [fontFamily, fontStyle, fontVersion, style.tamanho, text, textBoxHeight, textBoxWidth],
+    [
+      fontFamily,
+      fontStyle,
+      fontVersion,
+      professionalStyle,
+      requestedFontSize,
+      resolvedStyle.typography.horizontalScale,
+      resolvedStyle.typography.verticalScale,
+      text,
+      textBoxHeight,
+      textBoxWidth,
+    ],
   );
   useEffect(() => {
     let cancelled = false;
-    void ensureEditorFontLoaded(fontFamily, style.tamanho, fontStyle).then(() => {
+    void ensureEditorFontLoaded(fontFamily, requestedFontSize, fontStyle).then(() => {
       if (cancelled) return;
       bumpFontVersion((version) => version + 1);
       textRef.current?.getLayer()?.batchDraw();
@@ -83,7 +100,7 @@ export function EditorTextLayer({
     return () => {
       cancelled = true;
     };
-  }, [fontFamily, fontStyle, style.tamanho]);
+  }, [fontFamily, fontStyle, requestedFontSize]);
 
   // Early-return só DEPOIS de todos os hooks
   if (entry.visible === false) return null;
@@ -201,11 +218,11 @@ export function EditorTextLayer({
         width={textBoxWidth}
         height={textBoxHeight}
         text={text}
-        align={style.alinhamento}
+        align={textAlign}
         fontSize={fontSize}
         fontFamily={fontFamily}
         fontStyle={fontStyle}
-        lineHeight={EDITOR_TEXT_LINE_HEIGHT}
+        lineHeight={lineHeight}
         style={style}
         listening={false}
       />

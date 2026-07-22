@@ -24,6 +24,7 @@ import {
   Scissors,
 } from "lucide-react";
 import { useEditorStore, type EditorToolMode } from "../../../lib/stores/editorStore";
+import { editorToolsForMode, type EditorMode } from "../editorMode";
 
 const TOOLS: {
   key: EditorToolMode;
@@ -47,13 +48,14 @@ const PAN_TOOL = { key: "select" as EditorToolMode, label: "H", icon: Hand, hotk
 
 const ALL_TOOLS = [TOOLS[0], PAN_TOOL, ...TOOLS.slice(1)];
 
-export function ToolSidebar() {
+export function ToolSidebar({ mode = "traduzai" }: { mode?: EditorMode }) {
   const toolMode = useEditorStore((s) => s.toolMode);
   const setToolMode = useEditorStore((s) => s.setToolMode);
+  const visibleTools = new Set(editorToolsForMode(mode));
 
   return (
     <div className="flex flex-col items-center gap-1 border-r border-border bg-bg-secondary/60 px-1 py-2 w-[44px] shrink-0">
-      {ALL_TOOLS.map(({ key, icon: Icon, hotkey, title }) => {
+      {ALL_TOOLS.filter(({ key }) => visibleTools.has(key)).map(({ key, icon: Icon, hotkey, title }) => {
         // Para o PAN_TOOL, nunca mostra ativo (pois key='select' e select já cobre)
         const isActive = toolMode === key && !(hotkey === "H");
         return (

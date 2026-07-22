@@ -1,0 +1,64 @@
+{
+  "result": "ok",
+  "response": "collection",
+  "data": [
+    {
+      "id": "chapter-es-11",
+      "type": "chapter",
+      "attributes": {
+        "title": null,
+        "chapter": "11",
+        "translatedLanguage": "es",
+        "publishAt": "2026-07-22T15:00:00+00:00",
+        "readableAt": "2026-07-22T15:00:00+00:00"
+      }
+    },
+    {
+      "id": "chapter-en-10-5-new",
+      "type": "chapter",
+      "attributes": {
+        "title": "A new step",
+        "chapter": "10.5",
+        "translatedLanguage": "en",
+        "publishAt": "2026-07-22T14:00:00+00:00",
+        "readableAt": "2026-07-22T14:00:00+00:00"
+      }
+    },
+    {
+      "id": "chapter-en-10-5-old-group",
+      "type": "chapter",
+      "attributes": {
+        "title": "A new step",
+        "chapter": "10.5",
+        "translatedLanguage": "en",
+        "publishAt": "2026-07-22T13:00:00+00:00",
+        "readableAt": "2026-07-22T13:00:00+00:00"
+      }
+    },
+    {
+      "id": "chapter-en-extra",
+      "type": "chapter",
+      "attributes": {
+        "title": "Extra",
+        "chapter": null,
+        "translatedLanguage": "en",
+        "publishAt": "2026-07-21T12:00:00+00:00",
+        "readableAt": "2026-07-21T12:00:00+00:00"
+      }
+    },
+    {
+      "id": "chapter-en-10",
+      "type": "chapter",
+      "attributes": {
+        "title": null,
+        "chapter": "10",
+        "translatedLanguage": "en",
+        "publishAt": "2026-07-20T12:00:00+00:00",
+        "readableAt": "2026-07-20T12:00:00+00:00"
+      }
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "total": 5
+}
