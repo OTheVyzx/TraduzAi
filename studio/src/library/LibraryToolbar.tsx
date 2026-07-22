@@ -1,4 +1,4 @@
-import { Grid3X3, List, Search } from "lucide-react";
+import { Grid3X3, List, Pencil, Search } from "lucide-react";
 
 export function LibraryToolbar({
   title,
@@ -9,6 +9,7 @@ export function LibraryToolbar({
   onQueryChange,
   onSetView,
   onSetThumbnailSize,
+  onEditWork,
 }: {
   title: string;
   chapterCount: number;
@@ -18,6 +19,7 @@ export function LibraryToolbar({
   onQueryChange: (query: string) => void;
   onSetView: (view: "grid" | "list") => void;
   onSetThumbnailSize: (size: number) => void;
+  onEditWork?: () => void;
 }) {
   return (
     <header className="studio-library-toolbar">
@@ -25,6 +27,11 @@ export function LibraryToolbar({
         <h2>Capítulos</h2>
         <span>{title}</span>
         <small>{chapterCount}</small>
+        {onEditWork && (
+          <button type="button" className="studio-library-edit-work" aria-label="Editar obra" onClick={onEditWork}>
+            <Pencil size={12} />
+          </button>
+        )}
       </div>
 
       <label className="studio-library-chapter-search">

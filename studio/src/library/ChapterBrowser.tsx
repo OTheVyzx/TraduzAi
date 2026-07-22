@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { BookOpen, CheckCircle2, FileInput, FolderOpen, Image, Plus } from "lucide-react";
+import { AlertTriangle, BookOpen, CheckCircle2, FileInput, FolderOpen, Image, Link2, Plus, Trash2 } from "lucide-react";
 import { chapterProgress, type LibraryChapter, type LibraryWork } from "./libraryModel";
 
 const WORKFLOW_LABELS: Record<NonNullable<LibraryChapter["workflowStatus"]>, string> = {
@@ -20,6 +20,9 @@ export function ChapterBrowser({
   onOpenChapter,
   onImportProject,
   onAddChapter,
+  missingProjectPaths = new Set<string>(),
+  onRelinkChapter,
+  onRemoveChapter,
 }: {
   work: LibraryWork | null;
   query?: string;
@@ -30,6 +33,9 @@ export function ChapterBrowser({
   onOpenChapter: (projectPath: string) => void;
   onImportProject?: () => void;
   onAddChapter?: () => void;
+  missingProjectPaths?: ReadonlySet<string>;
+  onRelinkChapter?: (chapterId: string) => void;
+  onRemoveChapter?: (chapterId: string) => void;
 }) {
   const normalizedQuery = query.trim().toLocaleLowerCase("pt-BR");
   const chapters = (work?.chapters ?? []).filter((chapter) => {
@@ -65,34 +71,42 @@ export function ChapterBrowser({
             {chapters.map((chapter) => {
               const progress = chapterProgress(chapter);
               const selected = chapter.id === selectedChapterId;
+              const missing = missingProjectPaths.has(chapter.projectPath);
               return (
-                <button
-                  key={chapter.id}
-                  type="button"
-                  className="studio-chapter-card"
-                  aria-label={`Selecionar capítulo ${chapter.label}`}
-                  aria-pressed={selected}
-                  onClick={() => onSelectChapter(chapter.id)}
-                  onDoubleClick={() => onOpenChapter(chapter.projectPath)}
-                >
-                  <span className="studio-chapter-thumbnail">
-                    {chapter.coverPath ? (
-                      <img src={chapter.coverPath} alt="" />
-                    ) : (
-                      <span className="studio-chapter-placeholder"><Image size={28} /></span>
-                    )}
-                    {selected && <span className="studio-chapter-selected"><CheckCircle2 size={17} /></span>}
-                    <span className="studio-chapter-progress" style={{ "--chapter-progress": `${progress}%` } as CSSProperties} />
-                  </span>
-                  <span className="studio-chapter-details">
-                    <strong>Capítulo {chapter.label}</strong>
-                    {chapter.title && <span>{chapter.title}</span>}
-                    <small>
-                      {chapter.completedPages ?? 0} de {chapter.pageCount ?? 0} páginas
-                      {chapter.workflowStatus ? ` · ${WORKFLOW_LABELS[chapter.workflowStatus]}` : ""}
-                    </small>
-                  </span>
-                </button>
+                <article key={chapter.id} className={`studio-chapter-entry${missing ? " studio-chapter-entry-missing" : ""}`}>
+                  <button
+                    type="button"
+                    className="studio-chapter-card"
+                    aria-label={`Selecionar capítulo ${chapter.label}`}
+                    aria-pressed={selected}
+                    onClick={() => onSelectChapter(chapter.id)}
+                    onDoubleClick={() => !missing && onOpenChapter(chapter.projectPath)}
+                  >
+                    <span className="studio-chapter-thumbnail">
+                      {chapter.coverPath ? (
+                        <img src={chapter.coverPath} alt="" />
+                      ) : (
+                        <span className="studio-chapter-placeholder"><Image size={28} /></span>
+                      )}
+                      {selected && <span className="studio-chapter-selected"><CheckCircle2 size={17} /></span>}
+                      {missing && <span className="studio-chapter-missing-mark"><AlertTriangle size={16} /></span>}
+                      <span className="studio-chapter-progress" style={{ "--chapter-progress": `${progress}%` } as CSSProperties} />
+                    </span>
+                    <span className="studio-chapter-details">
+                      <strong>Capítulo {chapter.label}</strong>
+                      {chapter.title && <span>{chapter.title}</span>}
+                      <small>
+                        {missing ? "Caminho ausente" : `${chapter.completedPages ?? 0} de ${chapter.pageCount ?? 0} páginas${chapter.workflowStatus ? ` · ${WORKFLOW_LABELS[chapter.workflowStatus]}` : ""}`}
+                      </small>
+                    </span>
+                  </button>
+                  {(missing || selected) && (
+                    <div className="studio-chapter-reference-actions">
+                      {missing && <button type="button" onClick={() => onRelinkChapter?.(chapter.id)}><Link2 size={11} /> Relocalizar</button>}
+                      {selected && <button type="button" onClick={() => onRemoveChapter?.(chapter.id)}><Trash2 size={11} /> Remover referência</button>}
+                    </div>
+                  )}
+                </article>
               );
             })}
           </div>
@@ -112,8 +126,8 @@ export function ChapterBrowser({
           <button
             type="button"
             className="studio-library-open"
-            disabled={!selectedChapter}
-            onClick={() => selectedChapter && onOpenChapter(selectedChapter.projectPath)}
+            disabled={!selectedChapter || missingProjectPaths.has(selectedChapter.projectPath)}
+            onClick={() => selectedChapter && !missingProjectPaths.has(selectedChapter.projectPath) && onOpenChapter(selectedChapter.projectPath)}
           >
             <FolderOpen size={15} />
             Abrir

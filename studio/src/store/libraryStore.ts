@@ -27,8 +27,11 @@ export interface LibraryStoreState {
   document: StudioLibrary;
   load(): Promise<void>;
   addWork(work: AddLibraryWorkInput): Promise<void>;
+  removeWork(workId: string): Promise<void>;
   selectWork(workId: string): Promise<void>;
   upsertChapter(workId: string, chapter: LibraryChapter): Promise<void>;
+  removeChapter(workId: string, chapterId: string): Promise<void>;
+  relinkChapter(workId: string, chapterId: string, projectPath: string): Promise<void>;
   setChapterView(view: "grid" | "list"): Promise<void>;
   setThumbnailSize(size: number): Promise<void>;
 }
@@ -105,6 +108,19 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
         });
       },
 
+      removeWork: async (workId) => {
+        const current = get().document;
+        const works = current.works.filter((work) => work.id !== workId);
+        if (works.length === current.works.length) return;
+        await persist({
+          ...current,
+          works,
+          selectedWorkId: current.selectedWorkId === workId
+            ? works[0]?.id ?? null
+            : current.selectedWorkId,
+        });
+      },
+
       selectWork: async (workId) => {
         const current = get().document;
         if (!current.works.some((work) => work.id === workId)) return;
@@ -113,6 +129,30 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
 
       upsertChapter: async (workId, chapter) => {
         await persist(upsertChapter(get().document, workId, chapter));
+      },
+
+      removeChapter: async (workId, chapterId) => {
+        const current = get().document;
+        const workIndex = current.works.findIndex((work) => work.id === workId);
+        if (workIndex < 0) return;
+        const chapters = current.works[workIndex].chapters.filter((chapter) => chapter.id !== chapterId);
+        if (chapters.length === current.works[workIndex].chapters.length) return;
+        const works = [...current.works];
+        works[workIndex] = { ...works[workIndex], chapters };
+        await persist({ ...current, works });
+      },
+
+      relinkChapter: async (workId, chapterId, projectPath) => {
+        const current = get().document;
+        const workIndex = current.works.findIndex((work) => work.id === workId);
+        if (workIndex < 0 || !projectPath.trim()) return;
+        const chapterIndex = current.works[workIndex].chapters.findIndex((chapter) => chapter.id === chapterId);
+        if (chapterIndex < 0) return;
+        const chapters = [...current.works[workIndex].chapters];
+        chapters[chapterIndex] = { ...chapters[chapterIndex], projectPath: projectPath.trim() };
+        const works = [...current.works];
+        works[workIndex] = { ...works[workIndex], chapters };
+        await persist({ ...current, works });
       },
 
       setChapterView: async (view) => {

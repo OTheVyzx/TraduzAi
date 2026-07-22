@@ -8,7 +8,7 @@ export function canUseProjectDialogs() {
 
 export async function openProjectDialog() {
   if (!isTauriRuntime()) {
-    throw new Error("Abrir projeto pelo sistema de arquivos esta disponivel apenas no app desktop.");
+    throw new Error("Abrir projeto pelo sistema de arquivos está disponível apenas no app desktop.");
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
@@ -20,9 +20,36 @@ export async function openProjectDialog() {
   return typeof selected === "string" ? selected : null;
 }
 
+export async function openProjectForAttachment() {
+  const projectPath = await openProjectDialog();
+  if (!projectPath) return null;
+  const project = await getStudioEditorBackend().loadProject({ project_path: projectPath });
+  return { projectPath, project };
+}
+
+export async function openCoverImageDialog() {
+  if (!isTauriRuntime()) {
+    throw new Error("Escolher capa pelo sistema de arquivos está disponível apenas no app desktop.");
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Imagem", extensions: ["png", "jpg", "jpeg", "webp"] }],
+    title: "Escolher capa da obra",
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function projectPathExists(projectPath: string) {
+  if (!isTauriRuntime()) return true;
+  const { exists } = await import("@tauri-apps/plugin-fs");
+  return exists(projectPath);
+}
+
 export async function saveProjectDialog(defaultPath = "project.json") {
   if (!isTauriRuntime()) {
-    throw new Error("Salvar projeto pelo sistema de arquivos esta disponivel apenas no app desktop.");
+    throw new Error("Salvar projeto pelo sistema de arquivos está disponível apenas no app desktop.");
   }
   const { save } = await import("@tauri-apps/plugin-dialog");
   const selected = await save({
@@ -32,3 +59,4 @@ export async function saveProjectDialog(defaultPath = "project.json") {
   });
   return typeof selected === "string" ? selected : null;
 }
+import { getStudioEditorBackend } from "./editorBackend";

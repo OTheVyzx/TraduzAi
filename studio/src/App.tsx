@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { useStore } from "zustand";
 import { StudioLibraryHome } from "./library/StudioLibraryHome";
 import { createDefaultLibraryBackend } from "./library/libraryBackend";
@@ -47,7 +47,6 @@ export function App() {
   const dismissRecovery = useStudioProjectStore((state) => state.dismissRecovery);
   const library = useStore(libraryStore, (state) => state);
   const registeredProjects = useRef(new Set<string>());
-  const [addingWork, setAddingWork] = useState(false);
 
   useEffect(() => {
     void libraryStore.getState().load();
@@ -102,19 +101,6 @@ export function App() {
     );
   }
 
-  const handleAddWork = async () => {
-    if (addingWork) return;
-    setAddingWork(true);
-    try {
-      const sequence = library.document.works.length + 1;
-      const id = `work-${Date.now().toString(36)}`;
-      await library.addWork({ id, title: `Nova obra ${sequence}`, aliases: [] });
-      await library.selectWork(id);
-    } finally {
-      setAddingWork(false);
-    }
-  };
-
   return (
     <StudioLibraryHome
       document={library.document}
@@ -123,8 +109,23 @@ export function App() {
       recoveryAvailable={Boolean(recoverySnapshot)}
       onRecover={() => void restoreRecovery()}
       onDismissRecovery={() => void dismissRecovery()}
-      onAddWork={() => void handleAddWork()}
-      onAddChapter={() => void openProjectFromDialog()}
+      onSaveWork={async (input) => {
+        await library.addWork(input);
+        await library.selectWork(input.id);
+      }}
+      onRemoveWork={(workId) => library.removeWork(workId)}
+      onAttachChapter={(workId, draft) => library.upsertChapter(workId, {
+        id: stableId("chapter", draft.projectPath.toLocaleLowerCase("en-US")),
+        label: draft.chapterLabel,
+        projectPath: draft.projectPath,
+        coverPath: draft.coverPath,
+        pageCount: draft.pageCount,
+        completedPages: 0,
+        workflowStatus: "editing",
+        lastOpenedAt: null,
+      })}
+      onRemoveChapter={(workId, chapterId) => library.removeChapter(workId, chapterId)}
+      onRelinkChapter={(workId, chapterId, path) => library.relinkChapter(workId, chapterId, path)}
       onImportProject={() => void openProjectFromDialog()}
       onSelectWork={(workId) => void library.selectWork(workId)}
       onOpenChapter={(path) => void loadProject(path)}

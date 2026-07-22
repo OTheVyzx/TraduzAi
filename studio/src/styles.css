@@ -268,6 +268,23 @@ body {
   font-size: 9px;
 }
 
+.studio-library-edit-work {
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  color: #7d838e;
+  background: transparent;
+  cursor: pointer;
+}
+
+.studio-library-edit-work:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+}
+
 .studio-library-chapter-search {
   width: 190px;
   margin-left: auto;
@@ -367,6 +384,17 @@ body {
   text-align: left;
 }
 
+.studio-chapter-entry {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+
+.studio-chapter-entry-missing .studio-chapter-thumbnail {
+  border-color: rgba(245, 158, 11, 0.7);
+}
+
 .studio-chapter-thumbnail {
   aspect-ratio: 16 / 10;
   position: relative;
@@ -401,6 +429,18 @@ body {
   border-radius: 50%;
   color: #fff;
   background: rgb(var(--color-brand));
+}
+
+.studio-chapter-missing-mark {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+  padding: 3px;
+  color: #241b0a;
+  background: #f59e0b;
 }
 
 .studio-chapter-progress {
@@ -448,6 +488,11 @@ body {
   gap: 3px;
 }
 
+.studio-chapter-browser-list .studio-chapter-entry {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
 .studio-chapter-browser-list .studio-chapter-card {
   grid-template-columns: 88px minmax(0, 1fr);
   align-items: center;
@@ -459,6 +504,35 @@ body {
 .studio-chapter-browser-list .studio-chapter-card:hover,
 .studio-chapter-browser-list .studio-chapter-card[aria-pressed="true"] {
   background: rgba(255, 255, 255, 0.045);
+}
+
+.studio-chapter-reference-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px;
+}
+
+.studio-chapter-reference-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  padding: 2px 0;
+  color: #888e99;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+}
+
+.studio-chapter-reference-actions button:hover {
+  color: #e4e6eb;
+}
+
+.studio-chapter-entry-missing .studio-chapter-details small,
+.studio-chapter-entry-missing .studio-chapter-reference-actions button:first-child {
+  color: #e6ad49;
 }
 
 .studio-chapter-empty,
@@ -534,6 +608,329 @@ body {
   border-color: rgb(var(--color-brand) / 0.8);
   color: #fff;
   background: rgb(var(--color-brand) / 0.72);
+}
+
+.studio-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 6, 8, 0.78);
+  backdrop-filter: blur(2px);
+}
+
+.studio-dialog {
+  width: min(680px, calc(100vw - 48px));
+  overflow: hidden;
+  border: 1px solid #40434b;
+  border-radius: 6px;
+  color: #daddE4;
+  background: #202126;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65);
+}
+
+.studio-dialog > header {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid #0d0e11;
+  padding: 0 16px;
+  background: #27282e;
+}
+
+.studio-dialog > header div {
+  display: grid;
+  gap: 3px;
+}
+
+.studio-dialog > header small {
+  color: #858b96;
+  font-size: 9px;
+}
+
+.studio-dialog h2 {
+  margin: 0;
+  color: #f0f1f4;
+  font-size: 14px;
+}
+
+.studio-dialog-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  border: 0;
+  border-radius: 4px;
+  color: #8b919c;
+  background: transparent;
+  cursor: pointer;
+}
+
+.studio-dialog-icon:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.studio-dialog form {
+  display: grid;
+}
+
+.studio-work-dialog-grid {
+  display: grid;
+  grid-template-columns: 145px minmax(0, 1fr);
+  gap: 20px;
+  padding: 20px;
+}
+
+.studio-work-dialog-cover {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  justify-items: stretch;
+  gap: 8px;
+}
+
+.studio-work-dialog-cover > span {
+  aspect-ratio: 3 / 4;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #3a3c44;
+  border-radius: 4px;
+  color: #656b76;
+  background: #15161a;
+}
+
+.studio-work-dialog-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.studio-work-dialog-cover button,
+.studio-attach-picker button {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #41444d;
+  border-radius: 4px;
+  color: #c5c9d0;
+  background: #2b2d33;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+}
+
+.studio-work-dialog-cover small {
+  overflow: hidden;
+  color: #767c87;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-dialog-fields {
+  display: grid;
+  gap: 11px;
+}
+
+.studio-dialog-fields label,
+.studio-attach-metadata label {
+  display: grid;
+  gap: 5px;
+}
+
+.studio-dialog-fields label > span,
+.studio-attach-metadata label > span,
+.studio-attach-metadata div > span {
+  color: #9298a3;
+  font-size: 9px;
+}
+
+.studio-dialog-fields input,
+.studio-dialog-fields select,
+.studio-attach-metadata input {
+  height: 31px;
+  box-sizing: border-box;
+  border: 1px solid #3a3d45;
+  border-radius: 4px;
+  outline: 0;
+  padding: 0 9px;
+  color: #e2e4e9;
+  background: #16171b;
+  font: inherit;
+  font-size: 11px;
+}
+
+.studio-dialog-fields input:focus,
+.studio-dialog-fields select:focus,
+.studio-attach-metadata input:focus {
+  border-color: rgb(var(--color-brand) / 0.85);
+}
+
+.studio-dialog-field-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.studio-dialog footer {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid #101115;
+  padding: 10px 16px;
+  background: #1a1b1f;
+}
+
+.studio-dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.studio-dialog-actions button,
+.studio-dialog-remove button {
+  min-height: 29px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #41444d;
+  border-radius: 4px;
+  padding: 0 12px;
+  color: #c5c9d0;
+  background: #292b31;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+}
+
+.studio-dialog-actions button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.studio-dialog-actions .studio-dialog-primary {
+  border-color: rgb(var(--color-brand) / 0.9);
+  color: #fff;
+  background: rgb(var(--color-brand) / 0.72);
+}
+
+.studio-dialog-remove {
+  display: grid;
+  justify-items: start;
+  gap: 3px;
+}
+
+.studio-dialog-remove button {
+  border: 0;
+  padding: 0;
+  color: #e58d94;
+  background: transparent;
+}
+
+.studio-dialog-remove small,
+.studio-dialog footer > p {
+  margin: 0;
+  color: #737985;
+  font-size: 8px;
+}
+
+.studio-dialog-error {
+  margin: 0 20px 14px;
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #f4a3a9;
+  background: rgba(248, 113, 113, 0.07);
+  font-size: 10px;
+}
+
+.studio-attach-dialog {
+  width: min(590px, calc(100vw - 48px));
+}
+
+.studio-attach-picker {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 20px;
+  border: 1px dashed #444750;
+  border-radius: 5px;
+  padding: 14px;
+  color: #777e89;
+  background: #191a1e;
+}
+
+.studio-attach-picker div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.studio-attach-picker strong {
+  color: #cdd1d8;
+  font-size: 11px;
+}
+
+.studio-attach-picker small {
+  overflow: hidden;
+  color: #777d88;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-attach-picker button {
+  padding: 0 11px;
+}
+
+.studio-attach-metadata {
+  display: grid;
+  grid-template-columns: 1fr 110px 80px;
+  align-items: end;
+  gap: 10px;
+  padding: 0 20px 18px;
+}
+
+.studio-attach-metadata div {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.studio-attach-metadata div strong {
+  font-size: 10px;
+}
+
+.studio-dialog-warning {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  margin: 0 20px 18px;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 4px;
+  padding: 9px 10px;
+  color: #dbb96f;
+  background: rgba(245, 158, 11, 0.07);
+  font-size: 9px;
+}
+
+.studio-dialog-warning span {
+  display: grid;
+  gap: 2px;
+}
+
+.studio-dialog-warning input {
+  accent-color: #f59e0b;
 }
 
 .studio-sr-only {
