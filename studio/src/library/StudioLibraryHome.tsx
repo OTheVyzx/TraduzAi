@@ -20,6 +20,7 @@ import type { StudioLibrary } from "./libraryModel";
 import { ChapterBrowser } from "./ChapterBrowser";
 import { CreateChapterDialog } from "./CreateChapterDialog";
 import { LibraryToolbar } from "./LibraryToolbar";
+import { LibraryRecoveryBanner } from "./LibraryRecoveryBanner";
 import { WorkDialog } from "./WorkDialog";
 import { WorkLibrarySidebar } from "./WorkLibrarySidebar";
 
@@ -27,9 +28,13 @@ export function StudioLibraryHome({
   document,
   status,
   error,
+  libraryError = null,
   recoveryAvailable = false,
+  libraryRecoveredFromBackup = false,
+  hasUnsavedLibraryChanges = false,
   onRecover,
   onDismissRecovery,
+  onSaveRecoveredCopy,
   onSaveWork,
   onRemoveWork,
   onAttachChapter,
@@ -47,9 +52,13 @@ export function StudioLibraryHome({
   document: StudioLibrary;
   status: LibraryStoreStatus;
   error?: string | null;
+  libraryError?: string | null;
   recoveryAvailable?: boolean;
+  libraryRecoveredFromBackup?: boolean;
+  hasUnsavedLibraryChanges?: boolean;
   onRecover?: () => void;
   onDismissRecovery?: () => void;
+  onSaveRecoveredCopy?: () => void | Promise<void>;
   onSaveWork: (input: AddLibraryWorkInput) => void | Promise<void>;
   onRemoveWork: (workId: string) => void | Promise<void>;
   onAttachChapter: (workId: string, draft: ProjectAttachmentDraft) => void | Promise<void>;
@@ -201,6 +210,14 @@ export function StudioLibraryHome({
               setEditingWorkId(selectedWork.id);
               setWorkDialogOpen(true);
             } : undefined}
+          />
+
+          <LibraryRecoveryBanner
+            recoveredFromBackup={libraryRecoveredFromBackup}
+            hasUnsavedChanges={hasUnsavedLibraryChanges}
+            error={libraryError}
+            saving={status === "saving"}
+            onSaveRecoveredCopy={() => onSaveRecoveredCopy?.()}
           />
 
           <div className="flex justify-end border-b border-zinc-800 px-5 py-2">

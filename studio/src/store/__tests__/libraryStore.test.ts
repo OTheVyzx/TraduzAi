@@ -84,16 +84,19 @@ describe("libraryStore", () => {
     const invoke = async <T>(command: string, args?: Record<string, unknown>) => {
       calls.push({ command, args });
       if (command === "studio_load_library") {
-        return { document: { works: [] }, recoveredFromBackup: false } as T;
+        return { document: { works: [] }, recoveredFromBackup: true } as T;
       }
       return undefined as T;
     };
     const backend = createTauriLibraryBackend(invoke);
     const document = await backend.load();
+    const metadata = await backend.loadWithMetadata?.();
     await backend.save(document);
 
     expect(document).toEqual(createEmptyLibrary());
+    expect(metadata).toEqual({ document: createEmptyLibrary(), recoveredFromBackup: true });
     expect(calls).toEqual([
+      { command: "studio_load_library", args: undefined },
       { command: "studio_load_library", args: undefined },
       { command: "studio_save_library", args: { document } },
     ]);
@@ -154,6 +157,25 @@ describe("libraryStore", () => {
     expect(store.getState().document.works[0].title).toBe("Não perder");
     expect(store.getState().status).toBe("error");
     expect(store.getState().error).toBe("disco indisponível");
+    expect(store.getState().hasUnsavedChanges).toBe(true);
+  });
+
+  it("keeps backup recovery active until the recovered catalog is saved", async () => {
+    let saveCount = 0;
+    const backend: LibraryBackend = {
+      load: async () => createEmptyLibrary(),
+      loadWithMetadata: async () => ({ document: createEmptyLibrary(), recoveredFromBackup: true }),
+      save: async () => { saveCount += 1; },
+    };
+    const store = createLibraryStore(backend);
+
+    await store.getState().load();
+    expect(store.getState().recoveredFromBackup).toBe(true);
+
+    await store.getState().saveRecoveredCopy();
+    expect(saveCount).toBe(1);
+    expect(store.getState().recoveredFromBackup).toBe(false);
+    expect(store.getState().hasUnsavedChanges).toBe(false);
   });
 
   it("persists chapter registration and home view preferences", async () => {

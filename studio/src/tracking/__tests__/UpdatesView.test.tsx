@@ -48,6 +48,8 @@ describe("UpdatesView", () => {
     );
 
     expect(html).toContain("Desatualizado");
+    expect(html).toContain("Última atualização");
+    expect(html).toContain('dateTime="2026-07-22T10:00:00Z"');
     expect(html).toContain("10.5");
     expect(html).toContain("Status manual");
     expect(html).toContain("Conflito");

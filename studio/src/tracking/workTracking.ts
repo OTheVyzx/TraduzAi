@@ -151,6 +151,16 @@ export function isTrackingCacheStale(cache: WorkTrackingCache | undefined, now =
   return !Number.isFinite(expiresAt) || expiresAt <= now.getTime();
 }
 
+export function preserveTrackingCacheOnError(
+  cache: WorkTrackingCache | undefined,
+  error: string,
+  now = new Date(),
+): WorkTrackingCache {
+  return cache
+    ? { ...cache, snapshots: cache.snapshots.map((snapshot) => ({ ...snapshot })), lastError: error }
+    : createTrackingCache([], now, 0, error);
+}
+
 function normalizeSnapshotList(value: unknown): WorkTrackingSnapshot[] {
   if (!Array.isArray(value)) throw new Error("Resposta de acompanhamento inválida: lista ausente.");
   return value.map(normalizeTrackingSnapshot);

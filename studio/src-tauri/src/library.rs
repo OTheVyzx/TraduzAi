@@ -22,7 +22,8 @@ fn empty_library_document() -> Value {
         "works": [],
         "preferences": {
             "chapterView": "grid",
-            "thumbnailSize": 176
+            "thumbnailSize": 176,
+            "trackingLanguage": "en"
         }
     })
 }
@@ -168,6 +169,7 @@ mod tests {
         assert!(!loaded.recovered_from_backup);
         assert_eq!(loaded.document["schemaVersion"], 1);
         assert_eq!(loaded.document["works"], json!([]));
+        assert_eq!(loaded.document["preferences"]["trackingLanguage"], "en");
     }
 
     #[test]
@@ -214,5 +216,22 @@ mod tests {
         let loaded = load_library_from_path(&path).unwrap();
         assert_eq!(loaded.document, first);
         assert!(loaded.recovered_from_backup);
+    }
+
+    #[test]
+    fn saving_a_recovered_copy_replaces_the_corrupt_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("studio-library.json");
+        let recovered = json!({"schemaVersion": 1, "works": [{"id": "recovered"}]});
+        std::fs::write(&path, "{").unwrap();
+        std::fs::write(path.with_extension("json.bak"), recovered.to_string()).unwrap();
+
+        let loaded = load_library_from_path(&path).unwrap();
+        assert!(loaded.recovered_from_backup);
+        save_library_to_path(&path, &loaded.document).unwrap();
+
+        let reloaded = load_library_from_path(&path).unwrap();
+        assert!(!reloaded.recovered_from_backup);
+        assert_eq!(reloaded.document, recovered);
     }
 }

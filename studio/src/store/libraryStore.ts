@@ -24,6 +24,8 @@ export interface AddLibraryWorkInput {
 export interface LibraryStoreState {
   status: LibraryStoreStatus;
   error: string | null;
+  recoveredFromBackup: boolean;
+  hasUnsavedChanges: boolean;
   document: StudioLibrary;
   load(): Promise<void>;
   addWork(work: AddLibraryWorkInput): Promise<void>;
@@ -35,6 +37,7 @@ export interface LibraryStoreState {
   setChapterView(view: "grid" | "list"): Promise<void>;
   setThumbnailSize(size: number): Promise<void>;
   setTrackingLanguage(language: string): Promise<void>;
+  saveRecoveredCopy(): Promise<void>;
 }
 
 function errorMessage(error: unknown): string {
@@ -49,7 +52,7 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
     async function persist(document: StudioLibrary) {
       const normalized = normalizeLibrary(document);
       const revision = ++latestRevision;
-      set({ document: normalized, status: "saving", error: null });
+      set({ document: normalized, status: "saving", error: null, hasUnsavedChanges: true });
 
       const operation = saveQueue
         .catch(() => undefined)
@@ -58,23 +61,43 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
 
       try {
         await operation;
-        if (revision === latestRevision) set({ status: "ready", error: null });
+        if (revision === latestRevision) {
+          set({
+            status: "ready",
+            error: null,
+            recoveredFromBackup: false,
+            hasUnsavedChanges: false,
+          });
+        }
       } catch (error) {
-        if (revision === latestRevision) set({ status: "error", error: errorMessage(error) });
+        if (revision === latestRevision) {
+          set({ status: "error", error: errorMessage(error), hasUnsavedChanges: true });
+        }
       }
     }
 
     return {
       status: "idle",
       error: null,
+      recoveredFromBackup: false,
+      hasUnsavedChanges: false,
       document: normalizeLibrary(null),
 
       load: async () => {
         set({ status: "loading", error: null });
         try {
-          const document = normalizeLibrary(await backend.load());
+          const loaded = backend.loadWithMetadata
+            ? await backend.loadWithMetadata()
+            : { document: await backend.load(), recoveredFromBackup: false };
+          const document = normalizeLibrary(loaded.document);
           latestRevision += 1;
-          set({ document, status: "ready", error: null });
+          set({
+            document,
+            status: "ready",
+            error: null,
+            recoveredFromBackup: loaded.recoveredFromBackup,
+            hasUnsavedChanges: false,
+          });
         } catch (error) {
           set({ status: "error", error: errorMessage(error) });
         }
@@ -179,6 +202,10 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
           ...current,
           preferences: { ...current.preferences, trackingLanguage: normalized },
         });
+      },
+
+      saveRecoveredCopy: async () => {
+        await persist(get().document);
       },
     };
   });

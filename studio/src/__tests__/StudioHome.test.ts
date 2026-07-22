@@ -1,7 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ChapterBrowser } from "../library/ChapterBrowser";
+import {
+  ChapterBrowser,
+  nextChapterSelection,
+  shouldHandleChapterArrowKey,
+} from "../library/ChapterBrowser";
 import { StudioLibraryHome } from "../library/StudioLibraryHome";
 import { WorkLibrarySidebar } from "../library/WorkLibrarySidebar";
 import { createEmptyLibrary, type LibraryWork } from "../library/libraryModel";
@@ -111,5 +115,34 @@ describe("StudioLibraryHome", () => {
     expect(html).toContain("Abrir");
     expect(html).toMatch(/class="studio-library-open"[^>]*><svg/);
     expect(html).not.toMatch(/class="studio-library-open"[^>]*disabled/);
+  });
+
+  it("keeps a missing chapter searchable by path and exposes relinking", () => {
+    const html = renderToStaticMarkup(createElement(ChapterBrowser, {
+      work,
+      query: "obras/norte/002",
+      view: "grid",
+      thumbnailSize: 176,
+      selectedChapterId: null,
+      missingProjectPaths: new Set([work.chapters[0].projectPath]),
+      onSelectChapter: () => undefined,
+      onOpenChapter: () => undefined,
+      onRelinkChapter: () => undefined,
+    }));
+
+    expect(html).toContain("Capítulo 2");
+    expect(html).toContain("Caminho ausente");
+    expect(html).toContain("Relocalizar");
+  });
+
+  it("moves chapter selection in every grid direction without capturing form fields", () => {
+    const chapters = ["a", "b", "c", "d", "e"].map((id) => ({ id }));
+
+    expect(nextChapterSelection(chapters, "a", "ArrowRight", 2)).toBe("b");
+    expect(nextChapterSelection(chapters, "a", "ArrowDown", 2)).toBe("c");
+    expect(nextChapterSelection(chapters, "d", "ArrowLeft", 2)).toBe("c");
+    expect(nextChapterSelection(chapters, "e", "ArrowUp", 2)).toBe("c");
+    expect(shouldHandleChapterArrowKey("ArrowRight", { tagName: "INPUT", isContentEditable: false })).toBe(false);
+    expect(shouldHandleChapterArrowKey("ArrowRight", { tagName: "BUTTON", isContentEditable: false })).toBe(true);
   });
 });

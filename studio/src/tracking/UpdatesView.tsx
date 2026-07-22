@@ -6,6 +6,7 @@ import {
   createTrackingCache,
   hasRemoteChapterUpdate,
   isTrackingCacheStale,
+  preserveTrackingCacheOnError,
   resolveTrackingStatus,
   syncTrackingWork,
   UPDATES_REFRESH_TTL_MS,
@@ -20,6 +21,15 @@ const STATUS_LABELS: Record<PublicationStatus, string> = {
   not_yet_released: "Não iniciada",
   unknown: "Status desconhecido",
 };
+
+function formatTrackingTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(timestamp));
+}
 
 function workInput(work: LibraryWork, snapshots: WorkTrackingSnapshot[], lastError: string | null): AddLibraryWorkInput {
   const updatedProviders = new Set(snapshots.map((snapshot) => snapshot.provider));
@@ -100,9 +110,7 @@ export function UpdatesView({
               publicationStatus: work.publicationStatus,
               external: {
                 ...work.external,
-                tracking: cached
-                  ? { ...cached, lastError: message }
-                  : createTrackingCache([], new Date(), 0, message),
+                tracking: preserveTrackingCacheOnError(cached, message),
               },
             });
           } catch {
@@ -186,6 +194,11 @@ export function UpdatesView({
                   {hasChapter && <p className="mt-2 text-sm text-emerald-300">Capítulo {chapterSnapshot?.latestChapter} disponível na fonte.</p>}
                   {!hasChapter && chapterSnapshot?.latestChapter && <p className="mt-2 text-sm text-zinc-500">Último capítulo remoto: {chapterSnapshot.latestChapter}</p>}
                   {cache?.lastError && <p className="mt-2 text-xs text-amber-300">Offline: {cache.lastError}</p>}
+                  {cache && (
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Última atualização: <time dateTime={cache.fetchedAt}>{formatTrackingTime(cache.fetchedAt)}</time>
+                    </p>
+                  )}
                   <div className="mt-2 flex gap-3 text-xs text-zinc-500">
                     {snapshots.map((snapshot) => <span key={`${snapshot.provider}:${snapshot.providerId}`}>{snapshot.provider === "anilist" ? "AniList" : "MangaDex"}</span>)}
                   </div>

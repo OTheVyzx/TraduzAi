@@ -3,7 +3,13 @@ import { createEmptyLibrary, normalizeLibrary, type StudioLibrary } from "./libr
 
 export interface LibraryBackend {
   load(): Promise<StudioLibrary>;
+  loadWithMetadata?(): Promise<LibraryBackendLoadResult>;
   save(document: StudioLibrary): Promise<void>;
+}
+
+export interface LibraryBackendLoadResult {
+  document: StudioLibrary;
+  recoveredFromBackup: boolean;
 }
 
 export type LibraryInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -24,6 +30,9 @@ export function createMemoryLibraryBackend(initial = createEmptyLibrary()): Libr
     async load() {
       return cloneLibrary(document);
     },
+    async loadWithMetadata() {
+      return { document: cloneLibrary(document), recoveredFromBackup: false };
+    },
     async save(nextDocument) {
       document = cloneLibrary(normalizeLibrary(nextDocument));
     },
@@ -31,11 +40,19 @@ export function createMemoryLibraryBackend(initial = createEmptyLibrary()): Libr
 }
 
 export function createTauriLibraryBackend(invoke: LibraryInvoke = tauriInvoke): LibraryBackend {
+  async function loadWithMetadata(): Promise<LibraryBackendLoadResult> {
+    const payload = await invoke<LibraryLoadPayload>("studio_load_library");
+    return {
+      document: normalizeLibrary(payload.document),
+      recoveredFromBackup: payload.recoveredFromBackup === true,
+    };
+  }
+
   return {
     async load() {
-      const payload = await invoke<LibraryLoadPayload>("studio_load_library");
-      return normalizeLibrary(payload.document);
+      return (await loadWithMetadata()).document;
     },
+    loadWithMetadata,
     async save(document) {
       await invoke<void>("studio_save_library", { document: normalizeLibrary(document) });
     },

@@ -17,6 +17,7 @@ describe("useStudioProjectStore", () => {
       chapterHistory: [],
       chapterHistoryIndex: 0,
       isProjectSaving: false,
+      hasUnsavedChanges: false,
       recoverySnapshot: null,
     });
   });
@@ -44,7 +45,7 @@ describe("useStudioProjectStore", () => {
       "memory://close-project",
     );
 
-    useStudioProjectStore.getState().closeProject();
+    useStudioProjectStore.getState().closeProject(true);
 
     expect(useStudioProjectStore.getState()).toMatchObject({
       project: null,
@@ -55,6 +56,20 @@ describe("useStudioProjectStore", () => {
       chapterHistoryIndex: 0,
       recoverySnapshot: null,
     });
+  });
+
+  it("blocks a silent close while the in-memory project has unsaved changes", async () => {
+    await useStudioProjectStore.getState().importProjectJson(
+      JSON.stringify({ versao: "1.0", paginas: [{ numero: 1, textos: [] }] }),
+      "memory://dirty-project",
+    );
+
+    expect(useStudioProjectStore.getState().hasUnsavedChanges).toBe(true);
+    expect(useStudioProjectStore.getState().closeProject()).toBe(false);
+    expect(useStudioProjectStore.getState().project).not.toBeNull();
+    expect(useStudioProjectStore.getState().error).toContain("alterações não salvas");
+    expect(useStudioProjectStore.getState().closeProject(true)).toBe(true);
+    expect(useStudioProjectStore.getState().project).toBeNull();
   });
 
   it("patches current text layers through the compatibility backend", async () => {

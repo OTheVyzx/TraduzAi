@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StudioLibraryHome } from "./library/StudioLibraryHome";
 import { createManualChapterFromImages } from "./backend/projectDialog";
 import { createDefaultLibraryBackend } from "./library/libraryBackend";
@@ -59,6 +60,7 @@ export function App() {
   const restoreRecovery = useStudioProjectStore((state) => state.restoreRecovery);
   const dismissRecovery = useStudioProjectStore((state) => state.dismissRecovery);
   const closeProject = useStudioProjectStore((state) => state.closeProject);
+  const projectHasUnsavedChanges = useStudioProjectStore((state) => state.hasUnsavedChanges);
   const library = useStore(libraryStore, (state) => state);
   const registeredProjects = useRef(new Set<string>());
   const [lastOpenedChapterPath, setLastOpenedChapterPath] = useState<string | null>(null);
@@ -66,6 +68,37 @@ export function App() {
   useEffect(() => {
     void libraryStore.getState().load();
   }, []);
+
+  useEffect(() => {
+    const hasUnsavedChanges = library.hasUnsavedChanges || projectHasUnsavedChanges;
+    if (!hasUnsavedChanges) return;
+    const closeWarning = library.hasUnsavedChanges
+      ? "Há alterações da biblioteca que ainda não foram gravadas. Fechar o Studio e descartar esta sessão?"
+      : "Há alterações não salvas neste capítulo. Fechar o Studio e descartá-las?";
+    const warnBeforeClose = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const tauriRuntime = "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
+    if (!tauriRuntime) window.addEventListener("beforeunload", warnBeforeClose);
+    let disposed = false;
+    let unlistenCloseRequest: (() => void) | undefined;
+    if (tauriRuntime) {
+      void getCurrentWindow().onCloseRequested((event) => {
+        if (!window.confirm(closeWarning)) event.preventDefault();
+      }).then((unlisten) => {
+        if (disposed) unlisten();
+        else unlistenCloseRequest = unlisten;
+      }).catch((error) => {
+        console.warn("Não foi possível proteger o fechamento da janela do Studio:", error);
+      });
+    }
+    return () => {
+      disposed = true;
+      if (!tauriRuntime) window.removeEventListener("beforeunload", warnBeforeClose);
+      unlistenCloseRequest?.();
+    };
+  }, [library.hasUnsavedChanges, projectHasUnsavedChanges]);
 
   useEffect(() => {
     if (project) return;
@@ -112,7 +145,14 @@ export function App() {
   if (project && projectPath) {
     return (
       <Suspense fallback={<StudioBoot message="Carregando editor..." />}>
-        <StudioWorkspaceShell project={project} projectPath={projectPath} onBack={closeProject} />
+        <StudioWorkspaceShell
+          project={project}
+          projectPath={projectPath}
+          onBack={() => {
+            if (projectHasUnsavedChanges && !window.confirm("Há alterações não salvas neste capítulo. Descartar e voltar para a biblioteca?")) return;
+            closeProject(true);
+          }}
+        />
       </Suspense>
     );
   }
@@ -122,9 +162,13 @@ export function App() {
       document={library.document}
       status={library.status}
       error={library.error ?? projectError}
+      libraryError={library.error}
       recoveryAvailable={Boolean(recoverySnapshot)}
+      libraryRecoveredFromBackup={library.recoveredFromBackup}
+      hasUnsavedLibraryChanges={library.hasUnsavedChanges}
       onRecover={() => void restoreRecovery()}
       onDismissRecovery={() => void dismissRecovery()}
+      onSaveRecoveredCopy={() => library.saveRecoveredCopy()}
       onSaveWork={async (input) => {
         await library.addWork(input);
         await library.selectWork(input.id);

@@ -41,11 +41,12 @@ export interface StudioProjectState {
   chapterHistory: ChapterHistoryEntry[];
   chapterHistoryIndex: number;
   isProjectSaving: boolean;
+  hasUnsavedChanges: boolean;
   recoverySnapshot: StudioRecoverySnapshot | null;
   importProjectJson: (jsonText: string, projectPath?: string) => Promise<void>;
   loadProject: (projectPath: string) => Promise<void>;
   openProjectFromDialog: () => Promise<void>;
-  closeProject: () => void;
+  closeProject: (force?: boolean) => boolean;
   saveProject: () => Promise<void>;
   saveProjectAsFromDialog: () => Promise<void>;
   setCurrentPageIndex: (pageIndex: number) => void;
@@ -72,6 +73,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   chapterHistory: [],
   chapterHistoryIndex: 0,
   isProjectSaving: false,
+  hasUnsavedChanges: false,
   recoverySnapshot: null,
 
   importProjectJson: async (jsonText, projectPath = DEFAULT_PROJECT_PATH) => {
@@ -88,6 +90,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         chapterHistory: [],
         chapterHistoryIndex: 0,
         isProjectSaving: false,
+        hasUnsavedChanges: true,
         recoverySnapshot: null,
       });
     } catch (error) {
@@ -113,6 +116,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         chapterHistory: [],
         chapterHistoryIndex: 0,
         isProjectSaving: false,
+        hasUnsavedChanges: false,
         recoverySnapshot: isRecoveryCandidate(snapshot, project, projectPath) ? snapshot : null,
       });
     } catch (error) {
@@ -136,17 +140,25 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
     }
   },
 
-  closeProject: () => set({
-    project: null,
-    projectPath: null,
-    currentPageIndex: 0,
-    lastImport: null,
-    error: null,
-    chapterHistory: [],
-    chapterHistoryIndex: 0,
-    isProjectSaving: false,
-    recoverySnapshot: null,
-  }),
+  closeProject: (force = false) => {
+    if (get().hasUnsavedChanges && !force) {
+      set({ error: "Há alterações não salvas. Salve o capítulo ou confirme o descarte antes de fechar." });
+      return false;
+    }
+    set({
+      project: null,
+      projectPath: null,
+      currentPageIndex: 0,
+      lastImport: null,
+      error: null,
+      chapterHistory: [],
+      chapterHistoryIndex: 0,
+      isProjectSaving: false,
+      hasUnsavedChanges: false,
+      recoverySnapshot: null,
+    });
+    return true;
+  },
 
   saveProject: async () => {
     const { project, projectPath } = get();
@@ -156,9 +168,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       await getStudioEditorBackend().saveProjectJson({ project_path: projectPath, project_json: compatProject });
       const savedProject = await getStudioEditorBackend().loadProject({ project_path: projectPath });
       await refreshRecoverySnapshot(projectPath, savedProject);
-      set({ project: savedProject, error: null });
+      set({ project: savedProject, error: null, hasUnsavedChanges: false });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
 
@@ -176,9 +188,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       await getStudioEditorBackend().saveProjectJson({ project_path: selected, project_json: compatProject });
       const savedProject = await getStudioEditorBackend().loadProject({ project_path: selected });
       await refreshRecoverySnapshot(selected, savedProject);
-      set({ project: savedProject, projectPath: selected, error: null });
+      set({ project: savedProject, projectPath: selected, error: null, hasUnsavedChanges: false });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
 
@@ -201,9 +213,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       const project = await backend.loadProject({ project_path: projectPath });
       await refreshRecoverySnapshot(projectPath, project);
-      set({ project, error: null });
+      set({ project, error: null, hasUnsavedChanges: false });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
 
@@ -222,9 +234,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       const project = await backend.loadProject({ project_path: projectPath });
       await refreshRecoverySnapshot(projectPath, project);
-      set({ project, error: null });
+      set({ project, error: null, hasUnsavedChanges: false });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
 
@@ -243,9 +255,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       const project = await backend.loadProject({ project_path: projectPath });
       await refreshRecoverySnapshot(projectPath, project);
-      set({ project, error: null });
+      set({ project, error: null, hasUnsavedChanges: false });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
 
@@ -278,12 +290,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         chapterHistory: history,
         chapterHistoryIndex: history.length,
         isProjectSaving: false,
+        hasUnsavedChanges: false,
         error: null,
       });
       return true;
     } catch (error) {
       set({
         isProjectSaving: false,
+        hasUnsavedChanges: true,
         error: error instanceof Error ? error.message : String(error),
       });
       return false;
@@ -309,12 +323,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         project: savedProject,
         chapterHistoryIndex: chapterHistoryIndex - 1,
         isProjectSaving: false,
+        hasUnsavedChanges: false,
         error: null,
       });
       return true;
     } catch (error) {
       set({
         isProjectSaving: false,
+        hasUnsavedChanges: true,
         error: error instanceof Error ? error.message : String(error),
       });
       return false;
@@ -340,12 +356,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         project: savedProject,
         chapterHistoryIndex: chapterHistoryIndex + 1,
         isProjectSaving: false,
+        hasUnsavedChanges: false,
         error: null,
       });
       return true;
     } catch (error) {
       set({
         isProjectSaving: false,
+        hasUnsavedChanges: true,
         error: error instanceof Error ? error.message : String(error),
       });
       return false;
@@ -366,6 +384,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         project,
         recoverySnapshot: null,
         isProjectSaving: false,
+        hasUnsavedChanges: false,
         chapterHistory: [],
         chapterHistoryIndex: 0,
         error: null,
@@ -374,6 +393,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
     } catch (error) {
       set({
         isProjectSaving: false,
+        hasUnsavedChanges: true,
         error: error instanceof Error ? error.message : String(error),
       });
       return false;

@@ -6,6 +6,7 @@ import {
   isTrackingCacheStale,
   normalizeTrackingSnapshot,
   normalizeTrackingStatus,
+  preserveTrackingCacheOnError,
   resolveTrackingStatus,
   searchTrackingWorks,
   syncTrackingWork,
@@ -156,5 +157,27 @@ describe("workTracking", () => {
     expect(isTrackingCacheStale(cache, new Date("2026-07-22T12:31:00Z"))).toBe(true);
     expect(cache.snapshots).toEqual([snapshot]);
     expect(cache).not.toHaveProperty("raw");
+  });
+
+  it("preserves stale provider data and records the current offline error", () => {
+    const snapshot = normalizeTrackingSnapshot({
+      provider: "mangadex",
+      providerId: "uuid",
+      title: "Obra",
+      status: "ongoing",
+      remoteChapterCount: 11,
+      latestChapter: "10.5",
+      coverUrl: null,
+      siteUrl: null,
+      fetchedAt: "2026-07-22T10:00:00Z",
+    });
+    const cache = createTrackingCache([snapshot], new Date("2026-07-22T10:00:00Z"), 30 * 60 * 1000);
+
+    const offline = preserveTrackingCacheOnError(cache, "Sem conexão", new Date("2026-07-22T12:00:00Z"));
+
+    expect(offline.snapshots).toEqual([snapshot]);
+    expect(offline.expiresAt).toBe(cache.expiresAt);
+    expect(offline.lastError).toBe("Sem conexão");
+    expect(isTrackingCacheStale(offline, new Date("2026-07-22T12:00:00Z"))).toBe(true);
   });
 });
