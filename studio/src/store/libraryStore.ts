@@ -2,7 +2,9 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import type { LibraryBackend } from "../library/libraryBackend";
 import {
   normalizeLibrary,
+  upsertChapter,
   type ExternalWorkLink,
+  type LibraryChapter,
   type LibraryWork,
   type PublicationStatus,
   type StudioLibrary,
@@ -26,6 +28,9 @@ export interface LibraryStoreState {
   load(): Promise<void>;
   addWork(work: AddLibraryWorkInput): Promise<void>;
   selectWork(workId: string): Promise<void>;
+  upsertChapter(workId: string, chapter: LibraryChapter): Promise<void>;
+  setChapterView(view: "grid" | "list"): Promise<void>;
+  setThumbnailSize(size: number): Promise<void>;
 }
 
 function errorMessage(error: unknown): string {
@@ -84,7 +89,13 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
         };
         const existingIndex = current.works.findIndex((candidate) => candidate.id === work.id);
         const works = [...current.works];
-        if (existingIndex >= 0) works[existingIndex] = { ...works[existingIndex], ...work };
+        if (existingIndex >= 0) {
+          works[existingIndex] = {
+            ...works[existingIndex],
+            ...work,
+            chapters: works[existingIndex].chapters,
+          };
+        }
         else works.push(work);
 
         await persist({
@@ -98,6 +109,26 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
         const current = get().document;
         if (!current.works.some((work) => work.id === workId)) return;
         await persist({ ...current, selectedWorkId: workId });
+      },
+
+      upsertChapter: async (workId, chapter) => {
+        await persist(upsertChapter(get().document, workId, chapter));
+      },
+
+      setChapterView: async (view) => {
+        const current = get().document;
+        await persist({
+          ...current,
+          preferences: { ...current.preferences, chapterView: view },
+        });
+      },
+
+      setThumbnailSize: async (size) => {
+        const current = get().document;
+        await persist({
+          ...current,
+          preferences: { ...current.preferences, thumbnailSize: size },
+        });
       },
     };
   });

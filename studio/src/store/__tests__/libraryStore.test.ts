@@ -155,4 +155,24 @@ describe("libraryStore", () => {
     expect(store.getState().status).toBe("error");
     expect(store.getState().error).toBe("disco indisponível");
   });
+
+  it("persists chapter registration and home view preferences", async () => {
+    const backend = new FakeLibraryBackend();
+    const store = createLibraryStore(backend);
+    await store.getState().load();
+    await store.getState().addWork({ id: "work-1", title: "Obra", aliases: [] });
+
+    await store.getState().upsertChapter("work-1", {
+      id: "chapter-1",
+      label: "1",
+      projectPath: "N:/Obra/001/project.json",
+    });
+    await store.getState().addWork({ id: "work-1", title: "Obra renomeada", aliases: [] });
+    await store.getState().setChapterView("list");
+    await store.getState().setThumbnailSize(220);
+
+    expect(backend.document.works[0].chapters[0].label).toBe("1");
+    expect(backend.document.works[0].title).toBe("Obra renomeada");
+    expect(backend.document.preferences).toEqual({ chapterView: "list", thumbnailSize: 220 });
+  });
 });
