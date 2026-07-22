@@ -10,6 +10,7 @@ import {
   textForLayer,
 } from "../components/editor/stage/textLayerStyleUtils";
 import { addStyledKonvaTextNodes } from "../components/editor/stage/konvaTextStyleRenderer";
+import { fontStyleForResolvedTextStyle, resolveEditorTextStyle } from "./editorTextStyleResolver";
 
 type RenderPageOptions = {
   page: PageData;
@@ -83,18 +84,23 @@ function addTextLayer(layer: Konva.Layer, entry: TextEntry) {
   if (entry.visible === false) return;
   const rect = bboxRect(entry);
   const style = styleForLayer(entry);
+  const resolvedStyle = resolveEditorTextStyle(style);
+  const professionalStyle = resolvedStyle.source === "studio";
   const text = textForLayer(entry);
-  const fontFamily = fontFamilyFromStyle(style);
-  const fontStyle = fontStyleFromStyle(style);
+  const fontFamily = professionalStyle ? resolvedStyle.typography.fontFamily : fontFamilyFromStyle(style);
+  const fontStyle = professionalStyle ? fontStyleForResolvedTextStyle(resolvedStyle) : fontStyleFromStyle(style);
+  const requestedFontSize = professionalStyle ? resolvedStyle.typography.fontSize : style.tamanho;
+  const textAlign = professionalStyle ? resolvedStyle.typography.align : style.alinhamento;
+  const lineHeight = professionalStyle ? resolvedStyle.typography.lineHeight : EDITOR_TEXT_LINE_HEIGHT;
   const textBoxWidth = Math.max(1, rect.width - 16);
   const textBoxHeight = Math.max(1, rect.height - 12);
   const fontSize = fitEditorTextFontSize({
     text,
     fontFamily,
     fontStyle,
-    maxFontSize: Math.max(8, style.tamanho),
-    maxWidth: textBoxWidth,
-    maxHeight: textBoxHeight,
+    maxFontSize: Math.max(8, requestedFontSize),
+    maxWidth: professionalStyle ? textBoxWidth * 100 / resolvedStyle.typography.horizontalScale : textBoxWidth,
+    maxHeight: professionalStyle ? textBoxHeight * 100 / resolvedStyle.typography.verticalScale : textBoxHeight,
   });
 
   const group = new Konva.Group({
@@ -113,11 +119,11 @@ function addTextLayer(layer: Konva.Layer, entry: TextEntry) {
     width: textBoxWidth,
     height: textBoxHeight,
     text,
-    align: style.alinhamento,
+    align: textAlign,
     fontSize,
     fontFamily,
     fontStyle,
-    lineHeight: EDITOR_TEXT_LINE_HEIGHT,
+    lineHeight,
     style,
     listening: false,
   });
@@ -164,6 +170,14 @@ export async function renderPageWithKonvaToDataUrl({
     await Promise.all(
       textEntries.map((entry) => {
         const style = styleForLayer(entry);
+        const resolvedStyle = resolveEditorTextStyle(style);
+        if (resolvedStyle.source === "studio") {
+          return waitForStyledFont(
+            resolvedStyle.typography.fontFamily,
+            resolvedStyle.typography.fontSize,
+            fontStyleForResolvedTextStyle(resolvedStyle),
+          );
+        }
         return waitForStyledFont(fontFamilyFromStyle(style), style.tamanho, fontStyleFromStyle(style));
       }),
     );

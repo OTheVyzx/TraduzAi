@@ -38,7 +38,7 @@ import {
 } from "../workContext";
 import { DEFAULT_TEXT_STYLE, canonicalizeTextStyle } from "../editorTextStylePolicy";
 import type { LassoSelection } from "../lassoSelection";
-import { rasterizeLassoToPng } from "../lassoSelection";
+import { rasterizeLassoSelectionToPng, rasterizeLassoToPng } from "../lassoSelection";
 
 export type EditorToolMode =
   | "select"
@@ -1209,7 +1209,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const selection = get().activeLassoSelection;
     const path = projectPath();
     if (!selection || !path) return;
-    const pngData = rasterizeLassoToPng(selection.points, selection.width, selection.height);
+    const pngData = selection.regions || selection.feather || selection.expansion
+      ? rasterizeLassoSelectionToPng(selection)
+      : rasterizeLassoToPng(selection.points, selection.width, selection.height);
     if (!pngData) return;
     const { writeMaskFromPng } = await getTauriEditorApi();
     const absolutePath = await writeMaskFromPng({
@@ -1217,7 +1219,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       page_index: selection.pageIndex,
       png_data: pngData,
       layer_key: "mask",
-      op: get().maskOp,
+      op: selection.regions ? "replace" : get().maskOp,
     });
     const page = get().currentPage;
     if (page && get().currentPageIndex === selection.pageIndex) {
@@ -1820,7 +1822,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ activePageAction: action, pageActionError: null });
     try {
       const { runPageActionWithOptionalMask, writeMaskFromPng } = await getTauriEditorApi();
-      const pngData = rasterizeLassoToPng(selection.points, selection.width, selection.height);
+      const pngData = selection.regions || selection.feather || selection.expansion
+        ? rasterizeLassoSelectionToPng(selection)
+        : rasterizeLassoToPng(selection.points, selection.width, selection.height);
       const maskPath = pngData
         ? await writeMaskFromPng({
             project_path: path,
@@ -1885,7 +1889,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ activePageAction: "process", pageActionError: null });
     try {
       const { runProcessRegion, writeMaskFromPng } = await getTauriEditorApi();
-      const pngData = rasterizeLassoToPng(selection.points, selection.width, selection.height);
+      const pngData = selection.regions || selection.feather || selection.expansion
+        ? rasterizeLassoSelectionToPng(selection)
+        : rasterizeLassoToPng(selection.points, selection.width, selection.height);
       const maskPath = pngData
         ? await writeMaskFromPng({
             project_path: path,
