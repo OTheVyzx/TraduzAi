@@ -15,6 +15,8 @@ use tokio::time::{timeout, Duration};
 #[path = "../../../src-tauri/src/commands/studio_lite.rs"]
 mod studio_lite;
 
+mod library;
+
 #[derive(Debug, Deserialize)]
 struct ProjectPathConfig {
     project_path: String,
@@ -229,7 +231,8 @@ fn parse_project_payload(payload: &str) -> Result<Value, String> {
 fn studio_save_project(config: SaveProjectConfig) -> Result<(), String> {
     let project_file = resolve_project_file(&config.project_path);
     if let Some(parent) = project_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("Falha ao criar pasta do projeto: {error}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Falha ao criar pasta do projeto: {error}"))?;
     }
     let payload = serde_json::to_string_pretty(&config.project_json)
         .map_err(|error| format!("Falha ao serializar project.json: {error}"))?;
@@ -472,7 +475,8 @@ fn studio_write_bitmap_layer(config: BitmapLayerConfig) -> Result<String, String
     let rel = format!("layers/{}/{:03}.png", layer, config.page_index + 1);
     let output = project_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("Falha ao criar pasta de camada: {error}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Falha ao criar pasta de camada: {error}"))?;
     }
     let raw = config
         .png_data
@@ -482,7 +486,8 @@ fn studio_write_bitmap_layer(config: BitmapLayerConfig) -> Result<String, String
     let bytes = BASE64
         .decode(raw)
         .map_err(|error| format!("PNG base64 invalido: {error}"))?;
-    std::fs::write(&output, bytes).map_err(|error| format!("Falha ao salvar camada bitmap: {error}"))?;
+    std::fs::write(&output, bytes)
+        .map_err(|error| format!("Falha ao salvar camada bitmap: {error}"))?;
     Ok(rel)
 }
 
@@ -951,7 +956,8 @@ fn studio_prepare_psd_export(config: PsdExportConfig) -> Result<String, String> 
     let rel = format!("exports/{}", safe_name);
     let output = project_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("Falha ao criar pasta de exportacao: {error}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Falha ao criar pasta de exportacao: {error}"))?;
     }
     Ok(output.to_string_lossy().to_string())
 }
@@ -972,14 +978,18 @@ async fn search_google_fonts(query: String) -> Result<Vec<GoogleFontSearchResult
         .map_err(|error| format!("Falha ao consultar Google Fonts: {error}"))?;
 
     if !metadata.status().is_success() {
-        return Err(format!("Falha ao consultar Google Fonts: HTTP {}", metadata.status()));
+        return Err(format!(
+            "Falha ao consultar Google Fonts: HTTP {}",
+            metadata.status()
+        ));
     }
 
     let metadata_text = metadata
         .text()
         .await
         .map_err(|error| format!("Falha ao ler resposta do Google Fonts: {error}"))?;
-    let families = search_google_fonts_metadata_json(&metadata_text, &query, GOOGLE_FONT_SEARCH_LIMIT)?;
+    let families =
+        search_google_fonts_metadata_json(&metadata_text, &query, GOOGLE_FONT_SEARCH_LIMIT)?;
     let mut results = Vec::new();
 
     for family in families {
@@ -1054,7 +1064,12 @@ async fn list_system_fonts(query: Option<String>) -> Result<Vec<SystemFontInfo>,
     let mut fonts = Vec::new();
 
     for (pattern, font_path) in cache.list() {
-        let family = pattern.family.clone().unwrap_or_default().trim().to_string();
+        let family = pattern
+            .family
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if family.is_empty() {
             continue;
         }
@@ -1111,9 +1126,14 @@ async fn resolve_system_font(filename: String) -> Result<Option<SystemFontInfo>,
 fn google_fonts_cache_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
-        .ok_or_else(|| "Nao foi possivel localizar a pasta do usuario para cache de fontes".to_string())?;
+        .ok_or_else(|| {
+            "Nao foi possivel localizar a pasta do usuario para cache de fontes".to_string()
+        })?;
 
-    Ok(PathBuf::from(home).join(".traduzai").join("fonts").join("google"))
+    Ok(PathBuf::from(home)
+        .join(".traduzai")
+        .join("fonts")
+        .join("google"))
 }
 
 fn sanitize_google_font_filename(filename: &str) -> Result<String, String> {
@@ -1125,7 +1145,10 @@ fn sanitize_google_font_filename(filename: &str) -> Result<String, String> {
         return Err("Nome de fonte invalido".to_string());
     }
     if trimmed.chars().any(|ch| {
-        matches!(ch, '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*') || ch.is_control()
+        matches!(
+            ch,
+            '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*'
+        ) || ch.is_control()
     }) {
         return Err("Nome de fonte deve ser um arquivo simples".to_string());
     }
@@ -1141,7 +1164,13 @@ fn sanitize_google_font_filename(filename: &str) -> Result<String, String> {
 fn normalize_google_font_query(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1176,13 +1205,23 @@ fn google_font_cache_filename(family: &str, extension: &str) -> String {
         "otf" => "otf",
         _ => "ttf",
     };
-    format!("GoogleFont__{}__regular.{}", google_font_cache_slug(family), normalized_extension)
+    format!(
+        "GoogleFont__{}__regular.{}",
+        google_font_cache_slug(family),
+        normalized_extension
+    )
 }
 
 fn normalize_system_font_query(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1216,7 +1255,11 @@ fn system_font_cache_slug(value: &str) -> Result<String, String> {
     }
 }
 
-fn system_font_cache_filename(family: &str, style: &str, extension: &str) -> Result<String, String> {
+fn system_font_cache_filename(
+    family: &str,
+    style: &str,
+    extension: &str,
+) -> Result<String, String> {
     let normalized_extension = match extension.to_ascii_lowercase().as_str() {
         "otf" => "otf",
         _ => "ttf",
@@ -1237,7 +1280,10 @@ fn sanitize_system_font_filename(filename: &str) -> Result<String, String> {
         || trimmed.contains("..")
         || !trimmed.starts_with("SystemFont__")
         || trimmed.chars().any(|ch| {
-            matches!(ch, '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*') || ch.is_control()
+            matches!(
+                ch,
+                '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*'
+            ) || ch.is_control()
         })
     {
         return Err("Nome de fonte do sistema invalido".to_string());
@@ -1250,11 +1296,19 @@ fn sanitize_system_font_filename(filename: &str) -> Result<String, String> {
 }
 
 fn system_font_weight(bold: PatternMatch) -> String {
-    if bold == PatternMatch::True { "700".to_string() } else { "400".to_string() }
+    if bold == PatternMatch::True {
+        "700".to_string()
+    } else {
+        "400".to_string()
+    }
 }
 
 fn system_font_style(italic: PatternMatch) -> String {
-    if italic == PatternMatch::True { "italic".to_string() } else { "normal".to_string() }
+    if italic == PatternMatch::True {
+        "italic".to_string()
+    } else {
+        "normal".to_string()
+    }
 }
 
 fn system_font_style_name(bold: PatternMatch, italic: PatternMatch) -> String {
@@ -1271,8 +1325,8 @@ fn search_google_fonts_metadata_json(
     query: &str,
     limit: usize,
 ) -> Result<Vec<GoogleFontFamilyMetadata>, String> {
-    let parsed: GoogleFontsMetadataResponse =
-        serde_json::from_str(metadata_json).map_err(|error| format!("Resposta invalida do Google Fonts: {error}"))?;
+    let parsed: GoogleFontsMetadataResponse = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("Resposta invalida do Google Fonts: {error}"))?;
     let normalized_query = normalize_google_font_query(query);
     if normalized_query.is_empty() || limit == 0 {
         return Ok(Vec::new());
@@ -1292,7 +1346,11 @@ fn search_google_fonts_metadata_json(
         let b_family = normalize_google_font_query(&b.family);
         google_font_match_rank(&a_family, &normalized_query)
             .cmp(&google_font_match_rank(&b_family, &normalized_query))
-            .then_with(|| a.popularity.unwrap_or(i64::MAX).cmp(&b.popularity.unwrap_or(i64::MAX)))
+            .then_with(|| {
+                a.popularity
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.popularity.unwrap_or(i64::MAX))
+            })
             .then_with(|| a.family.cmp(&b.family))
     });
     matches.truncate(limit);
@@ -1334,7 +1392,9 @@ fn select_google_font_repo_file(entries: &[GoogleFontRepoEntry]) -> Option<&Goog
                     Some("ttf") | Some("otf")
                 )
         })
-        .min_by(|a, b| google_font_repo_file_rank(&a.name).cmp(&google_font_repo_file_rank(&b.name)))
+        .min_by(|a, b| {
+            google_font_repo_file_rank(&a.name).cmp(&google_font_repo_file_rank(&b.name))
+        })
 }
 
 fn google_font_repo_file_rank(name: &str) -> (i32, usize, String) {
@@ -1368,7 +1428,9 @@ async fn fetch_google_font_repo_file(
             .header(reqwest::header::USER_AGENT, "TraduzAI Studio")
             .send()
             .await
-            .map_err(|error| format!("Falha ao localizar fonte no repositorio Google Fonts: {error}"))?;
+            .map_err(|error| {
+                format!("Falha ao localizar fonte no repositorio Google Fonts: {error}")
+            })?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             continue;
         }
@@ -1384,7 +1446,9 @@ async fn fetch_google_font_repo_file(
         }
     }
 
-    Err(format!("Nao foi encontrado arquivo TTF/OTF para a fonte Google: {family}"))
+    Err(format!(
+        "Nao foi encontrado arquivo TTF/OTF para a fonte Google: {family}"
+    ))
 }
 
 async fn cache_google_font_in_dir(
@@ -1412,7 +1476,8 @@ async fn cache_google_font_in_dir(
         return Err("URL de fonte Google deve usar http ou https".to_string());
     }
 
-    std::fs::create_dir_all(cache_dir).map_err(|error| format!("Falha ao criar cache de fontes Google: {error}"))?;
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|error| format!("Falha ao criar cache de fontes Google: {error}"))?;
 
     let response = reqwest::Client::new()
         .get(parsed_url)
@@ -1421,7 +1486,10 @@ async fn cache_google_font_in_dir(
         .map_err(|error| format!("Falha ao baixar fonte Google: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(format!("Falha ao baixar fonte Google: HTTP {}", response.status()));
+        return Err(format!(
+            "Falha ao baixar fonte Google: HTTP {}",
+            response.status()
+        ));
     }
 
     let bytes = response
@@ -1432,7 +1500,8 @@ async fn cache_google_font_in_dir(
         return Err("Fonte Google baixada esta vazia".to_string());
     }
 
-    std::fs::write(&target_path, &bytes).map_err(|error| format!("Falha ao gravar fonte Google em cache: {error}"))?;
+    std::fs::write(&target_path, &bytes)
+        .map_err(|error| format!("Falha ao gravar fonte Google em cache: {error}"))?;
 
     Ok(CachedGoogleFont {
         family: request.family,
@@ -1505,6 +1574,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            library::studio_load_library,
+            library::studio_save_library,
             studio_load_project,
             studio_save_project,
             studio_save_recovery_snapshot,
@@ -1561,13 +1632,19 @@ mod tests {
     #[test]
     fn resolves_any_selected_json_file_as_project_file() {
         let path = super::resolve_project_file("N:\\TraduzAI\\qa\\project-saved.json");
-        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("project-saved.json"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("project-saved.json")
+        );
     }
 
     #[test]
     fn resolves_directory_path_to_default_project_json() {
         let path = super::resolve_project_file("N:\\TraduzAI\\qa");
-        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("project.json"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("project.json")
+        );
     }
 
     #[test]
@@ -1688,7 +1765,10 @@ mod tests {
 
     #[test]
     fn normalizes_system_font_query() {
-        assert_eq!(super::normalize_system_font_query("  Times-New  "), "times new");
+        assert_eq!(
+            super::normalize_system_font_query("  Times-New  "),
+            "times new"
+        );
     }
 
     #[test]
