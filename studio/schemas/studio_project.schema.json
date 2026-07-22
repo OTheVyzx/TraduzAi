@@ -79,7 +79,11 @@
         "estilo": { "type": "object" },
         "visible": { "type": "boolean" },
         "locked": { "type": "boolean" },
-        "order": { "type": "number" }
+        "order": { "type": "number" },
+        "translation_status": {
+          "enum": ["pending", "translated", "review", "approved"]
+        },
+        "translation_notes": { "type": "string" }
       },
       "additionalProperties": true
     },

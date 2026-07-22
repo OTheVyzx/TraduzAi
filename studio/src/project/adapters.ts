@@ -1,5 +1,6 @@
 import {
   COMPAT_PROJECT_VERSION,
+  isTranslationStatus,
   STUDIO_SCENE_VERSION,
   STUDIO_SCHEMA_VERSION,
   type ImageLayerKey,
@@ -112,13 +113,19 @@ function normalizeTextLayer(value: unknown, index: number): StudioTextLayer {
   const layer = isRecord(value) ? value : {};
   const confidence = asNumber(layer.ocr_confidence) ?? asNumber(layer.confianca_ocr) ?? asNumber(layer.confidence);
   const style = textStyleFrom(layer.style ?? layer.estilo);
+  const translated = asString(layer.translated, "") || asString(layer.traduzido, "");
+  const translationStatus = isTranslationStatus(layer.translation_status)
+    ? layer.translation_status
+    : translated.trim().length > 0
+      ? "translated"
+      : "pending";
   return syncLayerAliases({
     ...layer,
     id: asString(layer.id, `text-${index + 1}`),
     kind: "text",
     original: asString(layer.original ?? layer.texto ?? layer.text, ""),
-    translated: asString(layer.translated ?? layer.traduzido, ""),
-    traduzido: asString(layer.traduzido ?? layer.translated, ""),
+    translated,
+    traduzido: translated,
     bbox: asBBox(layer.render_bbox ?? layer.layout_bbox ?? layer.bbox ?? layer.source_bbox ?? layer.balloon_bbox),
     source_bbox: Array.isArray(layer.source_bbox) ? asBBox(layer.source_bbox) : undefined,
     layout_bbox: Array.isArray(layer.layout_bbox) ? asBBox(layer.layout_bbox) : undefined,
@@ -132,6 +139,8 @@ function normalizeTextLayer(value: unknown, index: number): StudioTextLayer {
     ocr_confidence: confidence,
     confianca_ocr: confidence,
     qa_flags: Array.isArray(layer.qa_flags) ? layer.qa_flags : undefined,
+    translation_status: translationStatus,
+    translation_notes: typeof layer.translation_notes === "string" ? layer.translation_notes : undefined,
   });
 }
 

@@ -110,6 +110,64 @@ describe("studio project adapters", () => {
     expect(compat.paginas[0].textos).toEqual(compat.paginas[0].text_layers);
   });
 
+  it("derives manual translation status and preserves status, notes, and aliases on round trip", () => {
+    const imported = importStudioProject({
+      versao: "2.0",
+      paginas: [{
+        numero: 1,
+        textos: [
+          { id: "pending", bbox: [0, 0, 10, 10], texto: "WAIT", traduzido: "" },
+          {
+            id: "translated",
+            bbox: [0, 10, 10, 20],
+            texto: "DONE",
+            translated: "",
+            traduzido: "FEITO",
+          },
+          {
+            id: "review",
+            bbox: [0, 20, 10, 30],
+            texto: "CHECK",
+            traduzido: "REVISAR",
+            translation_status: "review",
+            translation_notes: "Confirmar o nome próprio",
+          },
+        ],
+      }],
+    });
+
+    expect(imported.project.paginas[0].text_layers).toMatchObject([
+      { id: "pending", translation_status: "pending" },
+      { id: "translated", translation_status: "translated" },
+      {
+        id: "review",
+        translation_status: "review",
+        translation_notes: "Confirmar o nome próprio",
+      },
+    ]);
+
+    const compat = toTraduzAiV2Compat(imported.project);
+    const reopened = importStudioProject(compat).project.paginas[0];
+    expect(reopened.text_layers[2]).toMatchObject({
+      translated: "REVISAR",
+      traduzido: "REVISAR",
+      translation_status: "review",
+      translation_notes: "Confirmar o nome próprio",
+    });
+    expect(reopened.textos).toEqual(reopened.text_layers);
+  });
+
+  it("declares additive manual translation fields in the Studio JSON schema", () => {
+    const textLayerProperties = studioProjectSchema.$defs.textLayer.properties;
+
+    expect(textLayerProperties.translation_status).toEqual({
+      enum: ["pending", "translated", "review", "approved"],
+    });
+    expect(textLayerProperties.translation_notes).toEqual({ type: "string" });
+    expect(studioProjectSchema.$defs.textLayer.required).not.toContain("translation_status");
+    expect(studioProjectSchema.$defs.textLayer.required).not.toContain("translation_notes");
+  });
+
   it("keeps final image fallback order compatible with site exports", () => {
     const result = importStudioProject({
       versao: "2.0",

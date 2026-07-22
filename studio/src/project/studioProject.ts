@@ -63,6 +63,13 @@ export interface StudioTextStyle {
   [key: string]: unknown;
 }
 
+export const TRANSLATION_STATUSES = ["pending", "translated", "review", "approved"] as const;
+export type TranslationStatus = (typeof TRANSLATION_STATUSES)[number];
+
+export function isTranslationStatus(value: unknown): value is TranslationStatus {
+  return typeof value === "string" && TRANSLATION_STATUSES.includes(value as TranslationStatus);
+}
+
 export interface StudioTextLayer {
   id: string;
   kind: "text";
@@ -82,6 +89,8 @@ export interface StudioTextLayer {
   ocr_confidence?: number | null;
   confianca_ocr?: number | null;
   qa_flags?: unknown[];
+  translation_status?: TranslationStatus;
+  translation_notes?: string;
   [key: string]: unknown;
 }
 
