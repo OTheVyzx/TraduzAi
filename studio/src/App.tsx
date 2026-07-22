@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { StudioLibraryHome } from "./library/StudioLibraryHome";
 import { createManualChapterFromImages } from "./backend/projectDialog";
@@ -7,9 +7,9 @@ import type { StudioProject } from "./project/studioProject";
 import { createLibraryStore } from "./store/libraryStore";
 import { useStudioProjectStore } from "./store/projectStore";
 
-const StudioSharedEditor = lazy(async () => {
-  const mod = await import("./editor/StudioSharedEditor");
-  return { default: mod.StudioSharedEditor };
+const StudioWorkspaceShell = lazy(async () => {
+  const mod = await import("./editor/StudioWorkspaceShell");
+  return { default: mod.StudioWorkspaceShell };
 });
 
 const libraryStore = createLibraryStore(createDefaultLibraryBackend());
@@ -58,8 +58,10 @@ export function App() {
   const recoverySnapshot = useStudioProjectStore((state) => state.recoverySnapshot);
   const restoreRecovery = useStudioProjectStore((state) => state.restoreRecovery);
   const dismissRecovery = useStudioProjectStore((state) => state.dismissRecovery);
+  const closeProject = useStudioProjectStore((state) => state.closeProject);
   const library = useStore(libraryStore, (state) => state);
   const registeredProjects = useRef(new Set<string>());
+  const [lastOpenedChapterPath, setLastOpenedChapterPath] = useState<string | null>(null);
 
   useEffect(() => {
     void libraryStore.getState().load();
@@ -73,6 +75,7 @@ export function App() {
 
   useEffect(() => {
     if (!project || !projectPath || projectPath.startsWith("memory://") || library.status !== "ready") return;
+    setLastOpenedChapterPath(projectPath);
     if (registeredProjects.current.has(projectPath)) return;
     registeredProjects.current.add(projectPath);
 
@@ -109,7 +112,7 @@ export function App() {
   if (project && projectPath) {
     return (
       <Suspense fallback={<StudioBoot message="Carregando editor..." />}>
-        <StudioSharedEditor project={project} projectPath={projectPath} />
+        <StudioWorkspaceShell project={project} projectPath={projectPath} onBack={closeProject} />
       </Suspense>
     );
   }
@@ -151,13 +154,18 @@ export function App() {
           lastOpenedAt: new Date().toISOString(),
         });
         await library.selectWork(workId);
+        setLastOpenedChapterPath(input.projectJsonPath);
         await loadProject(input.projectJsonPath);
       }}
       onRemoveChapter={(workId, chapterId) => library.removeChapter(workId, chapterId)}
       onRelinkChapter={(workId, chapterId, path) => library.relinkChapter(workId, chapterId, path)}
       onImportProject={() => void openProjectFromDialog()}
       onSelectWork={(workId) => void library.selectWork(workId)}
-      onOpenChapter={(path) => void loadProject(path)}
+      onOpenChapter={(path) => {
+        setLastOpenedChapterPath(path);
+        void loadProject(path);
+      }}
+      initialSelectedChapterPath={lastOpenedChapterPath}
       onSetChapterView={(view) => void library.setChapterView(view)}
       onSetThumbnailSize={(size) => void library.setThumbnailSize(size)}
     />

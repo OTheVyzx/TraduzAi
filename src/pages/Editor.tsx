@@ -391,6 +391,7 @@ export interface EditorProps {
   onBack?: () => void;
   emptyBackLabel?: string;
   headerActions?: ReactNode;
+  workspaceSwitcher?: ReactNode;
   layersPanel?: ReactNode;
   mode?: EditorMode;
   selectionTargetNodeId?: string | null;
@@ -405,6 +406,7 @@ export function Editor({
   onBack,
   emptyBackLabel = "Voltar ao início",
   headerActions,
+  workspaceSwitcher,
   layersPanel,
   mode = "traduzai",
   selectionTargetNodeId = null,
@@ -731,6 +733,7 @@ export function Editor({
 
           {/* Undo/Redo + indicador "Não salvo" + Salvar manual + descartar */}
           <div className="flex items-center gap-1.5">
+            {workspaceSwitcher}
             <UndoRedoControls />
             <AutoSaveIndicator />
             <RenderStatusBadge />

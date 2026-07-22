@@ -38,6 +38,7 @@ export function StudioLibraryHome({
   onOpenChapter,
   onSetChapterView,
   onSetThumbnailSize,
+  initialSelectedChapterPath = null,
 }: {
   document: StudioLibrary;
   status: LibraryStoreStatus;
@@ -60,24 +61,27 @@ export function StudioLibraryHome({
   onOpenChapter: (projectPath: string) => void;
   onSetChapterView: (view: "grid" | "list") => void;
   onSetThumbnailSize: (size: number) => void;
+  initialSelectedChapterPath?: string | null;
 }) {
   const [workQuery, setWorkQuery] = useState("");
   const [chapterQuery, setChapterQuery] = useState("");
-  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null);
+  const selectedWork = useMemo(
+    () => document.works.find((work) => work.id === document.selectedWorkId) ?? null,
+    [document.selectedWorkId, document.works],
+  );
+  const initialChapterId = selectedWork?.chapters.find((chapter) => chapter.projectPath === initialSelectedChapterPath)?.id ?? null;
+  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(initialChapterId);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
   const [editingWorkId, setEditingWorkId] = useState<string | null>(null);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [createChapterDialogOpen, setCreateChapterDialogOpen] = useState(false);
   const [missingProjectPaths, setMissingProjectPaths] = useState<Set<string>>(new Set());
-  const selectedWork = useMemo(
-    () => document.works.find((work) => work.id === document.selectedWorkId) ?? null,
-    [document.selectedWorkId, document.works],
-  );
-
   useEffect(() => {
-    setSelectedChapterId(null);
+    setSelectedChapterId(
+      selectedWork?.chapters.find((chapter) => chapter.projectPath === initialSelectedChapterPath)?.id ?? null,
+    );
     setChapterQuery("");
-  }, [selectedWork?.id]);
+  }, [initialSelectedChapterPath, selectedWork?.id]);
 
   const projectPathSignature = useMemo(
     () => document.works.flatMap((work) => work.chapters.map((chapter) => chapter.projectPath)).join("\u0000"),

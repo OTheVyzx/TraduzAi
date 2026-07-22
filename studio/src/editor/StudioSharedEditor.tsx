@@ -25,6 +25,8 @@ import { ChapterToolsPanel } from "./batch/ChapterToolsPanel";
 import { runStudioAutosaveCycle } from "../autosave/recovery";
 import { useStudioProjectStore } from "../store/projectStore";
 import { reconcileStudioEditorPage } from "./sharedEditorProjectSync";
+import type { StudioWorkspace } from "./studioWorkspace";
+import type { ReactNode } from "react";
 
 const DEFAULT_TEXT_STYLE: TextLayerStyle = {
   fonte: "Comic Neue",
@@ -145,9 +147,15 @@ function toAppProject(project: StudioProject, projectPath: string): Project {
 export function StudioSharedEditor({
   project,
   projectPath,
+  workspace,
+  onBack,
+  workspaceSwitcher,
 }: {
   project: StudioProject;
   projectPath: string;
+  workspace: StudioWorkspace;
+  onBack: () => void;
+  workspaceSwitcher: ReactNode;
 }) {
   const appProject = useMemo(() => toAppProject(project, projectPath), [project, projectPath]);
   const resetEditor = useEditorStore((state) => state.resetEditor);
@@ -417,8 +425,9 @@ export function StudioSharedEditor({
       )}
       <Editor
         mode="studio"
-        onBack={() => undefined}
+        onBack={onBack}
         emptyBackLabel="Voltar ao Studio"
+        workspaceSwitcher={workspaceSwitcher}
         layersPanel={<StudioLayersTree onSelectTextLayer={selectSceneTextLayer} />}
         selectionTargetNodeId={selectionTargetNode?.id ?? null}
         selectionTargetLabel={selectionTargetLabel}
@@ -432,6 +441,9 @@ export function StudioSharedEditor({
         onRequestPageChange={changeStudioPage}
         headerActions={
           <>
+            <span className="studio-sr-only" data-workspace={workspace}>
+              Área atual: {workspace === "translation" ? "Tradução" : "Edição"}
+            </span>
             <ChapterToolsPanel
               project={project}
               currentPageIndex={currentPageIndex}

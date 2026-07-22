@@ -38,6 +38,25 @@ describe("useStudioProjectStore", () => {
     expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("B");
   });
 
+  it("closes the active project explicitly and clears chapter-only state", async () => {
+    await useStudioProjectStore.getState().importProjectJson(
+      JSON.stringify({ versao: "1.0", paginas: [{ numero: 1, textos: [] }] }),
+      "memory://close-project",
+    );
+
+    useStudioProjectStore.getState().closeProject();
+
+    expect(useStudioProjectStore.getState()).toMatchObject({
+      project: null,
+      projectPath: null,
+      currentPageIndex: 0,
+      lastImport: null,
+      chapterHistory: [],
+      chapterHistoryIndex: 0,
+      recoverySnapshot: null,
+    });
+  });
+
   it("patches current text layers through the compatibility backend", async () => {
     await useStudioProjectStore.getState().importProjectJson(
       JSON.stringify({

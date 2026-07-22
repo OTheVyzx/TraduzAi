@@ -72,12 +72,14 @@ describe("StudioLibraryHome", () => {
       onOpenChapter: () => undefined,
       onSetChapterView: () => undefined,
       onSetThumbnailSize: () => undefined,
+      initialSelectedChapterPath: "N:/Obras/Norte/002/project.json",
     }));
 
     expect(html).toContain("A Espada do Norte");
     expect(html).toContain("Capítulo 2");
     expect(html).toContain("6 de 24 páginas");
     expect(html).toContain("--chapter-card-size:192px");
+    expect(html).toMatch(/aria-label="Selecionar capítulo 2" aria-pressed="true"/);
   });
 
   it("filters the work sidebar and exposes selection state", () => {

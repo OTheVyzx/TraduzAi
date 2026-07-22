@@ -45,6 +45,7 @@ export interface StudioProjectState {
   importProjectJson: (jsonText: string, projectPath?: string) => Promise<void>;
   loadProject: (projectPath: string) => Promise<void>;
   openProjectFromDialog: () => Promise<void>;
+  closeProject: () => void;
   saveProject: () => Promise<void>;
   saveProjectAsFromDialog: () => Promise<void>;
   setCurrentPageIndex: (pageIndex: number) => void;
@@ -134,6 +135,18 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       set({ error: error instanceof Error ? error.message : String(error) });
     }
   },
+
+  closeProject: () => set({
+    project: null,
+    projectPath: null,
+    currentPageIndex: 0,
+    lastImport: null,
+    error: null,
+    chapterHistory: [],
+    chapterHistoryIndex: 0,
+    isProjectSaving: false,
+    recoverySnapshot: null,
+  }),
 
   saveProject: async () => {
     const { project, projectPath } = get();
