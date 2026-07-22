@@ -16,6 +16,7 @@ use tokio::time::{timeout, Duration};
 mod studio_lite;
 
 mod library;
+mod chapter_import;
 
 #[derive(Debug, Deserialize)]
 struct ProjectPathConfig {
@@ -1576,6 +1577,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             library::studio_load_library,
             library::studio_save_library,
+            chapter_import::studio_prepare_manual_chapter,
             studio_load_project,
             studio_save_project,
             studio_save_recovery_snapshot,
