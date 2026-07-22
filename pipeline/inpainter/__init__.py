@@ -3942,6 +3942,12 @@ def _promote_translucent_balloon_profile(image_rgb: np.ndarray, text: dict) -> b
     return True
 
 
+def _is_translucent_balloon_profile(text: dict | None) -> bool:
+    if not isinstance(text, dict):
+        return False
+    return str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower() == "translucent_balloon"
+
+
 def _looks_saturated_colored_background(
     image_rgb: np.ndarray,
     sample_bbox: list[int],
@@ -6863,6 +6869,9 @@ def _apply_fast_dark_panel_text_fill(
         if not isinstance(text, dict):
             _reject("invalid_text")
             continue
+        if _is_translucent_balloon_profile(text):
+            _reject("translucent_balloon")
+            continue
         if not global_fast_dark_enabled and not _auto_fast_dark_card_fill_allowed(text):
             _reject("disabled")
             continue
@@ -7448,6 +7457,11 @@ def _source_matches_active_inpaint_block(source: dict, blocks: list[dict] | None
 def _auto_inpaint_unsafe_reason(item: dict | None) -> str:
     flags = _qa_flags_for_auto_inpaint(item)
     has_current_mask_evidence = _has_current_image_bubble_mask_evidence(item)
+    if _is_translucent_balloon_profile(item):
+        # The translucent profile replaces a broad, image-derived balloon mask
+        # with its text-safe action mask below.  Its old outside-bubble flag
+        # must therefore not divert it back to a solid fallback.
+        flags = {flag for flag in flags if flag != "mask_outside_balloon_critical"}
     if has_current_mask_evidence:
         flags = {flag for flag in flags if flag != "mask_outside_balloon"}
     if _current_contour_mask_evidence_clears_outside_critical(item):
@@ -8448,6 +8462,86 @@ def _augment_inpaint_masks_from_texts(
     raw = _drop_unprotected_dark_outline_slivers(raw, texts, image_rgb)
     expanded = _drop_unprotected_dark_outline_slivers(expanded, texts, image_rgb)
     return raw.astype(np.uint8), expanded.astype(np.uint8)
+
+
+def _constrain_translucent_balloon_action_masks(
+    raw_mask: np.ndarray | None,
+    expanded_mask: np.ndarray | None,
+    texts: list[dict],
+    image_rgb: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep translucent-balloon repair inside each text's safe layout area.
+
+    Image segmentation can mistake the translucent overlay and its surrounding
+    art for one white balloon.  That broad mask is unsafe for both a flat fill
+    and Lama.  We retain only the safe layout rectangle for the translucent
+    text, while preserving geometry belonging to any neighbouring text.
+    """
+    shape = image_rgb.shape[:2]
+    raw = _coerce_mask_for_shape(raw_mask, shape)
+    expanded = _coerce_mask_for_shape(expanded_mask, shape)
+    translucent = [text for text in texts if _is_translucent_balloon_profile(text)]
+    if not translucent:
+        return raw, expanded
+
+    height, width = shape
+    scope = np.zeros(shape, dtype=np.uint8)
+    allowed = np.zeros(shape, dtype=np.uint8)
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        geometry = _text_geometry_mask(width, height, text)
+        if not _is_translucent_balloon_profile(text):
+            if isinstance(geometry, np.ndarray) and np.any(geometry):
+                allowed = np.maximum(allowed, geometry.astype(np.uint8))
+            continue
+        safe_bbox = (
+            _normalize_bbox(text.get("layout_safe_bbox"), width, height)
+            or _normalize_bbox(text.get("safe_text_box"), width, height)
+            or _normalize_bbox(text.get("bubble_inner_bbox"), width, height)
+            or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+            or _normalize_bbox(text.get("bbox"), width, height)
+        )
+        bubble_bbox = (
+            _normalize_bbox(text.get("balloon_bbox"), width, height)
+            or _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+            or safe_bbox
+        )
+        if safe_bbox is None or bubble_bbox is None:
+            continue
+        safe_mask = _mask_from_bbox(width, height, safe_bbox, padding=4)
+        bubble_scope = _mask_from_bbox(width, height, bubble_bbox, padding=8)
+        if isinstance(geometry, np.ndarray) and np.any(geometry):
+            geometry = cv2.dilate(
+                geometry.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+                iterations=1,
+            )
+            safe_mask = cv2.bitwise_or(safe_mask, cv2.bitwise_and(geometry, bubble_scope))
+        allowed = np.maximum(allowed, safe_mask.astype(np.uint8))
+        scope = np.maximum(scope, bubble_scope.astype(np.uint8))
+
+    if not np.any(scope) or not np.any(allowed):
+        return raw, expanded
+
+    def _limit(mask: np.ndarray) -> tuple[np.ndarray, int]:
+        inside_scope = cv2.bitwise_and(mask, scope)
+        kept_inside = cv2.bitwise_and(inside_scope, allowed)
+        outside_scope = cv2.bitwise_and(mask, cv2.bitwise_not(scope))
+        constrained = cv2.bitwise_or(outside_scope, kept_inside).astype(np.uint8)
+        return constrained, int(np.count_nonzero(mask) - np.count_nonzero(constrained))
+
+    constrained_raw, raw_dropped = _limit(raw)
+    constrained_expanded, expanded_dropped = _limit(expanded)
+    for text in translucent:
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["translucent_balloon_mask_constrained"] = {
+                "raw_pixels_dropped": int(raw_dropped),
+                "expanded_pixels_dropped": int(expanded_dropped),
+                "safe_pixels": int(np.count_nonzero(allowed)),
+            }
+    return constrained_raw, constrained_expanded
 
 
 def _drop_unprotected_dark_outline_slivers(
@@ -9899,6 +9993,20 @@ def _apply_koharu_bubble_fast_fill_to_blocks(
     for block in vision_blocks:
         if not isinstance(block, dict) or _text_suppressed_for_inpaint(block) or _route_action_blocks_inpaint(block):
             continue
+        if _is_translucent_balloon_profile(block):
+            remaining_blocks.append(dict(block))
+            rejection_reasons["translucent_balloon"] = rejection_reasons.get("translucent_balloon", 0) + 1
+            samples.append(
+                {
+                    "text": block.get("text") or block.get("original"),
+                    "bbox": block.get("bbox"),
+                    "bubble_id": block.get("bubble_id") or block.get("bubbleId"),
+                    "filled_pixels": 0,
+                    "remaining_pixels": 0,
+                    "reason": "translucent_balloon",
+                }
+            )
+            continue
         if (
             str(block.get("route_action") or "").strip().lower() == "review_required"
             and _item_has_current_inpaint_mask_evidence(block)
@@ -10256,6 +10364,12 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     ocr_page.setdefault("_strip_flat_ui_prefill_count", 0)
     ocr_page.setdefault("_strip_remaining_inpaint_blocks", len(vision_blocks))
 
+    translucent_profile_count = 0
+    for item in list(ocr_page.get("texts") or []) + list(vision_blocks or []):
+        if isinstance(item, dict) and _promote_translucent_balloon_profile(band_rgb, item):
+            translucent_profile_count += 1
+    if translucent_profile_count:
+        ocr_page["_strip_translucent_balloon_profile_count"] = int(translucent_profile_count)
     _prime_mask_evidence_for_fast_fill(ocr_page, vision_blocks, band_rgb)
     _promote_visually_light_dark_bubbles_to_white(band_rgb, ocr_page, vision_blocks)
     vision_blocks = _filter_unsafe_auto_inpaint_blocks(ocr_page, vision_blocks, band_rgb)
@@ -10592,6 +10706,12 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         local_texts,
         working_rgb,
     )
+    raw_mask, expanded_mask = _constrain_translucent_balloon_action_masks(
+        raw_mask,
+        expanded_mask,
+        local_texts,
+        working_rgb,
+    )
     expanded_mask = _expand_strip_real_inpaint_mask(
         raw_mask,
         expanded_mask,
@@ -10662,6 +10782,12 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         raw_mask, expanded_mask = _augment_inpaint_masks_from_texts(
             raw_mask,
             expanded_seed_mask,
+            local_texts,
+            working_rgb,
+        )
+        raw_mask, expanded_mask = _constrain_translucent_balloon_action_masks(
+            raw_mask,
+            expanded_mask,
             local_texts,
             working_rgb,
         )

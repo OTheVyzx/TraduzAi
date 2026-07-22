@@ -7780,7 +7780,13 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertLess(float(np.mean(filled)), 40.0)
 
     def test_translucent_white_balloon_profile_blocks_dark_panel_route(self):
-        from inpainter import _apply_dark_panel_text_fills, _fast_local_rejection_reason, _fast_white_rejection_reason
+        from inpainter import (
+            _apply_dark_panel_text_fills,
+            _apply_fast_dark_panel_text_fill,
+            _constrain_translucent_balloon_action_masks,
+            _fast_local_rejection_reason,
+            _fast_white_rejection_reason,
+        )
 
         image = np.full((100, 180, 3), 32, dtype=np.uint8)
         gradient = np.tile(np.linspace(210, 245, 120, dtype=np.uint8), (70, 1))
@@ -7804,6 +7810,26 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertIn("translucent_balloon", text["qa_metrics"])
         self.assertEqual(_fast_white_rejection_reason(text), "translucent_balloon")
         self.assertEqual(_fast_local_rejection_reason(text), "translucent_balloon")
+
+        broad_mask = np.zeros((100, 180), dtype=np.uint8)
+        broad_mask[10:90, 20:160] = 255
+        constrained_raw, constrained_expanded = _constrain_translucent_balloon_action_masks(
+            broad_mask,
+            broad_mask,
+            [text],
+            image,
+        )
+        self.assertLess(np.count_nonzero(constrained_raw), np.count_nonzero(broad_mask))
+        self.assertTrue(np.array_equal(constrained_raw, constrained_expanded))
+
+        page = {"texts": [dict(text)]}
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1"}, clear=False):
+            fast_result, remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [dict(text)])
+        self.assertTrue(np.array_equal(fast_result, image))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(stats["dark_panel_fill_count"], 0)
+        self.assertEqual(stats["remaining_blocks"], 1)
+        self.assertEqual(page["_strip_fast_dark_rejection_reasons"], {"translucent_balloon": 1})
 
 
 if __name__ == "__main__":
