@@ -1,5 +1,6 @@
 import type { PageData } from "../../../lib/stores/appStore";
 import type { EditorViewMode, RenderPreviewCacheEntry } from "../../../lib/stores/editorStore";
+import type { EditorMode } from "../editorMode";
 
 export function editingBaseImagePath(page: PageData | null | undefined) {
   if (!page) return null;
@@ -37,4 +38,20 @@ export function isFaithfulPreviewMode(
   _renderPreviewState: RenderPreviewCacheEntry,
 ) {
   return false;
+}
+
+export function isStudioBitmapCompositeActive(
+  mode: EditorMode,
+  viewMode: EditorViewMode,
+  compositeSource?: string | null,
+) {
+  return mode === "studio" && viewMode !== "original" && Boolean(compositeSource);
+}
+
+export function visibleBitmapOverlayPath(
+  page: PageData | null | undefined,
+  layerKey: "mask" | "brush",
+) {
+  const layer = page?.image_layers?.[layerKey];
+  return layer?.visible ? layer.path : null;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readPsd } from "ag-psd";
-import { writePsdRasterLayers } from "../psd";
+import { mergePsdRasterLayers, slicePsdLayers, writePsdRasterLayers } from "../psd";
 
 function solid(width: number, height: number, rgba: [number, number, number, number]) {
   const pixels = new Uint8Array(width * height * 4);
@@ -137,5 +137,98 @@ describe("Studio PSD export", () => {
     const psd = parseStructure(bytes);
     const textLayer = psd.children?.find((layer) => layer.name === "Texto 1");
     expect(textLayer).toMatchObject({ top: 7, left: 5, bottom: 11, right: 11 });
+  });
+
+  it("keeps generated raster masks editable in the PSD", () => {
+    const maskPixels = new Uint8Array([
+      0, 0, 255, 255,
+    ]);
+    const bytes = writePsdRasterLayers(2, 2, [
+      { name: "Original", pixels: solid(2, 2, [255, 255, 255, 255]) },
+      {
+        name: "Clone gerado",
+        pixels: solid(2, 2, [255, 0, 0, 255]),
+        maskPixels,
+        maskFeather: 3,
+      },
+    ]);
+
+    const psd = parseStructure(bytes);
+    const generated = psd.children?.find((layer) => layer.name === "Clone gerado");
+    expect(generated?.mask).toMatchObject({
+      top: 0,
+      left: 0,
+      bottom: 2,
+      right: 2,
+      userMaskFeather: 3,
+    });
+  });
+
+  it("applies layer masks and opacity to the embedded PSD composite", () => {
+    const composite = mergePsdRasterLayers(2, 1, [
+      { name: "Original", pixels: solid(2, 1, [255, 255, 255, 255]) },
+      {
+        name: "Clone gerado",
+        pixels: solid(2, 1, [255, 0, 0, 255]),
+        opacity: 0.5,
+        maskPixels: new Uint8Array([255, 0]),
+      },
+    ]);
+
+    expect(Array.from(composite)).toEqual([
+      255, 128, 128, 255,
+      255, 255, 255, 255,
+    ]);
+  });
+
+  it("applies mask feather to embedded composite edges without changing the editable hard mask", () => {
+    const hardMask = new Uint8Array(25);
+    for (let y = 1; y <= 3; y += 1) {
+      for (let x = 1; x <= 3; x += 1) hardMask[y * 5 + x] = 255;
+    }
+    const composite = mergePsdRasterLayers(5, 5, [
+      { name: "Original", pixels: solid(5, 5, [255, 255, 255, 255]) },
+      {
+        name: "Retoque suavizado",
+        pixels: solid(5, 5, [255, 0, 0, 255]),
+        maskPixels: hardMask,
+        maskFeather: 1,
+      },
+    ]);
+
+    expect(Array.from(composite.slice((2 * 5) * 4, (2 * 5 + 1) * 4))).toEqual([255, 170, 170, 255]);
+    expect(Array.from(composite.slice((2 * 5 + 2) * 4, (2 * 5 + 3) * 4))).toEqual([255, 0, 0, 255]);
+    expect(hardMask[2 * 5]).toBe(0);
+    expect(hardMask[2 * 5 + 2]).toBe(255);
+  });
+
+  it("keeps editable text metadata in only one long-page slice", () => {
+    const textLayer = {
+      name: "Texto cruzando corte",
+      pixels: solid(20, 40, [0, 0, 0, 255]),
+      left: 0,
+      top: 1980,
+      right: 20,
+      bottom: 2020,
+      textSpec: {
+        text: "SEM DUPLICAR",
+        x: 0,
+        y: 1980,
+        width: 20,
+        height: 40,
+        fontName: "ArialMT",
+        fontSize: 18,
+        color: [0, 0, 0, 255] as [number, number, number, number],
+        vertical: false,
+        justification: "center" as const,
+      },
+    };
+    const first = slicePsdLayers([textLayer], 20, 4000, 0, 2000);
+    const second = slicePsdLayers([textLayer], 20, 4000, 2000, 2000);
+
+    expect(first[0].textSpec?.text).toBe("SEM DUPLICAR");
+    expect(second[0].textSpec).toBeUndefined();
+    expect(first[0].pixels).toHaveLength(20 * 20 * 4);
+    expect(second[0].pixels).toHaveLength(20 * 20 * 4);
   });
 });

@@ -15,9 +15,11 @@ import { EditorTransformer } from "./EditorTransformer";
 import { LassoSelectionOverlay } from "./LassoSelectionOverlay";
 import { MaskInProgressOverlay } from "./MaskInProgressOverlay";
 import { strokePassesForHardness } from "./bitmapStrokePreview";
-import { editingBaseImagePath, originalImagePath } from "./renderModeUtils";
+import { editingBaseImagePath, isStudioBitmapCompositeActive, originalImagePath } from "./renderModeUtils";
 import type { SnapGuide } from "./snapGuides";
 import { useEditorStageController } from "./useEditorStageController";
+import type { EditorMode } from "../editorMode";
+import type { EditorSceneVisualNode } from "./editorSceneVisual";
 
 const FloatingTextEditor = lazy(async () => {
   const mod = await import("./FloatingTextEditor");
@@ -209,6 +211,47 @@ function ProcessRegionOverlayNode({
       y={y1}
       width={overlayWidth}
       height={overlayHeight}
+      listening={false}
+    />
+  );
+}
+
+function EditorSceneBitmapNode({
+  node,
+  width,
+  height,
+}: {
+  node: Extract<EditorSceneVisualNode, { kind: "bitmap" }>;
+  width: number;
+  height: number;
+}) {
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    const next = new Image();
+    next.decoding = "async";
+    next.onload = () => {
+      if (!disposed) setImage(next);
+    };
+    next.onerror = () => {
+      if (!disposed) setImage(null);
+    };
+    next.src = node.source;
+    return () => {
+      disposed = true;
+    };
+  }, [node.source]);
+
+  if (!image) return null;
+  const blendMode = node.blendMode === "normal" ? "source-over" : node.blendMode;
+  return (
+    <KonvaImage
+      image={image}
+      width={width}
+      height={height}
+      opacity={node.opacity}
+      globalCompositeOperation={blendMode as "source-over" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge" | "color-burn" | "hard-light" | "soft-light" | "difference" | "exclusion" | "hue" | "saturation" | "color" | "luminosity"}
       listening={false}
     />
   );
@@ -429,9 +472,21 @@ function EditorReaderPageBarrier({
   );
 }
 
-export function EditorStage() {
+export function EditorStage({
+  mode = "traduzai",
+  selectionTargetNodeId = null,
+  bitmapCompositeSource = null,
+  sceneVisualNodes = null,
+  showFloatingTextEditor = true,
+}: {
+  mode?: EditorMode;
+  selectionTargetNodeId?: string | null;
+  bitmapCompositeSource?: string | null;
+  sceneVisualNodes?: EditorSceneVisualNode[] | null;
+  showFloatingTextEditor?: boolean;
+}) {
   const e2e = isE2E();
-  const controller = useEditorStageController();
+  const controller = useEditorStageController({ mode, selectionTargetNodeId, bitmapCompositeSource });
   const [draftTextRotation, setDraftTextRotation] = useState<{ layerId: string; rotation: number } | null>(null);
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
   const brushColor = useEditorStore((s) => s.brushColor);
@@ -490,6 +545,7 @@ export function EditorStage() {
   const width = baseImage.size.width;
   const height = baseImage.size.height;
   const selectedLayer = selectedLayerId ? layers.find((layer) => layer.id === selectedLayerId) ?? null : null;
+  const textLayerById = useMemo(() => new Map(layers.map((layer) => [layer.id, layer])), [layers]);
   const readerPageRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const readerScrollSyncFrameRef = useRef<number | null>(null);
   const readerScrollSyncTargetRef = useRef<number | null>(null);
@@ -501,6 +557,7 @@ export function EditorStage() {
     Math.round(width > 0 ? width * stageScale : Math.max(1, containerSize.width - 48) * zoom),
   );
   const lassoMenuPosition = useMemo(() => {
+    if (mode === "studio") return null;
     if (toolMode !== "mask") return null;
     if (!activeLassoSelection || activeLassoSelection.pageIndex !== currentPageIndex) return null;
     const [x1, y1, x2, y2] = activeLassoSelection.bbox;
@@ -519,7 +576,7 @@ export function EditorStage() {
         : Math.max(8, Math.min(pageHeight - LASSO_CONTEXT_MENU_SIZE.height - 8, above));
 
     return { x: Math.round(left), y: Math.round(top) };
-  }, [activeLassoSelection, currentPageIndex, height, panOffset.x, panOffset.y, stageScale, toolMode, width]);
+  }, [activeLassoSelection, currentPageIndex, height, mode, panOffset.x, panOffset.y, stageScale, toolMode, width]);
 
   useEffect(() => {
     setSnapGuides([]);
@@ -528,6 +585,8 @@ export function EditorStage() {
   const paintStrokeClipPolygon =
     activeLassoSelection?.pageIndex === currentPageIndex ? activeLassoSelection.points : undefined;
   const paintPreviewRef = useRef<PaintStrokeCanvasOverlayHandle | null>(null);
+  const studioCompositeActive = isStudioBitmapCompositeActive(mode, viewMode, bitmapCompositeSource);
+  const studioSceneVisualsActive = studioCompositeActive && Boolean(sceneVisualNodes?.length);
 
   const setReaderPageRef = (index: number, node: HTMLDivElement | null) => {
     readerPageRefs.current[index] = node;
@@ -703,7 +762,7 @@ export function EditorStage() {
 
       {/* Status badges (StageStatusBadge removido — canvas é WYSIWYG) */}
       {/* Fase 5: FloatingTextEditor — painel flutuante para edição rápida */}
-      {selectedLayerId && (
+      {showFloatingTextEditor && selectedLayerId && (
         <Suspense fallback={null}>
           <FloatingTextEditor
             stageScale={stageScale}
@@ -727,6 +786,9 @@ export function EditorStage() {
                   pageIndex: activeLassoSelection.pageIndex,
                   points: activeLassoSelection.points,
                   bbox: activeLassoSelection.bbox,
+                  feather: activeLassoSelection.feather ?? 0,
+                  expansion: activeLassoSelection.expansion ?? 0,
+                  targetNodeId: activeLassoSelection.targetNodeId ?? null,
                 })
               : ""
           }
@@ -828,6 +890,70 @@ export function EditorStage() {
                 }
               }}
             >
+              {studioSceneVisualsActive && sceneVisualNodes ? (
+                <Layer>
+                  {sceneVisualNodes.map((node) => {
+                    if (node.kind === "bitmap") {
+                      return <EditorSceneBitmapNode key={node.id} node={node} width={width} height={height} />;
+                    }
+                    const entry = textLayerById.get(node.textLayerId);
+                    if (!entry || !translatedEditing) return null;
+                    return (
+                      <EditorTextLayer
+                        key={node.id}
+                        entry={entry}
+                        selected={selectedLayerId === entry.id}
+                        hovered={hoveredLayerId === entry.id}
+                        showGuides={!faithfulPreview && showOverlays}
+                        interactive={toolMode === "select"}
+                        draftRotation={draftTextRotation?.layerId === entry.id ? draftTextRotation.rotation : null}
+                        pageSize={{ width, height }}
+                        snapLayers={layers}
+                        onSelect={() => selectLayer(entry.id)}
+                        onHover={(isHovered) => hoverLayer(isHovered ? entry.id : null)}
+                        onCommitTransform={(before, after) => commitTextLayerTransform(entry, before, after)}
+                        onSnapGuidesChange={setSnapGuides}
+                      />
+                    );
+                  })}
+                  {blockDraft && (
+                    <Rect
+                      x={Math.min(blockDraft.start.x, blockDraft.current.x)}
+                      y={Math.min(blockDraft.start.y, blockDraft.current.y)}
+                      width={Math.abs(blockDraft.current.x - blockDraft.start.x)}
+                      height={Math.abs(blockDraft.current.y - blockDraft.start.y)}
+                      cornerRadius={12}
+                      stroke="rgba(108, 92, 231, 0.95)"
+                      strokeWidth={2}
+                      dash={[8, 6]}
+                      fill="rgba(108, 92, 231, 0.10)"
+                      listening={false}
+                    />
+                  )}
+                  <EditorSnapGuides guides={snapGuides} />
+                  {translatedEditing && toolMode === "select" && selectedLayer && (
+                    <EditorTransformer
+                      selectedNodeName={selectedNodeName}
+                      pageSize={{ width, height }}
+                      selectedLayerId={selectedLayer.id}
+                      snapLayers={layers}
+                      disabled={selectedLayer.locked === true}
+                      onSnapGuidesChange={setSnapGuides}
+                    />
+                  )}
+                  {translatedEditing && toolMode === "select" && selectedLayer && (
+                    <EditorRotationHotspots
+                      entry={selectedLayer}
+                      draftRotation={draftTextRotation?.layerId === selectedLayer.id ? draftTextRotation.rotation : null}
+                      onDraftRotation={(rotation) =>
+                        setDraftTextRotation(rotation === null ? null : { layerId: selectedLayer.id, rotation })
+                      }
+                      onCommitTransform={(before, after) => commitTextLayerTransform(selectedLayer, before, after)}
+                    />
+                  )}
+                </Layer>
+              ) : (
+                <>
               <Layer>
                 <EditorStageBackground image={baseImage.image} width={width} height={height} />
                 {recoveryPreviewPatches.map((patch) => (
@@ -853,9 +979,9 @@ export function EditorStage() {
                   />
                 ))}
                 <EditorBitmapOverlay
-                  brushImage={brushImage.image}
+                  brushImage={studioCompositeActive ? null : brushImage.image}
                   brushOpacity={brushLayerOpacity}
-                  maskImage={maskImage.image}
+                  maskImage={studioCompositeActive ? null : maskImage.image}
                   maskOpacity={maskLayerOpacity * 0.65}
                   width={width}
                   height={height}
@@ -930,6 +1056,8 @@ export function EditorStage() {
               </Layer>
 
               {/* Fase 8: Lasso em construção */}
+                </>
+              )}
               {activeLassoSelection && activeLassoSelection.pageIndex === currentPageIndex && (
                 <LassoSelectionOverlay selection={activeLassoSelection} />
               )}

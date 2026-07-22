@@ -38,6 +38,22 @@
         { "path": "D:/**" },
         { "path": "N:/**" }
       ]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [
+        { "path": "$APPDATA/**" },
+        { "path": "$APPCONFIG/**" },
+        { "path": "$APPLOCALDATA/**" },
+        { "path": "$HOME/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$PICTURE/**" },
+        { "path": "$TEMP/**" },
+        { "path": "D:/**" },
+        { "path": "N:/**" }
+      ]
     }
   ]
 }
