@@ -1,4 +1,7 @@
+import type { StudioTextStyleDefinition } from "../styles/styleModel";
+
 export const STUDIO_SCHEMA_VERSION = "1.0" as const;
+export const STUDIO_SCENE_VERSION = "1.0" as const;
 export const COMPAT_PROJECT_VERSION = "2.0" as const;
 
 export type ImageLayerKey = "base" | "mask" | "inpaint" | "brush" | "recovery" | "rendered";
@@ -10,7 +13,42 @@ export interface StudioImageLayer {
   locked: boolean;
   opacity?: number;
   order?: number;
+  blend_mode?: string;
   technical?: boolean;
+}
+
+export type StudioSceneNodeKind =
+  | "raster"
+  | "text"
+  | "group"
+  | "mask"
+  | "generated"
+  | "adjustment"
+  | "fill";
+
+export interface StudioSceneNode {
+  id: string;
+  kind: StudioSceneNodeKind;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  blend_mode: string;
+  parent_id: string | null;
+  order: number;
+  mask_ids: string[];
+  image_layer_key?: ImageLayerKey;
+  text_layer_id?: string;
+  metadata: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface StudioScene {
+  version: typeof STUDIO_SCENE_VERSION;
+  roots: string[];
+  nodes: StudioSceneNode[];
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 export interface StudioTextStyle {
@@ -21,6 +59,7 @@ export interface StudioTextStyle {
   strokeWidth?: number;
   align?: "left" | "center" | "right";
   vertical?: boolean;
+  studio_style?: StudioTextStyleDefinition;
   [key: string]: unknown;
 }
 
@@ -53,6 +92,7 @@ export interface StudioPage {
   image_layers: Partial<Record<ImageLayerKey, StudioImageLayer>>;
   text_layers: StudioTextLayer[];
   textos: StudioTextLayer[];
+  studio_scene: StudioScene;
   inpaint_blocks?: unknown[];
   process_overlays?: unknown[];
   editor_cache?: Record<string, unknown>;

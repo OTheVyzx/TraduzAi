@@ -1,9 +1,24 @@
 import type { StudioPage, StudioProject } from "../project/studioProject";
 import { writePsdUint8Array } from "ag-psd";
-import type { Layer, LayerTextData, Psd, UnitsBounds } from "ag-psd";
+import type { Color, Layer, LayerEffectsInfo, LayerTextData, Psd, UnitsBounds } from "ag-psd";
 import { serializeEngineData } from "ag-psd/dist-es/engineData";
 import { encodeEngineData as encodeAgEngineData } from "ag-psd/dist-es/text";
 import { loadImageSource } from "../../../src/lib/imageSource";
+import { createStyledKonvaTextGroup } from "../../../src/components/editor/stage/konvaTextStyleRenderer";
+import type { TextLayerStyle } from "../../../src/lib/stores/appStore";
+import {
+  applySelectionAlphaModifiers,
+  rasterizeLassoSelectionToCanvas,
+} from "../../../src/lib/lassoSelection";
+import {
+  resolveStudioAssetPath,
+  resolveStudioSceneRenderLayers,
+  resolveStudioSceneVisualOrder,
+  type ResolvedStudioSceneMask,
+  type ResolvedStudioSceneRenderLayer,
+} from "../editor/compositor/studioSceneCompositor";
+import type { ResolvedEditorTextStyle, ResolvedLinearGradientFill } from "../styles/styleModel";
+import { colorToRgba, fontStyleForResolvedTextStyle, resolveStudioTextStyle } from "../styles/styleResolver";
 
 const MAX_PSD_SLICE_HEIGHT = 2000;
 
@@ -11,6 +26,11 @@ export interface PsdRasterLayer {
   name: string;
   pixels: Uint8Array;
   hidden?: boolean;
+  opacity?: number;
+  blendMode?: string;
+  maskPixels?: Uint8Array;
+  compositeMaskPixels?: Uint8Array;
+  maskFeather?: number;
   textSpec?: PsdTextSpec;
   left?: number;
   top?: number;
@@ -29,6 +49,7 @@ export interface PsdTextSpec {
   color: [number, number, number, number];
   vertical: boolean;
   justification: "left" | "center" | "right";
+  resolvedStyle?: ResolvedEditorTextStyle;
 }
 
 interface PsdPagePayload {
@@ -51,7 +72,8 @@ export async function exportStudioPagePsdParts(project: StudioProject, pageIndex
   const page = project.paginas[pageIndex];
   if (!page) throw new Error("Pagina nao encontrada");
 
-  const payload = await buildPsdPagePayload(page);
+  const projectPath = typeof project.source_path === "string" ? project.source_path : null;
+  const payload = await buildPsdPagePayload(page, projectPath);
   const sliceCount = Math.ceil(payload.height / MAX_PSD_SLICE_HEIGHT);
   const baseName = project.obra ?? "traduzai-studio";
   return Array.from({ length: sliceCount }, (_, index) => {
@@ -60,53 +82,72 @@ export async function exportStudioPagePsdParts(project: StudioProject, pageIndex
     const suffix = sliceCount > 1 ? `-parte-${index + 1}` : "";
     return {
       filename: safeFilename(`${baseName}-pg-${pageIndex + 1}${suffix}.psd`),
-      bytes: writePsdRasterLayers(payload.width, height, sliceLayers(payload.layers, payload.width, payload.height, top, height)),
+      bytes: writePsdRasterLayers(payload.width, height, slicePsdLayers(payload.layers, payload.width, payload.height, top, height)),
     };
   });
 }
 
-async function buildPsdPagePayload(page: StudioPage): Promise<PsdPagePayload> {
+async function buildPsdPagePayload(page: StudioPage, projectPath: string | null): Promise<PsdPagePayload> {
+  const resolvePath = (path: string) => projectPath ? resolveStudioAssetPath(projectPath, path) : path;
   const baseSource = firstPageImagePath(page, "base") ?? firstPageImagePath(page, "rendered");
-  const base = baseSource ? await loadImagePixels(baseSource) : null;
+  const base = baseSource ? await loadImagePixels(resolvePath(baseSource)) : null;
   const width = base?.width ?? inferPageWidth(page);
   const height = base?.height ?? inferPageHeight(page);
-  const layers: PsdRasterLayer[] = [
-    {
+  const sceneLayers = resolveStudioSceneRenderLayers(page, page.studio_scene, { includeHidden: true });
+  const sceneLayerById = new Map(sceneLayers.map((layer) => [layer.nodeId, layer]));
+  const sceneNodeById = new Map(page.studio_scene.nodes.map((node) => [node.id, node]));
+  const textLayerById = new Map(page.text_layers.map((layer, index) => [layer.id, { layer, index }]));
+  const layers: PsdRasterLayer[] = [];
+  let includedBaseLayer = false;
+
+  for (const item of resolveStudioSceneVisualOrder(page, page.studio_scene, { includeHidden: true })) {
+    if (item.kind === "bitmap") {
+      const sceneLayer = sceneLayerById.get(item.nodeId);
+      if (!sceneLayer) continue;
+      if (sceneLayer.imageLayerKey === "base") {
+        includedBaseLayer = true;
+        layers.push({
+          name: sceneLayer.name,
+          pixels: base?.pixels ?? solidPixels(width, height, [255, 255, 255, 255]),
+          ...psdSceneLayerProperties(sceneLayer, width, height),
+        });
+        continue;
+      }
+      const raster = await psdRasterFromSceneLayer(sceneLayer, width, height, resolvePath);
+      if (raster) layers.push(raster);
+      continue;
+    }
+
+    const textEntry = textLayerById.get(item.textLayerId);
+    if (!textEntry) continue;
+    const { layer: textLayer, index } = textEntry;
+    const text = textLayer.translated ?? textLayer.traduzido ?? textLayer.original ?? "";
+    if (!text.trim()) continue;
+    const textSpec = psdTextSpecFromLayer(text, textLayer);
+    layers.push({
+      name: sceneNodeById.get(item.nodeId)?.name ?? `Texto ${index + 1}`,
+      pixels: await rasterizePsdTextLayer(text, textLayer, textSpec),
+      left: textSpec.x,
+      top: textSpec.y,
+      right: textSpec.x + textSpec.width,
+      bottom: textSpec.y + textSpec.height,
+      hidden: textLayer.visible === false,
+      opacity: typeof textLayer.opacity === "number" ? textLayer.opacity : 1,
+      blendMode: typeof textLayer.blend_mode === "string" ? textLayer.blend_mode : "normal",
+      textSpec,
+    });
+  }
+
+  if (!includedBaseLayer) {
+    layers.unshift({
       name: "Original",
       pixels: base?.pixels ?? solidPixels(width, height, [255, 255, 255, 255]),
-    },
-  ];
-
-  const inpaintLayer = page.image_layers.inpaint;
-  const inpaintSource = inpaintLayer?.visible === false ? null : firstPageImagePath(page, "inpaint");
-  const inpaint = inpaintSource ? await loadImagePixels(inpaintSource, width, height) : null;
-  if (inpaint) {
-    layers.push({ name: "Limpeza (Inpaint)", pixels: inpaint.pixels });
+    });
   }
 
-  const maskSource = page.image_layers.mask?.visible === false ? null : page.image_layers.mask?.path;
-  const mask = maskSource ? await loadImagePixels(maskSource, width, height).catch(() => null) : null;
+  const maskSource = page.image_layers.mask?.path;
+  const mask = maskSource ? await loadImagePixels(resolvePath(maskSource), width, height).catch(() => null) : null;
   if (mask) layers.push({ name: "Mascara de Deteccao", pixels: mask.pixels, hidden: true });
-
-  const brushSource = page.image_layers.brush?.visible === false ? null : page.image_layers.brush?.path;
-  const brush = brushSource ? await loadImagePixels(brushSource, width, height).catch(() => null) : null;
-  if (brush) layers.push({ name: "Pincel de Edicao", pixels: brush.pixels, hidden: true });
-
-  for (const [index, textLayer] of page.text_layers.entries()) {
-    const text = textLayer.translated ?? textLayer.traduzido ?? textLayer.original ?? "";
-    if (text.trim()) {
-      const textSpec = textSpecFromLayer(text, textLayer);
-      layers.push({
-        name: `Texto ${index + 1}`,
-        pixels: transparentPixels(textSpec.width, textSpec.height),
-        left: textSpec.x,
-        top: textSpec.y,
-        right: textSpec.x + textSpec.width,
-        bottom: textSpec.y + textSpec.height,
-        textSpec,
-      });
-    }
-  }
 
   return { width, height, layers };
 }
@@ -168,7 +209,7 @@ export function writePsdRasterLayers(width: number, height: number, layers: PsdR
   const psd: Psd = {
     width,
     height,
-    imageData: { data: mergedComposite(width, height, layers), width, height },
+    imageData: { data: mergePsdRasterLayers(width, height, layers), width, height },
     children: [...layers].reverse().map((layer) => agPsdLayerFromRaster(width, height, layer)),
   };
   return writePsdUint8Array(psd, {
@@ -180,6 +221,8 @@ export function writePsdRasterLayers(width: number, height: number, layers: PsdR
 
 function agPsdLayerFromRaster(width: number, height: number, layer: PsdRasterLayer): Layer {
   const bounds = boundsForLayer(width, height, layer);
+  const layerWidth = Math.max(0, bounds.right - bounds.left);
+  const layerHeight = Math.max(0, bounds.bottom - bounds.top);
   const psdLayer: Layer = {
     name: layer.name,
     top: bounds.top,
@@ -187,15 +230,39 @@ function agPsdLayerFromRaster(width: number, height: number, layer: PsdRasterLay
     bottom: bounds.bottom,
     right: bounds.right,
     hidden: layer.hidden,
-    blendMode: "normal",
-    opacity: 255,
+    blendMode: psdBlendMode(layer.blendMode),
+    opacity: Math.round(clamp01(layer.opacity ?? 1) * 255),
     imageData: {
       data: layer.pixels,
-      width: Math.max(0, bounds.right - bounds.left),
-      height: Math.max(0, bounds.bottom - bounds.top),
+      width: layerWidth,
+      height: layerHeight,
     },
   };
-  if (layer.textSpec) psdLayer.text = layerTextData(layer.textSpec);
+  if (layer.maskPixels) {
+    const expectedLength = layerWidth * layerHeight;
+    if (layer.maskPixels.length !== expectedLength) {
+      throw new Error(`Mascara PSD invalida (${layer.name}): ${layer.maskPixels.length} bytes para area de ${expectedLength} pixels`);
+    }
+    psdLayer.mask = {
+      top: bounds.top,
+      left: bounds.left,
+      bottom: bounds.bottom,
+      right: bounds.right,
+      defaultColor: 0,
+      positionRelativeToLayer: false,
+      ...(layer.maskFeather !== undefined ? { userMaskFeather: Math.max(0, layer.maskFeather) } : {}),
+      imageData: {
+        data: grayscaleToRgba(layer.maskPixels),
+        width: layerWidth,
+        height: layerHeight,
+      },
+    };
+  }
+  if (layer.textSpec) {
+    psdLayer.text = layerTextData(layer.textSpec);
+    const effects = layerEffectsFromTextSpec(layer.textSpec);
+    if (effects) psdLayer.effects = effects;
+  }
   return psdLayer;
 }
 
@@ -262,7 +329,125 @@ function transparentPixels(width: number, height: number) {
   return new Uint8Array(width * height * 4);
 }
 
-function sliceLayers(layers: PsdRasterLayer[], width: number, pageHeight: number, top: number, height: number) {
+function rasterizeSceneMasks(
+  masks: ResolvedStudioSceneMask[],
+  width: number,
+  height: number,
+  preserveFeather: boolean,
+) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D indisponivel para exportar mascara PSD");
+  ctx.clearRect(0, 0, width, height);
+  let initialized = false;
+  for (const mask of masks) {
+    const selection = preserveFeather ? mask.selection : { ...mask.selection, feather: 0 };
+    const raster = rasterizeLassoSelectionToCanvas(selection);
+    if (!raster) continue;
+    ctx.save();
+    ctx.globalAlpha = mask.opacity;
+    ctx.globalCompositeOperation = initialized ? "destination-in" : "source-over";
+    ctx.drawImage(raster, 0, 0, width, height);
+    ctx.restore();
+    initialized = true;
+  }
+  if (!initialized) return null;
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const pixels = new Uint8Array(width * height);
+  for (let source = 3, target = 0; source < rgba.length; source += 4, target += 1) {
+    pixels[target] = rgba[source];
+  }
+  return pixels;
+}
+
+function psdMaskFromSceneMasks(masks: ResolvedStudioSceneMask[], width: number, height: number) {
+  if (masks.length === 0) return null;
+  const maskPixels = rasterizeSceneMasks(masks, width, height, false);
+  if (!maskPixels) return null;
+  return {
+    maskPixels,
+    compositeMaskPixels: rasterizeSceneMasks(masks, width, height, true) ?? maskPixels,
+    maskFeather: Math.max(0, ...masks.map((mask) => mask.selection.feather)),
+  };
+}
+
+function psdSceneLayerProperties(
+  layer: ResolvedStudioSceneRenderLayer | undefined,
+  width: number,
+  height: number,
+): Partial<PsdRasterLayer> {
+  if (!layer) return {};
+  const mask = psdMaskFromSceneMasks(layer.masks, width, height);
+  return {
+    hidden: !layer.visible,
+    opacity: layer.opacity,
+    blendMode: layer.blendMode,
+    ...(mask ?? {}),
+  };
+}
+
+async function psdRasterFromSceneLayer(
+  layer: ResolvedStudioSceneRenderLayer,
+  width: number,
+  height: number,
+  resolvePath: (path: string) => string,
+): Promise<PsdRasterLayer | null> {
+  let pixels: Uint8Array | null = null;
+  if (layer.sourcePath) {
+    pixels = (await loadImagePixels(resolvePath(layer.sourcePath), width, height)).pixels;
+  } else if (layer.fillColor) {
+    pixels = solidPixels(width, height, colorToRgba(layer.fillColor));
+  }
+  if (!pixels) return null;
+  return {
+    name: layer.name,
+    pixels,
+    ...psdSceneLayerProperties(layer, width, height),
+  };
+}
+
+function grayscaleToRgba(grayscale: Uint8Array) {
+  const pixels = new Uint8Array(grayscale.length * 4);
+  for (let source = 0, target = 0; source < grayscale.length; source += 1, target += 4) {
+    const value = grayscale[source];
+    pixels[target] = value;
+    pixels[target + 1] = value;
+    pixels[target + 2] = value;
+    pixels[target + 3] = 255;
+  }
+  return pixels;
+}
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(1, Math.max(0, value));
+}
+
+function psdBlendMode(value?: string): Layer["blendMode"] {
+  const blendModes: Record<string, NonNullable<Layer["blendMode"]>> = {
+    normal: "normal",
+    multiply: "multiply",
+    screen: "screen",
+    overlay: "overlay",
+    darken: "darken",
+    lighten: "lighten",
+    "color-dodge": "color dodge",
+    "color-burn": "color burn",
+    "hard-light": "hard light",
+    "soft-light": "soft light",
+    difference: "difference",
+    exclusion: "exclusion",
+    hue: "hue",
+    saturation: "saturation",
+    color: "color",
+    luminosity: "luminosity",
+  };
+  return blendModes[value ?? "normal"] ?? "normal";
+}
+
+export function slicePsdLayers(layers: PsdRasterLayer[], width: number, pageHeight: number, top: number, height: number) {
   const bottom = top + height;
   return layers.flatMap((layer) => {
     const bounds = boundsForLayer(width, pageHeight, layer);
@@ -273,7 +458,14 @@ function sliceLayers(layers: PsdRasterLayer[], width: number, pageHeight: number
     const sourceTop = localTop - bounds.top;
     const sourceHeight = localBottom - localTop;
     const pixels = cropPixels(layer.pixels, sourceWidth, sourceTop, sourceHeight);
-    const textSpec = layer.textSpec
+    const maskPixels = layer.maskPixels
+      ? cropGrayscalePixels(layer.maskPixels, sourceWidth, sourceTop, sourceHeight)
+      : undefined;
+    const compositeMaskPixels = layer.compositeMaskPixels
+      ? cropGrayscalePixels(layer.compositeMaskPixels, sourceWidth, sourceTop, sourceHeight)
+      : undefined;
+    const ownsEditableText = Boolean(layer.textSpec && bounds.top >= top && bounds.top < bottom);
+    const textSpec = layer.textSpec && ownsEditableText
       ? {
           ...layer.textSpec,
           y: Math.max(0, layer.textSpec.y - top),
@@ -283,6 +475,8 @@ function sliceLayers(layers: PsdRasterLayer[], width: number, pageHeight: number
     return [{
       ...layer,
       pixels,
+      maskPixels,
+      compositeMaskPixels,
       top: localTop - top,
       bottom: localBottom - top,
       textSpec,
@@ -297,21 +491,70 @@ function cropPixels(pixels: Uint8Array, width: number, top: number, height: numb
   return pixels.slice(start, end);
 }
 
-function textSpecFromLayer(text: string, layer: StudioPage["text_layers"][number]): PsdTextSpec {
+function cropGrayscalePixels(pixels: Uint8Array, width: number, top: number, height: number) {
+  if (top === 0 && height * width === pixels.length) return pixels;
+  const start = top * width;
+  const end = start + height * width;
+  return pixels.slice(start, end);
+}
+
+export function psdTextSpecFromLayer(text: string, layer: StudioPage["text_layers"][number]): PsdTextSpec {
   const [x, y, width, height] = textBoundsFromLayer(layer);
-  const style = textStyleFromLayer(layer);
+  const resolvedStyle = resolveStudioTextStyle(layer.style, layer.estilo);
+  const primaryFill = resolvedStyle.fills[0];
+  const primaryColor = primaryFill?.type === "solid"
+    ? colorToRgba(primaryFill.color, primaryFill.opacity)
+    : colorToRgba(primaryFill?.stops[0]?.color ?? "#000000", primaryFill?.opacity ?? 1);
   return {
     text,
     x: Math.max(0, Math.round(x)),
     y: Math.max(0, Math.round(y)),
     width: Math.max(1, Math.round(width)),
     height: Math.max(1, Math.round(height)),
-    fontName: style.fontName,
-    fontSize: style.fontSize,
-    color: parseColor(style.color),
-    vertical: style.vertical,
-    justification: style.justification,
+    fontName: normalizeFontName(resolvedStyle.typography.fontFamily),
+    fontSize: resolvedStyle.typography.fontSize,
+    color: primaryColor,
+    vertical: resolvedStyle.typography.vertical,
+    justification: resolvedStyle.typography.align,
+    resolvedStyle,
   };
+}
+
+export async function rasterizePsdTextLayer(
+  text: string,
+  layer: StudioPage["text_layers"][number],
+  spec = psdTextSpecFromLayer(text, layer),
+): Promise<Uint8Array> {
+  const resolved = spec.resolvedStyle ?? resolveStudioTextStyle(layer.style, layer.estilo);
+  const style = (Object.keys(layer.style ?? {}).length > 0 ? layer.style : layer.estilo) as unknown as TextLayerStyle;
+  const group = createStyledKonvaTextGroup({
+    x: 0,
+    y: 0,
+    width: spec.width,
+    height: spec.height,
+    text,
+    align: spec.justification,
+    fontSize: resolved.typography.fontSize,
+    fontFamily: resolved.typography.fontFamily,
+    fontStyle: fontStyleForResolvedTextStyle(resolved),
+    lineHeight: resolved.typography.lineHeight,
+    style,
+    listening: false,
+  });
+  try {
+    const canvas = group.toCanvas({
+      x: 0,
+      y: 0,
+      width: spec.width,
+      height: spec.height,
+      pixelRatio: 1,
+    });
+    const context = canvas.getContext("2d");
+    if (!context) return transparentPixels(spec.width, spec.height);
+    return new Uint8Array(context.getImageData(0, 0, spec.width, spec.height).data);
+  } finally {
+    group.destroy();
+  }
 }
 
 function textBoundsFromLayer(layer: StudioPage["text_layers"][number]): [number, number, number, number] {
@@ -330,57 +573,127 @@ function textBoundsFromLayer(layer: StudioPage["text_layers"][number]): [number,
   return [0, 0, 1, 1];
 }
 
-function textStyleFromLayer(layer: StudioPage["text_layers"][number]) {
-  const style = layer.style ?? {};
-  const legacy = layer.estilo ?? {};
-  const fontName =
-    stringValue(style.fontFamily) ??
-    stringValue(style.fonte) ??
-    stringValue(legacy.fontFamily) ??
-    stringValue(legacy.fonte) ??
-    "ArialMT";
-  const fontSize =
-    finiteNumber(style.fontSize) ??
-    finiteNumber(style.tamanho) ??
-    finiteNumber(legacy.fontSize) ??
-    finiteNumber(legacy.tamanho) ??
-    24;
-  const color =
-    stringValue(style.color) ??
-    stringValue(style.cor) ??
-    stringValue(legacy.color) ??
-    stringValue(legacy.cor) ??
-    "#000000";
-  const align = stringValue(style.align) ?? stringValue(style.alinhamento) ?? stringValue(legacy.align) ?? stringValue(legacy.alinhamento);
-  const vertical = style.vertical === true || legacy.vertical === true;
-  return {
-    fontName: normalizeFontName(fontName),
-    fontSize,
-    color,
-    vertical,
-    justification: align === "left" || align === "right" ? align : "center" as "left" | "center" | "right",
-  };
-}
-
-function stringValue(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function finiteNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 function normalizeFontName(value: string) {
   return value.replace(/\.(ttf|otf)$/i, "").trim() || "ArialMT";
 }
 
-function parseColor(value: unknown): [number, number, number, number] {
-  if (typeof value !== "string") return [0, 0, 0, 255];
-  const hex = value.trim().replace(/^#/, "");
-  if (/^[0-9a-f]{6}$/i.test(hex)) {
-    return [Number.parseInt(hex.slice(0, 2), 16), Number.parseInt(hex.slice(2, 4), 16), Number.parseInt(hex.slice(4, 6), 16), 255];
+function psdColor(value: string): Color {
+  const [r, g, b] = colorToRgba(value);
+  return { r, g, b };
+}
+
+function pixels(value: number) {
+  return { units: "Pixels" as const, value };
+}
+
+function shadowAngle(offsetX: number, offsetY: number) {
+  const degrees = Math.atan2(offsetY, offsetX) * 180 / Math.PI;
+  return Number.isFinite(degrees) ? degrees : 0;
+}
+
+function psdGradient(fill: ResolvedLinearGradientFill) {
+  return {
+    name: "TraduzAI Studio",
+    type: "solid" as const,
+    smoothness: 1,
+    colorStops: fill.stops.map((stop) => ({
+      color: psdColor(stop.color),
+      location: stop.offset,
+      midpoint: 0.5,
+    })),
+    opacityStops: fill.stops.map((stop) => ({
+      opacity: stop.opacity,
+      location: stop.offset,
+      midpoint: 0.5,
+    })),
+  };
+}
+
+function layerEffectsFromTextSpec(spec: PsdTextSpec): LayerEffectsInfo | null {
+  const style = spec.resolvedStyle;
+  if (!style) return null;
+  const effects: LayerEffectsInfo = { scale: 1 };
+
+  if (style.strokes.length > 0) {
+    effects.stroke = style.strokes.map((stroke) => ({
+      present: true,
+      showInDialog: true,
+      enabled: true,
+      size: pixels(stroke.width),
+      position: stroke.position,
+      fillType: "color",
+      blendMode: "normal",
+      opacity: stroke.opacity,
+      color: psdColor(stroke.color),
+    }));
   }
-  return [0, 0, 0, 255];
+
+  if (style.effects.dropShadows.length > 0) {
+    effects.dropShadow = style.effects.dropShadows.map((shadow) => ({
+      present: true,
+      showInDialog: true,
+      enabled: true,
+      size: pixels(shadow.blur),
+      angle: shadowAngle(shadow.offsetX, shadow.offsetY),
+      distance: pixels(Math.hypot(shadow.offsetX, shadow.offsetY)),
+      color: psdColor(shadow.color),
+      blendMode: "multiply",
+      opacity: shadow.opacity,
+      useGlobalLight: false,
+      layerConceals: true,
+    }));
+  }
+
+  if (style.effects.outerGlow) {
+    const glow = style.effects.outerGlow;
+    effects.outerGlow = {
+      present: true,
+      showInDialog: true,
+      enabled: true,
+      size: pixels(glow.blur),
+      choke: pixels(glow.spread),
+      color: psdColor(glow.color),
+      blendMode: "screen",
+      opacity: glow.opacity,
+      source: "edge",
+      range: 0.5,
+    };
+  }
+
+  const gradientFills = style.fills.filter((fill): fill is ResolvedLinearGradientFill => fill.type === "linear-gradient");
+  if (gradientFills.length > 0) {
+    effects.gradientOverlay = gradientFills.map((fill) => ({
+      present: true,
+      showInDialog: true,
+      enabled: true,
+      blendMode: "normal",
+      opacity: fill.opacity,
+      align: true,
+      scale: 1,
+      type: "linear",
+      angle: fill.angle,
+      gradient: psdGradient(fill),
+    }));
+  }
+
+  const secondarySolidFills = style.fills
+    .map((fill, index) => ({ fill, index }))
+    .filter(({ fill, index }) => index > 0 && fill.type === "solid");
+  if (secondarySolidFills.length > 0) {
+    effects.solidFill = secondarySolidFills.map(({ fill }) => {
+      if (fill.type !== "solid") throw new Error("Fill solido invalido");
+      return {
+        present: true,
+        showInDialog: true,
+        enabled: true,
+        blendMode: "normal",
+        color: psdColor(fill.color),
+        opacity: fill.opacity,
+      };
+    });
+  }
+
+  return effects;
 }
 
 function writeHeader(out: ByteWriter, width: number, height: number) {
@@ -615,10 +928,19 @@ function layerTextData(spec: PsdTextSpec): LayerTextData {
   const textLength = utf16Length(`${text.replace(/\n/g, "\r")}\r`);
   const bounds = textUnitsBounds(0, 0, spec.width, spec.height);
   const font = { name: spec.fontName.trim() || "ArialMT", script: 0, type: 0, synthetic: 0 };
+  const typography = spec.resolvedStyle?.typography;
   const style = {
     font,
     fontSize: spec.fontSize,
     fillColor: { r: spec.color[0], g: spec.color[1], b: spec.color[2], a: spec.color[3] },
+    fauxBold: typography ? typography.fontWeight >= 600 : undefined,
+    fauxItalic: typography ? typography.fontStyle === "italic" : undefined,
+    autoLeading: typography ? false : undefined,
+    leading: typography ? typography.fontSize * typography.lineHeight : undefined,
+    tracking: typography?.tracking,
+    horizontalScale: typography?.horizontalScale,
+    verticalScale: typography?.verticalScale,
+    baselineShift: typography?.baselineShift,
     autoKerning: true,
     kerning: 0,
   };
@@ -939,7 +1261,7 @@ function layerChannels(pixels: Uint8Array) {
   return channels;
 }
 
-function mergedComposite(width: number, height: number, layers: PsdRasterLayer[]) {
+export function mergePsdRasterLayers(width: number, height: number, layers: PsdRasterLayer[]) {
   const output = solidPixels(width, height, [255, 255, 255, 255]);
   for (const layer of layers) {
     if (layer.hidden) continue;
@@ -952,22 +1274,63 @@ function alphaCompositeLayer(base: Uint8Array, width: number, height: number, la
   const bounds = boundsForLayer(width, height, layer);
   const layerWidth = bounds.right - bounds.left;
   const layerHeight = bounds.bottom - bounds.top;
+  const layerOpacity = clamp01(layer.opacity ?? 1);
+  const previewMaskPixels = layer.compositeMaskPixels ?? (
+    layer.maskPixels && (layer.maskFeather ?? 0) > 0
+      ? applySelectionAlphaModifiers(
+          new Uint8ClampedArray(layer.maskPixels),
+          layerWidth,
+          layerHeight,
+          { feather: layer.maskFeather },
+        )
+      : layer.maskPixels
+  );
   for (let y = 0; y < layerHeight; y += 1) {
     for (let x = 0; x < layerWidth; x += 1) {
       const topIndex = (y * layerWidth + x) * 4;
       const baseIndex = ((bounds.top + y) * width + bounds.left + x) * 4;
-      alphaCompositePixel(base, baseIndex, layer.pixels, topIndex);
+      const maskAlpha = previewMaskPixels ? previewMaskPixels[y * layerWidth + x] / 255 : 1;
+      alphaCompositePixel(base, baseIndex, layer.pixels, topIndex, layerOpacity * maskAlpha, layer.blendMode);
     }
   }
 }
 
-function alphaCompositePixel(base: Uint8Array, baseIndex: number, top: Uint8Array, topIndex: number) {
-  const alpha = top[topIndex + 3] / 255;
+function alphaCompositePixel(
+  base: Uint8Array,
+  baseIndex: number,
+  top: Uint8Array,
+  topIndex: number,
+  layerAlpha = 1,
+  blendMode = "normal",
+) {
+  const alpha = (top[topIndex + 3] / 255) * clamp01(layerAlpha);
   if (alpha <= 0) return;
-  base[baseIndex] = Math.round(top[topIndex] * alpha + base[baseIndex] * (1 - alpha));
-  base[baseIndex + 1] = Math.round(top[topIndex + 1] * alpha + base[baseIndex + 1] * (1 - alpha));
-  base[baseIndex + 2] = Math.round(top[topIndex + 2] * alpha + base[baseIndex + 2] * (1 - alpha));
+  for (let channel = 0; channel < 3; channel += 1) {
+    const blended = blendChannel(base[baseIndex + channel], top[topIndex + channel], blendMode);
+    base[baseIndex + channel] = Math.round(blended * alpha + base[baseIndex + channel] * (1 - alpha));
+  }
   base[baseIndex + 3] = 255;
+}
+
+function blendChannel(base: number, top: number, blendMode: string) {
+  switch (blendMode) {
+    case "multiply": return base * top / 255;
+    case "screen": return 255 - ((255 - base) * (255 - top) / 255);
+    case "overlay": return base < 128 ? 2 * base * top / 255 : 255 - 2 * (255 - base) * (255 - top) / 255;
+    case "darken": return Math.min(base, top);
+    case "lighten": return Math.max(base, top);
+    case "color-dodge": return top >= 255 ? 255 : Math.min(255, base * 255 / (255 - top));
+    case "color-burn": return top <= 0 ? 0 : 255 - Math.min(255, (255 - base) * 255 / top);
+    case "hard-light": return top < 128 ? 2 * base * top / 255 : 255 - 2 * (255 - base) * (255 - top) / 255;
+    case "soft-light": {
+      const normalizedBase = base / 255;
+      const normalizedTop = top / 255;
+      return 255 * ((1 - 2 * normalizedTop) * normalizedBase * normalizedBase + 2 * normalizedTop * normalizedBase);
+    }
+    case "difference": return Math.abs(base - top);
+    case "exclusion": return base + top - 2 * base * top / 255;
+    default: return top;
+  }
 }
 
 function writeImageData(out: ByteWriter, pixels: Uint8Array) {

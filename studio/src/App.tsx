@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { ArrowRight, Clock3, FileInput, Plus } from "lucide-react";
+import { ArrowRight, Clock3, FolderOpen } from "lucide-react";
 import { useStudioProjectStore } from "./store/projectStore";
 import traduzaiLogoUrl from "../../traduzaistudiologo.svg";
 
@@ -7,53 +7,6 @@ const StudioSharedEditor = lazy(async () => {
   const mod = await import("./editor/StudioSharedEditor");
   return { default: mod.StudioSharedEditor };
 });
-
-function samplePageDataUri() {
-  const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="900" height="1280" viewBox="0 0 900 1280">
-      <rect width="900" height="1280" fill="#f8fafc"/>
-      <path d="M120 210 C260 120 430 130 560 240 C700 360 720 560 600 700 C490 830 310 850 180 730 C40 600 20 340 120 210Z" fill="#e5e7eb" stroke="#0f172a" stroke-width="16"/>
-      <ellipse cx="448" cy="430" rx="210" ry="130" fill="#ffffff" stroke="#111827" stroke-width="10"/>
-      <path d="M310 595 C390 650 510 650 590 595" fill="none" stroke="#111827" stroke-width="14" stroke-linecap="round"/>
-      <rect x="110" y="925" width="680" height="210" rx="18" fill="#ffffff" stroke="#111827" stroke-width="8"/>
-    </svg>
-  `.trim();
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-const sampleProject = JSON.stringify(
-  {
-    versao: "1.0",
-    app: "TraduzAi",
-    obra: "Exemplo Studio",
-    paginas: [
-      {
-        numero: 1,
-        arquivo_original: samplePageDataUri(),
-        arquivo_traduzido: samplePageDataUri(),
-        textos: [
-          {
-            id: "sample-text-1",
-            bbox: [235, 350, 665, 505],
-            texto: "HELLO",
-            traduzido: "OLA",
-            tipo: "fala",
-            confidence: 0.98,
-          },
-          {
-            id: "sample-text-2",
-            bbox: [155, 955, 745, 1105],
-            texto: "THIS IS A CLEANING NOTE",
-            traduzido: "Texto de revisao da scan",
-            tipo: "narracao",
-          },
-        ],
-      },
-    ],
-  },
-  null,
-  2,
-);
 
 const RECENTS_KEY = "traduzai-studio-recents";
 const MAX_RECENTS = 72;
@@ -107,9 +60,11 @@ export function App() {
   const project = useStudioProjectStore((state) => state.project);
   const projectPath = useStudioProjectStore((state) => state.projectPath);
   const error = useStudioProjectStore((state) => state.error);
-  const importProjectJson = useStudioProjectStore((state) => state.importProjectJson);
   const loadProject = useStudioProjectStore((state) => state.loadProject);
   const openProjectFromDialog = useStudioProjectStore((state) => state.openProjectFromDialog);
+  const recoverySnapshot = useStudioProjectStore((state) => state.recoverySnapshot);
+  const restoreRecovery = useStudioProjectStore((state) => state.restoreRecovery);
+  const dismissRecovery = useStudioProjectStore((state) => state.dismissRecovery);
   const [recents, setRecents] = useState<RecentProject[]>(() => readRecentProjects());
 
   useEffect(() => {
@@ -149,9 +104,11 @@ export function App() {
     <StudioHome
       error={error}
       recents={recents}
-      onNewProject={() => void importProjectJson(sampleProject, "memory://novo-projeto")}
-      onImportProject={() => void openProjectFromDialog().then(() => setRecents(readRecentProjects()))}
+      onOpenProject={() => void openProjectFromDialog().then(() => setRecents(readRecentProjects()))}
       onOpenRecent={(path) => void loadProject(path)}
+      recoveryAvailable={Boolean(recoverySnapshot)}
+      onRecover={() => void restoreRecovery()}
+      onDismissRecovery={() => void dismissRecovery()}
     />
   );
 }
@@ -169,18 +126,22 @@ function StudioBoot({ message, error }: { message: string; error?: string | null
   );
 }
 
-function StudioHome({
+export function StudioHome({
   error,
   recents,
-  onNewProject,
-  onImportProject,
+  onOpenProject,
   onOpenRecent,
+  recoveryAvailable = false,
+  onRecover,
+  onDismissRecovery,
 }: {
   error?: string | null;
   recents: RecentProject[];
-  onNewProject: () => void;
-  onImportProject: () => void;
+  onOpenProject: () => void;
   onOpenRecent: (path: string) => void;
+  recoveryAvailable?: boolean;
+  onRecover?: () => void;
+  onDismissRecovery?: () => void;
 }) {
   const visibleRecents = useMemo(() => recents.slice(0, 6), [recents]);
   return (
@@ -188,23 +149,28 @@ function StudioHome({
       <section className="studio-home-shell">
         <div className="studio-home-brand">
           <img className="studio-home-wordmark" src={traduzaiLogoUrl} alt="TraduzAI Studio" />
-          <p>Espaco de trabalho de traducao de manga</p>
+          <p>Editor mestre de pós-tradução para mangá</p>
         </div>
 
         <div className="studio-home-actions">
-          <button type="button" className="studio-home-primary" onClick={onNewProject}>
-            <span className="studio-home-primary-icon"><Plus size={22} /></span>
+          <button type="button" className="studio-home-primary" onClick={onOpenProject}>
+            <span className="studio-home-primary-icon"><FolderOpen size={22} /></span>
             <span className="studio-home-primary-copy">
-              <strong>Novo projeto</strong>
-              <small>Comece uma area de trabalho e importe paginas depois</small>
+              <strong>Abrir projeto TraduzAI</strong>
+              <small>Edite um projeto já traduzido pelo TraduzAI Central</small>
             </span>
             <ArrowRight size={18} className="studio-home-primary-arrow" />
           </button>
-
-          <button type="button" className="studio-home-import" onClick={onImportProject}>
-            <FileInput size={16} />
-            Importar projeto
-          </button>
+          {recoveryAvailable && (
+            <div className="studio-home-recovery">
+              <div>
+                <strong>Sessão recuperável encontrada</strong>
+                <small>O project.json falhou ou difere do último autosave.</small>
+              </div>
+              <button type="button" onClick={onRecover}>Recuperar</button>
+              <button type="button" onClick={onDismissRecovery}>Ignorar</button>
+            </div>
+          )}
         </div>
 
         <div className="studio-home-recents">

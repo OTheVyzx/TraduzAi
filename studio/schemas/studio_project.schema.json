@@ -11,7 +11,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["numero", "image_layers", "text_layers", "textos"],
+        "required": ["numero", "image_layers", "text_layers", "textos", "studio_scene"],
         "properties": {
           "numero": { "type": "number" },
           "arquivo_original": { "type": ["string", "null"] },
@@ -35,7 +35,8 @@
           "textos": {
             "type": "array",
             "items": { "$ref": "#/$defs/textLayer" }
-          }
+          },
+          "studio_scene": { "$ref": "#/$defs/studioScene" }
         },
         "additionalProperties": true
       }
@@ -79,6 +80,64 @@
         "visible": { "type": "boolean" },
         "locked": { "type": "boolean" },
         "order": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "studioScene": {
+      "type": "object",
+      "required": ["version", "roots", "nodes"],
+      "properties": {
+        "version": { "const": "1.0" },
+        "roots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sceneNode" }
+        },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "sceneNode": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "visible",
+        "locked",
+        "opacity",
+        "blend_mode",
+        "parent_id",
+        "order",
+        "mask_ids",
+        "metadata"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": ["raster", "text", "group", "mask", "generated", "adjustment", "fill"]
+        },
+        "name": { "type": "string" },
+        "visible": { "type": "boolean" },
+        "locked": { "type": "boolean" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "blend_mode": { "type": "string" },
+        "parent_id": { "type": ["string", "null"] },
+        "order": { "type": "number" },
+        "mask_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "image_layer_key": {
+          "enum": ["base", "mask", "inpaint", "brush", "recovery", "rendered"]
+        },
+        "text_layer_id": { "type": "string" },
+        "metadata": { "type": "object" }
       },
       "additionalProperties": true
     }

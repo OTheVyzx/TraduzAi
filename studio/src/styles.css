@@ -112,22 +112,51 @@ body {
   color: #b9c3d0;
 }
 
-.studio-home-import {
-  min-height: 36px;
-  display: inline-flex;
+.studio-home-recovery {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: center;
-  gap: 9px;
-  border: 0;
-  color: #b9c3d0;
-  background: transparent;
-  font-size: 14px;
-  font-weight: 700;
+  gap: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.studio-home-recovery div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.studio-home-recovery strong,
+.studio-home-recovery small {
+  display: block;
+}
+
+.studio-home-recovery strong {
+  color: #f8fafc;
+  font-size: 12px;
+}
+
+.studio-home-recovery small {
+  color: #aeb8c7;
+  font-size: 10px;
+}
+
+.studio-home-recovery button {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  padding: 6px 9px;
+  color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.04);
   cursor: pointer;
 }
 
-.studio-home-import:hover {
-  color: #ffffff;
+.studio-home-recovery button:first-of-type {
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #111827;
+  background: #f59e0b;
 }
 
 .studio-home-recents-head {

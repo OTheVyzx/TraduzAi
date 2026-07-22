@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import studioProjectSchema from "../../../schemas/studio_project.schema.json";
 import { finalImagePathForPage, importStudioProject, toTraduzAiV2Compat } from "../adapters";
 
 describe("studio project adapters", () => {
@@ -257,6 +258,48 @@ describe("studio project adapters", () => {
     });
   });
 
+  it("round-trips the additive professional text style without flattening its passes", () => {
+    const imported = importStudioProject({
+      app: "traduzai",
+      versao: "2.0",
+      paginas: [
+        {
+          numero: 1,
+          text_layers: [
+            {
+              id: "styled-text",
+              bbox: [10, 20, 200, 120],
+              original: "STYLE",
+              translated: "ESTILO",
+              style: {
+                fonte: "Legacy.ttf",
+                studio_style: {
+                  version: "1.0",
+                  typography: { fontFamily: "Anime Ace", fontSize: 38, fontWeight: 700 },
+                  fills: [{ type: "solid", color: "#fefefe", opacity: 1 }],
+                  strokes: [
+                    { color: "#ffffff", width: 3, position: "outside" },
+                    { color: "#000000", width: 8, position: "outside" },
+                  ],
+                  effects: {
+                    dropShadows: [{ color: "#000000", offsetX: 4, offsetY: 6, blur: 3 }],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const reopened = importStudioProject(toTraduzAiV2Compat(imported.project));
+    const style = reopened.project.paginas[0].text_layers[0].style.studio_style;
+
+    expect(style?.typography).toMatchObject({ fontFamily: "Anime Ace", fontSize: 38, fontWeight: 700 });
+    expect(style?.strokes).toHaveLength(2);
+    expect(style?.effects?.dropShadows).toHaveLength(1);
+  });
+
   it("uses editor/site bbox priority when only derived geometry is reliable", () => {
     const result = importStudioProject({
       versao: "2.0",
@@ -287,5 +330,285 @@ describe("studio project adapters", () => {
 
     expect(result.project.paginas[0].text_layers[0].bbox).toEqual([30, 40, 220, 260]);
     expect(result.project.paginas[0].text_layers[1].bbox).toEqual([50, 60, 260, 300]);
+  });
+
+  it("derives an additive scene for legacy image and text layers", () => {
+    const result = importStudioProject({
+      versao: "2.0",
+      paginas: [
+        {
+          numero: 3,
+          image_layers: {
+            base: { path: "original/003.png", visible: true, locked: true, opacity: 0.75 },
+            mask: { path: "layers/masks/003.png", visible: false, technical: true },
+          },
+          text_layers: [
+            {
+              id: "dialogue-1",
+              bbox: [10, 20, 200, 120],
+              original: "HELLO",
+              translated: "OLA",
+              visible: true,
+              locked: false,
+              order: 4,
+            },
+          ],
+        },
+      ],
+    });
+
+    const scene = result.project.paginas[0].studio_scene;
+
+    expect(scene.version).toBe("1.0");
+    expect(scene.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "image:base",
+          kind: "raster",
+          name: "Original",
+          image_layer_key: "base",
+          visible: true,
+          locked: true,
+          opacity: 0.75,
+          blend_mode: "normal",
+          parent_id: null,
+        }),
+        expect.objectContaining({
+          id: "image:mask",
+          kind: "mask",
+          name: "Máscara",
+          image_layer_key: "mask",
+          visible: false,
+        }),
+        expect.objectContaining({
+          id: "text:dialogue-1",
+          kind: "text",
+          name: "OLA",
+          text_layer_id: "dialogue-1",
+        }),
+      ]),
+    );
+    expect(scene.roots).toEqual(expect.arrayContaining(["image:base", "image:mask", "text:dialogue-1"]));
+    expect(scene.nodes.some((node) => node.id === "image:rendered")).toBe(false);
+  });
+
+  it("round-trips every Studio scene node kind and custom metadata", () => {
+    const nodeKinds = ["raster", "text", "group", "mask", "generated", "adjustment", "fill"] as const;
+    const nodes = nodeKinds.map((kind, order) => ({
+      id: `custom:${kind}`,
+      kind,
+      name: `Custom ${kind}`,
+      visible: kind !== "mask",
+      locked: kind === "raster",
+      opacity: 1 - order * 0.1,
+      blend_mode: kind === "adjustment" ? "multiply" : "normal",
+      parent_id: kind === "generated" ? "custom:group" : null,
+      order,
+      mask_ids: kind === "generated" ? ["custom:mask"] : [],
+      metadata: kind === "generated" ? { prompt: "reconstruir o fundo", seed: 42 } : { preserved: true },
+    }));
+    const imported = importStudioProject({
+      app: "traduzai",
+      versao: "2.0",
+      studio_schema_version: "1.0",
+      paginas: [
+        {
+          numero: 1,
+          image_layers: {},
+          text_layers: [],
+          studio_scene: {
+            version: "1.0",
+            roots: nodes.filter((node) => node.parent_id === null).map((node) => node.id),
+            nodes,
+            metadata: { workspace: "lettering" },
+          },
+        },
+      ],
+    });
+
+    const compat = toTraduzAiV2Compat(imported.project);
+    const reopened = importStudioProject(compat);
+    const scene = reopened.project.paginas[0].studio_scene;
+
+    expect(scene.nodes.map((node) => node.kind)).toEqual(nodeKinds);
+    expect(scene.nodes.find((node) => node.kind === "generated")?.metadata).toEqual({
+      prompt: "reconstruir o fundo",
+      seed: 42,
+    });
+    expect(scene.nodes.find((node) => node.kind === "generated")?.parent_id).toBe("custom:group");
+    expect(scene.metadata).toEqual({ workspace: "lettering" });
+  });
+
+  it("reconciles projected scene state without dropping free scene nodes", () => {
+    const imported = importStudioProject({
+      app: "traduzai",
+      versao: "2.0",
+      studio_schema_version: "1.0",
+      paginas: [
+        {
+          numero: 1,
+          image_layers: {
+            base: { path: "base.png", visible: false, locked: true, opacity: 0.4 },
+          },
+          text_layers: [
+            {
+              id: "t1",
+              bbox: [0, 0, 100, 100],
+              original: "A",
+              translated: "B",
+              visible: false,
+              locked: true,
+              order: 2,
+            },
+          ],
+          studio_scene: {
+            version: "1.0",
+            roots: ["free:group", "image:base", "text:t1"],
+            nodes: [
+              {
+                id: "free:group",
+                kind: "group",
+                name: "Retoques",
+                visible: true,
+                locked: false,
+                opacity: 1,
+                blend_mode: "normal",
+                parent_id: null,
+                order: 0,
+                mask_ids: [],
+                metadata: { custom: true },
+              },
+              {
+                id: "image:base",
+                kind: "raster",
+                name: "Original",
+                image_layer_key: "base",
+                visible: true,
+                locked: false,
+                opacity: 1,
+                blend_mode: "normal",
+                parent_id: null,
+                order: 1,
+                mask_ids: [],
+                metadata: {},
+              },
+              {
+                id: "text:t1",
+                kind: "text",
+                name: "B",
+                text_layer_id: "t1",
+                visible: true,
+                locked: false,
+                opacity: 1,
+                blend_mode: "normal",
+                parent_id: null,
+                order: 2,
+                mask_ids: [],
+                metadata: {},
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const importedScene = imported.project.paginas[0].studio_scene;
+    expect(importedScene.nodes.find((node) => node.id === "image:base")).toMatchObject({
+      visible: false,
+      locked: true,
+      opacity: 0.4,
+    });
+    expect(importedScene.nodes.find((node) => node.id === "text:t1")).toMatchObject({
+      visible: false,
+      locked: true,
+    });
+
+    imported.project.paginas[0].image_layers.base!.opacity = 0.25;
+    imported.project.paginas[0].text_layers[0].visible = true;
+    const compat = toTraduzAiV2Compat(imported.project) as {
+      paginas: Array<{ studio_scene: { nodes: Array<Record<string, unknown>> } }>;
+    };
+
+    expect(compat.paginas[0].studio_scene.nodes.find((node) => node.id === "image:base")).toMatchObject({
+      opacity: 0.25,
+    });
+    expect(compat.paginas[0].studio_scene.nodes.find((node) => node.id === "text:t1")).toMatchObject({
+      visible: true,
+    });
+    expect(compat.paginas[0].studio_scene.nodes.find((node) => node.id === "free:group")?.metadata).toEqual({
+      custom: true,
+    });
+  });
+
+  it("declares the additive scene contract in the Studio JSON schema", () => {
+    const pageSchema = studioProjectSchema.properties.paginas.items;
+
+    expect(pageSchema.required).toContain("studio_scene");
+    expect(pageSchema.properties.studio_scene).toEqual({ $ref: "#/$defs/studioScene" });
+    expect(studioProjectSchema.$defs.sceneNode.properties.kind.enum).toEqual([
+      "raster",
+      "text",
+      "group",
+      "mask",
+      "generated",
+      "adjustment",
+      "fill",
+    ]);
+  });
+
+  it("keeps scene-owned properties intrinsic when compatibility state is flattened", () => {
+    const result = importStudioProject({
+      app: "traduzai",
+      versao: "2.0",
+      studio_schema_version: "1.0",
+      paginas: [
+        {
+          numero: 1,
+          image_layers: {},
+          text_layers: [
+            {
+              id: "t1",
+              bbox: [0, 0, 100, 100],
+              original: "A",
+              translated: "B",
+              visible: false,
+              locked: true,
+              opacity: 0.25,
+            },
+          ],
+          studio_scene: {
+            version: "1.0",
+            roots: ["text:t1"],
+            nodes: [
+              {
+                id: "text:t1",
+                kind: "text",
+                name: "B",
+                visible: true,
+                locked: false,
+                opacity: 1,
+                blend_mode: "normal",
+                parent_id: null,
+                order: 0,
+                mask_ids: [],
+                text_layer_id: "t1",
+                metadata: { projected_from: "text_layers", scene_owned: true },
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    expect(result.project.paginas[0].studio_scene.nodes[0]).toMatchObject({
+      visible: true,
+      locked: false,
+      opacity: 1,
+    });
+    expect(result.project.paginas[0].text_layers[0]).toMatchObject({
+      visible: false,
+      locked: true,
+      opacity: 0.25,
+    });
   });
 });
