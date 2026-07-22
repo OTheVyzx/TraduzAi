@@ -17,6 +17,7 @@ mod studio_lite;
 
 mod library;
 mod chapter_import;
+mod work_tracking;
 
 #[derive(Debug, Deserialize)]
 struct ProjectPathConfig {
@@ -1577,6 +1578,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             library::studio_load_library,
             library::studio_save_library,
+            work_tracking::studio_search_tracking_works,
+            work_tracking::studio_sync_tracking_work,
             chapter_import::studio_prepare_manual_chapter,
             studio_load_project,
             studio_save_project,
