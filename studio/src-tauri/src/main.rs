@@ -15,8 +15,8 @@ use tokio::time::{timeout, Duration};
 #[path = "../../../src-tauri/src/commands/studio_lite.rs"]
 mod studio_lite;
 
-mod library;
 mod chapter_import;
+mod library;
 mod work_tracking;
 
 #[derive(Debug, Deserialize)]
@@ -286,9 +286,14 @@ fn write_project_json_atomically(project_file: &Path, payload: &str) -> Result<(
         .write(true)
         .open(&temporary)
         .map_err(|error| format!("Falha ao criar project.json temporario: {error}"))?;
-    if let Err(error) = file.write_all(payload.as_bytes()).and_then(|_| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(payload.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
         let _ = std::fs::remove_file(&temporary);
-        return Err(format!("Falha ao sincronizar project.json temporario: {error}"));
+        return Err(format!(
+            "Falha ao sincronizar project.json temporario: {error}"
+        ));
     }
     drop(file);
 
@@ -301,7 +306,9 @@ fn write_project_json_atomically(project_file: &Path, payload: &str) -> Result<(
             let _ = std::fs::rename(&backup, project_file);
         }
         let _ = std::fs::remove_file(&temporary);
-        return Err(format!("Falha ao concluir troca atomica do project.json: {error}"));
+        return Err(format!(
+            "Falha ao concluir troca atomica do project.json: {error}"
+        ));
     }
     if backup.exists() {
         let _ = std::fs::remove_file(&backup);
@@ -313,8 +320,12 @@ fn recovery_directory(project_file: &Path) -> Result<PathBuf, String> {
     let project_dir = project_file
         .parent()
         .ok_or_else(|| "Caminho de projeto invalido para recuperacao".to_string())?;
-    let canonical = std::fs::canonicalize(project_file).unwrap_or_else(|_| project_file.to_path_buf());
-    let identity = canonical.to_string_lossy().replace('\\', "/").to_lowercase();
+    let canonical =
+        std::fs::canonicalize(project_file).unwrap_or_else(|_| project_file.to_path_buf());
+    let identity = canonical
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in identity.as_bytes() {
         hash ^= u64::from(*byte);
@@ -325,7 +336,13 @@ fn recovery_directory(project_file: &Path) -> Result<PathBuf, String> {
         .and_then(|value| value.to_str())
         .unwrap_or("project.json")
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') { character } else { '-' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     Ok(project_dir
         .join(".traduzai-studio")
@@ -399,7 +416,11 @@ fn load_latest_recovery_snapshot(project_file: &Path) -> Result<Option<Value>, S
         .and_then(|payload| parse_project_payload(&payload).ok())
         .is_some();
     let project_modified = current_project_is_valid
-        .then(|| std::fs::metadata(project_file).and_then(|metadata| metadata.modified()).ok())
+        .then(|| {
+            std::fs::metadata(project_file)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
         .flatten();
     for path in recovery_snapshot_paths(project_file)? {
         if let (Some(project_time), Ok(snapshot_time)) = (
@@ -435,7 +456,8 @@ fn snapshot_matches_project(snapshot: &Value, configured_project_path: &str) -> 
         .get("projectPath")
         .and_then(Value::as_str)
         .map(|snapshot_path| {
-            normalized_project_identity(snapshot_path) == normalized_project_identity(configured_project_path)
+            normalized_project_identity(snapshot_path)
+                == normalized_project_identity(configured_project_path)
         })
         .unwrap_or(false)
 }
@@ -558,7 +580,9 @@ fn flux_command_spec(
     let program = command
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Configure TRADUZAI_STUDIO_FLUX_COMMAND para habilitar o FLUX local".to_string())?;
+        .ok_or_else(|| {
+            "Configure TRADUZAI_STUDIO_FLUX_COMMAND para habilitar o FLUX local".to_string()
+        })?;
     if program.contains('\0') {
         return Err("Comando do adaptador FLUX invalido".to_string());
     }
@@ -647,9 +671,13 @@ fn validate_flux_generate_result(
             return Err(format!("A variante {} nao possui imagem", variant.id));
         }
         if !png_data.is_empty()
-            && (!png_data.starts_with("data:image/png;base64,") || png_data.len() > 128 * 1024 * 1024)
+            && (!png_data.starts_with("data:image/png;base64,")
+                || png_data.len() > 128 * 1024 * 1024)
         {
-            return Err(format!("A variante {} retornou PNG invalido ou muito grande", variant.id));
+            return Err(format!(
+                "A variante {} retornou PNG invalido ou muito grande",
+                variant.id
+            ));
         }
         let lower_path = path.to_ascii_lowercase();
         if lower_path.starts_with("http://") || lower_path.starts_with("https://") {
@@ -670,7 +698,10 @@ fn parse_flux_adapter_output(stdout: &[u8]) -> Result<FluxGenerateResult, String
     let value: Value = serde_json::from_str(candidate.trim())
         .map_err(|error| format!("Resposta JSON invalida do adaptador FLUX: {error}"))?;
     if let Some(message) = value.get("error").and_then(Value::as_str) {
-        return Err(format!("O adaptador FLUX falhou: {}", message.chars().take(1000).collect::<String>()));
+        return Err(format!(
+            "O adaptador FLUX falhou: {}",
+            message.chars().take(1000).collect::<String>()
+        ));
     }
     serde_json::from_value(value)
         .map_err(|error| format!("Contrato JSON invalido do adaptador FLUX: {error}"))
@@ -687,7 +718,11 @@ async fn read_limited_flux_line<R: AsyncBufRead + Unpin>(
             .await
             .map_err(|error| format!("Falha ao ler adaptador FLUX: {error}"))?;
         if available.is_empty() {
-            return if output.is_empty() { Ok(None) } else { Ok(Some(output)) };
+            return if output.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(output))
+            };
         }
         let end = available
             .iter()
@@ -718,9 +753,11 @@ async fn run_flux_worker(
     let mut stdout = BufReader::new(stdout);
     while let Some(message) = receiver.recv().await {
         let (config, timeout_seconds, response) = match message {
-            FluxWorkerMessage::Generate { config, timeout_seconds, response } => {
-                (config, timeout_seconds, response)
-            }
+            FluxWorkerMessage::Generate {
+                config,
+                timeout_seconds,
+                response,
+            } => (config, timeout_seconds, response),
             FluxWorkerMessage::Cancel { response, .. } => {
                 let _ = response.send(false);
                 continue;
@@ -739,7 +776,9 @@ async fn run_flux_worker(
         };
         if let Err(error) = stdin.write_all(&payload).await {
             if let Some(response) = response.take() {
-                let _ = response.send(Err(format!("Falha ao enviar job ao adaptador FLUX: {error}")));
+                let _ = response.send(Err(format!(
+                    "Falha ao enviar job ao adaptador FLUX: {error}"
+                )));
             }
             let _ = child.kill().await;
             return;
@@ -753,7 +792,9 @@ async fn run_flux_worker(
         }
         if let Err(error) = stdin.flush().await {
             if let Some(response) = response.take() {
-                let _ = response.send(Err(format!("Falha ao enviar job ao adaptador FLUX: {error}")));
+                let _ = response.send(Err(format!(
+                    "Falha ao enviar job ao adaptador FLUX: {error}"
+                )));
             }
             let _ = child.kill().await;
             return;
@@ -826,8 +867,14 @@ async fn spawn_flux_worker_from_spec(
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| format!("Falha ao iniciar adaptador FLUX local: {error}"))?;
-    let stdin = child.stdin.take().ok_or_else(|| "Falha ao abrir stdin do adaptador FLUX".to_string())?;
-    let stdout = child.stdout.take().ok_or_else(|| "Falha ao abrir stdout do adaptador FLUX".to_string())?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Falha ao abrir stdin do adaptador FLUX".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Falha ao abrir stdout do adaptador FLUX".to_string())?;
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
@@ -856,10 +903,22 @@ impl FluxWorkerManager {
         Ok(sender)
     }
 
-    async fn generate(&self, config: FluxGenerateConfig, timeout_seconds: u64) -> Result<FluxGenerateResult, String> {
+    async fn generate(
+        &self,
+        config: FluxGenerateConfig,
+        timeout_seconds: u64,
+    ) -> Result<FluxGenerateResult, String> {
         let sender = self.worker_sender().await?;
         let (response, result) = oneshot::channel();
-        if sender.send(FluxWorkerMessage::Generate { config, timeout_seconds, response }).await.is_err() {
+        if sender
+            .send(FluxWorkerMessage::Generate {
+                config,
+                timeout_seconds,
+                response,
+            })
+            .await
+            .is_err()
+        {
             self.sender.lock().await.take();
             return Err("O worker FLUX local foi encerrado".to_string());
         }
@@ -874,9 +933,15 @@ impl FluxWorkerManager {
 
     async fn cancel(&self, job_id: String) -> Result<bool, String> {
         let sender = self.sender.lock().await.as_ref().cloned();
-        let Some(sender) = sender else { return Ok(false) };
+        let Some(sender) = sender else {
+            return Ok(false);
+        };
         let (response, result) = oneshot::channel();
-        if sender.send(FluxWorkerMessage::Cancel { job_id, response }).await.is_err() {
+        if sender
+            .send(FluxWorkerMessage::Cancel { job_id, response })
+            .await
+            .is_err()
+        {
             self.sender.lock().await.take();
             return Ok(false);
         }
@@ -912,7 +977,10 @@ fn studio_flux_status() -> FluxProviderStatus {
                 status: "configured".to_string(),
                 provider: "local-adapter".to_string(),
                 model: Some(model),
-                message: Some("Adaptador FLUX configurado; dependencias e modelo serao validados ao gerar".to_string()),
+                message: Some(
+                    "Adaptador FLUX configurado; dependencias e modelo serao validados ao gerar"
+                        .to_string(),
+                ),
             }
         }
         Err(message) => FluxProviderStatus {
@@ -1669,14 +1737,19 @@ mod tests {
         });
 
         super::write_recovery_snapshot(&project_file, &snapshot).unwrap();
-        assert_eq!(super::load_latest_recovery_snapshot(&project_file).unwrap(), Some(snapshot));
+        assert_eq!(
+            super::load_latest_recovery_snapshot(&project_file).unwrap(),
+            Some(snapshot)
+        );
 
         let recovery_dir = super::recovery_directory(&project_file).unwrap();
         let names = std::fs::read_dir(&recovery_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert!(names.iter().any(|name| name.starts_with("snapshot-") && name.ends_with(".json")));
+        assert!(names
+            .iter()
+            .any(|name| name.starts_with("snapshot-") && name.ends_with(".json")));
         assert!(!names.iter().any(|name| name.ends_with(".tmp")));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1702,8 +1775,14 @@ mod tests {
             super::recovery_directory(&first_file).unwrap(),
             super::recovery_directory(&second_file).unwrap(),
         );
-        assert_eq!(super::load_latest_recovery_snapshot(&first_file).unwrap(), Some(first));
-        assert_eq!(super::load_latest_recovery_snapshot(&second_file).unwrap(), Some(second));
+        assert_eq!(
+            super::load_latest_recovery_snapshot(&first_file).unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            super::load_latest_recovery_snapshot(&second_file).unwrap(),
+            Some(second)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1713,7 +1792,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("traduzai-studio-recovery-corruption-{nonce}"));
+        let root =
+            std::env::temp_dir().join(format!("traduzai-studio-recovery-corruption-{nonce}"));
         let project_file = root.join("project.json");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&project_file, r#"{"app":"traduzai","paginas":[]}"#).unwrap();
@@ -1725,15 +1805,24 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&project_file, "{arquivo truncado").unwrap();
 
-        assert_eq!(super::load_latest_recovery_snapshot(&project_file).unwrap(), Some(snapshot));
+        assert_eq!(
+            super::load_latest_recovery_snapshot(&project_file).unwrap(),
+            Some(snapshot)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn rejects_recovery_identity_from_another_project() {
         let snapshot = serde_json::json!({ "projectPath": "N:/TraduzAI/chapter-a.json" });
-        assert!(super::snapshot_matches_project(&snapshot, "N:\\TraduzAI\\chapter-a.json"));
-        assert!(!super::snapshot_matches_project(&snapshot, "N:/TraduzAI/chapter-b.json"));
+        assert!(super::snapshot_matches_project(
+            &snapshot,
+            "N:\\TraduzAI\\chapter-a.json"
+        ));
+        assert!(!super::snapshot_matches_project(
+            &snapshot,
+            "N:/TraduzAI/chapter-b.json"
+        ));
     }
 
     #[test]
@@ -1749,7 +1838,10 @@ mod tests {
 
         super::write_project_json_atomically(&project_file, "{\"version\":2}").unwrap();
 
-        assert_eq!(std::fs::read_to_string(&project_file).unwrap(), "{\"version\":2}");
+        assert_eq!(
+            std::fs::read_to_string(&project_file).unwrap(),
+            "{\"version\":2}"
+        );
         let names = std::fs::read_dir(&root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
@@ -1824,7 +1916,10 @@ mod tests {
         .expect("command should parse");
         assert_eq!(spec.program, "python");
         assert_eq!(spec.args, vec!["worker.py", "--local"]);
-        assert!(super::flux_command_spec(Some("python".to_string()), Some("not-json".to_string())).is_err());
+        assert!(
+            super::flux_command_spec(Some("python".to_string()), Some("not-json".to_string()))
+                .is_err()
+        );
         assert!(super::flux_command_spec(None, None).is_err());
     }
 
@@ -1848,10 +1943,14 @@ for line in sys.stdin:
         .await
         .expect("fake persistent worker should start");
 
-        let first = run_fake_flux_job(&sender, flux_config(2)).await.expect("first job should pass");
+        let first = run_fake_flux_job(&sender, flux_config(2))
+            .await
+            .expect("first job should pass");
         let mut second_config = flux_config(2);
         second_config.job_id = "flux-job-2".to_string();
-        let second = run_fake_flux_job(&sender, second_config).await.expect("second job should pass");
+        let second = run_fake_flux_job(&sender, second_config)
+            .await
+            .expect("second job should pass");
         assert_eq!(first.provider, "fake-1");
         assert_eq!(second.provider, "fake-2");
 
@@ -1876,7 +1975,9 @@ for line in sys.stdin:
             })
             .await
             .expect("cancel message should reach worker");
-        assert!(cancel_result.await.expect("worker should confirm cancellation"));
+        assert!(cancel_result
+            .await
+            .expect("worker should confirm cancellation"));
         assert!(generation_result
             .await
             .expect("cancelled generation should answer")

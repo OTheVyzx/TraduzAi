@@ -995,6 +995,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (edit.traduzido !== undefined || edit.translated !== undefined) {
         patch.translated = edit.traduzido ?? edit.translated ?? "";
       }
+      if (edit.translation_status !== undefined) patch.translation_status = edit.translation_status;
+      if (edit.translation_notes !== undefined) patch.translation_notes = edit.translation_notes;
       if (edit.tipo) patch.tipo = edit.tipo;
       if (edit.bbox) {
         patch.layout_bbox = edit.bbox;
@@ -2481,6 +2483,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (edit.traduzido !== undefined || edit.translated !== undefined) {
         patch.translated = edit.traduzido ?? edit.translated ?? "";
       }
+      if (edit.translation_status !== undefined) patch.translation_status = edit.translation_status;
+      if (edit.translation_notes !== undefined) patch.translation_notes = edit.translation_notes;
       if (edit.tipo) patch.tipo = edit.tipo;
       if (edit.bbox) {
         patch.layout_bbox = edit.bbox;

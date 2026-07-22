@@ -73,6 +73,8 @@ export interface TextEntry {
   original: string;
   traduzido: string;
   translated?: string;
+  translation_status?: "pending" | "translated" | "review" | "approved";
+  translation_notes?: string;
   confianca_ocr: number;
   ocr_confidence?: number;
   estilo: TextLayerStyle;

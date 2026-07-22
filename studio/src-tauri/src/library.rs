@@ -126,12 +126,10 @@ pub(crate) fn save_library_to_path(path: &Path, document: &Value) -> Result<(), 
     let payload = serde_json::to_vec_pretty(document)
         .map_err(|error| format!("Falha ao serializar catalogo: {error}"))?;
 
-    if path.exists() {
-        if parse_document(path).is_ok() {
-            let current = fs::read(path)
-                .map_err(|error| format!("Falha ao preservar catalogo atual: {error}"))?;
-            replace_file(&backup_path(path), &current)?;
-        }
+    if path.exists() && parse_document(path).is_ok() {
+        let current = fs::read(path)
+            .map_err(|error| format!("Falha ao preservar catalogo atual: {error}"))?;
+        replace_file(&backup_path(path), &current)?;
     }
 
     replace_file(path, &payload)

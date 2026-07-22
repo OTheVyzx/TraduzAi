@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StudioLibraryHome } from "./library/StudioLibraryHome";
 import { createManualChapterFromImages } from "./backend/projectDialog";
 import { createDefaultLibraryBackend } from "./library/libraryBackend";
+import { findWorkForProjectRegistration } from "./library/projectRegistration";
 import type { StudioProject } from "./project/studioProject";
 import { createLibraryStore } from "./store/libraryStore";
 import { useStudioProjectStore } from "./store/projectStore";
@@ -114,9 +115,7 @@ export function App() {
 
     const register = async () => {
       const title = projectWorkTitle(project, projectPath);
-      const existingWork = library.document.works.find(
-        (work) => work.title.localeCompare(title, "pt-BR", { sensitivity: "base" }) === 0,
-      );
+      const existingWork = findWorkForProjectRegistration(library.document.works, title, projectPath);
       const workId = existingWork?.id ?? stableId("work", title.toLocaleLowerCase("pt-BR"));
       if (!existingWork) {
         await libraryStore.getState().addWork({
