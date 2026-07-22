@@ -3909,6 +3909,33 @@ def _looks_translucent_or_textured_background(
     return spread >= 14.0 or std >= 5.5 or grad_p90 >= 18.0
 
 
+def _promote_translucent_balloon_profile(image_rgb: np.ndarray, text: dict) -> bool:
+    """Persist a safe translucent-balloon decision before any fast dark fill."""
+    if not isinstance(text, dict) or not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return False
+    if str(text.get("content_class") or "").strip().lower() == "sfx":
+        return False
+    source = str(text.get("bubble_mask_source") or "").strip().lower()
+    if source != "image_white_bubble_mask":
+        return False
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    if profile in {"dark_panel", "colored_status_panel", "status_panel", "card", "title_card"}:
+        return False
+    height, width = image_rgb.shape[:2]
+    balloon_bbox = _normalize_bbox(text.get("balloon_bbox") or text.get("bubble_mask_bbox"), width, height)
+    text_mask = _text_geometry_mask(width, height, text)
+    if balloon_bbox is None or text_mask is None or not np.any(text_mask):
+        return False
+    if not _looks_translucent_or_textured_background(image_rgb, balloon_bbox, text_mask):
+        return False
+    text["layout_profile"] = "translucent_balloon"
+    text["block_profile"] = "translucent_balloon"
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["translucent_balloon"] = {"source": source, "balloon_bbox": list(balloon_bbox)}
+    return True
+
+
 def _looks_saturated_colored_background(
     image_rgb: np.ndarray,
     sample_bbox: list[int],
@@ -6507,12 +6534,16 @@ def _apply_dark_panel_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple
     result = image_rgb.copy()
     fill_count = 0
     filled_text_keys: set[str] = set()
+    for item in ocr_page.get("texts", []):
+        if isinstance(item, dict):
+            _promote_translucent_balloon_profile(result, item)
     candidate_texts = [
         item
         for item in ocr_page.get("texts", [])
         if isinstance(item, dict)
         and not _text_suppressed_for_inpaint(item)
         and _route_action_allows_local_dark_panel_fill(item)
+        and str(item.get("layout_profile") or item.get("block_profile") or "").strip().lower() != "translucent_balloon"
         and not _text_has_rejected_bubble_without_glyph_evidence(item)
         and (not _text_has_no_glyph_evidence(item) or _dark_bubble_no_glyph_fast_fillable(item))
         and (
