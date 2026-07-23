@@ -7820,7 +7820,29 @@ class VisionStackInpainterTests(unittest.TestCase):
             image,
         )
         self.assertLess(np.count_nonzero(constrained_raw), np.count_nonzero(broad_mask))
-        self.assertTrue(np.array_equal(constrained_raw, constrained_expanded))
+        self.assertGreaterEqual(np.count_nonzero(constrained_expanded), np.count_nonzero(constrained_raw))
+        self.assertLess(np.count_nonzero(constrained_expanded), np.count_nonzero(broad_mask))
+
+        glyph_mask = np.zeros((100, 180), dtype=np.uint8)
+        glyph_mask[40:50, 76:104] = 255
+        narrow_raw, narrow_expanded = _constrain_translucent_balloon_action_masks(
+            glyph_mask,
+            broad_mask,
+            [text],
+            image,
+        )
+        self.assertGreater(np.count_nonzero(narrow_expanded), np.count_nonzero(narrow_raw))
+        self.assertLess(np.count_nonzero(narrow_expanded), np.count_nonzero(broad_mask) // 4)
+
+        recovery_image = image.copy()
+        recovery_image[43:49, 107:113] = 0
+        recovered_raw, _recovered_expanded = _constrain_translucent_balloon_action_masks(
+            glyph_mask,
+            glyph_mask,
+            [text],
+            recovery_image,
+        )
+        self.assertGreater(int(recovered_raw[45, 110]), 0)
 
         page = {"texts": [dict(text)]}
         with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1"}, clear=False):

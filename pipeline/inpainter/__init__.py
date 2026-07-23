@@ -8487,6 +8487,7 @@ def _constrain_translucent_balloon_action_masks(
     height, width = shape
     scope = np.zeros(shape, dtype=np.uint8)
     allowed = np.zeros(shape, dtype=np.uint8)
+    translucent_safe = np.zeros(shape, dtype=np.uint8)
     for text in texts:
         if not isinstance(text, dict):
             continue
@@ -8519,6 +8520,7 @@ def _constrain_translucent_balloon_action_masks(
             )
             safe_mask = cv2.bitwise_or(safe_mask, cv2.bitwise_and(geometry, bubble_scope))
         allowed = np.maximum(allowed, safe_mask.astype(np.uint8))
+        translucent_safe = np.maximum(translucent_safe, safe_mask.astype(np.uint8))
         scope = np.maximum(scope, bubble_scope.astype(np.uint8))
 
     if not np.any(scope) or not np.any(allowed):
@@ -8533,6 +8535,39 @@ def _constrain_translucent_balloon_action_masks(
 
     constrained_raw, raw_dropped = _limit(raw)
     constrained_expanded, expanded_dropped = _limit(expanded)
+    # Recover only dark components touching the current glyph mask.  This
+    # catches an OCR mask that misses an outline/edge of a letter without
+    # turning a free-form search across the translucent art into an erase mask.
+    if np.any(translucent_safe) and image_rgb.ndim == 3:
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        support = cv2.dilate(
+            constrained_raw,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17)),
+            iterations=1,
+        )
+        candidate = ((gray <= 96) & (translucent_safe > 0) & (support > 0)).astype(np.uint8)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+        recovered = np.zeros(shape, dtype=np.uint8)
+        for label in range(1, component_count):
+            x, y, comp_w, comp_h, area = [int(value) for value in stats[label]]
+            if area < 4 or area > 1800 or comp_w > 140 or comp_h > 64:
+                continue
+            recovered[labels == label] = 255
+        if np.any(recovered):
+            constrained_raw = np.maximum(constrained_raw, recovered).astype(np.uint8)
+    # Text over art must keep disconnected glyph components disconnected.  The
+    # generic expansion joins each OCR line into a solid stripe, which makes a
+    # texture inpainter synthesize a flat panel instead of the background.
+    narrow_glyphs = cv2.dilate(
+        constrained_raw,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    constrained_expanded = cv2.bitwise_or(
+        cv2.bitwise_and(constrained_expanded, cv2.bitwise_not(scope)),
+        cv2.bitwise_and(narrow_glyphs, scope),
+    ).astype(np.uint8)
+    expanded_dropped = int(np.count_nonzero(expanded) - np.count_nonzero(constrained_expanded))
     for text in translucent:
         metrics = text.setdefault("qa_metrics", {})
         if isinstance(metrics, dict):
@@ -10739,6 +10774,12 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         local_texts,
         working_rgb,
     )
+    raw_mask, expanded_mask = _constrain_translucent_balloon_action_masks(
+        raw_mask,
+        expanded_mask,
+        local_texts,
+        working_rgb,
+    )
     late_dark_input = working_rgb
     working_rgb, vision_blocks, late_dark_fill_meta = _apply_fast_dark_panel_text_fill(
         working_rgb,
@@ -10815,6 +10856,12 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         raw_mask,
         expanded_mask,
         ocr_page,
+        local_texts,
+        working_rgb,
+    )
+    raw_mask, expanded_mask = _constrain_translucent_balloon_action_masks(
+        raw_mask,
+        expanded_mask,
         local_texts,
         working_rgb,
     )
