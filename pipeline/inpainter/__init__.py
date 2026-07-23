@@ -3932,7 +3932,34 @@ def _promote_translucent_balloon_profile(image_rgb: np.ndarray, text: dict) -> b
     text_mask = _text_geometry_mask(width, height, text)
     if balloon_bbox is None or text_mask is None or not np.any(text_mask):
         return False
+    text_bbox = _normalize_bbox(text.get("text_pixel_bbox") or text.get("bbox"), width, height)
+    if text_bbox is not None:
+        balloon_w = max(1, balloon_bbox[2] - balloon_bbox[0])
+        balloon_h = max(1, balloon_bbox[3] - balloon_bbox[1])
+        text_w = max(1, text_bbox[2] - text_bbox[0])
+        text_h = max(1, text_bbox[3] - text_bbox[1])
+        # A derived "white bubble" that collapses to the text itself is an
+        # art/placard false positive, not a translucent speech balloon.  Do
+        # not give it the balloon-specific renderer or local reconstruction.
+        if balloon_w <= int(round(text_w * 1.15)) and balloon_h <= int(round(text_h * 1.25)):
+            return False
     if not _looks_translucent_or_textured_background(image_rgb, balloon_bbox, text_mask):
+        return False
+    x1, y1, x2, y2 = balloon_bbox
+    balloon_sample = np.zeros((height, width), dtype=np.uint8)
+    balloon_sample[y1:y2, x1:x2] = 255
+    glyph_halo = cv2.dilate(
+        text_mask.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    balloon_sample = cv2.bitwise_and(balloon_sample, cv2.bitwise_not(glyph_halo))
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    bright_pixels = gray[(balloon_sample > 0) & (gray >= 205)]
+    # A mostly clipped-white interior is an opaque balloon, even if a border
+    # gradient makes the broad texture heuristic fire.  Local continuation is
+    # only appropriate when some of the underlying art is actually visible.
+    if bright_pixels.size >= 64 and float(np.mean(bright_pixels >= 242)) >= 0.80:
         return False
     text["layout_profile"] = "translucent_balloon"
     text["block_profile"] = "translucent_balloon"

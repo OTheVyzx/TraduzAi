@@ -7905,6 +7905,38 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertFalse(np.array_equal(result[action_mask > 0], current[action_mask > 0]))
         self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
 
+    def test_translucent_profile_rejects_a_balloon_collapsed_to_art_text(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((100, 180, 3), 220, dtype=np.uint8)
+        image[42:58, 64:116] = 10
+        text = {
+            "text_pixel_bbox": [64, 42, 116, 58],
+            "bbox": [64, 42, 116, 58],
+            "line_polygons": [[[64, 42], [116, 42], [116, 58], [64, 58]]],
+            "balloon_bbox": [64, 42, 116, 58],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertFalse(_promote_translucent_balloon_profile(image, text))
+        self.assertNotEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_profile_rejects_an_opaque_white_balloon(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((100, 180, 3), 255, dtype=np.uint8)
+        image[42:58, 64:116] = 10
+        text = {
+            "text_pixel_bbox": [64, 42, 116, 58],
+            "bbox": [60, 38, 120, 62],
+            "line_polygons": [[[64, 42], [116, 42], [116, 58], [64, 58]]],
+            "balloon_bbox": [30, 18, 150, 82],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertFalse(_promote_translucent_balloon_profile(image, text))
+        self.assertNotEqual(text.get("layout_profile"), "translucent_balloon")
+
     def test_translucent_balloon_does_not_receive_a_second_runtime_mask_expansion(self):
         from vision_stack.runtime import _run_masked_inpaint_passes
 
