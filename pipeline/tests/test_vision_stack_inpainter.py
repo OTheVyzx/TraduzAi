@@ -7937,6 +7937,24 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertFalse(_promote_translucent_balloon_profile(image, text))
         self.assertNotEqual(text.get("layout_profile"), "translucent_balloon")
 
+    def test_translucent_profile_accepts_a_tight_balloon_with_visible_background(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((100, 180, 3), 215, dtype=np.uint8)
+        gradient = np.tile(np.linspace(205, 240, 120, dtype=np.uint8), (60, 1))
+        image[20:80, 30:150] = np.stack([gradient, gradient, gradient], axis=2)
+        image[45:61, 38:150] = 10
+        text = {
+            "text_pixel_bbox": [38, 26, 143, 74],
+            "bbox": [38, 26, 143, 74],
+            "line_polygons": [[[38, 26], [143, 26], [143, 74], [38, 74]]],
+            "balloon_bbox": [30, 20, 150, 80],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+
     def test_translucent_balloon_does_not_receive_a_second_runtime_mask_expansion(self):
         from vision_stack.runtime import _run_masked_inpaint_passes
 

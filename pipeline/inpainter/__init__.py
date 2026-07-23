@@ -3941,7 +3941,7 @@ def _promote_translucent_balloon_profile(image_rgb: np.ndarray, text: dict) -> b
         # A derived "white bubble" that collapses to the text itself is an
         # art/placard false positive, not a translucent speech balloon.  Do
         # not give it the balloon-specific renderer or local reconstruction.
-        if balloon_w <= int(round(text_w * 1.15)) and balloon_h <= int(round(text_h * 1.25)):
+        if balloon_w <= int(round(text_w * 1.02)) and balloon_h <= int(round(text_h * 1.05)):
             return False
     if not _looks_translucent_or_textured_background(image_rgb, balloon_bbox, text_mask):
         return False
