@@ -10490,6 +10490,9 @@ def _has_white_balloon_text_residual(
     for text in texts:
         if not isinstance(text, dict):
             continue
+        profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
+        if profile == "translucent_balloon":
+            continue
 
         bbox = _normalize_focus_bbox(text.get("bbox"))
         if bbox is None:
@@ -10981,6 +10984,9 @@ def _apply_white_balloon_residual_force_fill(
     cleaned_gray = cv2.cvtColor(cleaned_rgb, cv2.COLOR_RGB2GRAY)
     for text in texts:
         if not isinstance(text, dict):
+            continue
+        profile = str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower()
+        if profile == "translucent_balloon":
             continue
         line_mask = _build_white_balloon_text_line_fill_mask(original_rgb, text)
         if not isinstance(line_mask, np.ndarray) or line_mask.shape[:2] != (height, width) or not np.any(line_mask):

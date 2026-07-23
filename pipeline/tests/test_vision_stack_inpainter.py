@@ -7831,6 +7831,28 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(stats["remaining_blocks"], 1)
         self.assertEqual(page["_strip_fast_dark_rejection_reasons"], {"translucent_balloon": 1})
 
+    def test_translucent_balloon_skips_white_residual_force_fill(self):
+        from vision_stack.runtime import _apply_white_balloon_residual_force_fill
+
+        original = np.full((80, 120, 3), 255, dtype=np.uint8)
+        original[28:44, 34:86] = 0
+        cleaned = original.copy()
+        cleaned[28:44, 34:86] = 100
+        text = {
+            "bbox": [30, 24, 90, 48],
+            "text_pixel_bbox": [34, 28, 86, 44],
+            "line_polygons": [[[34, 28], [86, 28], [86, 44], [34, 44]]],
+            "balloon_bbox": [20, 16, 100, 60],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        opaque_result = _apply_white_balloon_residual_force_fill(original, cleaned, [dict(text)])
+        translucent = dict(text, layout_profile="translucent_balloon", block_profile="translucent_balloon")
+        translucent_result = _apply_white_balloon_residual_force_fill(original, cleaned, [translucent])
+
+        self.assertFalse(np.array_equal(opaque_result, cleaned))
+        self.assertTrue(np.array_equal(translucent_result, cleaned))
+
 
 if __name__ == "__main__":
     unittest.main()

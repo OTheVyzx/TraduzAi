@@ -9143,6 +9143,18 @@ def _record_inpaint_decision(
         for flag in ocr_page.get("_strip_inpaint_decision_flags", [])
         if flag
     ]
+    translucent_texts = [
+        text
+        for text in ocr_page.get("texts", [])
+        if isinstance(text, dict) and _is_translucent_balloon_profile(text)
+    ]
+    translucent_mask_metrics = {
+        str(text.get("text_id") or text.get("id") or f"text_{index:03d}"): (
+            (text.get("qa_metrics") or {}).get("translucent_balloon_mask_constrained")
+        )
+        for index, text in enumerate(translucent_texts, start=1)
+        if isinstance((text.get("qa_metrics") or {}).get("translucent_balloon_mask_constrained"), dict)
+    }
     payload = {
         "page_id": _strip_page_id(ocr_page),
         "band_id": band_id,
@@ -9174,6 +9186,11 @@ def _record_inpaint_decision(
         "flat_ui_prefill_count": int(ocr_page.get("_strip_flat_ui_prefill_count") or 0),
         "used_dark_panel_fill": bool(ocr_page.get("_strip_used_dark_panel_fill")),
         "dark_panel_fill_count": int(ocr_page.get("_strip_dark_panel_fill_count") or 0),
+        "translucent_balloon_text_ids": [
+            str(text.get("text_id") or text.get("id") or f"text_{index:03d}")
+            for index, text in enumerate(translucent_texts, start=1)
+        ],
+        "translucent_balloon_mask_metrics": translucent_mask_metrics,
         "used_real_inpaint": bool(used_real_inpaint or ocr_page.get("_strip_used_real_inpaint")),
         "used_post_cleanup": bool(ocr_page.get("_strip_used_post_cleanup")),
         "post_cleanup_skipped_reason": str(ocr_page.get("_strip_post_cleanup_skipped_reason") or ""),
@@ -9640,6 +9657,8 @@ def _text_allows_final_white_cleanup_extension(text: dict, image_rgb: np.ndarray
     if source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask", "translator_note_text_mask"}:
         return False
     profile = str(text.get("block_profile") or text.get("layout_profile") or text.get("render_profile") or "").strip().lower()
+    if profile == "translucent_balloon":
+        return False
     if profile in {"dark_panel", "dark_bubble", "black_bubble", "colored_status_panel", "status_panel", "card", "title_card"}:
         return False
     if (
@@ -9656,6 +9675,7 @@ def _text_allows_final_white_cleanup_extension(text: dict, image_rgb: np.ndarray
 def _has_white_balloon_cleanup_metadata(texts: list[dict]) -> bool:
     return any(
         isinstance(text, dict)
+        and str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower() != "translucent_balloon"
         and (
             str(text.get("block_profile") or text.get("layout_profile") or "").strip().lower() == "white_balloon"
             or str(text.get("balloon_type") or "").strip().lower() == "white"
@@ -10884,13 +10904,14 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     ocr_page.update(cleanup_stats)
     ocr_page["_strip_used_post_cleanup"] = True
     texts = local_texts
+    has_translucent_balloon_profile = any(_is_translucent_balloon_profile(text) for text in texts)
     residual_ocr_page = dict(ocr_page)
     residual_ocr_page["texts"] = texts
     ocr_page["_strip_residual_texts"] = texts
     cleaned, rotated_residual_pixels = _apply_rotated_recovery_residual_cleanup(band_rgb, cleaned, texts)
     if rotated_residual_pixels:
         ocr_page["_strip_rotated_residual_cleanup_pixels"] = int(rotated_residual_pixels)
-    if _has_white_balloon_text_residual(band_rgb, cleaned, texts):
+    if not has_translucent_balloon_profile and _has_white_balloon_text_residual(band_rgb, cleaned, texts):
         forced = _apply_white_balloon_residual_force_fill(band_rgb, cleaned, texts)
         forced, force_limit_pixels, force_changed_outside = _clamp_image_to_limit_mask(
             cleaned,
@@ -10915,6 +10936,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     if (
         residual_check.get("has_residual")
+        and not has_translucent_balloon_profile
         and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
     ):
         forced = _apply_white_balloon_residual_force_fill(band_rgb, cleaned, texts)
@@ -10942,6 +10964,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             )
     if (
         residual_check.get("has_residual")
+        and not has_translucent_balloon_profile
         and "dark_residual_pixels" in set(residual_check.get("flags") or [])
         and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
         and _all_processable_texts_are_white_balloon(texts, band_rgb)
@@ -11016,6 +11039,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     if (
         residual_check.get("has_residual")
+        and not has_translucent_balloon_profile
         and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
     ):
         forced = _apply_white_balloon_residual_force_fill(band_rgb, cleaned, texts)
@@ -11091,6 +11115,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     if (
         residual_check.get("has_residual")
+        and not has_translucent_balloon_profile
         and str(residual_check.get("region_source") or "").startswith("text_region_white_balloon")
     ):
         residual_mask = _build_residual_text_region_mask(residual_ocr_page, cleaned.shape[:2])
@@ -11153,6 +11178,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     )
     if (
         final_residual_check.get("has_residual")
+        and not has_translucent_balloon_profile
         and str(final_residual_check.get("region_source") or "").startswith("text_region_white_balloon")
     ):
         residual_mask = _build_residual_text_region_mask(residual_ocr_page, cleaned.shape[:2])
