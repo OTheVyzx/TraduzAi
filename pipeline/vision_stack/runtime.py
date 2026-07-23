@@ -11155,7 +11155,17 @@ def _run_masked_inpaint_passes(
     assert mask.shape[:2] == image_np.shape[:2], (
         f"mask/image mismatch before passes: mask={mask.shape[:2]} image={image_np.shape[:2]}"
     )
-    if expand_mask:
+    # A translucent balloon has already received the text-over-art glyph
+    # expansion in the strip mask builder.  Applying this generic dilation a
+    # second time turns the individual glyph repair areas into pale blocks.
+    # Other text classes retain the existing extra halo.
+    has_preexpanded_text_over_art_mask = any(
+        isinstance(text, dict)
+        and str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+        == "translucent_balloon"
+        for text in (texts or [])
+    )
+    if expand_mask and not has_preexpanded_text_over_art_mask:
         expanded = cv2.dilate(
             mask,
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),

@@ -7832,6 +7832,10 @@ class VisionStackInpainterTests(unittest.TestCase):
             image,
         )
         self.assertGreater(np.count_nonzero(narrow_expanded), np.count_nonzero(narrow_raw))
+        # Text over art needs enough room to cover the anti-aliased edge and
+        # outline of a glyph.  The expansion must be stronger than the
+        # generic 2 px glyph halo while remaining far below the broad balloon.
+        self.assertGreaterEqual(np.count_nonzero(narrow_expanded), 900)
         self.assertLess(np.count_nonzero(narrow_expanded), np.count_nonzero(broad_mask) // 4)
 
         recovery_image = image.copy()
@@ -7874,6 +7878,53 @@ class VisionStackInpainterTests(unittest.TestCase):
 
         self.assertFalse(np.array_equal(opaque_result, cleaned))
         self.assertTrue(np.array_equal(translucent_result, cleaned))
+
+    def test_translucent_balloon_uses_local_text_over_art_reconstruction(self):
+        from inpainter import _apply_translucent_balloon_text_over_art_inpaint
+
+        original = np.full((80, 120, 3), 220, dtype=np.uint8)
+        original[:, :, 0] = np.tile(np.linspace(190, 240, 120, dtype=np.uint8), (80, 1))
+        original[30:46, 38:82] = 15
+        current = np.full_like(original, 255)
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[26:50, 32:88] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "balloon_bbox": [20, 16, 100, 60],
+        }
+
+        result, pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            original,
+            current,
+            action_mask,
+            [text],
+        )
+
+        self.assertEqual(pixels, int(np.count_nonzero(action_mask)))
+        self.assertFalse(np.array_equal(result[action_mask > 0], current[action_mask > 0]))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_translucent_balloon_does_not_receive_a_second_runtime_mask_expansion(self):
+        from vision_stack.runtime import _run_masked_inpaint_passes
+
+        class IdentityInpainter:
+            def inpaint(self, image, _mask, **_kwargs):
+                return image.copy()
+
+        image = np.full((72, 96, 3), 180, dtype=np.uint8)
+        glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph_mask[28:40, 34:62] = 255
+
+        result = _run_masked_inpaint_passes(
+            IdentityInpainter(),
+            image,
+            glyph_mask,
+            texts=[{"layout_profile": "translucent_balloon"}],
+            expand_mask=True,
+        )
+
+        self.assertTrue(np.array_equal(result["expanded_mask"], glyph_mask))
 
 
 if __name__ == "__main__":

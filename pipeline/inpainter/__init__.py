@@ -8555,13 +8555,14 @@ def _constrain_translucent_balloon_action_masks(
             recovered[labels == label] = 255
         if np.any(recovered):
             constrained_raw = np.maximum(constrained_raw, recovered).astype(np.uint8)
-    # Text over art must keep disconnected glyph components disconnected.  The
-    # generic expansion joins each OCR line into a solid stripe, which makes a
-    # texture inpainter synthesize a flat panel instead of the background.
+    # Match the text-over-art repair radius, but apply it only to the recovered
+    # glyphs.  It covers anti-aliased edges, outlines and the small shadow
+    # around lettering without expanding the OCR line rectangles into a flat
+    # panel over the translucent background.
     narrow_glyphs = cv2.dilate(
         constrained_raw,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
-        iterations=1,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+        iterations=2,
     )
     constrained_expanded = cv2.bitwise_or(
         cv2.bitwise_and(constrained_expanded, cv2.bitwise_not(scope)),
@@ -8575,8 +8576,64 @@ def _constrain_translucent_balloon_action_masks(
                 "raw_pixels_dropped": int(raw_dropped),
                 "expanded_pixels_dropped": int(expanded_dropped),
                 "safe_pixels": int(np.count_nonzero(allowed)),
+                "glyph_expansion": "text_over_art_7x7_x2",
             }
     return constrained_raw, constrained_expanded
+
+
+def _apply_translucent_balloon_text_over_art_inpaint(
+    original_rgb: np.ndarray,
+    current_rgb: np.ndarray,
+    action_mask: np.ndarray | None,
+    texts: list[dict],
+) -> tuple[np.ndarray, int]:
+    """Reconstruct translucent-balloon lettering from its local image context.
+
+    AOT/LaMa are useful for broad artwork, but with an expanded glyph mask on a
+    translucent overlay they can synthesize one pale patch per word.  Use the
+    same expanded, glyph-only action mask with a local continuation pass; it
+    keeps the balloon's underlying gradient continuous without becoming a
+    uniform fill.  Only the promoted translucent profile can enter here.
+    """
+    if (
+        not isinstance(original_rgb, np.ndarray)
+        or not isinstance(current_rgb, np.ndarray)
+        or original_rgb.shape != current_rgb.shape
+        or original_rgb.ndim != 3
+    ):
+        return current_rgb, 0
+    shape = original_rgb.shape[:2]
+    source = _coerce_mask_for_shape(action_mask, shape)
+    if not np.any(source):
+        return current_rgb, 0
+
+    height, width = shape
+    translucent_action = np.zeros(shape, dtype=np.uint8)
+    for text in texts:
+        if not _is_translucent_balloon_profile(text):
+            continue
+        scope_bbox = (
+            _normalize_bbox(text.get("balloon_bbox"), width, height)
+            or _normalize_bbox(text.get("bubble_mask_bbox"), width, height)
+            or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+            or _normalize_bbox(text.get("bbox"), width, height)
+        )
+        if scope_bbox is None:
+            continue
+        scope = _mask_from_bbox(width, height, scope_bbox, padding=0)
+        translucent_action = np.maximum(
+            translucent_action,
+            cv2.bitwise_and(source, scope).astype(np.uint8),
+        )
+    pixel_count = int(np.count_nonzero(translucent_action))
+    if pixel_count == 0:
+        return current_rgb, 0
+
+    reconstructed = cv2.inpaint(original_rgb, translucent_action, 7, cv2.INPAINT_NS)
+    result = current_rgb.copy()
+    use_reconstructed = translucent_action > 0
+    result[use_reconstructed] = reconstructed[use_reconstructed]
+    return result, pixel_count
 
 
 def _drop_unprotected_dark_outline_slivers(
@@ -10952,6 +11009,14 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     ocr_page["_strip_used_post_cleanup"] = True
     texts = local_texts
     has_translucent_balloon_profile = any(_is_translucent_balloon_profile(text) for text in texts)
+    if has_translucent_balloon_profile:
+        cleaned, translucent_texture_pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            working_rgb,
+            cleaned,
+            expanded_mask,
+            texts,
+        )
+        ocr_page["_strip_translucent_text_over_art_inpaint_pixels"] = int(translucent_texture_pixels)
     residual_ocr_page = dict(ocr_page)
     residual_ocr_page["texts"] = texts
     ocr_page["_strip_residual_texts"] = texts
