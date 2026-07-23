@@ -17593,6 +17593,9 @@ def _cleanup_bbox4(value, width: int, height: int, *, band_y_top: int = 0) -> li
 def _text_mask_cleanup_allowed(text: dict) -> bool:
     if not isinstance(text, dict):
         return False
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    if profile == "translucent_balloon":
+        return False
     translated = str(text.get("translated") or text.get("traduzido") or "").strip()
     if not translated:
         return False

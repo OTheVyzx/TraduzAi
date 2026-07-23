@@ -10948,5 +10948,21 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertGreater(img.getpixel((80, 42))[0], 220)
 
+    def test_render_band_text_mask_cleanup_skips_translucent_balloon(self):
+        img = Image.new("RGB", (160, 90), (112, 120, 126))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "TEXTO",
+            "source_text_mask_bbox": [42, 32, 118, 54],
+            "background_rgb": [220, 220, 220],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "translucent_balloon",
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((80, 42)), (112, 120, 126))
+
 if __name__ == "__main__":
     unittest.main()
