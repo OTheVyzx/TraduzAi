@@ -1,6 +1,6 @@
 ---
 name: traduzai-translation
-description: Use when TraduzAI sends the wrong OCR text to translation, preserves untranslated source, mistranslates names or glossary terms, loses placeholders, skips the wrong route_action, repeats fragments, or falls through after Google health failures.
+description: Use when TraduzAI translation texts are missing or disappear, use the wrong OCR source, preserve untranslated text, mistranslate names or glossary terms, lose placeholders, skip the wrong route_action, repeat fragments, or fall through after Google health failures.
 ---
 
 # TraduzAI Translation
@@ -17,7 +17,7 @@ Contrato: preserve `texts`, IDs/trace/metadados; produza `original`, `translated
 
 `_source_text_before_normalization`: reparo especial de lóbulo; senão `raw_ocr` → `original` → `text`. `_source_text_for_translation` usa `normalized_text_final` alterado apenas com confiança ≥ 0,7; senão `text`, depois raw. Atenção: se upstream já sobrescreveu `text` com o normalizado, o fallback pode contornar o gate baixo.
 
-`route_action` é o gate autoritativo via `route_action_requires_translation`; campos legacy de skip não substituem essa decisão. Antes do envio, `normalize_ocr_record` e `merge_same_balloon_fragments_before_translation` fazem merge/dedupe e preservam `source_text_ids`/`source_trace_ids`; o wrapper mescla a resposta de volta ao snapshot OCR.
+`route_action` é o gate autoritativo; skips legacy não o substituem. `normalize_ocr_record` e `merge_same_balloon_fragments_before_translation` fazem merge/dedupe. `_merge_translated_page_metadata` percorre só `translated_texts`: OCR sem output correspondente pode desaparecer. Exija paridade por `trace_id` entre inputs → outputs → project.
 
 ## Backend e proteção
 
@@ -26,7 +26,7 @@ Contrato: preserve `texts`, IDs/trace/metadados; produza `original`, `translated
 - Glossário é ativo em normalização, memória, proteção/restore de placeholders e locks pós-processamento. `translation_context` rico é distinto: hoje não chega às requisições Google automáticas.
 - Proteja termos antes do backend; restaure placeholders, aplique entity/name locks e pós-processamento; placeholder perdido gera `unrestored_placeholder`.
 
-O backend Ollama e o semantic review por LLM existem como entrypoints, mas `translate_pages` fixa o status Ollama como indisponível e `semantic_review_requested = False`. Não prometa execução/fallback. O pós-processamento determinístico `_review_translation_grammar_semantics` continua separado e ativo.
+Ollama/semantic review LLM são entrypoints inativos: `translate_pages` fixa Ollama indisponível e `semantic_review_requested = False`. Não prometa fallback. `_review_translation_grammar_semantics` é pós-processo determinístico ativo.
 
 ## Primeira divergência e artefatos
 
@@ -39,7 +39,7 @@ O backend Ollama e o semantic review por LLM existem como entrypoints, mas `tran
 | `decision_trace.jsonl` diverge | policy/reason em `record_decision` |
 | `07` correto, `project.json`/QA errado | merge, persistência ou export gate |
 
-Use também `translation_debug_summary.json`, `glossary_application.jsonl` e `translation_fallbacks.jsonl`.
+Use também `07_translation/translation_debug_summary.json`, `07_translation/glossary_application.jsonl` e `07_translation/translation_fallbacks.jsonl`.
 
 ## Testes e REDs pendentes
 
@@ -51,11 +51,11 @@ try {
 } finally { Pop-Location }
 ```
 
-REDs pendentes: impedir bypass quando `text` já contém normalizado de baixa confiança; definir se contexto rico alcançará Google; `test_translate_pages_writes_complete_translation_debug_artifacts` espera 2 inputs por skip legacy, mas o runtime autoritativo gera 4. Header isolado não prova integração.
+REDs pendentes: preservar/sinalizar OCR sem output e testar paridade por trace; impedir bypass de normalizado baixo; definir se contexto rico alcançará Google; o teste de debug espera 2 skips legacy, mas o runtime gera 4. Header isolado não prova integração.
 
 ## Fronteiras e checklist
 
-OCR possui texto/rota; translation possui seleção, backend, termos e saída; pipeline possui merge/QA; typesetting apenas renderiza. Registre primeira divergência, texto efetivamente enviado, rota, backend/fallback e trace; valide nodeids, artefatos, visual downstream, UTF-8, auditor, diff e checkout sujo.
+OCR possui texto/rota; translation, seleção/backend/termos; pipeline, merge/QA. Registre primeira divergência, texto enviado, rota, backend e trace; valide nodeids, artefatos, UTF-8, auditor, diff e checkout sujo.
 
 ## Última verificação
 
