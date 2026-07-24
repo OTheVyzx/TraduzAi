@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [string]$SourceRoot,
 
     [string]$DestinationRoot = 'C:\Users\PICHAU\.agents\skills',
@@ -9,6 +8,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $SourceRoot = Join-Path (Join-Path $PSScriptRoot '..') '.agents\skills'
+}
 
 $skillNames = @(
     'mangatl-dev'
