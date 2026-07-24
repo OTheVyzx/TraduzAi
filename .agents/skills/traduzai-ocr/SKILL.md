@@ -1,19 +1,27 @@
 ---
 name: traduzai-ocr
-description: Use when TraduzAI OCR text is wrong, disappears after recognition, is normalized unexpectedly, or diverges in review, language, SFX, watermark, scanlation-credit, route_action, or route_reason behavior.
+description: Use when TraduzAI OCR text is wrong, disappears, changes during normalization, or diverges in review, language, SFX, watermark, credits, route_action, or route_reason.
 ---
 
 # TraduzAI OCR
 
-## Escopo e owner
+## Owner e fronteiras
 
-Esta skill é dona do reconhecimento, limpeza/normalização, review, classificação e contrato de roteamento OCR. Detect é dona da geometria; tradução apenas consome o texto e aplica o gate; QA/export é downstream. Em falhas multietapa, use também `mangatl-dev`.
+Owner de reconhecimento, normalização, review, classificação e roteamento: `pipeline/vision_stack/runtime.py`, `pipeline/vision_stack/ocr.py`, `pipeline/ocr/detector.py` e `pipeline/ocr/`. `process_bands.py` orquestra; `translate.py` consome.
 
-Entrypoints: `pipeline/vision_stack/runtime.py`, `pipeline/ocr/` e `pipeline/strip/process_bands.py`. `pipeline/translator/translate.py` é consumer do contrato.
+Detect fornece geometria; tradução aplica o gate, não cria semântica OCR; QA/export é downstream. Em problema multietapa do pipeline automático, use `traduzai-pipeline` junto da especialista afetada; use `mangatl-dev` para coordenação geral.
 
 ## Fluxo ativo por bandas
 
-`process_band` → `run_ocr_stage` / `build_page_result` → `_record_ocr_raw_blocks` → `_run_review_layout_stage` / `contextual_review_page` → `_finalize_ocr_page_before_translation` / normalizers → `translate_pages` → `normalize_ocr_record` novamente → `_should_skip_translation_item` / gate de `route_action`.
+`process_band` → `_run_band_ocr_stage` → `run_ocr_stage` / `build_page_result` → `_record_ocr_raw_blocks` → `_run_review_layout_stage` / `contextual_review_page` → `_finalize_ocr_page_before_translation` / normalizers → `_run_translate_stage` → `translate_pages` → `normalize_ocr_record` novamente → `_should_skip_translation_item`.
+
+Entrada: imagem/crop, `_vision_blocks` com `bbox`, idioma/preset e contexto. Saída: página com `texts` e `_vision_blocks` alinhados. Preserve `bbox`, `text`, `raw_ocr`, `normalized_ocr`, `normalized_text_final`, `original`, `confidence`, `tipo`/`type`, `route_action`, `route_reason`, `needs_review`, `qa_flags` e `skip_processing` legado.
+
+## Backend, idioma e texto enviado
+
+`run_ocr` usa o stack ativo e falha fechado, sem legacy/EasyOCR. MangaOCR indisponível cai para PaddleOCR. OCR regional com preset tenta o stack e pode cair para crop Paddle; EasyOCR está desativado. `normalize_paddleocr_language` resolve aliases/regiões (`en-US`, `pt-BR`, `zh-CN`, `zh-TW`, `ja`, `ko`); confira o mapping EasyOCR antes de mudar legado.
+
+Após nova `normalize_ocr_record`, `_source_text_for_translation` escolhe: raw para `leading_dark_lobe_duplicate_fragment_removed`; senão `normalized_text_final` alterado com confiança ≥0,7; senão `text`; por último raw, cuja precedência é `raw_ocr` → `original` → `text`.
 
 ## Quick reference: primeira divergência
 
@@ -23,21 +31,17 @@ Entrypoints: `pipeline/vision_stack/runtime.py`, `pipeline/ocr/` e `pipeline/str
 | Correta em `03_ocr`, alterada em `04_text_normalization_router/*` | reviewer, normalizer ou `text_router` |
 | Correta em `04`, ausente de `07_translation/translation_inputs.jsonl` | `route_action`/`route_reason`; gate de tradução |
 | Presente em inputs, incorreta em `translation_outputs.jsonl`/`translation_debug_summary.json` | tradução/backend; use `traduzai-translation` |
-| Correta em `07`, divergente em `project.json` ou `export_gate` | serialização/QA downstream; use `mangatl-dev` |
+| Correta em `07`, divergente em `project.json`/`export_gate` | serialização/QA; use `traduzai-pipeline` + especialista |
 
-`03_ocr` prova aceitação no momento do OCR, antes da normalização e do gate; não contém todas as tentativas. `decision_trace.jsonl` localiza drops e decisões. `04` explica reparos; `07` prova o que cruzou o gate.
+`03_ocr` prova aceitação antes da normalização/gate, não todas as tentativas. `decision_trace.jsonl` localiza drops; `04` explica reparos; `07` prova o que cruzou o gate.
 
-## Contrato e invariantes
+## Invariantes e diagnóstico
 
-- Preserve o shape: `bbox`, `text`, `raw_ocr`, `normalized_ocr`, `normalized_text_final`, `original` quando usado, `confidence`, `tipo`/`type`, `route_action`, `route_reason`, `needs_review`, `qa_flags` e `skip_processing` legado.
 - `route_action` é autoritativo. `skip_processing` é legado/derivado e pode divergir; `review_required` não traduz mesmo com `skip_processing: false`.
-- Decida a causa por `route_reason` e traces: `scanlation_credit_suppressed`, fragmento de arte, scene text, texto truncado/joined. Não use apenas confidence/skip.
-- A tradução reexecuta `normalize_ocr_record` antes do gate. Watermark, não-inglês, SFX e créditos podem mudar tradução, inpaint e render.
-- Não assuma `review_reason` como campo top-level; procure `route_reason`, `qa_flags` e metadata/trace de normalização.
+- Decida por `route_reason`/traces (`scanlation_credit_suppressed`, art fragment, scene text, truncated/joined), não apenas confidence/skip. `review_reason` não é contrato top-level.
+- Preserve shape/alinhamento. Watermark, não-inglês, SFX e crédito alteram tradução, inpaint e render.
 
-## Diagnóstico antes de patch
-
-Siga um `text_id`/`trace_id` pelos artefatos, encontre a primeira divergência e compare texto, rota, motivo e flags. Só então altere threshold, classifier, reviewer ou normalizer. Tradução não cria a semântica OCR.
+Siga `text_id`/`trace_id` até a primeira divergência; só então altere threshold, classifier, reviewer ou normalizer.
 
 ## Testes focados
 
@@ -50,9 +54,13 @@ try {
 } finally { Pop-Location }
 ```
 
-Mapa adicional: `test_vision_stack_ocr.py` cobre backend, idioma e mapping; `test_ocr_reviewer.py`, escolha primary/fallback; testes `translation`/`debug`, o consumer e seus artefatos. Selecione nodeid/`-k`, não o arquivo inteiro.
+`test_ocr_reviewer.py` cobre primary/fallback; testes `translation`/`debug`, o consumer. Se expectativa usar só `skip_processing`, trate-a primeiro como possível legado, não falha confirmada.
 
-Se um teste de debug de tradução esperar skip baseado apenas em `skip_processing`, trate primeiro como possível expectativa legada do teste, não como falha confirmada do produto.
+## Checklist de encerramento
+
+- Primeiro artefato divergente e owner registrados.
+- Entrada/saída, aliases, shape, `route_action` e consumidores vizinhos preservados.
+- Nodeids focados, auditor, UTF-8 e `git diff --check` validados.
 
 ## Última verificação
 
