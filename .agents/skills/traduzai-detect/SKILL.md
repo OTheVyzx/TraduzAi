@@ -7,13 +7,13 @@ description: Use when text or balloon boxes are missing, duplicated, oversized, 
 
 ## Escopo e owner
 
-Esta skill é dona da criação, cobertura e geometria dos candidatos de texto/balão e de sua transformação até o `_vision_blocks` inicial. OCR decide quais pares sobrevivem; inpaint transforma os blocos aceitos em máscara. Use `traduzai-ocr` ou `traduzai-inpaint` para esses estágios. Em falhas multietapa, use também `traduzai-pipeline`.
+Esta skill é dona da cobertura/geometria dos candidatos e de sua transformação até o `_vision_blocks` inicial. OCR é dona do reconhecimento, pareamento e filtros textuais; inpaint transforma os blocos aceitos em máscara. Use `traduzai-ocr` ou `traduzai-inpaint` para esses estágios. Em falhas multietapa, use `mangatl-dev`, que encaminha ao owner do pipeline.
 
 O fluxo ativo é:
 
-`pipeline/main.py` → `pipeline/strip/run.py::run_chapter` → `pipeline/strip/detect_balloons.py::detect_strip_balloons` → `pipeline/strip/bands.py::group_balloons_into_bands` → `pipeline/strip/bands.py::attach_band_slices` → `pipeline/strip/process_bands.py::_band_to_page_dict` / `_run_band_ocr_stage` → `pipeline/vision_stack/runtime.py::run_ocr_stage` / `build_page_result`.
+`pipeline/main.py` → `pipeline/strip/run.py::run_chapter` → `pipeline/strip/detect_balloons.py::detect_strip_balloons` → `pipeline/strip/bands.py::group_balloons_into_bands` → `pipeline/strip/bands.py::attach_band_slices` → `pipeline/strip/process_bands.py::process_band` → `_band_to_page_dict` / `_run_band_ocr_stage` → `pipeline/vision_stack/runtime.py::run_ocr_stage` / `build_page_result`.
 
-`pipeline/vision_stack/detector.py` fornece o backend alcançado por `_get_detector`; `runtime.py` consome caixas e monta resultados. Nenhum deles, isoladamente, é o owner do fluxo por bandas.
+`pipeline/vision_stack/detector.py` fornece o backend via `_get_detector`. `run_ocr_stage` pode adicionar ou alterar candidatos antes do reconhecimento por scans orphan, UIED e auxiliares; essa geometria continua no domínio detect. O runtime não é, isoladamente, owner do fluxo por bandas.
 
 ## Quick reference: onde a caixa sumiu?
 
@@ -32,7 +32,7 @@ O fluxo ativo é:
 - Detecção produz candidatos antes de OCR. Não diagnostique caixa faltante apenas pelo resultado final.
 - `strip_bbox` usa coordenadas do strip; `_band_to_page_dict` subtrai `band.y_top`; a reatribuição final converte para coordenadas de página.
 - Shape mínimo verificável: dict com `bbox: [x1, y1, x2, y2]`, `x2 > x1`, `y2 > y1`, limites válidos no espaço declarado e `confidence` numérica.
-- `_vision_blocks` muda de significado: começa em `band.balloons`; `build_page_result` usa `zip(blocks, texts)` e filtros, portanto termina apenas com pares sobreviventes.
+- `_vision_blocks` muda de significado: começa em `band.balloons`; no caminho normal até `build_page_result`, `zip(blocks, texts)` e filtros deixam só pares sobreviventes. Early returns sinalizados de `run_ocr_stage` podem preservar candidatos de entrada com `texts: []`.
 - Preserve o fast path sem texto: resultado vazio/sinalizado não autoriza inventar candidatos.
 - Caixa perdida ou larga contamina OCR, layout, copyback e inpaint.
 
