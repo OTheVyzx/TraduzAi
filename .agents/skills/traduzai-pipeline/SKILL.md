@@ -20,6 +20,8 @@ Rust inicia o sidecar Python; `main.py` → `run_chapter` → `process_band` →
 
 Em execução normal, `BLOCK` salva preview, emite `complete`/exit 0 e o Rust publica `success: true`, `completion_status: blocked`. Com `strict` ou `export_mode: strict`, somente `BLOCK` emite `error`/exit 2. `REVIEW` sai do Rust como `completion_status: approved`, preservando `needs_review` e contagens; não confunda com ausência de revisão.
 
+Lacuna de contrato: `REVIEW` existe no runtime, mas `src/lib/pipelineCompletion.ts::ExportGateStatus` ainda o exclui. Investigue possível divergência TypeScript/runtime; não normalize silenciosamente.
+
 O Rust resolve o resumo nesta ordem: `project.json` (`qa.export_gate`) → `qa_report.json` → fallback `PASS`. Erro do sidecar gera `success: false` e `completion_status: error`.
 
 ## Triagem e divergência conhecida
@@ -32,7 +34,7 @@ Batch: `BatchCompletionScreen` mostra ícones verdes; `openBatchChapter` força 
 
 - Raiz: `project.json`, `qa_report.json`/`.md`, `decision_trace.jsonl`, `performance_timing.json` e imagens.
 - `debug/e2e/00_run`: config, ambiente, argumentos e timing.
-- `debug/e2e/11_qa_export_gate`: `export_gate.json`, `qa_export_gate_consistency.json`, `qa_flag_propagation_audit.json`, `final_rerender_visual_qa.json`/`.jsonl`; `strict_exit_audit.json` existe apenas no BLOCK strict.
+- `debug/e2e/11_qa_export_gate`: `export_gate.json`, `qa_issues.jsonl`, `visual_blockers.jsonl`, `qa_export_gate_consistency.json`, `qa_flag_propagation_audit.json`, `final_rerender_visual_qa.json`/`.jsonl`; `strict_exit_audit.json` existe apenas no BLOCK strict.
 
 Compare primeiro `project.json` com `qa_report.json`; depois payload Rust, evento, store e tela. Não conclua pelo último log isolado.
 
