@@ -9,18 +9,16 @@ description: Use when TraduzAI finishes but QA blocks the preview, reports succe
 
 Owners: `pipeline/main.py`, `pipeline/strip/run.py`, `pipeline/strip/process_bands.py`, `pipeline/qa/export_gate.py`, `pipeline/project_writer.py`, `src-tauri/src/commands/pipeline.rs`, `src/lib/tauri.ts`, `src/lib/pipelineCompletion.ts`, `src/lib/stores/appStore.ts` e `src/pages/Processing.tsx`.
 
-`main.py` → `run_chapter` → `process_band` → detect/OCR → review/layout/style → tradução → inpaint → typeset/copyback → `project.json`/QA/export gate → sidecar Rust → evento `pipeline-complete` → store/tela React.
-
-Entrada: config, fontes e opções de execução. Saída: imagens, projeto aberto/reimportável, relatórios, debug e estado de revisão propagado ao app.
+Rust inicia o sidecar Python; `main.py` → `run_chapter` → `process_band` → stages → `project.json`/QA/export gate. Rust lê os artefatos e emite `pipeline-complete` para store/tela React.
 
 ## Contrato de conclusão
 
 - `success` é sucesso **técnico** do processo/IPC; não aprova a saída.
 - `completion_status`: `approved | blocked | overridden | error`. Nunca use `success` como valor.
 - `output_review_state`: `approved | blocked_preview | overridden`, persistido no projeto.
-- `qa.export_gate.status`: `PASS | BLOCK | OVERRIDDEN`; é a autoridade visual junto de issues/contagens.
+- `qa.export_gate.status`: `PASS | REVIEW | BLOCK | OVERRIDDEN`; é a autoridade visual junto de issues/contagens.
 
-Em execução normal, `BLOCK` salva preview revisável, emite `complete`/exit 0 e o Rust publica `success: true`, `completion_status: blocked`. Com `strict` ou `export_mode: strict`, `BLOCK` emite `error` e exit 2. Portanto exit 0, imagem gerada ou 100% de progresso não provam aprovação.
+Em execução normal, `BLOCK` salva preview, emite `complete`/exit 0 e o Rust publica `success: true`, `completion_status: blocked`. Com `strict` ou `export_mode: strict`, somente `BLOCK` emite `error`/exit 2. `REVIEW` sai do Rust como `completion_status: approved`, preservando `needs_review` e contagens; não confunda com ausência de revisão.
 
 O Rust resolve o resumo nesta ordem: `project.json` (`qa.export_gate`) → `qa_report.json` → fallback `PASS`. Erro do sidecar gera `success: false` e `completion_status: error`.
 
@@ -28,13 +26,13 @@ O Rust resolve o resumo nesta ordem: `project.json` (`qa.export_gate`) → `qa_r
 
 Individual: `pipelineCompletion.ts` deriva `done_blocked`; `ChapterCompletionScreen` mostra “Preview bloqueado”, issues e mantém revisão/editor.
 
-Batch: `BatchCompletionScreen` ainda mostra ícones verdes e ações comuns; `openBatchChapter` força `status: done` e não repassa QA/completion. Trate isso como lacuna real, não como aprovação. O E2E de batch cobre navegação, não estado bloqueado.
+Batch: `BatchCompletionScreen` mostra ícones verdes; `openBatchChapter` força `status: done` e perde QA/completion. **Important — lacuna de teste:** Vitest cobre só derivação individual; Playwright cobre só navegação do batch, não capítulo bloqueado.
 
 ## Artefatos e primeira divergência
 
 - Raiz: `project.json`, `qa_report.json`/`.md`, `decision_trace.jsonl`, `performance_timing.json` e imagens.
 - `debug/e2e/00_run`: config, ambiente, argumentos e timing.
-- `debug/e2e/11_qa_export_gate`: `export_gate.json`, `qa_issues.jsonl`, `visual_blockers.jsonl`, consistência e `strict_exit_audit.json`.
+- `debug/e2e/11_qa_export_gate`: `export_gate.json`, `qa_export_gate_consistency.json`, `qa_flag_propagation_audit.json`, `final_rerender_visual_qa.json`/`.jsonl`; `strict_exit_audit.json` existe apenas no BLOCK strict.
 
 Compare primeiro `project.json` com `qa_report.json`; depois payload Rust, evento, store e tela. Não conclua pelo último log isolado.
 
