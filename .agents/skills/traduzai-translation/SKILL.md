@@ -1,13 +1,15 @@
 ---
 name: traduzai-translation
-description: Use when TraduzAI translation texts are missing or disappear, use the wrong OCR source, preserve untranslated text, mistranslate names or glossary terms, lose placeholders, skip the wrong route_action, repeat fragments, or fall through after Google health failures.
+description: Use when TraduzAI applies a translation route incorrectly, sends the wrong accepted text to the backend, loses translation outputs during merge, preserves untranslated text, mistranslates protected terms, loses placeholders, or falls through after Google health failures.
 ---
 
 # TraduzAI Translation
 
 ## Owners, contrato e fluxo
 
-Owners: `pipeline/translator/translate.py`, `pipeline/translator/term_protection.py`, `pipeline/strip/process_bands.py`, `pipeline/ocr/ocr_normalizer.py`, `pipeline/ocr/contextual_reviewer.py`, `pipeline/ocr/text_router.py` (gate), `pipeline/main.py` e `pipeline/qa/export_gate.py`.
+Owners: `pipeline/translator/translate.py`, `pipeline/translator/term_protection.py` e o trecho de tradução de `pipeline/strip/process_bands.py`: precedência do texto aceito, consumo/aplicação de `route_action`, backend, outputs e `_merge_translated_page_metadata`.
+
+OCR é owner de normalização, review, `text_router` e criação de `route_action`; rota criada errada pertence a `traduzai-ocr`. Pipeline é owner de `main.py`, orquestração, QA e export. São fronteiras upstream/downstream, não owners desta skill.
 
 Band OCR/review → `_finalize_ocr_page_before_translation` → `_run_translate_stage` → `translate_pages` → normalização/merge → Google ou passthrough → `_merge_translated_page_metadata` → project/QA.
 
@@ -32,12 +34,13 @@ Ollama/semantic review LLM são entrypoints inativos: `translate_pages` fixa Oll
 
 | Evidência | Investigue |
 |---|---|
-| `03_ocr/ocr_raw_blocks.jsonl` errado | OCR/detect |
-| `04_text_normalization_router/*` muda indevidamente | review/normalizer/merge |
-| `07_translation/translation_inputs.jsonl` ausente/errado | source precedence ou `route_action` |
+| `03_ocr/ocr_raw_blocks.jsonl` errado | `traduzai-ocr`/`traduzai-detect` |
+| `04_text_normalization_router/*` ou `route_action` criada errada | `traduzai-ocr` |
+| rota correta, mas `07_translation/translation_inputs.jsonl` ausente/errado | aplicação do gate ou source precedence desta skill |
 | input correto, `translation_outputs.jsonl` errado | Google, proteção, restore ou pós-processo |
 | `decision_trace.jsonl` diverge | policy/reason em `record_decision` |
-| `07` correto, `project.json`/QA errado | merge, persistência ou export gate |
+| output correto, merge em `project.json` perde tradução | merge desta skill |
+| merge correto, QA/export diverge | `traduzai-pipeline` |
 
 Use também `07_translation/translation_debug_summary.json`, `07_translation/glossary_application.jsonl` e `07_translation/translation_fallbacks.jsonl`.
 
@@ -55,7 +58,7 @@ REDs pendentes: preservar/sinalizar OCR sem output e testar paridade por trace; 
 
 ## Fronteiras e checklist
 
-OCR possui texto/rota; translation, seleção/backend/termos; pipeline, merge/QA. Registre primeira divergência, texto enviado, rota, backend e trace; valide nodeids, artefatos, UTF-8, auditor, diff e checkout sujo.
+OCR possui normalização/review/router e cria a rota; translation consome o gate e possui text-precedence, backend, outputs, termos e merge; pipeline possui main/orquestração/QA/export. Registre primeira divergência, texto enviado, rota aplicada, backend e trace; valide nodeids, artefatos, UTF-8, auditor, diff e checkout sujo.
 
 ## Última verificação
 
