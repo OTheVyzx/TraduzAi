@@ -7,7 +7,7 @@ description: Use when TraduzAI finishes but QA blocks the preview, reports succe
 
 ## Owners e fluxo automático
 
-Owners: `pipeline/main.py`, `pipeline/strip/run.py`, `pipeline/strip/process_bands.py`, `pipeline/qa/export_gate.py`, `pipeline/project_writer.py`, `src-tauri/src/commands/pipeline.rs`, `src/lib/tauri.ts`, `src/lib/pipelineCompletion.ts`, `src/lib/stores/appStore.ts` e `src/pages/Processing.tsx`.
+Owners: `pipeline/main.py`, a orquestração em `pipeline/strip/run.py`/`process_bands.py`, `pipeline/qa/export_gate.py`, `pipeline/project_writer.py`, `src-tauri/src/commands/pipeline.rs`, `src/lib/tauri.ts`, `src/lib/pipelineCompletion.ts`, `src/lib/stores/appStore.ts` e `src/pages/Processing.tsx`. O trecho interno de gate/backend/inputs/outputs/merge de tradução pertence a `traduzai-translation`.
 
 Rust inicia o sidecar Python; `main.py` → `run_chapter` → `process_band` → stages → `project.json`/QA/export gate. Rust lê os artefatos e emite `pipeline-complete` para store/tela React.
 
@@ -38,6 +38,15 @@ Batch: `BatchCompletionScreen` mostra ícones verdes; `openBatchChapter` força 
 
 Compare primeiro `project.json` com `qa_report.json`; depois payload Rust, evento, store e tela. Não conclua pelo último log isolado.
 
+| Primeira divergência | Delegue para |
+|---|---|
+| detect/bboxes | `traduzai-detect` |
+| OCR, normalização, review, `text_router` ou `route_action` criada | `traduzai-ocr` |
+| gate de tradução aplicado, backend, `translation_inputs`/`translation_outputs` ou merge traduzido | `traduzai-translation` |
+| máscara/limpeza | `traduzai-inpaint` |
+| layout/render de texto | `traduzai-typesetting` |
+| main/orquestração, QA/export ou conclusão Python→Rust→frontend | esta skill |
+
 ## Testes focados
 
 ```powershell
@@ -50,7 +59,7 @@ npx playwright test e2e/editor-rebuild.spec.ts -g "processing final de lote most
 
 ## Fronteiras e checklist
 
-Use `traduzai-detect`, `traduzai-ocr`, `traduzai-inpaint` ou `traduzai-typesetting` para a primeira etapa divergente; esta skill possui orquestração, persistência, QA/export gate e entrega ao app. Use `mangatl-dev` para coordenação geral.
+Use a tabela para a primeira etapa divergente; esta skill possui main/orquestração, persistência, QA/export gate e entrega ao app. Use `mangatl-dev` para coordenação geral.
 
 - Registre primeira divergência, `trace_id`, gate e modo strict/normal.
 - Valide saída visual, contrato Python→Rust→frontend, individual e batch.
