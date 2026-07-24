@@ -7,6 +7,60 @@ import numpy as np
 from strip.types import Balloon, Band, VerticalStrip
 
 
+def visual_card_edge_expansion(
+    band: Band,
+    *,
+    page_y_top: int,
+    page_y_bottom: int,
+    ocr_result: dict,
+    edge_px: int = 8,
+    expansion_px: int = 160,
+) -> dict[str, int | str] | None:
+    """Return the one permitted page-bounded retry crop for a clipped card.
+
+    OCR bboxes are band-local.  The helper is intentionally pure so the
+    orchestrator can persist the reason and retry exactly once before any
+    translation or destructive stage.
+    """
+    if not isinstance(ocr_result, dict) or ocr_result.get("_adaptive_edge_retry_done"):
+        return None
+    records = [record for record in list(ocr_result.get("texts") or []) if isinstance(record, dict)]
+    if not records:
+        return None
+    card_records = [
+        record
+        for record in records
+        if "visual_card_ocr_recall" in set(record.get("qa_flags") or [])
+        or bool(record.get("card_panel_id"))
+        or str(record.get("layout_category") or "").strip().lower() == "item_card"
+    ]
+    if not card_records:
+        return None
+    height = max(1, int(band.y_bottom) - int(band.y_top))
+    touch_top = False
+    touch_bottom = False
+    for record in card_records:
+        bbox = record.get("text_pixel_bbox") or record.get("source_bbox") or record.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        try:
+            y1, y2 = int(round(float(bbox[1]))), int(round(float(bbox[3])))
+        except (TypeError, ValueError):
+            continue
+        touch_top = touch_top or y1 <= edge_px
+        touch_bottom = touch_bottom or y2 >= height - edge_px
+    if not touch_top and not touch_bottom:
+        return None
+    y_top = max(int(page_y_top), int(band.y_top) - (expansion_px if touch_top else 0))
+    y_bottom = min(int(page_y_bottom), int(band.y_bottom) + (expansion_px if touch_bottom else 0))
+    if y_top == int(band.y_top) and y_bottom == int(band.y_bottom):
+        return None
+    if y_bottom <= y_top:
+        return None
+    direction = "top" if touch_top and not touch_bottom else "bottom" if touch_bottom and not touch_top else "both"
+    return {"y_top": y_top, "y_bottom": y_bottom, "reason": f"visual_card_edge_{direction}"}
+
+
 def _flush_band(
     current_balloons: list[Balloon],
     margin: int,

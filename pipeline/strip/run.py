@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 
 from strip._diagnostics import dump_strip_debug, is_debug_enabled
-from strip.bands import attach_band_slices, group_balloons_into_bands
+from strip.bands import attach_band_slices, group_balloons_into_bands, visual_card_edge_expansion
 from strip.concat import build_strip
 from strip.detect_balloons import _inner_dark_text_evidence, detect_strip_balloons
 from strip.process_bands import _band_id_for, _page_id_for, process_band
@@ -5172,6 +5172,33 @@ def run_chapter(
             **precomputed_macro_ocr_pages,
             **precomputed_koharu_cjk_pages,
         }
+        for band_index, precomputed_page in list(precomputed_ocr_pages.items()):
+            if not 0 <= int(band_index) < len(bands):
+                continue
+            band = bands[int(band_index)]
+            source_page_number = _source_page_number_for_band(strip, band)
+            page_y0, page_y1 = _source_page_bounds(strip, source_page_number)
+            retry = visual_card_edge_expansion(
+                band,
+                page_y_top=page_y0,
+                page_y_bottom=page_y1,
+                ocr_result=precomputed_page,
+            )
+            if retry is None:
+                continue
+            original_y_top, original_y_bottom = int(band.y_top), int(band.y_bottom)
+            band.y_top, band.y_bottom = int(retry["y_top"]), int(retry["y_bottom"])
+            attach_band_slices(strip, [band])
+            band._adaptive_edge_retry_metadata = {
+                "adaptive_original_y_top": original_y_top,
+                "adaptive_original_y_bottom": original_y_bottom,
+                "adaptive_final_y_top": int(band.y_top),
+                "adaptive_final_y_bottom": int(band.y_bottom),
+                "adaptive_edge_retry_reason": str(retry["reason"]),
+            }
+            # Force OCR on the expanded crop. This is still before translation,
+            # and removing the precompute makes the retry bounded to this band.
+            precomputed_ocr_pages.pop(band_index, None)
         with _timed(chapter_telemetry, "reconcile_cross_band_ocr_fragments"):
             cross_band_ocr_fragments_reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation(
                 bands,
@@ -5376,6 +5403,11 @@ def run_chapter(
         # band is processed (macro precompute is optional).  Reconcile once
         # more now that every band has its real OCR payload, then re-run only
         # the complete owner band before the strip is pasted back together.
+        for band in bands:
+            retry_metadata = getattr(band, "_adaptive_edge_retry_metadata", None)
+            if isinstance(retry_metadata, dict) and isinstance(getattr(band, "ocr_result", None), dict):
+                band.ocr_result.update(retry_metadata)
+                band.ocr_result["_adaptive_edge_retry_done"] = True
         completed_ocr_pages = {
             index: band.ocr_result
             for index, band in enumerate(bands)

@@ -9,6 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from debug_tools import DebugRecorder, bind_recorder
+from strip.bands import visual_card_edge_expansion
 from strip.run import (
     _candidate_matches_band_text_bbox,
     _reconcile_overlapping_band_ocr_fragments_before_translation,
@@ -209,6 +210,55 @@ def test_reconcile_overlapping_bands_keeps_repeated_text_in_distinct_geometry():
     assert reconciled == 0
     assert [text["id"] for text in pages[0]["texts"]] == ["left"]
     assert [text["id"] for text in pages[1]["texts"]] == ["right"]
+
+
+def _visual_card_edge_page(*, bbox, retried=False, card=True):
+    record = {"id": "card", "text": "TITLE", "bbox": bbox}
+    if card:
+        record["qa_flags"] = ["visual_card_ocr_recall"]
+    return {"texts": [record], "_adaptive_edge_retry_done": retried}
+
+
+def test_visual_card_edge_recall_expands_only_own_band_and_keeps_id():
+    band = Band(y_top=200, y_bottom=400)
+
+    expansion = visual_card_edge_expansion(
+        band, page_y_top=100, page_y_bottom=900, ocr_result=_visual_card_edge_page(bbox=[10, 2, 180, 40])
+    )
+
+    assert expansion == {"y_top": 100, "y_bottom": 400, "reason": "visual_card_edge_top"}
+    assert band.y_top == 200 and band.y_bottom == 400
+
+
+def test_visual_card_retry_is_limited_to_once():
+    expansion = visual_card_edge_expansion(
+        Band(y_top=200, y_bottom=400),
+        page_y_top=100,
+        page_y_bottom=900,
+        ocr_result=_visual_card_edge_page(bbox=[10, 2, 180, 40], retried=True),
+    )
+
+    assert expansion is None
+
+
+def test_visual_card_expansion_stops_at_source_page_boundary():
+    expansion = visual_card_edge_expansion(
+        Band(y_top=120, y_bottom=280),
+        page_y_top=100,
+        page_y_bottom=300,
+        ocr_result=_visual_card_edge_page(bbox=[10, 150, 180, 159]),
+    )
+
+    assert expansion == {"y_top": 120, "y_bottom": 300, "reason": "visual_card_edge_bottom"}
+
+
+def test_normal_speech_band_does_not_receive_card_expansion():
+    assert visual_card_edge_expansion(
+        Band(y_top=200, y_bottom=400),
+        page_y_top=100,
+        page_y_bottom=900,
+        ocr_result=_visual_card_edge_page(bbox=[10, 2, 180, 40], card=False),
+    ) is None
 
 
 def test_run_chapter_writes_bands_manifest_with_stable_ids(tmp_path):

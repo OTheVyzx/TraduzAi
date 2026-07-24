@@ -2683,6 +2683,8 @@ def _text_anchor_has_white_cleanup_context(
 def _text_is_white_cleanup_safe(image_rgb: np.ndarray, text: dict) -> bool:
     if not isinstance(text, dict):
         return False
+    if str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower() == "translucent_balloon":
+        return False
     white_marker = _text_has_white_cleanup_marker(text)
     nonwhite_marker = _text_has_nonwhite_cleanup_marker(text)
     anchor_white_context = _text_anchor_has_white_cleanup_context(
@@ -5316,6 +5318,18 @@ def _mixed_balloon_cluster_has_card_title_veto(texts: list[dict], region_bbox: l
 
 def _should_merge_ocr_cluster(texts: list[dict], region_bbox: list[int]) -> bool:
     if len(texts) < 2:
+        return False
+    # Rows inside a visual status/item card share one colored surface, but they
+    # are independent semantic fields (title, grade, stats, description).  The
+    # generic mask-region clusterer sees the shared panel and otherwise joins
+    # every row into the dominant OCR record, which drops most of the card at
+    # translation/render time.
+    if any(
+        str(text.get("layout_category") or "").strip().lower() == "item_card"
+        or bool(str(text.get("card_panel_id") or "").strip())
+        for text in texts
+        if isinstance(text, dict)
+    ):
         return False
     if _dark_bubble_cluster_has_distinct_side_lobes(texts):
         return False
@@ -11424,6 +11438,90 @@ def _run_masked_inpaint_passes(
     }
 
 
+def _split_translucent_separator_action_mask(
+    image_np: np.ndarray,
+    action_mask: np.ndarray,
+    texts: list[dict] | None,
+) -> tuple[list[np.ndarray], dict[str, int | str] | None]:
+    """Split one translucent glyph action at a proven external panel edge.
+
+    The edge must be visible on both sides of the masked glyphs.  This keeps
+    letter contours from becoming separators and works in either orientation.
+    """
+    if (
+        not isinstance(image_np, np.ndarray)
+        or image_np.ndim != 3
+        or not isinstance(action_mask, np.ndarray)
+        or action_mask.shape[:2] != image_np.shape[:2]
+        or not any(
+            isinstance(text, dict)
+            and str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+            == "translucent_balloon"
+            and str(text.get("inpaint_profile") or "").strip().lower()
+            == "translucent_separator_split"
+            for text in (texts or [])
+        )
+    ):
+        return [action_mask.astype(np.uint8, copy=True)], None
+    action = np.where(action_mask > 0, 255, 0).astype(np.uint8)
+    ys, xs = np.where(action > 0)
+    if xs.size < 64 or ys.size < 64:
+        return [action], None
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+    if x2 - x1 < 48 or y2 - y1 < 32:
+        return [action], None
+
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 40, 110)
+    halo = cv2.dilate(action, np.ones((17, 17), np.uint8), iterations=1)
+    edges[halo > 0] = 0
+    support = max(12, min(48, int(round(max(x2 - x1, y2 - y1) * 0.18))))
+    candidates: list[tuple[int, str, int]] = []
+
+    for y in range(max(0, y1 - 20), min(edges.shape[0], y2 + 20)):
+        left = int(np.count_nonzero(edges[y, max(0, x1 - 96) : x1]))
+        right = int(np.count_nonzero(edges[y, x2 : min(edges.shape[1], x2 + 96)]))
+        if left >= support and right >= support:
+            candidates.append((y, "horizontal", left + right))
+    for x in range(max(0, x1 - 20), min(edges.shape[1], x2 + 20)):
+        top = int(np.count_nonzero(edges[max(0, y1 - 96) : y1, x]))
+        bottom = int(np.count_nonzero(edges[y2 : min(edges.shape[0], y2 + 96), x]))
+        if top >= support and bottom >= support:
+            candidates.append((x, "vertical", top + bottom))
+    if not candidates:
+        return [action], None
+
+    grouped: list[tuple[int, str, int]] = []
+    for axis in ("horizontal", "vertical"):
+        points = sorted((position, score) for position, candidate_axis, score in candidates if candidate_axis == axis)
+        if not points:
+            continue
+        cluster: list[tuple[int, int]] = []
+        for point in points:
+            if cluster and point[0] > cluster[-1][0] + 4:
+                grouped.append((int(round(np.median([value for value, _ in cluster]))), axis, sum(score for _, score in cluster)))
+                cluster = []
+            cluster.append(point)
+        if cluster:
+            grouped.append((int(round(np.median([value for value, _ in cluster]))), axis, sum(score for _, score in cluster)))
+    if not grouped:
+        return [action], None
+    position, axis, _score = max(grouped, key=lambda candidate: candidate[2])
+
+    first = action.copy()
+    second = action.copy()
+    if axis == "horizontal":
+        first[position + 1 :] = 0
+        second[: position + 1] = 0
+    else:
+        first[:, position + 1 :] = 0
+        second[:, : position + 1] = 0
+    if min(np.count_nonzero(first), np.count_nonzero(second)) < max(64, int(np.count_nonzero(action) * 0.08)):
+        return [action], None
+    return [first, second], {"axis": axis, "position": int(position)}
+
+
 def _apply_inpainting_round(
     image_np: np.ndarray,
     ocr_data: dict,
@@ -11461,21 +11559,23 @@ def _apply_inpainting_round(
             if strict_mask_only
             else None
         )
-        if debug is None and not seam_cleanup and not multi_pass and force_no_tiling:
-            result = _run_masked_inpaint_passes(
+        def run_masked(mask: np.ndarray, *, preserve_full_context: bool = False) -> dict:
+            crop_windows = None if preserve_full_context else strict_crop_windows
+            if debug is None and not seam_cleanup and not multi_pass and force_no_tiling:
+                return _run_masked_inpaint_passes(
+                    inpainter,
+                    image_np,
+                    mask,
+                    batch_size=4,
+                    texts=texts,
+                    expand_mask=not strict_mask_only,
+                    prefer_roi=not preserve_full_context,
+                    crop_windows=crop_windows,
+                )
+            return _run_masked_inpaint_passes(
                 inpainter,
                 image_np,
-                full_mask,
-                batch_size=4,
-                texts=texts,
-                expand_mask=not strict_mask_only,
-                crop_windows=strict_crop_windows,
-            )
-        else:
-            result = _run_masked_inpaint_passes(
-                inpainter,
-                image_np,
-                full_mask,
+                mask,
                 batch_size=4,
                 debug=debug,
                 seam_cleanup=seam_cleanup,
@@ -11483,8 +11583,42 @@ def _apply_inpainting_round(
                 force_no_tiling=force_no_tiling,
                 texts=texts,
                 expand_mask=not strict_mask_only,
-                crop_windows=strict_crop_windows,
+                prefer_roi=not preserve_full_context,
+                crop_windows=crop_windows,
             )
+
+        regions, separator = _split_translucent_separator_action_mask(image_np, full_mask, texts)
+        if separator is None:
+            result = run_masked(full_mask)
+        else:
+            combined = image_np.copy()
+            combined_mask = np.zeros(full_mask.shape, dtype=np.uint8)
+            pass_results = [run_masked(region, preserve_full_context=True) for region in regions]
+            for region, region_result in zip(regions, pass_results, strict=True):
+                repaired = region_result.get("final_output")
+                if not isinstance(repaired, np.ndarray) or repaired.shape != image_np.shape:
+                    raise ValueError("inpaint por região retornou imagem incompatível")
+                combined[region > 0] = repaired[region > 0]
+                combined_mask = np.maximum(combined_mask, region_result.get("expanded_mask", region)).astype(np.uint8)
+            result = {
+                "final_output": combined,
+                "expanded_mask": combined_mask,
+                "raw_output": combined.copy(),
+                "after_roi_paste": combined.copy(),
+                "after_seam_cleanup": combined.copy(),
+                "cleanup_base_mask": combined_mask,
+                "fallback_to_legacy": any(bool(item.get("fallback_to_legacy")) for item in pass_results),
+                "fallback_error": "; ".join(
+                    str(item.get("fallback_error") or "") for item in pass_results if item.get("fallback_error")
+                ),
+                "_t_lama_ms": round(sum(float(item.get("_t_lama_ms") or 0.0) for item in pass_results), 3),
+                "_t_roi_select_ms": round(sum(float(item.get("_t_roi_select_ms") or 0.0) for item in pass_results), 3),
+                "used_roi_crop": any(bool(item.get("used_roi_crop")) for item in pass_results),
+                "roi_area_ratio": round(sum(float(item.get("roi_area_ratio") or 0.0) for item in pass_results), 6),
+                "crop_windows_used": sum(int(item.get("crop_windows_used") or 0) for item in pass_results),
+            }
+            if isinstance(ocr_data, dict):
+                ocr_data["_inpaint_region_separator"] = separator
         if debug is not None:
             return result
         if isinstance(result, dict):
@@ -11500,6 +11634,8 @@ def _apply_inpainting_round(
                 if key in result
             }
             if isinstance(ocr_data, dict):
+                if ocr_data.get("_inpaint_region_separator") is not None:
+                    stats["inpaint_region_separator"] = dict(ocr_data["_inpaint_region_separator"])
                 ocr_data["_inpaint_round_stats"] = stats
             limited_raw, raw_limit_pixels, raw_changed_outside = _clamp_image_to_limit_mask(
                 image_np,
@@ -13114,6 +13250,12 @@ def _run_detect_ocr_on_image(
         work_title_aliases=work_title_aliases,
         work_title_user_provided=work_title_user_provided,
     )
+    page_result = _recover_missing_visual_card_ocr_lines(
+        page_result,
+        image_rgb,
+        list(getattr(ocr, "_last_full_page_line_records", []) or []),
+        ocr=ocr,
+    )
     if pre_ocr_sfx_candidates:
         page_result["_sfx_visual_candidates"] = pre_ocr_sfx_candidates
     if pre_ocr_sfx_skipped_blocks:
@@ -13257,6 +13399,247 @@ def _should_run_sparse_page_recovery(page_result: dict, blocks: list, backend_na
     accepted = len(page_result.get("texts", []))
     detected = len(blocks)
     return accepted == 0 and detected <= 4
+
+
+def _line_bbox_from_record(record: dict) -> list[int] | None:
+    if not isinstance(record, dict):
+        return None
+    return _coerce_bbox(record.get("text_pixel_bbox") or record.get("source_bbox") or record.get("bbox"))
+
+
+def _line_polygon_or_bbox(record: dict, bbox: list[int]) -> list[list[int]]:
+    polygons = _normalize_line_polygons(record.get("line_polygons") or [])
+    if polygons:
+        return polygons[0]
+    x1, y1, x2, y2 = bbox
+    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+
+def _raw_card_line_overlaps_page_text(raw_bbox: list[int], text: dict) -> bool:
+    candidate_bboxes = []
+    for polygon in _normalize_line_polygons(text.get("line_polygons") or []):
+        bbox = _bbox_from_line_polygons([polygon])
+        if bbox is not None:
+            candidate_bboxes.append(bbox)
+    text_bbox = _coerce_bbox(text.get("text_pixel_bbox") or text.get("source_bbox") or text.get("bbox"))
+    if text_bbox is not None:
+        candidate_bboxes.append(text_bbox)
+    for existing_bbox in candidate_bboxes:
+        if _bbox_intersection_fraction(raw_bbox, existing_bbox) >= 0.55:
+            return True
+    return False
+
+
+def _looks_like_colored_visual_card_line(image_rgb: np.ndarray, bbox: list[int]) -> bool:
+    height, width = image_rgb.shape[:2]
+    x1, y1, x2, y2 = bbox
+    pad = 10
+    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+    x2, y2 = min(width, x2 + pad), min(height, y2 + pad)
+    if x2 <= x1 or y2 <= y1:
+        return False
+    patch = image_rgb[y1:y2, x1:x2]
+    if patch.size == 0:
+        return False
+    try:
+        hsv = cv2.cvtColor(patch.astype(np.uint8, copy=False), cv2.COLOR_RGB2HSV)
+        median_saturation = float(np.median(hsv[:, :, 1]))
+        median_value = float(np.median(hsv[:, :, 2]))
+    except Exception:
+        return False
+    # Cartoes de item podem ser dourados/coloridos ou escuros. Balões brancos
+    # comuns ficam de fora para esta recuperacao nao ampliar OCR globalmente.
+    return median_saturation >= 30.0 or median_value <= 130.0
+
+
+def _visual_card_cluster_has_support(record: dict, candidates: list[dict]) -> bool:
+    bbox = _line_bbox_from_record(record)
+    if bbox is None:
+        return False
+    center_x = (bbox[0] + bbox[2]) / 2.0
+    center_y = (bbox[1] + bbox[3]) / 2.0
+    peers = 0
+    for other in candidates:
+        other_bbox = _line_bbox_from_record(other)
+        if other_bbox is None:
+            continue
+        other_center_x = (other_bbox[0] + other_bbox[2]) / 2.0
+        other_center_y = (other_bbox[1] + other_bbox[3]) / 2.0
+        if abs(other_center_x - center_x) <= 116.0 and abs(other_center_y - center_y) <= 560.0:
+            peers += 1
+    return peers >= 5
+
+
+def _group_visual_card_recall_lines(records: list[dict]) -> list[list[dict]]:
+    grouped: list[list[dict]] = []
+    for record in sorted(records, key=lambda item: (_line_bbox_from_record(item) or [0, 0, 0, 0])[1]):
+        bbox = _line_bbox_from_record(record)
+        if bbox is None:
+            continue
+        if grouped:
+            previous = grouped[-1][-1]
+            previous_bbox = _line_bbox_from_record(previous)
+            if previous_bbox is not None:
+                vertical_gap = bbox[1] - previous_bbox[3]
+                center_delta = abs((bbox[0] + bbox[2]) / 2.0 - (previous_bbox[0] + previous_bbox[2]) / 2.0)
+                previous_width = previous_bbox[2] - previous_bbox[0]
+                width = bbox[2] - bbox[0]
+                # Mantem cada linha do cartão como filho próprio. A única
+                # exceção é o rodapé longo quebrado em exatamente duas linhas,
+                # que traduz melhor como uma frase única.
+                if (
+                    len(grouped[-1]) == 1
+                    and -2 <= vertical_gap <= 18
+                    and center_delta <= 72
+                    and previous_width >= 320
+                    and width >= 320
+                ):
+                    grouped[-1].append(record)
+                    continue
+        grouped.append([record])
+    return grouped
+
+
+def _recover_missing_visual_card_ocr_lines(
+    page_result: dict,
+    image_rgb: np.ndarray,
+    raw_lines: list[dict],
+    *,
+    ocr=None,
+) -> dict:
+    """Recupera linhas Paddle perdidas pelo mapeamento bloco->OCR em cartões.
+
+    A passagem de página já reconheceu as linhas. Esta etapa não faz uma busca
+    OCR nova pela página inteira: só promove linhas ausentes que pertencem a um
+    agrupamento visual colorido/escuro com bastante evidência de cartão.
+    """
+    if not isinstance(page_result, dict) or not isinstance(image_rgb, np.ndarray):
+        return page_result
+    existing_texts = [text for text in page_result.get("texts", []) if isinstance(text, dict)]
+    candidates: list[dict] = []
+    for raw in raw_lines or []:
+        bbox = _line_bbox_from_record(raw)
+        text = str(raw.get("text") or "").strip() if isinstance(raw, dict) else ""
+        try:
+            confidence = float(raw.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if not text or bbox is None or confidence < 0.80:
+            continue
+        if _looks_like_colored_visual_card_line(image_rgb, bbox):
+            candidates.append(dict(raw))
+    if not candidates:
+        return page_result
+
+    missing = [
+        record
+        for record in candidates
+        if _visual_card_cluster_has_support(record, candidates)
+        and not any(_raw_card_line_overlaps_page_text(_line_bbox_from_record(record), text) for text in existing_texts)
+    ]
+    if not missing:
+        return page_result
+
+    updated = _clone_page_result(page_result)
+    card_records = [record for record in candidates if _visual_card_cluster_has_support(record, candidates)]
+    card_bboxes = [_line_bbox_from_record(record) for record in card_records]
+    card_bboxes = [bbox for bbox in card_bboxes if bbox is not None]
+    card_panel_bbox = _bbox_union_many(card_bboxes)
+    card_panel_id = f"item_card:{str(card_records[0].get('text') or 'visual')[:24]}" if card_records else ""
+    recovered_count = 0
+    for group in _group_visual_card_recall_lines(missing):
+        group_bboxes = [_line_bbox_from_record(record) for record in group]
+        group_bboxes = [bbox for bbox in group_bboxes if bbox is not None]
+        if not group_bboxes:
+            continue
+        bbox = _bbox_union_many(group_bboxes)
+        if bbox is None:
+            continue
+        raw_text = " ".join(str(record.get("text") or "").strip() for record in group).strip()
+        recovered_text = raw_text
+        if ocr is not None and hasattr(ocr, "recognize_batch"):
+            try:
+                x1, y1, x2, y2 = _expand_bbox(bbox, image_rgb.shape, pad_x_ratio=0.02, pad_y_ratio=0.18, min_pad_x=6, min_pad_y=5)
+                crop = image_rgb[y1:y2, x1:x2]
+                retried = list(ocr.recognize_batch([crop]) or [])
+                retry_text = str(retried[0] if retried else "").strip()
+                raw_len = len("".join(char for char in raw_text if char.isalnum()))
+                retry_len = len("".join(char for char in retry_text if char.isalnum()))
+                # A leitura de linha inteira ja e a evidência primária. O
+                # micro-recorte só substitui quando recupera caracteres que
+                # estavam ausentes (caso típico: "BY 4"), nunca por uma
+                # variante de mesmo tamanho que possa trocar letras finais.
+                retry_recovers_number = any(char.isdigit() for char in retry_text) and not any(char.isdigit() for char in raw_text)
+                if retry_text and (retry_len >= raw_len + 1 or retry_recovers_number):
+                    recovered_text = retry_text
+            except Exception:
+                pass
+        if not recovered_text:
+            continue
+        recovered_count += 1
+        line_polygons = [_line_polygon_or_bbox(record, _line_bbox_from_record(record)) for record in group]
+        confidence = min(float(record.get("confidence") or 0.0) for record in group)
+        text_id = f"cardocr_{len(updated.get('texts') or []) + 1:03d}"
+        entry = {
+            "id": text_id,
+            "text_id": text_id,
+            "text": recovered_text,
+            "raw_text": recovered_text,
+            "bbox": list(bbox),
+            "source_bbox": list(bbox),
+            "text_pixel_bbox": list(bbox),
+            "line_polygons": line_polygons,
+            "confidence": round(confidence, 3),
+            "tipo": "text",
+            "content_class": "text",
+            "skip_processing": False,
+            "detector": "visual_card_full_page_recall",
+            "ocr_recovery": "visual_card_full_page_recall",
+            "qa_flags": ["visual_card_ocr_recall"],
+        }
+        updated.setdefault("texts", []).append(entry)
+        updated.setdefault("_vision_blocks", []).append(
+            {
+                "text_id": text_id,
+                "bbox": list(bbox),
+                "source_bbox": list(bbox),
+                "text_pixel_bbox": list(bbox),
+                "line_polygons": line_polygons,
+                "confidence": round(confidence, 3),
+                "mask": None,
+                "detector": "visual_card_full_page_recall",
+                "qa_flags": ["visual_card_ocr_recall"],
+            }
+        )
+    if recovered_count:
+        def _belongs_to_card(entry: dict) -> bool:
+            bbox = _coerce_bbox(entry.get("text_pixel_bbox") or entry.get("source_bbox") or entry.get("bbox"))
+            if bbox is None or card_panel_bbox is None:
+                return False
+            center_x = (bbox[0] + bbox[2]) / 2.0
+            center_y = (bbox[1] + bbox[3]) / 2.0
+            return (
+                card_panel_bbox[0] - 24 <= center_x <= card_panel_bbox[2] + 24
+                and card_panel_bbox[1] - 24 <= center_y <= card_panel_bbox[3] + 24
+            )
+
+        for entry in list(updated.get("texts") or []) + list(updated.get("_vision_blocks") or []):
+            if not isinstance(entry, dict) or not _belongs_to_card(entry):
+                continue
+            entry["layout_category"] = "item_card"
+            entry["card_panel_id"] = card_panel_id
+            entry["card_panel_bbox"] = list(card_panel_bbox)
+            entry["card_panel_text_context"] = True
+            entry["_visual_card_bbox_hint"] = list(card_panel_bbox)
+            entry["layout_profile"] = "colored_status_panel"
+            entry["block_profile"] = "colored_status_panel"
+            entry["background_type"] = "colored_status_panel"
+            flags = list(entry.get("qa_flags") or [])
+            if "visual_text_only_inpaint_contract" not in flags:
+                flags.append("visual_text_only_inpaint_contract")
+            entry["qa_flags"] = flags
+        updated.setdefault("debug", {})["visual_card_ocr_recall"] = {"recovered_line_groups": recovered_count}
+    return updated
 
 
 def _adaptive_cjk_bbox_reocr_enabled(source_lang: str) -> bool:
@@ -14051,6 +14434,12 @@ def run_ocr_stage(
         work_title=work_title,
         work_title_aliases=work_title_aliases,
         work_title_user_provided=work_title_user_provided,
+    )
+    page_result = _recover_missing_visual_card_ocr_lines(
+        page_result,
+        image_rgb,
+        list(getattr(ocr, "_last_full_page_line_records", []) or []),
+        ocr=ocr,
     )
     if pre_ocr_sfx_candidates:
         page_result["_sfx_visual_candidates"] = pre_ocr_sfx_candidates
