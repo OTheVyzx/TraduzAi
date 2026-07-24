@@ -71,6 +71,7 @@ def resolve_runtime_profile(config: dict[str, Any] | None) -> RuntimeProfileDeci
         "TRADUZAI_SEMANTIC_REVIEW": "0",
     }
     automatic_pipeline_env = {
+        "TRADUZAI_INPAINT_POLICY": "pure",
         "TRADUZAI_STRIP_SCHEDULER_EXECUTOR": "overlap_context_release",
         "TRADUZAI_STRIP_PARALLEL_INPAINT_THREADS": "3",
         "TRADUZAI_STRIP_FAST_SOLID_INPAINT": "0",

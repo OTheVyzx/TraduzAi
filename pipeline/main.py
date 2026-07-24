@@ -1151,6 +1151,7 @@ def _merge_same_balloon_fragment_layers(project_data: dict) -> int:
             if layer.get("visible", True) is not False
             and str(layer.get("render_policy") or "") != "merged_into_primary"
             and not _is_low_containment_suppressed_fragment(layer)
+            and str(layer.get("layout_category") or "").strip().lower() != "item_card"
             and (
                 "same_balloon_fragment_merged" in {str(flag) for flag in layer.get("qa_flags") or []}
                 or layer_source_token_count > 1
@@ -1534,6 +1535,8 @@ def _suppress_same_identity_merged_fragments(project_data: dict) -> int:
             if not primaries:
                 continue
             for fragment in band_layers:
+                if str(fragment.get("layout_category") or "").strip().lower() == "item_card" or fragment.get("card_panel_id"):
+                    continue
                 if not _is_fragment_layer_id(fragment):
                     continue
                 if fragment.get("visible", True) is False:
@@ -7293,6 +7296,9 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
         "after_late_render_contract_repair": False,
         "seen_count": 0,
         "refreshed_count": 0,
+        "clean_band_source_used": 0,
+        "clean_band_final_mismatch_count": 0,
+        "clean_band_final_checks": [],
         "missing_count": 0,
         "error_count": 0,
     }
@@ -7305,15 +7311,21 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
         crops_path = root / "10_copyback_reassemble" / "final_band_crops.jsonl"
         if not crops_path.exists():
             return audit
+        crop_rows: list[dict] = []
         for line in crops_path.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.strip():
                 continue
             audit["seen_count"] += 1
             try:
                 row = json.loads(line)
+                if isinstance(row, dict):
+                    crop_rows.append(row)
+                else:
+                    audit["error_count"] += 1
             except Exception:
                 audit["error_count"] += 1
                 continue
+        for row in sorted(crop_rows, key=_final_crop_page_composition_sort_key):
             translated_name = str(row.get("translated_output_page") or "").strip()
             final_rel = str(row.get("final_crop_path") or "").strip()
             bbox = row.get("crop_bbox_in_translated_page")
@@ -7343,10 +7355,62 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
             if x2 <= x1 or y2 <= y1:
                 audit["missing_count"] += 1
                 continue
-            recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100)
+            crop_w = x2 - x1
+            crop_h = y2 - y1
+            clean_bgr, clean_path, clean_source = _preferred_clean_band_source_for_final_crop(
+                row,
+                work_dir,
+                (crop_w, crop_h),
+            )
+            if clean_bgr is not None:
+                final_path = _resolve_debug_e2e_artifact_path(work_dir, final_rel)
+                if (
+                    final_path is not None
+                    and clean_path is not None
+                    and final_path.suffix.lower() == clean_path.suffix.lower()
+                ):
+                    import shutil
+
+                    final_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(clean_path, final_path)
+                else:
+                    recorder.write_image(final_rel, clean_bgr, quality=100)
+                image[y1:y2, x1:x2, :] = clean_bgr
+                cv2.imwrite(str(translated_path), image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
+                diff_summary = _final_band_diff_summary(clean_bgr, final_bgr)
+                diff_summary.update(
+                    {
+                        "band_id": str(row.get("band_id") or ""),
+                        "source": clean_source,
+                        "source_path": str(clean_path) if clean_path else "",
+                        "final_path": str(final_path) if final_path else "",
+                    }
+                )
+                audit["clean_band_final_checks"].append(diff_summary)
+                if diff_summary.get("worse_than_clean_source"):
+                    audit["clean_band_final_mismatch_count"] += 1
+                row["final_band_clean_source"] = clean_source
+                row["final_band_clean_source_path"] = str(clean_path) if clean_path else ""
+                audit["clean_band_source_used"] += 1
+            else:
+                recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100)
             audit["refreshed_count"] += 1
         try:
             recorder.write_json("10_copyback_reassemble/final_band_crops_refresh.json", audit)
+        except Exception:
+            pass
+        try:
+            consistency_audit = _audit_translated_page_band_consistency(work_dir)
+            recorder.write_json(
+                "10_copyback_reassemble/translated_page_band_consistency_audit.json",
+                consistency_audit,
+            )
+            audit["translated_page_band_consistency"] = {
+                "rows_checked": consistency_audit.get("rows_checked", 0),
+                "rows_compared": consistency_audit.get("rows_compared", 0),
+                "rows_failed": consistency_audit.get("rows_failed", 0),
+            }
         except Exception:
             pass
     except Exception:
@@ -7404,6 +7468,261 @@ def _final_rerender_layers_for_crop(row: dict, layers: list[dict]) -> list[dict]
         for layer in layers
         if band_id and str(layer.get("band_id") or "").strip() == band_id
     ]
+
+
+def _resolve_debug_e2e_artifact_path(work_dir: Path, rel_or_abs: str | None) -> Path | None:
+    raw = str(rel_or_abs or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return Path(work_dir) / "debug" / "e2e" / path
+
+
+def _preferred_clean_band_source_for_final_crop(
+    row: dict,
+    work_dir: Path,
+    expected_size: tuple[int, int],
+):
+    """Return a clean already-rendered band source for final crop sync.
+
+    The strip path can have a good post-copyback/rendered band before later
+    project-level metadata is hydrated.  Final crops must not be regenerated
+    from stale text_layers when one of these clean artifacts exists.
+    """
+
+    try:
+        import cv2
+    except Exception:
+        return None, None, ""
+
+    band_id = str(row.get("band_id") or "").strip()
+    candidates: list[tuple[str, Path | None]] = [
+        ("post_copyback_path", _resolve_debug_e2e_artifact_path(work_dir, row.get("post_copyback_path"))),
+        (
+            "post_copyback_convention",
+            _resolve_debug_e2e_artifact_path(
+                work_dir,
+                f"10_copyback_reassemble/{band_id}/post_copyback.jpg" if band_id else "",
+            ),
+        ),
+        ("rendered_band_path", _resolve_debug_e2e_artifact_path(work_dir, row.get("rendered_band_path"))),
+    ]
+    expected_w, expected_h = expected_size
+    for source, path in candidates:
+        if path is None:
+            continue
+        if not path.exists():
+            continue
+        image_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            continue
+        height, width = image_bgr.shape[:2]
+        if width == expected_w and height == expected_h:
+            return image_bgr, path, source
+    return None, None, ""
+
+
+def _final_band_diff_summary(reference_bgr, observed_bgr) -> dict:
+    if reference_bgr is None or observed_bgr is None:
+        return {"valid": False, "reason": "missing_image"}
+    if not hasattr(reference_bgr, "shape") or not hasattr(observed_bgr, "shape"):
+        return {"valid": False, "reason": "invalid_image"}
+    if reference_bgr.shape != observed_bgr.shape:
+        return {
+            "valid": False,
+            "reason": "shape_mismatch",
+            "reference_shape": list(reference_bgr.shape),
+            "observed_shape": list(observed_bgr.shape),
+        }
+    try:
+        import numpy as np
+
+        diff = np.abs(reference_bgr.astype(np.int16) - observed_bgr.astype(np.int16))
+        max_diff = int(diff.max()) if diff.size else 0
+        changed_gt8 = int((diff > 8).sum()) if diff.size else 0
+        return {
+            "valid": True,
+            "max_diff": max_diff,
+            "changed_gt8": changed_gt8,
+            "mean_diff": float(diff.mean()) if diff.size else 0.0,
+            "worse_than_clean_source": bool(max_diff > 12 and changed_gt8 > 0),
+        }
+    except Exception as exc:
+        return {"valid": False, "reason": "diff_failed", "error": str(exc)}
+
+
+def _band_visible_mask_for_final_composition(row_index: int, rows: list[dict]) -> object | None:
+    try:
+        import numpy as np
+    except Exception:
+        return None
+
+    row = rows[row_index]
+    bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    if x2 <= x1 or y2 <= y1:
+        return None
+    mask = np.ones((y2 - y1, x2 - x1), dtype=bool)
+    page = str(row.get("translated_output_page") or "")
+    for later in rows[row_index + 1:]:
+        if str(later.get("translated_output_page") or "") != page:
+            continue
+        other = _optional_bbox4(later.get("crop_bbox_in_translated_page"))
+        if other is None:
+            continue
+        ox1, oy1, ox2, oy2 = [int(value) for value in other]
+        ix1 = max(x1, ox1)
+        iy1 = max(y1, oy1)
+        ix2 = min(x2, ox2)
+        iy2 = min(y2, oy2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        mask[iy1 - y1:iy2 - y1, ix1 - x1:ix2 - x1] = False
+    return mask
+
+
+def _audit_translated_page_band_consistency(work_dir: Path) -> dict:
+    audit: dict = {
+        "schema_version": 1,
+        "source": "final_band_vs_translated_visible_crop",
+        "rows_checked": 0,
+        "rows_compared": 0,
+        "rows_failed": 0,
+        "rows_skipped": 0,
+        "failures": [],
+        "checks": [],
+        "max_allowed_diff": 12,
+        "jpeg_edge_max_allowed_diff": 24,
+        "changed_gt8_allowed": 256,
+        "changed_gt8_visible_ratio_allowed": 0.001,
+    }
+    try:
+        import cv2
+        import numpy as np
+    except Exception as exc:
+        audit["errors"] = [{"stage": "import", "error": str(exc)}]
+        return audit
+
+    crops_path = Path(work_dir) / "debug" / "e2e" / "10_copyback_reassemble" / "final_band_crops.jsonl"
+    rows = [row for row in _load_debug_jsonl(crops_path) if isinstance(row, dict)]
+    rows = sorted(rows, key=_final_crop_page_composition_sort_key)
+    translated_cache: dict[Path, object] = {}
+    for index, row in enumerate(rows):
+        audit["rows_checked"] += 1
+        bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+        final_rel = str(row.get("final_crop_path") or "").strip()
+        translated_name = str(row.get("translated_output_page") or "").strip()
+        if bbox is None or not final_rel or not translated_name:
+            audit["rows_skipped"] += 1
+            continue
+        x1, y1, x2, y2 = [int(value) for value in bbox]
+        final_path = _resolve_debug_e2e_artifact_path(work_dir, final_rel)
+        translated_path = _final_rerender_resolve_translated_path(work_dir, translated_name)
+        if final_path is None:
+            audit["rows_skipped"] += 1
+            continue
+        final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR)
+        if translated_path not in translated_cache:
+            translated_cache[translated_path] = cv2.imread(str(translated_path), cv2.IMREAD_COLOR)
+        page_bgr = translated_cache.get(translated_path)
+        if final_bgr is None or page_bgr is None:
+            audit["rows_skipped"] += 1
+            continue
+        page_h, page_w = page_bgr.shape[:2]
+        x1c = max(0, min(page_w, x1))
+        x2c = max(0, min(page_w, x2))
+        y1c = max(0, min(page_h, y1))
+        y2c = max(0, min(page_h, y2))
+        if x1c != x1 or x2c != x2 or y1c != y1 or y2c != y2:
+            audit["rows_skipped"] += 1
+            continue
+        crop_bgr = page_bgr[y1:y2, x1:x2, :]
+        if crop_bgr.shape != final_bgr.shape:
+            audit["rows_skipped"] += 1
+            audit["failures"].append(
+                {
+                    "band_id": str(row.get("band_id") or ""),
+                    "reason": "shape_mismatch",
+                    "final_shape": list(final_bgr.shape),
+                    "translated_crop_shape": list(crop_bgr.shape),
+                }
+            )
+            continue
+        visible = _band_visible_mask_for_final_composition(index, rows)
+        if visible is None or int(np.count_nonzero(visible)) <= 0:
+            audit["rows_skipped"] += 1
+            continue
+        reference_bgr = final_bgr
+        if translated_path.suffix.lower() in {".jpg", ".jpeg"}:
+            try:
+                ok, encoded = cv2.imencode(".jpg", final_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                if ok:
+                    decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+                    if decoded is not None and decoded.shape == final_bgr.shape:
+                        reference_bgr = decoded
+            except Exception:
+                reference_bgr = final_bgr
+        diff = np.abs(reference_bgr.astype(np.int16) - crop_bgr.astype(np.int16))
+        visible_diff = diff[visible]
+        max_diff = int(visible_diff.max()) if visible_diff.size else 0
+        changed_gt8 = int((visible_diff > 8).sum()) if visible_diff.size else 0
+        visible_pixels = int(np.count_nonzero(visible))
+        changed_limit = max(256, int(round(visible_pixels * 0.001)))
+        passed = bool(max_diff <= 12 or (max_diff <= 24 and changed_gt8 <= changed_limit))
+        check = {
+            "band_id": str(row.get("band_id") or ""),
+            "translated_output_page": translated_name,
+            "final_crop_path": final_rel,
+            "visible_pixels": visible_pixels,
+            "max_diff": max_diff,
+            "changed_gt8": changed_gt8,
+            "changed_gt8_limit": changed_limit,
+            "has_text_trace": _final_crop_has_text_trace(row),
+            "passed": passed,
+        }
+        audit["checks"].append(check)
+        audit["rows_compared"] += 1
+        if not check["passed"]:
+            audit["rows_failed"] += 1
+            audit["failures"].append(check)
+    return audit
+
+
+def _final_crop_has_text_trace(row: dict) -> bool:
+    trace_ids = row.get("trace_ids")
+    if not isinstance(trace_ids, list):
+        return False
+    return any(str(trace_id or "").strip() for trace_id in trace_ids)
+
+
+def _final_crop_page_composition_sort_key(row: dict) -> tuple[str, int, int, int, str]:
+    """Paste context first, then lower text crops so upper text crops own seams."""
+
+    bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+    y1 = int(bbox[1]) if bbox is not None else -1
+    y2 = int(bbox[3]) if bbox is not None else -1
+    return (
+        str(row.get("translated_output_page") or ""),
+        1 if _final_crop_has_text_trace(row) else 0,
+        -y1,
+        -y2,
+        str(row.get("band_id") or ""),
+    )
+
+
+def _load_final_rerender_render_plan_layers(work_dir: Path) -> list[dict]:
+    plan_path = (
+        Path(work_dir)
+        / "debug"
+        / "e2e"
+        / "09_typeset"
+        / "render_plan_final.jsonl"
+    )
+    return [entry for entry in _load_debug_jsonl(plan_path) if isinstance(entry, dict)]
 
 
 def _final_rerender_resolve_translated_path(work_dir: Path, translated_name: str) -> Path:
@@ -9042,17 +9361,31 @@ def _run_pipeline(config_path: str):
                     "skipped": True,
                     "skip_reason": "skip_final_page_space_typeset",
                 }
+                final_output_consistency_audit = {
+                    "pages_checked": 0,
+                    "pages_rerendered": 0,
+                    "errors": [],
+                    "skipped": True,
+                    "skip_reason": "skip_final_page_space_typeset",
+                }
             else:
                 post_rerender_contract_audit = _rerender_final_project_images_after_contract(project_data, work_dir)
+                final_output_consistency_audit = _rerender_final_project_images_from_metadata(project_data, work_dir)
             project_data.setdefault("qa", {}).setdefault("summary", {})[
                 "final_project_image_rerender"
             ] = final_rerender_audit
             project_data.setdefault("qa", {}).setdefault("summary", {})[
                 "post_rerender_contract_repair"
             ] = post_rerender_contract_audit
+            project_data.setdefault("qa", {}).setdefault("summary", {})[
+                "final_output_consistency_rerender"
+            ] = final_output_consistency_audit
             project_data.setdefault("qa", {})[
                 "post_rerender_contract_repair"
             ] = post_rerender_contract_audit
+            project_data.setdefault("qa")[
+                "final_output_consistency_rerender"
+            ] = final_output_consistency_audit
     except Exception as exc:
         logger.warning("Falha ao rerenderizar imagens finais a partir do project.json: %s", exc)
     try:
@@ -9128,6 +9461,17 @@ def _run_pipeline(config_path: str):
             )
     except Exception as exc:
         logger.warning("Falha ao executar QA visual pós-rerender final: %s", exc)
+    try:
+        with pipeline_timing.measure("final_translated_page_consistency_guard"):
+            final_translated_page_consistency_guard = _rerender_final_project_images_from_metadata(project_data, work_dir)
+            project_data.setdefault("qa", {})[
+                "final_translated_page_consistency_guard"
+            ] = final_translated_page_consistency_guard
+            project_data.setdefault("qa", {}).setdefault("summary", {})[
+                "final_translated_page_consistency_guard"
+            ] = final_translated_page_consistency_guard
+    except Exception as exc:
+        logger.warning("Falha ao aplicar guarda final de consistencia translated/final_band: %s", exc)
     try:
         from qa.export_gate import evaluate_export_gate
 
@@ -12804,7 +13148,9 @@ def _scrub_crop_rerender_text_regions(base_crop_rgb, local_layers: list[dict]) -
                     fill_rgb = _np.median(background_pixels, axis=0).astype("uint8")
                 else:
                     fill_rgb = _np.array([0, 0, 0], dtype="uint8")
-                roi[:, :, :] = fill_rgb
+                if int(_np.count_nonzero(mask)) <= 0:
+                    continue
+                roi[mask > 0] = fill_rgb
             else:
                 base_crop_rgb[y1:y2, x1:x2, :] = 0
             scrubbed += 1
@@ -12862,6 +13208,11 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
         "rows_checked": 0,
         "rows_rerendered": 0,
         "positive_band_base_used": 0,
+        "rendered_band_direct_copy_used": 0,
+        "clean_band_source_used": 0,
+        "clean_band_final_mismatch_count": 0,
+        "clean_band_final_checks": [],
+        "render_plan_layers_used": 0,
         "stale_text_regions_scrubbed": 0,
         "errors": [],
         "strip_reassembled_output_rerender_allowed": True,
@@ -12878,21 +13229,16 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
     crop_rows = _load_debug_jsonl(crops_path)
     if not crop_rows:
         return audit
+    render_plan_layers = _load_final_rerender_render_plan_layers(work_dir)
     project_layers = [layer for layer in _iter_project_text_layers(project_data) if isinstance(layer, dict)]
     translated_pages: dict[Path, np.ndarray] = {}
     touched_pages: set[Path] = set()
     seen_pages: set[Path] = set()
-    for row in crop_rows:
+    for row in sorted(crop_rows, key=_final_crop_page_composition_sort_key):
         audit["rows_checked"] += 1
         bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
         translated_name = str(row.get("translated_output_page") or "").strip()
         if bbox is None or not translated_name:
-            continue
-        matching_layers = [
-            layer for layer in _final_rerender_layers_for_crop(row, project_layers)
-            if _layer_requires_strip_crop_rerender(layer)
-        ]
-        if not matching_layers:
             continue
         translated_path = _final_rerender_resolve_translated_path(work_dir, translated_name)
         seen_pages.add(translated_path)
@@ -12912,10 +13258,69 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
             continue
         crop_w = x2 - x1
         crop_h = y2 - y1
+        clean_bgr, clean_path, clean_source = _preferred_clean_band_source_for_final_crop(
+            row,
+            work_dir,
+            (crop_w, crop_h),
+        )
+        if clean_bgr is not None:
+            page_bgr[y1:y2, x1:x2, :] = clean_bgr
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            final_path = None
+            if final_rel:
+                final_path = work_dir / "debug" / "e2e" / final_rel
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                if clean_path is not None and final_path.suffix.lower() == clean_path.suffix.lower():
+                    import shutil
+
+                    shutil.copyfile(clean_path, final_path)
+                else:
+                    cv2.imwrite(str(final_path), clean_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
+            diff_summary = _final_band_diff_summary(clean_bgr, final_bgr)
+            diff_summary.update(
+                {
+                    "band_id": str(row.get("band_id") or ""),
+                    "source": clean_source,
+                    "source_path": str(clean_path) if clean_path else "",
+                    "final_path": str(final_path) if final_path else "",
+                }
+            )
+            audit["clean_band_final_checks"].append(diff_summary)
+            if diff_summary.get("worse_than_clean_source"):
+                audit["clean_band_final_mismatch_count"] += 1
+            audit["clean_band_source_used"] += 1
+            if clean_source == "rendered_band_path":
+                audit["rendered_band_direct_copy_used"] += 1
+            audit["rows_rerendered"] += 1
+            touched_pages.add(translated_path)
+            continue
+        matching_layers = [
+            layer for layer in _final_rerender_layers_for_crop(row, render_plan_layers)
+            if _layer_requires_strip_crop_rerender(layer)
+        ]
+        if matching_layers:
+            audit["render_plan_layers_used"] += 1
+        else:
+            matching_layers = [
+                layer for layer in _final_rerender_layers_for_crop(row, project_layers)
+                if _layer_requires_strip_crop_rerender(layer)
+            ]
+        if not matching_layers:
+            continue
         positive_band_bgr, positive_band_path = _positive_strip_band_base_for_rerender(row, work_dir, (crop_w, crop_h))
         if positive_band_bgr is not None:
-            base_crop_rgb = cv2.cvtColor(positive_band_bgr, cv2.COLOR_BGR2RGB)
             audit["positive_band_base_used"] += 1
+            page_bgr[y1:y2, x1:x2, :] = positive_band_bgr
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            if final_rel:
+                final_path = work_dir / "debug" / "e2e" / final_rel
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(final_path), positive_band_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            audit["rendered_band_direct_copy_used"] += 1
+            audit["rows_rerendered"] += 1
+            touched_pages.add(translated_path)
+            continue
         else:
             base_page_path = work_dir / "images" / Path(translated_name).name
             base_bgr = cv2.imread(str(base_page_path), cv2.IMREAD_COLOR)
@@ -12957,9 +13362,27 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
         audit["rows_rerendered"] += 1
         touched_pages.add(translated_path)
     for path in touched_pages:
-        cv2.imwrite(str(path), translated_pages[path], [cv2.IMWRITE_JPEG_QUALITY, 95])
+        cv2.imwrite(str(path), translated_pages[path], [cv2.IMWRITE_JPEG_QUALITY, 100])
     audit["pages_checked"] = len(seen_pages)
     audit["pages_rerendered"] = len(touched_pages)
+    consistency_audit = _audit_translated_page_band_consistency(work_dir)
+    audit["translated_page_band_consistency"] = {
+        "rows_checked": consistency_audit.get("rows_checked", 0),
+        "rows_compared": consistency_audit.get("rows_compared", 0),
+        "rows_failed": consistency_audit.get("rows_failed", 0),
+    }
+    try:
+        consistency_path = (
+            Path(work_dir)
+            / "debug"
+            / "e2e"
+            / "10_copyback_reassemble"
+            / "translated_page_band_consistency_audit.json"
+        )
+        consistency_path.parent.mkdir(parents=True, exist_ok=True)
+        consistency_path.write_text(json.dumps(consistency_audit, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        audit["errors"].append({"stage": "translated_page_band_consistency_audit", "error": str(exc)})
     return audit
 
 

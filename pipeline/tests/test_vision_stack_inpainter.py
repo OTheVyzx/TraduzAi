@@ -561,6 +561,26 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(page["_strip_fast_white_rejection_reasons"], {"koharu_text_evidence_mismatch": 1})
         self.assertTrue(np.array_equal(result, image))
 
+    def test_fast_white_evidence_rejects_partial_line_polygon_coverage(self):
+        import inpainter
+        from inpainter import _koharu_style_fast_white_evidence_rejection_reason
+
+        image = np.full((120, 220, 3), 255, dtype=np.uint8)
+        text = {
+            "line_polygons": [
+                [[30, 42], [190, 42], [190, 72], [30, 72]],
+            ],
+        }
+        fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        fill_mask[42:72, 88:132] = 255
+        evidence = np.zeros(image.shape[:2], dtype=np.uint8)
+        evidence[42:72, 30:190] = 255
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=evidence):
+            reason = _koharu_style_fast_white_evidence_rejection_reason(image, text, fill_mask)
+
+        self.assertEqual(reason, "koharu_text_evidence_mismatch")
+
     def test_fast_white_fill_prefers_merged_source_boxes_over_broad_bbox(self):
         from inpainter import _apply_fast_white_balloon_fill
 
@@ -3762,6 +3782,15 @@ class VisionStackInpainterTests(unittest.TestCase):
             },
             clear=False,
         ), patch(
+            "inpainter._apply_koharu_bubble_fast_fill_to_blocks",
+            side_effect=lambda working_rgb, page, blocks: (
+                working_rgb,
+                blocks,
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                {"filled_pixels": 0, "remaining_pixels": 0, "samples": [], "rejection_reasons": {}},
+            ),
+        ), patch(
             "vision_stack.runtime._get_inpainter",
             return_value=fake_inpainter,
         ), patch(
@@ -3779,7 +3808,104 @@ class VisionStackInpainterTests(unittest.TestCase):
                 {"has_residual": True, "flags": ["dark_residual_pixels"], "score": 0.24},
                 {"has_residual": True, "flags": ["dark_residual_pixels"], "score": 0.24},
                 {"has_residual": False, "flags": [], "score": 0.0},
+                {"has_residual": False, "flags": [], "score": 0.0},
             ],
+        ):
+            result = inpaint_band_image(image, page)
+
+        self.assertEqual(len(fake_inpainter.calls), 1)
+        self.assertTrue(page["_strip_dark_residual_retry"])
+        self.assertGreater(page["_strip_dark_residual_retry_mask_pixels"], 0)
+        self.assertTrue(np.all(result[34:42, 42:110] == 42))
+
+    def test_dark_residual_retry_runs_for_text_over_art_when_evidence_uses_expanded_mask(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((90, 150, 3), 36, dtype=np.uint8)
+        image[34:42, 42:110] = 245
+        first_clean = image.copy()
+        first_clean[32:46, 38:116] = 54
+        page = {
+            "texts": [
+                {
+                    "bbox": [40, 30, 112, 48],
+                    "text_pixel_bbox": [42, 34, 110, 42],
+                    "balloon_bbox": [34, 24, 122, 56],
+                    "tipo": "fala",
+                    "layout_profile": "translucent_balloon",
+                    "bubble_mask_source": "derived_white_crop_rejected",
+                    "bubble_mask_error": "derived_mask_not_anchored_to_text",
+                    "mask_evidence": {
+                        "kind": "ocr_pixels",
+                        "raw_mask_pixels": 512,
+                        "expanded_mask_pixels": 1187,
+                        "evidence_score": 1.0,
+                    },
+                    "skip_processing": False,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [40, 30, 112, 48], "confidence": 0.95}],
+        }
+
+        class FakeInpainter:
+            def __init__(self):
+                self.calls = []
+
+            def inpaint(self, img, mask, batch_size=4, force_no_tiling=True):
+                self.calls.append(mask.copy())
+                repaired = img.copy()
+                repaired[mask > 0] = 42
+                return repaired
+
+        fake_inpainter = FakeInpainter()
+        dark_residual = {
+            "has_residual": True,
+            "flags": ["dark_residual_pixels"],
+            "score": 0.24,
+            "region_source": "expanded_mask",
+        }
+        retry_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        retry_mask[28:52, 36:120] = 255
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "0",
+            },
+            clear=False,
+        ), patch(
+            "inpainter._apply_koharu_bubble_fast_fill_to_blocks",
+            side_effect=lambda working_rgb, page, blocks: (
+                working_rgb,
+                blocks,
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                {"filled_pixels": 0, "remaining_pixels": 0, "samples": [], "rejection_reasons": {}},
+            ),
+        ), patch(
+            "vision_stack.runtime._get_inpainter",
+            return_value=fake_inpainter,
+        ), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=first_clean,
+        ), patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=lambda original, cleaned, texts, **kwargs: (cleaned, {}),
+        ), patch(
+            "vision_stack.runtime._clamp_image_to_limit_mask",
+            side_effect=lambda base, candidate, mask, texts, **kwargs: (candidate, int(np.count_nonzero(mask)), 0),
+        ), patch(
+            "inpainter._detect_inpaint_residual_text",
+            side_effect=[
+                dark_residual,
+                dark_residual,
+                {"has_residual": False, "flags": [], "score": 0.0},
+                {"has_residual": False, "flags": [], "score": 0.0},
+            ],
+        ), patch(
+            "inpainter._build_dark_residual_retry_mask",
+            return_value=retry_mask,
         ):
             result = inpaint_band_image(image, page)
 
@@ -4675,6 +4801,95 @@ class VisionStackInpainterTests(unittest.TestCase):
         inpaint_round.assert_called_once()
         self.assertFalse(page.get("_strip_used_dark_panel_fill"))
         self.assertGreaterEqual(page.get("_strip_remaining_inpaint_blocks"), 1)
+
+    def test_filter_keeps_text_only_colored_card_fragment_with_fallback_mask_for_real_inpaint(self):
+        """A merged item card must not lose its safe OCR-glyph action mask.
+
+        The first paragraph can carry a rejected derived mask while the next
+        paragraph has only a bbox fallback.  Both still have OCR-pixel masks;
+        discarding the fallback used to discard the whole inpaint batch and
+        leave the English item description underneath the translation.
+        """
+        from inpainter import _filter_unsafe_auto_inpaint_blocks, _ocr_page_has_unsafe_auto_inpaint_evidence
+
+        evidence = _allowed_mask_evidence()
+        evidence.update({"kind": "ocr_pixels", "raw_mask_pixels": 1200, "expanded_mask_pixels": 3400})
+        base = {
+            "background_rgb": [244, 207, 105],
+            "layout_profile": "translucent_balloon",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["visual_text_only_inpaint_contract", "fast_fill_no_glyph_evidence"],
+            "mask_evidence": evidence,
+        }
+        primary = {
+            **base,
+            "id": "ocr_002",
+            "bbox": [207, 460, 487, 532],
+            "text_pixel_bbox": [208, 466, 517, 527],
+            "line_polygons": [[[208, 466], [517, 466], [517, 527], [208, 527]]],
+            "balloon_bbox": [146, 439, 548, 553],
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "bubble_mask_error": "derived_mask_not_anchored_to_text",
+        }
+        continuation = {
+            **base,
+            "id": "ocr_003",
+            "bbox": [150, 571, 535, 708],
+            "text_pixel_bbox": [151, 574, 572, 704],
+            "line_polygons": [[[151, 574], [572, 574], [572, 704], [151, 704]]],
+            "balloon_bbox": [66, 530, 619, 749],
+            "bubble_mask_source": "rejected_derived_bubble_mask",
+            "bubble_mask_error": "missing_real_bubble_mask",
+        }
+        page = {"texts": [primary, continuation]}
+
+        remaining = _filter_unsafe_auto_inpaint_blocks(
+            page,
+            [dict(primary), dict(continuation)],
+            np.full((800, 700, 3), [244, 207, 105], dtype=np.uint8),
+        )
+
+        self.assertEqual([block["id"] for block in remaining], ["ocr_002", "ocr_003"])
+        self.assertFalse(_ocr_page_has_unsafe_auto_inpaint_evidence(page, remaining))
+        self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
+
+    def test_inpaint_band_image_runs_real_inpaint_for_text_only_colored_card_contract(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((180, 360, 3), [244, 207, 105], dtype=np.uint8)
+        image[:, :, 0] = np.linspace(216, 250, image.shape[1], dtype=np.uint8)
+        cv2.putText(image, "MOONSTONE ELIXIR", (64, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.64, (250, 250, 250), 2, cv2.LINE_AA)
+        evidence = _allowed_mask_evidence()
+        evidence.update({"kind": "ocr_pixels", "raw_mask_pixels": 1900, "expanded_mask_pixels": 4800})
+        text = {
+            "id": "ocr_003",
+            "trace_id": "ocr_003@page_002_band_033",
+            "text": "MOONSTONE ELIXIR",
+            "bbox": [56, 60, 314, 112],
+            "text_pixel_bbox": [56, 60, 314, 112],
+            "line_polygons": [[[64, 66], [314, 66], [314, 108], [64, 108]]],
+            "balloon_bbox": [34, 42, 330, 132],
+            "bubble_mask_source": "rejected_derived_bubble_mask",
+            "bubble_mask_error": "missing_real_bubble_mask",
+            "background_rgb": [244, 207, 105],
+            "layout_profile": "translucent_balloon",
+            "card_panel_text_context": True,
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["visual_text_only_inpaint_contract", "fast_fill_no_glyph_evidence"],
+            "mask_evidence": evidence,
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)], "_band_y_top": 0}
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "0"}, clear=False), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=image.copy(),
+        ) as inpaint_round:
+            inpaint_band_image(image, page)
+
+        inpaint_round.assert_called_once()
+        self.assertTrue(page.get("_strip_used_real_inpaint"))
+        self.assertEqual(page["texts"][0]["layout_category"], "item_card")
+        self.assertEqual(page["texts"][0]["card_panel_child_index"], 0)
 
     def test_dark_bubble_with_ocr_evidence_uses_glyph_action_mask_not_panel_mask(self):
         from inpainter import _apply_fast_dark_panel_text_fill
@@ -6116,6 +6331,142 @@ class VisionStackInpainterTests(unittest.TestCase):
         samples = page.get("_strip_koharu_fast_fill_samples") or []
         self.assertTrue(any(sample.get("reason") == "visual_contract_missing_bubble_mask" for sample in samples))
         self.assertTrue(np.array_equal(result[80, 80], np.asarray([4, 8, 12], dtype=np.uint8)))
+
+    def test_colored_item_card_contract_fill_prefers_panel_color_over_black_shadow(self):
+        from inpainter import _sample_dark_panel_contract_fill_rgb
+
+        image = np.full((180, 420, 3), (249, 210, 107), dtype=np.uint8)
+        cv2.rectangle(image, (92, 62), (328, 116), (0, 0, 0), -1)
+        cv2.putText(
+            image,
+            "MOONSTONE ELIXIR",
+            (100, 96),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (255, 254, 221),
+            2,
+            cv2.LINE_AA,
+        )
+        fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        fill_mask[58:121, 88:332] = 255
+        text = {
+            "bbox": [92, 62, 328, 116],
+            "text_pixel_bbox": [92, 62, 328, 116],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "background_rgb": [249, 210, 107],
+            "background_type": "colored_status_panel",
+            "layout_profile": "colored_status_panel",
+            "layout_category": "item_card",
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+            "dark_panel_effect_colors": {"panel_fill_rgb": [249, 210, 107]},
+            "qa_metrics": {
+                "derived_card_panel_mask": {"panel_fill_rgb": [249, 210, 107]},
+            },
+        }
+
+        fill_rgb = _sample_dark_panel_contract_fill_rgb(
+            image,
+            fill_mask,
+            text,
+            image.shape[1],
+            image.shape[0],
+        )
+
+        self.assertIsInstance(fill_rgb, np.ndarray)
+        self.assertTrue(np.allclose(fill_rgb, np.asarray([249, 210, 107]), atol=3))
+        self.assertEqual(
+            (text["qa_metrics"].get("dark_panel_sampled_contract_fill_rgb") or {}).get("source"),
+            "visual_card_panel_color",
+        )
+
+    def test_recalled_colored_item_card_samples_clean_panel_when_color_metadata_is_missing(self):
+        from inpainter import _sample_dark_panel_contract_fill_rgb
+
+        image = np.full((180, 420, 3), (247, 208, 106), dtype=np.uint8)
+        cv2.rectangle(image, (92, 62), (328, 116), (0, 0, 0), -1)
+        cv2.putText(
+            image,
+            "MOONSTONE ELIXIR",
+            (100, 96),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (255, 254, 221),
+            2,
+            cv2.LINE_AA,
+        )
+        fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        fill_mask[58:121, 88:332] = 255
+        text = {
+            "bbox": [92, 62, 328, 116],
+            "text_pixel_bbox": [92, 62, 328, 116],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_profile": "dark_panel",
+            "card_panel_text_context": True,
+            "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+        }
+
+        fill_rgb = _sample_dark_panel_contract_fill_rgb(
+            image,
+            fill_mask,
+            text,
+            image.shape[1],
+            image.shape[0],
+        )
+
+        self.assertIsInstance(fill_rgb, np.ndarray)
+        self.assertTrue(np.allclose(fill_rgb, np.asarray([247, 208, 106]), atol=5))
+        self.assertEqual(
+            (text["qa_metrics"].get("dark_panel_sampled_contract_fill_rgb") or {}).get("source"),
+            "local_colored_panel_context",
+        )
+
+    def test_visual_item_card_contract_cleanup_covers_every_row_after_earlier_routes(self):
+        from inpainter import _apply_visual_item_card_contract_cleanup
+
+        image = np.full((220, 520, 3), (248, 209, 107), dtype=np.uint8)
+        cv2.putText(image, "MOONSTONE ELIXIR", (112, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (15, 10, 4), 7, cv2.LINE_AA)
+        cv2.putText(image, "MOONSTONE ELIXIR", (112, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 253, 221), 2, cv2.LINE_AA)
+        cv2.putText(image, "GRADE: B+", (170, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.74, (15, 10, 4), 7, cv2.LINE_AA)
+        cv2.putText(image, "GRADE: B+", (170, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.74, (255, 253, 221), 2, cv2.LINE_AA)
+        texts = [
+            {
+                "id": "cardocr_title",
+                "bbox": [105, 42, 410, 82],
+                "text_pixel_bbox": [105, 42, 410, 82],
+                "line_polygons": [[[105, 42], [410, 42], [410, 82], [105, 82]]],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "block_profile": "colored_status_panel",
+                "card_panel_text_context": True,
+                "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "ocr_grade",
+                "bbox": [160, 112, 350, 156],
+                "text_pixel_bbox": [160, 112, 350, 156],
+                "line_polygons": [[[160, 112], [350, 112], [350, 156], [160, 156]]],
+                "bubble_mask_source": "derived_card_panel_mask",
+                "background_rgb": [248, 209, 107],
+                "layout_category": "item_card",
+                "block_profile": "colored_status_panel",
+                "qa_flags": ["visual_text_only_inpaint_contract", "fast_fill_no_glyph_evidence"],
+                "_fast_fill_inpaint_resolved": True,
+            },
+        ]
+
+        cleaned, count, action_mask = _apply_visual_item_card_contract_cleanup(image, image, texts)
+
+        self.assertEqual(count, 2)
+        self.assertGreater(int(np.count_nonzero(action_mask)), 8000)
+        for text in texts:
+            x1, y1, x2, y2 = text["text_pixel_bbox"]
+            crop = cleaned[y1:y2, x1:x2]
+            luma = np.mean(crop.astype(np.float32), axis=2)
+            self.assertLess(int(np.count_nonzero(luma >= 245.0)), 12)
+            self.assertLess(int(np.count_nonzero(luma <= 80.0)), 12)
+            self.assertIn("visual_item_card_forced_contract_cleanup", text.get("qa_flags") or [])
+            metric = (text.get("qa_metrics") or {}).get("visual_item_card_forced_contract_cleanup") or {}
+            self.assertGreater(int(metric.get("mask_pixels") or 0), 1000)
+            self.assertEqual(metric.get("fill_rgb"), [248, 209, 107])
 
     def test_dark_bubble_connected_pair_uses_sibling_split_like_white_pair(self):
         from inpainter import _try_dark_panel_text_fill
@@ -7779,6 +8130,29 @@ class VisionStackInpainterTests(unittest.TestCase):
         filled = result[mask > 0]
         self.assertLess(float(np.mean(filled)), 40.0)
 
+    def test_wide_contour_balloon_skips_expanded_white_residual_force_fill(self):
+        from inpainter import _should_skip_expanded_white_residual_force_fill
+
+        text = {
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_bbox": [0, 0, 800, 340],
+            "bubble_mask_bbox": [189, 8, 483, 130],
+            "bubble_inner_bbox": [197, 7, 602, 168],
+            "qa_flags": ["band_edge_clipped_balloon_mask", "ocr_geometry_overmerged"],
+        }
+
+        self.assertTrue(_should_skip_expanded_white_residual_force_fill([text]))
+
+    def test_missing_real_bubble_mask_skips_expanded_white_residual_force_fill(self):
+        from inpainter import _should_skip_expanded_white_residual_force_fill
+
+        text = {
+            "bubble_mask_source": "bbox_fallback",
+            "qa_flags": ["missing_real_bubble_mask", "debug_derived_bubble_mask_rejected"],
+        }
+
+        self.assertTrue(_should_skip_expanded_white_residual_force_fill([text]))
+
     def test_translucent_white_balloon_profile_blocks_dark_panel_route(self):
         from inpainter import (
             _apply_dark_panel_text_fills,
@@ -7905,6 +8279,123 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertFalse(np.array_equal(result[action_mask > 0], current[action_mask > 0]))
         self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
 
+    def test_white_outline_translucent_panel_keeps_normal_inpaint_result(self):
+        from inpainter import _apply_translucent_balloon_text_over_art_inpaint
+
+        original = np.full((80, 120, 3), 220, dtype=np.uint8)
+        original[30:46, 38:82] = 255
+        current = np.full_like(original, 190)
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[26:50, 32:88] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "inpaint_profile": "white_outline_translucent_panel",
+            "balloon_bbox": [20, 16, 100, 60],
+        }
+
+        result, pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            original,
+            current,
+            action_mask,
+            [text],
+        )
+
+        self.assertEqual(pixels, 0)
+        self.assertTrue(np.array_equal(result, current))
+
+    def test_translucent_separator_split_keeps_the_region_inpaint_result(self):
+        from inpainter import _apply_translucent_balloon_text_over_art_inpaint
+
+        original = np.full((80, 120, 3), 220, dtype=np.uint8)
+        current = np.full_like(original, 190)
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[26:50, 32:88] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_separator_split",
+            "balloon_bbox": [20, 16, 100, 60],
+        }
+
+        result, pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            original,
+            current,
+            action_mask,
+            [text],
+        )
+
+        self.assertEqual(pixels, 0)
+        self.assertTrue(np.array_equal(result, current))
+
+    def test_translucent_separator_reconstruction_blends_a_long_horizontal_panel_edge(self):
+        from inpainter import _blend_translucent_horizontal_separator_edges
+
+        original = np.full((80, 120, 3), 230, dtype=np.uint8)
+        original[39:42, :28] = 20
+        original[39:42, 92:] = 20
+        current = original.copy()
+        current[39:42, 28:92] = 205
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[20:62, 28:92] = 255
+
+        result, restored_pixels = _blend_translucent_horizontal_separator_edges(
+            original,
+            current,
+            action_mask,
+        )
+
+        self.assertGreaterEqual(restored_pixels, 64)
+        self.assertTrue(np.all((result[39:42, 28:92] >= 140) & (result[39:42, 28:92] <= 190)))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_translucent_fallback_context_copy_interpolates_clean_side_samples(self):
+        from inpainter import _copy_translucent_fallback_context_rows
+
+        current = np.full((80, 160, 3), 220, dtype=np.uint8)
+        current[20:60, 44:116] = 40
+        current[20:60, 20:44] = 205
+        current[20:60, 116:140] = 235
+        current[34:37, :44] = 20
+        current[34:37, 116:] = 20
+        action_mask = np.zeros(current.shape[:2], dtype=np.uint8)
+        action_mask[20:60, 44:116] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "bubble_mask_source": "bbox_fallback",
+            "inpaint_profile": "translucent_divider_white_lower",
+        }
+
+        result, copied_pixels = _copy_translucent_fallback_context_rows(current, action_mask, [text])
+
+        self.assertGreater(copied_pixels, 0)
+        self.assertTrue(np.all(result[25, 76] == 40))
+        self.assertTrue(np.all((result[40, 76] >= 215) & (result[40, 76] <= 225)))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_translucent_context_copy_tiles_clean_side_texture(self):
+        from inpainter import _copy_translucent_fallback_context_rows
+
+        current = np.full((50, 120, 3), 220, dtype=np.uint8)
+        texture = np.array([[90, 90, 90], [230, 230, 230]] * 12, dtype=np.uint8)
+        current[12:38, 16:40] = texture
+        current[12:38, 40:80] = 40
+        current[12:38, 80:104] = texture
+        action_mask = np.zeros(current.shape[:2], dtype=np.uint8)
+        action_mask[12:38, 40:80] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_context_copy",
+        }
+
+        result, copied_pixels = _copy_translucent_fallback_context_rows(current, action_mask, [text])
+
+        self.assertGreaterEqual(copied_pixels, 40 * 26)
+        self.assertTrue(np.array_equal(result[24, 40:64], texture))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
     def test_translucent_profile_rejects_a_balloon_collapsed_to_art_text(self):
         from inpainter import _promote_translucent_balloon_profile
 
@@ -7954,6 +8445,84 @@ class VisionStackInpainterTests(unittest.TestCase):
 
         self.assertTrue(_promote_translucent_balloon_profile(image, text))
         self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_profile_promotes_visible_panel_separator_for_split_inpaint(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 218, dtype=np.uint8)
+        image[56:, :] = 250
+        image[50:53, 24:58] = 18
+        image[50:53, 142:176] = 18
+        image[42:68, 58:142] = 10
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+        self.assertEqual(text.get("inpaint_profile"), "translucent_separator_split")
+
+    def test_translucent_profile_accepts_rejected_white_crop_with_visible_texture(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 235, dtype=np.uint8)
+        image[:, 24:176:8] = 110
+        image[42:68, 58:142] = 10
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "qa_flags": ["missing_real_bubble_mask", "rejected_derived_bubble_mask"],
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+        self.assertEqual(text.get("inpaint_profile"), "translucent_context_copy")
+
+    def test_translucent_profile_accepts_fallback_mask_with_visible_texture(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 235, dtype=np.uint8)
+        image[:, 24:176:8] = 110
+        image[42:68, 58:142] = 10
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "bbox_fallback",
+            "bubble_mask_error": "missing_real_bubble_mask",
+            "qa_flags": ["missing_real_bubble_mask"],
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_fallback_divider_receives_white_lower_context_profile(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 235, dtype=np.uint8)
+        image[:, 24:176:8] = 110
+        image[42:68, 58:142] = 10
+        image[50:53, 24:58] = 20
+        image[50:53, 142:176] = 20
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "bbox_fallback",
+            "bubble_mask_error": "missing_real_bubble_mask",
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("inpaint_profile"), "translucent_divider_white_lower")
 
     def test_translucent_balloon_does_not_receive_a_second_runtime_mask_expansion(self):
         from vision_stack.runtime import _run_masked_inpaint_passes

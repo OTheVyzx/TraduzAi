@@ -69,8 +69,12 @@ def test_eco_profile_disables_optional_prewarm_and_caps_cpu_threads():
     assert "TRADUZAI_STRIP_FAST_LOCAL_INPAINT" not in decision.env_defaults
 
 
-def test_fast_fill_rejects_skip_processing_and_qa_flags():
+def test_fast_fill_rejects_skip_processing_and_qa_flags(monkeypatch):
     from inpainter import _fast_local_rejection_reason, _fast_white_rejection_reason
+
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "fast")
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_WHITE_INPAINT", "1")
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_LOCAL_INPAINT", "1")
 
     assert _fast_white_rejection_reason({"skip_processing": True, "tipo": "fala"}) == "skip_processing"
     assert _fast_local_rejection_reason({"skip_processing": True, "tipo": "fala"}) == "skip_processing"
@@ -92,8 +96,22 @@ def test_fast_solid_fill_is_opt_in_by_env(monkeypatch):
     assert _fast_solid_balloon_fill_enabled() is False
 
     monkeypatch.setenv("TRADUZAI_STRIP_FAST_SOLID_INPAINT", "1")
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "fast")
 
     assert _fast_solid_balloon_fill_enabled() is True
+
+
+def test_default_runtime_profile_selects_pure_inpaint():
+    assert resolve_runtime_profile({}).env_defaults["TRADUZAI_INPAINT_POLICY"] == "pure"
+
+
+def test_explicit_fast_profile_does_not_override_pure_without_opt_in(monkeypatch):
+    from inpainter import direct_inpaint_mutations_allowed
+
+    monkeypatch.delenv("TRADUZAI_INPAINT_POLICY", raising=False)
+    assert direct_inpaint_mutations_allowed() is False
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "fast")
+    assert direct_inpaint_mutations_allowed() is True
 
 
 def test_runtime_profile_can_be_requested_by_preset_object():
