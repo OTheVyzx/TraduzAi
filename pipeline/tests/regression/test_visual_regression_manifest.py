@@ -10,6 +10,7 @@ import pytest
 
 
 MANIFEST_DIR = Path(__file__).with_name("manifests")
+MYTHIC_CH40_VISUAL_CASES_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "mythic_ch40_visual_cases.json"
 REPORT_PATH = Path(__file__).resolve().parents[3] / "docs" / "debug" / "visual_regression_report.md"
 REQUIRED_MANIFEST_FIELDS = {
     "manifest_version",
@@ -333,6 +334,24 @@ def test_visual_regression_report_is_generated():
     assert "| Chapter | Pages | Flags before/current | Flags after/target | Final status | Needs review | Evidence |" in content
     expected_run_id = "ci_visual_smoke" if _running_in_ci() else "one_second_ch2"
     assert expected_run_id in content
+
+
+def test_mythic_ch40_visual_cases_fixture_has_a_valid_failure_matrix():
+    fixture = _load_manifest(MYTHIC_CH40_VISUAL_CASES_PATH)
+
+    assert isinstance(fixture.get("run_id"), str) and fixture["run_id"]
+    bad_bands = fixture.get("bad_bands")
+    control_bands = fixture.get("control_bands")
+    issue_codes = fixture.get("required_issue_codes")
+
+    assert isinstance(bad_bands, list) and all(isinstance(band_id, int) for band_id in bad_bands)
+    assert isinstance(control_bands, list) and all(isinstance(band_id, int) for band_id in control_bands)
+    assert len(bad_bands) == len(set(bad_bands))
+    assert len(control_bands) == len(set(control_bands))
+    assert set(bad_bands).isdisjoint(control_bands)
+    assert isinstance(issue_codes, list) and issue_codes
+    assert all(isinstance(code, str) and code for code in issue_codes)
+    assert len(issue_codes) == len(set(issue_codes))
 
 
 def test_manifest_qa_report_hash_mismatch_fails(tmp_path: Path):
