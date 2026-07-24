@@ -9,7 +9,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from debug_tools import DebugRecorder, bind_recorder
-from strip.run import _candidate_matches_band_text_bbox, run_chapter
+from strip.run import (
+    _candidate_matches_band_text_bbox,
+    _reconcile_overlapping_band_ocr_fragments_before_translation,
+    run_chapter,
+)
 from strip.process_bands import _band_to_page_dict, process_band
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
@@ -117,6 +121,94 @@ def test_candidate_text_matching_rejects_edge_overlap_from_next_balloon():
 
     assert _candidate_matches_band_text_bbox(candidate_bbox, top_balloon_text)
     assert not _candidate_matches_band_text_bbox(candidate_bbox, lower_balloon_text)
+
+
+def test_reconcile_overlapping_band_ocr_fragments_keeps_full_text_for_translation():
+    bands = [
+        SimpleNamespace(y_top=92743, y_bottom=93423),
+        SimpleNamespace(y_top=93211, y_bottom=93648),
+    ]
+    precomputed = {
+        0: {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "THAT'S RIGHT! HOW",
+                    "bbox": [351, 641, 601, 665],
+                    "text_pixel_bbox": [351, 641, 601, 665],
+                }
+            ]
+        },
+        1: {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "THAT'S RIGHT! HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE THOUGH...",
+                    "bbox": [274, 172, 673, 267],
+                    "text_pixel_bbox": [274, 172, 673, 267],
+                }
+            ]
+        },
+    }
+
+    reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation(bands, precomputed)
+
+    assert reconciled == 1
+    assert precomputed[0]["texts"] == []
+    assert precomputed[1]["texts"][0]["text"].startswith("THAT'S RIGHT! HOW DID HE")
+    assert precomputed[1]["texts"][0]["cross_band_fragment_trace_ids"] == ["band_000:ocr_001"]
+
+
+def test_reconcile_overlapping_bands_suppresses_equivalent_full_duplicate():
+    bands = [
+        Band(y_top=0, y_bottom=200, balloons=[Balloon(BBox(20, 40, 180, 160), confidence=0.95)]),
+        Band(y_top=100, y_bottom=300, balloons=[Balloon(BBox(20, 120, 180, 240), confidence=0.95)]),
+    ]
+    pages = {
+        0: {"texts": [{"id": "edge", "text": "DID IT GO WELL?", "bbox": [30, 105, 170, 145], "confidence": 0.8}], "_vision_blocks": [{"id": "edge", "bbox": [30, 105, 170, 145]}]},
+        1: {"texts": [{"id": "central", "text": "DID IT GO well?", "bbox": [30, 5, 170, 45], "confidence": 0.92}], "_vision_blocks": [{"id": "central", "bbox": [30, 5, 170, 45]}]},
+    }
+
+    reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation(bands, pages)
+
+    assert reconciled == 1
+    assert pages[1]["texts"] == []
+    assert pages[1]["_vision_blocks"] == []
+    owner = pages[0]["texts"][0]
+    assert owner["cross_band_owner_trace_id"] == "band_000:edge"
+    assert owner["cross_band_suppressed_trace_ids"] == ["band_001:central"]
+
+
+def test_reconcile_overlapping_bands_quarantines_unsupported_edge_fragment():
+    band = Band(y_top=100, y_bottom=300, balloons=[Balloon(BBox(20, 160, 180, 260), confidence=0.9)])
+    page = {
+        "texts": [{"id": "edge", "text": "IMLAK...", "bbox": [30, 0, 100, 20], "confidence": 0.6}],
+        "_vision_blocks": [{"id": "edge", "bbox": [30, 0, 100, 20]}],
+    }
+
+    reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation([band], {0: page})
+
+    assert reconciled == 0
+    assert page["texts"][0]["route_action"] == "review_required"
+    assert page["texts"][0]["route_reason"] == "cross_band_unsupported_edge_fragment"
+    assert page["_vision_blocks"] == []
+
+
+def test_reconcile_overlapping_bands_keeps_repeated_text_in_distinct_geometry():
+    bands = [
+        Band(y_top=0, y_bottom=200, balloons=[Balloon(BBox(10, 20, 100, 80), confidence=0.9)]),
+        Band(y_top=100, y_bottom=300, balloons=[Balloon(BBox(240, 160, 330, 220), confidence=0.9)]),
+    ]
+    pages = {
+        0: {"texts": [{"id": "left", "text": "HELP!", "bbox": [10, 20, 100, 60]}], "_vision_blocks": [{"id": "left", "bbox": [10, 20, 100, 60]}]},
+        1: {"texts": [{"id": "right", "text": "HELP!", "bbox": [240, 60, 330, 100]}], "_vision_blocks": [{"id": "right", "bbox": [240, 60, 330, 100]}]},
+    }
+
+    reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation(bands, pages)
+
+    assert reconciled == 0
+    assert [text["id"] for text in pages[0]["texts"]] == ["left"]
+    assert [text["id"] for text in pages[1]["texts"]] == ["right"]
 
 
 def test_run_chapter_writes_bands_manifest_with_stable_ids(tmp_path):

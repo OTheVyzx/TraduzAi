@@ -56,6 +56,194 @@ def _texts_without_legacy_decision_fields(texts) -> list[dict]:
     ]
 
 
+def _record_bbox4_for_cross_band_reconciliation(record: dict) -> list[int] | None:
+    for key in ("text_pixel_bbox", "layout_bbox", "bbox", "source_bbox"):
+        raw = record.get(key)
+        if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (int(round(float(value))) for value in raw[:4])
+        except (TypeError, ValueError):
+            continue
+        if x2 > x1 and y2 > y1:
+            return [x1, y1, x2, y2]
+    return None
+
+
+def _cross_band_merge_source_text(record: dict) -> str:
+    for key in ("normalized_text_final", "text", "original", "raw_ocr"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalized_cross_band_source_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _cross_band_trace_id(band_index: int, record: dict) -> str:
+    identity = str(record.get("trace_id") or record.get("text_id") or record.get("id") or "text").strip()
+    return f"band_{band_index:03d}:{identity}"
+
+
+def _cross_band_bbox_overlap_ratio(reference: list[int], candidate: list[int]) -> float:
+    intersection_w = max(0, min(reference[2], candidate[2]) - max(reference[0], candidate[0]))
+    intersection_h = max(0, min(reference[3], candidate[3]) - max(reference[1], candidate[1]))
+    reference_area = max(1, (reference[2] - reference[0]) * (reference[3] - reference[1]))
+    return (intersection_w * intersection_h) / float(reference_area)
+
+
+def _cross_band_detector_support(band: Band, global_bbox: list[int]) -> float:
+    support = 0.0
+    for balloon in list(getattr(band, "balloons", None) or []):
+        strip_bbox = getattr(balloon, "strip_bbox", None)
+        candidate = [
+            int(getattr(strip_bbox, "x1", 0)),
+            int(getattr(strip_bbox, "y1", 0)),
+            int(getattr(strip_bbox, "x2", 0)),
+            int(getattr(strip_bbox, "y2", 0)),
+        ]
+        if candidate[2] <= candidate[0] or candidate[3] <= candidate[1]:
+            continue
+        overlap = _cross_band_bbox_overlap_ratio(global_bbox, candidate)
+        if overlap >= 0.60:
+            support = max(support, float(getattr(balloon, "confidence", 0.0) or 0.0))
+    return min(1.0, support)
+
+
+def _cross_band_bbox_interior_ratio(band: Band, local_bbox: list[int]) -> float:
+    band_height = max(1, int(band.y_bottom) - int(band.y_top))
+    nearest_edge = min(max(0, local_bbox[1]), max(0, band_height - local_bbox[3]))
+    return min(1.0, nearest_edge / max(1.0, band_height * 0.25))
+
+
+def _cross_band_remove_vision_block(page: dict, record: dict, text_index: int) -> None:
+    blocks = [block for block in list(page.get("_vision_blocks") or []) if isinstance(block, dict)]
+    if len(blocks) == len(list(page.get("texts") or [])) and 0 <= text_index < len(blocks):
+        del blocks[text_index]
+    else:
+        trace = _cross_band_trace_id(0, record).split(":", 1)[-1]
+        bbox = _record_bbox4_for_cross_band_reconciliation(record)
+        blocks = [
+            block
+            for block in blocks
+            if not (
+                str(block.get("trace_id") or block.get("text_id") or block.get("id") or "") == trace
+                or _record_bbox4_for_cross_band_reconciliation(block) == bbox
+            )
+        ]
+    page["_vision_blocks"] = blocks
+
+
+def _reconcile_overlapping_band_ocr_fragments_before_translation(
+    bands: list[Band],
+    precomputed_pages: dict[int, dict],
+) -> int:
+    """Keep the complete OCR read when adjacent bands see the same text.
+
+    The strip bands deliberately overlap.  A text that begins at the lower edge
+    of one band can therefore be recognized once as a short prefix and once as
+    the complete sentence in the following band.  Each band is translated on
+    its own, so this must be resolved before either record reaches translation
+    or inpainting.  The match is intentionally narrow: the short OCR bbox must
+    be almost fully covered in strip space and its normalized source must be a
+    prefix of the longer source.
+    """
+
+    entries: list[tuple[int, int, dict, list[int], list[int], str, float]] = []
+    for band_index, band in enumerate(bands):
+        page = precomputed_pages.get(band_index)
+        if not isinstance(page, dict):
+            continue
+        for text_index, record in enumerate(list(page.get("texts") or [])):
+            if not isinstance(record, dict):
+                continue
+            bbox = _record_bbox4_for_cross_band_reconciliation(record)
+            source = _normalized_cross_band_source_text(_cross_band_merge_source_text(record))
+            if bbox is None or not source:
+                continue
+            global_bbox = [bbox[0], bbox[1] + int(band.y_top), bbox[2], bbox[3] + int(band.y_top)]
+            detector_support = _cross_band_detector_support(band, global_bbox)
+            if bbox[1] <= 8 and detector_support <= 0.0:
+                record["route_action"] = "review_required"
+                record["route_reason"] = "cross_band_unsupported_edge_fragment"
+                flags = [str(flag) for flag in record.get("qa_flags") or [] if str(flag)]
+                if "cross_band_unsupported_edge_fragment" not in flags:
+                    flags.append("cross_band_unsupported_edge_fragment")
+                record["qa_flags"] = flags
+                _cross_band_remove_vision_block(page, record, text_index)
+                continue
+            confidence = float(record.get("confidence") or record.get("confidence_raw") or 0.0)
+            completeness_score = min(1.0, len(source) / 40.0)
+            band_height = max(1, int(band.y_bottom) - int(band.y_top))
+            owner_score = (
+                detector_support * 4.0
+                + _cross_band_bbox_interior_ratio(band, bbox) * 2.0
+                + confidence
+                + completeness_score
+                - (1.0 if bbox[1] <= 8 or bbox[3] >= band_height - 8 else 0.0) * 3.0
+            )
+            entries.append((band_index, text_index, record, bbox, global_bbox, source, owner_score))
+
+    to_remove: dict[int, set[int]] = {}
+    reconciled = 0
+    for short_band, short_index, short_record, _short_local_bbox, short_bbox, short_source, short_score in entries:
+        if short_index in to_remove.get(short_band, set()):
+            continue
+        short_area = max(1, (short_bbox[2] - short_bbox[0]) * (short_bbox[3] - short_bbox[1]))
+        best: tuple[int, int, dict, str, float] | None = None
+        for long_band, long_index, long_record, _long_local_bbox, long_bbox, long_source, long_score in entries:
+            if long_band == short_band or long_index in to_remove.get(long_band, set()):
+                continue
+            same_text = long_source == short_source
+            longer_prefix = len(long_source) >= len(short_source) + 8 and long_source.startswith(short_source)
+            if not same_text and not longer_prefix:
+                continue
+            if _cross_band_bbox_overlap_ratio(short_bbox, long_bbox) < 0.85:
+                continue
+            if same_text and short_score > long_score:
+                continue
+            if best is None or (len(long_source), long_score) > (len(best[3]), best[4]):
+                best = (long_band, long_index, long_record, long_source, long_score)
+        if best is None:
+            continue
+        long_band, _long_index, long_record, _long_source, _long_score = best
+        trace_ids = [str(value) for value in long_record.get("cross_band_fragment_trace_ids") or [] if str(value)]
+        fragment_trace = _cross_band_trace_id(short_band, short_record)
+        if fragment_trace not in trace_ids:
+            trace_ids.append(fragment_trace)
+        long_record["cross_band_fragment_trace_ids"] = trace_ids
+        long_record["cross_band_owner_trace_id"] = _cross_band_trace_id(long_band, long_record)
+        suppressed_trace_ids = [
+            str(value) for value in long_record.get("cross_band_suppressed_trace_ids") or [] if str(value)
+        ]
+        if fragment_trace not in suppressed_trace_ids:
+            suppressed_trace_ids.append(fragment_trace)
+        long_record["cross_band_suppressed_trace_ids"] = suppressed_trace_ids
+        flags = [str(flag) for flag in long_record.get("qa_flags") or [] if str(flag)]
+        if "cross_band_ocr_fragment_reconciled" not in flags:
+            flags.append("cross_band_ocr_fragment_reconciled")
+        long_record["qa_flags"] = flags
+        to_remove.setdefault(short_band, set()).add(short_index)
+        reconciled += 1
+
+    for band_index, indexes in to_remove.items():
+        page = precomputed_pages.get(band_index)
+        if not isinstance(page, dict):
+            continue
+        original_texts = list(page.get("texts") or [])
+        for text_index in sorted(indexes, reverse=True):
+            if text_index < len(original_texts):
+                _cross_band_remove_vision_block(page, original_texts[text_index], text_index)
+        page["texts"] = [
+            record
+            for text_index, record in enumerate(original_texts)
+            if text_index not in indexes
+        ]
+    return reconciled
+
+
 def _legacy_compat_key(record: dict, index: int) -> tuple[str, str | int]:
     for key in ("trace_id", "text_id", "id"):
         value = record.get(key)
@@ -1673,6 +1861,7 @@ def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Ban
                     "band_y_bottom": band_y_bottom,
                     "crop_bbox_in_translated_page": [0, crop_y1, int(image.shape[1]), crop_y2],
                     "final_crop_path": final_rel,
+                    "post_copyback_path": f"10_copyback_reassemble/{band_id}/post_copyback.jpg",
                     "rendered_band_path": rendered_rel,
                     "trace_ids": list(trace_ids_by_page.get(best_page_index, {}).get(band_id, [])),
                 },
@@ -4983,6 +5172,13 @@ def run_chapter(
             **precomputed_macro_ocr_pages,
             **precomputed_koharu_cjk_pages,
         }
+        with _timed(chapter_telemetry, "reconcile_cross_band_ocr_fragments"):
+            cross_band_ocr_fragments_reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation(
+                bands,
+                precomputed_ocr_pages,
+            )
+        if chapter_telemetry is not None:
+            chapter_telemetry["cross_band_ocr_fragments_reconciled"] = int(cross_band_ocr_fragments_reconciled)
 
         running_glossary: dict = dict(glossario or {})
         running_history: list[dict] = []
@@ -5175,6 +5371,68 @@ def run_chapter(
                     running_glossary,
                     band.ocr_result,
                 )
+
+        # The normal runtime OCR can discover a fuller duplicate only while a
+        # band is processed (macro precompute is optional).  Reconcile once
+        # more now that every band has its real OCR payload, then re-run only
+        # the complete owner band before the strip is pasted back together.
+        completed_ocr_pages = {
+            index: band.ocr_result
+            for index, band in enumerate(bands)
+            if isinstance(getattr(band, "ocr_result", None), dict)
+        }
+        with _timed(chapter_telemetry, "reconcile_completed_cross_band_ocr_fragments"):
+            completed_cross_band_ocr_fragments_reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation(
+                bands,
+                completed_ocr_pages,
+            )
+        rerun_cross_band_owner_indexes = [
+            index
+            for index, page in completed_ocr_pages.items()
+            if any(
+                isinstance(text, dict) and text.get("cross_band_fragment_trace_ids")
+                for text in list(page.get("texts") or [])
+            )
+        ]
+        for index in rerun_cross_band_owner_indexes:
+            band = bands[index]
+            source_page_number = _source_page_number_for_band(strip, band)
+            page_y0, page_y1 = _source_page_bounds(strip, source_page_number)
+            layout_page_image_bgr = cv2.cvtColor(strip.image[page_y0:page_y1, :, :], cv2.COLOR_RGB2BGR)
+            ordered_context = _build_ordered_band_context_snapshot(running_history, running_glossary).to_process_kwargs()
+            process_band(
+                band,
+                runtime=runtime,
+                translator=translator,
+                inpainter=inpainter,
+                typesetter=typesetter,
+                page_idx=index,
+                context=context,
+                glossario=ordered_context["glossario"],
+                idioma_origem=idioma_origem,
+                idioma_destino=idioma_destino,
+                obra=obra,
+                work_title_user_provided=work_title_user_provided,
+                connected_reasoner_config=connected_reasoner_config,
+                band_history=ordered_context["band_history"],
+                source_page_number=source_page_number,
+                models_dir=models_dir,
+                ollama_host=ollama_host,
+                ollama_model=ollama_model,
+                translation_context=translation_context,
+                precomputed_ocr_page=completed_ocr_pages[index],
+                layout_page_image_bgr=layout_page_image_bgr,
+                layout_page_y_top=page_y0,
+                gpu_stage_lock=gpu_stage_lock,
+                ocr_stage_lock=ocr_stage_lock,
+                inpaint_stage_lock=inpaint_stage_lock,
+                typeset_stage_lock=typeset_stage_lock,
+            )
+        if chapter_telemetry is not None:
+            chapter_telemetry["completed_cross_band_ocr_fragments_reconciled"] = int(
+                completed_cross_band_ocr_fragments_reconciled
+            )
+            chapter_telemetry["cross_band_owner_bands_reprocessed"] = int(len(rerun_cross_band_owner_indexes))
         _add_timing(chapter_telemetry, "strip_process_bands_total", time.perf_counter() - process_bands_started)
     finally:
         with _timed(chapter_telemetry, "inpainter_prewarm_close"):
