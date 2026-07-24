@@ -7,11 +7,11 @@ description: Use when TraduzAI sends the wrong OCR text to translation, preserve
 
 ## Owners, contrato e fluxo
 
-Owners: `pipeline/translator/translate.py`, `pipeline/translator/term_protection.py`, `pipeline/strip/process_bands.py`, `pipeline/ocr/ocr_normalizer.py`, `pipeline/main.py` e `pipeline/qa/export_gate.py`.
+Owners: `pipeline/translator/translate.py`, `pipeline/translator/term_protection.py`, `pipeline/strip/process_bands.py`, `pipeline/ocr/ocr_normalizer.py`, `pipeline/ocr/contextual_reviewer.py`, `pipeline/ocr/text_router.py` (gate), `pipeline/main.py` e `pipeline/qa/export_gate.py`.
 
 Band OCR/review → `_finalize_ocr_page_before_translation` → `_run_translate_stage` → `translate_pages` → normalização/merge → Google ou passthrough → `_merge_translated_page_metadata` → project/QA.
 
-Contrato: preserve `texts`, IDs/trace e metadados; produza `original`, `translated`, `source_text_sent_to_translator`, contexto local, reparos e `qa_flags`.
+Contrato: preserve `texts`, IDs/trace/metadados; produza `original`, `translated`, `source_text_sent_to_translator`, reparos e `qa_flags`.
 
 ## Seleção, gate e merge
 
@@ -21,7 +21,7 @@ Contrato: preserve `texts`, IDs/trace e metadados; produza `original`, `translat
 
 ## Backend e proteção
 
-- Google ativo: health probe por par de idiomas, cooldown após falha, cache, até três tentativas, lote primeiro e fallback por item se o split falhar; chunks paralelos são opt-in e deduplicam mantendo ordem.
+- Google: health probe, cooldown, cache e três tentativas; lote cai por item se o split falhar. Chunks paralelos opt-in deduplicam em ordem.
 - Sem Google saudável, `_resolve_translation_backend` retorna `passthrough`; não há fallback automático para Ollama.
 - Glossário é ativo em normalização, memória, proteção/restore de placeholders e locks pós-processamento. `translation_context` rico é distinto: hoje não chega às requisições Google automáticas.
 - Proteja termos antes do backend; restaure placeholders, aplique entity/name locks e pós-processamento; placeholder perdido gera `unrestored_placeholder`.
@@ -36,6 +36,7 @@ O backend Ollama e o semantic review por LLM existem como entrypoints, mas `tran
 | `04_text_normalization_router/*` muda indevidamente | review/normalizer/merge |
 | `07_translation/translation_inputs.jsonl` ausente/errado | source precedence ou `route_action` |
 | input correto, `translation_outputs.jsonl` errado | Google, proteção, restore ou pós-processo |
+| `decision_trace.jsonl` diverge | policy/reason em `record_decision` |
 | `07` correto, `project.json`/QA errado | merge, persistência ou export gate |
 
 Use também `translation_debug_summary.json`, `glossary_application.jsonl` e `translation_fallbacks.jsonl`.
@@ -45,8 +46,8 @@ Use também `translation_debug_summary.json`, `glossary_application.jsonl` e `tr
 ```powershell
 Push-Location pipeline
 try {
-  python -m pytest tests/test_translate_context.py::TranslateContextTests::test_should_skip_translation_item_ignores_legacy_skip_fields tests/test_translate_context.py::TranslateContextTests::test_translate_pages_caches_google_failure_and_skips_reprobe_temporarily tests/test_translate_context.py::TranslateContextTests::test_translate_pages_locks_glossary_terms_inside_sentence -q
-  python -m pytest tests/test_normalized_text_propagates_to_translation.py::test_translator_uses_confident_normalized_text_final tests/test_normalized_text_propagates_to_translation.py::test_same_balloon_fragments_are_repaired_before_translation tests/test_translation_debug_outputs.py::test_translation_debug_redacts_sensitive_header_values -q
+  python -m pytest tests/test_translate_context.py::TranslateContextTests::test_should_skip_translation_item_ignores_legacy_skip_fields tests/test_translate_context.py::TranslateContextTests::test_translate_pages_does_not_call_ollama_when_google_health_fails tests/test_translate_context.py::TranslateContextTests::test_resolve_translation_backend_does_not_fallback_to_ollama tests/test_translate_context.py::TranslateContextTests::test_translate_pages_locks_glossary_terms_inside_sentence -q
+  python -m pytest tests/test_normalized_text_propagates_to_translation.py::test_translator_uses_confident_normalized_text_final tests/test_normalized_text_propagates_to_translation.py::test_same_balloon_fragments_are_repaired_before_translation tests/test_translate_context.py::TranslateContextTests::test_translate_pages_flags_dropped_placeholder_as_unrestored -q
 } finally { Pop-Location }
 ```
 
