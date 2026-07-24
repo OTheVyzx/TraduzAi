@@ -54,15 +54,23 @@ $fixtureBytes = @{}
 $shellExe = (Get-Process -Id $PID).Path
 
 function Invoke-Sync {
-    param([switch]$Check)
+    param(
+        [switch]$Check,
+        [string]$Source = $sourceRoot,
+        [string]$Destination = $destinationRoot,
+        [string]$ScriptPath = $scriptUnderTest,
+        [switch]$OmitSourceRoot
+    )
 
     $arguments = @(
         '-NoProfile'
         '-ExecutionPolicy', 'Bypass'
-        '-File', $scriptUnderTest
-        '-SourceRoot', $sourceRoot
-        '-DestinationRoot', $destinationRoot
+        '-File', $ScriptPath
     )
+    if (-not $OmitSourceRoot) {
+        $arguments += @('-SourceRoot', $Source)
+    }
+    $arguments += @('-DestinationRoot', $Destination)
     if ($Check) {
         $arguments += '-Check'
     }
@@ -124,6 +132,30 @@ try {
         $current = Get-Item -LiteralPath $snapshot.Path
         Assert-BytesEqual $snapshot.Bytes ([System.IO.File]::ReadAllBytes($snapshot.Path)) "check escreveu em $($snapshot.Path)"
         Assert-True ($current.LastWriteTimeUtc -eq $snapshot.LastWriteTimeUtc) "check tocou timestamp de $($snapshot.Path)"
+    }
+
+    $absentDestination = Join-Path $testRoot 'check-destination-ausente'
+    $exitCode = Invoke-Sync -Check -Destination $absentDestination
+    Assert-True ($exitCode -ne 0) 'check aceitou destino inteiramente ausente'
+    Assert-True (-not (Test-Path -LiteralPath $absentDestination)) 'check criou DestinationRoot ausente'
+
+    $defaultRepoRoot = Join-Path $testRoot 'default-source-repo'
+    $defaultScriptsRoot = Join-Path $defaultRepoRoot 'scripts'
+    $defaultSourceRoot = Join-Path (Join-Path $defaultRepoRoot '.agents') 'skills'
+    $defaultDestination = Join-Path $testRoot 'default-source-destination'
+    [void](New-Item -ItemType Directory -Path $defaultScriptsRoot, $defaultSourceRoot -Force)
+    $copiedSync = Join-Path $defaultScriptsRoot 'Sync-TraduzAISkills.ps1'
+    Copy-Item -LiteralPath $scriptUnderTest -Destination $copiedSync
+    foreach ($skillName in $skillNames) {
+        $defaultSkillRoot = Join-Path $defaultSourceRoot $skillName
+        [void](New-Item -ItemType Directory -Path $defaultSkillRoot -Force)
+        [System.IO.File]::WriteAllBytes((Join-Path $defaultSkillRoot 'SKILL.md'), $fixtureBytes[$skillName])
+    }
+    $exitCode = Invoke-Sync -ScriptPath $copiedSync -Destination $defaultDestination -OmitSourceRoot
+    Assert-True ($exitCode -eq 0) "sync sem SourceRoot falhou com exit code $exitCode"
+    foreach ($skillName in $skillNames) {
+        $defaultDestinationFile = Join-Path (Join-Path $defaultDestination $skillName) 'SKILL.md'
+        Assert-BytesEqual $fixtureBytes[$skillName] ([System.IO.File]::ReadAllBytes($defaultDestinationFile)) "SourceRoot padrao incorreto: $skillName"
     }
 
     $divergentPath = Join-Path (Join-Path $destinationRoot 'traduzai-ocr') 'SKILL.md'
