@@ -34,6 +34,7 @@ Se um contrato cruza owners, carregue todas as especialistas envolvidas.
 - **IPC TS/Rust:** alinhe nome do `invoke`, argumentos camelCase/serde, retorno, registro, mocks e consumidores.
 - **JSON lines Rust/Python:** stdout é protocolo. Para campo/evento novo, rastreie `emit` Python, parser/emissão Rust e listener/store/UI React, incluindo erro, lote e fallback.
 - **`project.json`:** rastreie produtor, allow-lists/schema, aliases e consumidores. Campo novo exige migração/default, hidratação, persistência e round-trip. Confira `text_layers`/`textos`, `style`/`estilo`, `translated`/`traduzido` e caminhos relativos/absolutos.
+- **Conclusão/exportação:** exit técnico ou `success: true` não prova aprovação. Antes de declarar sucesso, compare `completion_status`, `output_review_state`, `qa.export_gate` e consumidores individual, lote e fallback.
 
 ## Regras de trabalho
 
@@ -60,4 +61,4 @@ Se o venv não existir, use o Python configurado. Rode build/E2E ou inspeção v
 
 ## Última verificação
 
-Verificado em 2026-07-24 contra o runtime no commit-base `c0801348` (HEAD documental `37930d14`).
+Base verificada em 2026-07-24: runtime no commit `c0801348`.
