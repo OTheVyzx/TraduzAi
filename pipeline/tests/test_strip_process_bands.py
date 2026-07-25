@@ -5900,6 +5900,7 @@ def test_failed_render_restores_original_pixels_for_trace_mask():
     assert np.array_equal(rolled_rendered[mask > 0], original[mask > 0])
     assert page["texts"][0]["route_reason"] == "atomic_inpaint_render_rollback"
     assert "pure_inpaint_unresolved" in page["texts"][0]["qa_flags"]
+    assert page["texts"][0]["visible"] is False
 
 
 def test_unsafe_mask_never_leaves_empty_dark_rectangle():

@@ -8614,6 +8614,28 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["fit_status"], "ok")
         self.assertEqual(layer["qa_flags"], ["safe_text_box_recomputed"])
 
+    def test_ensure_project_render_contract_hides_review_layer_below_minimum(self) -> None:
+        layer = {
+            "id": "cardocr_003",
+            "trace_id": "cardocr_003@page_001_band_020",
+            "translated": "REQUISITO DE NIVEL",
+            "visible": True,
+            "route_action": "review_required",
+            "route_reason": "atomic_inpaint_render_rollback",
+            "render_policy": "normal",
+            "render_completed": False,
+            "fit_status": "below_minimum_legible",
+            "font_size_final": 11,
+            "minimum_legible_font_px": 12,
+            "qa_flags": ["fit_below_minimum_legible", "pure_inpaint_unresolved"],
+        }
+        project = {"paginas": [{"text_layers": [layer]}]}
+
+        audit = main._ensure_project_render_contract(project)
+
+        self.assertFalse(layer["visible"])
+        self.assertEqual(audit["hidden_unsafe_review_layer_count"], 1)
+
     def test_ensure_project_render_contract_normalizes_stale_fit_status_when_attempts_are_ok(self) -> None:
         project = {
             "paginas": [
@@ -8739,6 +8761,80 @@ class MainEmitTests(unittest.TestCase):
         layer = project["paginas"][0]["text_layers"][0]
         self.assertEqual(layer["qa_flags"], [])
         self.assertEqual(audit["summary"]["project_layer_flags"], 0)
+
+    def test_debug_qa_propagation_drops_stale_texture_flattening_flag(self) -> None:
+        project = {
+            "_work_dir": "dummy",
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "trace_id": "ocr_001@page_004_band_094",
+                            "qa_flags": ["inpaint_texture_flattened"],
+                        }
+                    ]
+                }
+            ],
+        }
+
+        with patch.object(main, "_debug_root_from_project", return_value=Path("dummy-debug")):
+            with patch.object(main, "_collect_render_plan_qa_flags", return_value=[]):
+                with patch.object(main, "_collect_mask_decision_qa_flags", return_value=[]):
+                    with patch.object(main, "_collect_inpaint_decision_qa_flags", return_value=[]):
+                        audit = main._propagate_debug_qa_flags_to_project(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(layer["qa_flags"], [])
+        self.assertEqual(audit["summary"]["project_layer_flags"], 0)
+
+    def test_collect_inpaint_flags_drops_texture_flag_when_final_metric_is_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            debug_root = Path(tmp_dir)
+            decision_dir = debug_root / "08_inpaint" / "page_004_band_094"
+            decision_dir.mkdir(parents=True)
+            (decision_dir / "inpaint_decision.json").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_004_band_094",
+                        "trace_ids": ["ocr_001@page_004_band_094"],
+                        "flags": ["inpaint_texture_flattened"],
+                        "texture_flattening": {"flattened": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            claims = main._collect_inpaint_decision_qa_flags(debug_root)
+
+        self.assertEqual(claims, [])
+
+    def test_collect_render_flags_defers_texture_flag_to_final_inpaint_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            debug_root = Path(tmp_dir)
+            render_plan = debug_root / "09_typeset" / "render_plan_final.jsonl"
+            render_plan.parent.mkdir(parents=True)
+            render_plan.write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_004_band_094",
+                        "trace_id": "ocr_001@page_004_band_094",
+                        "qa_flags": ["inpaint_texture_flattened"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            decision_dir = debug_root / "08_inpaint" / "page_004_band_094"
+            decision_dir.mkdir(parents=True)
+            (decision_dir / "inpaint_decision.json").write_text(
+                json.dumps({"texture_flattening": {"flattened": False}}),
+                encoding="utf-8",
+            )
+
+            claims = main._collect_render_plan_qa_flags(debug_root)
+
+        self.assertEqual(claims, [])
 
     def test_debug_qa_propagation_drops_suppressed_low_containment_flag_for_clean_layer(self) -> None:
         project = {

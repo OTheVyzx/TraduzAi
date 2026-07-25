@@ -9943,7 +9943,14 @@ def _detect_inpaint_texture_flattening(
     strong_std_drop = after_std <= max(2.5, before_std * 0.30)
     strong_gradient_drop = after_gradient_mean <= max(0.5, before_gradient_mean * 0.35)
     large_uniform_region = quantized_colors <= 8 and near_uniform_ratio >= 0.90
-    flattened = bool(texture_present_before and strong_std_drop and strong_gradient_drop and large_uniform_region)
+    textured_context = ring_std >= 8.0
+    flattened = bool(
+        texture_present_before
+        and textured_context
+        and strong_std_drop
+        and strong_gradient_drop
+        and large_uniform_region
+    )
     return {
         "flattened": flattened,
         "flag": "inpaint_texture_flattened" if flattened else "",

@@ -1897,9 +1897,23 @@ def _ensure_project_render_contract(project_data: dict) -> dict:
         "dropped_stale_fit_flag_count": 0,
         "dropped_stale_render_background_flag_count": 0,
         "normalized_fit_status_count": 0,
+        "hidden_unsafe_review_layer_count": 0,
     }
     for layer in _iter_project_text_layers(project_data):
         route_action = str(layer.get("route_action") or "").strip()
+        layer_flags = {str(flag) for flag in layer.get("qa_flags") or []}
+        unsafe_review_layer = bool(
+            route_action == "review_required"
+            and (
+                layer.get("render_completed") is False
+                or str(layer.get("fit_status") or "").strip().lower() == "below_minimum_legible"
+                or "fit_below_minimum_legible" in layer_flags
+                or "pure_inpaint_unresolved" in layer_flags
+            )
+        )
+        if unsafe_review_layer and layer.get("visible", True):
+            layer["visible"] = False
+            audit["hidden_unsafe_review_layer_count"] += 1
         if str(layer.get("render_policy") or "").strip() == "merged_into_primary":
             continue
         if not route_action.startswith("translate_"):
@@ -2316,6 +2330,10 @@ MASK_SYNCED_QA_FLAGS = {
     "source_glyph_area_ratio_critical",
 }
 
+INPAINT_SYNCED_QA_FLAGS = {
+    "inpaint_texture_flattened",
+}
+
 RENDER_GEOMETRY_QA_FLAGS = {"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"}
 RENDER_BACKGROUND_QA_FLAGS = {"render_on_art_suspected"}
 
@@ -2689,6 +2707,17 @@ def _collect_render_plan_qa_flags(debug_root: Path) -> list[dict]:
         flags = {str(flag).strip() for flag in entry.get("qa_flags") or [] if str(flag).strip()}
         flags.update(_render_fit_qa_flags(entry))
         flags = {flag for flag in flags if flag not in MASK_SYNCED_QA_FLAGS}
+        if "inpaint_texture_flattened" in flags:
+            band_id = str(entry.get("band_id") or "").strip()
+            inpaint_decision = _load_inpaint_decision_for_band(debug_root, band_id)
+            texture_flattening = (
+                inpaint_decision.get("texture_flattening")
+                if isinstance(inpaint_decision, dict)
+                and isinstance(inpaint_decision.get("texture_flattening"), dict)
+                else {}
+            )
+            if texture_flattening.get("flattened") is False:
+                flags.discard("inpaint_texture_flattened")
         flags = _filter_render_plan_qa_flags(entry, flags)
         claim = _qa_flag_claim(entry, flags, "render_plan")
         if claim:
@@ -2738,6 +2767,13 @@ def _collect_inpaint_decision_qa_flags(debug_root: Path) -> list[dict]:
             logger.warning("Falha ao ler inpaint_decision %s: %s", path, exc)
             continue
         flags = {str(flag).strip() for flag in decision.get("flags") or [] if str(flag).strip()}
+        texture_flattening = (
+            decision.get("texture_flattening")
+            if isinstance(decision.get("texture_flattening"), dict)
+            else {}
+        )
+        if texture_flattening.get("flattened") is False:
+            flags.discard("inpaint_texture_flattened")
         flags = _blocking_or_review_flags(flags)
         if not flags:
             continue
@@ -6954,7 +6990,9 @@ def _propagate_debug_qa_flags_to_project(project_data: dict) -> dict:
     if debug_root:
         for layer in project_layers:
             layer["qa_flags"] = [
-                flag for flag in (layer.get("qa_flags") or []) if str(flag) not in MASK_SYNCED_QA_FLAGS
+                flag
+                for flag in (layer.get("qa_flags") or [])
+                if str(flag) not in MASK_SYNCED_QA_FLAGS | INPAINT_SYNCED_QA_FLAGS
             ]
 
     missing: list[dict] = []

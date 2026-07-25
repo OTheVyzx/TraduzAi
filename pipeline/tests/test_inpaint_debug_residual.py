@@ -931,3 +931,20 @@ def test_detect_inpaint_texture_flattening_accepts_continuous_texture():
 
     assert metrics["flattened"] is False
     assert metrics["flag"] == ""
+
+
+def test_detect_inpaint_texture_flattening_accepts_plain_balloon_text_removal():
+    from inpainter import _detect_inpaint_texture_flattening
+
+    before = np.full((96, 128, 3), 246, dtype=np.uint8)
+    mask = np.zeros((96, 128), dtype=np.uint8)
+    mask[28:68, 30:98] = 255
+    before[40:56, 44:84] = 12
+    after = before.copy()
+    after[mask > 0] = 246
+
+    metrics = _detect_inpaint_texture_flattening(before, after, mask)
+
+    assert metrics["ring_luminance_std"] < 8.0
+    assert metrics["flattened"] is False
+    assert metrics["flag"] == ""

@@ -7794,6 +7794,7 @@ def _apply_atomic_inpaint_render_rollback(
         text["render_completed"] = safe_render
         if safe_render:
             continue
+        text["visible"] = False
         action_mask = text.get("_precomputed_inpaint_mask")
         if isinstance(action_mask, np.ndarray) and action_mask.shape[:2] == (height, width):
             restore_mask = action_mask > 0
