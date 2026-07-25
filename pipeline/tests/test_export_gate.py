@@ -1350,7 +1350,7 @@ def test_export_gate_drops_dark_bubble_overflow_when_render_fit_safe_box_contain
     assert all("TEXT_OVERFLOW" not in issue["flags"] for issue in gate["issues"])
 
 
-def test_export_gate_demotes_compact_small_text_fit_when_render_is_contained():
+def test_export_gate_blocks_unresolved_compact_small_text_fit_when_render_is_contained():
     project = {
         "paginas": [
             {
@@ -1371,9 +1371,9 @@ def test_export_gate_demotes_compact_small_text_fit_when_render_is_contained():
 
     gate = evaluate_export_gate(project)
 
-    assert gate["status"] == "PASS"
-    assert gate["blocking_issue_count"] == 0
-    assert gate["critical_issue_count"] == 0
+    assert gate["status"] == "BLOCK"
+    assert gate["blocking_issue_count"] == 1
+    assert gate["critical_issue_count"] == 1
 
 
 def test_export_gate_demotes_fast_fill_for_group_sibling_render_geometry():
@@ -1709,7 +1709,7 @@ def test_export_gate_blocks_unpropagated_debug_qa_flags():
     assert issue["flags"] == ["qa_flag_not_propagated"]
 
 
-def test_export_gate_does_not_block_white_balloon_fit_below_minimum_legible():
+def test_export_gate_blocks_unresolved_white_balloon_fit_below_minimum_legible():
     project = {
         "idioma_origem": "en",
         "paginas": [
@@ -1740,14 +1740,11 @@ def test_export_gate_does_not_block_white_balloon_fit_below_minimum_legible():
 
     gate = evaluate_export_gate(project)
 
-    assert gate["status"] == "PASS"
-    assert gate["needs_review"] is True
-    assert gate["critical_issue_count"] == 0
-    assert gate["review_issue_count"] == 1
+    assert gate["status"] == "BLOCK"
+    assert gate["critical_issue_count"] == 1
     issue = gate["issues"][0]
-    assert issue["type"] == "needs_review"
-    assert issue["severity"] == "warning"
-    assert issue["blocks_export"] is False
+    assert issue["severity"] == "critical"
+    assert issue["blocks_export"] is True
     assert issue["flags"] == ["fit_below_minimum_legible"]
 
 
@@ -1761,6 +1758,8 @@ def test_export_gate_demotes_translator_note_fit_below_minimum_on_flat_white_bac
                         "id": "ocr_001",
                         "translated": "T/N: HYUNGNIM É UM TERMO USADO PARA CHAMAR O CHEFE DA MÁFIA.",
                         "qa_flags": ["fit_below_minimum_legible", "safe_text_box_recomputed"],
+                        "font_size_final": 9,
+                        "minimum_legible_font_px": 8,
                         "bbox": [595, 14319, 643, 14365],
                         "source_bbox": [595, 14319, 643, 14365],
                         "balloon_bbox": [535, 14278, 797, 14413],

@@ -8123,6 +8123,45 @@ class MainEmitTests(unittest.TestCase):
         self.assertFalse(second.get("visible", True))
         self.assertEqual(second.get("render_policy"), "merged_into_primary")
 
+    def test_merge_same_balloon_fragment_layers_keeps_item_card_children_separate(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 2,
+                    "text_layers": [
+                        {
+                            "id": "ocr_002",
+                            "trace_id": "ocr_002@page_002_band_033",
+                            "band_id": "page_002_band_033",
+                            "translated": "NOTA: B+ AUMENTA A AGILIDADE",
+                            "bbox": [208, 6857, 517, 6918],
+                            "layout_category": "item_card",
+                            "card_panel_id": "item_card:ocr_002@page_002_band_033",
+                            "source_trace_ids": ["ocr_002@page_002_band_033", "ocr_003@page_002_band_033"],
+                        },
+                        {
+                            "id": "ocr_003",
+                            "trace_id": "ocr_003@page_002_band_033",
+                            "band_id": "page_002_band_033",
+                            "translated": "O USO PELA PRIMEIRA VEZ AUMENTA A FLEXIBILIDADE",
+                            "bbox": [151, 6965, 572, 7095],
+                            "layout_category": "item_card",
+                            "card_panel_id": "item_card:ocr_002@page_002_band_033",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        merged = main._merge_same_balloon_fragment_layers(project)
+
+        first, second = project["paginas"][0]["text_layers"]
+        self.assertEqual(merged, 0)
+        self.assertTrue(first.get("visible", True))
+        self.assertTrue(second.get("visible", True))
+        self.assertEqual(first["translated"], "NOTA: B+ AUMENTA A AGILIDADE")
+        self.assertEqual(second["translated"], "O USO PELA PRIMEIRA VEZ AUMENTA A FLEXIBILIDADE")
+
     def test_merge_same_balloon_fragment_layers_folds_hidden_source_text(self) -> None:
         project = {
             "paginas": [
@@ -9159,6 +9198,24 @@ class MainEmitTests(unittest.TestCase):
             crops_dir.mkdir(parents=True)
             rendered_bands_dir = work_dir / "debug" / "e2e" / "09_typeset" / "rendered_bands"
             rendered_bands_dir.mkdir(parents=True)
+            (work_dir / "debug" / "e2e" / "09_typeset" / "render_plan_final.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "ocr_001",
+                        "text_id": "ocr_001",
+                        "trace_id": "ocr_001@page_002_band_023",
+                        "band_id": "page_002_band_023",
+                        "translated": "VOCE CRESCEU EM UM ORFANATO",
+                        "source_text_mask_bbox": [4, 4, 12, 12],
+                        "render_bbox": [4, 4, 12, 12],
+                        "safe_text_box": [4, 4, 12, 12],
+                        "_render_bbox_from_repaired_safe_text_box": True,
+                        "qa_flags": ["dark_connected_component_safe_partition"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             positive_band = np.zeros((20, 20, 3), dtype=np.uint8)
             positive_band[:, :] = (10, 20, 30)
             positive_band[3:8, 3:8, :] = (245, 245, 245)
@@ -9215,13 +9272,292 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(audit["pages_checked"], 1)
             self.assertEqual(audit["pages_rerendered"], 1)
             self.assertEqual(audit["rows_rerendered"], 1)
-            self.assertEqual(audit["positive_band_base_used"], 1)
-            self.assertGreaterEqual(audit["stale_text_regions_scrubbed"], 1)
+            self.assertEqual(audit["positive_band_base_used"], 0)
+            self.assertEqual(audit["clean_band_source_used"], 1)
+            self.assertEqual(audit["clean_band_final_mismatch_count"], 0)
+            self.assertEqual(len(audit["clean_band_final_checks"]), 1)
+            self.assertEqual(audit["rendered_band_direct_copy_used"], 1)
+            self.assertEqual(audit["render_plan_layers_used"], 0)
+            self.assertEqual(audit["stale_text_regions_scrubbed"], 0)
             self.assertTrue(audit["strip_reassembled_output_rerender_allowed"])
-            render_band.assert_called_once()
-            self.assertFalse(np.any(render_band.call_args.args[0] == 245))
-            self.assertTrue((work_dir / "debug" / "e2e" / "10_copyback_reassemble" / "final_bands" / "page_002_band_023.jpg").exists())
+            render_band.assert_not_called()
+            final_path = work_dir / "debug" / "e2e" / "10_copyback_reassemble" / "final_bands" / "page_002_band_023.jpg"
+            self.assertTrue(final_path.exists())
+            final_band = cv2.imread(str(final_path), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(final_band)
+            self.assertTrue(np.any(final_band == 245))
             self.assertNotIn("_work_dir", project)
+
+    def test_final_project_rerender_keeps_clean_post_copyback_for_regression_bands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            page = np.zeros((140, 48, 3), dtype=np.uint8)
+            page[:, :] = (4, 4, 4)
+            cv2.imwrite(str(work_dir / "translated" / "002.png"), page)
+            cv2.imwrite(str(work_dir / "images" / "002.png"), page)
+
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = crops_dir / "final_bands"
+            final_dir.mkdir(parents=True)
+            rows = []
+            bands = [
+                "page_002_band_007",
+                "page_003_band_034",
+                "page_004_band_055",
+                "page_005_band_078",
+            ]
+            for index, band_id in enumerate(bands):
+                y1 = index * 32
+                y2 = y1 + 28
+                clean = np.zeros((28, 48, 3), dtype=np.uint8)
+                clean[:, :] = (10 + index, 20 + index, 30 + index)
+                clean[8:20, 12:36] = (220 - index, 180, 40 + index)
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), clean)
+                stale = np.zeros((28, 48, 3), dtype=np.uint8)
+                stale[:, :] = (0, 0, 0)
+                stale[2:26, 2:46] = (255, 255, 255)
+                cv2.imwrite(str(final_dir / f"{band_id}.png"), stale)
+                rows.append(
+                    {
+                        "band_id": band_id,
+                        "translated_output_page": "002.png",
+                        "output_page_number": 2,
+                        "crop_bbox_in_translated_page": [0, y1, 48, y2],
+                        "final_crop_path": f"10_copyback_reassemble/final_bands/{band_id}.png",
+                        "post_copyback_path": f"10_copyback_reassemble/{band_id}/post_copyback.png",
+                        "rendered_band_path": f"09_typeset/rendered_bands/{band_id}.jpg",
+                        "trace_ids": [f"ocr_{index:03}@{band_id}"],
+                    }
+                )
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [
+                    {
+                        "numero": 2,
+                        "arquivo_original": "originals/002.jpg",
+                        "arquivo_traduzido": "translated/002.png",
+                        "text_layers": [
+                            {
+                                "id": f"ocr_{index:03}",
+                                "trace_id": f"ocr_{index:03}@{band_id}",
+                                "band_id": band_id,
+                                "translated": "METADATA ANTIGA",
+                                "bbox": [0, 0, 48, 140],
+                                "render_bbox": [0, 0, 48, 140],
+                                "safe_text_box": [0, 0, 48, 140],
+                                "_render_bbox_from_repaired_safe_text_box": True,
+                                "qa_flags": ["dark_connected_component_safe_partition"],
+                            }
+                            for index, band_id in enumerate(bands)
+                        ],
+                    }
+                ],
+            }
+
+            with patch("typesetter.renderer.render_band_image") as render_band:
+                audit = main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            self.assertEqual(audit["rows_rerendered"], 4)
+            self.assertEqual(audit["clean_band_source_used"], 4)
+            self.assertEqual(audit["clean_band_final_mismatch_count"], 0)
+            self.assertEqual(len(audit["clean_band_final_checks"]), 4)
+            self.assertEqual(audit["stale_text_regions_scrubbed"], 0)
+            render_band.assert_not_called()
+
+            translated = cv2.imread(str(work_dir / "translated" / "002.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            for row in rows:
+                band_id = row["band_id"]
+                source = cv2.imread(str(work_dir / "debug" / "e2e" / "10_copyback_reassemble" / band_id / "post_copyback.png"), cv2.IMREAD_COLOR)
+                final = cv2.imread(str(work_dir / "debug" / "e2e" / row["final_crop_path"]), cv2.IMREAD_COLOR)
+                x1, y1, x2, y2 = row["crop_bbox_in_translated_page"]
+                crop = translated[y1:y2, x1:x2]
+                self.assertIsNotNone(source)
+                self.assertIsNotNone(final)
+                for observed in (final, crop):
+                    diff = np.abs(observed.astype(np.int16) - source.astype(np.int16))
+                    self.assertLessEqual(int(diff.max()), 12, band_id)
+                    self.assertEqual(int((diff > 12).sum()), 0, band_id)
+
+    def test_final_project_rerender_pastes_upper_clean_band_over_lower_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            page = np.zeros((80, 40, 3), dtype=np.uint8)
+            cv2.imwrite(str(work_dir / "translated" / "002.png"), page)
+            cv2.imwrite(str(work_dir / "images" / "002.png"), page)
+
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = crops_dir / "final_bands"
+            final_dir.mkdir(parents=True)
+
+            upper = np.zeros((35, 40, 3), dtype=np.uint8)
+            upper[:, :] = (20, 40, 60)
+            upper[25:35, :, :] = (200, 50, 50)
+            lower = np.zeros((35, 40, 3), dtype=np.uint8)
+            lower[:, :] = (70, 90, 110)
+            lower[0:10, :, :] = (10, 220, 10)
+
+            for band_id, image in {
+                "page_003_band_034": upper,
+                "page_003_band_035": lower,
+            }.items():
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+
+            rows = [
+                {
+                    "band_id": "page_003_band_034",
+                    "translated_output_page": "002.png",
+                    "output_page_number": 2,
+                    "crop_bbox_in_translated_page": [0, 20, 40, 55],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_034.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_034/post_copyback.png",
+                    "trace_ids": ["ocr_upper@page_003_band_034"],
+                },
+                {
+                    "band_id": "page_003_band_035",
+                    "translated_output_page": "002.png",
+                    "output_page_number": 2,
+                    "crop_bbox_in_translated_page": [0, 45, 40, 80],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_035.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_035/post_copyback.png",
+                    "trace_ids": ["ocr_lower@page_003_band_035"],
+                },
+            ]
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [
+                    {
+                        "numero": 2,
+                        "arquivo_original": "originals/002.jpg",
+                        "arquivo_traduzido": "translated/002.png",
+                        "text_layers": [
+                            {
+                                "id": "ocr_stale",
+                                "trace_id": "ocr_stale@page_003_band_035",
+                                "band_id": "page_003_band_035",
+                                "translated": "STALE",
+                                "render_bbox": [0, 0, 40, 80],
+                                "safe_text_box": [0, 0, 40, 80],
+                                "_render_bbox_from_repaired_safe_text_box": True,
+                                "qa_flags": ["dark_connected_component_safe_partition"],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            with patch("typesetter.renderer.render_band_image") as render_band:
+                audit = main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            self.assertEqual(audit["clean_band_source_used"], 2)
+            self.assertEqual(audit["clean_band_final_mismatch_count"], 0)
+            render_band.assert_not_called()
+            translated = cv2.imread(str(work_dir / "translated" / "002.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            # The overlap 45:55 belongs to the upper crop after composition.
+            expected_overlap = upper[25:35, :, :]
+            observed_overlap = translated[45:55, :, :]
+            self.assertTrue(np.array_equal(observed_overlap, expected_overlap))
+
+    def test_final_project_rerender_prevents_trace_empty_context_from_overwriting_text_band(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            page = np.zeros((70, 50, 3), dtype=np.uint8)
+            cv2.imwrite(str(work_dir / "translated" / "003.png"), page)
+            cv2.imwrite(str(work_dir / "images" / "003.png"), page)
+
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = crops_dir / "final_bands"
+            final_dir.mkdir(parents=True)
+
+            stale_context = np.zeros((30, 50, 3), dtype=np.uint8)
+            stale_context[:, :] = (5, 5, 5)
+            stale_context[12:24, 5:45, :] = (255, 255, 255)
+            translated_text = np.zeros((35, 50, 3), dtype=np.uint8)
+            translated_text[:, :] = (10, 20, 30)
+            translated_text[10:22, 8:42, :] = (30, 220, 80)
+
+            for band_id, image in {
+                "page_003_band_045": stale_context,
+                "page_003_band_046": translated_text,
+            }.items():
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+
+            rows = [
+                {
+                    "band_id": "page_003_band_045",
+                    "translated_output_page": "003.png",
+                    "output_page_number": 3,
+                    "crop_bbox_in_translated_page": [0, 10, 50, 40],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_045.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_045/post_copyback.png",
+                    "trace_ids": [],
+                },
+                {
+                    "band_id": "page_003_band_046",
+                    "translated_output_page": "003.png",
+                    "output_page_number": 3,
+                    "crop_bbox_in_translated_page": [0, 20, 50, 55],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_046.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_046/post_copyback.png",
+                    "trace_ids": ["ocr_001@page_003_band_046"],
+                },
+            ]
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [
+                    {
+                        "numero": 3,
+                        "arquivo_original": "originals/003.jpg",
+                        "arquivo_traduzido": "translated/003.png",
+                        "text_layers": [],
+                    }
+                ],
+            }
+
+            with patch("typesetter.renderer.render_band_image") as render_band:
+                audit = main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            render_band.assert_not_called()
+            self.assertEqual(audit["clean_band_source_used"], 2)
+            self.assertEqual(audit["translated_page_band_consistency"]["rows_failed"], 0)
+            translated = cv2.imread(str(work_dir / "translated" / "003.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            observed_overlap = translated[20:40, :, :]
+            expected_overlap = translated_text[0:20, :, :]
+            self.assertTrue(np.array_equal(observed_overlap, expected_overlap))
+            consistency_path = (
+                work_dir
+                / "debug"
+                / "e2e"
+                / "10_copyback_reassemble"
+                / "translated_page_band_consistency_audit.json"
+            )
+            self.assertTrue(consistency_path.exists())
 
     def test_debug_render_metadata_hydration_preserves_final_layout_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9294,6 +9630,59 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(final_row["line_height"], 36)
             self.assertEqual(final_row["wrapped_lines"], raw_entry["wrapped_lines"])
             self.assertEqual(final_row["render_layout_contract"], contract)
+
+    def test_render_metadata_round_trip_preserves_minimum_legibility_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            typeset_dir = work_dir / "debug" / "e2e" / "09_typeset"
+            typeset_dir.mkdir(parents=True)
+            raw_entry = {
+                "text_id": "ocr_tiny",
+                "trace_id": "ocr_tiny@page_001_band_001",
+                "page_id": "page_001",
+                "band_id": "page_001_band_001",
+                "coordinate_space": "page",
+                "translated": "TEXTO LONGO",
+                "target_bbox": [10, 10, 90, 50],
+                "safe_text_box": [12, 12, 88, 48],
+                "render_bbox": [14, 14, 86, 46],
+                "text_pixel_bbox": [14, 14, 86, 46],
+                "font_size_final": 6,
+                "minimum_legible_font_px": 12,
+                "fit_status": "below_minimum_legible",
+                "fit_attempts": [{"font_px": 12, "lines": 4, "status": "overflow"}],
+                "qa_flags": ["fit_below_minimum_legible"],
+            }
+            (typeset_dir / "render_plan_raw.jsonl").write_text(
+                json.dumps(raw_entry, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            project = {
+                "_work_dir": str(work_dir),
+                "paginas": [{"numero": 1, "text_layers": [{
+                    "id": "ocr_tiny",
+                    "text_id": "ocr_tiny",
+                    "trace_id": "ocr_tiny@page_001_band_001",
+                    "band_id": "page_001_band_001",
+                    "route_action": "translate_inpaint_render",
+                    "translated": "TEXTO LONGO",
+                    "bbox": [14, 14, 86, 46],
+                    "text_pixel_bbox": [14, 14, 86, 46],
+                    "source_bbox": [14, 14, 86, 46],
+                }]}],
+            }
+
+            main._hydrate_project_render_metadata_from_debug_candidates(project)
+            layer = project["paginas"][0]["text_layers"][0]
+            final_row = main._project_render_plan_row({"numero": 1}, layer, 0)
+
+            self.assertEqual(layer["font_size_final"], 6)
+            self.assertEqual(layer["minimum_legible_font_px"], 12)
+            self.assertEqual(layer["fit_status"], "below_minimum_legible")
+            self.assertIn("fit_below_minimum_legible", layer["qa_flags"])
+            self.assertEqual(final_row["font_size_final"], 6)
+            self.assertEqual(final_row["minimum_legible_font_px"], 12)
+            self.assertEqual(final_row["fit_status"], "below_minimum_legible")
 
     def test_debug_render_metadata_prefers_page_space_candidate_over_strip_band_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

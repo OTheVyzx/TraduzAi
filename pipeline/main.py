@@ -1866,6 +1866,26 @@ def _is_project_bbox(value) -> bool:
     return x2 > x1 and y2 > y1
 
 
+def _has_legible_fit_evidence(layer: dict) -> bool:
+    """Return True only for a real fit attempt at or above the stored minimum."""
+    try:
+        final_font_px = int(layer.get("font_size_final", 0) or 0)
+        minimum_font_px = int(layer.get("minimum_legible_font_px", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
+    has_ok_attempt = False
+    for item in attempts:
+        try:
+            attempt_font_px = int(item.get("font_px", 0) or 0)
+        except (TypeError, ValueError):
+            attempt_font_px = 0
+        if str(item.get("status") or "").strip().lower() == "ok" and attempt_font_px >= minimum_font_px:
+            has_ok_attempt = True
+            break
+    return bool(final_font_px >= minimum_font_px > 0 and has_ok_attempt)
+
+
 def _ensure_project_render_contract(project_data: dict) -> dict:
     """Audit final render metadata for translated layers before export gate."""
 
@@ -1919,16 +1939,17 @@ def _ensure_project_render_contract(project_data: dict) -> dict:
                     if str(flag) != "missing_render_bbox"
                 ]
                 qa_flags = list(layer.get("qa_flags") or [])
-            attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
-            has_ok_attempt = any(str(item.get("status") or "").strip().lower() == "ok" for item in attempts)
             if (
                 str(layer.get("fit_status") or "").strip().lower() == "below_minimum_legible"
-                and has_ok_attempt
-                and _bbox_contains4_margin(layer.get("safe_text_box"), layer.get("render_bbox"))
+                and _has_legible_fit_evidence(layer)
             ):
                 layer["fit_status"] = "ok"
                 audit["normalized_fit_status_count"] += 1
-            if str(layer.get("fit_status") or "").strip().lower() == "ok" and "fit_below_minimum_legible" in qa_flags:
+            if (
+                str(layer.get("fit_status") or "").strip().lower() == "ok"
+                and "fit_below_minimum_legible" in qa_flags
+                and _has_legible_fit_evidence(layer)
+            ):
                 layer["qa_flags"] = [
                     flag
                     for flag in qa_flags
@@ -1945,16 +1966,7 @@ def _ensure_project_render_contract(project_data: dict) -> dict:
                 qa_flags = list(layer.get("qa_flags") or [])
                 audit["dropped_stale_render_background_flag_count"] += 1
             if not isinstance(layer.get("fit_attempts"), list):
-                layer["fit_attempts"] = [
-                    {
-                        "font_px": int(((layer.get("estilo") or {}).get("tamanho") or 0) or 0),
-                        "lines": len(layer.get("linhas") or layer.get("lines") or []) or 1,
-                        "status": "ok",
-                    }
-                ]
-                audit["filled_fit_metadata_count"] += 1
-            if not layer.get("fit_status"):
-                layer["fit_status"] = "ok"
+                layer["fit_attempts"] = []
                 audit["filled_fit_metadata_count"] += 1
     return audit
 
@@ -6677,6 +6689,9 @@ def _hydrate_project_render_metadata_from_debug_candidates(project_data: dict) -
             layer["fit_status"] = best.get("fit_status")
         if isinstance(best.get("fit_attempts"), list):
             layer["fit_attempts"] = best.get("fit_attempts")
+        for fit_key in ("font_size_final", "minimum_legible_font_px", "render_completed"):
+            if best.get(fit_key) is not None:
+                layer[fit_key] = best.get(fit_key)
         try:
             font_size_final = int(best.get("font_size_final") or 0)
         except (TypeError, ValueError):
@@ -7007,9 +7022,7 @@ def _filter_debug_claim_flags_for_project_layer(layer: dict, flags: set[str]) ->
         filtered.discard("missing_render_bbox")
     if "fit_below_minimum_legible" in filtered and has_render_geometry:
         fit_status = str(layer.get("fit_status") or "").strip().lower()
-        attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
-        has_ok_attempt = any(str(item.get("status") or "").strip().lower() == "ok" for item in attempts)
-        if fit_status == "ok" or (has_ok_attempt and _bbox_contains4_margin(safe_text_box, render_bbox)):
+        if fit_status == "ok" and _has_legible_fit_evidence(layer):
             filtered.discard("fit_below_minimum_legible")
     if "render_on_art_suspected" in filtered and _render_background_art_flag_is_stale(layer):
         filtered.discard("render_on_art_suspected")
@@ -7190,6 +7203,10 @@ def _project_render_plan_row(page: dict, layer: dict, page_index: int) -> dict |
         "qa_flags": list(layer.get("qa_flags") or []),
         "qa_metrics": dict(layer.get("qa_metrics") or {}),
         "warnings": list(layer.get("warnings") or []),
+        "fit_status": layer.get("fit_status"),
+        "font_size_final": layer.get("font_size_final"),
+        "minimum_legible_font_px": layer.get("minimum_legible_font_px"),
+        "render_completed": layer.get("render_completed"),
     }
     style = layer.get("estilo") if isinstance(layer.get("estilo"), dict) else layer.get("style")
     if isinstance(style, dict):

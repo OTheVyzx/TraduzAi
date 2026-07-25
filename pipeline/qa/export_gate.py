@@ -679,13 +679,9 @@ def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[st
         # detected balloon, and no other confirmed visual-damage flag exists.
         source = str(layer.get("bubble_mask_source") or "").strip().lower()
         return source in {"rejected_derived_bubble_mask", "derived_white_crop_rejected"} and _render_inside_safe_box(layer) and _render_geometry_contained(layer)
-    if flag in {"bbox_overreach_critical", "fit_below_minimum_legible"}:
-        if flag == "fit_below_minimum_legible" and _translator_note_fit_is_review_only(layer):
-            return True
-        if flag == "fit_below_minimum_legible" and "compact_small_text_capacity" in flags:
-            return _render_inside_safe_box(layer)
-        if flag == "fit_below_minimum_legible" and _rendered_background_is_white_balloon(layer):
-            return _render_geometry_contained(layer) and _render_inside_safe_box(layer)
+    if flag == "fit_below_minimum_legible":
+        return _translator_note_fit_is_review_only(layer)
+    if flag == "bbox_overreach_critical":
         if _microtext_render_is_upscaled(layer):
             return False
         return _is_microtext_layer(layer) and _render_geometry_contained(layer)
@@ -705,6 +701,13 @@ def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[st
 def _translator_note_fit_is_review_only(layer: dict[str, Any]) -> bool:
     text = str(layer.get("translated") or layer.get("text") or "").strip().lower()
     if not (text.startswith("t/n:") or text.startswith("tn:") or text.startswith("n/t:")):
+        return False
+    try:
+        final_font_px = int(layer.get("font_size_final", 0) or 0)
+        minimum_font_px = int(layer.get("minimum_legible_font_px", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if minimum_font_px <= 0 or final_font_px < minimum_font_px:
         return False
     qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
     containment = _float_or_none(qa_metrics.get("render_balloon_containment"))

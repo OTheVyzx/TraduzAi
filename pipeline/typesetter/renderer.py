@@ -17887,6 +17887,8 @@ def _record_render_plan(ocr_page: dict, block: dict) -> None:
         "font_name": render_debug.get("font_name"),
         "font_size_seed": render_debug.get("font_size_seed"),
         "font_size_final": render_debug.get("font_size_final"),
+        "minimum_legible_font_px": block.get("minimum_legible_font_px"),
+        "render_completed": block.get("render_completed"),
         "line_height": render_debug.get("line_height"),
         "wrapped_lines": render_debug.get("wrapped_lines", []),
         "rotation_deg": block.get("rotation_deg", render_debug.get("rotation_deg")),
