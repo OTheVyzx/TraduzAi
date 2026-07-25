@@ -1791,6 +1791,77 @@ def test_export_gate_demotes_translator_note_fit_below_minimum_on_flat_white_bac
     assert "fit_below_minimum_legible" in issue["flags"]
 
 
+def test_export_gate_blocks_final_visual_render_bbox_missing():
+    project = {
+        "paginas": [{"numero": 3, "text_layers": [{"id": "ocr_1", "trace_id": "ocr_1@page_003_band_042", "band_id": "page_003_band_042", "translated": "OLA"}]}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_003_band_042",
+            "trace_ids": ["ocr_1@page_003_band_042"],
+            "status": "fail",
+            "flags": ["render_bbox_missing"],
+            "metrics": {"layers": [{"trace_id": "ocr_1@page_003_band_042"}]},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert gate["issues"][0]["source"] == "post_rerender_final_visual_contract"
+
+
+def test_export_gate_blocks_translated_crop_mismatch():
+    project = {
+        "paginas": [{"numero": 4, "text_layers": []}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_004_band_009",
+            "trace_ids": [],
+            "status": "fail",
+            "flags": ["translated_crop_mismatch_final_band"],
+            "metrics": {"translated_crop_mean_abs_diff": 42.0},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert gate["issues"][0]["flags"] == ["translated_crop_mismatch_final_band"]
+
+
+def test_export_gate_links_visual_failure_to_trace_ids():
+    trace_ids = ["ocr_a@page_005_band_011", "ocr_b@page_005_band_011"]
+    project = {
+        "paginas": [{"numero": 5, "text_layers": [
+            {"id": "ocr_a", "trace_id": trace_ids[0], "band_id": "page_005_band_011", "translated": "A"},
+            {"id": "ocr_b", "trace_id": trace_ids[1], "band_id": "page_005_band_011", "translated": "B"},
+        ]}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_005_band_011", "trace_ids": trace_ids, "status": "fail",
+            "flags": ["dark_text_center_drift"], "metrics": {"dark_text_center_drift": 48.0},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    issue = next(issue for issue in gate["issues"] if issue.get("source") == "post_rerender_final_visual_contract")
+    assert issue["trace_ids"] == trace_ids
+    assert "11_qa_export_gate/final_rerender_visual_qa.json" in issue["artifact_links"]
+
+
+def test_visual_control_band_pass_does_not_create_issue():
+    project = {
+        "paginas": [{"numero": 6, "text_layers": []}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_006_band_012", "trace_ids": [], "status": "pass", "flags": [],
+            "metrics": {"translated_crop_matches_final_band": True},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert not any(issue.get("source") == "post_rerender_final_visual_contract" for issue in gate["issues"])
+
+
 def test_export_gate_does_not_block_unpropagated_fast_fill_no_glyph_evidence():
     project = {
         "qa": {

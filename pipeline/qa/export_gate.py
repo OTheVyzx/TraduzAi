@@ -895,6 +895,85 @@ def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> 
     }
 
 
+def _collect_final_visual_contract_issues(project: dict[str, Any], existing_issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+    contract = qa.get("post_rerender_final_visual_contract") if isinstance(qa, dict) else None
+    visual_qa = contract.get("qa") if isinstance(contract, dict) and isinstance(contract.get("qa"), dict) else {}
+    rows = visual_qa.get("rows") if isinstance(visual_qa, dict) else []
+    if not isinstance(rows, list):
+        return []
+
+    layers_by_trace: dict[str, dict[str, Any]] = {}
+    for page in project.get("paginas") or []:
+        for layer in page.get("text_layers") or page.get("textos") or []:
+            if not isinstance(layer, dict):
+                continue
+            trace_id = _clean_string(layer.get("trace_id") or layer.get("text_instance_id"))
+            if trace_id:
+                layers_by_trace[trace_id] = layer
+
+    generated: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("status") or "").strip().lower() != "fail":
+            continue
+        band_id = _clean_string(row.get("band_id")) or "unresolved"
+        trace_ids = list(dict.fromkeys(
+            str(value).strip() for value in row.get("trace_ids") or [] if str(value).strip()
+        ))
+        flags = list(dict.fromkeys(str(flag).strip() for flag in row.get("flags") or [] if str(flag).strip()))
+        if not flags:
+            continue
+        already_reported = {
+            str(flag)
+            for issue in [*existing_issues, *generated]
+            if str(issue.get("band_id") or "") == band_id
+            and (
+                not trace_ids
+                or str(issue.get("trace_id") or "") in trace_ids
+                or bool(set(issue.get("trace_ids") or []) & set(trace_ids))
+            )
+            for flag in issue.get("flags") or []
+        }
+        flags = [flag for flag in flags if flag not in already_reported]
+        if not flags:
+            continue
+        page_match = re.search(r"page_(\d+)", band_id, re.IGNORECASE)
+        page_number = int(page_match.group(1)) if page_match else None
+        page_id = f"page_{page_number:03d}" if page_number is not None else "unresolved"
+        matched_layers = [layers_by_trace[trace_id] for trace_id in trace_ids if trace_id in layers_by_trace]
+        artifact_links = list(dict.fromkeys([
+            "11_qa_export_gate/final_rerender_visual_qa.json",
+            "11_qa_export_gate/final_rerender_visual_qa.jsonl",
+            "10_copyback_reassemble/final_band_crops.jsonl",
+            *[str(link) for link in row.get("artifact_links") or [] if str(link).strip()],
+        ]))
+        generated.append(
+            {
+                "page": page_number,
+                "page_id": page_id,
+                "band_id": band_id,
+                "layer": (
+                    matched_layers[0].get("id") or matched_layers[0].get("text_id")
+                    if matched_layers else band_id
+                ),
+                "text_id": matched_layers[0].get("text_id") or matched_layers[0].get("id") if matched_layers else None,
+                "trace_id": trace_ids[0] if trace_ids else None,
+                "trace_ids": trace_ids,
+                "coordinate_space": "page",
+                "type": "p0_final_visual_blocker",
+                "issue_scope": "band",
+                "severity": "critical",
+                "blocks_export": True,
+                "source": "post_rerender_final_visual_contract",
+                "flags": flags,
+                "metrics": dict(row.get("metrics") or {}),
+                "artifact_links": artifact_links,
+                "linked_artifacts": artifact_links,
+            }
+        )
+    return generated
+
+
 def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, Any]]:
     source_lang = str(project.get("idioma_origem") or "").lower()
     cjk_source = source_lang in {"ja", "jp", "ko", "kr", "zh", "zh-cn", "zh-tw"}
@@ -1026,6 +1105,7 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                         **({"artifact_links": artifact_links} if artifact_links else {}),
                     }
                 )
+    issues.extend(_collect_final_visual_contract_issues(project, issues))
     qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
     propagation_audit = qa.get("flag_propagation_audit") if isinstance(qa, dict) else None
     if isinstance(propagation_audit, dict):
