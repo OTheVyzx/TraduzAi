@@ -5,14 +5,19 @@ from pathlib import Path
 
 # This module exercises the explicit legacy fast-fill paths. Runtime defaults
 # remain pure; tests that need direct fills opt in locally.
-os.environ.setdefault("TRADUZAI_INPAINT_POLICY", "fast")
-os.environ.setdefault("TRADUZAI_STRIP_FAST_DARK_PANEL_FILL", "1")
-os.environ.setdefault("TRADUZAI_STRIP_FAST_LOCAL_INPAINT", "1")
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+@pytest.fixture(autouse=True)
+def _legacy_fast_inpaint_profile(monkeypatch):
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "fast")
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_DARK_PANEL_FILL", "1")
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_LOCAL_INPAINT", "1")
 
 
 def test_translator_note_text_mask_fills_with_dark_background_near_white_bubble():
