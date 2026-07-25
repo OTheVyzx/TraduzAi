@@ -7720,6 +7720,115 @@ def _run_typeset_stage(
     )
 
 
+def _apply_atomic_inpaint_render_rollback(
+    band: Band,
+    cleaned_slice: np.ndarray,
+    rendered_slice: np.ndarray,
+    translated_page: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Restore only a trace action mask when its translated render is unsafe."""
+    original = band.original_slice
+    if (
+        not isinstance(original, np.ndarray)
+        or not isinstance(cleaned_slice, np.ndarray)
+        or not isinstance(rendered_slice, np.ndarray)
+        or original.shape != cleaned_slice.shape
+        or original.shape != rendered_slice.shape
+        or not isinstance(translated_page, dict)
+    ):
+        return cleaned_slice, rendered_slice
+    rolled_cleaned = np.array(cleaned_slice, copy=True)
+    rolled_rendered = np.array(rendered_slice, copy=True)
+    height, width = original.shape[:2]
+
+    def _bounded_bbox(value) -> list[int] | None:
+        bbox = _coerce_bbox(value)
+        if bbox is None:
+            return None
+        x1, y1, x2, y2 = bbox
+        x1, y1 = max(0, min(width, x1)), max(0, min(height, y1))
+        x2, y2 = max(0, min(width, x2)), max(0, min(height, y2))
+        return [x1, y1, x2, y2] if x2 > x1 and y2 > y1 else None
+
+    for text in list(translated_page.get("texts") or []):
+        if not isinstance(text, dict):
+            continue
+        explicit_render_contract = any(
+            key in text
+            for key in (
+                "render_completed",
+                "render_bbox",
+                "fit_status",
+                "font_size_final",
+                "minimum_legible_font_px",
+            )
+        )
+        if not explicit_render_contract:
+            continue
+        render_bbox = _bounded_bbox(text.get("render_bbox"))
+        fit_status = str(text.get("fit_status") or "").strip().lower()
+        try:
+            font_size_final = float(text.get("font_size_final"))
+        except (TypeError, ValueError):
+            font_size_final = None
+        try:
+            minimum_legible = float(text.get("minimum_legible_font_px"))
+        except (TypeError, ValueError):
+            minimum_legible = None
+        below_minimum = (
+            fit_status == "below_minimum_legible"
+            or "fit_below_minimum_legible" in set(text.get("qa_flags") or [])
+            or (
+                font_size_final is not None
+                and minimum_legible is not None
+                and font_size_final < minimum_legible
+            )
+        )
+        render_completed = text.get("render_completed")
+        safe_render = bool(
+            render_completed is not False
+            and render_bbox is not None
+            and fit_status not in {"failed", "rejected", "overflow", "below_minimum_legible"}
+            and not below_minimum
+        )
+        text["render_completed"] = safe_render
+        if safe_render:
+            continue
+        action_mask = text.get("_precomputed_inpaint_mask")
+        if isinstance(action_mask, np.ndarray) and action_mask.shape[:2] == (height, width):
+            restore_mask = action_mask > 0
+        else:
+            restore_mask = np.zeros((height, width), dtype=bool)
+            source_bbox = _bounded_bbox(
+                text.get("text_pixel_bbox")
+                or text.get("source_bbox")
+                or text.get("layout_bbox")
+                or text.get("bbox")
+            )
+            if source_bbox is not None:
+                x1, y1, x2, y2 = source_bbox
+                restore_mask[y1:y2, x1:x2] = True
+        if not np.any(restore_mask):
+            continue
+        rolled_cleaned[restore_mask] = original[restore_mask]
+        rolled_rendered[restore_mask] = original[restore_mask]
+        text["route_action"] = "review_required"
+        text["route_reason"] = "atomic_inpaint_render_rollback"
+        flags = [str(flag) for flag in text.get("qa_flags") or [] if str(flag)]
+        if "pure_inpaint_unresolved" not in flags:
+            flags.append("pure_inpaint_unresolved")
+        text["qa_flags"] = flags
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["atomic_inpaint_render_rollback"] = {
+                "restored_pixels": int(np.count_nonzero(restore_mask)),
+                "fit_status": fit_status,
+                "font_size_final": font_size_final,
+                "minimum_legible_font_px": minimum_legible,
+            }
+    return rolled_cleaned, rolled_rendered
+
+
 def _run_copy_back_stage(
     band: Band,
     *,
@@ -8249,11 +8358,17 @@ def process_band(
             translated_page=translated_page,
         ),
     )
+    atomic_cleaned, atomic_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        typeset_stage.to_image(),
+        translated_page,
+    )
     stage_start = time.perf_counter()
     copy_back_stage = _run_copy_back_stage(
         band,
-        cleaned_slice=cleaned,
-        rendered_slice=typeset_stage.to_image(),
+        cleaned_slice=atomic_cleaned,
+        rendered_slice=atomic_rendered,
         translated_page=translated_page,
     )
     _mark("copy_back", stage_start)
@@ -8269,12 +8384,12 @@ def process_band(
         band=band,
         band_id=band_id,
         source_page_number=source_page_number,
-        post_typeset=typeset_stage.to_image(),
+        post_typeset=atomic_rendered,
         post_copyback=copy_back_stage.to_image(),
     )
     _commit_band_outputs(
         band,
-        cleaned_slice=cleaned,
+        cleaned_slice=atomic_cleaned,
         rendered_slice=copy_back_stage.to_image(),
         ocr_result=translated_page,
     )

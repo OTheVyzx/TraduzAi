@@ -1813,6 +1813,8 @@ def _bbox_containment_ratio(inner: list[int] | tuple[int, ...], outer: list[int]
 
 
 def _find_nested_same_balloon_duplicate_index(candidate: dict, accepted: list[dict]) -> int | None:
+    if str(candidate.get("layout_category") or "").strip().lower() == "item_card" or candidate.get("card_panel_id"):
+        return None
     candidate_balloon = _render_identity_bbox(candidate)
     candidate_bbox = candidate.get("text_pixel_bbox") or candidate.get("bbox") or []
     candidate_text = _normalize_duplicate_compare_text(candidate.get("translated", ""))
@@ -1820,6 +1822,8 @@ def _find_nested_same_balloon_duplicate_index(candidate: dict, accepted: list[di
         return None
 
     for index, previous in enumerate(accepted):
+        if str(previous.get("layout_category") or "").strip().lower() == "item_card" or previous.get("card_panel_id"):
+            continue
         previous_balloon = _render_identity_bbox(previous)
         if len(candidate_balloon) != 4 or len(previous_balloon) != 4:
             continue
@@ -2141,6 +2145,13 @@ def _has_degenerate_fragment_render_area(text: dict) -> bool:
 
 
 def _should_merge_adjacent_same_balloon_fragment(a: dict, b: dict) -> bool:
+    if (
+        str(a.get("layout_category") or "").strip().lower() == "item_card"
+        or str(b.get("layout_category") or "").strip().lower() == "item_card"
+        or a.get("card_panel_id")
+        or b.get("card_panel_id")
+    ):
+        return False
     if int(a.get("layout_group_size", 1) or 1) > 1 or int(b.get("layout_group_size", 1) or 1) > 1:
         return False
     a_source = str(a.get("bubble_mask_source") or a.get("balloon_mask_source") or "").strip().lower()
@@ -4791,6 +4802,13 @@ def _drop_low_quality_duplicate_balloon_blocks(blocks: list[dict]) -> list[dict]
             bbox_j = bboxes[j]
             if not keep[j] or bbox_j is None:
                 continue
+            if (
+                str(blocks[i].get("layout_category") or "").strip().lower() == "item_card"
+                or str(blocks[j].get("layout_category") or "").strip().lower() == "item_card"
+                or blocks[i].get("card_panel_id")
+                or blocks[j].get("card_panel_id")
+            ):
+                continue
             inter = _bbox_intersection_area(bbox_i, bbox_j)
             if inter <= 0:
                 continue
@@ -5830,6 +5848,109 @@ def _has_unsafe_broad_derived_art_mask(text: dict) -> bool:
     return target_area >= max(anchor_area * 4.0, anchor_area + 18000)
 
 
+_UNSAFE_AUTOMATIC_RENDER_FLAGS = {
+    "mask_outside_balloon_critical",
+    "missing_real_bubble_mask",
+    "weak_text_residual_after_inpaint",
+}
+
+
+def _has_trustworthy_colored_visual_card_contract(text: dict) -> bool:
+    """Allow rendering only when a colored card has a real cleanup contract.
+
+    ``mask_outside_balloon_critical`` is meaningful for speech balloons, but a
+    visual item card intentionally uses a panel mask instead of a balloon.  The
+    exception stays conservative: it requires the text-only contract, a panel
+    mask source, non-empty cleanup-mask evidence, and a chromatic panel color.
+    """
+    flags = _qa_flags_set(text)
+    if "visual_text_only_inpaint_contract" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    contract = metrics.get("inpaint_mask_contract") if isinstance(metrics, dict) else None
+    contract_pixels = 0
+    if isinstance(contract, dict):
+        for key in ("expanded_pixels", "source_pixels", "mask_pixels", "pixels"):
+            try:
+                contract_pixels = max(contract_pixels, int(contract.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+    for key in (
+        "dark_panel_visual_contract_fill_mask",
+        "dark_text_contract_fill_mask",
+        "koharu_missing_bubble_visual_contract_fill_mask",
+    ):
+        evidence = metrics.get(key) if isinstance(metrics, dict) else None
+        if not isinstance(evidence, dict):
+            continue
+        for pixel_key in ("mask_pixels", "contract_mask_pixels", "pixels"):
+            try:
+                contract_pixels = max(contract_pixels, int(evidence.get(pixel_key) or 0))
+            except (TypeError, ValueError):
+                pass
+    if contract_pixels <= 0:
+        return False
+
+    color_candidates: list[object] = [text.get("background_rgb")]
+    effect_colors = text.get("dark_panel_effect_colors")
+    if isinstance(effect_colors, dict):
+        color_candidates.append(effect_colors.get("panel_fill_rgb"))
+    if isinstance(metrics, dict):
+        for key in ("derived_card_panel_mask", "image_dark_panel_mask"):
+            evidence = metrics.get(key)
+            if isinstance(evidence, dict):
+                color_candidates.extend((evidence.get("panel_fill_rgb"), evidence.get("background_rgb")))
+        sampled = metrics.get("dark_panel_sampled_contract_fill_rgb")
+        if isinstance(sampled, dict):
+            color_candidates.append(sampled.get("rgb"))
+    return any(_rgb_chroma(_coerce_rgb_tuple(candidate)) >= 24.0 for candidate in color_candidates)
+
+
+def _suppress_unsafe_automatic_render(text: dict) -> bool:
+    """Keep uncertain text out of the final image instead of forcing a fallback.
+
+    These flags mean the source was not removed or located reliably.  A
+    typesetter fallback would add Portuguese text on top of the uncertain
+    region, so keep the item for manual review and do not create a block.
+    """
+    if _should_anchor_ui_form_text(text):
+        return False
+    content_class = str(text.get("content_class") or text.get("tipo") or "").strip().lower()
+    if content_class == "sfx":
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    matched = sorted(flags.intersection(_UNSAFE_AUTOMATIC_RENDER_FLAGS))
+    if not matched:
+        return False
+    if _has_trustworthy_colored_visual_card_contract(text):
+        return False
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    text_over_art = metrics.get("translucent_text_over_art_inpaint") if isinstance(metrics, dict) else None
+    reconstructed_pixels = int(text_over_art.get("pixels") or 0) if isinstance(text_over_art, dict) else 0
+    if (
+        profile == "translucent_balloon"
+        and reconstructed_pixels > 0
+        and "weak_text_residual_after_inpaint" not in matched
+    ):
+        return False
+    text["visible"] = False
+    text["needs_review"] = True
+    text["skip_processing"] = True
+    text["preserve_original"] = True
+    _merge_qa_flags(text, ["unsafe_automatic_render_suppressed"])
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["unsafe_automatic_render"] = {"flags": matched, "decision": "suppressed"}
+    apply_route_action(text, route_action="review_required", route_reason="unsafe_automatic_render")
+    text["skip_processing"] = True
+    text["preserve_original"] = True
+    return True
+
+
 def _may_need_unsafe_render_rollback(text: dict) -> bool:
     if _should_anchor_ui_form_text(text):
         return False
@@ -6137,8 +6258,137 @@ def _strip_mixed_sfx_prefix_for_detached_white_bubble(text: dict) -> dict:
     return cleaned_text
 
 
+def _is_visual_item_card_row(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = _qa_flags_set(text)
+    if str(text.get("layout_category") or "").strip().lower() == "item_card":
+        return True
+    if bool(text.get("card_panel_text_context")) or bool(str(text.get("card_panel_id") or "").strip()):
+        return True
+    if "visual_card_ocr_recall" in flags:
+        return True
+    if "visual_text_only_inpaint_contract" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return False
+    color_candidates: list[object] = [text.get("background_rgb")]
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    for key in ("derived_card_panel_mask", "image_dark_panel_mask"):
+        evidence = metrics.get(key) if isinstance(metrics, dict) else None
+        if isinstance(evidence, dict):
+            color_candidates.extend((evidence.get("panel_fill_rgb"), evidence.get("background_rgb")))
+    return any(_rgb_chroma(_coerce_rgb_tuple(candidate)) >= 24.0 for candidate in color_candidates)
+
+
+def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
+    """Keep every item-card row centered on its own source-text band.
+
+    Card masks describe a broad visual panel, not an independent balloon for
+    each OCR row.  Using those masks as layout capacity lets short rows drift
+    vertically into their neighbours.  Build narrow, non-overlapping row slots
+    from the original OCR geometry while retaining extra horizontal room for
+    PT-BR expansion.
+    """
+    candidates: list[tuple[dict, list[int]]] = []
+    for text in texts:
+        if not _is_visual_item_card_row(text):
+            continue
+        anchor = _layout_bbox(text.get("text_pixel_bbox") or text.get("source_bbox") or text.get("bbox"))
+        if anchor is not None:
+            candidates.append((text, anchor))
+    if not candidates:
+        return
+
+    groups: list[list[tuple[dict, list[int]]]] = []
+    for item in sorted(candidates, key=lambda value: (value[1][1], value[1][0])):
+        text, anchor = item
+        center_x = (anchor[0] + anchor[2]) / 2.0
+        selected: list[tuple[dict, list[int]]] | None = None
+        for group in reversed(groups):
+            last_anchor = group[-1][1]
+            group_center_x = float(np.median([(row[1][0] + row[1][2]) / 2.0 for row in group]))
+            if center_x and abs(center_x - group_center_x) <= 180.0 and anchor[1] - last_anchor[3] <= 260:
+                selected = group
+                break
+        if selected is None:
+            selected = []
+            groups.append(selected)
+        selected.append(item)
+
+    for group in groups:
+        ordered = sorted(group, key=lambda value: (value[1][1], value[1][0]))
+        for index, (text, anchor) in enumerate(ordered):
+            sanitized = _clear_connected_balloon_metadata(text)
+            text.clear()
+            text.update(sanitized)
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor]
+            width = max(1, ax2 - ax1)
+            height = max(1, ay2 - ay1)
+            parent = _layout_bbox(text.get("card_panel_bbox") or text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
+            pad_x = max(10, min(72, int(round(width * 0.16))))
+            pad_y = max(4, min(18, int(round(height * 0.22))))
+            slot_x1, slot_x2 = ax1 - pad_x, ax2 + pad_x
+            if parent is not None:
+                slot_x1 = max(parent[0] + 6, slot_x1)
+                slot_x2 = min(parent[2] - 6, slot_x2)
+            slot_y1, slot_y2 = ay1 - pad_y, ay2 + pad_y
+            if index > 0:
+                previous = ordered[index - 1][1]
+                boundary = (int(previous[3]) + ay1) // 2
+                slot_y1 = max(slot_y1, boundary + 1)
+            if index + 1 < len(ordered):
+                following = ordered[index + 1][1]
+                boundary = (ay2 + int(following[1])) // 2
+                slot_y2 = min(slot_y2, boundary)
+            if slot_x2 <= slot_x1 + 8 or slot_y2 <= slot_y1 + 6:
+                continue
+            slot = [int(slot_x1), int(slot_y1), int(slot_x2), int(slot_y2)]
+            inset_x = min(5, max(2, (slot_x2 - slot_x1) // 20))
+            inset_y = min(3, max(1, (slot_y2 - slot_y1) // 16))
+            safe = [slot_x1 + inset_x, slot_y1 + inset_y, slot_x2 - inset_x, slot_y2 - inset_y]
+            # The inpaint stage may preserve page-space source-mask aliases
+            # while ``text_pixel_bbox`` has already been mapped to the band.
+            # A mixed pair makes the original-scale contract render thousands
+            # of pixels below the row.  The row slot is authoritative here.
+            for key in (
+                "bbox",
+                "source_bbox",
+                "layout_bbox",
+                "source_text_anchor_bbox",
+                "_source_text_anchor_bbox",
+                "source_text_mask_bbox",
+                "_source_text_mask_bbox",
+            ):
+                text[key] = list(anchor)
+            for key in ("target_bbox", "balloon_bbox", "bubble_mask_bbox", "position_bbox", "capacity_bbox"):
+                text[key] = list(slot)
+            text["bubble_inner_bbox"] = list(safe)
+            text["balloon_inner_bbox"] = list(safe)
+            text["safe_text_box"] = list(safe)
+            text["_debug_safe_text_box"] = list(safe)
+            text["layout_safe_bbox"] = list(safe)
+            text["layout_safe_reason"] = "visual_item_card_row_slot"
+            text["layout_profile"] = "colored_status_panel_row"
+            text["block_profile"] = "colored_status_panel_row"
+            text["_render_target_source"] = "visual_item_card_row_slot"
+            for stale_key in (
+                "render_bbox",
+                "_debug_render_bbox",
+                "fit_status",
+                "layout_fit_result",
+                "render_layout_contract",
+                "_render_layout_contract_replayed",
+                "_render_layout_contract_band_y_shift",
+            ):
+                text.pop(stale_key, None)
+            _merge_qa_flags(text, ["visual_item_card_row_slot", "safe_text_box_recomputed"])
+
+
 def build_render_blocks(texts: list[dict]) -> list[dict]:
     simple_layout_only = os.getenv("TRADUZAI_SIMPLE_LAYOUT_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
+    _apply_visual_item_card_row_slots(texts)
     for text in texts:
         if isinstance(text, dict) and _should_skip_dark_connected_combined_fragment(text, texts):
             text["visible"] = False
@@ -6177,6 +6427,8 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             continue
         if special_block is not text:
             blocks.append(sanitize_simple_text_geometry(special_block) if simple_layout_only else normalize_text_geometry(special_block))
+            continue
+        if _suppress_unsafe_automatic_render(text):
             continue
         if _should_skip_noisy_overlapping_ocr_fragment(text, texts):
             continue
@@ -8100,7 +8352,23 @@ def _should_reject_tiny_bubble_inner_safe_area(
     target_bbox: list[int],
     safe_bbox: list[int],
 ) -> bool:
-    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    reference_bbox = list(target_bbox)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    if source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"} and balloon_bbox is not None:
+        target_area = _bbox_area_px(target_bbox)
+        balloon_area = _bbox_area_px(balloon_bbox)
+        safe_overlap = _bbox_intersection_area(safe_bbox, balloon_bbox)
+        safe_area = _bbox_area_px(safe_bbox)
+        if (
+            target_area >= int(balloon_area * 1.45)
+            and safe_overlap >= int(safe_area * 0.85)
+        ):
+            # A broad segmentation mask can include the whole surrounding
+            # region.  In that case the detected balloon body is the correct
+            # reference for judging whether its inner area is usable.
+            reference_bbox = list(balloon_bbox)
+    tx1, ty1, tx2, ty2 = [int(v) for v in reference_bbox]
     sx1, sy1, sx2, sy2 = [int(v) for v in safe_bbox]
     target_w = max(1, tx2 - tx1)
     target_h = max(1, ty2 - ty1)
@@ -10409,6 +10677,21 @@ def _select_real_bubble_render_target_bbox(text_data: dict, target_bbox: list[in
         text_data["_render_target_source"] = "real_bubble_mask_bbox_distinct"
         _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
         return [int(v) for v in bubble_bbox]
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if (
+        source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}
+        and balloon_bbox is not None
+        and anchor_bbox is not None
+        and _bbox_area_px(balloon_bbox) >= int(_bbox_area_px(bubble_bbox) * 3.5)
+        and _bbox_intersection_area(bubble_inner_bbox, balloon_bbox) >= int(_bbox_area_px(bubble_inner_bbox) * 0.85)
+        and _bbox_intersection_area(anchor_bbox, balloon_bbox) >= int(_bbox_area_px(anchor_bbox) * 0.85)
+    ):
+        text_data["_render_target_source"] = "real_balloon_bbox_overmerged_contour_guard"
+        text_data["_overmerged_contour_mask_bbox"] = list(bubble_bbox)
+        _merge_qa_flags(text_data, ["safe_text_box_recomputed", "ocr_geometry_overmerged"])
+        return [int(v) for v in balloon_bbox]
     if _ocr_geometry_looks_overmerged_for_bubble(text_data, target_bbox, bubble_bbox):
         text_data["_render_target_source"] = "real_bubble_mask_bbox_overmerged_guard"
         text_data["_overmerged_ocr_original_target_bbox"] = list(target_bbox)
@@ -10484,6 +10767,8 @@ def _select_dark_panel_visual_mask_render_target_bbox(
     text_data: dict,
     target_bbox: list[int],
 ) -> list[int] | None:
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        return list(target_bbox)
     source = str(text_data.get("bubble_mask_source") or "").strip().lower()
     if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
         return None
@@ -10901,6 +11186,8 @@ def _dark_bubble_compact_ellipse_bbox(text_data: dict, mask_bbox: list[int]) -> 
 
 
 def _clear_stale_dark_panel_visual_render_geometry(text_data: dict) -> None:
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        return
     source = str(text_data.get("bubble_mask_source") or "").strip().lower()
     dark_visual_white_context = _is_dark_visual_white_mask_context(text_data, source)
     if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"} and not dark_visual_white_context:
@@ -11851,6 +12138,13 @@ def plan_text_layout(text_data: dict) -> dict:
         width_ratio = max(width_ratio, 0.92)
         padding_y = min(padding_y, max(2, int(round(padding_ref_height * 0.035))))
         line_spacing = min(line_spacing, 0.06)
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        # The slot boundaries already provide the vertical safety margin.  A
+        # second generic padding pass can leave only ~20 px of usable height,
+        # forcing short rows to 5-6 px and long rows to a single tiny line.
+        width_ratio = max(width_ratio, 0.96)
+        padding_y = 0
+        line_spacing = min(line_spacing, 0.04)
     # Special rules to match test expectations
     if layout_shape == "tall" and not anchor_bbox and group_size == 1:
         # Narrow ellipses should use more relative width
@@ -12023,14 +12317,24 @@ def plan_text_layout(text_data: dict) -> dict:
             )
         )
         if 1 <= compact_len <= 34:
-            panel_cap = max(
-                _MIN_FONT_SIZE,
-                min(
-                    int(round(capacity_width * 0.145)),
-                    int(round(capacity_height * 0.20)),
-                    int(round(max(1, target_size) * 0.88)),
-                ),
-            )
+            if "visual_item_card_row_slot" in dark_visual_flags:
+                panel_cap = max(
+                    _MIN_FONT_SIZE,
+                    min(
+                        int(round(capacity_width * 0.145)),
+                        int(round(capacity_height * 0.72)),
+                        int(max(1, target_size)),
+                    ),
+                )
+            else:
+                panel_cap = max(
+                    _MIN_FONT_SIZE,
+                    min(
+                        int(round(capacity_width * 0.145)),
+                        int(round(capacity_height * 0.20)),
+                        int(round(max(1, target_size) * 0.88)),
+                    ),
+                )
             if target_size > panel_cap:
                 target_size = panel_cap
                 _merge_qa_flags(text_data, ["dark_card_panel_font_capped_for_margin"])
@@ -12915,6 +13219,28 @@ def _persist_fit_attempts(text_data: dict, plan: dict, text: str, resolved: dict
             text_data["qa_flags"] = flags
 
     text_data["fit_attempts"] = attempts[-4:]
+    text_data["minimum_legible_font_px"] = int(min_font_px)
+    text_data["font_size_final"] = int(final_attempt["font_px"])
+
+
+def _finalize_render_completion_contract(text_data: dict) -> None:
+    """Record whether translated ink was rendered at a safe, legible size."""
+    render_bbox = _layout_bbox(text_data.get("render_bbox"))
+    try:
+        final_font_px = int(text_data.get("font_size_final", 0) or 0)
+    except (TypeError, ValueError):
+        final_font_px = 0
+    try:
+        minimum_font_px = int(text_data.get("minimum_legible_font_px", 0) or 0)
+    except (TypeError, ValueError):
+        minimum_font_px = 0
+    text_data["render_completed"] = bool(
+        str(text_data.get("fit_status") or "").strip().lower() == "ok"
+        and render_bbox is not None
+        and final_font_px > 0
+        and minimum_font_px > 0
+        and final_font_px >= minimum_font_px
+    )
 
 
 def _render_plan_debug_enabled() -> bool:
@@ -13109,14 +13435,125 @@ def _should_enforce_original_text_scale_contract(text_data: dict) -> bool:
         or route_action in {"skip", "preserve_original"}
     ):
         return False
+    # Item-card rows already use source-anchored, non-overlapping slots.  The
+    # generic source-area scorer can prefer a tiny one-line rendering for long
+    # PT-BR text, or keep a tall rendering that crosses into the next row.
+    # Let the row slot be the hard size/position contract instead.
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        return False
     # Enforcement is deliberately broader than _should_use_original_text_scale_contract:
     # planning/split heuristics stay conservative, but render size and center
     # must follow the real original text mask whenever that mask exists.
     return _original_text_mask_bbox_for_scale(text_data) is not None
 
 
+def _typeset_inpaint_contract_bbox_for_scale(text_data: dict) -> tuple[list[int], str] | None:
+    """Return the per-text inpaint contract bbox when it is safe for typeset scale.
+
+    Dark connected bubbles often carry a broad visual/text bbox for lobe
+    partitioning. The inpaint contract bbox is the closest evidence of the
+    original glyph mask actually erased, so it must win the size/center
+    contract when it is not an overbroad fallback.
+    """
+
+    metrics = text_data.get("qa_metrics")
+    if not isinstance(metrics, dict):
+        return None
+
+    candidates: list[tuple[str, list[int] | None]] = []
+    fill_mask = metrics.get("dark_text_contract_fill_mask")
+    if isinstance(fill_mask, dict):
+        candidates.append(("qa_metrics.dark_text_contract_fill_mask.bbox", _layout_bbox(fill_mask.get("bbox"))))
+    fill_uses = metrics.get("dark_text_contract_fill_uses_inpaint_contract_mask")
+    if isinstance(fill_uses, dict):
+        candidates.append(
+            (
+                "qa_metrics.dark_text_contract_fill_uses_inpaint_contract_mask.contract_bbox",
+                _layout_bbox(fill_uses.get("contract_bbox")),
+            )
+        )
+    inpaint_contract = metrics.get("inpaint_mask_contract")
+    if isinstance(inpaint_contract, dict):
+        candidates.append(("qa_metrics.inpaint_mask_contract.contract_bbox", _layout_bbox(inpaint_contract.get("contract_bbox"))))
+
+    flags = _qa_flags_set(text_data)
+    dark_contract_context = bool(
+        flags
+        & {
+            "text_contract_direct_fill",
+            "visual_text_only_inpaint_contract",
+            "source_text_mask_bbox_from_inpaint_component",
+            "dark_connected_component_safe_partition",
+            "dark_connected_lobes_repaired_from_visual_mask",
+        }
+    )
+    if not dark_contract_context:
+        source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+        dark_contract_context = source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
+    if not dark_contract_context:
+        return None
+
+    refs = [
+        bbox
+        for bbox in (
+            _layout_bbox(text_data.get("source_text_mask_bbox")),
+            _layout_bbox(text_data.get("_source_text_mask_bbox")),
+            _layout_bbox(text_data.get("text_pixel_bbox")),
+            _layout_bbox(text_data.get("ocr_text_bbox")),
+            _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
+        )
+        if bbox is not None
+    ]
+    ref_union = _bbox_union_many_for_layout(refs) if refs else None
+    target_ref = _layout_bbox(
+        text_data.get("target_bbox")
+        or text_data.get("balloon_bbox")
+        or text_data.get("bubble_mask_bbox")
+        or text_data.get("bbox")
+    )
+
+    for source_name, bbox in candidates:
+        if bbox is None or _bbox_area_px(bbox) < 16:
+            continue
+        rejection_reason = ""
+        if [int(v) for v in bbox] == [0, 0, 32, 32]:
+            rejection_reason = "placeholder_bbox"
+        elif target_ref is not None and _bbox_intersection_area(bbox, target_ref) <= 0:
+            rejection_reason = "outside_target"
+        elif ref_union is not None:
+            overlap = _bbox_intersection_area(bbox, ref_union)
+            if overlap <= 0:
+                rejection_reason = "outside_text_reference"
+            else:
+                bbox_area = max(1, _bbox_area_px(bbox))
+                ref_area = max(1, _bbox_area_px(ref_union))
+                if bbox_area > int(ref_area * 2.35) and overlap / float(bbox_area) < 0.55:
+                    rejection_reason = "overbroad_vs_text_reference"
+        if rejection_reason:
+            text_data["typeset_contract_rejection_reason"] = rejection_reason
+            text_data["typeset_contract_rejected_bbox"] = list(bbox)
+            text_data["typeset_contract_rejected_source"] = source_name
+            continue
+        text_data["typeset_inpaint_contract_bbox_used"] = list(bbox)
+        text_data["typeset_contract_source"] = source_name
+        text_data["typeset_contract_space"] = "page"
+        return list(bbox), source_name
+
+    return None
+
+
 def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     _propagate_dark_connected_text_anchor_to_type(text_data)
+    contract_candidate = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    if contract_candidate is not None:
+        bbox, source_name = contract_candidate
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["typeset_inpaint_contract_bbox_used"] = {
+                "bbox": [int(v) for v in bbox],
+                "source": source_name,
+            }
+        return bbox
     candidates: list[tuple[str, list[int]]] = []
     def _valid_scale_bbox(bbox: list[int] | None) -> bool:
         if bbox is None or _bbox_area_px(bbox) < 16:
@@ -13428,6 +13865,23 @@ def _original_text_scale_contract_metrics(candidate: dict, source_bbox: list[int
         "height_ratio": block_h / float(source_h),
         "area_ratio": block_area / float(source_area),
     }
+
+
+def _record_typeset_contract_fit(text_data: dict, candidate: dict, source_bbox: list[int], *, reason: str) -> None:
+    metrics = text_data.setdefault("qa_metrics", {})
+    contract_metrics = _original_text_scale_contract_metrics(candidate, source_bbox)
+    if isinstance(metrics, dict):
+        metrics["typeset_contract_fit"] = {
+            "source_bbox": [int(v) for v in source_bbox],
+            "block_bbox": [int(round(v)) for v in candidate.get("block_bbox", [])],
+            "font_size": int(candidate.get("font_size", 0) or 0),
+            "line_count": len(candidate.get("lines") or []),
+            "line_widths": [int(v) for v in candidate.get("line_widths") or []],
+            "contract_metrics": contract_metrics,
+        }
+        metrics["typeset_contract_reflow_or_shrink_reason"] = reason
+    text_data["typeset_contract_fit"] = contract_metrics
+    text_data["typeset_contract_reflow_or_shrink_reason"] = reason
 
 
 def _original_text_scale_candidate_violations(candidate: dict, source_bbox: list[int]) -> list[str]:
@@ -13898,6 +14352,21 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     use_capacity_position = bool(plan.get("_simple_anchor_capacity_expanded") or plan.get("_position_on_capacity_bbox"))
     effective_position_bbox = plan.get("capacity_bbox") if use_capacity_position else plan.get("position_bbox", plan["target_bbox"])
     safe_text_box = plan.get("safe_text_box")
+    # The original glyph mask is useful scale evidence, but a white speech
+    # balloon's measured inner body is the hard visual boundary.  Keeping the
+    # OCR-scale candidate when it does not fit that body creates the exact
+    # `render_outside_balloon` failure this contract is meant to prevent.
+    mask_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    is_trusted_white_bubble = _is_white_layout_profile(text_data) or mask_source in {
+        "image_white_bubble_mask",
+        "image_contour_bubble_mask",
+        "image_rect_bubble_mask",
+    }
+    constrain_original_scale_to_safe_box = bool(
+        original_scale_bbox is not None
+        and (is_trusted_white_bubble or "visual_item_card_row_slot" in _qa_flags_set(text_data))
+        and _layout_bbox(safe_text_box) is not None
+    )
     if (
         not use_capacity_position
         and isinstance(safe_text_box, (list, tuple))
@@ -14018,7 +14487,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             attempt_size,
             plan["line_spacing_ratio"],
         )
-        if original_scale_bbox is not None and len(wrapped) > 1:
+        if original_scale_bbox is not None and len(wrapped) > 1 and not constrain_original_scale_to_safe_box:
             line_height = max(line_height, int(round(attempt_size * 1.28)))
         
         total_text_height = line_height * len(wrapped)
@@ -14029,7 +14498,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         # que candidatos vÃ¡lidos pelo binary-search sejam descartados aqui e
         # caiam no fallback de category_min.
         if (
-            original_scale_bbox is None
+            (original_scale_bbox is None or constrain_original_scale_to_safe_box)
             and (block_width > plan["max_width"] or total_text_height > plan["max_height"] + height_tolerance)
         ):
             if trace_candidates:
@@ -14053,7 +14522,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 )
             continue
 
-        if original_scale_bbox is not None:
+        if original_scale_bbox is not None and not constrain_original_scale_to_safe_box:
             anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
             center_x = int(round(anchor_cx))
             start_y = int(round(anchor_cy - (total_text_height / 2.0)))
@@ -14065,7 +14534,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             )
             center_x = px1 + (position_width // 2)
 
-        if original_scale_bbox is None and plan["vertical_anchor"] != "top":
+        if (original_scale_bbox is None or constrain_original_scale_to_safe_box) and plan["vertical_anchor"] != "top":
             min_start_y = py1 + int(plan["padding_y"])
             max_start_y = py2 - int(plan["padding_y"]) - total_text_height
             if max_start_y >= min_start_y:
@@ -14227,6 +14696,11 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     }
         if trace_candidates:
             _mark_selected_render_candidate(text_data, best_candidate)
+        if original_scale_bbox is not None:
+            reason = "original_text_scale_selected"
+            if best_candidate.get("original_text_scale_underflow_violations"):
+                reason = "original_text_scale_selected_with_soft_underflow"
+            _record_typeset_contract_fit(text_data, best_candidate, original_scale_bbox, reason=reason)
         _persist_fit_attempts(text_data, plan, text, best_candidate, font_size)
         return best_candidate
 
@@ -14249,10 +14723,10 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
-    if original_scale_bbox is not None and len(fallback_lines) > 1:
+    if original_scale_bbox is not None and len(fallback_lines) > 1 and not constrain_original_scale_to_safe_box:
         fallback_line_height = max(fallback_line_height, int(round(fallback_size * 1.28)))
     fallback_total_height = fallback_line_height * len(fallback_lines)
-    if original_scale_bbox is not None:
+    if original_scale_bbox is not None and not constrain_original_scale_to_safe_box:
         anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
         center_x = int(round(anchor_cx))
         start_y = int(round(anchor_cy - (fallback_total_height / 2.0)))
@@ -14263,7 +14737,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             else py1 + max(plan["padding_y"], (position_height - fallback_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
         )
         center_x = px1 + (position_width // 2)
-    if original_scale_bbox is None and plan["vertical_anchor"] != "top":
+    if (original_scale_bbox is None or constrain_original_scale_to_safe_box) and plan["vertical_anchor"] != "top":
         min_start_y = py1 + int(plan["padding_y"])
         max_start_y = py2 - int(plan["padding_y"]) - fallback_total_height
         if max_start_y >= min_start_y:
@@ -14303,16 +14777,22 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             test_font = get_font(plan["font_name"], size)
             test_lines = wrap_text(text, test_font, plan["max_width"])
             test_line_height = get_line_height(test_font, size, plan["line_spacing_ratio"])
-            if len(test_lines) > 1:
+            if len(test_lines) > 1 and not constrain_original_scale_to_safe_box:
                 test_line_height = max(test_line_height, int(round(size * 1.28)))
             test_total_height = test_line_height * len(test_lines)
             test_widths = [measure_text_width(test_font, line, size) for line in test_lines]
-            test_start_y = (
-                py1 + plan["padding_y"]
-                if plan["vertical_anchor"] == "top"
-                else py1 + max(plan["padding_y"], (position_height - test_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
-            )
-            if plan["vertical_anchor"] != "top":
+            if original_scale_bbox is not None and not constrain_original_scale_to_safe_box:
+                anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
+                center_x = int(round(anchor_cx))
+                test_start_y = int(round(anchor_cy - (test_total_height / 2.0)))
+            else:
+                center_x = px1 + (position_width // 2)
+                test_start_y = (
+                    py1 + plan["padding_y"]
+                    if plan["vertical_anchor"] == "top"
+                    else py1 + max(plan["padding_y"], (position_height - test_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
+                )
+            if (original_scale_bbox is None or constrain_original_scale_to_safe_box) and plan["vertical_anchor"] != "top":
                 min_start_y = py1 + int(plan["padding_y"])
                 max_start_y = py2 - int(plan["padding_y"]) - test_total_height
                 if max_start_y >= min_start_y:
@@ -14353,6 +14833,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 break
     elif original_scale_bbox is not None and fallback_violations:
         _merge_qa_flags(text_data, ["original_text_scale_fallback_underflow_not_shrunk"])
+    if original_scale_bbox is not None:
+        _record_typeset_contract_fit(text_data, fallback, original_scale_bbox, reason="original_text_scale_fallback")
     if trace_candidates:
         _append_render_debug_item(
             text_data,
@@ -15850,18 +16332,24 @@ def _render_single_text_block_unrotated(
             positions,
             plan.get("safe_text_box") or plan["target_bbox"],
         )
+        source_center_bounds = plan.get("safe_text_box") or plan["target_bbox"]
+        if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard":
+            # The safe box came from a contour that only covered the source
+            # glyph cluster.  The selected target is the real balloon, so it
+            # is the appropriate boundary for the original-center contract.
+            source_center_bounds = plan["target_bbox"]
         positions = _align_uied_positions_to_source_center(
             best_font,
             best_lines,
             positions,
             text_data,
-            plan.get("safe_text_box") or plan["target_bbox"],
+            source_center_bounds,
         )
         positions = _clamp_safe_text_positions_to_bbox(
             best_font,
             best_lines,
             positions,
-            plan.get("safe_text_box") or plan["target_bbox"],
+            source_center_bounds,
         )
         _persist_render_layout_contract(text_data, plan, resolved, positions)
 
@@ -15999,6 +16487,84 @@ def _render_single_text_block_unrotated(
         _run_render_qa(text_data, plan, background_image=pre_render_np)
 
 
+def _append_resolved_pre_render_flag(qa_metrics: dict, flag: str) -> None:
+    resolved = list(qa_metrics.get("resolved_pre_render_flags") or [])
+    if flag not in resolved:
+        resolved.append(flag)
+    qa_metrics["resolved_pre_render_flags"] = resolved
+
+
+def _revalidate_tight_contract_typeset_flags_after_layout(
+    qa_flags: list,
+    qa_metrics: dict,
+    *,
+    render_bbox: list[int],
+    render_fit_flags: list[str],
+    original_qa_flags: list | None = None,
+) -> tuple[list, list[str]]:
+    tight_fit = qa_metrics.get("contract_bbox_tight_but_visual_balloon_fit_ok")
+    if not isinstance(tight_fit, dict):
+        return qa_flags, render_fit_flags
+
+    render = _layout_bbox(render_bbox)
+    visual = _layout_bbox(tight_fit.get("visual_bbox"))
+    if render is None or visual is None:
+        return qa_flags, render_fit_flags
+
+    containment = qa_metrics.get("render_balloon_containment")
+    try:
+        containment_value = float(containment)
+    except (TypeError, ValueError):
+        containment_value = -1.0
+
+    rx1, ry1, rx2, ry2 = [int(v) for v in render]
+    vx1, vy1, vx2, vy2 = [int(v) for v in visual]
+    margin = 4
+    render_inside_visual = (
+        rx1 >= vx1 - margin
+        and ry1 >= vy1 - margin
+        and rx2 <= vx2 + margin
+        and ry2 <= vy2 + margin
+    )
+    if containment_value < 0.98 or not render_inside_visual:
+        qa_metrics["typeset_contract_flags_revalidated"] = {
+            "decision": "kept",
+            "reason": "render_not_inside_visual_bbox",
+            "contract_bbox": list(tight_fit.get("source_bbox") or []),
+            "visual_bbox": [int(v) for v in visual],
+            "render_bbox": [int(v) for v in render],
+            "containment": containment_value,
+        }
+        return qa_flags, render_fit_flags
+
+    movable_flags = {"TEXT_CLIPPED", "TEXT_OVERFLOW", "fit_below_minimum_legible"}
+    original_flags = list(original_qa_flags or [])
+    resolved_flags = [
+        flag
+        for flag in ("TEXT_CLIPPED", "TEXT_OVERFLOW", "fit_below_minimum_legible")
+        if flag in qa_flags or flag in original_flags
+    ]
+    if not resolved_flags:
+        return qa_flags, render_fit_flags
+
+    for flag in resolved_flags:
+        _append_resolved_pre_render_flag(qa_metrics, flag)
+    qa_metrics["typeset_contract_flags_revalidated"] = {
+        "decision": "cleared",
+        "resolved_flags": resolved_flags,
+        "reason": "contract_bbox_tight_but_visual_balloon_fit_ok",
+        "contract_bbox": list(tight_fit.get("source_bbox") or []),
+        "visual_bbox": [int(v) for v in visual],
+        "visual_bbox_source": str(tight_fit.get("visual_bbox_source") or ""),
+        "render_bbox": [int(v) for v in render],
+        "containment": containment_value,
+    }
+    return (
+        [flag for flag in qa_flags if flag not in movable_flags],
+        [flag for flag in render_fit_flags if flag not in {"TEXT_CLIPPED", "TEXT_OVERFLOW"}],
+    )
+
+
 def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
     """Verifica se o texto renderizado ultrapassa safe_text_box.
 
@@ -16024,10 +16590,11 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         else plan.get("target_bbox")
     )
 
+    original_qa_flags = list(text_data.get("qa_flags") or [])
     render_geometry_flags = {"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"}
     qa_flags: list = [
         flag
-        for flag in list(text_data.get("qa_flags") or [])
+        for flag in original_qa_flags
         if str(flag) not in render_geometry_flags
     ]
     qa_metrics: dict = dict(text_data.get("qa_metrics") or {})
@@ -16072,6 +16639,12 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
             return False
         max_overhang = max(4, int(round(min(safe_w, safe_h) * 0.04)))
         real_target = balloon_bbox or target
+        profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+        if profile == "translucent_balloon" and _contains_with_margin(real_target, render_bbox, margin=2):
+            # The white component inside a translucent panel can be only a
+            # local highlight.  The outer balloon is the real visual bound.
+            qa_metrics["render_safe_box_ignored_for_translucent_panel"] = True
+            return True
         if overhang_px > max_overhang or not _contains_with_margin(real_target, render_bbox, margin=2):
             return False
         qa_metrics["render_safe_overhang_px"] = int(overhang_px)
@@ -16175,6 +16748,14 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
                 continue
             if flag not in qa_flags:
                 qa_flags.append(flag)
+
+    qa_flags, render_fit_flags = _revalidate_tight_contract_typeset_flags_after_layout(
+        qa_flags,
+        qa_metrics,
+        render_bbox=[int(v) for v in render_bbox],
+        render_fit_flags=render_fit_flags,
+        original_qa_flags=original_qa_flags,
+    )
 
     if render_fit_flags:
         qa_metrics["render_fit"] = {
@@ -16812,6 +17393,9 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         "render_bbox",
         "fit_attempts",
         "fit_status",
+        "render_completed",
+        "font_size_final",
+        "minimum_legible_font_px",
         "rotation_deg",
         "rotation_source",
         "qa_metrics",
@@ -17593,8 +18177,24 @@ def _cleanup_bbox4(value, width: int, height: int, *, band_y_top: int = 0) -> li
 def _text_mask_cleanup_allowed(text: dict) -> bool:
     if not isinstance(text, dict):
         return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if (
+        str(text.get("layout_category") or "").strip().lower() == "item_card"
+        or bool(str(text.get("card_panel_id") or "").strip())
+        or "visual_text_only_inpaint_contract" in flags
+    ):
+        # Visual cards are already cleaned by their glyph/expanded inpaint
+        # mask.  Painting a rectangular cleanup fill here destroys gradients
+        # and was the direct source of the black boxes over colored cards.
+        return False
     profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
-    if profile == "translucent_balloon":
+    if profile in {
+        "translucent_balloon",
+        "white_balloon",
+        "speech_balloon",
+        "connected_balloon",
+        "standard",
+    }:
         return False
     translated = str(text.get("translated") or text.get("traduzido") or "").strip()
     if not translated:
@@ -17611,7 +18211,21 @@ def _text_mask_cleanup_allowed(text: dict) -> bool:
         return False
     if render_policy in {"merged_into_primary", "preserve_original", "review_required"}:
         return False
-    return route_action.startswith("translate") or route_action == ""
+    if not (route_action.startswith("translate") or route_action == ""):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    return source in {
+        "image_dark_bubble_mask",
+        "image_dark_panel_mask",
+        "derived_card_panel_mask",
+    } or bool(
+        flags
+        & {
+            "visual_text_only_inpaint_contract",
+            "text_contract_direct_fill",
+            "dark_panel_style_grouped",
+        }
+    )
 
 
 def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) -> tuple[int, int, int]:
@@ -17623,6 +18237,9 @@ def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) ->
         "dark_panel_style_grouped",
     }:
         return (0, 0, 0)
+    white_sfx_fill = _sfx_white_bubble_cleanup_fill_rgb(img, text, bbox)
+    if white_sfx_fill is not None:
+        return white_sfx_fill
     raw_background = text.get("background_rgb")
     if isinstance(raw_background, (list, tuple)) and len(raw_background) >= 3:
         try:
@@ -17654,6 +18271,99 @@ def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) ->
     except Exception:
         pass
     return (0, 0, 0)
+
+
+def _sfx_white_bubble_cleanup_fill_rgb(img: Image.Image, text: dict, bbox: list[int]) -> tuple[int, int, int] | None:
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if source != "image_white_bubble_mask" and profile not in {"white_balloon", "speech_balloon"}:
+        return None
+    if flags & {"translator_note_text_only_mask", "visual_text_only_inpaint_contract", "text_contract_direct_fill"}:
+        return None
+    content_class = str(text.get("content_class") or text.get("tipo") or "").strip().lower()
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if content_class == "sfx" or route_action == "translate_sfx_inpaint_render":
+        return None
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    original = str(text.get("original") or text.get("text") or "").strip()
+    style = text.get("estilo") or text.get("style") or {}
+    sfx_like = (
+        0 < len(translated) <= 28
+        and (
+            "!" in translated
+            or "!" in original
+            or bool(isinstance(style, dict) and (style.get("italico") or style.get("bold")) and style.get("force_upper"))
+        )
+    )
+    if not sfx_like:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        sample = np.asarray(img.crop((x1, y1, x2, y2)).convert("RGB"), dtype=np.uint8)
+        if sample.size == 0:
+            return None
+        flat = sample.reshape(-1, 3).astype(np.float32)
+        luma = flat.mean(axis=1)
+        mean_luma = float(luma.mean())
+        std_luma = float(luma.std())
+        light_ratio = float((luma >= 238.0).mean())
+        if mean_luma < 238.0 or std_luma > 10.0 or light_ratio < 0.92:
+            _record_white_sfx_cleanup_metric(
+                text,
+                decision="rejected",
+                reason="background_required_for_legibility",
+                old_background=text.get("background_rgb"),
+                new_background=None,
+                sample_mean_luma=mean_luma,
+                sample_luma_std=std_luma,
+                sample_light_ratio=light_ratio,
+            )
+            return None
+        fill = tuple(int(max(0, min(255, round(float(v))))) for v in np.median(flat, axis=0)[:3])
+        if sum(fill) / 3.0 < 245.0:
+            fill = (255, 255, 255)
+        _record_white_sfx_cleanup_metric(
+            text,
+            decision="applied",
+            reason="gray_background_rect_not_allowed_for_white_jagged_bubble",
+            old_background=text.get("background_rgb"),
+            new_background=list(fill),
+            sample_mean_luma=mean_luma,
+            sample_luma_std=std_luma,
+            sample_light_ratio=light_ratio,
+        )
+        return fill
+    except Exception:
+        return None
+
+
+def _record_white_sfx_cleanup_metric(
+    text: dict,
+    *,
+    decision: str,
+    reason: str,
+    old_background,
+    new_background,
+    sample_mean_luma: float,
+    sample_luma_std: float,
+    sample_light_ratio: float,
+) -> None:
+    metrics = text.setdefault("qa_metrics", {})
+    key = "sfx_white_bubble_background_removed" if decision == "applied" else "sfx_white_bubble_background_removal_rejected"
+    metrics[key] = {
+        "decision": decision,
+        "reason": reason,
+        "old_background": old_background,
+        "new_background": new_background,
+        "style_profile": str(text.get("layout_profile") or text.get("block_profile") or ""),
+        "render_bbox": text.get("render_bbox"),
+        "safe_text_box": text.get("safe_text_box") or text.get("_debug_safe_text_box"),
+        "source_bbox": text.get("source_text_mask_bbox") or text.get("_source_text_mask_bbox") or text.get("text_pixel_bbox"),
+        "sample_mean_luma": round(float(sample_mean_luma), 3),
+        "sample_luma_std": round(float(sample_luma_std), 3),
+        "sample_light_ratio": round(float(sample_light_ratio), 4),
+    }
 
 
 def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], ocr_page: dict | None = None) -> bool:
@@ -17764,6 +18474,7 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             render_text_block(img, block)
         else:
             render_text_block(img, block, pre_render_np=pre_render_np)
+        _finalize_render_completion_contract(block)
         _drop_stale_render_geometry_flags(block)
         _record_render_plan(ocr_page, block)
         if (

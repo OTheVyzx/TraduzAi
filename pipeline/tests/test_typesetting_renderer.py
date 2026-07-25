@@ -1310,6 +1310,71 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreaterEqual(safe[2] - render[2], 6)
         self.assertNotIn("TEXT_OVERFLOW", text_data.get("qa_flags") or [])
 
+    def test_visual_item_card_rows_receive_independent_non_overlapping_slots(self):
+        rows = []
+        for text_id, bbox, translated in (
+            ("cardocr_003", [266, 269, 461, 299], "ELIXIR DA PEDRA DA LUA"),
+            ("ocr_002", [208, 466, 517, 527], "NOTA: B+ AUMENTA PERMANENTEMENTE A AGILIDADE"),
+            ("cardocr_004", [220, 540, 501, 561], "STAT POR 4 APÓS O CONSUMO"),
+            ("ocr_003", [151, 574, 572, 704], "O USO PELA PRIMEIRA VEZ AUMENTA LIGEIRAMENTE A FLEXIBILIDADE TAMBÉM UM ELIXIR CRIADO PELA MISTURA DE PÓ DE MINÉRIO DO LUAR E ERVA RASA"),
+            ("cardocr_005", [134, 715, 588, 778], "ALQUIMIA AVANÇADA E APRIMORAMENTO DE ELIXIR MELHORARAM MUITO A EFICÁCIA DA POÇÃO"),
+        ):
+            rows.append(
+                {
+                    "id": text_id,
+                    "translated": translated,
+                    "bbox": list(bbox),
+                    "source_bbox": list(bbox),
+                    "text_pixel_bbox": list(bbox),
+                    "balloon_bbox": [35, 250, 687, 796],
+                    "bubble_mask_bbox": [35, 250, 687, 796],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "layout_category": "item_card",
+                    "card_panel_text_context": True,
+                    "qa_flags": ["visual_text_only_inpaint_contract"],
+                }
+            )
+        rows[2]["balloon_subregions"] = [[66, 504, 369, 744], [381, 504, 619, 744]]
+        rows[2]["connected_lobe_bboxes"] = [[66, 504, 369, 744], [381, 504, 619, 744]]
+        rows[2]["connected_balloon_orientation"] = "left-right"
+        rows[2]["render_layout_contract"] = {
+            "schema_version": 1,
+            "translated_key": renderer_mod._text_layout_contract_text_key(rows[2]["translated"]),
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "font_size": 5,
+            "line_height": 5,
+            "lines": [rows[2]["translated"]],
+            "positions": [[337, 548]],
+        }
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        targets = [row["target_bbox"] for row in rows]
+        for row, target in zip(rows, targets, strict=True):
+            source = row["text_pixel_bbox"]
+            self.assertLessEqual(target[1], source[1])
+            self.assertGreaterEqual(target[3], source[3])
+            self.assertIn("visual_item_card_row_slot", row.get("qa_flags") or [])
+        for previous, current in zip(targets, targets[1:], strict=False):
+            self.assertLess(previous[3], current[1])
+        self.assertLessEqual(targets[2][3] - targets[2][1], 34)
+        self.assertEqual(rows[2].get("balloon_subregions"), [])
+        self.assertFalse(rows[2].get("connected_lobe_bboxes"))
+        self.assertNotIn("render_layout_contract", rows[2])
+
+        resolved_rows = []
+        for row in rows[2:]:
+            plan = plan_text_layout(row)
+            resolved = _resolve_text_layout(row, plan)
+            resolved_rows.append(resolved)
+            safe = row["safe_text_box"]
+            block = resolved["block_bbox"]
+            self.assertGreaterEqual(block[1], safe[1])
+            self.assertLessEqual(block[3], safe[3])
+        self.assertGreaterEqual(resolved_rows[0]["font_size"], 10)
+        self.assertGreaterEqual(resolved_rows[-1]["font_size"], 10)
+        self.assertGreaterEqual(len(resolved_rows[-1]["lines"]), 2)
+
     def test_dark_bubble_visual_capacity_does_not_cap_font_to_ocr_anchor_height(self):
         text_data = {
             "id": "dark_oval_capacity",
@@ -2602,6 +2667,64 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(text_data.get("_render_target_source"), "real_bubble_mask_bbox_overmerged_guard")
         self.assertIn("ocr_geometry_overmerged", text_data.get("qa_flags") or [])
         self.assertIn("safe_text_box_recomputed", text_data.get("qa_flags") or [])
+
+    def test_plan_text_layout_uses_wide_real_balloon_when_contour_mask_is_overmerged(self):
+        text_data = {
+            "translated": "COMO ESPERADO DE UMA RAPOSA, PARECE QUE YUJEONG JA FEZ UM MOVIMENTO ANTES",
+            "bbox": [189, 8678, 611, 8841],
+            "source_bbox": [189, 8678, 611, 8841],
+            "text_pixel_bbox": [189, 8678, 611, 8841],
+            "balloon_bbox": [0, 8670, 800, 9010],
+            "bubble_mask_bbox": [189, 8678, 483, 8800],
+            "bubble_inner_bbox": [197, 8677, 602, 8838],
+            "layout_profile": "standard",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "background_rgb": [229, 229, 229],
+            "qa_flags": ["balloon_outline_components_removed", "bubble_clip_preserved_raw_text"],
+            "tipo": "fala",
+            "style_origin": "auto",
+            "page_width": 800,
+            "page_height": 9200,
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["target_bbox"], [0, 8670, 800, 9010])
+        self.assertEqual(text_data.get("_render_target_source"), "real_balloon_bbox_overmerged_contour_guard")
+
+    def test_wide_contour_balloon_render_stays_centered_on_original_text(self):
+        img = Image.new("RGB", (800, 505), (229, 229, 229))
+        text_data = {
+            "id": "ocr_001",
+            "translated": "COMO ESPERADO DE UMA RAPOSA, PARECE QUE YUJEONG JA FEZ UM MOVIMENTO ANTES",
+            "original": "AS EXPECTED OF A FOX, LOOKS LIKE THAT YUJEONG ALREADY MADE A MOVE BEFOREHAND",
+            "bbox": [189, 173, 611, 336],
+            "source_bbox": [189, 173, 611, 336],
+            "text_pixel_bbox": [189, 173, 611, 336],
+            "balloon_bbox": [0, 165, 800, 505],
+            "bubble_mask_bbox": [189, 173, 483, 295],
+            "bubble_inner_bbox": [197, 172, 602, 333],
+            "layout_profile": "standard",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "background_rgb": [229, 229, 229],
+            "qa_flags": ["balloon_outline_components_removed", "bubble_clip_preserved_raw_text"],
+            "tipo": "fala",
+            "style_origin": "auto",
+            "page_width": 800,
+            "page_height": 505,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#000000", "alinhamento": "center"},
+            "style": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#000000", "alinhamento": "center"},
+        }
+
+        plan = plan_text_layout(text_data)
+        with patch("typesetter.renderer._try_render_single_text_block_with_rust", return_value=False):
+            _render_single_text_block_unrotated(img, text_data, plan)
+
+        render_bbox = text_data.get("render_bbox")
+        self.assertIsNotNone(render_bbox)
+        original_center_y = (text_data["text_pixel_bbox"][1] + text_data["text_pixel_bbox"][3]) / 2.0
+        render_center_y = (render_bbox[1] + render_bbox[3]) / 2.0
+        self.assertLessEqual(abs(render_center_y - original_center_y), 2.0)
 
     def test_plan_text_layout_rejects_collapsed_anchor_when_real_bubble_exists(self):
         text_data = {
@@ -3931,6 +4054,117 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(text["route_reason"], "false_short_art_ocr")
         self.assertIn("false_short_art_ocr_suppressed", text["qa_flags"])
 
+    def test_build_render_blocks_skips_critical_mask_failure_instead_of_review_fallback(self):
+        text = {
+            "id": "ocr_critical_mask",
+            "text": "THIS DIALOGUE MUST NOT BE FORCED",
+            "original": "THIS DIALOGUE MUST NOT BE FORCED",
+            "translated": "ESTE DIALOGO NAO PODE SER FORCADO",
+            "bbox": [160, 180, 390, 250],
+            "text_pixel_bbox": [160, 180, 390, 250],
+            "balloon_bbox": [100, 120, 440, 300],
+            "layout_profile": "white_balloon",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(blocks, [])
+        self.assertTrue(text["needs_review"])
+        self.assertTrue(text["skip_processing"])
+        self.assertTrue(text["preserve_original"])
+        self.assertEqual(text["route_action"], "review_required")
+        self.assertEqual(text["route_reason"], "unsafe_automatic_render")
+
+    def test_build_render_blocks_skips_unsafe_connected_balloon_before_split(self):
+        text = {
+            "id": "ocr_unsafe_connected",
+            "text": "THIS CONNECTED DIALOGUE MUST NOT BE FORCED",
+            "original": "THIS CONNECTED DIALOGUE MUST NOT BE FORCED",
+            "translated": "ESTE DIALOGO CONECTADO NAO PODE SER FORCADO",
+            "bbox": [180, 180, 430, 250],
+            "text_pixel_bbox": [180, 180, 430, 250],
+            "balloon_bbox": [100, 120, 520, 310],
+            "layout_profile": "connected_balloon",
+            "connected_balloon_orientation": "left-right",
+            "connected_lobe_bboxes": [[100, 120, 310, 310], [310, 120, 520, 310]],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["missing_real_bubble_mask"],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(blocks, [])
+        self.assertEqual(text["route_reason"], "unsafe_automatic_render")
+
+    def test_build_render_blocks_keeps_inpainted_text_over_art_with_unsafe_history(self):
+        text = {
+            "id": "ocr_text_over_art",
+            "text": "ALRIGHT!!! THE NATIONAL TEAM SELECTION EVENT",
+            "original": "ALRIGHT!!! THE NATIONAL TEAM SELECTION EVENT",
+            "translated": "TUDO BEM!!! O EVENTO DE SELEÇÃO NACIONAL",
+            "bbox": [180, 150, 620, 320],
+            "text_pixel_bbox": [180, 150, 620, 320],
+            "balloon_bbox": [120, 100, 700, 380],
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["missing_real_bubble_mask", "rejected_derived_bubble_mask"],
+            "qa_metrics": {"translucent_text_over_art_inpaint": {"pixels": 640}},
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 28},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(text.get("skip_processing"))
+        self.assertEqual(text.get("route_action"), "translate_inpaint_render")
+
+    def test_build_render_blocks_keeps_colored_item_card_with_trustworthy_inpaint_contract(self):
+        text = {
+            "id": "cardocr_003",
+            "text": "MOONSTONE ELIXIR",
+            "original": "MOONSTONE ELIXIR",
+            "translated": "ELIXIR DE PEDRA DA LUA",
+            "bbox": [266, 160, 461, 190],
+            "text_pixel_bbox": [266, 160, 461, 190],
+            "balloon_bbox": [130, 120, 590, 360],
+            "bubble_mask_bbox": [130, 120, 590, 360],
+            "layout_category": "item_card",
+            "layout_profile": "colored_status_panel",
+            "background_type": "colored_status_panel",
+            "bubble_mask_source": "image_dark_panel_mask",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "mask_outside_balloon_critical",
+            ],
+            "qa_metrics": {
+                "inpaint_mask_contract": {
+                    "source_pixels": 420,
+                    "expanded_pixels": 710,
+                },
+                "derived_card_panel_mask": {
+                    "panel_fill_rgb": [249, 210, 107],
+                    "mask_pixels": 39200,
+                },
+            },
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(text.get("skip_processing"))
+        self.assertEqual(text.get("route_action"), "translate_inpaint_render")
+        self.assertNotIn("unsafe_automatic_render_suppressed", text.get("qa_flags") or [])
+
     def test_build_render_blocks_skips_unverified_merged_fragment(self):
         real_text = {
             "id": "ocr_001",
@@ -4104,6 +4338,35 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIn("TEXT_OVERFLOW", evidence["flags"])
         self.assertIn("render_outside_balloon", evidence["flags"])
 
+    def test_run_render_qa_keeps_overflow_when_tight_contract_still_exceeds_visual_bbox(self):
+        text_data = {
+            "translated": "TEXTO LONGO",
+            "balloon_bbox": [100, 100, 210, 190],
+            "render_bbox": [86, 82, 252, 226],
+            "qa_flags": ["fit_below_minimum_legible"],
+            "qa_metrics": {
+                "contract_bbox_tight_but_visual_balloon_fit_ok": {
+                    "source_bbox": [118, 118, 190, 170],
+                    "visual_bbox": [100, 100, 210, 190],
+                    "visual_bbox_source": "qa_metrics.derived_card_panel_mask.mask_bbox",
+                }
+            },
+        }
+        plan = {
+            "target_bbox": [100, 100, 210, 190],
+            "safe_text_box": [112, 112, 198, 178],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertIn("TEXT_CLIPPED", text_data["qa_flags"])
+        self.assertIn("TEXT_OVERFLOW", text_data["qa_flags"])
+        self.assertIn("fit_below_minimum_legible", text_data["qa_flags"])
+        self.assertEqual(
+            text_data["qa_metrics"]["typeset_contract_flags_revalidated"]["decision"],
+            "kept",
+        )
+
     def test_run_render_qa_flags_render_outside_validated_source(self):
         text_data = {
             "translated": "TEXTO LONGO",
@@ -4145,6 +4408,25 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertNotIn("TEXT_OVERFLOW", text_data["qa_flags"])
         self.assertNotIn("TEXT_CLIPPED", text_data["qa_flags"])
         self.assertIn("mask_density_high", text_data["qa_flags"])
+
+    def test_run_render_qa_does_not_clip_translucent_panel_text_inside_the_outer_balloon(self):
+        text_data = {
+            "translated": "E PENSAR QUE ELE USARIA O GOLPE SEM SOMBRAS.",
+            "layout_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_separator_split",
+            "balloon_bbox": [0, 168, 800, 456],
+            "render_bbox": [265, 168, 541, 324],
+            "qa_flags": [],
+        }
+        plan = {
+            "target_bbox": [0, 168, 800, 456],
+            "safe_text_box": [212, 204, 730, 377],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertNotIn("TEXT_CLIPPED", text_data["qa_flags"])
+        self.assertNotIn("TEXT_OVERFLOW", text_data["qa_flags"])
 
     def test_copy_render_debug_fields_drops_stale_render_geometry_flags_when_clean(self):
         source = {
@@ -9563,6 +9845,63 @@ class TypesettingRendererTests(unittest.TestCase):
         )
         self.assertEqual(renderer_mod._original_text_scale_candidate_violations(valid, source_bbox), [])
 
+    def test_contour_speech_balloon_clamps_original_anchor_layout_to_safe_box(self):
+        text_data = {
+            "translated": "HA UMA EXPECTATIVA E UM INTERESSE SEM PRECEDENTES NESTA SELETIVA NACIONAL, CERTO?",
+            "original": "THERE ARE UNPRECEDENTED EXPECTATIONS AND INTEREST IN THIS NATIONAL TEAM SELECTION, RIGHT?",
+            "tipo": "fala",
+            "layout_profile": "standard",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "bbox": [221, 528, 593, 648],
+            "source_bbox": [221, 528, 593, 648],
+            "text_pixel_bbox": [221, 528, 593, 648],
+            "source_text_mask_bbox": [221, 528, 593, 648],
+            "balloon_bbox": [218, 516, 597, 655],
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 23,
+                "cor": "#000000",
+                "alinhamento": "center",
+            },
+        }
+        plan = {
+            "target_bbox": [218, 516, 597, 655],
+            "position_bbox": [218, 516, 597, 655],
+            "capacity_bbox": [218, 516, 597, 655],
+            "safe_text_box": [282, 551, 533, 620],
+            "font_name": "ComicNeue-Bold.ttf",
+            "max_width": 251,
+            "max_height": 69,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "ellipse",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertGreaterEqual(resolved["block_bbox"][1], plan["safe_text_box"][1])
+        self.assertLessEqual(resolved["block_bbox"][3], plan["safe_text_box"][3])
+
+    def test_contour_speech_balloon_keeps_real_inner_box_when_mask_bbox_is_overbroad(self):
+        text_data = {
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_bbox": [218, 516, 597, 655],
+            "background_rgb": [248, 248, 248],
+        }
+        overbroad_mask_bbox = [98, 396, 717, 775]
+        real_inner_bbox = [230, 528, 585, 643]
+
+        self.assertFalse(
+            renderer_mod._should_reject_tiny_bubble_inner_safe_area(
+                text_data,
+                overbroad_mask_bbox,
+                real_inner_bbox,
+            )
+        )
+
     def test_dark_bubble_uses_original_text_scale_contract_without_env_flag(self):
         text_data = {
             "translated": "MESMO ASSIM, VOCE AINDA ESTA DISPOSTO A SE ARRISCAR PELOS SEUS AMIGOS.",
@@ -10963,6 +11302,73 @@ class TypesettingRendererTests(unittest.TestCase):
 
         self.assertFalse(changed)
         self.assertEqual(img.getpixel((80, 42)), (112, 120, 126))
+
+    def test_render_band_text_mask_cleanup_skips_white_balloon(self):
+        img = Image.new("RGB", (160, 90), (248, 248, 248))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "TEXTO",
+            "source_text_mask_bbox": [42, 32, 118, 54],
+            "background_rgb": [220, 220, 220],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((80, 42)), (248, 248, 248))
+
+    def test_render_band_text_mask_cleanup_skips_standard_text_over_art(self):
+        img = Image.new("RGB", (160, 90), (116, 128, 142))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "TEXTO",
+            "source_text_mask_bbox": [42, 32, 118, 54],
+            "background_rgb": [180, 180, 180],
+            "layout_profile": "standard",
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((80, 42)), (116, 128, 142))
+
+    def test_render_band_text_mask_cleanup_skips_visual_item_card(self):
+        img = Image.new("RGB", (220, 120), (241, 206, 107))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "ELIXIR DA PEDRA DA LUA",
+            "source_text_mask_bbox": [52, 32, 168, 58],
+            "background_rgb": [241, 206, 107],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_profile": "colored_status_panel",
+            "layout_category": "item_card",
+            "card_panel_id": "item_card_35_257_687_796",
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((110, 45)), (241, 206, 107))
+
+    def test_finalize_render_completion_contract_requires_legible_ink_bbox(self):
+        text_data = {
+            "fit_status": "ok",
+            "render_bbox": [12, 8, 72, 34],
+            "font_size_final": 16,
+            "minimum_legible_font_px": 12,
+        }
+
+        renderer_mod._finalize_render_completion_contract(text_data)
+
+        self.assertTrue(text_data["render_completed"])
+
+        text_data["font_size_final"] = 10
+        renderer_mod._finalize_render_completion_contract(text_data)
+
+        self.assertFalse(text_data["render_completed"])
 
 if __name__ == "__main__":
     unittest.main()

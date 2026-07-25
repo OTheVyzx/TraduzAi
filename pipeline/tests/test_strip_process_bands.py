@@ -5879,3 +5879,61 @@ class BandAdaptersTests(unittest.TestCase):
         rendered = render_band_image(band, page)
         self.assertEqual(rendered.shape, band.shape)
 
+
+def test_failed_render_restores_original_pixels_for_trace_mask():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((60, 100, 3), 180, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[20:40, 30:70] = 5
+    rendered = cleaned.copy()
+    mask = np.zeros((60, 100), dtype=np.uint8)
+    mask[20:40, 30:70] = 255
+    band = Band(y_top=0, y_bottom=60, original_slice=original.copy())
+    page = {"texts": [{"id": "t1", "translated": "OLA", "render_completed": False, "fit_status": "failed", "_precomputed_inpaint_mask": mask}]}
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(band, cleaned, rendered, page)
+
+    assert np.array_equal(rolled_cleaned[mask > 0], original[mask > 0])
+    assert np.array_equal(rolled_rendered[mask > 0], original[mask > 0])
+    assert page["texts"][0]["route_reason"] == "atomic_inpaint_render_rollback"
+    assert "pure_inpaint_unresolved" in page["texts"][0]["qa_flags"]
+
+
+def test_unsafe_mask_never_leaves_empty_dark_rectangle():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((50, 90, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[10:35, 20:75] = 0
+    band = Band(y_top=0, y_bottom=50, original_slice=original.copy())
+    page = {"texts": [{"id": "t1", "translated": "TEXTO", "render_completed": False, "bbox": [20, 10, 75, 35]}]}
+
+    _, output = _apply_atomic_inpaint_render_rollback(band, cleaned, cleaned.copy(), page)
+
+    assert float(np.mean(output[10:35, 20:75])) == 210.0
+
+
+def test_successful_render_keeps_cleaned_pixels_and_translation():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((50, 90, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[10:35, 20:75] = 80
+    rendered = cleaned.copy()
+    rendered[16:28, 30:65] = 15
+    band = Band(y_top=0, y_bottom=50, original_slice=original.copy())
+    page = {"texts": [{"id": "t1", "translated": "TEXTO", "render_completed": True, "render_bbox": [30, 16, 65, 28], "fit_status": "ok", "font_size_final": 16, "minimum_legible_font_px": 12, "bbox": [20, 10, 75, 35]}]}
+
+    kept_cleaned, kept_rendered = _apply_atomic_inpaint_render_rollback(band, cleaned, rendered, page)
+
+    assert np.array_equal(kept_cleaned, cleaned)
+    assert np.array_equal(kept_rendered, rendered)
+    assert page["texts"][0]["translated"] == "TEXTO"
+
