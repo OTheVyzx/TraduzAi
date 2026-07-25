@@ -87,7 +87,14 @@ class DebugRecorder:
         except Exception as exc:
             self._record_error(stage=stage, action="write_jsonl", exc=exc, rel_path=rel_path)
 
-    def write_image(self, rel_path: str, image: Any, *, quality: int = 88) -> None:
+    def write_image(
+        self,
+        rel_path: str,
+        image: Any,
+        *,
+        quality: int = 88,
+        color_space: str = "RGB",
+    ) -> None:
         if not self.enabled:
             return
         stage = self._stage_from_rel(rel_path)
@@ -96,12 +103,29 @@ class DebugRecorder:
 
             target = self._root / rel_path
             target.parent.mkdir(parents=True, exist_ok=True)
+            normalized_color_space = str(color_space or "").strip().upper()
+            if normalized_color_space not in {"RGB", "BGR", "GRAY"}:
+                raise ValueError(f"unsupported debug image color space: {color_space!r}")
+            output = image
+            shape = getattr(image, "shape", ())
+            if normalized_color_space == "RGB" and len(shape) == 3 and int(shape[2]) >= 3:
+                output = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2BGR)
             ext = target.suffix.lower()
             if ext in {".jpg", ".jpeg"}:
-                cv2.imwrite(str(target), image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+                cv2.imwrite(str(target), output, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
             else:
-                cv2.imwrite(str(target), image)
-            self.register_artifact(stage=stage, rel_path=rel_path, kind="image")
+                cv2.imwrite(str(target), output)
+            dimensions = {
+                "height": int(shape[0]) if len(shape) >= 1 else 0,
+                "width": int(shape[1]) if len(shape) >= 2 else 0,
+                "channels": int(shape[2]) if len(shape) >= 3 else 1,
+            }
+            self.register_artifact(
+                stage=stage,
+                rel_path=rel_path,
+                kind="image",
+                meta={"run_id": self.run_id, "color_space": normalized_color_space, "dimensions": dimensions},
+            )
         except Exception as exc:
             self._record_error(stage=stage, action="write_image", exc=exc, rel_path=rel_path)
 

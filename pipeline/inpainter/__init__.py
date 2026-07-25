@@ -7538,6 +7538,15 @@ def _save_rgb(path: Path, image_rgb: np.ndarray) -> None:
     Image.fromarray(image_rgb.astype(np.uint8)).save(path, quality=92)
 
 
+def _debug_inpaint_metadata_matches_run(metadata: dict, expected_run_id: str) -> bool:
+    """Reject stale legacy debug artifacts before they participate in QA."""
+    if not isinstance(metadata, dict):
+        return False
+    actual_run_id = str(metadata.get("run_id") or "").strip()
+    expected = str(expected_run_id or "").strip()
+    return bool(actual_run_id and expected and actual_run_id == expected)
+
+
 def _save_mask(path: Path, mask: np.ndarray) -> None:
     cv2.imwrite(str(path), mask.astype(np.uint8))
 
@@ -10207,10 +10216,18 @@ def _write_strip_inpaint_debug(
                 break
         return samples
 
+    recorder_run_id = str(getattr(recorder, "run_id", "") or "").strip() if recorder is not None else ""
     metadata = {
+        "run_id": recorder_run_id or str(ocr_page.get("_run_id") or os.getenv("TRADUZAI_RUN_ID", "") or "unbound"),
         "page_number": int(ocr_page.get("_source_page_number") or ocr_page.get("numero") or 0),
         "band_index": int(ocr_page.get("_band_index") or 0),
         "band_id": _strip_band_id(ocr_page),
+        "color_space": "RGB",
+        "dimensions": {
+            "height": int(working_rgb.shape[0]),
+            "width": int(working_rgb.shape[1]),
+            "channels": int(working_rgb.shape[2]) if working_rgb.ndim >= 3 else 1,
+        },
         "band_y_top": int(ocr_page.get("_band_y_top") or 0),
         "text_count": len([t for t in ocr_page.get("texts", []) if isinstance(t, dict)]),
         "text_samples": _debug_text_samples(ocr_page.get("texts")),

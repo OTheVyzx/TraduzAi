@@ -7391,7 +7391,7 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
                     final_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(clean_path, final_path)
                 else:
-                    recorder.write_image(final_rel, clean_bgr, quality=100)
+                    recorder.write_image(final_rel, clean_bgr, quality=100, color_space="BGR")
                 image[y1:y2, x1:x2, :] = clean_bgr
                 cv2.imwrite(str(translated_path), image, [cv2.IMWRITE_JPEG_QUALITY, 100])
                 final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
@@ -7411,7 +7411,7 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
                 row["final_band_clean_source_path"] = str(clean_path) if clean_path else ""
                 audit["clean_band_source_used"] += 1
             else:
-                recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100)
+                recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100, color_space="BGR")
             audit["refreshed_count"] += 1
         try:
             recorder.write_json("10_copyback_reassemble/final_band_crops_refresh.json", audit)

@@ -858,6 +858,26 @@ def test_inpaint_band_image_records_decision_payload_with_active_debug_recorder(
     assert "texture_flattening" in payload
 
 
+def test_debug_image_writers_share_explicit_rgb_color_space(tmp_path):
+    from PIL import Image
+    from debug_tools import DebugRecorder
+    from inpainter import _save_rgb
+
+    image_rgb = np.array(
+        [[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [240, 180, 20]]],
+        dtype=np.uint8,
+    )
+    direct_path = tmp_path / "direct.png"
+    _save_rgb(direct_path, image_rgb)
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-color")
+    recorder.write_image("08_inpaint/color.png", image_rgb, color_space="RGB")
+
+    direct = np.asarray(Image.open(direct_path).convert("RGB"))
+    recorded = np.asarray(Image.open(tmp_path / "debug" / "e2e" / "08_inpaint" / "color.png").convert("RGB"))
+    assert np.array_equal(direct, image_rgb)
+    assert np.array_equal(recorded, image_rgb)
+
+
 def test_detect_inpaint_texture_flattening_flags_solid_fill_over_gradient():
     from inpainter import _detect_inpaint_texture_flattening
 

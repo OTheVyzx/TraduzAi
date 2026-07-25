@@ -1088,10 +1088,7 @@ def _recorder_key(recorder: Any) -> int:
 
 
 def _write_recorder_image(recorder: Any, rel_path: str, image: np.ndarray) -> None:
-    output = image
-    if output.ndim == 3 and output.shape[2] >= 3:
-        output = cv2.cvtColor(output[:, :, :3], cv2.COLOR_RGB2BGR)
-    recorder.write_image(rel_path, output)
+    recorder.write_image(rel_path, image, color_space="RGB")
 
 
 def _safe_path_segment(value: Any) -> str:

@@ -20,6 +20,40 @@ from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
 
 
+def test_debug_provenance_rejects_metadata_from_another_run(tmp_path):
+    from inpainter import _debug_inpaint_metadata_matches_run, _write_strip_inpaint_debug
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-current")
+    bind_recorder(recorder)
+    image = np.full((12, 20, 3), [220, 40, 10], dtype=np.uint8)
+    mask = np.zeros((12, 20), dtype=np.uint8)
+    page = {"_band_id": "page_001_band_002", "_source_page_number": 1, "_band_index": 2, "texts": []}
+    debug_root = tmp_path / "debug_inpaint"
+    try:
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_DEBUG_DIR": str(debug_root)}):
+            _write_strip_inpaint_debug(
+                page,
+                original_rgb=image,
+                working_rgb=image,
+                cleaned_rgb=image.copy(),
+                vision_blocks=[],
+                used_real_inpaint=False,
+                fast_fill_mask=mask,
+                raw_mask=mask,
+                expanded_mask=mask,
+            )
+    finally:
+        bind_recorder(None)
+
+    metadata = json.loads((debug_root / "page_001_band_002" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["run_id"] == "run-current"
+    assert metadata["band_id"] == "page_001_band_002"
+    assert metadata["color_space"] == "RGB"
+    assert metadata["dimensions"] == {"height": 12, "width": 20, "channels": 3}
+    assert _debug_inpaint_metadata_matches_run(metadata, "run-current") is True
+    assert _debug_inpaint_metadata_matches_run(metadata, "run-stale") is False
+
+
 class FakeRuntime:
     def run_ocr_stage(self, _image_rgb, page_dict):
         band_id = page_dict["_band_id"]
