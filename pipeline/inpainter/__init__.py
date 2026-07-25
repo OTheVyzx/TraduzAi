@@ -7040,6 +7040,12 @@ def _apply_fast_dark_panel_text_fill(
         ocr_page["_strip_fast_dark_rejection_reasons"] = dict(rejection_reasons)
         return stats
 
+    if not direct_inpaint_mutations_allowed():
+        rejection_reasons["inpaint_policy:pure"] = max(1, len(vision_blocks or []))
+        return band_rgb, vision_blocks, _record(
+            {"dark_panel_fill_count": 0, "remaining_blocks": len(vision_blocks or [])}
+        )
+
     candidate_texts: list[dict] = []
     seen_candidate_keys: set[str] = set()
     candidate_by_key: dict[str, dict] = {}
@@ -9735,6 +9741,21 @@ def _record_inpaint_decision(
         for flag in ocr_page.get("_strip_inpaint_decision_flags", [])
         if flag
     ]
+    texture_flattening = _detect_inpaint_texture_flattening(
+        working_rgb,
+        cleaned_rgb,
+        expanded_mask,
+    )
+    if texture_flattening.get("flattened"):
+        flattening_flag = "inpaint_texture_flattened"
+        decision_flags.append(flattening_flag)
+        for item in list(ocr_page.get("texts") or []) + list(vision_blocks or []):
+            if not isinstance(item, dict):
+                continue
+            _append_qa_flag_to_item(item, flattening_flag)
+            qa_metrics = item.setdefault("qa_metrics", {})
+            if isinstance(qa_metrics, dict):
+                qa_metrics["inpaint_texture_flattening"] = dict(texture_flattening)
     translucent_texts = [
         text
         for text in ocr_page.get("texts", [])
@@ -9748,6 +9769,10 @@ def _record_inpaint_decision(
         if isinstance((text.get("qa_metrics") or {}).get("translucent_balloon_mask_constrained"), dict)
     }
     payload = {
+        "inpaint_policy": os.getenv("TRADUZAI_INPAINT_POLICY", "pure").strip().lower() or "pure",
+        "engine": str(engine_preset.get("engine") or engine_preset.get("engine_preset_id") or ""),
+        "fallback_used": bool(ocr_page.get("_strip_inpaint_fallback_used")),
+        "texture_flattening": texture_flattening,
         "page_id": _strip_page_id(ocr_page),
         "band_id": band_id,
         "page_number": int(ocr_page.get("_source_page_number") or ocr_page.get("numero") or 0),
@@ -9837,6 +9862,79 @@ def _record_inpaint_decision(
         decision_flags.append(residual_qa_flag)
     payload["flags"] = list(dict.fromkeys(decision_flags))
     recorder.write_json(f"08_inpaint/{payload['band_id']}/inpaint_decision.json", payload)
+
+
+def _detect_inpaint_texture_flattening(
+    before_rgb: np.ndarray,
+    after_rgb: np.ndarray | None,
+    action_mask: np.ndarray,
+) -> dict:
+    """Detect a large nearly-uniform replacement over previously textured pixels."""
+    empty = {
+        "flattened": False,
+        "flag": "",
+        "mask_pixels": 0,
+        "before_luminance_std": 0.0,
+        "after_luminance_std": 0.0,
+        "before_gradient_mean": 0.0,
+        "after_gradient_mean": 0.0,
+        "after_quantized_color_count": 0,
+        "after_near_uniform_ratio": 0.0,
+        "ring_luminance_std": 0.0,
+    }
+    if (
+        not isinstance(before_rgb, np.ndarray)
+        or not isinstance(after_rgb, np.ndarray)
+        or before_rgb.shape != after_rgb.shape
+        or before_rgb.ndim != 3
+        or not isinstance(action_mask, np.ndarray)
+        or action_mask.shape[:2] != before_rgb.shape[:2]
+    ):
+        return empty
+    mask = np.where(action_mask > 0, 255, 0).astype(np.uint8)
+    mask_pixels = int(np.count_nonzero(mask))
+    if mask_pixels < 256:
+        return {**empty, "mask_pixels": mask_pixels}
+    core = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=2)
+    if np.count_nonzero(core) < 128:
+        core = mask
+    sample = core > 0
+    before_gray = cv2.cvtColor(before_rgb.astype(np.uint8, copy=False), cv2.COLOR_RGB2GRAY)
+    after_gray = cv2.cvtColor(after_rgb.astype(np.uint8, copy=False), cv2.COLOR_RGB2GRAY)
+    before_grad_x = cv2.Sobel(before_gray, cv2.CV_32F, 1, 0, ksize=3)
+    before_grad_y = cv2.Sobel(before_gray, cv2.CV_32F, 0, 1, ksize=3)
+    after_grad_x = cv2.Sobel(after_gray, cv2.CV_32F, 1, 0, ksize=3)
+    after_grad_y = cv2.Sobel(after_gray, cv2.CV_32F, 0, 1, ksize=3)
+    before_gradient = cv2.magnitude(before_grad_x, before_grad_y)
+    after_gradient = cv2.magnitude(after_grad_x, after_grad_y)
+    before_std = float(np.std(before_gray[sample]))
+    after_std = float(np.std(after_gray[sample]))
+    before_gradient_mean = float(np.mean(before_gradient[sample]))
+    after_gradient_mean = float(np.mean(after_gradient[sample]))
+    after_pixels = after_rgb[sample].astype(np.uint8, copy=False)
+    quantized = (after_pixels // 16).reshape(-1, 3)
+    quantized_colors = int(np.unique(quantized, axis=0).shape[0]) if quantized.size else 0
+    median_luma = float(np.median(after_gray[sample]))
+    near_uniform_ratio = float(np.mean(np.abs(after_gray[sample].astype(np.float32) - median_luma) <= 3.0))
+    ring = (cv2.dilate(mask, np.ones((9, 9), np.uint8), iterations=1) > 0) & (mask == 0)
+    ring_std = float(np.std(after_gray[ring])) if np.any(ring) else 0.0
+    texture_present_before = before_std >= 5.0 or before_gradient_mean >= 1.5
+    strong_std_drop = after_std <= max(2.5, before_std * 0.30)
+    strong_gradient_drop = after_gradient_mean <= max(0.5, before_gradient_mean * 0.35)
+    large_uniform_region = quantized_colors <= 8 and near_uniform_ratio >= 0.90
+    flattened = bool(texture_present_before and strong_std_drop and strong_gradient_drop and large_uniform_region)
+    return {
+        "flattened": flattened,
+        "flag": "inpaint_texture_flattened" if flattened else "",
+        "mask_pixels": mask_pixels,
+        "before_luminance_std": round(before_std, 6),
+        "after_luminance_std": round(after_std, 6),
+        "before_gradient_mean": round(before_gradient_mean, 6),
+        "after_gradient_mean": round(after_gradient_mean, 6),
+        "after_quantized_color_count": quantized_colors,
+        "after_near_uniform_ratio": round(near_uniform_ratio, 6),
+        "ring_luminance_std": round(ring_std, 6),
+    }
 
 
 def _collect_bboxes_for_debug(ocr_page: dict, vision_blocks: list[dict], key: str) -> list[list[int]]:

@@ -33,6 +33,7 @@ FLAG_SEVERITY = {
     "fast_fill_unverified_residual": "critical",
     "fast_fill_insufficient_coverage": "critical",
     "fast_fill_no_glyph_evidence": "critical",
+    "inpaint_texture_flattened": "critical",
     "missing_real_bubble_mask": "critical",
     "glyph_mask_outside_bubble": "critical",
     "render_outside_bubble_mask": "critical",

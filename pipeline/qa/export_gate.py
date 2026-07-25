@@ -169,6 +169,11 @@ def _is_suppressed_scanlation_credit_layer(layer: dict[str, Any]) -> bool:
 def _layer_is_export_gate_candidate(layer: dict[str, Any]) -> bool:
     if _is_suppressed_scanlation_credit_layer(layer):
         return False
+    # A layer explicitly hidden by the automatic safety guard is not emitted
+    # into the translated image.  Its diagnostic flags remain useful in the
+    # project, but must not block exporting pixels that are absent by design.
+    if layer.get("visible") is False:
+        return False
     route_action = _clean_string(layer.get("route_action"))
     if route_action:
         return (
@@ -667,6 +672,13 @@ def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[st
         if _source_and_render_are_displaced(layer):
             return False
         return _render_geometry_contained(layer)
+    if flag == "missing_real_bubble_mask":
+        # A rejected derived mask is not enough to prove inpaint damage after
+        # the final render.  Preserve it for review, but do not block export
+        # when the final text is demonstrably inside both its safe box and the
+        # detected balloon, and no other confirmed visual-damage flag exists.
+        source = str(layer.get("bubble_mask_source") or "").strip().lower()
+        return source in {"rejected_derived_bubble_mask", "derived_white_crop_rejected"} and _render_inside_safe_box(layer) and _render_geometry_contained(layer)
     if flag in {"bbox_overreach_critical", "fit_below_minimum_legible"}:
         if flag == "fit_below_minimum_legible" and _translator_note_fit_is_review_only(layer):
             return True
@@ -767,6 +779,7 @@ def _artifact_links_for_issue(
         "text_residual_after_inpaint_suspected",
         "fast_fill_unverified_residual",
         "fast_fill_insufficient_coverage",
+        "inpaint_texture_flattened",
     }
     translation_flags = {
         "vlm_failure_phrase",
@@ -814,6 +827,16 @@ def _artifact_links_for_issue(
                     f"08_inpaint/{band_id}/06_band_after_inpaint.jpg",
                 ]
             )
+
+    if "inpaint_texture_flattened" in flags and band_id:
+        links.extend(
+            [
+                f"08_inpaint/{band_id}/00_band_before_inpaint.jpg",
+                f"08_inpaint/{band_id}/05_inpaint_mask_overlay.jpg",
+                f"08_inpaint/{band_id}/06_band_after_inpaint.jpg",
+                f"08_inpaint/{band_id}/inpaint_decision.json",
+            ]
+        )
 
     if flags & translation_flags:
         links.extend(

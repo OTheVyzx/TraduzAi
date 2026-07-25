@@ -1,6 +1,16 @@
 from qa.export_gate import evaluate_export_gate
 
 
+def test_export_gate_blocks_inpaint_texture_flattened():
+    gate = evaluate_export_gate({"paginas": [{"numero": 1, "text_layers": [{"id": "t1", "band_id": "page_001_band_004", "translated": "Texto", "qa_flags": ["inpaint_texture_flattened"]}]}]})
+
+    assert gate["status"] == "BLOCK"
+    assert "inpaint_texture_flattened" in gate["issues"][0]["flags"]
+    assert "08_inpaint/page_001_band_004/00_band_before_inpaint.jpg" in gate["issues"][0]["artifact_links"]
+    assert "08_inpaint/page_001_band_004/05_inpaint_mask_overlay.jpg" in gate["issues"][0]["artifact_links"]
+    assert "08_inpaint/page_001_band_004/06_band_after_inpaint.jpg" in gate["issues"][0]["artifact_links"]
+
+
 def test_export_gate_blocks_renderable_p0_flags():
     project = {
         "idioma_origem": "ko",
@@ -629,6 +639,35 @@ def test_export_gate_demotes_aligned_contained_mask_outside_balloon_critical_wit
     assert gate["issues"][0]["blocks_export"] is False
 
 
+def test_export_gate_demotes_missing_real_mask_when_final_render_is_geometrically_contained():
+    project = {
+        "paginas": [
+            {
+                "text_layers": [
+                    {
+                        "id": "ocr_001",
+                        "translated": "TUDO BEM, O EVENTO VAI COMECAR",
+                        "qa_flags": ["missing_real_bubble_mask"],
+                        "bubble_mask_source": "derived_white_crop_rejected",
+                        "bbox": [256, 10603, 613, 10806],
+                        "balloon_bbox": [120, 10432, 755, 10967],
+                        "safe_text_box": [288, 10628, 580, 10776],
+                        "render_bbox": [291, 10650, 579, 10755],
+                    }
+                ]
+            }
+        ]
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert gate["needs_review"] is True
+    assert gate["issues"][0]["severity"] == "warning"
+    assert gate["issues"][0]["blocks_export"] is False
+    assert gate["issues"][0]["flags"] == ["missing_real_bubble_mask"]
+
+
 def test_export_gate_demotes_mask_outside_critical_when_render_overlaps_text_bbox_despite_tiny_source():
     project = {
         "paginas": [
@@ -822,6 +861,31 @@ def test_export_gate_keeps_content_missing_render_blocking():
     assert gate["status"] == "BLOCK"
     assert gate["allowed"] is False
     assert gate["critical_issue_count"] == 1
+
+
+def test_export_gate_ignores_hidden_unsafe_render_suppression():
+    project = {
+        "paginas": [
+            {
+                "numero": 3,
+                "text_layers": [
+                    {
+                        "id": "unsafe_fragment",
+                        "text": "THIS MUST NOT RENDER",
+                        "route_action": "translate_inpaint_render",
+                        "visible": False,
+                        "render_policy": "suppressed_unsafe_automatic_render",
+                        "qa_flags": ["missing_render_bbox", "mask_outside_balloon_critical"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert gate["critical_issue_count"] == 0
 
 
 def test_export_gate_demotes_credit_tier_only_when_band_has_strong_credit_context():
