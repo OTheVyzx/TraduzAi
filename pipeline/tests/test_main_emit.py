@@ -1466,6 +1466,89 @@ class MainEmitTests(unittest.TestCase):
             self.assertTrue(np.array_equal(crop, image[2:7, 3:9]))
             self.assertTrue((debug_root / "final_band_crops_refresh.json").exists())
 
+    def test_refresh_debug_final_band_crops_resyncs_overlapping_crops_from_final_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            cv2.imwrite(str(translated_dir / "001.png"), np.zeros((10, 6, 3), dtype=np.uint8))
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = debug_root / "final_bands"
+            final_dir.mkdir(parents=True)
+            upper = np.full((6, 6, 3), (20, 40, 60), dtype=np.uint8)
+            lower = np.full((6, 6, 3), (80, 100, 120), dtype=np.uint8)
+            rows = []
+            for band_id, bbox, clean in (
+                ("page_001_band_000", [0, 0, 6, 6], upper),
+                ("page_001_band_001", [0, 4, 6, 10], lower),
+            ):
+                post_dir = debug_root / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), clean)
+                rows.append(
+                    {
+                        "band_id": band_id,
+                        "translated_output_page": "001.png",
+                        "crop_bbox_in_translated_page": bbox,
+                        "final_crop_path": f"10_copyback_reassemble/final_bands/{band_id}.png",
+                        "post_copyback_path": f"10_copyback_reassemble/{band_id}/post_copyback.png",
+                        "trace_ids": [f"ocr@{band_id}"],
+                    }
+                )
+            (debug_root / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-overlap")
+
+            audit = main._refresh_debug_final_band_crops_from_translated(recorder, root)
+
+            translated = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            self.assertEqual(audit["translated_page_band_consistency"]["rows_failed"], 0)
+            for row in rows:
+                x1, y1, x2, y2 = row["crop_bbox_in_translated_page"]
+                final = cv2.imread(str(root / "debug" / "e2e" / row["final_crop_path"]), cv2.IMREAD_COLOR)
+                self.assertIsNotNone(final)
+                self.assertTrue(np.array_equal(final, translated[y1:y2, x1:x2]), row["band_id"])
+
+    def test_translated_page_band_consistency_does_not_double_encode_jpeg_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            rng = np.random.default_rng(42)
+            source = rng.integers(0, 256, size=(200, 200, 3), dtype=np.uint8)
+            page_path = translated_dir / "001.jpg"
+            cv2.imwrite(str(page_path), source, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            persisted = cv2.imread(str(page_path), cv2.IMREAD_COLOR)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_path = debug_root / "final_bands" / "page_001_band_000.jpg"
+            final_path.parent.mkdir(parents=True)
+            cv2.imwrite(str(final_path), persisted, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.jpg",
+                        "crop_bbox_in_translated_page": [0, 0, 200, 200],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "trace_ids": ["ocr@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            audit = main._audit_translated_page_band_consistency(root)
+
+            self.assertEqual(audit["rows_compared"], 1)
+            self.assertEqual(audit["rows_failed"], 0)
+
     def test_post_rerender_visual_contract_refreshes_crops_from_translated_after_rerender(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder
@@ -1537,7 +1620,7 @@ class MainEmitTests(unittest.TestCase):
             self.assertTrue((root / "debug" / "e2e" / "11_qa_export_gate" / "final_rerender_visual_qa.json").exists())
             self.assertTrue((root / "debug" / "e2e" / "11_qa_export_gate" / "final_rerender_visual_qa.jsonl").exists())
 
-    def test_post_rerender_visual_contract_keeps_final_bands_when_no_rerender_happened(self) -> None:
+    def test_post_rerender_visual_contract_refreshes_after_late_render_contract_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder
 
@@ -1600,10 +1683,11 @@ class MainEmitTests(unittest.TestCase):
             )
 
             final_crop = cv2.imread(str(final_bands / "page_001_band_000.jpg"), cv2.IMREAD_COLOR)
-            self.assertEqual(audit["refresh"]["refreshed_count"], 0)
-            self.assertTrue(audit["refresh"]["skipped_no_final_rerender"])
+            translated_loaded = cv2.imread(str(translated_dir / "001.jpg"), cv2.IMREAD_COLOR)
+            self.assertEqual(audit["refresh"]["refreshed_count"], 1)
+            self.assertFalse(audit["refresh"].get("skipped_no_final_rerender", False))
             self.assertTrue(audit["refresh"]["after_late_render_contract_repair"])
-            self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - original_final.astype(np.int16)))), 3.0)
+            self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - translated_loaded[1:6, 2:8].astype(np.int16)))), 8.0)
 
     def test_final_rerender_visual_qa_flags_dark_bubble_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9474,6 +9558,12 @@ class MainEmitTests(unittest.TestCase):
             expected_overlap = upper[25:35, :, :]
             observed_overlap = translated[45:55, :, :]
             self.assertTrue(np.array_equal(observed_overlap, expected_overlap))
+            self.assertEqual(audit["translated_page_band_consistency"]["rows_failed"], 0)
+            for row in rows:
+                x1, y1, x2, y2 = row["crop_bbox_in_translated_page"]
+                final = cv2.imread(str(work_dir / "debug" / "e2e" / row["final_crop_path"]), cv2.IMREAD_COLOR)
+                self.assertIsNotNone(final)
+                self.assertTrue(np.array_equal(final, translated[y1:y2, x1:x2]), row["band_id"])
 
     def test_final_project_rerender_prevents_trace_empty_context_from_overwriting_text_band(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

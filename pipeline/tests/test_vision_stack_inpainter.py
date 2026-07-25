@@ -6453,7 +6453,8 @@ class VisionStackInpainterTests(unittest.TestCase):
             },
         ]
 
-        cleaned, count, action_mask = _apply_visual_item_card_contract_cleanup(image, image, texts)
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "fast"}):
+            cleaned, count, action_mask = _apply_visual_item_card_contract_cleanup(image, image, texts)
 
         self.assertEqual(count, 2)
         self.assertGreater(int(np.count_nonzero(action_mask)), 8000)
@@ -6467,6 +6468,42 @@ class VisionStackInpainterTests(unittest.TestCase):
             metric = (text.get("qa_metrics") or {}).get("visual_item_card_forced_contract_cleanup") or {}
             self.assertGreater(int(metric.get("mask_pixels") or 0), 1000)
             self.assertEqual(metric.get("fill_rgb"), [248, 209, 107])
+
+    def test_pure_mode_skips_visual_item_card_forced_cleanup(self):
+        from inpainter import _apply_visual_item_card_contract_cleanup
+
+        image = np.full((80, 180, 3), (248, 209, 107), dtype=np.uint8)
+        cv2.putText(image, "GRADE B", (20, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (15, 10, 4), 3, cv2.LINE_AA)
+        text = {
+            "id": "cardocr_grade",
+            "bbox": [16, 18, 150, 58],
+            "text_pixel_bbox": [16, 18, 150, 58],
+            "line_polygons": [[[16, 18], [150, 18], [150, 58], [16, 58]]],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_category": "item_card",
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "pure"}):
+            cleaned, count, action_mask = _apply_visual_item_card_contract_cleanup(image, image, [text])
+
+        self.assertTrue(np.array_equal(cleaned, image))
+        self.assertEqual(count, 0)
+        self.assertEqual(int(np.count_nonzero(action_mask)), 0)
+        self.assertNotIn("visual_item_card_forced_contract_cleanup", text.get("qa_flags") or [])
+
+    def test_pure_mode_skips_expanded_white_residual_force_fill(self):
+        from inpainter import _apply_white_residual_expanded_mask_force_fill
+
+        image = np.full((64, 96, 3), 232, dtype=np.uint8)
+        image[20:44, 30:66] = (80, 90, 100)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[18:46, 28:68] = 255
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "pure"}):
+            cleaned = _apply_white_residual_expanded_mask_force_fill(image, mask)
+
+        self.assertTrue(np.array_equal(cleaned, image))
 
     def test_dark_bubble_connected_pair_uses_sibling_split_like_white_pair(self):
         from inpainter import _try_dark_panel_text_fill

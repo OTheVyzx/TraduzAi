@@ -7313,6 +7313,7 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
         "after_late_render_contract_repair": False,
         "seen_count": 0,
         "refreshed_count": 0,
+        "final_page_crop_resync_count": 0,
         "clean_band_source_used": 0,
         "clean_band_final_mismatch_count": 0,
         "clean_band_final_checks": [],
@@ -7413,6 +7414,42 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
             else:
                 recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100, color_space="BGR")
             audit["refreshed_count"] += 1
+        # Adaptive bands may overlap. The composition loop above establishes the
+        # final ownership order on each translated page, so an earlier band crop
+        # can become stale when a later band writes into the shared area. Refresh
+        # every debug crop once more from the fully composed page before QA.
+        final_pages: dict[str, object] = {}
+        for row in crop_rows:
+            translated_name = str(row.get("translated_output_page") or "").strip()
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            bbox = row.get("crop_bbox_in_translated_page")
+            if not translated_name or not final_rel or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            translated_path = Path(translated_name)
+            if not translated_path.is_absolute():
+                if translated_path.parts and translated_path.parts[0].lower() == "translated":
+                    translated_path = Path(work_dir) / translated_path
+                else:
+                    translated_path = Path(work_dir) / "translated" / translated_path
+            page_key = str(translated_path)
+            if page_key not in final_pages:
+                final_pages[page_key] = cv2.imread(page_key, cv2.IMREAD_COLOR)
+            image = final_pages[page_key]
+            if image is None:
+                continue
+            try:
+                x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
+            except Exception:
+                continue
+            height, width = image.shape[:2]
+            x1 = max(0, min(width, x1))
+            x2 = max(0, min(width, x2))
+            y1 = max(0, min(height, y1))
+            y2 = max(0, min(height, y2))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100, color_space="BGR")
+            audit["final_page_crop_resync_count"] += 1
         try:
             recorder.write_json("10_copyback_reassemble/final_band_crops_refresh.json", audit)
         except Exception:
@@ -7673,17 +7710,21 @@ def _audit_translated_page_band_consistency(work_dir: Path) -> dict:
         if visible is None or int(np.count_nonzero(visible)) <= 0:
             audit["rows_skipped"] += 1
             continue
-        reference_bgr = final_bgr
+        reference_bgr = crop_bgr
         if translated_path.suffix.lower() in {".jpg", ".jpeg"}:
             try:
-                ok, encoded = cv2.imencode(".jpg", final_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                # final_band is a JPEG encoding of the already-decoded page
+                # crop. Encode that crop once to model the expected artifact;
+                # re-encoding final_bgr would incorrectly compare generation
+                # two against the page's decoded generation zero.
+                ok, encoded = cv2.imencode(".jpg", crop_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
                 if ok:
                     decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-                    if decoded is not None and decoded.shape == final_bgr.shape:
+                    if decoded is not None and decoded.shape == crop_bgr.shape:
                         reference_bgr = decoded
             except Exception:
-                reference_bgr = final_bgr
-        diff = np.abs(reference_bgr.astype(np.int16) - crop_bgr.astype(np.int16))
+                reference_bgr = crop_bgr
+        diff = np.abs(reference_bgr.astype(np.int16) - final_bgr.astype(np.int16))
         visible_diff = diff[visible]
         max_diff = int(visible_diff.max()) if visible_diff.size else 0
         changed_gt8 = int((visible_diff > 8).sum()) if visible_diff.size else 0
@@ -8152,7 +8193,7 @@ def _run_post_rerender_final_visual_contract(
     after_final_project_image_rerender: bool,
     after_late_render_contract_repair: bool,
 ) -> dict:
-    should_refresh_crops = bool(after_final_project_image_rerender)
+    should_refresh_crops = bool(after_final_project_image_rerender or after_late_render_contract_repair)
     if should_refresh_crops:
         refresh_audit = _refresh_debug_final_band_crops_from_translated(recorder, work_dir)
     else:
@@ -13224,6 +13265,7 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
         "pages_rerendered": 0,
         "rows_checked": 0,
         "rows_rerendered": 0,
+        "final_page_crop_resync_count": 0,
         "positive_band_base_used": 0,
         "rendered_band_direct_copy_used": 0,
         "clean_band_source_used": 0,
@@ -13380,6 +13422,32 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
         touched_pages.add(translated_path)
     for path in touched_pages:
         cv2.imwrite(str(path), translated_pages[path], [cv2.IMWRITE_JPEG_QUALITY, 100])
+        persisted = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if persisted is not None:
+            translated_pages[path] = persisted
+    for row in crop_rows:
+        bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+        translated_name = str(row.get("translated_output_page") or "").strip()
+        final_rel = str(row.get("final_crop_path") or "").strip()
+        if bbox is None or not translated_name or not final_rel:
+            continue
+        translated_path = _final_rerender_resolve_translated_path(work_dir, translated_name)
+        if translated_path not in touched_pages:
+            continue
+        page_bgr = translated_pages.get(translated_path)
+        if page_bgr is None:
+            continue
+        height, width = page_bgr.shape[:2]
+        x1 = max(0, min(width, int(bbox[0])))
+        y1 = max(0, min(height, int(bbox[1])))
+        x2 = max(0, min(width, int(bbox[2])))
+        y2 = max(0, min(height, int(bbox[3])))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        final_path = work_dir / "debug" / "e2e" / final_rel
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(final_path), page_bgr[y1:y2, x1:x2, :], [cv2.IMWRITE_JPEG_QUALITY, 100])
+        audit["final_page_crop_resync_count"] += 1
     audit["pages_checked"] = len(seen_pages)
     audit["pages_rerendered"] = len(touched_pages)
     consistency_audit = _audit_translated_page_band_consistency(work_dir)

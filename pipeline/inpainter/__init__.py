@@ -5695,6 +5695,8 @@ def _sample_dark_bubble_inner_fill_color(
 
 
 def _try_dark_panel_text_fill(image_rgb: np.ndarray, text: dict) -> np.ndarray | None:
+    if not direct_inpaint_mutations_allowed():
+        return None
     if not isinstance(image_rgb, np.ndarray):
         return None
     qa_flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()} if isinstance(text, dict) else set()
@@ -6519,6 +6521,8 @@ def _unsafe_white_balloon_limit_mask(
 
 
 def _apply_unsafe_white_balloon_text_fills(image_rgb: np.ndarray, ocr_page: dict) -> tuple[np.ndarray, int]:
+    if not direct_inpaint_mutations_allowed():
+        return image_rgb, 0
     if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3 or not isinstance(ocr_page, dict):
         return image_rgb, 0
     height, width = image_rgb.shape[:2]
@@ -6762,6 +6766,8 @@ def _apply_flat_ui_text_prefill_to_blocks(
     ocr_page: dict,
     vision_blocks: list[dict],
 ) -> tuple[np.ndarray, list[dict], dict]:
+    if not direct_inpaint_mutations_allowed():
+        return band_rgb, vision_blocks, {"flat_ui_prefill_count": 0, "remaining_blocks": len(vision_blocks)}
     if not isinstance(band_rgb, np.ndarray) or band_rgb.ndim != 3 or not vision_blocks:
         return band_rgb, vision_blocks, {"flat_ui_prefill_count": 0, "remaining_blocks": len(vision_blocks)}
     height, width = band_rgb.shape[:2]
@@ -6989,6 +6995,8 @@ def _clipped_overlap_fragment_cleanup_bbox_for_text(text: dict, width: int, heig
 
 
 def _apply_clipped_overlap_fragment_cleanup_fill(image_rgb: np.ndarray, ocr_page: dict) -> int:
+    if not direct_inpaint_mutations_allowed():
+        return 0
     if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
         return 0
     height, width = image_rgb.shape[:2]
@@ -9528,6 +9536,8 @@ def _apply_white_residual_expanded_mask_force_fill(
     cleaned_rgb: np.ndarray,
     mask: np.ndarray | None,
 ) -> np.ndarray:
+    if not direct_inpaint_mutations_allowed():
+        return cleaned_rgb
     if cleaned_rgb is None or cleaned_rgb.size == 0:
         return cleaned_rgb
     fill_mask = _coerce_mask_for_shape(mask, cleaned_rgb.shape[:2]) > 0
@@ -9620,6 +9630,8 @@ def _apply_translator_note_dark_text_contract_fill(
     cleaned_rgb: np.ndarray,
     ocr_page: dict,
 ) -> tuple[np.ndarray, int]:
+    if not direct_inpaint_mutations_allowed():
+        return cleaned_rgb, 0
     if not isinstance(cleaned_rgb, np.ndarray) or cleaned_rgb.ndim != 3 or not isinstance(ocr_page, dict):
         return cleaned_rgb, 0
     height, width = cleaned_rgb.shape[:2]
@@ -10712,6 +10724,13 @@ def _apply_koharu_bubble_fast_fill_to_blocks(
     working_rgb = band_rgb.copy()
     fast_fill_mask = np.zeros((height, width), dtype=np.uint8)
     remaining_mask = np.zeros((height, width), dtype=np.uint8)
+    if not direct_inpaint_mutations_allowed():
+        return working_rgb, list(vision_blocks), fast_fill_mask, remaining_mask, {
+            "filled_pixels": 0,
+            "remaining_pixels": 0,
+            "samples": [],
+            "rejection_reasons": {"inpaint_policy:pure": max(1, len(vision_blocks or []))},
+        }
     remaining_blocks: list[dict] = []
     samples: list[dict] = []
     rejection_reasons: dict[str, int] = {}
@@ -10926,6 +10945,9 @@ def _apply_visual_item_card_contract_cleanup(
     card rows; a row that was marked resolved must still honor its explicit
     text-only visual contract before typesetting.
     """
+    if not direct_inpaint_mutations_allowed():
+        shape = original_rgb.shape[:2] if isinstance(original_rgb, np.ndarray) and original_rgb.ndim >= 2 else (0, 0)
+        return cleaned_rgb, 0, np.zeros(shape, dtype=np.uint8)
     if (
         not isinstance(original_rgb, np.ndarray)
         or original_rgb.ndim != 3
@@ -11023,13 +11045,22 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     """Aplica o mesmo round de inpaint do runtime principal na banda do strip."""
     from vision_stack.runtime import (
         _apply_inpainting_round,
-        _apply_white_balloon_residual_force_fill,
+        _apply_white_balloon_residual_force_fill as _runtime_apply_white_balloon_residual_force_fill,
         _build_post_cleanup_limit_mask,
         _apply_post_inpaint_cleanup_timed,
         _clamp_image_to_limit_mask,
         _get_inpainter,
         _has_white_balloon_text_residual,
     )
+
+    def _apply_white_balloon_residual_force_fill(
+        original_rgb: np.ndarray,
+        cleaned_rgb: np.ndarray,
+        texts: list[dict],
+    ) -> np.ndarray:
+        if not direct_inpaint_mutations_allowed():
+            return cleaned_rgb
+        return _runtime_apply_white_balloon_residual_force_fill(original_rgb, cleaned_rgb, texts)
 
     if band_rgb.size == 0 or not ocr_page.get("texts"):
         return band_rgb.copy()
