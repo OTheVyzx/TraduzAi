@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ownership.coordinates import stable_spatial_id
 from strip.types import Balloon, Band, VerticalStrip
 
 
@@ -109,6 +110,14 @@ def group_balloons_into_bands(
             current_y_bottom = b.strip_bbox.y2
 
     bands.append(_flush_band(current_balloons, margin))
+    for ordinal, band in enumerate(bands):
+        band.tile_id = stable_spatial_id(
+            "tile",
+            "strip",
+            (0, int(band.y_top), 1, int(band.y_bottom)),
+            ordinal,
+        )
+        band.strip_offset_xy = (0, int(band.y_top))
     return bands
 
 

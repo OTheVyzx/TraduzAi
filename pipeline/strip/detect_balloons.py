@@ -33,7 +33,16 @@ def _nms_balloons(balloons: list[Balloon], iou_threshold: float = 0.5) -> list[B
     """Remove balões redundantes; mantém o de maior confidence em cada cluster."""
     if not balloons:
         return []
-    sorted_balloons = sorted(balloons, key=lambda b: b.confidence, reverse=True)
+    sorted_balloons = sorted(
+        balloons,
+        key=lambda balloon: (
+            -float(balloon.confidence),
+            int(balloon.strip_bbox.y1),
+            int(balloon.strip_bbox.x1),
+            int(balloon.strip_bbox.y2),
+            int(balloon.strip_bbox.x2),
+        ),
+    )
     kept: list[Balloon] = []
     for cand in sorted_balloons:
         is_dup = any(_iou(cand.strip_bbox, k.strip_bbox) > iou_threshold for k in kept)
@@ -894,6 +903,61 @@ def _source_page_height_for_bbox(strip: VerticalStrip, bbox: BBox) -> int:
     return max(1, int(strip.height))
 
 
+def _page_location_for_bbox(strip: VerticalStrip, bbox: BBox) -> tuple[int, int, int]:
+    """Return (page index, page y origin, page x origin) by maximum overlap."""
+
+    chunks = _source_page_chunks(strip)
+    best_index = 0
+    best_overlap = -1
+    for index, (page_y0, page_y1) in enumerate(chunks):
+        overlap = max(0, min(int(bbox.y2), page_y1) - max(int(bbox.y1), page_y0))
+        if overlap > best_overlap:
+            best_index = index
+            best_overlap = overlap
+    page_y0 = chunks[best_index][0]
+    offsets = list(getattr(strip, "page_x_offsets", None) or [])
+    page_x0 = int(offsets[best_index]) if best_index < len(offsets) else 0
+    return best_index, int(page_y0), page_x0
+
+
+def _attach_page_region_identities(strip: VerticalStrip, balloons: list[Balloon]) -> list[Balloon]:
+    """Attach stable page-space region identity after all geometry mutations."""
+
+    from ownership.coordinates import ComponentSeed, assign_component_ids
+
+    by_page: dict[str, list[tuple[Balloon, ComponentSeed, list[int]]]] = {}
+    for balloon in balloons:
+        page_index, page_y0, page_x0 = _page_location_for_bbox(strip, balloon.strip_bbox)
+        page_id = f"page_{page_index + 1:03d}"
+        bbox_page = [
+            int(balloon.strip_bbox.x1) - page_x0,
+            int(balloon.strip_bbox.y1) - page_y0,
+            int(balloon.strip_bbox.x2) - page_x0,
+            int(balloon.strip_bbox.y2) - page_y0,
+        ]
+        metadata = dict(getattr(balloon, "metadata", {}) or {})
+        detector_source = str(
+            metadata.get("detector_source")
+            or metadata.get("candidate_source")
+            or ("negative" if metadata.get("negative_detect_candidate") else "primary")
+        )
+        seed = ComponentSeed(tuple(bbox_page), detector_source)
+        by_page.setdefault(page_id, []).append((balloon, seed, bbox_page))
+
+    for page_id, entries in by_page.items():
+        component_ids = assign_component_ids(page_id, [entry[1] for entry in entries])
+        for (balloon, _seed, bbox_page), component_id in zip(entries, component_ids):
+            balloon.metadata.update(
+                {
+                    "bbox_page": bbox_page,
+                    "coordinate_space": "page",
+                    "page_id": page_id,
+                    "region_id": component_id,
+                }
+            )
+    return balloons
+
+
 def detect_strip_balloons(
     strip,
     detector,
@@ -1070,7 +1134,7 @@ def detect_strip_balloons(
             )
         if not oversized:
             filtered.append(balloon)
-    return sorted(
+    ordered = sorted(
         filtered,
         key=lambda balloon: (
             int(balloon.strip_bbox.y1),
@@ -1079,3 +1143,4 @@ def detect_strip_balloons(
             int(balloon.strip_bbox.x2),
         ),
     )
+    return _attach_page_region_identities(strip, ordered)

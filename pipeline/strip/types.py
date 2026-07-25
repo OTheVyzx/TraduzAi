@@ -56,6 +56,12 @@ class Balloon:
     lobe_count: int = 1
     metadata: dict = field(default_factory=dict)
 
+    @property
+    def region_id(self) -> Optional[str]:
+        """Stable page-global visual identity, when assigned by detection."""
+        value = self.metadata.get("region_id")
+        return str(value) if value else None
+
 
 @dataclass
 class Band:
@@ -69,6 +75,8 @@ class Band:
     rendered_slice: Optional[np.ndarray] = None
     ocr_result: Optional[dict] = None
     perf: dict = field(default_factory=dict)
+    tile_id: Optional[str] = None
+    strip_offset_xy: tuple[int, int] = (0, 0)
 
 
     @property
