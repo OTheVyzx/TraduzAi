@@ -1,0 +1,304 @@
+{
+  "schema_version": 1,
+  "coordinate_space": "page",
+  "cases": [
+    {
+      "case_id": "case_overlap_body",
+      "category": "overlapping_tiles_single_body",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_line_top",
+          "bbox": [240, 420, 760, 500],
+          "polygon": [[240, 420], [760, 420], [760, 500], [240, 500]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        },
+        {
+          "component_id": "component_line_bottom",
+          "bbox": [260, 510, 740, 590],
+          "polygon": [[260, 510], [740, 510], [740, 590], [260, 590]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_body_full",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_line_top", "component_line_bottom"],
+          "text": "SOURCE BODY COMPLETE",
+          "confidence": 0.91,
+          "bbox": [240, 420, 760, 590],
+          "tile_provenance": ["tile_upper", "tile_lower"]
+        },
+        {
+          "observation_id": "observation_body_partial",
+          "provider": "crop_ocr",
+          "component_ids": ["component_line_bottom"],
+          "text": "BODY COMPLETE",
+          "confidence": 0.96,
+          "bbox": [260, 510, 740, 590],
+          "tile_provenance": ["tile_lower"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_upper", "bbox": [0, 300, 1000, 540], "role": "candidate"},
+        {"tile_id": "tile_lower", "bbox": [0, 470, 1000, 720], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "body_component_ids": ["component_line_top", "component_line_bottom"],
+        "selected_observation_ids": ["observation_body_full"]
+      }
+    },
+    {
+      "case_id": "case_card_roles",
+      "category": "card_semantic_roles",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_title",
+          "bbox": [260, 210, 740, 280],
+          "polygon": [[260, 210], [740, 210], [740, 280], [260, 280]],
+          "detector_sources": ["region_detector"]
+        },
+        {
+          "component_id": "component_body_top",
+          "bbox": [210, 360, 790, 430],
+          "polygon": [[210, 360], [790, 360], [790, 430], [210, 430]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        },
+        {
+          "component_id": "component_body_bottom",
+          "bbox": [220, 440, 780, 510],
+          "polygon": [[220, 440], [780, 440], [780, 510], [220, 510]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        },
+        {
+          "component_id": "component_footer",
+          "bbox": [300, 650, 700, 710],
+          "polygon": [[300, 650], [700, 650], [700, 710], [300, 710]],
+          "detector_sources": ["region_detector"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_title",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_title"],
+          "text": "CARD TITLE",
+          "confidence": 0.94,
+          "bbox": [260, 210, 740, 280],
+          "tile_provenance": ["tile_card_top_left", "tile_card_top_right"]
+        },
+        {
+          "observation_id": "observation_body",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_body_top", "component_body_bottom"],
+          "text": "COMPLETE CARD BODY",
+          "confidence": 0.9,
+          "bbox": [210, 360, 790, 510],
+          "tile_provenance": ["tile_card_top_left", "tile_card_top_right", "tile_card_bottom_left", "tile_card_bottom_right"]
+        },
+        {
+          "observation_id": "observation_footer",
+          "provider": "crop_ocr",
+          "component_ids": ["component_footer"],
+          "text": "CARD FOOTER",
+          "confidence": 0.88,
+          "bbox": [300, 650, 700, 710],
+          "tile_provenance": ["tile_card_bottom_left", "tile_card_bottom_right"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_card_top_left", "bbox": [0, 100, 600, 470], "role": "candidate"},
+        {"tile_id": "tile_card_top_right", "bbox": [400, 100, 1000, 470], "role": "candidate"},
+        {"tile_id": "tile_card_bottom_left", "bbox": [0, 390, 600, 800], "role": "candidate"},
+        {"tile_id": "tile_card_bottom_right", "bbox": [400, 390, 1000, 800], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 3,
+        "translation_count": 3,
+        "render_count": 3,
+        "semantic_roles": ["title", "body", "footer"],
+        "body_component_ids": ["component_body_top", "component_body_bottom"]
+      }
+    },
+    {
+      "case_id": "case_connected_regions",
+      "category": "connected_layout_regions",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_connected_top",
+          "bbox": [250, 320, 750, 390],
+          "polygon": [[250, 320], [750, 320], [750, 390], [250, 390]],
+          "detector_sources": ["region_detector"]
+        },
+        {
+          "component_id": "component_connected_bottom",
+          "bbox": [280, 470, 720, 540],
+          "polygon": [[280, 470], [720, 470], [720, 540], [280, 540]],
+          "detector_sources": ["region_detector"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_connected_body",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_connected_top", "component_connected_bottom"],
+          "text": "ONE SEMANTIC BODY",
+          "confidence": 0.89,
+          "bbox": [250, 320, 750, 540],
+          "tile_provenance": ["tile_connected"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_connected", "bbox": [0, 200, 1000, 680], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "layout_region_count": 2,
+        "body_component_ids": ["component_connected_top", "component_connected_bottom"]
+      }
+    },
+    {
+      "case_id": "case_repeated_geometry",
+      "category": "repeated_text_distinct_geometry",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_repeated_top",
+          "bbox": [180, 180, 420, 250],
+          "polygon": [[180, 180], [420, 180], [420, 250], [180, 250]],
+          "detector_sources": ["region_detector"]
+        },
+        {
+          "component_id": "component_repeated_bottom",
+          "bbox": [580, 1050, 820, 1120],
+          "polygon": [[580, 1050], [820, 1050], [820, 1120], [580, 1120]],
+          "detector_sources": ["region_detector"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_repeated_top",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_repeated_top"],
+          "text": "REPEATED SOURCE",
+          "confidence": 0.92,
+          "bbox": [180, 180, 420, 250],
+          "tile_provenance": ["tile_repeated_top"]
+        },
+        {
+          "observation_id": "observation_repeated_bottom",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_repeated_bottom"],
+          "text": "REPEATED SOURCE",
+          "confidence": 0.92,
+          "bbox": [580, 1050, 820, 1120],
+          "tile_provenance": ["tile_repeated_bottom"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_repeated_top", "bbox": [0, 80, 1000, 380], "role": "candidate"},
+        {"tile_id": "tile_repeated_bottom", "bbox": [0, 930, 1000, 1260], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 2,
+        "translation_count": 2,
+        "render_count": 2,
+        "owners_must_remain_distinct": true
+      }
+    },
+    {
+      "case_id": "case_protected_contact",
+      "category": "protected_art_contact",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_touching_art",
+          "bbox": [360, 580, 720, 680],
+          "polygon": [[360, 580], [720, 580], [720, 680], [360, 680]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_touching_art",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_touching_art"],
+          "text": "TEXT NEAR ART",
+          "confidence": 0.87,
+          "bbox": [360, 580, 720, 680],
+          "tile_provenance": ["tile_contact_left", "tile_contact_right"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_contact_left", "bbox": [0, 450, 620, 820], "role": "candidate"},
+        {"tile_id": "tile_contact_right", "bbox": [480, 450, 1000, 820], "role": "candidate"}
+      ],
+      "protected_art": [
+        {
+          "artifact_id": "protected_icon",
+          "polygon": [[680, 560], [810, 560], [810, 720], [680, 720]]
+        }
+      ],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "changed_outside_action_mask_pixels": 0,
+        "protected_art_changed_pixels": 0
+      }
+    },
+    {
+      "case_id": "case_independent_recall",
+      "category": "primary_ocr_omission_recall",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_recall_only",
+          "bbox": [300, 760, 700, 850],
+          "polygon": [[300, 760], [700, 760], [700, 850], [300, 850]],
+          "detector_sources": ["glyph_scan"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_recall_crop",
+          "provider": "recall_crop_ocr",
+          "component_ids": ["component_recall_only"],
+          "text": "RECOVERED SOURCE",
+          "confidence": 0.73,
+          "bbox": [300, 760, 700, 850],
+          "tile_provenance": ["tile_recall"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_recall", "bbox": [0, 650, 1000, 980], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "primary_ocr_observation_count": 0,
+        "source_text_unowned": 0
+      }
+    }
+  ]
+}
