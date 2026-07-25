@@ -6283,7 +6283,7 @@ def _is_visual_item_card_row(text: dict) -> bool:
 
 
 def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
-    """Keep every item-card row centered on its own source-text band.
+    """Solve item-card children jointly inside their shared panel.
 
     Card masks describe a broad visual panel, not an independent balloon for
     each OCR row.  Using those masks as layout capacity lets short rows drift
@@ -6319,6 +6319,15 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
 
     for group in groups:
         ordered = sorted(group, key=lambda value: (value[1][1], value[1][0]))
+        role_defaults: list[str]
+        if len(ordered) >= 4:
+            role_defaults = ["title", "note"] + ["body"] * (len(ordered) - 3) + ["footer"]
+        elif len(ordered) == 3:
+            role_defaults = ["title", "body", "footer"]
+        elif len(ordered) == 2:
+            role_defaults = ["title", "body"]
+        else:
+            role_defaults = ["title"]
         for index, (text, anchor) in enumerate(ordered):
             sanitized = _clear_connected_balloon_metadata(text)
             text.clear()
@@ -6372,6 +6381,7 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
             text["layout_safe_reason"] = "visual_item_card_row_slot"
             text["layout_profile"] = "colored_status_panel_row"
             text["block_profile"] = "colored_status_panel_row"
+            text["card_panel_role"] = str(text.get("card_panel_role") or role_defaults[index])
             text["_render_target_source"] = "visual_item_card_row_slot"
             for stale_key in (
                 "render_bbox",
@@ -6384,6 +6394,50 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
             ):
                 text.pop(stale_key, None)
             _merge_qa_flags(text, ["visual_item_card_row_slot", "safe_text_box_recomputed"])
+
+        group_is_legible = True
+        fit_evidence: list[dict] = []
+        for text, _anchor in ordered:
+            translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+            if not translated:
+                continue
+            plan = plan_text_layout(text)
+            minimum_font_px = _minimum_legible_font_px(text, plan)
+            text["minimum_legible_font_px"] = int(minimum_font_px)
+            fits_at_minimum = _fits_in_box(
+                translated,
+                str(plan.get("font_name") or ""),
+                int(minimum_font_px),
+                int(plan.get("max_width", 0) or 0),
+                int(plan.get("max_height", 0) or 0),
+                float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+            )
+            fit_evidence.append(
+                {
+                    "id": str(text.get("trace_id") or text.get("id") or ""),
+                    "role": str(text.get("card_panel_role") or "body"),
+                    "minimum_legible_font_px": int(minimum_font_px),
+                    "fits_at_minimum": bool(fits_at_minimum),
+                }
+            )
+            if not fits_at_minimum:
+                group_is_legible = False
+
+        status = "ok" if group_is_legible else "below_minimum_legible"
+        for text, _anchor in ordered:
+            text["card_joint_layout_status"] = status
+            metrics = text.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["item_card_joint_layout"] = {
+                    "status": status,
+                    "panel_bbox": list(text.get("card_panel_bbox") or []),
+                    "children": fit_evidence,
+                    "minimum_gap_px": 4,
+                }
+            if not group_is_legible:
+                text["route_action"] = "review_required"
+                text["route_reason"] = "item_card_joint_layout_below_minimum"
+                _merge_qa_flags(text, ["fit_below_minimum_legible", "item_card_joint_layout_failed"])
 
 
 def build_render_blocks(texts: list[dict]) -> list[dict]:

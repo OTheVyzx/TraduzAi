@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from PIL import Image
+from layout.balloon_layout import _assign_visual_item_card_groups
 
 from typesetter.renderer import (
     SafeTextPathFont,
@@ -13,11 +14,13 @@ from typesetter.renderer import (
     _infer_connected_orientation_from_subregions,
     _looks_like_connected_balloon_pair,
     _measure_safe_text_block_bbox,
+    _original_text_mask_bbox_for_scale,
     _resolve_english_anchor_bbox,
     _recenter_safe_text_positions,
     _resolve_connected_area_weights,
     _resolve_connected_target_sizes,
     _resolve_text_layout,
+    _run_render_qa,
     _score_connected_group_candidate,
     _split_text_for_connected_balloons,
     build_render_blocks,
@@ -48,6 +51,20 @@ class TypesettingLayoutTests(unittest.TestCase):
         "test_single_text_connected_balloon_still_splits",
         "test_tall_balloon_without_english_anchor_falls_back_to_balloon_width",
     }
+
+    def test_item_card_assigns_stable_roles_without_merging_payloads(self):
+        texts = [
+            {"id": "title", "original": "MOON STONE ELIXIR", "translated": "ELIXIR DA PEDRA DA LUA", "bbox": [120, 120, 480, 160], "_visual_card_bbox_hint": [80, 90, 520, 520], "card_panel_text_context": True},
+            {"id": "note", "original": "GRADE B+", "translated": "NOTA B+", "bbox": [160, 190, 440, 220], "_visual_card_bbox_hint": [80, 90, 520, 520], "card_panel_text_context": True},
+            {"id": "body", "original": "PERMANENTLY INCREASES AGILITY", "translated": "AUMENTA PERMANENTEMENTE A AGILIDADE", "bbox": [110, 270, 490, 360], "_visual_card_bbox_hint": [80, 90, 520, 520], "card_panel_text_context": True},
+            {"id": "footer", "original": "ADVANCED ALCHEMY", "translated": "ALQUIMIA AVANCADA", "bbox": [130, 440, 470, 475], "_visual_card_bbox_hint": [80, 90, 520, 520], "card_panel_text_context": True},
+        ]
+        payloads = [(text["id"], text["original"], text["translated"]) for text in texts]
+
+        _assign_visual_item_card_groups(texts)
+
+        self.assertEqual([text["card_panel_role"] for text in texts], ["title", "note", "body", "footer"])
+        self.assertEqual([(text["id"], text["original"], text["translated"]) for text in texts], payloads)
 
     def test_build_render_blocks_does_not_skip_by_legacy_balloon_type(self):
         noisy = {
@@ -109,8 +126,10 @@ class TypesettingLayoutTests(unittest.TestCase):
             "bubble_mask_bbox": [53, 0, 800, 320],
             "bubble_inner_bbox": [353, 108, 553, 212],
             "bubble_mask_source": "outline_seeded_contour",
-            "layout_profile": "white_balloon",
-            "block_profile": "white_balloon",
+            # The real artifact retains a standard layout profile even though
+            # the trusted image mask identifies a white speech balloon.
+            "layout_profile": "standard",
+            "block_profile": "standard",
             "qa_flags": ["tiny_bubble_inner_bbox_rejected"],
             "estilo": {"tamanho": 48, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
         }
@@ -125,6 +144,169 @@ class TypesettingLayoutTests(unittest.TestCase):
         safe_cx = (plan["safe_text_box"][0] + plan["safe_text_box"][2]) / 2
         bubble_cx = (text_data["balloon_bbox"][0] + text_data["balloon_bbox"][2]) / 2
         self.assertLess(abs(safe_cx - bubble_cx), 70)
+
+    def test_dark_connected_lobe_typeset_uses_inpaint_contract_bbox_for_scale(self):
+        text_data = {
+            "id": "ocr_001",
+            "text": "You grew up at an orphanage without parents, and by your early teens, you had already set foot in the world of gangsters.",
+            "translated": "VOCÊ CRESCEU EM UM ORFANATO SEM PAIS E NO INÍCIO DA ADOLESCÊNCIA JÁ HAVIA COLOCADO OS PÉS NO MUNDO DOS GANGSTERS",
+            "source_bbox": [11, 16481, 492, 16866],
+            "bbox": [68, 16575, 491, 16780],
+            "text_pixel_bbox": [68, 16575, 491, 16780],
+            "target_bbox": [55, 16509, 407, 16856],
+            "balloon_bbox": [68, 16575, 491, 16780],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "text_contract_direct_fill",
+                "visual_text_only_inpaint_contract",
+                "dark_connected_lobes_repaired_from_visual_mask",
+                "source_text_mask_bbox_from_inpaint_component",
+                "dark_connected_component_safe_partition",
+            ],
+            "qa_metrics": {
+                "dark_text_contract_fill_mask": {
+                    "bbox": [66, 16572, 388, 16763],
+                    "source": "build_inpaint_mask_contract",
+                    "mask_pixels": 61494,
+                },
+                "dark_text_contract_fill_uses_inpaint_contract_mask": {
+                    "contract_bbox": [66, 16572, 388, 16763],
+                    "added_pixels": 22989,
+                },
+                "text_contract_direct_fill": {
+                    "fill_rgb": [0, 0, 0],
+                    "reason": "expanded_text_contract_mask",
+                },
+            },
+            "estilo": {
+                "fonte": "LeagueGothic-Regular.ttf",
+                "tamanho": 44,
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 2,
+                "alinhamento": "center",
+            },
+        }
+        plan = {
+            "target_bbox": [55, 16509, 407, 16856],
+            "position_bbox": [55, 16509, 407, 16856],
+            "capacity_bbox": [55, 16509, 407, 16856],
+            "safe_text_box": [98, 16585, 461, 16762],
+            "layout_safe_bbox": [98, 16585, 461, 16762],
+            "max_width": 420,
+            "max_height": 320,
+            "padding_y": 0,
+            "vertical_anchor": "middle",
+            "vertical_bias_px": 0,
+            "font_name": "LeagueGothic-Regular.ttf",
+            "alignment": "center",
+            "line_spacing_ratio": 1.0,
+            "target_size": 44,
+            "balloon_geo": "ellipse",
+            "layout_shape": "wide",
+        }
+
+        self.assertEqual(_original_text_mask_bbox_for_scale(text_data), [66, 16572, 388, 16763])
+
+        resolved = _resolve_text_layout(text_data, plan)
+        fit = text_data["qa_metrics"]["typeset_contract_fit"]
+
+        self.assertEqual(text_data["typeset_inpaint_contract_bbox_used"], [66, 16572, 388, 16763])
+        self.assertEqual(fit["source_bbox"], [66, 16572, 388, 16763])
+        self.assertLess(fit["contract_metrics"]["source_width"], 481)
+        self.assertLessEqual(fit["contract_metrics"]["width_ratio"], 1.20)
+        self.assertLessEqual(fit["contract_metrics"]["height_ratio"], 1.60)
+        source_cx = (66 + 388) / 2
+        source_cy = (16572 + 16763) / 2
+        block = resolved["block_bbox"]
+        block_cx = (block[0] + block[2]) / 2
+        block_cy = (block[1] + block[3]) / 2
+        self.assertLessEqual(abs(block_cx - source_cx), 1.0)
+        self.assertLessEqual(abs(block_cy - source_cy), 1.0)
+
+    def test_contract_bbox_tight_visual_balloon_fit_revalidates_final_typeset_flags(self):
+        text_data = {
+            "id": "page_004_band_054",
+            "translated": "A MISSAO PRINCIPAL SERA MOSTRADA EM BREVE",
+            "source_bbox": [269, 1430, 472, 1512],
+            "bbox": [269, 1430, 472, 1512],
+            "text_pixel_bbox": [269, 1430, 472, 1512],
+            "target_bbox": [224, 1415, 492, 1530],
+            "balloon_bbox": [224, 1415, 492, 1530],
+            "render_bbox": [302, 1417, 438, 1525],
+            "bubble_mask_source": "image_dark_bubble_mask",
+            "layout_profile": "dark_bubble",
+            "background_rgb": [0, 0, 0],
+            "qa_flags": [
+                "TEXT_CLIPPED",
+                "TEXT_OVERFLOW",
+                "fit_below_minimum_legible",
+                "mask_outside_balloon",
+            ],
+            "qa_metrics": {
+                "render_balloon_containment": 1.0,
+                "contract_bbox_tight_but_visual_balloon_fit_ok": {
+                    "source_bbox": [269, 1430, 472, 1512],
+                    "block_bbox": [302, 1417, 438, 1525],
+                    "visual_bbox": [224, 1415, 492, 1530],
+                    "visual_bbox_source": "qa_metrics.derived_card_panel_mask.mask_bbox",
+                },
+            },
+        }
+        plan = {
+            "target_bbox": [224, 1415, 492, 1530],
+            "safe_text_box": [224, 1415, 492, 1530],
+        }
+
+        _run_render_qa(text_data, plan)
+
+        self.assertNotIn("TEXT_CLIPPED", text_data["qa_flags"])
+        self.assertNotIn("TEXT_OVERFLOW", text_data["qa_flags"])
+        self.assertNotIn("fit_below_minimum_legible", text_data["qa_flags"])
+        self.assertIn("mask_outside_balloon", text_data["qa_flags"])
+        self.assertEqual(
+            text_data["qa_metrics"]["typeset_contract_flags_revalidated"]["resolved_flags"],
+            ["TEXT_CLIPPED", "TEXT_OVERFLOW", "fit_below_minimum_legible"],
+        )
+        self.assertEqual(
+            text_data["qa_metrics"]["typeset_contract_flags_revalidated"]["reason"],
+            "contract_bbox_tight_but_visual_balloon_fit_ok",
+        )
+        self.assertEqual(
+            text_data["qa_metrics"]["resolved_pre_render_flags"],
+            ["TEXT_CLIPPED", "TEXT_OVERFLOW", "fit_below_minimum_legible"],
+        )
+
+    def test_original_scale_does_not_escape_tight_white_balloon_safe_box(self):
+        """Regression: Mythic ch39 page_001_band_005 must fit before preserving OCR scale."""
+        text_data = {
+            "id": "ocr_001",
+            "text": "SIHYEOK, YOU'RE PARTICIPATING IN THE NATIONAL TEAM SELECTION TOO, RIGHT?",
+            "translated": "SIHYEOK, VOCÊ TAMBÉM ESTÁ PARTICIPANDO DA SELETIVA NACIONAL, CERTO?",
+            "bbox": [234, 68, 635, 339],
+            "source_bbox": [234, 68, 635, 339],
+            "text_pixel_bbox": [267, 175, 597, 307],
+            "balloon_bbox": [252, 160, 605, 312],
+            "bubble_mask_bbox": [234, 68, 635, 339],
+            "bubble_inner_bbox": [264, 172, 593, 300],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+            "block_profile": "white_balloon",
+            "qa_flags": ["safe_text_box_recomputed"],
+            "estilo": {"tamanho": 31, "alinhamento": "center", "fonte": "ComicNeue-Bold.ttf"},
+        }
+
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+
+        bx1, by1, bx2, by2 = resolved["block_bbox"]
+        sx1, sy1, sx2, sy2 = plan["safe_text_box"]
+        self.assertGreaterEqual(bx1, sx1)
+        self.assertGreaterEqual(by1, sy1)
+        self.assertLessEqual(bx2, sx2)
+        self.assertLessEqual(by2, sy2)
 
     def test_plan_text_layout_recomputes_edge_clipped_balloon_from_full_safe_area(self):
         text_data = {

@@ -1375,6 +1375,42 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreaterEqual(resolved_rows[-1]["font_size"], 10)
         self.assertGreaterEqual(len(resolved_rows[-1]["lines"]), 2)
 
+    def test_item_card_joint_layout_preserves_all_translated_text(self):
+        rows = [
+            {"id": "title", "translated": "ELIXIR DA PEDRA DA LUA", "text_pixel_bbox": [120, 120, 480, 160], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "title", "layout_category": "item_card"},
+            {"id": "note", "translated": "NOTA B+", "text_pixel_bbox": [160, 190, 440, 220], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "note", "layout_category": "item_card"},
+            {"id": "body", "translated": "AUMENTA PERMANENTEMENTE A AGILIDADE E A FLEXIBILIDADE", "text_pixel_bbox": [110, 270, 490, 360], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "body", "layout_category": "item_card"},
+            {"id": "footer", "translated": "ALQUIMIA AVANCADA", "text_pixel_bbox": [130, 440, 470, 475], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "footer", "layout_category": "item_card"},
+        ]
+        payloads = [row["translated"] for row in rows]
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        self.assertEqual([row["translated"] for row in rows], payloads)
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+
+    def test_item_card_title_never_renders_below_minimum(self):
+        row = {"id": "title", "translated": "ELIXIR SUPREMO DA PEDRA DA LUA", "text_pixel_bbox": [120, 120, 480, 160], "card_panel_bbox": [80, 90, 520, 250], "card_panel_id": "card:2", "card_panel_role": "title", "layout_category": "item_card", "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24}}
+
+        renderer_mod._apply_visual_item_card_row_slots([row])
+        resolved = _resolve_text_layout(row, plan_text_layout(row))
+
+        self.assertGreaterEqual(resolved["font_size"], row["minimum_legible_font_px"])
+        self.assertEqual(row["card_joint_layout_status"], "ok")
+
+    def test_item_card_rows_do_not_overlap_after_ptbr_expansion(self):
+        rows = [
+            {"id": "title", "translated": "ELIXIR DA PEDRA DA LUA", "text_pixel_bbox": [120, 120, 480, 160], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "title", "layout_category": "item_card"},
+            {"id": "note", "translated": "NOTA B+ AUMENTA PERMANENTEMENTE A AGILIDADE", "text_pixel_bbox": [160, 190, 440, 220], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "note", "layout_category": "item_card"},
+            {"id": "body", "translated": "O PRIMEIRO USO TAMBEM AUMENTA A FLEXIBILIDADE E MELHORA MUITO A EFICACIA DA POCAO", "text_pixel_bbox": [110, 270, 490, 360], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "body", "layout_category": "item_card"},
+            {"id": "footer", "translated": "ALQUIMIA AVANCADA", "text_pixel_bbox": [130, 440, 470, 475], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "footer", "layout_category": "item_card"},
+        ]
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        slots = [row["safe_text_box"] for row in rows]
+        self.assertTrue(all(previous[3] + 4 <= current[1] for previous, current in zip(slots, slots[1:])))
+
     def test_dark_bubble_visual_capacity_does_not_cap_font_to_ocr_anchor_height(self):
         text_data = {
             "id": "dark_oval_capacity",

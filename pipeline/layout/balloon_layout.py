@@ -440,6 +440,11 @@ def _can_try_connected_balloon_detection(
     layout_shape: str,
     page_image: np.ndarray | None,
 ) -> bool:
+    if (
+        str(text.get("layout_category") or "").strip().lower() == "item_card"
+        or bool(str(text.get("card_panel_id") or "").strip())
+    ):
+        return False
     if _looks_like_textured_lettering(text):
         if not _balloon_region_looks_white(page_image, balloon_bbox):
             return False
@@ -733,6 +738,16 @@ def enrich_page_layout(page_result: dict) -> dict:
         updated["layout_shape"] = layout_shape
         updated["layout_align"] = layout_align
         updated["layout_profile"] = layout_profile
+        original_mask_source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        original_flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        if (
+            text.get("card_panel_text_context")
+            or original_mask_source in {"image_dark_panel_mask", "derived_card_panel_mask"}
+            or "visual_text_only_inpaint_contract" in original_flags
+        ):
+            original_card_bbox = _normalize_bbox_list(text.get("bubble_mask_bbox") or text.get("balloon_bbox"))
+            if original_card_bbox is not None:
+                updated["_visual_card_bbox_hint"] = list(original_card_bbox)
         if isinstance(bubble_region, dict):
             for key in ("bubble_id", "bubble_mask_bbox", "bubble_inner_bbox"):
                 value = bubble_region.get(key)
@@ -973,11 +988,128 @@ def enrich_page_layout(page_result: dict) -> dict:
     _promote_shared_connected_balloon_pairs(enriched_texts)
     _separate_false_shared_white_balloons(enriched_texts, page_image)
     _merge_connected_nearby_texts(enriched_texts, page_image, width, height)
+    _assign_visual_item_card_groups(enriched_texts)
 
     updated_page = dict(page_result)
     updated_page["texts"] = enriched_texts
     updated_page.pop("_cached_image_bgr", None)
     return updated_page
+
+
+def _assign_visual_item_card_groups(texts: list[dict]) -> None:
+    """Attach a shared visual-card parent without joining OCR child text.
+
+    A status/item card commonly has a title, body, and footer in one framed
+    visual surface.  They must share inpaint/layout geometry but remain
+    independent OCR/translation records; joining them loses hierarchy and can
+    contaminate adjacent text during the same-balloon merge passes.
+    """
+    candidates: list[tuple[int, list[int]]] = []
+    for index, text in enumerate(texts):
+        if not isinstance(text, dict):
+            continue
+        source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+        flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        is_visual_card = bool(
+            text.get("card_panel_text_context")
+            or source in {"image_dark_panel_mask", "derived_card_panel_mask"}
+            or "visual_text_only_inpaint_contract" in flags
+        )
+        if not is_visual_card:
+            continue
+        bbox = _normalize_bbox_list(
+            text.get("_visual_card_bbox_hint")
+            or text.get("bubble_mask_bbox")
+            or text.get("balloon_bbox")
+            or text.get("bbox")
+        )
+        if bbox is not None:
+            candidates.append((index, bbox))
+
+    groups: list[list[tuple[int, list[int]]]] = []
+    assigned_groups: dict[str, list[tuple[int, list[int]]]] = {}
+    unassigned_candidates: list[tuple[int, list[int]]] = []
+    for candidate in candidates:
+        text = texts[candidate[0]]
+        explicit_panel_id = str(text.get("card_panel_id") or "").strip()
+        if explicit_panel_id:
+            assigned_groups.setdefault(explicit_panel_id, []).append(candidate)
+        else:
+            unassigned_candidates.append(candidate)
+    groups.extend(assigned_groups.values())
+    for candidate in unassigned_candidates:
+        index, bbox = candidate
+        matching_groups: list[int] = []
+        for group_index, group in enumerate(groups):
+            if any(_visual_card_boxes_belong_together(bbox, peer_bbox) for _, peer_bbox in group):
+                matching_groups.append(group_index)
+        if not matching_groups:
+            groups.append([candidate])
+            continue
+        target = groups[matching_groups[0]]
+        target.append(candidate)
+        for group_index in reversed(matching_groups[1:]):
+            target.extend(groups.pop(group_index))
+
+    for group in groups:
+        if not group:
+            continue
+        panel_bbox = list(group[0][1])
+        for _, bbox in group[1:]:
+            panel_bbox = _union_bbox(panel_bbox, bbox)
+        def _child_anchor(item: tuple[int, list[int]]) -> list[int]:
+            child = texts[item[0]]
+            return _normalize_bbox_list(
+                child.get("text_pixel_bbox")
+                or child.get("source_bbox")
+                or child.get("bbox")
+            ) or item[1]
+
+        ordered = sorted(group, key=lambda item: (_child_anchor(item)[1], _child_anchor(item)[0], item[0]))
+        parent_anchor = str(texts[ordered[0][0]].get("trace_id") or texts[ordered[0][0]].get("id") or ordered[0][0])
+        explicit_ids = {
+            str(texts[text_index].get("card_panel_id") or "").strip()
+            for text_index, _bbox in ordered
+            if str(texts[text_index].get("card_panel_id") or "").strip()
+        }
+        panel_id = next(iter(explicit_ids)) if len(explicit_ids) == 1 else f"item_card:{parent_anchor}"
+        child_heights = [max(1, _child_anchor(item)[3] - _child_anchor(item)[1]) for item in ordered]
+        median_height = float(np.median(child_heights)) if child_heights else 1.0
+        for child_index, (text_index, _bbox) in enumerate(ordered):
+            text = texts[text_index]
+            anchor = _child_anchor((text_index, _bbox))
+            relative_bottom = (anchor[3] - panel_bbox[1]) / float(max(1, panel_bbox[3] - panel_bbox[1]))
+            if child_index == 0:
+                role = "title"
+            elif child_index == len(ordered) - 1 and len(ordered) >= 4:
+                role = "footer"
+            elif child_index == 1 and len(ordered) >= 4:
+                role = "note"
+            elif child_index == len(ordered) - 1 and relative_bottom >= 0.78 and child_heights[child_index] <= median_height:
+                role = "footer"
+            elif child_heights[child_index] <= median_height * 0.72 and child_index < len(ordered) - 1:
+                role = "note"
+            else:
+                role = "body"
+            text["layout_category"] = "item_card"
+            text["card_panel_id"] = panel_id
+            text["card_panel_bbox"] = list(panel_bbox)
+            text["card_panel_child_index"] = child_index
+            text["card_panel_role"] = role
+            text["card_panel_text_context"] = True
+
+
+def _visual_card_boxes_belong_together(a: list[int], b: list[int]) -> bool:
+    """Conservative adjacency check for child text regions in one card."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    overlap_x = max(0, min(ax2, bx2) - max(ax1, bx1))
+    min_width = max(1, min(ax2 - ax1, bx2 - bx1))
+    if overlap_x / float(min_width) < 0.55:
+        return False
+    vertical_gap = max(0, max(ay1, by1) - min(ay2, by2))
+    max_height = max(1, ay2 - ay1, by2 - by1)
+    return vertical_gap <= max(28, int(round(max_height * 0.28)))
 
 
 def _merge_connected_nearby_texts(
