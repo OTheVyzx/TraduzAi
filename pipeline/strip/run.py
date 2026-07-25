@@ -168,6 +168,10 @@ def _reconcile_overlapping_band_ocr_fragments_before_translation(
             if bbox[1] <= 8 and detector_support <= 0.0:
                 record["route_action"] = "review_required"
                 record["route_reason"] = "cross_band_unsupported_edge_fragment"
+                record["skip_processing"] = True
+                record["render_completed"] = False
+                record["render_skip_reason"] = "cross_band_unsupported_edge_fragment"
+                record["_cross_band_quarantined"] = True
                 flags = [str(flag) for flag in record.get("qa_flags") or [] if str(flag)]
                 if "cross_band_unsupported_edge_fragment" not in flags:
                     flags.append("cross_band_unsupported_edge_fragment")
@@ -185,6 +189,26 @@ def _reconcile_overlapping_band_ocr_fragments_before_translation(
                 - (1.0 if bbox[1] <= 8 or bbox[3] >= band_height - 8 else 0.0) * 3.0
             )
             entries.append((band_index, text_index, record, bbox, global_bbox, source, owner_score))
+
+    for page in precomputed_pages.values():
+        if not isinstance(page, dict):
+            continue
+        quarantined = [
+            copy.deepcopy(text)
+            for text in list(page.get("texts") or [])
+            if isinstance(text, dict) and text.get("_cross_band_quarantined")
+        ]
+        if not quarantined:
+            continue
+        for text in quarantined:
+            text.pop("_cross_band_quarantined", None)
+        page.setdefault("_cross_band_quarantined_texts", []).extend(quarantined)
+        page["_cross_band_unsupported_edge_fragment_quarantined"] = True
+        page["texts"] = [
+            text
+            for text in list(page.get("texts") or [])
+            if not (isinstance(text, dict) and text.get("_cross_band_quarantined"))
+        ]
 
     to_remove: dict[int, set[int]] = {}
     reconciled = 0
@@ -5422,9 +5446,14 @@ def run_chapter(
             index
             for index, page in completed_ocr_pages.items()
             if any(
-                isinstance(text, dict) and text.get("cross_band_fragment_trace_ids")
+                isinstance(text, dict)
+                and (
+                    text.get("cross_band_fragment_trace_ids")
+                    or "cross_band_unsupported_edge_fragment" in (text.get("qa_flags") or [])
+                )
                 for text in list(page.get("texts") or [])
             )
+            or bool(page.get("_cross_band_unsupported_edge_fragment_quarantined"))
         ]
         for index in rerun_cross_band_owner_indexes:
             band = bands[index]

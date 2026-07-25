@@ -4209,6 +4209,84 @@ def _annotate_dark_panel_recovery(
         item.pop("bubbleMaskError", None)
 
 
+def _candidate_crop_reocr_allows_colored_visual_card_line(
+    image: np.ndarray,
+    bbox: list[int],
+    *,
+    confidence: float,
+) -> bool:
+    """Aceita somente linhas largas com glifos sobre card colorido uniforme."""
+    if not isinstance(image, np.ndarray) or image.ndim < 2 or float(confidence) < 0.72:
+        return False
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    box_w, box_h = x2 - x1, y2 - y1
+    if box_w < 150 or box_h < 18 or box_h > 110 or box_w / float(max(1, box_h)) < 2.4:
+        return False
+    patch = image[y1:y2, x1:x2]
+    if patch.size == 0:
+        return False
+    try:
+        hsv = cv2.cvtColor(patch.astype(np.uint8, copy=False), cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(patch.astype(np.uint8, copy=False), cv2.COLOR_BGR2GRAY)
+    except Exception:
+        return False
+    if float(np.median(hsv[:, :, 1])) < 30.0 or float(np.std(gray)) > 48.0:
+        return False
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.6, sigmaY=1.6)
+    contrast = np.maximum(cv2.subtract(gray, blur), cv2.subtract(blur, gray))
+    glyph_mask = (contrast >= 12).astype(np.uint8) * 255
+    glyph_mask = cv2.morphologyEx(glyph_mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+    labels, _, stats, _ = cv2.connectedComponentsWithStats(glyph_mask, connectivity=8)
+    component_count = 0
+    component_pixels = 0
+    for label in range(1, labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        component_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if area < 3 or area > max(500, int(gray.size * 0.18)):
+            continue
+        if component_w < 2 or component_h < 2 or component_h > max(42, int(gray.shape[0] * 0.92)):
+            continue
+        if max(component_w, component_h) / float(max(1, min(component_w, component_h))) > 16.0:
+            continue
+        component_count += 1
+        component_pixels += area
+    return component_count >= 5 and component_pixels >= max(18, int(gray.size * 0.0025))
+
+
+def _annotate_colored_visual_card_recovery(
+    texts: list[dict],
+    blocks: list[dict],
+    *,
+    panel_bbox: list[int],
+    band_id: str,
+) -> None:
+    panel_id = f"item_card:{band_id}:candidate"
+    for item in list(texts) + list(blocks):
+        if not isinstance(item, dict):
+            continue
+        item["layout_category"] = "item_card"
+        item["card_panel_id"] = panel_id
+        item["card_panel_bbox"] = list(panel_bbox)
+        item["card_panel_text_context"] = True
+        item["_visual_card_bbox_hint"] = list(panel_bbox)
+        item["layout_profile"] = "colored_status_panel"
+        item["block_profile"] = "colored_status_panel"
+        item["background_type"] = "colored_status_panel"
+        flags = list(item.get("qa_flags") or [])
+        for flag in (
+            "candidate_crop_colored_visual_card_reocr",
+            "visual_card_ocr_recall",
+            "visual_text_only_inpaint_contract",
+        ):
+            if flag not in flags:
+                flags.append(flag)
+        item["qa_flags"] = flags
+
+
 def _recover_empty_ocr_with_candidate_crops(
     band: Band,
     *,
@@ -4295,6 +4373,11 @@ def _recover_empty_ocr_with_candidate_crops(
         allow_dark_bubble_probe = False
         allow_sparse_dark_bubble_reocr = False
         high_conf_dark_light_text = False
+        allow_colored_visual_card_line = _candidate_crop_reocr_allows_colored_visual_card_line(
+            image,
+            [x1, y1, x2, y2],
+            confidence=confidence,
+        )
         if _inner_dark_text_evidence is not None:
             evidence = _inner_dark_text_evidence(image, BBox(x1, y1, x2, y2))
             evidence_is_strong = _candidate_crop_reocr_evidence_is_strong(evidence)
@@ -4328,6 +4411,7 @@ def _recover_empty_ocr_with_candidate_crops(
                 and not allow_dark_bubble_probe
                 and not allow_sparse_dark_bubble_reocr
                 and not high_conf_dark_light_text
+                and not allow_colored_visual_card_line
             ):
                 continue
             if (
@@ -4390,6 +4474,30 @@ def _recover_empty_ocr_with_candidate_crops(
         )
         has_rect_panel_frame = rect_panel_bbox is not None
         has_dark_oval_bubble = dark_oval_bbox is not None
+        if allow_colored_visual_card_line:
+            direct_crop_result = _run_direct_paddle_candidate_crop_reocr(
+                crop,
+                idioma_origem=str(page_dict.get("idioma_origem") or page_dict.get("source_language") or "en"),
+            )
+            if _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result):
+                direct_crop_result = {"texts": [], "_vision_blocks": [], "blocks": []}
+            direct_texts, direct_blocks = _map_crop_ocr_page_to_band(
+                direct_crop_result,
+                band_page=page_dict,
+                band_id=band_id,
+                balloon_local_bbox=[x1, y1, x2, y2],
+                crop_left=crop_left,
+                crop_top=crop_top,
+                candidate_index=candidate_index,
+            )
+            if direct_texts:
+                _annotate_colored_visual_card_recovery(
+                    direct_texts,
+                    direct_blocks,
+                    panel_bbox=[x1, y1, x2, y2],
+                    band_id=band_id,
+                )
+                texts, blocks = direct_texts, direct_blocks
         if (
             _dark_bubble_evidence_supports_lobe_reocr(
                 evidence,
@@ -7705,6 +7813,7 @@ def _run_typeset_stage(
     typesetter,
     translated_page: dict,
 ) -> BandImageStageOutput:
+    _propagate_unresolved_visual_card_inpaint_flags(translated_page)
     compat_text_fields = _legacy_decision_fields_by_record(translated_page.get("texts"))
     page_for_typeset = _without_legacy_decision_fields_for_stage(translated_page)
     _normalize_dark_bubble_contracts_for_stage(page_for_typeset, cleaned_slice)
@@ -7718,6 +7827,34 @@ def _run_typeset_stage(
         "typeset",
         rendered,
     )
+
+
+def _propagate_unresolved_visual_card_inpaint_flags(page: dict) -> None:
+    """Expose an unresolved pure-card decision before automatic typesetting."""
+    if not isinstance(page, dict) or bool(page.get("_strip_used_real_inpaint")):
+        return
+    decision_flags = {
+        str(flag).strip()
+        for flag in page.get("_strip_inpaint_decision_flags") or []
+        if str(flag).strip()
+    }
+    unsafe_flags = decision_flags.intersection(
+        {"real_inpaint_skipped_unsafe_mask", "weak_text_residual_after_inpaint"}
+    )
+    if not unsafe_flags:
+        return
+    for text in page.get("texts") or []:
+        if not isinstance(text, dict):
+            continue
+        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        is_visual_card = bool(
+            "visual_text_only_inpaint_contract" in flags
+            or "visual_card_ocr_recall" in flags
+            or str(text.get("layout_category") or "").strip().lower() == "item_card"
+        )
+        if not is_visual_card:
+            continue
+        text["qa_flags"] = list(dict.fromkeys([*(text.get("qa_flags") or []), *sorted(unsafe_flags)]))
 
 
 def _apply_atomic_inpaint_render_rollback(

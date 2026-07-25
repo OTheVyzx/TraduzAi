@@ -4535,13 +4535,25 @@ def _visual_text_only_card_can_use_real_inpaint(text: dict | None) -> bool:
         "missing_real_bubble_mask",
     }
     fallback_mask = source == "bbox_fallback" and error == "missing_real_bubble_mask"
-    if not (rejected_derived_mask or fallback_mask):
+    current_dark_panel_mask = source in {
+        "image_dark_panel_mask",
+        "image_dark_bubble_mask",
+        "derived_card_panel_mask",
+    }
+    if not (rejected_derived_mask or fallback_mask or current_dark_panel_mask):
         return False
     if not (text.get("line_polygons") or text.get("text_pixel_bbox")):
         return False
     if not _has_fast_fillable_text_mask_evidence(text):
         return False
     if text.get("card_panel_text_context"):
+        return True
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("render_profile") or "").strip().lower(),
+    }
+    if any(profile == "colored_status_panel" or profile.startswith("colored_status_panel_") for profile in profiles):
         return True
     # Translucent-balloon routing is deliberately excluded from the local
     # dark-panel filler.  It must not also exclude a saturated item card from
@@ -4551,6 +4563,44 @@ def _visual_text_only_card_can_use_real_inpaint(text: dict | None) -> bool:
         return False
     luma, chroma = background
     return bool(luma < 135.0 or chroma > 45.0)
+
+
+def _band_edge_rejected_white_crop_can_use_real_inpaint(text: dict | None) -> bool:
+    if not isinstance(text, dict):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    error = str(text.get("bubble_mask_error") or text.get("bubbleMaskError") or "").strip().lower()
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if source != "derived_white_crop_rejected" or error not in {"", "rejected_rectangular_crop"}:
+        return False
+    if "band_edge_clipped_text_mask" not in flags:
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox")):
+        return False
+    return _has_fast_fillable_text_mask_evidence(text)
+
+
+def _visual_image_panel_row_can_use_aggregate_inpaint(text: dict | None) -> bool:
+    """Whether a card row may rely on a safely contained aggregate panel mask."""
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "visual_text_only_inpaint_contract" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "image_dark_bubble_mask"}:
+        return False
+    if not (text.get("line_polygons") or text.get("text_pixel_bbox")):
+        return False
+    profiles = {
+        str(text.get("layout_profile") or "").strip().lower(),
+        str(text.get("block_profile") or "").strip().lower(),
+        str(text.get("render_profile") or "").strip().lower(),
+    }
+    return bool(
+        text.get("card_panel_text_context")
+        or any(profile == "colored_status_panel" or profile.startswith("colored_status_panel_") for profile in profiles)
+    )
 
 
 def _text_has_rejected_bubble_mask_source(text: dict) -> bool:
@@ -7425,6 +7475,16 @@ def _text_geometry_mask(width: int, height: int, text: dict) -> np.ndarray | Non
 def _strict_text_geometry_mask(width: int, height: int, text: dict) -> np.ndarray | None:
     mask = np.zeros((height, width), dtype=np.uint8)
     has_polygon = False
+    flags = {
+        str(flag).strip()
+        for flag in (text.get("qa_flags") if isinstance(text, dict) else []) or []
+        if str(flag).strip()
+    }
+    permits_fragment_bbox_rebuild = bool(
+        "fast_fill_no_glyph_evidence" in flags
+        or "dark_connected_lobe_mask_rebuilt_from_glyphs" in flags
+        or "dark_bubble_visual_glyph_mask_replaced_geometry" in flags
+    )
     raw_polygons = text.get("line_polygons") if isinstance(text, dict) else None
     if isinstance(raw_polygons, list):
         for polygon in raw_polygons:
@@ -7448,11 +7508,11 @@ def _strict_text_geometry_mask(width: int, height: int, text: dict) -> np.ndarra
         or _normalize_bbox(text.get("_source_text_anchor_bbox"), width, height)
         or _normalize_bbox(text.get("source_text_mask_bbox"), width, height)
         or _normalize_bbox(text.get("_source_text_mask_bbox"), width, height)
-        or _trusted_text_bbox_for_contract(text, width, height)
         or _normalize_bbox(text.get("text_pixel_bbox"), width, height)
+        or _normalize_bbox(text.get("ocr_text_bbox"), width, height)
+        or (_trusted_text_bbox_for_contract(text, width, height) if permits_fragment_bbox_rebuild else None)
     )
     if has_polygon and bbox is not None and isinstance(text, dict):
-        flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
         no_glyph_or_fragmented = bool(
             "fast_fill_no_glyph_evidence" in flags
             or "dark_connected_lobe_mask_rebuilt_from_glyphs" in flags
@@ -7781,6 +7841,12 @@ def _auto_inpaint_unsafe_reason(item: dict | None) -> str:
             for flag in flags
             if flag not in {"mask_outside_balloon", "mask_outside_balloon_critical"}
         }
+    if _visual_text_only_card_can_use_real_inpaint(item):
+        flags = {
+            flag
+            for flag in flags
+            if flag not in {"mask_outside_balloon", "mask_outside_balloon_critical"}
+        }
     if _translator_note_has_current_text_mask_evidence(item):
         flags = {
             flag
@@ -7791,6 +7857,8 @@ def _auto_inpaint_unsafe_reason(item: dict | None) -> str:
     if blocked:
         return blocked[0]
     if not isinstance(item, dict):
+        return ""
+    if _band_edge_rejected_white_crop_can_use_real_inpaint(item):
         return ""
     source = str(item.get("bubble_mask_source") or item.get("bubbleMaskSource") or "").strip().lower()
     error = str(item.get("bubble_mask_error") or item.get("bubbleMaskError") or "").strip().lower()
@@ -8138,14 +8206,45 @@ def _rejected_card_action_mask_allows_real_inpaint(
     action_pixels = int(np.count_nonzero(action))
     if action_pixels <= 0:
         return False
-    if action_pixels / float(max(1, int(shape[0]) * int(shape[1]))) > 0.12:
-        return False
     blocks = [block for block in (active_blocks or []) if isinstance(block, dict)]
     height, width = shape
     texts = [text for text in list(ocr_page.get("texts") or []) if isinstance(text, dict)]
     candidates = blocks or texts
     if not candidates:
         return False
+    action_ratio = action_pixels / float(max(1, int(shape[0]) * int(shape[1])))
+    if action_ratio > 0.12:
+        all_glyph_rows = all(_visual_text_only_card_can_use_real_inpaint(candidate) for candidate in candidates)
+        aggregate_panel_rows = [
+            candidate for candidate in candidates if _visual_image_panel_row_can_use_aggregate_inpaint(candidate)
+        ]
+        multi_row_visual_card = bool(
+            len(candidates) >= 2
+            and action_ratio <= 0.32
+            and (
+                all_glyph_rows
+                or (
+                    len(aggregate_panel_rows) == len(candidates)
+                    and any(_visual_text_only_card_can_use_real_inpaint(candidate) for candidate in candidates)
+                )
+            )
+        )
+        if not multi_row_visual_card:
+            return False
+        if not all_glyph_rows:
+            panel_union = np.zeros(shape, dtype=np.uint8)
+            for candidate in aggregate_panel_rows:
+                panel_bbox = _normalize_bbox(
+                    candidate.get("bubble_mask_bbox") or candidate.get("balloon_bbox"),
+                    width,
+                    height,
+                )
+                if panel_bbox is None:
+                    return False
+                panel_union = np.maximum(panel_union, _mask_from_bbox(width, height, panel_bbox))
+            outside_ratio = int(np.count_nonzero((action > 0) & (panel_union == 0))) / float(max(1, action_pixels))
+            if outside_ratio > 0.08:
+                return False
     matched = 0
     for block in candidates:
         text = _find_mask_evidence_text_for_block(block, texts, width, height)
@@ -8161,7 +8260,12 @@ def _rejected_card_action_mask_allows_real_inpaint(
             or merged.get("bubbleMaskError")
             or ""
         ).strip().lower()
-        if not _visual_text_only_card_can_use_real_inpaint(merged) and (
+        trusted_visual_action = bool(
+            _visual_text_only_card_can_use_real_inpaint(merged)
+            or _visual_image_panel_row_can_use_aggregate_inpaint(merged)
+            or _band_edge_rejected_white_crop_can_use_real_inpaint(merged)
+        )
+        if not trusted_visual_action and (
             source not in _REJECTED_BUBBLE_MASK_SOURCES or error != "derived_mask_not_anchored_to_text"
         ):
             return False
@@ -8173,6 +8277,7 @@ def _rejected_card_action_mask_allows_real_inpaint(
             merged.get("card_panel_text_context")
             or _is_dark_or_colored_card_text(merged)
             or has_text_mask_evidence
+            or _visual_image_panel_row_can_use_aggregate_inpaint(merged)
         ):
             return False
         if _text_suppressed_for_inpaint(merged) or _route_action_blocks_inpaint(merged):
@@ -8191,6 +8296,58 @@ def _rejected_card_action_mask_allows_real_inpaint(
             return False
         matched += 1
     return matched > 0
+
+
+def _visual_card_action_prefers_local_inpaint(
+    ocr_page: dict,
+    active_blocks: list[dict] | None,
+    action_mask: np.ndarray | None,
+    shape: tuple[int, int],
+) -> bool:
+    """Use local inpaint when LaMa would reconstruct repeated card glyphs."""
+    blocks = [block for block in (active_blocks or []) if isinstance(block, dict)]
+    texts = [text for text in list(ocr_page.get("texts") or []) if isinstance(text, dict)]
+    candidates = blocks or texts
+    action = _coerce_mask_for_shape(action_mask, shape)
+    action_pixels = int(np.count_nonzero(action))
+    action_ratio = action_pixels / float(max(1, int(shape[0]) * int(shape[1])))
+    allowed_sources = {
+        "image_dark_panel_mask",
+        "image_dark_bubble_mask",
+        "derived_card_panel_mask",
+        "derived_white_crop_rejected",
+    }
+    visual_rows: list[dict] = []
+    has_card_signal = False
+    fast_evidence_rows = 0
+    for candidate in candidates:
+        flags = {str(flag).strip().lower() for flag in candidate.get("qa_flags") or [] if str(flag).strip()}
+        source = str(candidate.get("bubble_mask_source") or candidate.get("bubbleMaskSource") or "").strip().lower()
+        if (
+            "visual_text_only_inpaint_contract" not in flags
+            or source not in allowed_sources
+            or not (candidate.get("line_polygons") or candidate.get("text_pixel_bbox"))
+        ):
+            return False
+        if _has_fast_fillable_text_mask_evidence(candidate):
+            fast_evidence_rows += 1
+        has_card_signal = bool(
+            has_card_signal
+            or "visual_card_ocr_recall" in flags
+            or "dark_panel_full_bbox_selected" in flags
+            or source == "derived_card_panel_mask"
+            or str(candidate.get("block_profile") or candidate.get("layout_profile") or "").strip().lower()
+            in {"colored_status_panel", "colored_status_panel_row", "status_panel", "card"}
+        )
+        visual_rows.append(candidate)
+    return bool(
+        len(visual_rows) >= 2
+        and len(visual_rows) == len(candidates)
+        and fast_evidence_rows >= max(2, len(visual_rows) - 2)
+        and has_card_signal
+        and 0 < action_pixels
+        and action_ratio <= 0.32
+    )
 
 
 def _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page: dict, active_blocks: list[dict] | None) -> None:
@@ -9496,6 +9653,186 @@ def _build_light_residual_retry_mask(
     return retry
 
 
+def _build_visual_card_residual_retry_mask(
+    original_rgb: np.ndarray,
+    cleaned_rgb: np.ndarray,
+    base_mask: np.ndarray | None,
+    texts: list[dict],
+    shape: tuple[int, int],
+) -> np.ndarray | None:
+    """Select only text-like remnants inside an already approved card mask."""
+    if original_rgb.shape[:2] != shape or cleaned_rgb.shape[:2] != shape:
+        return None
+    base = _coerce_mask_for_shape(base_mask, shape)
+    base_pixels = int(np.count_nonzero(base))
+    if base_pixels <= 0:
+        return None
+    visual_rows: list[dict] = []
+    for text in texts:
+        if not isinstance(text, dict) or _text_suppressed_for_inpaint(text) or _route_action_blocks_inpaint(text):
+            continue
+        flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+        source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+        is_visual_row = bool(
+            "visual_text_only_inpaint_contract" in flags
+            and source
+            in {
+                "image_dark_panel_mask",
+                "image_dark_bubble_mask",
+                "derived_card_panel_mask",
+                "derived_white_crop_rejected",
+            }
+            and (
+                profile == "colored_status_panel"
+                or profile.startswith("colored_status_panel_")
+                or "visual_card_ocr_recall" in flags
+                or source in {"derived_card_panel_mask", "derived_white_crop_rejected"}
+            )
+        )
+        if not is_visual_row:
+            return None
+        visual_rows.append(text)
+    if len(visual_rows) < 2:
+        return None
+
+    before_gray = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    after_gray = cv2.cvtColor(cleaned_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    before_contrast = np.abs(_light_residual_contrast(before_gray))
+    after_contrast = np.abs(_light_residual_contrast(after_gray))
+    candidate = (
+        (base > 0)
+        & (before_contrast >= 8.0)
+        & (after_contrast >= 5.0)
+    ).astype(np.uint8)
+    if not np.any(candidate):
+        return None
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+    remnants = np.zeros(shape, dtype=np.uint8)
+    height, width = shape
+    for label in range(1, labels_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if 2 <= area <= 3200 and comp_w <= max(48, int(width * 0.55)) and comp_h <= max(20, int(height * 0.24)):
+            remnants[labels == label] = 255
+    if not np.any(remnants):
+        return None
+    retry = cv2.dilate(remnants, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
+    retry = cv2.bitwise_and(retry, base)
+    retry_pixels = int(np.count_nonzero(retry))
+    return retry if 0 < retry_pixels <= int(base_pixels * 0.55) else None
+
+
+def _build_visual_card_local_inpaint_mask(
+    image_rgb: np.ndarray,
+    base_mask: np.ndarray | None,
+    texts: list[dict],
+    shape: tuple[int, int],
+) -> np.ndarray | None:
+    """Build a glyph-granular Telea mask inside an approved visual card action."""
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.shape[:2] != shape:
+        return None
+    base = _coerce_mask_for_shape(base_mask, shape)
+    base_pixels = int(np.count_nonzero(base))
+    if base_pixels <= 0:
+        return None
+
+    raw_union = np.zeros(shape, dtype=np.uint8)
+    eligible_rows = 0
+    for text in texts:
+        if not isinstance(text, dict) or _text_suppressed_for_inpaint(text) or _route_action_blocks_inpaint(text):
+            continue
+        flags = {str(flag).strip().lower() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+        source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+        if "visual_text_only_inpaint_contract" not in flags or source not in {
+            "image_dark_panel_mask",
+            "image_dark_bubble_mask",
+            "derived_card_panel_mask",
+            "derived_white_crop_rejected",
+        }:
+            return None
+        eligible_rows += 1
+        try:
+            raw = build_raw_text_mask_from_image(dict(text), image_rgb, image_rgb.shape)
+        except Exception:
+            raw = None
+        if isinstance(raw, np.ndarray) and np.any(raw):
+            raw_union = np.maximum(raw_union, _coerce_mask_for_shape(raw, shape))
+
+    if eligible_rows < 2 or not np.any(raw_union):
+        return None
+    local = cv2.dilate(
+        raw_union.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    local = cv2.bitwise_and(local, base)
+    local_pixels = int(np.count_nonzero(local))
+    if local_pixels <= 0 or local_pixels > int(base_pixels * 0.65):
+        return None
+    return local
+
+
+def _apply_visual_card_residual_inpaint(image_rgb: np.ndarray, retry_mask: np.ndarray | None) -> np.ndarray:
+    """Refine card ghosts with local Telea inpaint, strictly inside the mask."""
+    mask = _coerce_mask_for_shape(retry_mask, image_rgb.shape[:2])
+    if not np.any(mask):
+        return image_rgb.copy()
+    repaired = cv2.inpaint(image_rgb.astype(np.uint8), mask, 3.0, cv2.INPAINT_TELEA)
+    repaired[mask == 0] = image_rgb[mask == 0]
+    return repaired
+
+
+def _visual_card_prefers_blurred_model_guide(
+    image_rgb: np.ndarray,
+    action_mask: np.ndarray | None,
+) -> bool:
+    """Select a smooth model guide only for broad, light card surfaces."""
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.ndim != 3:
+        return False
+    mask = _coerce_mask_for_shape(action_mask, image_rgb.shape[:2]) > 0
+    mask_pixels = int(np.count_nonzero(mask))
+    if mask_pixels < 512:
+        return False
+    ring = cv2.dilate(
+        mask.astype(np.uint8) * 255,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21)),
+        iterations=1,
+    ) > 0
+    ring &= ~mask
+    if int(np.count_nonzero(ring)) < 128:
+        return False
+    ring_luma = cv2.cvtColor(image_rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY)[ring]
+    return bool(float(np.median(ring_luma)) >= 165.0)
+
+
+def _apply_visual_card_guided_model_inpaint(
+    image_rgb: np.ndarray,
+    action_mask: np.ndarray | None,
+    inpainter,
+) -> np.ndarray:
+    """Run the configured model on a low-frequency guide and clamp exactly."""
+    mask = _coerce_mask_for_shape(action_mask, image_rgb.shape[:2])
+    if not np.any(mask):
+        return image_rgb.copy()
+    min_side = max(3, min(image_rgb.shape[:2]))
+    kernel_size = min(81, max(21, (min_side // 5) | 1))
+    if kernel_size % 2 == 0:
+        kernel_size -= 1
+    guide = cv2.GaussianBlur(image_rgb.astype(np.uint8), (kernel_size, kernel_size), 0)
+    repaired = inpainter.inpaint(guide, mask, batch_size=4, force_no_tiling=True)
+    repaired = np.asarray(repaired, dtype=np.uint8)
+    distance = cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    alpha = np.clip(distance / 12.0, 0.0, 1.0).astype(np.float32)
+    repaired = np.rint(
+        repaired.astype(np.float32) * alpha[:, :, None]
+        + image_rgb.astype(np.float32) * (1.0 - alpha[:, :, None])
+    ).astype(np.uint8)
+    repaired[mask == 0] = image_rgb[mask == 0]
+    return repaired
+
+
 def _build_dark_residual_retry_mask(
     base_mask: np.ndarray | None,
     limit_mask: np.ndarray | None,
@@ -9830,6 +10167,8 @@ def _record_inpaint_decision(
         ],
         "translucent_balloon_mask_metrics": translucent_mask_metrics,
         "used_real_inpaint": bool(used_real_inpaint or ocr_page.get("_strip_used_real_inpaint")),
+        "real_inpaint_engine": str(ocr_page.get("_strip_real_inpaint_engine") or ""),
+        "real_inpaint_mask_pixels": int(ocr_page.get("_strip_real_inpaint_mask_pixels") or 0),
         "used_post_cleanup": bool(ocr_page.get("_strip_used_post_cleanup")),
         "post_cleanup_skipped_reason": str(ocr_page.get("_strip_post_cleanup_skipped_reason") or ""),
         "remaining_inpaint_blocks": len(vision_blocks),
@@ -10180,6 +10519,8 @@ def _write_strip_inpaint_debug(
         expanded_mask=expanded_mask,
         effective_limit_mask=effective_limit_mask,
     )
+    local_action_mask = ocr_page.pop("_strip_real_inpaint_action_mask_debug", None)
+    pre_retry_rgb = ocr_page.pop("_strip_visual_card_pre_retry_debug", None)
     if debug_dir is None:
         return
     _save_rgb(debug_dir / "00_band_original.jpg", original_rgb)
@@ -10188,6 +10529,10 @@ def _write_strip_inpaint_debug(
     _save_mask(debug_dir / "02_inpaint_mask_raw.png", raw_mask)
     _save_mask(debug_dir / "03_inpaint_mask_expanded.png", expanded_mask)
     _save_mask(debug_dir / "04_real_inpaint_mask_used.png", expanded_mask if used_real_inpaint else np.zeros(raw_mask.shape, dtype=np.uint8))
+    if isinstance(local_action_mask, np.ndarray):
+        _save_mask(debug_dir / "04_visual_card_local_action_mask.png", local_action_mask)
+    if isinstance(pre_retry_rgb, np.ndarray):
+        _save_rgb(debug_dir / "04_visual_card_pre_retry.jpg", pre_retry_rgb)
     _save_rgb(debug_dir / "05_inpaint_mask_overlay.jpg", _mask_overlay(working_rgb, expanded_mask, vision_blocks))
     _save_mask(debug_dir / "07_effective_inpaint_limit_mask.png", effective_limit_mask)
     if cleaned_rgb is not None:
@@ -10274,6 +10619,8 @@ def _write_strip_inpaint_debug(
         "raw_mask_pixels": int(np.count_nonzero(raw_mask)),
         "expanded_mask_pixels": int(np.count_nonzero(expanded_mask)),
         "used_real_inpaint": bool(used_real_inpaint),
+        "real_inpaint_engine": str(ocr_page.get("_strip_real_inpaint_engine") or ""),
+        "real_inpaint_mask_pixels": int(ocr_page.get("_strip_real_inpaint_mask_pixels") or 0),
         "fast_fill_without_raw_mask": bool(ocr_page.get("_strip_fast_fill_without_raw_mask")),
         "used_fast_solid_fill": bool(ocr_page.get("_strip_used_fast_solid_fill")),
         "fast_solid_balloon_count": int(ocr_page.get("_strip_fast_solid_balloon_count") or 0),
@@ -11702,7 +12049,50 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     inpaint_payload["_precomputed_inpaint_mask"] = expanded_mask
     inpainter = _get_inpainter("quality")
     started = time.perf_counter()
-    cleaned = _apply_inpainting_round(working_rgb, inpaint_payload, inpainter)
+    visual_card_local_inpaint = bool(
+        _visual_card_action_prefers_local_inpaint(
+            ocr_page,
+            vision_blocks,
+            expanded_mask,
+            working_rgb.shape[:2],
+        )
+        or _visual_card_action_prefers_local_inpaint(
+            ocr_page,
+            None,
+            expanded_mask,
+            working_rgb.shape[:2],
+        )
+    )
+    visual_card_action_mask: np.ndarray | None = None
+    if visual_card_local_inpaint:
+        local_visual_mask = _build_visual_card_local_inpaint_mask(
+            working_rgb,
+            expanded_mask,
+            vision_blocks or local_texts,
+            working_rgb.shape[:2],
+        )
+        if local_visual_mask is None and vision_blocks:
+            local_visual_mask = _build_visual_card_local_inpaint_mask(
+                working_rgb,
+                expanded_mask,
+                local_texts,
+                working_rgb.shape[:2],
+            )
+        use_blurred_model_guide = _visual_card_prefers_blurred_model_guide(working_rgb, expanded_mask)
+        action_mask = expanded_mask if use_blurred_model_guide else (
+            local_visual_mask if local_visual_mask is not None else expanded_mask
+        )
+        visual_card_action_mask = action_mask
+        if use_blurred_model_guide:
+            cleaned = _apply_visual_card_guided_model_inpaint(working_rgb, action_mask, inpainter)
+            ocr_page["_strip_real_inpaint_engine"] = "aot_blurred_guide_visual_card"
+        else:
+            cleaned = _apply_visual_card_residual_inpaint(working_rgb, action_mask)
+            ocr_page["_strip_real_inpaint_engine"] = "opencv_telea_visual_card"
+        ocr_page["_strip_real_inpaint_mask_pixels"] = int(np.count_nonzero(action_mask))
+        ocr_page["_strip_real_inpaint_action_mask_debug"] = action_mask.copy()
+    else:
+        cleaned = _apply_inpainting_round(working_rgb, inpaint_payload, inpainter)
     cleaned, raw_limit_pixels, raw_changed_outside = _clamp_image_to_limit_mask(
         working_rgb,
         cleaned,
@@ -11734,7 +12124,13 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         working_rgb.shape[:2],
     ):
         _clear_stale_unsafe_inpaint_flags_for_current_action(ocr_page, vision_blocks)
-    unsafe_after_real_inpaint = _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page, vision_blocks)
+    # Reaching this branch with a visual-card action means the conservative
+    # per-row contract already approved and clamped the exact mask.  A stale
+    # pre-model unsafe flag must not discard the real inpaint afterwards.
+    unsafe_after_real_inpaint = bool(
+        visual_card_action_mask is None
+        and _ocr_page_has_unsafe_auto_inpaint_evidence(ocr_page, vision_blocks)
+    )
     if unsafe_after_real_inpaint and (
         _rejected_card_action_mask_allows_real_inpaint(
             ocr_page,
@@ -11768,15 +12164,35 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             expanded_mask=expanded_mask,
         )
         return _finish_visual_item_card_cleanup(cleaned)
+    if visual_card_action_mask is not None:
+        ocr_page["_strip_used_real_inpaint"] = True
+        ocr_page["_strip_used_post_cleanup"] = False
+        ocr_page["_strip_post_cleanup_skipped_reason"] = "visual_card_local_inpaint_complete"
+        ocr_page["_strip_visual_card_pre_retry_debug"] = cleaned.copy()
+        _write_strip_inpaint_debug(
+            ocr_page,
+            original_rgb=band_rgb,
+            working_rgb=working_rgb,
+            cleaned_rgb=cleaned,
+            vision_blocks=vision_blocks,
+            used_real_inpaint=True,
+            fast_fill_mask=fast_fill_mask,
+            raw_mask=raw_mask,
+            expanded_mask=expanded_mask,
+        )
+        return cleaned.copy()
     ocr_page["_strip_used_real_inpaint"] = True
+    post_cleanup_limit_mask = visual_card_action_mask if visual_card_action_mask is not None else expanded_mask
     cleaned, cleanup_stats = _apply_post_inpaint_cleanup_timed(
         band_rgb,
         cleaned,
         list(ocr_page.get("texts", [])),
-        limit_mask=expanded_mask,
+        limit_mask=post_cleanup_limit_mask,
     )
     ocr_page.update(cleanup_stats)
     ocr_page["_strip_used_post_cleanup"] = True
+    if visual_card_action_mask is not None:
+        ocr_page["_strip_visual_card_pre_retry_debug"] = cleaned.copy()
     texts = local_texts
     has_translucent_balloon_profile = any(_is_translucent_balloon_profile(text) for text in texts)
     if has_translucent_balloon_profile:
@@ -11875,29 +12291,83 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
                 fast_fill_mask=fast_fill_mask,
                 ocr_page=residual_ocr_page,
             )
-    if residual_check.get("has_residual") and "light_residual_pixels" in set(residual_check.get("flags") or []):
-        retry_limit = _build_post_cleanup_limit_mask(
-            expanded_mask,
-            texts,
-            cleaned.shape[:2],
-        )
-        if not np.any(retry_limit):
-            retry_limit = expanded_mask
-        retry_mask = _build_light_residual_retry_mask(
-            band_rgb,
-            cleaned,
-            expanded_mask,
-            retry_limit,
-        )
+    if (
+        residual_check.get("has_residual")
+        and visual_card_action_mask is None
+        and "light_residual_pixels" in set(residual_check.get("flags") or [])
+    ):
+        visual_card_retry = visual_card_action_mask is not None
+        if visual_card_retry:
+            retry_mask = _build_visual_card_residual_retry_mask(
+                band_rgb,
+                cleaned,
+                visual_card_action_mask,
+                texts,
+                cleaned.shape[:2],
+            )
+        else:
+            retry_limit = _build_post_cleanup_limit_mask(
+                expanded_mask,
+                texts,
+                cleaned.shape[:2],
+            )
+            if not np.any(retry_limit):
+                retry_limit = expanded_mask
+            retry_mask = _build_light_residual_retry_mask(
+                band_rgb,
+                cleaned,
+                expanded_mask,
+                retry_limit,
+            )
+            if retry_mask is None:
+                retry_mask = _build_visual_card_residual_retry_mask(
+                    band_rgb,
+                    cleaned,
+                    expanded_mask,
+                    texts,
+                    cleaned.shape[:2],
+                )
+                visual_card_retry = retry_mask is not None
         if retry_mask is not None and np.any(retry_mask):
             retry_started = time.perf_counter()
-            retried = inpainter.inpaint(working_rgb, retry_mask, batch_size=4, force_no_tiling=True)
+            retry_input = cleaned if visual_card_retry else working_rgb
+            retried = (
+                _apply_visual_card_residual_inpaint(retry_input, retry_mask)
+                if visual_card_retry
+                else inpainter.inpaint(retry_input, retry_mask, batch_size=4, force_no_tiling=True)
+            )
             retried, retry_limit_pixels, retry_changed_outside = _clamp_image_to_limit_mask(
-                working_rgb,
+                retry_input,
                 retried,
                 retry_mask,
                 texts,
             )
+            visual_retry_passes = 1
+            if visual_card_retry:
+                combined_retry_mask = retry_mask.astype(np.uint8)
+                for _retry_index in range(2):
+                    next_retry_mask = _build_visual_card_residual_retry_mask(
+                        band_rgb,
+                        retried,
+                        expanded_mask,
+                        texts,
+                        retried.shape[:2],
+                    )
+                    if next_retry_mask is None or not np.any(next_retry_mask):
+                        break
+                    refined = _apply_visual_card_residual_inpaint(retried, next_retry_mask)
+                    refined, next_limit_pixels, next_changed_outside = _clamp_image_to_limit_mask(
+                        retried,
+                        refined,
+                        next_retry_mask,
+                        texts,
+                    )
+                    retried = refined
+                    combined_retry_mask = np.maximum(combined_retry_mask, next_retry_mask.astype(np.uint8))
+                    retry_limit_pixels = max(int(retry_limit_pixels), int(next_limit_pixels))
+                    retry_changed_outside += int(next_changed_outside)
+                    visual_retry_passes += 1
+                retry_mask = combined_retry_mask
             retried, retry_cleanup_stats = _apply_post_inpaint_cleanup_timed(
                 band_rgb,
                 retried,
@@ -11908,6 +12378,10 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             final_action_mask = np.maximum(final_action_mask, retry_mask.astype(np.uint8))
             ocr_page.update(retry_cleanup_stats)
             ocr_page["_strip_light_residual_retry"] = True
+            if visual_card_retry:
+                ocr_page["_strip_visual_card_residual_retry"] = True
+                ocr_page["_strip_visual_card_residual_retry_passes"] = int(visual_retry_passes)
+                ocr_page["_strip_visual_card_residual_retry_engine"] = "opencv_telea"
             ocr_page["_strip_light_residual_retry_mask_pixels"] = int(np.count_nonzero(retry_mask))
             ocr_page["_strip_light_residual_retry_limit_pixels"] = int(retry_limit_pixels)
             ocr_page["_strip_light_residual_retry_changed_outside_limit"] = int(retry_changed_outside)
@@ -11951,6 +12425,7 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             )
     if (
         residual_check.get("has_residual")
+        and visual_card_action_mask is None
         and "dark_residual_pixels" in set(residual_check.get("flags") or [])
         and (
             str(residual_check.get("region_source") or "") != "expanded_mask"

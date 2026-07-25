@@ -13470,6 +13470,25 @@ def _visual_card_cluster_has_support(record: dict, candidates: list[dict]) -> bo
     return peers >= 5
 
 
+def _visual_card_cluster_has_surface_consistency(image_rgb: np.ndarray, candidates: list[dict]) -> bool:
+    luminance_std: list[float] = []
+    height, width = image_rgb.shape[:2]
+    for record in candidates:
+        bbox = _line_bbox_from_record(record)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        crop = image_rgb[
+            max(0, y1 - 8) : min(height, y2 + 8),
+            max(0, x1 - 8) : min(width, x2 + 8),
+        ]
+        if crop.size == 0:
+            continue
+        gray = cv2.cvtColor(crop.astype(np.uint8, copy=False), cv2.COLOR_RGB2GRAY)
+        luminance_std.append(float(np.std(gray)))
+    return bool(len(luminance_std) >= 5 and float(np.median(luminance_std)) <= 48.0)
+
+
 def _group_visual_card_recall_lines(records: list[dict]) -> list[list[dict]]:
     grouped: list[list[dict]] = []
     for record in sorted(records, key=lambda item: (_line_bbox_from_record(item) or [0, 0, 0, 0])[1]):
@@ -13498,6 +13517,37 @@ def _group_visual_card_recall_lines(records: list[dict]) -> list[list[dict]]:
                     continue
         grouped.append([record])
     return grouped
+
+
+def _visual_card_line_has_current_glyph_support(image_rgb: np.ndarray, bbox: list[int]) -> bool:
+    height, width = image_rgb.shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    x1, y1 = max(0, x1 - 4), max(0, y1 - 3)
+    x2, y2 = min(width, x2 + 4), min(height, y2 + 3)
+    crop = image_rgb[y1:y2, x1:x2]
+    if crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop.astype(np.uint8, copy=False), cv2.COLOR_RGB2GRAY)
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.6, sigmaY=1.6)
+    contrast = np.maximum(cv2.subtract(gray, blur), cv2.subtract(blur, gray))
+    mask = (contrast >= 12).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+    component_count = 0
+    component_pixels = 0
+    labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    for label in range(1, labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        box_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        box_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if area < 3 or area > max(500, int(gray.size * 0.18)):
+            continue
+        if box_w < 2 or box_h < 2 or box_h > max(42, int(gray.shape[0] * 0.92)):
+            continue
+        if max(box_w, box_h) / float(max(1, min(box_w, box_h))) > 16.0:
+            continue
+        component_count += 1
+        component_pixels += area
+    return component_count >= 3 and component_pixels >= max(12, int(gray.size * 0.0025))
 
 
 def _recover_missing_visual_card_ocr_lines(
@@ -13530,6 +13580,8 @@ def _recover_missing_visual_card_ocr_lines(
             candidates.append(dict(raw))
     if not candidates:
         return page_result
+    if not _visual_card_cluster_has_surface_consistency(image_rgb, candidates):
+        return page_result
 
     missing = [
         record
@@ -13557,6 +13609,7 @@ def _recover_missing_visual_card_ocr_lines(
             continue
         raw_text = " ".join(str(record.get("text") or "").strip() for record in group).strip()
         recovered_text = raw_text
+        retry_confirmed = ocr is None or not hasattr(ocr, "recognize_batch")
         if ocr is not None and hasattr(ocr, "recognize_batch"):
             try:
                 x1, y1, x2, y2 = _expand_bbox(bbox, image_rgb.shape, pad_x_ratio=0.02, pad_y_ratio=0.18, min_pad_x=6, min_pad_y=5)
@@ -13565,6 +13618,17 @@ def _recover_missing_visual_card_ocr_lines(
                 retry_text = str(retried[0] if retried else "").strip()
                 raw_len = len("".join(char for char in raw_text if char.isalnum()))
                 retry_len = len("".join(char for char in retry_text if char.isalnum()))
+                raw_key = re.sub(r"[^a-z0-9]+", "", raw_text.lower())
+                retry_key = re.sub(r"[^a-z0-9]+", "", retry_text.lower())
+                retry_confirmed = bool(
+                    raw_key
+                    and retry_key
+                    and (
+                        SequenceMatcher(None, raw_key, retry_key).ratio() >= 0.34
+                        or raw_key in retry_key
+                        or retry_key in raw_key
+                    )
+                )
                 # A leitura de linha inteira ja e a evidência primária. O
                 # micro-recorte só substitui quando recupera caracteres que
                 # estavam ausentes (caso típico: "BY 4"), nunca por uma
@@ -13574,6 +13638,10 @@ def _recover_missing_visual_card_ocr_lines(
                     recovered_text = retry_text
             except Exception:
                 pass
+        if not retry_confirmed and _visual_card_line_has_current_glyph_support(image_rgb, bbox):
+            retry_confirmed = True
+        if not retry_confirmed:
+            continue
         if not recovered_text:
             continue
         recovered_count += 1

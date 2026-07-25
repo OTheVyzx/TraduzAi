@@ -36,6 +36,10 @@ TRUNCATED_JOINED_REPAIRS = {
     "ITTOUS": "IT TO US",
     "LYINGIL": "LYING. I'LL",
     "NOTECPR": "NOTE CPR",
+    "THAT'SRIGHT": "THAT'S RIGHT",
+    "DIDHEDODGE": "DID HE DODGE",
+    "KIMSIHYEOK'S": "KIM SIHYEOK'S",
+    "SWORDSTRIKETHOUOH": "SWORD STRIKE THOUGH",
 }
 
 SAME_BALLOON_JOINED_WORD_REPAIRS: list[tuple[str, str]] = [
@@ -78,6 +82,7 @@ REMOVED_LEGACY_ROUTE_REASONS = REMOVED_LEGACY_FILTER_FLAGS | {
 }
 
 INLINE_MANDATORY_CORRECTIONS: list[tuple[str, str, int]] = [
+    (r"\bEUXIR\b", "ELIXIR", re.IGNORECASE),
     (r"\bDWAS\s+UNABLE\s+TO\s+HIRHSTAND\s+TRHE\s+SRIIGSMIANDRANAWAY\s+FROM\s+HOME\b", "WAS UNABLE TO WITHSTAND THE STIGMA AND RAN AWAY FROM HOME", re.IGNORECASE),
     (r"\bSURVIVED\s+COUNTLESS\s+BAUES\.\s+BUTUP\s+MY\s+SADLAND\s+MADE\s+A\s+NAME\s+FOR\s+MYSELF\b", "SURVIVED COUNTLESS BATTLES. BUILT UP MY SKILLS AND MADE A NAME FOR MYSELF", re.IGNORECASE),
     (r"\bALMDST\s+ALL\s+OF\s+US\s+ENDED\s+IP\s+DYNG\b", "ALMOST ALL OF US ENDED UP DYING", re.IGNORECASE),
@@ -134,6 +139,20 @@ INLINE_MANDATORY_CORRECTIONS: list[tuple[str, str, int]] = [
     (r"(?<![A-Za-z0-9])THIN%(?![A-Za-z0-9])", "THINK", re.IGNORECASE),
     (r"\bldun\b", "Idun", re.IGNORECASE),
     (r"\bBUMIANS\b", "HUMANS", re.IGNORECASE),
+    (r"\bUISE\b", "USE", re.IGNORECASE),
+    (r"\bSHALOW\b", "SHADOW", re.IGNORECASE),
+    (r"\bENHANCEMENI\b", "ENHANCEMENT", re.IGNORECASE),
+    (r"\bPOILON\b", "POTION", re.IGNORECASE),
+    (r"\bPERMANENTILY\b", "PERMANENTLY", re.IGNORECASE),
+    (r"\bSTRENGIH\b", "STRENGTH", re.IGNORECASE),
+    (r"\bSTAT\s+BY\s*5\b", "ATTRIBUTE BY 5", re.IGNORECASE),
+    (r"\bCONSUMPTON\b", "CONSUMPTION", re.IGNORECASE),
+    (r"\bNCREASES\b", "INCREASES", re.IGNORECASE),
+    (r"\bYDUR\b", "YOUR", re.IGNORECASE),
+    (r"\bTROLLS\.AND\b", "TROLLS AND", re.IGNORECASE),
+    (r"\bATIVANCET\b", "ADVANCED", re.IGNORECASE),
+    (r"\bALCHEMY\s+ANT\s+ELIXIR\b", "ALCHEMY AND ELIXIR", re.IGNORECASE),
+    (r"\bENHANCEI\b", "ENHANCED", re.IGNORECASE),
 ]
 
 COMMON_WORDS = {
@@ -881,6 +900,11 @@ def _record_band_id(record: dict[str, Any]) -> str:
 
 
 def _record_should_not_merge_for_translation(record: dict[str, Any]) -> bool:
+    # Item cards deliberately contain several independent lines (title, grade,
+    # effect and footer) inside one visual parent. They are not sentence
+    # fragments and must survive to the renderer separately.
+    if str(record.get("layout_category") or "").strip().lower() == "item_card" or record.get("card_panel_id"):
+        return True
     action = str(record.get("route_action") or "").strip().lower()
     if action in {"preserve", "merged_into_primary", "suppress"}:
         return True

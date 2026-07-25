@@ -7381,6 +7381,7 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
             except Exception:
                 audit["error_count"] += 1
                 continue
+        composition_coverage: dict[str, object] = {}
         for row in sorted(crop_rows, key=_final_crop_page_composition_sort_key):
             translated_name = str(row.get("translated_output_page") or "").strip()
             final_rel = str(row.get("final_crop_path") or "").strip()
@@ -7420,21 +7421,39 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
             )
             if clean_bgr is not None:
                 final_path = _resolve_debug_e2e_artifact_path(work_dir, final_rel)
-                if (
-                    final_path is not None
-                    and clean_path is not None
-                    and final_path.suffix.lower() == clean_path.suffix.lower()
-                ):
-                    import shutil
-
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(clean_path, final_path)
+                fallback_reference = cv2.imread(
+                    str(Path(work_dir) / "images" / Path(translated_name).name),
+                    cv2.IMREAD_COLOR,
+                )
+                if fallback_reference is not None and fallback_reference.shape[:2] == image.shape[:2]:
+                    fallback_reference = fallback_reference[y1:y2, x1:x2, :]
                 else:
-                    recorder.write_image(final_rel, clean_bgr, quality=100, color_space="BGR")
-                image[y1:y2, x1:x2, :] = clean_bgr
+                    fallback_reference = None
+                changed_mask = _final_band_changed_mask_for_composition(
+                    row,
+                    work_dir,
+                    clean_bgr,
+                    fallback_reference_bgr=fallback_reference,
+                )
+                coverage = composition_coverage.get(str(translated_path))
+                if coverage is None or getattr(coverage, "shape", None) != image.shape[:2]:
+                    import numpy as np
+
+                    coverage = np.zeros(image.shape[:2], dtype=bool)
+                    composition_coverage[str(translated_path)] = coverage
+                covered_mask = coverage[y1:y2, x1:x2]
+                composed = _composite_final_band_candidate(
+                    image[y1:y2, x1:x2, :],
+                    clean_bgr,
+                    changed_mask,
+                    covered_mask,
+                )
+                image[y1:y2, x1:x2, :] = composed
+                coverage[y1:y2, x1:x2] = True
                 cv2.imwrite(str(translated_path), image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                recorder.write_image(final_rel, composed, quality=100, color_space="BGR")
                 final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
-                diff_summary = _final_band_diff_summary(clean_bgr, final_bgr)
+                diff_summary = _final_band_diff_summary(clean_bgr, final_bgr, changed_mask)
                 diff_summary.update(
                     {
                         "band_id": str(row.get("band_id") or ""),
@@ -7616,7 +7635,7 @@ def _preferred_clean_band_source_for_final_crop(
     return None, None, ""
 
 
-def _final_band_diff_summary(reference_bgr, observed_bgr) -> dict:
+def _final_band_diff_summary(reference_bgr, observed_bgr, visible_mask=None) -> dict:
     if reference_bgr is None or observed_bgr is None:
         return {"valid": False, "reason": "missing_image"}
     if not hasattr(reference_bgr, "shape") or not hasattr(observed_bgr, "shape"):
@@ -7632,6 +7651,10 @@ def _final_band_diff_summary(reference_bgr, observed_bgr) -> dict:
         import numpy as np
 
         diff = np.abs(reference_bgr.astype(np.int16) - observed_bgr.astype(np.int16))
+        if visible_mask is not None:
+            mask = np.asarray(visible_mask, dtype=bool)
+            if mask.shape == diff.shape[:2] and np.any(mask):
+                diff = diff[mask]
         max_diff = int(diff.max()) if diff.size else 0
         changed_gt8 = int((diff > 8).sum()) if diff.size else 0
         return {
@@ -7643,6 +7666,80 @@ def _final_band_diff_summary(reference_bgr, observed_bgr) -> dict:
         }
     except Exception as exc:
         return {"valid": False, "reason": "diff_failed", "error": str(exc)}
+
+
+def _final_band_changed_mask_for_composition(
+    row: dict,
+    work_dir: Path,
+    candidate_bgr,
+    *,
+    fallback_reference_bgr=None,
+):
+    """Return only pixels owned by this band, excluding unchanged overlap context."""
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    if candidate_bgr is None or not hasattr(candidate_bgr, "shape"):
+        return None
+    band_id = str(row.get("band_id") or "").strip()
+    reference = None
+    if band_id:
+        reference_path = Path(work_dir) / "debug_inpaint" / band_id / "00_band_original.jpg"
+        if reference_path.exists():
+            reference = cv2.imread(str(reference_path), cv2.IMREAD_COLOR)
+    if reference is None or reference.shape != candidate_bgr.shape:
+        reference = fallback_reference_bgr
+    if reference is None or not hasattr(reference, "shape") or reference.shape != candidate_bgr.shape:
+        return None
+    direct_delta = np.max(np.abs(candidate_bgr.astype(np.int16) - reference.astype(np.int16)), axis=2)
+    if reference.ndim == 3 and reference.shape[2] == 3:
+        swapped = reference[:, :, ::-1]
+        swapped_delta = np.max(np.abs(candidate_bgr.astype(np.int16) - swapped.astype(np.int16)), axis=2)
+        if float(np.median(swapped_delta)) + 2.0 < float(np.median(direct_delta)):
+            reference = swapped
+    delta = np.max(np.abs(candidate_bgr.astype(np.int16) - reference.astype(np.int16)), axis=2)
+    changed = delta > 12
+    return changed if np.any(changed) else np.zeros(candidate_bgr.shape[:2], dtype=bool)
+
+
+def _final_band_overlap_mask_for_composition(row: dict, rows: list[dict]):
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    overlap = np.zeros((y2 - y1, x2 - x1), dtype=bool)
+    page = str(row.get("translated_output_page") or "")
+    band_id = str(row.get("band_id") or "")
+    for other in rows:
+        if other is row or str(other.get("band_id") or "") == band_id:
+            continue
+        if str(other.get("translated_output_page") or "") != page:
+            continue
+        other_bbox = _optional_bbox4(other.get("crop_bbox_in_translated_page"))
+        if other_bbox is None:
+            continue
+        ox1, oy1, ox2, oy2 = [int(value) for value in other_bbox]
+        ix1, iy1 = max(x1, ox1), max(y1, oy1)
+        ix2, iy2 = min(x2, ox2), min(y2, oy2)
+        if ix2 > ix1 and iy2 > iy1:
+            overlap[iy1 - y1 : iy2 - y1, ix1 - x1 : ix2 - x1] = True
+    return overlap
+
+
+def _composite_final_band_candidate(page_region_bgr, candidate_bgr, changed_mask, covered_mask=None):
+    if changed_mask is None or covered_mask is None:
+        return candidate_bgr.copy()
+    composed = page_region_bgr.copy()
+    if changed_mask.shape == composed.shape[:2] and covered_mask.shape == composed.shape[:2]:
+        owned = (~covered_mask) | changed_mask
+        composed[owned] = candidate_bgr[owned]
+    return composed
 
 
 def _band_visible_mask_for_final_composition(row_index: int, rows: list[dict]) -> object | None:
@@ -13331,6 +13428,7 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
     translated_pages: dict[Path, np.ndarray] = {}
     touched_pages: set[Path] = set()
     seen_pages: set[Path] = set()
+    composition_coverage: dict[Path, object] = {}
     for row in sorted(crop_rows, key=_final_crop_page_composition_sort_key):
         audit["rows_checked"] += 1
         bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
@@ -13361,20 +13459,40 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
             (crop_w, crop_h),
         )
         if clean_bgr is not None:
-            page_bgr[y1:y2, x1:x2, :] = clean_bgr
+            base_page_path = work_dir / "images" / Path(translated_name).name
+            base_bgr = cv2.imread(str(base_page_path), cv2.IMREAD_COLOR)
+            fallback_reference = None
+            if base_bgr is not None and base_bgr.shape[:2] == page_bgr.shape[:2]:
+                fallback_reference = base_bgr[y1:y2, x1:x2, :]
+            changed_mask = _final_band_changed_mask_for_composition(
+                row,
+                work_dir,
+                clean_bgr,
+                fallback_reference_bgr=fallback_reference,
+            )
+            coverage = composition_coverage.get(translated_path)
+            if coverage is None or getattr(coverage, "shape", None) != page_bgr.shape[:2]:
+                import numpy as np
+
+                coverage = np.zeros(page_bgr.shape[:2], dtype=bool)
+                composition_coverage[translated_path] = coverage
+            covered_mask = coverage[y1:y2, x1:x2]
+            composed = _composite_final_band_candidate(
+                page_bgr[y1:y2, x1:x2, :],
+                clean_bgr,
+                changed_mask,
+                covered_mask,
+            )
+            page_bgr[y1:y2, x1:x2, :] = composed
+            coverage[y1:y2, x1:x2] = True
             final_rel = str(row.get("final_crop_path") or "").strip()
             final_path = None
             if final_rel:
                 final_path = work_dir / "debug" / "e2e" / final_rel
                 final_path.parent.mkdir(parents=True, exist_ok=True)
-                if clean_path is not None and final_path.suffix.lower() == clean_path.suffix.lower():
-                    import shutil
-
-                    shutil.copyfile(clean_path, final_path)
-                else:
-                    cv2.imwrite(str(final_path), clean_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                cv2.imwrite(str(final_path), composed, [cv2.IMWRITE_JPEG_QUALITY, 100])
             final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
-            diff_summary = _final_band_diff_summary(clean_bgr, final_bgr)
+            diff_summary = _final_band_diff_summary(clean_bgr, final_bgr, changed_mask)
             diff_summary.update(
                 {
                     "band_id": str(row.get("band_id") or ""),

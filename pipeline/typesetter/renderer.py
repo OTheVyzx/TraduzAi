@@ -5864,6 +5864,10 @@ def _has_trustworthy_colored_visual_card_contract(text: dict) -> bool:
     mask source, non-empty cleanup-mask evidence, and a chromatic panel color.
     """
     flags = _qa_flags_set(text)
+    if flags.intersection(
+        {"weak_text_residual_after_inpaint", "real_inpaint_skipped_unsafe_mask"}
+    ):
+        return False
     if "visual_text_only_inpaint_contract" not in flags:
         return False
     source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
@@ -6273,13 +6277,11 @@ def _is_visual_item_card_row(text: dict) -> bool:
     source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
     if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
         return False
-    color_candidates: list[object] = [text.get("background_rgb")]
-    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
-    for key in ("derived_card_panel_mask", "image_dark_panel_mask"):
-        evidence = metrics.get(key) if isinstance(metrics, dict) else None
-        if isinstance(evidence, dict):
-            color_candidates.extend((evidence.get("panel_fill_rgb"), evidence.get("background_rgb")))
-    return any(_rgb_chroma(_coerce_rgb_tuple(candidate)) >= 24.0 for candidate in color_candidates)
+    # Reaching this point already requires the explicit visual-text-only
+    # contract.  A current image/card panel mask is sufficient geometry for
+    # joint layout even when the optional sampled background color was not
+    # copied into the renderer payload.
+    return True
 
 
 def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
@@ -6296,6 +6298,17 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
         if not _is_visual_item_card_row(text):
             continue
         anchor = _layout_bbox(text.get("text_pixel_bbox") or text.get("source_bbox") or text.get("bbox"))
+        polygon_anchor = _layout_bbox(_bbox_from_polygons(text.get("line_polygons") or []))
+        flags = _qa_flags_set(text)
+        if anchor is not None and polygon_anchor is not None and "page_space_aux_bbox_scrubbed" in flags:
+            anchor_height = max(1, anchor[3] - anchor[1])
+            polygon_height = max(1, polygon_anchor[3] - polygon_anchor[1])
+            anchor_center_y = (anchor[1] + anchor[3]) / 2.0
+            polygon_center_y = (polygon_anchor[1] + polygon_anchor[3]) / 2.0
+            if abs(anchor_center_y - polygon_center_y) > max(96.0, 3.0 * max(anchor_height, polygon_height)):
+                anchor = polygon_anchor
+                text["text_pixel_bbox"] = list(polygon_anchor)
+                _merge_qa_flags(text, ["visual_card_anchor_recovered_from_line_polygons"])
         if anchor is not None:
             candidates.append((text, anchor))
     if not candidates:
@@ -6308,6 +6321,10 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
         selected: list[tuple[dict, list[int]]] | None = None
         for group in reversed(groups):
             last_anchor = group[-1][1]
+            group_band_id = str(group[-1][0].get("band_id") or "").strip()
+            item_band_id = str(text.get("band_id") or "").strip()
+            if group_band_id and item_band_id and group_band_id != item_band_id:
+                continue
             group_center_x = float(np.median([(row[1][0] + row[1][2]) / 2.0 for row in group]))
             if center_x and abs(center_x - group_center_x) <= 180.0 and anchor[1] - last_anchor[3] <= 260:
                 selected = group
@@ -6319,6 +6336,34 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
 
     for group in groups:
         ordered = sorted(group, key=lambda value: (value[1][1], value[1][0]))
+        panel_bbox: list[int] | None = None
+        for text, anchor in ordered:
+            row_panel = _layout_bbox(
+                text.get("card_panel_bbox")
+                or text.get("bubble_mask_bbox")
+                or text.get("balloon_bbox")
+            ) or list(anchor)
+            panel_bbox = list(row_panel) if panel_bbox is None else _union_bbox_values(panel_bbox, row_panel)
+        if panel_bbox is None:
+            continue
+        if len(ordered) >= 6:
+            anchor_union = list(ordered[0][1])
+            for _text, anchor in ordered[1:]:
+                anchor_union = _union_bbox_values(anchor_union, anchor)
+            horizontal_margin = 28
+            panel_bbox[0] = max(0, min(int(panel_bbox[0]), int(anchor_union[0]) - horizontal_margin))
+            panel_bbox[2] = max(int(panel_bbox[2]), int(anchor_union[2]) + horizontal_margin)
+        explicit_panel_ids = {
+            str(text.get("card_panel_id") or "").strip()
+            for text, _anchor in ordered
+            if str(text.get("card_panel_id") or "").strip()
+        }
+        first_text = ordered[0][0]
+        runtime_panel_id = (
+            next(iter(explicit_panel_ids))
+            if len(explicit_panel_ids) == 1
+            else f"item_card:{first_text.get('band_id') or first_text.get('trace_id') or first_text.get('id') or id(first_text)}"
+        )
         role_defaults: list[str]
         if len(ordered) >= 4:
             role_defaults = ["title", "note"] + ["body"] * (len(ordered) - 3) + ["footer"]
@@ -6335,22 +6380,18 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
             ax1, ay1, ax2, ay2 = [int(v) for v in anchor]
             width = max(1, ax2 - ax1)
             height = max(1, ay2 - ay1)
-            parent = _layout_bbox(text.get("card_panel_bbox") or text.get("balloon_bbox") or text.get("bubble_mask_bbox"))
-            pad_x = max(10, min(72, int(round(width * 0.16))))
-            pad_y = max(4, min(18, int(round(height * 0.22))))
-            slot_x1, slot_x2 = ax1 - pad_x, ax2 + pad_x
-            if parent is not None:
-                slot_x1 = max(parent[0] + 6, slot_x1)
-                slot_x2 = min(parent[2] - 6, slot_x2)
-            slot_y1, slot_y2 = ay1 - pad_y, ay2 + pad_y
+            parent = panel_bbox
+            slot_x1, slot_x2 = parent[0] + 6, parent[2] - 6
+            slot_y1 = parent[1] + 4 if index == 0 else ay1
+            slot_y2 = parent[3] - 4 if index + 1 == len(ordered) else ay2
             if index > 0:
                 previous = ordered[index - 1][1]
                 boundary = (int(previous[3]) + ay1) // 2
-                slot_y1 = max(slot_y1, boundary + 1)
+                slot_y1 = boundary + 2
             if index + 1 < len(ordered):
                 following = ordered[index + 1][1]
                 boundary = (ay2 + int(following[1])) // 2
-                slot_y2 = min(slot_y2, boundary)
+                slot_y2 = boundary - 2
             if slot_x2 <= slot_x1 + 8 or slot_y2 <= slot_y1 + 6:
                 continue
             slot = [int(slot_x1), int(slot_y1), int(slot_x2), int(slot_y2)]
@@ -6381,6 +6422,9 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
             text["layout_safe_reason"] = "visual_item_card_row_slot"
             text["layout_profile"] = "colored_status_panel_row"
             text["block_profile"] = "colored_status_panel_row"
+            text["layout_category"] = "item_card"
+            text["card_panel_id"] = runtime_panel_id
+            text["card_panel_bbox"] = list(panel_bbox)
             text["card_panel_role"] = str(text.get("card_panel_role") or role_defaults[index])
             text["_render_target_source"] = "visual_item_card_row_slot"
             for stale_key in (
@@ -6412,6 +6456,26 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
                 int(plan.get("max_height", 0) or 0),
                 float(plan.get("line_spacing_ratio", 0.2) or 0.2),
             )
+            if not fits_at_minimum:
+                fallback_style = dict(text.get("estilo") or text.get("style") or {})
+                fallback_style["fonte"] = "ComicNeue-Bold.ttf"
+                fallback_style["font_family"] = "ComicNeue-Bold.ttf"
+                fallback_style["tamanho"] = max(int(minimum_font_px), int(fallback_style.get("tamanho", 0) or 0))
+                text["estilo"] = fallback_style
+                text["style"] = dict(fallback_style)
+                plan = plan_text_layout(text)
+                minimum_font_px = _minimum_legible_font_px(text, plan)
+                text["minimum_legible_font_px"] = int(minimum_font_px)
+                fits_at_minimum = _fits_in_box(
+                    translated,
+                    str(plan.get("font_name") or ""),
+                    int(minimum_font_px),
+                    int(plan.get("max_width", 0) or 0),
+                    int(plan.get("max_height", 0) or 0),
+                    float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+                )
+                if fits_at_minimum:
+                    _merge_qa_flags(text, ["visual_card_font_fallback"])
             fit_evidence.append(
                 {
                     "id": str(text.get("trace_id") or text.get("id") or ""),
@@ -6824,7 +6888,12 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             combined["balloon_subregions"] = []
         blocks.append(combined)
 
-    return _dedupe_render_blocks(blocks)
+    final_blocks = _dedupe_render_blocks(blocks)
+    # Merge/dedupe passes above may rebuild dictionaries from OCR children.
+    # Reapply the joint card contract to the actual objects that will be
+    # rendered and recorded so panel ownership cannot disappear at copyback.
+    _apply_visual_item_card_row_slots(final_blocks)
+    return final_blocks
 
 
 def merge_group_style(group: list[dict]) -> dict:
@@ -13295,6 +13364,25 @@ def _finalize_render_completion_contract(text_data: dict) -> None:
         and minimum_font_px > 0
         and final_font_px >= minimum_font_px
     )
+    if (
+        text_data["render_completed"]
+        and str(text_data.get("layout_category") or "").strip().lower() == "item_card"
+        and str(text_data.get("card_panel_id") or "").strip()
+        and str(text_data.get("card_joint_layout_status") or "").strip().lower() == "below_minimum_legible"
+    ):
+        text_data["card_joint_layout_status"] = "ok"
+        flags = [
+            str(flag)
+            for flag in text_data.get("qa_flags") or []
+            if str(flag) not in {"fit_below_minimum_legible", "item_card_joint_layout_failed"}
+        ]
+        text_data["qa_flags"] = flags
+        if str(text_data.get("route_reason") or "") == "item_card_joint_layout_below_minimum":
+            text_data.pop("route_action", None)
+            text_data.pop("route_reason", None)
+        metrics = text_data.get("qa_metrics")
+        if isinstance(metrics, dict) and isinstance(metrics.get("item_card_joint_layout"), dict):
+            metrics["item_card_joint_layout"]["status"] = "ok"
 
 
 def _render_plan_debug_enabled() -> bool:
@@ -14915,6 +15003,39 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     return fallback
 
 
+def _resolve_item_card_legible_fallback(
+    text_data: dict,
+    plan: dict,
+    resolved: dict,
+) -> tuple[dict, dict]:
+    """Retry an actually under-minimum card row with a compact legible font."""
+    minimum_font_px = _minimum_legible_font_px(text_data, plan)
+    if (
+        str(text_data.get("layout_category") or "").strip().lower() != "item_card"
+        or not str(text_data.get("card_panel_id") or "").strip()
+        or int(resolved.get("font_size", 0) or 0) >= int(minimum_font_px)
+    ):
+        return plan, resolved
+    fallback_plan = dict(plan)
+    fallback_plan["font_name"] = "ComicNeue-Bold.ttf"
+    fallback_plan["target_size"] = max(int(minimum_font_px), int(plan.get("target_size", 0) or 0))
+    fallback_plan["_font_search_floor"] = int(minimum_font_px)
+    fallback_plan["_prefer_original_font_size"] = False
+    fallback_plan["_follow_original_ocr_size"] = False
+    fallback_plan["_source_font_size_px"] = 0
+    fallback = _resolve_text_layout(text_data, fallback_plan)
+    if int(fallback.get("font_size", 0) or 0) < int(minimum_font_px):
+        return plan, resolved
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    style["fonte"] = "ComicNeue-Bold.ttf"
+    style["font_family"] = "ComicNeue-Bold.ttf"
+    style["tamanho"] = int(fallback.get("font_size", minimum_font_px) or minimum_font_px)
+    text_data["estilo"] = style
+    text_data["style"] = dict(style)
+    _merge_qa_flags(text_data, ["visual_card_font_fallback"])
+    return fallback_plan, fallback
+
+
 def _apply_corpus_layout_hints(
     width_ratio: float,
     tipo: str,
@@ -16286,6 +16407,7 @@ def _render_single_text_block_unrotated(
         text_data["_debug_safe_text_box"] = plan["safe_text_box"]
 
     resolved = _resolve_text_layout(text_data, plan)
+    plan, resolved = _resolve_item_card_legible_fallback(text_data, plan, resolved)
     text_data["_render_debug"] = {
         "target_bbox": plan.get("target_bbox"),
         "position_bbox": plan.get("position_bbox"),
@@ -17437,6 +17559,11 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         "_debug_safe_text_box",
         "layout_safe_bbox",
         "layout_safe_reason",
+        "layout_category",
+        "card_panel_id",
+        "card_panel_role",
+        "card_panel_bbox",
+        "card_joint_layout_status",
         "bubble_id",
         "bubble_mask_bbox",
         "bubble_inner_bbox",
@@ -17889,6 +18016,11 @@ def _record_render_plan(ocr_page: dict, block: dict) -> None:
         "font_size_final": render_debug.get("font_size_final"),
         "minimum_legible_font_px": block.get("minimum_legible_font_px"),
         "render_completed": block.get("render_completed"),
+        "layout_category": block.get("layout_category"),
+        "card_panel_id": block.get("card_panel_id"),
+        "card_panel_role": block.get("card_panel_role"),
+        "card_panel_bbox": block.get("card_panel_bbox"),
+        "card_joint_layout_status": block.get("card_joint_layout_status"),
         "line_height": render_debug.get("line_height"),
         "wrapped_lines": render_debug.get("wrapped_lines", []),
         "rotation_deg": block.get("rotation_deg", render_debug.get("rotation_deg")),

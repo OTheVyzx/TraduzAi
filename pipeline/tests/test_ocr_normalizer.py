@@ -62,6 +62,39 @@ def test_required_corrections_are_applied_inside_sentences():
         assert result["normalization"]["changed"] is True
 
 
+def test_item_card_ocr_confusions_are_repaired_before_translation():
+    raw = (
+        "FIRST-TIME UISE SLIGHTLY INCREASES FLEXIBILITY TOO AN ELIXIR CREATED BY "
+        "MIXING MOONLIGHT ORE DUST AND SHALOW HERB ADVANCED ALCHEMY AND ELIXIR "
+        "ENHANCEMENI GREATLY ENHANCED THE POILON'S EFFECTIVENESS"
+    )
+
+    result = normalize_ocr_text(raw)
+
+    assert result["normalized_ocr"] == (
+        "FIRST-TIME USE SLIGHTLY INCREASES FLEXIBILITY TOO AN ELIXIR CREATED BY "
+        "MIXING MOONLIGHT ORE DUST AND SHADOW HERB ADVANCED ALCHEMY AND ELIXIR "
+        "ENHANCEMENT GREATLY ENHANCED THE POTION'S EFFECTIVENESS"
+    )
+    assert result["normalization"]["changed"] is True
+
+
+def test_mythic_item_card_ocr_confusions_are_repaired_before_translation():
+    cases = {
+        "GRADE: B+ PERMANENTILY INCREASES STRENGIH": "GRADE: B+ PERMANENTLY INCREASES STRENGTH",
+        "STAT BY5 UPON CONSUMPTON": "ATTRIBUTE BY 5 UPON CONSUMPTION",
+        "NCREASES YDUR HEALTH": "INCREASES YOUR HEALTH",
+        "TROLLS.AND VARIOUS BEASTS": "TROLLS AND VARIOUS BEASTS",
+        "ATIVANCET ALCHEMY ANT ELIXIR": "ADVANCED ALCHEMY AND ELIXIR",
+        "ENHANCEMENT GREATLY ENHANCEI": "ENHANCEMENT GREATLY ENHANCED",
+    }
+
+    for raw, expected in cases.items():
+        result = normalize_ocr_text(raw)
+        assert result["normalized_ocr"] == expected
+        assert result["normalization"]["changed"] is True
+
+
 def test_punctuation_joined_dialogue_is_repaired_before_review_route():
     record = normalize_ocr_record(
         {
@@ -282,6 +315,20 @@ def test_joined_ocr_is_repaired_before_review_flag_survives():
     assert "ocr_truncated_or_joined" not in repaired.get("qa_flags", [])
     assert repaired.get("route_action") not in {"review_required", "preserve_original"}
     assert repaired.get("needs_review") is not True
+
+
+def test_truncated_prefix_is_repaired_before_translation_instead_of_passthrough():
+    record = normalize_ocr_record(
+        {
+            "text": "THAT'SRIGHT! HOW DIDHEDODGE KIMSIHYEOK'S SWORDSTRIKETHOUOH...",
+            "bbox": [274, 172, 673, 267],
+        }
+    )
+
+    assert record["text"] == "THAT'S RIGHT! HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE THOUGH..."
+    assert record["route_action"] == "translate_inpaint_render"
+    assert "ocr_truncated_or_joined" not in record.get("qa_flags", [])
+    assert "ocr_joined_repaired" in record.get("qa_flags", [])
 
 
 def test_scanlation_credit_is_suppressed_before_translation_and_inpaint():
@@ -666,3 +713,9 @@ def test_record_persists_raw_normalized_and_reason():
     assert record["normalized_ocr"] == "RAID SQUAD"
     assert record["text"] == "RAID SQUAD"
     assert record["normalization"]["corrections"][0]["from"] == "RAID SOUAD"
+
+
+def test_colored_card_title_repairs_euxir_to_elixir():
+    result = normalize_ocr_text("EUXIR OF SAVAGE MIGHT")
+
+    assert result["normalized_ocr"] == "ELIXIR OF SAVAGE MIGHT"

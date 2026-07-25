@@ -45,6 +45,42 @@ from main import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
+        text = {
+            "id": "cardocr_003",
+            "translated": "AUMENTA PERMANENTEMENTE A FORCA",
+            "bbox": [152, 243, 438, 266],
+            "text_pixel_bbox": [152, 243, 438, 266],
+            "layout_category": "item_card",
+            "layout_profile": "colored_status_panel",
+            "card_panel_text_context": True,
+            "bubble_mask_source": "image_dark_panel_mask",
+            "background_rgb": [230, 175, 64],
+            "qa_flags": [
+                "visual_card_ocr_recall",
+                "visual_text_only_inpaint_contract",
+                "weak_text_residual_after_inpaint",
+                "real_inpaint_skipped_unsafe_mask",
+            ],
+            "qa_metrics": {
+                "inpaint_mask_contract": {
+                    "source_pixels": 1938,
+                    "expanded_pixels": 2824,
+                },
+                "image_dark_panel_mask": {
+                    "mask_pixels": 12000,
+                    "panel_fill_rgb": [230, 175, 64],
+                }
+            },
+        }
+
+        suppressed = renderer_mod._suppress_unsafe_automatic_render(text)
+
+        self.assertTrue(suppressed)
+        self.assertFalse(text["visible"])
+        self.assertTrue(text["skip_processing"])
+        self.assertIn("unsafe_automatic_render_suppressed", text["qa_flags"])
+
     _LEGACY_CONNECTED_DEFAULT_TESTS = set()
     _LEGACY_CONNECTED_DEFAULT_TESTS_DISABLED = {
         "test_build_render_blocks_dedupes_nested_same_balloon_prefix_text",
@@ -1410,6 +1446,163 @@ class TypesettingRendererTests(unittest.TestCase):
 
         slots = [row["safe_text_box"] for row in rows]
         self.assertTrue(all(previous[3] + 4 <= current[1] for previous, current in zip(slots, slots[1:])))
+
+    def test_runtime_visual_card_rows_form_joint_group_without_preassigned_panel(self):
+        rows = [
+            {
+                "id": "ocr_001",
+                "band_id": "page_002_band_046",
+                "translated": "NOTA: AUMENTA PERMANENTEMENTE AS ESTATISTICAS DE SAUDE EM 7",
+                "text_pixel_bbox": [336, 154, 632, 252],
+                "bubble_mask_bbox": [271, 132, 697, 279],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "ocr_002",
+                "band_id": "page_002_band_046",
+                "translated": "A PRIMEIRA VEZ AUMENTA SUA SAUDE E A REGENERACAO NATURAL",
+                "text_pixel_bbox": [260, 262, 703, 386],
+                "bubble_mask_bbox": [249, 257, 709, 423],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "cardocr_003",
+                "band_id": "page_002_band_046",
+                "translated": "A ALQUIMIA AVANCADA E O APRIMORAMENTO DO ELIXIR AUMENTARAM MUITO A EFICACIA DA POCAO",
+                "text_pixel_bbox": [266, 398, 701, 456],
+                "bubble_mask_bbox": [171, 381, 796, 473],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "layout_profile": "colored_status_panel_row",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+        ]
+
+        rows = renderer_mod.build_render_blocks(rows)
+
+        self.assertEqual(len({row.get("card_panel_id") for row in rows}), 1)
+        self.assertEqual([row.get("card_panel_role") for row in rows], ["title", "body", "footer"])
+        self.assertTrue(all(row.get("card_panel_bbox") == [171, 132, 796, 473] for row in rows))
+        self.assertTrue(all(row.get("layout_category") == "item_card" for row in rows))
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+        self.assertTrue(all(row["safe_text_box"][0] <= 185 and row["safe_text_box"][2] >= 785 for row in rows))
+
+    def test_runtime_visual_card_narrow_panel_uses_resolved_layout_for_joint_legibility(self):
+        panel = [260, 159, 703, 456]
+        rows = [
+            {
+                "id": "ocr_001",
+                "band_id": "page_002_band_046",
+                "translated": "NOTA: AUMENTA PERMANENTEMENTE AS ESTATÍSTICAS DE SAÚDE EM 7 APÓS O CONSUMO",
+                "text_pixel_bbox": [336, 159, 632, 252],
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "ocr_002",
+                "band_id": "page_002_band_046",
+                "translated": "A PRIMEIRA VEZ AUMENTA SUA SAÚDE E 2 LIGEIRO AUMENTO NA TAXA DE REGENERAÇÃO NATURAL, UM ELIXIR FEITO COM USO REFINADO. BASE CONSUMÍVEL DE MITHRIL ASA",
+                "text_pixel_bbox": [260, 262, 703, 386],
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "cardocr_003",
+                "band_id": "page_002_band_046",
+                "translated": "A ALQUIMIA AVANÇADA E O APRIMORAMENTO DO ELIXIR AUMENTARAM MUITO A EFICÁCIA DA POÇÃO",
+                "text_pixel_bbox": [266, 398, 701, 456],
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "layout_profile": "colored_status_panel_row",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+        ]
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+        for row in rows:
+            resolved = _resolve_text_layout(row, plan_text_layout(row))
+            self.assertGreaterEqual(resolved["font_size"], row["minimum_legible_font_px"])
+
+    def test_runtime_nine_row_light_card_keeps_footer_and_long_rows_legible(self):
+        panel = [127, 161, 471, 523]
+        payloads = (
+            ("ocr_001", "NOTA: B+ AUMENTA PERMANENTEMENTE A FORÇA", [125, 161, 474, 225]),
+            ("cardocr_002", "STAT BY5 APÓS CONSUMO", [150, 238, 438, 261]),
+            ("cardocr_003", "PRIMEIRA UTILIZAÇÃO PERMANENTE", [158, 275, 443, 299]),
+            ("cardocr_004", "AUMENTA SUA SAÚDE", [186, 311, 411, 334]),
+            ("cardocr_005", "FEITO DE CORAÇÕES DE OGROS", [130, 347, 467, 376]),
+            ("cardocr_006", "TROLLS.E VÁRIOS ANIMAIS", [158, 387, 441, 411]),
+            ("cardocr_007", "ELIXIR DE FORMIGA DE ALQUIMIA ATIVANCET", [150, 424, 449, 447]),
+            ("cardocr_008", "APRIMORAMENTO MUITO MELHORADO", [135, 461, 463, 485]),
+            ("cardocr_009", "A EFICÁCIA DA POÇÃO", [162, 499, 437, 523]),
+        )
+        rows = [
+            {
+                "id": text_id,
+                "band_id": "page_002_band_044",
+                "translated": translated,
+                "text_pixel_bbox": bbox,
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "layout_profile": "colored_status_panel_row",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            }
+            for text_id, translated, bbox in payloads
+        ]
+        stale_style = {"fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "tamanho": 23}
+        rows[5].update({"line_height": 27, "wrapped_lines": [rows[5]["translated"]], "font_size_final": 11, "estilo": dict(stale_style)})
+        rows[8].update({"line_height": 26, "wrapped_lines": [rows[8]["translated"]], "font_size_final": 6, "estilo": dict(stale_style)})
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+        resolved = [_resolve_text_layout(row, plan_text_layout(row)) for row in rows]
+
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+        self.assertTrue(all(item["font_size"] >= row["minimum_legible_font_px"] for row, item in zip(rows, resolved, strict=True)))
+        self.assertTrue(all(row["card_panel_bbox"][0] <= 99 and row["card_panel_bbox"][2] >= 500 for row in rows))
+
+    def test_visual_card_row_recovers_anchor_from_polygon_when_text_bbox_is_double_page_shifted(self):
+        row = {
+            "id": "cardocr_006",
+            "band_id": "page_002_band_047",
+            "translated": "BASE DE MITHRIL",
+            "text_pixel_bbox": [401, 26848, 564, 26869],
+            "line_polygons": [[[397, 13303], [564, 13303], [564, 13324], [397, 13324]]],
+            "bubble_mask_bbox": [382, 13298, 579, 13329],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_profile": "colored_status_panel_row",
+            "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract", "page_space_aux_bbox_scrubbed"],
+        }
+
+        renderer_mod._apply_visual_item_card_row_slots([row])
+
+        self.assertEqual(row["text_pixel_bbox"], [397, 13303, 564, 13324])
+        self.assertLess(row["render_bbox"][1] if row.get("render_bbox") else row["safe_text_box"][1], 13400)
+        self.assertIn("visual_card_anchor_recovered_from_line_polygons", row.get("qa_flags") or [])
+
+    def test_render_copyback_preserves_joint_card_contract_fields(self):
+        source = {"id": "cardocr_003", "qa_flags": []}
+        rendered = {
+            "card_panel_id": "item_card:page_002_band_046",
+            "card_panel_role": "footer",
+            "card_panel_bbox": [171, 132, 796, 473],
+            "layout_category": "item_card",
+            "card_joint_layout_status": "ok",
+            "minimum_legible_font_px": 12,
+            "font_size_final": 18,
+            "fit_status": "ok",
+        }
+
+        renderer_mod._copy_render_debug_fields(source, rendered)
+
+        self.assertEqual(source["card_panel_id"], rendered["card_panel_id"])
+        self.assertEqual(source["card_panel_role"], "footer")
+        self.assertEqual(source["card_panel_bbox"], rendered["card_panel_bbox"])
+        self.assertEqual(source["card_joint_layout_status"], "ok")
 
     def test_dark_bubble_visual_capacity_does_not_cap_font_to_ocr_anchor_height(self):
         text_data = {
@@ -11405,6 +11598,55 @@ class TypesettingRendererTests(unittest.TestCase):
         renderer_mod._finalize_render_completion_contract(text_data)
 
         self.assertFalse(text_data["render_completed"])
+
+    def test_finalize_render_completion_reconciles_false_negative_item_card_preflight(self):
+        text_data = {
+            "fit_status": "ok",
+            "render_bbox": [280, 397, 684, 441],
+            "font_size_final": 13,
+            "minimum_legible_font_px": 12,
+            "layout_category": "item_card",
+            "card_panel_id": "item_card:GRADE:A",
+            "card_joint_layout_status": "below_minimum_legible",
+            "route_action": "review_required",
+            "route_reason": "item_card_joint_layout_below_minimum",
+            "qa_flags": ["fit_below_minimum_legible", "item_card_joint_layout_failed"],
+            "qa_metrics": {"item_card_joint_layout": {"status": "below_minimum_legible"}},
+        }
+
+        renderer_mod._finalize_render_completion_contract(text_data)
+
+        self.assertTrue(text_data["render_completed"])
+        self.assertEqual(text_data["card_joint_layout_status"], "ok")
+        self.assertNotIn("item_card_joint_layout_failed", text_data["qa_flags"])
+        self.assertNotIn("fit_below_minimum_legible", text_data["qa_flags"])
+        self.assertNotIn("route_action", text_data)
+        self.assertEqual(text_data["qa_metrics"]["item_card_joint_layout"]["status"], "ok")
+
+    def test_item_card_actual_resolver_retries_below_minimum_with_legible_font(self):
+        text_data = {
+            "id": "cardocr_009",
+            "translated": "A EFICÁCIA DA POÇÃO",
+            "layout_category": "item_card",
+            "card_panel_id": "item_card:GRADE:B+",
+            "safe_text_box": [116, 495, 483, 518],
+            "target_bbox": [103, 494, 496, 519],
+            "balloon_bbox": [103, 494, 496, 519],
+            "position_bbox": [108, 495, 491, 518],
+            "capacity_bbox": [108, 495, 491, 518],
+            "layout_safe_bbox": [108, 495, 491, 518],
+            "estilo": {"fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "tamanho": 23},
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+        }
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+        resolved["font_size"] = 6
+
+        fallback_plan, fallback = renderer_mod._resolve_item_card_legible_fallback(text_data, plan, resolved)
+
+        self.assertEqual(fallback_plan["font_name"], "ComicNeue-Bold.ttf")
+        self.assertGreaterEqual(fallback["font_size"], 12)
+        self.assertIn("visual_card_font_fallback", text_data["qa_flags"])
 
 if __name__ == "__main__":
     unittest.main()

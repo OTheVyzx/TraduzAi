@@ -73,6 +73,7 @@ from vision_stack.runtime import (
     _quick_text_presence_check,
     _remap_orientation_recovery_page,
     _run_orientation_recovery,
+    _recover_missing_visual_card_ocr_lines,
     _should_use_koharu_cjk_ocr,
     _run_koharu_blockwise_inpaint_page,
     _run_koharu_worker_detect_ocr_batch,
@@ -98,6 +99,155 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_visual_card_ocr_recall_rejects_stale_lines_when_current_crop_reocr_is_empty(self):
+        image = np.full((360, 600, 3), [28, 52, 112], dtype=np.uint8)
+        raw_lines = [
+            {
+                "text": f"CARD ROW {index}",
+                "source_bbox": [140, 40 + index * 38, 460, 64 + index * 38],
+                "confidence": 0.96,
+            }
+            for index in range(7)
+        ]
+        ocr = MagicMock()
+        ocr.recognize_batch.return_value = [""]
+
+        result = _recover_missing_visual_card_ocr_lines(
+            {"texts": [], "_vision_blocks": []},
+            image,
+            raw_lines,
+            ocr=ocr,
+        )
+
+        self.assertEqual(result["texts"], [])
+        self.assertEqual(result["_vision_blocks"], [])
+
+    def test_visual_card_ocr_recall_accepts_current_glyph_evidence_when_crop_reocr_is_empty(self):
+        image = np.full((360, 600, 3), [244, 207, 105], dtype=np.uint8)
+        raw_lines = []
+        for index in range(7):
+            y = 40 + index * 38
+            cv2.putText(
+                image,
+                f"CARD ROW {index}",
+                (150, y + 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            raw_lines.append(
+                {
+                    "text": f"CARD ROW {index}",
+                    "source_bbox": [140, y, 460, y + 28],
+                    "confidence": 0.96,
+                }
+            )
+        ocr = MagicMock()
+        ocr.recognize_batch.return_value = [""]
+
+        result = _recover_missing_visual_card_ocr_lines(
+            {"texts": [], "_vision_blocks": []},
+            image,
+            raw_lines,
+            ocr=ocr,
+        )
+
+        self.assertGreaterEqual(len(result["texts"]), 4)
+        self.assertTrue(all("visual_card_ocr_recall" in text["qa_flags"] for text in result["texts"]))
+
+    def test_visual_card_ocr_recall_rejects_confirmed_lines_on_textured_art_cluster(self):
+        rng = np.random.default_rng(7)
+        image = rng.integers(0, 256, size=(360, 600, 3), dtype=np.uint8)
+        raw_lines = [
+            {
+                "text": f"CARD ROW {index}",
+                "source_bbox": [140, 40 + index * 38, 460, 68 + index * 38],
+                "confidence": 0.96,
+            }
+            for index in range(7)
+        ]
+        ocr = MagicMock()
+        ocr.recognize_batch.side_effect = lambda _crops: ["CARD ROW 0"]
+
+        result = _recover_missing_visual_card_ocr_lines(
+            {"texts": [], "_vision_blocks": []},
+            image,
+            raw_lines,
+            ocr=ocr,
+        )
+
+        self.assertEqual(result["texts"], [])
+
+    def test_visual_card_ocr_recall_restores_missing_title_stat_and_footer_without_sfx(self):
+        image = np.full((860, 700, 3), [244, 207, 105], dtype=np.uint8)
+        base_page = {
+            "image": "card.jpg",
+            "width": 700,
+            "height": 860,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text": "GRADE: B+ PERMANENTLY INCREASES AGILITY",
+                    "bbox": [148, 461, 589, 785],
+                    "text_pixel_bbox": [208, 466, 517, 527],
+                    "line_polygons": [
+                        [[314, 466], [409, 466], [409, 492], [314, 492]],
+                        [[208, 502], [517, 502], [517, 527], [208, 527]],
+                    ],
+                    "confidence": 0.56,
+                    "tipo": "text",
+                    "skip_processing": False,
+                },
+                {
+                    "id": "ocr_003",
+                    "text": "FIRST-TIME USE SLIGHTLY INCREASES FLEXIBILITY",
+                    "bbox": [148, 461, 589, 785],
+                    "text_pixel_bbox": [195, 574, 528, 704],
+                    "line_polygons": [
+                        [[195, 574], [528, 574], [528, 599], [195, 599]],
+                        [[245, 681], [477, 681], [477, 704], [245, 704]],
+                    ],
+                    "confidence": 0.56,
+                    "tipo": "text",
+                    "skip_processing": False,
+                },
+            ],
+            "_vision_blocks": [],
+        }
+        raw_lines = [
+            {"text": "VING", "source_bbox": [73, 163, 213, 265], "confidence": 0.92},
+            {"text": "MOONSTONE ELIXIR", "source_bbox": [263, 269, 461, 299], "confidence": 0.97},
+            {"text": "GRADE:B+", "source_bbox": [314, 466, 409, 492], "confidence": 0.95},
+            {"text": "PERMANENTLY INCREASES AGILITY", "source_bbox": [208, 502, 517, 527], "confidence": 0.98},
+            {"text": "STAT BYYUPON CONSUMPTION", "source_bbox": [220, 540, 501, 561], "confidence": 0.90},
+            {"text": "FIRST-TIME USE SLIGHTLY INCREASES", "source_bbox": [195, 574, 528, 599], "confidence": 0.96},
+            {"text": "FLEXIBILITY TOO", "source_bbox": [286, 608, 434, 634], "confidence": 0.95},
+            {"text": "AN ELIXIR CREATED BY MIXING MOONLIGHT ORE", "source_bbox": [151, 645, 572, 670], "confidence": 0.94},
+            {"text": "DUST AND SHALOW HERB", "source_bbox": [245, 681, 477, 704], "confidence": 0.90},
+            {"text": "ADVANCED ALCHEMY AND ELIXIR ENHANCEMENT", "source_bbox": [145, 715, 576, 739], "confidence": 0.94},
+            {"text": "GREATLY ENHANCED THE POTION'S EFFECTIVENESS", "source_bbox": [132, 753, 589, 778], "confidence": 0.95},
+        ]
+        ocr = MagicMock()
+        ocr.recognize_batch.side_effect = [["MOONSTONE ELIXIR"], ["STAT BY 4 UPON CONSUMPTION"], ["ADVANCED ALCHEMY AND ELIXIR ENHANCEMENT GREATLY ENHANCED THE POTION'S EFFECTIVENESS"]]
+
+        result = _recover_missing_visual_card_ocr_lines(base_page, image, raw_lines, ocr=ocr)
+
+        recovered = [text for text in result["texts"] if text.get("ocr_recovery") == "visual_card_full_page_recall"]
+        self.assertEqual([text["text"] for text in recovered], [
+            "MOONSTONE ELIXIR",
+            "STAT BY 4 UPON CONSUMPTION",
+            "ADVANCED ALCHEMY AND ELIXIR ENHANCEMENT GREATLY ENHANCED THE POTION'S EFFECTIVENESS",
+        ])
+        self.assertFalse(any(text.get("text") == "VING" for text in result["texts"]))
+        self.assertTrue(all(text.get("tipo") == "text" and text.get("skip_processing") is False for text in recovered))
+        self.assertTrue(all("visual_card_ocr_recall" in (text.get("qa_flags") or []) for text in recovered))
+        self.assertTrue(all(text.get("layout_category") == "item_card" for text in recovered))
+        self.assertTrue(all(text.get("layout_profile") == "colored_status_panel" for text in recovered))
+        self.assertEqual({text.get("card_panel_id") for text in recovered}, {"item_card:MOONSTONE ELIXIR"})
+        self.assertTrue(all(text.get("bubble_mask_bbox") is None for text in recovered))
+
     def test_drop_suppressed_ocr_pairs_removes_visual_sfx_overlap_before_masks(self):
         texts = [
             {
@@ -4054,6 +4204,63 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(final_texts[0]["translated"], "AISH! POR QUE VOCE CONTINUA NOS TRANSFORMANDO EM BANDIDOS?")
         self.assertEqual(final_blocks[0]["bbox"], [130, 7615, 328, 7739])
 
+    def test_finalize_page_ocr_texts_keeps_visual_item_card_rows_independent(self):
+        panel_id = "item_card_125_257_605_780"
+        rows = [
+            ("MOONSTONE ELIXIR", [266, 269, 461, 299]),
+            ("GRADE: B+ PERMANENTLY INCREASES AGILITY", [207, 460, 487, 532]),
+            ("STAT BY 4 UPON CONSUMPTION", [220, 540, 501, 561]),
+            (
+                "FIRST-TIME USE SLIGHTLY INCREASES FLEXIBILITY TOO AN ELIXIR CREATED BY MIXING MOONLIGHT ORE DUST AND SHADOW HERB",
+                [150, 571, 535, 708],
+            ),
+            (
+                "ADVANCED ALCHEMY AND ELIXIR ENHANCEMENT GREATLY ENHANCED THE POTION'S EFFECTIVENESS",
+                [134, 715, 588, 778],
+            ),
+        ]
+        texts = []
+        for index, (body, bbox) in enumerate(rows, start=1):
+            texts.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "text": body,
+                    "bbox": bbox,
+                    "source_bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [
+                        [[bbox[0], bbox[1]], [bbox[2], bbox[1]], [bbox[2], bbox[3]], [bbox[0], bbox[3]]]
+                    ],
+                    "confidence": 0.91,
+                    "layout_category": "item_card",
+                    "card_panel_id": panel_id,
+                    "card_panel_bbox": [125, 257, 605, 780],
+                    "block_profile": "colored_status_panel",
+                    "layout_profile": "colored_status_panel",
+                    "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+                }
+            )
+        blocks = [
+            {
+                "bbox": list(text["bbox"]),
+                "source_bbox": list(text["source_bbox"]),
+                "text_pixel_bbox": list(text["text_pixel_bbox"]),
+                "line_polygons": list(text["line_polygons"]),
+                "confidence": text["confidence"],
+            }
+            for text in texts
+        ]
+
+        final_texts, final_blocks = _finalize_page_ocr_texts(
+            texts,
+            blocks,
+            (1030, 800, 3),
+            page_number=2,
+        )
+
+        self.assertEqual([text["text"] for text in final_texts], [body for body, _bbox in rows])
+        self.assertEqual(len(final_blocks), len(rows))
+
     def test_finalize_page_ocr_texts_uses_preserved_bbox_when_balloon_bbox_was_sanitized(self):
         texts = [
             {
@@ -7731,6 +7938,92 @@ class VisionStackRuntimeTests(unittest.TestCase):
         used_mask = mocked_run.call_args.args[2]
         self.assertTrue(np.array_equal(used_mask, precomputed))
         self.assertTrue(np.all(cleaned[22:30, 28:48] >= 240))
+
+    def test_translucent_separator_splits_only_at_a_long_background_edge(self):
+        from vision_stack.runtime import _split_translucent_separator_action_mask
+
+        image = np.full((100, 160, 3), 224, dtype=np.uint8)
+        image[56:, :] = 250
+        # The panel edge is visible only on both sides of the glyph action.
+        image[53:56, :36] = 18
+        image[53:56, 124:] = 18
+        action = np.zeros(image.shape[:2], dtype=np.uint8)
+        action[22:84, 36:124] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_separator_split",
+            "text_pixel_bbox": [36, 22, 124, 84],
+        }
+
+        regions, separator = _split_translucent_separator_action_mask(image, action, [text])
+
+        self.assertEqual(len(regions), 2)
+        self.assertEqual(separator, {"axis": "horizontal", "position": 54})
+        self.assertTrue(np.all(regions[0][56:] == 0))
+        self.assertTrue(np.all(regions[1][:53] == 0))
+        self.assertTrue(np.array_equal(np.maximum(regions[0], regions[1]), action))
+
+    def test_apply_inpainting_round_runs_each_translucent_separator_region_independently(self):
+        original = np.full((100, 160, 3), 224, dtype=np.uint8)
+        original[56:, :] = 250
+        original[53:56, :36] = 18
+        original[53:56, 124:] = 18
+        action = np.zeros(original.shape[:2], dtype=np.uint8)
+        action[22:84, 36:124] = 255
+        ocr_data = {
+            "texts": [
+                {
+                    "layout_profile": "translucent_balloon",
+                    "inpaint_profile": "translucent_separator_split",
+                    "text_pixel_bbox": [36, 22, 124, 84],
+                    "balloon_bbox": [20, 12, 140, 92],
+                }
+            ],
+            "_vision_blocks": [{"bbox": [36, 22, 124, 84]}],
+            "_precomputed_inpaint_mask": action,
+        }
+
+        def fake_pass(_inpainter, image, mask, **_kwargs):
+            result = image.copy()
+            result[mask > 0] = [180, 180, 180]
+            return {
+                "final_output": result,
+                "expanded_mask": mask.copy(),
+                "_t_lama_ms": 1.0,
+                "_t_roi_select_ms": 0.1,
+                "used_roi_crop": False,
+                "roi_area_ratio": 0.2,
+            }
+
+        with patch("vision_stack.runtime._run_masked_inpaint_passes", side_effect=fake_pass) as passes, patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=lambda _base, candidate, _texts, **_kwargs: (candidate, {}),
+        ), patch("vision_stack.runtime._has_white_balloon_text_residual", return_value=False):
+            result = _apply_inpainting_round(original, ocr_data, object())
+
+        self.assertEqual(passes.call_count, 2)
+        self.assertEqual(ocr_data.get("_inpaint_region_separator"), {"axis": "horizontal", "position": 54})
+        self.assertEqual(
+            ocr_data.get("_inpaint_round_stats", {}).get("inpaint_region_separator"),
+            {"axis": "horizontal", "position": 54},
+        )
+        self.assertTrue(all(call.kwargs.get("prefer_roi") is False for call in passes.call_args_list))
+        self.assertTrue(np.all(result[30, 48:112] == 180))
+        self.assertTrue(np.all(result[54, 48:112] == 180))
+
+    def test_translucent_separator_profile_is_not_eligible_for_white_balloon_cleanup(self):
+        from vision_stack.runtime import _white_cleanup_texts
+
+        image = np.full((100, 160, 3), 250, dtype=np.uint8)
+        text = {
+            "layout_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_separator_split",
+            "text_pixel_bbox": [36, 22, 124, 84],
+            "line_polygons": [[[36, 22], [124, 22], [124, 84], [36, 84]]],
+            "balloon_bbox": [20, 12, 140, 92],
+        }
+
+        self.assertEqual(_white_cleanup_texts(image, [text]), [])
 
     def test_merge_text_fragments_inserts_residual_word_in_middle(self):
         merged = _merge_text_fragments(

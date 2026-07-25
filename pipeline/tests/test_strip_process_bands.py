@@ -10,6 +10,104 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class BandToPageDictTests(unittest.TestCase):
+    def test_candidate_crop_reocr_accepts_wide_colored_card_line_but_rejects_textured_art(self):
+        import cv2
+        import numpy as np
+
+        from strip.process_bands import _candidate_crop_reocr_allows_colored_visual_card_line
+
+        card = np.full((140, 420, 3), (82, 190, 245), dtype=np.uint8)
+        cv2.putText(card, "ELIXIR OF SAVAGE MIGHT", (42, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
+        self.assertTrue(
+            _candidate_crop_reocr_allows_colored_visual_card_line(
+                card,
+                [28, 38, 392, 100],
+                confidence=0.79,
+            )
+        )
+
+        textured = np.random.default_rng(7).integers(0, 256, size=(140, 420, 3), dtype=np.uint8)
+        cv2.putText(textured, "POTION", (115, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
+        self.assertFalse(
+            _candidate_crop_reocr_allows_colored_visual_card_line(
+                textured,
+                [28, 38, 392, 100],
+                confidence=0.90,
+            )
+        )
+        self.assertFalse(
+            _candidate_crop_reocr_allows_colored_visual_card_line(
+                card,
+                [28, 20, 130, 116],
+                confidence=0.90,
+            )
+        )
+
+    def test_candidate_crop_reocr_promotes_wide_colored_card_title_contract(self):
+        from unittest.mock import MagicMock, patch
+
+        import cv2
+        import numpy as np
+
+        from strip.process_bands import _recover_empty_ocr_with_candidate_crops
+        from strip.types import BBox, Balloon, Band
+
+        image = np.full((180, 460, 3), (82, 190, 245), dtype=np.uint8)
+        cv2.putText(image, "ELIXIR OF SAVAGE MIGHT", (48, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
+        band = Band(
+            y_top=500,
+            y_bottom=680,
+            balloons=[Balloon(strip_bbox=BBox(30, 550, 430, 625), confidence=0.79)],
+            strip_slice=image,
+            original_slice=image.copy(),
+        )
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {"texts": [], "_vision_blocks": []}
+        direct_page = {
+            "texts": [
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text_id": "direct_paddle_reocr_001",
+                    "text": "EUXIR OF SAVAGE MIGHT",
+                    "bbox": [25, 45, 330, 78],
+                    "source_bbox": [25, 45, 330, 78],
+                    "text_pixel_bbox": [25, 45, 330, 78],
+                    "confidence": 0.935,
+                    "qa_flags": ["candidate_crop_direct_paddle_reocr"],
+                }
+            ],
+            "_vision_blocks": [{"bbox": [25, 45, 330, 78], "confidence": 0.935}],
+        }
+        weak_evidence = {
+            "has_inner_dark_text": False,
+            "has_inner_light_text": False,
+            "inner_dark_component_count": 0,
+            "inner_dark_area": 0,
+            "inner_light_component_count": 0,
+            "inner_light_area": 0,
+            "significant_component_count": 0,
+            "significant_area": 0,
+            "bright_pixel_ratio": 0.2,
+            "dark_pixel_ratio": 0.0,
+        }
+
+        with patch("strip.detect_balloons._inner_dark_text_evidence", return_value=weak_evidence), patch(
+            "strip.process_bands._run_direct_paddle_candidate_crop_reocr", return_value=direct_page
+        ):
+            result = _recover_empty_ocr_with_candidate_crops(
+                band,
+                runtime=runtime,
+                page_dict={"width": 460, "height": 180, "idioma_origem": "en"},
+                band_id="page_002_band_040",
+            ).to_page_dict()
+
+        self.assertEqual(len(result["texts"]), 1)
+        recovered = result["texts"][0]
+        self.assertEqual(recovered["layout_category"], "item_card")
+        self.assertEqual(recovered["block_profile"], "colored_status_panel")
+        self.assertIn("candidate_crop_colored_visual_card_reocr", recovered["qa_flags"])
+        self.assertIn("visual_text_only_inpaint_contract", recovered["qa_flags"])
+
     def test_candidate_crop_reocr_does_not_replace_existing_white_balloon_ocr_with_sfx_prefix(self):
         from strip.process_bands import _merge_candidate_crop_recovery_into_ocr_page
 
@@ -5938,3 +6036,30 @@ def test_successful_render_keeps_cleaned_pixels_and_translation():
     assert np.array_equal(kept_rendered, rendered)
     assert page["texts"][0]["translated"] == "TEXTO"
 
+
+def test_unresolved_pure_visual_card_flags_are_propagated_before_typeset():
+    from strip.process_bands import _propagate_unresolved_visual_card_inpaint_flags
+
+    page = {
+        "_strip_inpaint_policy": "pure",
+        "_strip_used_real_inpaint": False,
+        "_strip_inpaint_decision_flags": [
+            "real_inpaint_skipped_unsafe_mask",
+            "weak_text_residual_after_inpaint",
+        ],
+        "texts": [
+            {
+                "id": "cardocr_003",
+                "layout_category": "item_card",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {"id": "speech_001", "layout_profile": "white_balloon", "qa_flags": []},
+        ],
+    }
+
+    _propagate_unresolved_visual_card_inpaint_flags(page)
+
+    card_flags = set(page["texts"][0]["qa_flags"])
+    assert "real_inpaint_skipped_unsafe_mask" in card_flags
+    assert "weak_text_residual_after_inpaint" in card_flags
+    assert page["texts"][1]["qa_flags"] == []

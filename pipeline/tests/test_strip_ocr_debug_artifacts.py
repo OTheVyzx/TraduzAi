@@ -224,8 +224,13 @@ def test_reconcile_overlapping_bands_quarantines_unsupported_edge_fragment():
     reconciled = _reconcile_overlapping_band_ocr_fragments_before_translation([band], {0: page})
 
     assert reconciled == 0
-    assert page["texts"][0]["route_action"] == "review_required"
-    assert page["texts"][0]["route_reason"] == "cross_band_unsupported_edge_fragment"
+    assert page["texts"] == []
+    quarantined = page["_cross_band_quarantined_texts"][0]
+    assert quarantined["route_action"] == "review_required"
+    assert quarantined["route_reason"] == "cross_band_unsupported_edge_fragment"
+    assert quarantined["skip_processing"] is True
+    assert quarantined["render_completed"] is False
+    assert page["_cross_band_unsupported_edge_fragment_quarantined"] is True
     assert page["_vision_blocks"] == []
 
 

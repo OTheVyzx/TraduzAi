@@ -9661,6 +9661,68 @@ class MainEmitTests(unittest.TestCase):
                 self.assertIsNotNone(final)
                 self.assertTrue(np.array_equal(final, translated[y1:y2, x1:x2]), row["band_id"])
 
+    def test_final_project_rerender_does_not_restore_unchanged_source_text_from_upper_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            (crops_dir / "final_bands").mkdir(parents=True)
+
+            original = np.zeros((80, 40, 3), dtype=np.uint8)
+            original[45:55, 5:35, :] = (245, 245, 245)
+            translated = np.full_like(original, (7, 5, 3))
+            translated[45:55, 5:35, :] = (80, 100, 120)
+            cv2.imwrite(str(work_dir / "images" / "002.png"), original)
+            cv2.imwrite(str(work_dir / "translated" / "002.png"), translated)
+
+            upper = original[20:55].copy()
+            upper[5:15, 2:12, :] = (20, 200, 60)
+            lower = original[45:80].copy()
+            lower[0:10, 5:35, :] = (80, 100, 120)
+            for band_id, image in {
+                "page_002_band_043": upper,
+                "page_002_band_044": lower,
+            }.items():
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+
+            rows = [
+                {
+                    "band_id": "page_002_band_043",
+                    "translated_output_page": "002.png",
+                    "crop_bbox_in_translated_page": [0, 20, 40, 55],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_002_band_043.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_002_band_043/post_copyback.png",
+                    "trace_ids": ["title@page_002_band_043"],
+                },
+                {
+                    "band_id": "page_002_band_044",
+                    "translated_output_page": "002.png",
+                    "crop_bbox_in_translated_page": [0, 45, 40, 80],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_002_band_044.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_002_band_044/post_copyback.png",
+                    "trace_ids": ["body@page_002_band_044"],
+                },
+            ]
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [{"numero": 2, "arquivo_traduzido": "translated/002.png", "text_layers": []}],
+            }
+
+            main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            observed = cv2.imread(str(work_dir / "translated" / "002.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(observed)
+            self.assertTrue(np.array_equal(observed[45:55, 5:35, :], translated[45:55, 5:35, :]))
+            self.assertTrue(np.array_equal(observed[25:35, 2:12, :], upper[5:15, 2:12, :]))
+            self.assertTrue(np.array_equal(observed[60:75, :, :], original[60:75, :, :]))
+
     def test_final_project_rerender_prevents_trace_empty_context_from_overwriting_text_band(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)

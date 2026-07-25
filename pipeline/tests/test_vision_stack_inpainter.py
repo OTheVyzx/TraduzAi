@@ -4993,6 +4993,336 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
         self.assertGreater(int(np.count_nonzero(np.any(result != image, axis=2))), 100)
 
+    def test_inpaint_band_image_keeps_glyph_only_card_row_without_bubble_mask_bbox(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((150, 360, 3), [18, 24, 72], dtype=np.uint8)
+        cv2.putText(image, "PERMANENTLY INCREASES", (42, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (245, 248, 255), 2, cv2.LINE_AA)
+        text = {
+            "id": "cardocr_003",
+            "trace_id": "cardocr_003@page_002_band_044",
+            "text": "PERMANENTLY INCREASES",
+            "bbox": [38, 48, 322, 82],
+            "text_pixel_bbox": [38, 48, 322, 82],
+            "line_polygons": [[[38, 48], [322, 48], [322, 82], [38, 82]]],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "block_profile": "colored_status_panel_row",
+            "layout_profile": "colored_status_panel_row",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["visual_text_only_inpaint_contract", "mask_outside_balloon_critical"],
+            "mask_evidence": _allowed_mask_evidence(),
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)]}
+
+        def fake_round(img, payload, inpainter):
+            mask = payload.get("_precomputed_inpaint_mask")
+            result = img.copy()
+            result[mask > 0] = [18, 24, 72]
+            payload["_inpaint_round_stats"] = {
+                "_strip_inpaint_decision_flags": ["mask_outside_balloon_critical"],
+            }
+            return result
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "pure"}, clear=False), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            side_effect=fake_round,
+        ):
+            result = inpaint_band_image(image, page)
+
+        self.assertTrue(page.get("_strip_used_real_inpaint"))
+        self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
+        self.assertGreater(int(np.count_nonzero(np.any(result != image, axis=2))), 100)
+
+    def test_inpaint_band_image_uses_glyph_mask_for_band_edge_rejected_white_crop(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((497, 800, 3), 252, dtype=np.uint8)
+        cv2.putText(image, "SIMLAK TOO KIONT", (369, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (20, 20, 20), 1, cv2.LINE_AA)
+        evidence = _allowed_mask_evidence()
+        evidence.update({"kind": "ocr_pixels", "raw_mask_pixels": 1207, "expanded_mask_pixels": 2816})
+        text = {
+            "id": "ocr_001",
+            "trace_id": "ocr_001@page_002_band_043",
+            "text": "SIMLAK TOO KIONT",
+            "bbox": [338, 0, 645, 22],
+            "text_pixel_bbox": [369, 2, 617, 15],
+            "line_polygons": [[[369, 2], [617, 2], [617, 15], [369, 15]]],
+            "balloon_bbox": [271, 0, 712, 34],
+            "bubble_mask_bbox": [338, 0, 645, 22],
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "block_profile": "white_balloon",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["band_edge_clipped_text_mask", "rejected_derived_bubble_mask"],
+            "mask_evidence": evidence,
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)]}
+
+        def fake_round(img, payload, inpainter):
+            mask = payload.get("_precomputed_inpaint_mask")
+            result = img.copy()
+            result[mask > 0] = 252
+            payload["_inpaint_round_stats"] = {
+                "_strip_inpaint_decision_flags": ["mask_outside_balloon_critical"],
+            }
+            return result
+
+        with patch("vision_stack.runtime._apply_inpainting_round", side_effect=fake_round):
+            result = inpaint_band_image(image, page)
+
+        self.assertTrue(page.get("_strip_used_real_inpaint"))
+        self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
+        self.assertGreater(int(np.count_nonzero(np.any(result != image, axis=2))), 100)
+
+    def test_multi_row_visual_card_allows_dense_glyph_only_action_mask(self):
+        from inpainter import _rejected_card_action_mask_allows_real_inpaint, _visual_card_action_prefers_local_inpaint
+
+        shape = (220, 360)
+        action = np.zeros(shape, dtype=np.uint8)
+        blocks = []
+        for index, y1 in enumerate((22, 82, 142), start=1):
+            bbox = [36, y1, 324, y1 + 24]
+            action[y1 : y1 + 24, 36:324] = 255
+            blocks.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "trace_id": f"cardocr_{index:03d}@page_002_band_044",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [[[36, y1], [324, y1], [324, y1 + 24], [36, y1 + 24]]],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "block_profile": "colored_status_panel_row",
+                    "route_action": "translate_inpaint_render",
+                    "qa_flags": ["visual_text_only_inpaint_contract", "mask_outside_balloon_critical"],
+                    "mask_evidence": _allowed_mask_evidence(),
+                }
+            )
+        page = {"texts": [dict(block) for block in blocks], "_vision_blocks": [dict(block) for block in blocks]}
+
+        allowed = _rejected_card_action_mask_allows_real_inpaint(page, blocks, action, shape)
+
+        self.assertGreater(np.count_nonzero(action) / float(action.size), 0.12)
+        self.assertTrue(allowed)
+        self.assertTrue(_visual_card_action_prefers_local_inpaint(page, blocks, action, shape))
+        unsafe_blocks = [dict(block) for block in blocks]
+        unsafe_blocks[0]["qa_flags"] = []
+        self.assertFalse(_visual_card_action_prefers_local_inpaint({"texts": unsafe_blocks}, unsafe_blocks, action, shape))
+
+    def test_multi_row_image_panel_allows_one_row_without_glyph_evidence_when_action_is_contained(self):
+        from inpainter import _rejected_card_action_mask_allows_real_inpaint, _visual_card_action_prefers_local_inpaint
+
+        shape = (620, 800)
+        action = np.zeros(shape, dtype=np.uint8)
+        action[145:260, 250:710] = 255
+        action[250:400, 240:720] = 255
+        action[390:465, 250:710] = 255
+        blocks = []
+        for index, (bbox, has_evidence) in enumerate(
+            (
+                ([336, 159, 632, 252], False),
+                ([260, 262, 703, 386], True),
+                ([266, 398, 701, 456], True),
+            ),
+            start=1,
+        ):
+            x1, y1, x2, y2 = bbox
+            evidence = _allowed_mask_evidence() if has_evidence else {
+                "kind": "none",
+                "raw_mask_pixels": 0,
+                "expanded_mask_pixels": 0,
+                "fast_fill_allowed": False,
+            }
+            blocks.append(
+                {
+                    "id": f"ocr_{index:03d}",
+                    "trace_id": f"ocr_{index:03d}@page_002_band_046",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]],
+                    "balloon_bbox": [171, 132, 796, 473],
+                    "bubble_mask_bbox": [171, 132, 796, 473],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "block_profile": "colored_status_panel_row",
+                    "route_action": "translate_inpaint_render",
+                    "qa_flags": ["visual_text_only_inpaint_contract"] + ([] if has_evidence else ["fast_fill_no_glyph_evidence"]),
+                    "mask_evidence": evidence,
+                }
+            )
+        page = {"texts": [dict(block) for block in blocks], "_vision_blocks": [dict(block) for block in blocks]}
+
+        allowed = _rejected_card_action_mask_allows_real_inpaint(page, blocks, action, shape)
+
+        self.assertGreater(np.count_nonzero(action) / float(action.size), 0.12)
+        self.assertTrue(allowed)
+        self.assertTrue(_visual_card_action_prefers_local_inpaint(page, blocks, action, shape))
+
+    def test_visual_card_residual_retry_expands_glyph_rows_only_inside_shared_panel(self):
+        from inpainter import _build_visual_card_residual_retry_mask
+
+        shape = (500, 800)
+        original = np.full((500, 800, 3), [252, 210, 108], dtype=np.uint8)
+        cleaned = original.copy()
+        base = np.zeros(shape, dtype=np.uint8)
+        base[150:190, 160:640] = 255
+        base[220:250, 180:620] = 255
+        cv2.putText(original, "PERMANENTLY INCREASES", (180, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "PERMANENTLY INCREASES", (180, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (232, 194, 104), 2, cv2.LINE_AA)
+        cv2.putText(original, "UPON CONSUMPTION", (200, 243), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "UPON CONSUMPTION", (200, 243), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (232, 194, 104), 2, cv2.LINE_AA)
+        texts = []
+        for index, bbox in enumerate(([150, 145, 650, 195], [170, 215, 630, 255]), start=1):
+            texts.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "bubble_mask_bbox": [130, 120, 670, 280],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "layout_profile": "colored_status_panel_row",
+                    "qa_flags": ["visual_text_only_inpaint_contract"],
+                }
+            )
+
+        retry = _build_visual_card_residual_retry_mask(original, cleaned, base, texts, shape)
+
+        self.assertIsInstance(retry, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(retry)), 0)
+        self.assertLess(int(np.count_nonzero(retry)), int(np.count_nonzero(base)))
+        self.assertEqual(int(np.count_nonzero(retry[:120])), 0)
+        self.assertEqual(int(np.count_nonzero(retry[280:])), 0)
+        self.assertEqual(int(np.count_nonzero(retry[:, :130])), 0)
+        self.assertEqual(int(np.count_nonzero(retry[:, 670:])), 0)
+
+    def test_visual_card_local_inpaint_mask_uses_glyph_pixels_not_full_row_rectangles(self):
+        from inpainter import _build_visual_card_local_inpaint_mask
+
+        shape = (240, 520)
+        image = np.full((shape[0], shape[1], 3), [252, 210, 108], dtype=np.uint8)
+        base = np.zeros(shape, dtype=np.uint8)
+        texts = []
+        for index, (label, y1) in enumerate((("GRADE B PLUS", 48), ("INCREASES STRENGTH", 132)), start=1):
+            bbox = [48, y1, 472, y1 + 42]
+            base[y1 : y1 + 42, 48:472] = 255
+            cv2.putText(image, label, (62, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 245), 2, cv2.LINE_AA)
+            texts.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [[[48, y1], [472, y1], [472, y1 + 42], [48, y1 + 42]]],
+                    "bubble_mask_source": "derived_card_panel_mask",
+                    "block_profile": "colored_status_panel_row",
+                    "route_action": "translate_inpaint_render",
+                    "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+                    "mask_evidence": _allowed_mask_evidence(),
+                }
+            )
+
+        local = _build_visual_card_local_inpaint_mask(image, base, texts, shape)
+
+        self.assertIsInstance(local, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(local)), 250)
+        self.assertLess(int(np.count_nonzero(local)), int(np.count_nonzero(base)) * 0.55)
+        self.assertEqual(int(np.count_nonzero(local[base == 0])), 0)
+
+    def test_light_visual_card_uses_blurred_model_guide_and_clamps_outside_mask(self):
+        from inpainter import _apply_visual_card_guided_model_inpaint, _visual_card_prefers_blurred_model_guide
+
+        height, width = 180, 360
+        x_gradient = np.linspace(220, 252, width, dtype=np.uint8)
+        image = np.repeat(x_gradient[np.newaxis, :, np.newaxis], height, axis=0)
+        image = np.repeat(image, 3, axis=2)
+        cv2.putText(image, "GRADE B PLUS", (72, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 250), 3, cv2.LINE_AA)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[60:112, 54:314] = 255
+
+        class GuideReturningInpainter:
+            def inpaint(self, guide, action_mask, **_kwargs):
+                self.guide = guide.copy()
+                self.mask = action_mask.copy()
+                return guide.copy()
+
+        inpainter = GuideReturningInpainter()
+        outside = mask == 0
+
+        self.assertTrue(_visual_card_prefers_blurred_model_guide(image, mask))
+        result = _apply_visual_card_guided_model_inpaint(image, mask, inpainter)
+
+        self.assertTrue(np.array_equal(result[outside], image[outside]))
+        self.assertLess(float(np.std(inpainter.guide[mask > 0])), float(np.std(image[mask > 0])))
+        dark = np.full_like(image, 24)
+        self.assertFalse(_visual_card_prefers_blurred_model_guide(dark, mask))
+
+    def test_visual_card_guided_model_feathers_inside_edge_without_touching_outside(self):
+        from inpainter import _apply_visual_card_guided_model_inpaint
+
+        image = np.full((120, 220, 3), 220, dtype=np.uint8)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[30:90, 40:180] = 255
+
+        class FlatInpainter:
+            def inpaint(self, guide, action_mask, **_kwargs):
+                result = guide.copy()
+                result[action_mask > 0] = 100
+                return result
+
+        result = _apply_visual_card_guided_model_inpaint(image, mask, FlatInpainter())
+
+        self.assertTrue(np.array_equal(result[mask == 0], image[mask == 0]))
+        self.assertLess(int(np.max(np.abs(result[30, 40:180].astype(int) - 220))), 30)
+        self.assertLess(int(np.mean(result[52:68, 92:128])), 140)
+
+    def test_visual_card_residual_retry_handles_truncated_debug_text_samples(self):
+        from inpainter import _build_visual_card_residual_retry_mask
+
+        shape = (500, 800)
+        original = np.full((500, 800, 3), [252, 210, 108], dtype=np.uint8)
+        cleaned = original.copy()
+        base = np.zeros(shape, dtype=np.uint8)
+        base[150:190, 160:640] = 255
+        base[330:360, 180:620] = 255
+        cv2.putText(original, "TOP CARD ROW", (190, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "TOP CARD ROW", (190, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (232, 194, 104), 2, cv2.LINE_AA)
+        cv2.putText(original, "OMITTED SAMPLE ROW", (200, 355), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "OMITTED SAMPLE ROW", (200, 355), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (232, 194, 104), 2, cv2.LINE_AA)
+        texts = [
+            {
+                "id": "ocr_001",
+                "text_pixel_bbox": [150, 145, 650, 195],
+                "bubble_mask_bbox": [130, 120, 670, 220],
+                "bubble_mask_source": "derived_white_crop_rejected",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "cardocr_002",
+                "text_pixel_bbox": [170, 215, 630, 255],
+                "bubble_mask_bbox": [130, 210, 670, 280],
+                "bubble_mask_source": "derived_card_panel_mask",
+                "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+            },
+        ]
+
+        retry = _build_visual_card_residual_retry_mask(original, cleaned, base, texts, shape)
+
+        self.assertIsInstance(retry, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(retry[320:370])), 0)
+        self.assertLess(int(np.count_nonzero(retry)), int(np.count_nonzero(base)))
+
+    def test_visual_card_residual_telea_reduces_ghost_contrast_without_touching_outside_mask(self):
+        from inpainter import _apply_visual_card_residual_inpaint
+
+        image = np.full((120, 420, 3), [252, 210, 108], dtype=np.uint8)
+        cv2.putText(image, "PERMANENTLY", (62, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (218, 178, 94), 3, cv2.LINE_AA)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.putText(mask, "PERMANENTLY", (62, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, 255, 7, cv2.LINE_AA)
+        outside = mask == 0
+        before_std = float(np.std(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)[mask > 0]))
+
+        result = _apply_visual_card_residual_inpaint(image, mask)
+
+        after_std = float(np.std(cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)[mask > 0]))
+        self.assertLess(after_std, before_std * 0.55)
+        self.assertTrue(np.array_equal(result[outside], image[outside]))
+
     def test_white_image_rect_mask_not_blocked_by_stale_unsafe_flag(self):
         from inpainter import inpaint_band_image
 
