@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 import json
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +34,15 @@ from typesetter.renderer import (
     render_band_image,
     render_text_block,
 )
+from ownership.model import (
+    ComponentDisposition,
+    OwnerGlyphPatch,
+    OwnerGraph,
+    OwnerProjection,
+    SourceTextComponent,
+    TextObservation,
+    TextOwner,
+)
 
 from main import (
     _apply_dark_panel_style_groups,
@@ -45,6 +55,139 @@ from main import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_render_band_image_owner_mode_returns_page_space_glyph_patch(self):
+        canvas = np.full((120, 180, 3), 235, dtype=np.uint8)
+        action_mask_ref = (
+            "owner_masks/owner_body--"
+            f"{sha256(b'owner_body').hexdigest()[:12]}/"
+            "tile_executor/action_mask.png"
+        )
+        owner = TextOwner(
+            owner_id="owner_body",
+            page_id="page_001",
+            component_ids=["component_body"],
+            observation_ids=["observation_body"],
+            selected_observation_ids=["observation_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE BODY",
+            translated_payload="CORPO TRADUZIDO",
+            disposition="owned",
+            state="inpainted",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+            action_mask_ref=action_mask_ref,
+        )
+        component = SourceTextComponent(
+            component_id="component_body",
+            page_id="page_001",
+            bbox_page=(30, 20, 150, 100),
+            polygon_page=((30, 20), (150, 20), (150, 100), (30, 100)),
+            detector_sources=("independent_text_recall",),
+        )
+        observation = TextObservation(
+            observation_id="observation_body",
+            page_id="page_001",
+            component_ids=(component.component_id,),
+            text="SOURCE BODY",
+            confidence=0.96,
+            provider="paddle_full_page",
+            bbox_page=component.bbox_page,
+            tile_provenance=("tile_executor",),
+        )
+        graph = OwnerGraph(
+            schema_version=1,
+            page_id="page_001",
+            owners=[owner],
+            components=[component],
+            observations=[observation],
+            projections=[
+                OwnerProjection(
+                    owner_id="owner_body",
+                    tile_id="tile_executor",
+                    role="executor",
+                    bbox_page=component.bbox_page,
+                    bbox_tile=component.bbox_page,
+                    offset_xy=(0, 0),
+                )
+            ],
+            component_dispositions=[
+                ComponentDisposition(
+                    component_id=component.component_id,
+                    decision="owned",
+                    owner_id=owner.owner_id,
+                )
+            ],
+        )
+        graph.require_valid()
+        page = {
+            "page_id": "page_001",
+            "width": 180,
+            "height": 120,
+            "texts": [
+                {
+                    "id": "owner_body",
+                    "owner_id": "owner_body",
+                    "page_id": "page_001",
+                    "coordinate_space": "page",
+                    "translated": "CORPO TRADUZIDO",
+                    "route_action": "translate_inpaint_render",
+                    "action_mask_ref": owner.action_mask_ref,
+                    "execution_tile_id": "tile_executor",
+                    "render_safe_polygon_page": [
+                        [30, 20],
+                        [150, 20],
+                        [150, 100],
+                        [30, 100],
+                    ],
+                    "safe_text_box": [30, 20, 150, 100],
+                    "balloon_bbox": [30, 20, 150, 100],
+                    "layout_bbox": [30, 20, 150, 100],
+                    "bbox": [30, 20, 150, 100],
+                    "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 22},
+                }
+            ],
+        }
+
+        def deterministic_render(img, block, *_args, **_kwargs):
+            ImageDraw.Draw(img).rectangle((70, 52, 108, 68), fill=(8, 12, 18))
+            block["render_completed"] = True
+            block["fit_status"] = "ok"
+            block["render_bbox"] = [70, 52, 109, 69]
+
+        with patch("typesetter.renderer.render_text_block", side_effect=deterministic_render):
+            glyph_patch = render_band_image(canvas, page, owner_graph=graph)
+
+        self.assertIsInstance(glyph_patch, OwnerGlyphPatch)
+        self.assertEqual(glyph_patch.owner_id, "owner_body")
+        self.assertEqual(glyph_patch.page_id, "page_001")
+        self.assertEqual(glyph_patch.coordinate_space, "page")
+        self.assertEqual(glyph_patch.execution_tile_id, "tile_executor")
+        self.assertEqual(glyph_patch.projection_role, "executor")
+        self.assertTrue(glyph_patch.render_completed)
+        self.assertEqual(glyph_patch.fit_status, "ok")
+        self.assertEqual(glyph_patch.glyph_bbox_page, (70, 52, 109, 69))
+        self.assertEqual(int(np.count_nonzero(glyph_patch.glyph_mask)), 39 * 17)
+        self.assertEqual(len(glyph_patch.component_geometry_sha256), 64)
+        self.assertNotEqual(glyph_patch.after_sha256, glyph_patch.before_sha256)
+        self.assertEqual(
+            glyph_patch.render_safe_polygon_page,
+            ((30, 20), (150, 20), (150, 100), (30, 100)),
+        )
+
+    def test_owner_renderer_rejects_unvalidated_graph_object(self):
+        class ForgedGraph:
+            page_id = "page_001"
+            owners = []
+            components = []
+            projections = []
+
+        with self.assertRaisesRegex(TypeError, "OwnerGraph"):
+            render_band_image(
+                np.full((20, 30, 3), 235, dtype=np.uint8),
+                {"page_id": "page_001", "width": 30, "height": 20, "texts": []},
+                owner_graph=ForgedGraph(),
+            )
+
     def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
         text = {
             "id": "cardocr_003",

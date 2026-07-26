@@ -44,6 +44,41 @@ try:
 except ImportError:
     from ..utils.decision_log import infer_page_number, record_decision
 
+try:
+    from ownership.model import OwnerGraph
+except ImportError:  # pragma: no cover - supports package imports
+    from ..ownership.model import OwnerGraph
+
+
+_OWNER_LAYOUT_VISUAL_INPUT_FIELDS = frozenset(
+    {
+        "tipo",
+        "content_class",
+        "layout_category",
+        "layout_profile",
+        "block_profile",
+        "background_rgb",
+        "estilo",
+        "style",
+        "style_evidence",
+        "style_origin",
+        "style_confidence",
+        "style_source",
+        "page_width",
+        "page_height",
+        "source_font_bounds_px",
+        "container_font_bounds_px",
+        "render_safe_polygon_page",
+    }
+)
+_OWNER_RENDER_ROUTES = frozenset(
+    {
+        "translate_inpaint_render",
+        "translate_sfx_inpaint_render",
+        "translate_render_only",
+    }
+)
+
 def _resolve_page_number(page_result: dict) -> int | None:
     raw = page_result.get("numero")
     if raw is not None:
@@ -506,7 +541,433 @@ def _has_multiple_sentences(text: str) -> bool:
     return len(re.findall(r"[.!?…]+", str(text or ""))) >= 2
 
 
-def enrich_page_layout(page_result: dict) -> dict:
+def _owner_layout_bbox(value: object, *, label: str) -> list[int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError(f"{label} must be a canonical page-space bbox")
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ValueError(f"{label} must contain canonical integer coordinates")
+    bbox = list(value)
+    if bbox[0] < 0 or bbox[1] < 0 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise ValueError(f"{label} must be a canonical page-space bbox")
+    return bbox
+
+
+def _owner_layout_polygon(
+    value: object,
+    *,
+    bbox: list[int],
+    label: str,
+    require_within_bbox: bool = True,
+) -> list[list[int]]:
+    if value in (None, []):
+        raise ValueError(f"{label} must be explicit in verified owner mode")
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        raise ValueError(f"{label} must contain at least three page-space points")
+    points: list[list[int]] = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError(f"{label} contains an invalid point")
+        if not all(
+            isinstance(coordinate, int) and not isinstance(coordinate, bool)
+            for coordinate in point
+        ):
+            raise ValueError(f"{label} contains a non-canonical point")
+        x, y = point
+        if x < 0 or y < 0:
+            raise ValueError(f"{label} contains a negative page-space point")
+        points.append([x, y])
+    if len({tuple(point) for point in points}) < 3:
+        raise ValueError(f"{label} must contain at least three unique points")
+    contour = np.asarray(points, dtype=np.int32)
+    if float(abs(cv2.contourArea(contour))) <= 0.0:
+        raise ValueError(f"{label} must have positive area")
+    if require_within_bbox:
+        x1, y1, x2, y2 = bbox
+        if any(not (x1 <= x <= x2 and y1 <= y <= y2) for x, y in points):
+            raise ValueError(f"{label} must stay within bbox_page")
+    return points
+
+
+def _owner_polygon_is_raster_subset(
+    inner_polygon: list[list[int]],
+    outer_polygon: list[list[int]],
+    *,
+    width: int,
+    height: int,
+) -> bool:
+    """Return whether every page pixel in ``inner_polygon`` belongs to ``outer_polygon``.
+
+    Vertex-only containment is insufficient for concave owner polygons: an edge
+    can cross a cavity even when all of its vertices are inside.  Rasterizing
+    both canonical page-space polygons makes the full region area authoritative.
+    """
+
+    inner_mask = np.zeros((height, width), dtype=np.uint8)
+    outer_mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(
+        inner_mask,
+        [np.asarray(inner_polygon, dtype=np.int32)],
+        255,
+    )
+    cv2.fillPoly(
+        outer_mask,
+        [np.asarray(outer_polygon, dtype=np.int32)],
+        255,
+    )
+    return not bool(np.any((inner_mask > 0) & (outer_mask == 0)))
+
+
+def _owner_font_bounds(value: object, *, label: str) -> list[int] | None:
+    if value in (None, []):
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{label} must be [minimum_px, maximum_px]")
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ValueError(f"{label} must contain canonical integer bounds")
+    lower, upper = value
+    if lower <= 0 or upper < lower:
+        raise ValueError(f"{label} must be a positive ordered interval")
+    return [lower, upper]
+
+
+def _intersect_owner_font_bounds(values: list[list[int]]) -> list[int] | None:
+    if not values:
+        return None
+    lower = max(value[0] for value in values)
+    upper = min(value[1] for value in values)
+    if upper < lower:
+        raise ValueError("owner layout regions contain disjoint font-size bounds")
+    return [int(lower), int(upper)]
+
+
+def _flatten_owner_layout_regions(layout_regions: object) -> list[dict]:
+    if layout_regions is None:
+        return []
+    if isinstance(layout_regions, dict):
+        flattened: list[dict] = []
+        for owner_id, owner_regions in layout_regions.items():
+            if isinstance(owner_regions, dict):
+                owner_regions = [owner_regions]
+            if not isinstance(owner_regions, (list, tuple)):
+                raise ValueError("layout_regions mapping values must be region lists")
+            for raw_region in owner_regions:
+                if not isinstance(raw_region, dict):
+                    raise ValueError("layout_regions must contain mappings")
+                region = copy.deepcopy(raw_region)
+                region.setdefault("owner_id", owner_id)
+                flattened.append(region)
+        return flattened
+    if not isinstance(layout_regions, (list, tuple)):
+        raise ValueError("layout_regions must be a sequence or owner mapping")
+    if not all(isinstance(region, dict) for region in layout_regions):
+        raise ValueError("layout_regions must contain mappings")
+    return [copy.deepcopy(region) for region in layout_regions]
+
+
+def _enrich_owner_page_layout(
+    page_result: dict,
+    *,
+    owner_graph: object,
+    layout_regions: object,
+) -> dict:
+    """Materialize safe visual geometry without changing owner semantics."""
+
+    if not isinstance(owner_graph, OwnerGraph):
+        raise TypeError("verified owner layout requires an OwnerGraph instance")
+    owner_graph.require_valid()
+    graph_page_id = str(owner_graph.page_id or "").strip()
+    page_id = str(page_result.get("page_id") or graph_page_id).strip()
+    if not graph_page_id or page_id != graph_page_id:
+        raise ValueError("owner layout page_id does not match the owner graph")
+
+    width = int(page_result.get("width", 0) or 0)
+    height = int(page_result.get("height", 0) or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError("verified owner layout requires canonical page dimensions")
+
+    owners = list(owner_graph.owners)
+    owner_ids = [str(owner.owner_id or "").strip() for owner in owners]
+    if any(not owner_id for owner_id in owner_ids) or len(set(owner_ids)) != len(owner_ids):
+        raise ValueError("owner graph contains invalid or duplicate owner identities")
+    owner_by_id = dict(zip(owner_ids, owners, strict=True))
+    renderable_owner_ids = [
+        owner.owner_id
+        for owner in owners
+        if owner.disposition == "owned"
+        and owner.route_action in _OWNER_RENDER_ROUTES
+        and owner.state != "review_required"
+        and isinstance(owner.translated_payload, str)
+        and bool(owner.translated_payload.strip())
+    ]
+    blocked_owner_ids = [
+        owner_id for owner_id in owner_ids if owner_id not in set(renderable_owner_ids)
+    ]
+
+    source_records: dict[str, dict] = {}
+    for raw_record in page_result.get("texts", []) or []:
+        if not isinstance(raw_record, dict):
+            raise ValueError("verified owner layout text records must be mappings")
+        owner_id = str(raw_record.get("owner_id") or "").strip()
+        if owner_id not in owner_by_id:
+            raise ValueError(f"verified owner layout references unknown owner_id: {owner_id!r}")
+        if owner_id in source_records:
+            raise ValueError(f"verified owner layout duplicates owner_id: {owner_id}")
+        source_records[owner_id] = {
+            key: copy.deepcopy(value)
+            for key, value in raw_record.items()
+            if key in _OWNER_LAYOUT_VISUAL_INPUT_FIELDS
+        }
+
+    explicit_regions = _flatten_owner_layout_regions(layout_regions)
+    regions_by_owner: dict[str, list[dict]] = {owner_id: [] for owner_id in owner_ids}
+    region_ids: set[str] = set()
+    for index, raw_region in enumerate(explicit_regions):
+        owner_id = str(raw_region.get("owner_id") or "").strip()
+        if owner_id not in owner_by_id:
+            raise ValueError(f"layout region references unknown owner_id: {owner_id!r}")
+        region_id = str(
+            raw_region.get("layout_region_id")
+            or raw_region.get("region_id")
+            or ""
+        ).strip()
+        if not region_id or region_id in region_ids:
+            raise ValueError("layout_region_id must be non-empty and page-unique")
+        region_ids.add(region_id)
+        bbox = _owner_layout_bbox(
+            raw_region.get("bbox_page") or raw_region.get("bbox"),
+            label=f"layout region {region_id} bbox_page",
+        )
+        if bbox[2] > width or bbox[3] > height:
+            raise ValueError(f"layout region {region_id} escapes page bounds")
+        polygon = _owner_layout_polygon(
+            raw_region.get("safe_polygon_page"),
+            bbox=bbox,
+            label=f"layout region {region_id} safe_polygon_page",
+        )
+        if any(point[0] > width or point[1] > height for point in polygon):
+            raise ValueError(f"layout region {region_id} safe polygon escapes page bounds")
+        raw_order = raw_region.get("order", index)
+        if not isinstance(raw_order, int) or isinstance(raw_order, bool):
+            raise ValueError(f"layout region {region_id} order must be a canonical integer")
+        region = copy.deepcopy(raw_region)
+        region.update(
+            {
+                "layout_region_id": region_id,
+                "owner_id": owner_id,
+                "order": raw_order,
+                "bbox_page": bbox,
+                "safe_polygon_page": polygon,
+            }
+        )
+        for key in ("source_font_bounds_px", "container_font_bounds_px"):
+            bounds = _owner_font_bounds(region.get(key), label=f"{region_id}.{key}")
+            if bounds is not None:
+                region[key] = bounds
+        regions_by_owner[owner_id].append(region)
+
+    enriched_texts: list[dict] = []
+    for owner_id in renderable_owner_ids:
+        owner = owner_by_id[owner_id]
+        owner_regions = regions_by_owner.get(owner_id) or []
+        if not owner_regions:
+            raise ValueError(
+                f"verified render owner {owner_id} has no explicit layout region"
+            )
+        owner_regions = sorted(
+            owner_regions,
+            key=lambda region: (
+                int(region.get("order", 0) or 0),
+                str(region.get("layout_region_id") or ""),
+            ),
+        )
+        normalized_regions: list[dict] = []
+        for fallback_order, raw_region in enumerate(owner_regions):
+            region_id = str(raw_region.get("layout_region_id") or "").strip()
+            bbox = _owner_layout_bbox(
+                raw_region.get("bbox_page") or raw_region.get("bbox"),
+                label=f"layout region {region_id} bbox_page",
+            )
+            polygon = _owner_layout_polygon(
+                raw_region.get("safe_polygon_page"),
+                bbox=bbox,
+                label=f"layout region {region_id} safe_polygon_page",
+            )
+            raw_order = raw_region.get("order", fallback_order)
+            if not isinstance(raw_order, int) or isinstance(raw_order, bool):
+                raise ValueError(
+                    f"layout region {region_id} order must be a canonical integer"
+                )
+            region = copy.deepcopy(raw_region)
+            region.update(
+                {
+                    "layout_region_id": region_id,
+                    "owner_id": owner_id,
+                    "order": raw_order,
+                    "bbox_page": bbox,
+                    "safe_polygon_page": polygon,
+                }
+            )
+            normalized_regions.append(region)
+
+        if len(normalized_regions) == 1:
+            safe_polygon = copy.deepcopy(normalized_regions[0]["safe_polygon_page"])
+        else:
+            raw_owner_polygons = [
+                region.get("owner_safe_polygon_page")
+                for region in normalized_regions
+                if region.get("owner_safe_polygon_page") not in (None, [])
+            ]
+            source_owner_polygon = source_records.get(owner_id, {}).get(
+                "render_safe_polygon_page"
+            )
+            if source_owner_polygon not in (None, []):
+                raw_owner_polygons.append(source_owner_polygon)
+            if not raw_owner_polygons:
+                raise ValueError(
+                    f"connected owner {owner_id} requires explicit owner_safe_polygon_page"
+                )
+            canonical_owner_polygons = [
+                _owner_layout_polygon(
+                    polygon,
+                    bbox=[0, 0, width, height],
+                    label=f"owner {owner_id} owner_safe_polygon_page",
+                    require_within_bbox=True,
+                )
+                for polygon in raw_owner_polygons
+            ]
+            safe_polygon = canonical_owner_polygons[0]
+            if any(polygon != safe_polygon for polygon in canonical_owner_polygons[1:]):
+                raise ValueError(
+                    f"connected owner {owner_id} has divergent owner_safe_polygon_page values"
+                )
+            if any(
+                not _owner_polygon_is_raster_subset(
+                    region["safe_polygon_page"],
+                    safe_polygon,
+                    width=width,
+                    height=height,
+                )
+                for region in normalized_regions
+            ):
+                raise ValueError(
+                    f"connected owner {owner_id} regions escape owner_safe_polygon_page"
+                )
+
+        if any(point[0] >= width or point[1] >= height for point in safe_polygon):
+            raise ValueError(f"owner {owner_id} safe polygon escapes page bounds")
+        safe_x1 = min(point[0] for point in safe_polygon)
+        safe_y1 = min(point[1] for point in safe_polygon)
+        safe_x2 = max(point[0] for point in safe_polygon)
+        safe_y2 = max(point[1] for point in safe_polygon)
+        safe_bbox = [safe_x1, safe_y1, safe_x2, safe_y2]
+
+        source_bounds = _intersect_owner_font_bounds(
+            [
+                bounds
+                for region in normalized_regions
+                if (bounds := _owner_font_bounds(
+                    region.get("source_font_bounds_px"),
+                    label=f"{region['layout_region_id']}.source_font_bounds_px",
+                ))
+                is not None
+            ]
+        )
+        container_bounds = _intersect_owner_font_bounds(
+            [
+                bounds
+                for region in normalized_regions
+                if (bounds := _owner_font_bounds(
+                    region.get("container_font_bounds_px"),
+                    label=f"{region['layout_region_id']}.container_font_bounds_px",
+                ))
+                is not None
+            ]
+        )
+
+        record = copy.deepcopy(source_records.get(owner_id, {}))
+        record.update(
+            {
+                "id": owner_id,
+                "owner_id": owner_id,
+                "page_id": graph_page_id,
+                "coordinate_space": "page",
+                "component_ids": list(getattr(owner, "component_ids", []) or []),
+                "observation_ids": list(getattr(owner, "observation_ids", []) or []),
+                "selected_observation_ids": list(
+                    getattr(owner, "selected_observation_ids", []) or []
+                ),
+                "semantic_role": str(getattr(owner, "semantic_role", "") or ""),
+                "source_payload": str(getattr(owner, "source_payload", "") or ""),
+                "original": str(getattr(owner, "source_payload", "") or ""),
+                "translated_payload": getattr(owner, "translated_payload", None),
+                "translated": str(getattr(owner, "translated_payload", "") or ""),
+                "disposition": str(getattr(owner, "disposition", "") or ""),
+                "state": str(getattr(owner, "state", "") or ""),
+                "route_action": str(getattr(owner, "route_action", "") or ""),
+                "execution_tile_id": getattr(owner, "execution_tile_id", None),
+                "action_mask_ref": getattr(owner, "action_mask_ref", None),
+                "layout_region_ids": [
+                    str(region["layout_region_id"]) for region in normalized_regions
+                ],
+                "layout_regions": copy.deepcopy(normalized_regions),
+                "render_safe_polygon_page": safe_polygon,
+                "render_safe_polygons_page": [
+                    copy.deepcopy(region["safe_polygon_page"])
+                    for region in normalized_regions
+                ],
+                "safe_text_box": list(safe_bbox),
+                "_debug_safe_text_box": list(safe_bbox),
+                "layout_safe_bbox": list(safe_bbox),
+                "layout_safe_reason": "verified_owner_safe_polygon",
+                "balloon_bbox": list(safe_bbox),
+                "bubble_inner_bbox": list(safe_bbox),
+                "layout_bbox": list(safe_bbox),
+                "balloon_subregions": [
+                    list(region["bbox_page"]) for region in normalized_regions
+                ],
+                "connected_lobe_bboxes": [
+                    list(region["bbox_page"]) for region in normalized_regions
+                ],
+                "layout_group_size": len(normalized_regions),
+                "_owner_mode": True,
+                "_owner_layout_verified": True,
+            }
+        )
+        if len(normalized_regions) > 1:
+            record["layout_profile"] = "connected_balloon"
+        if source_bounds is not None:
+            record["source_font_bounds_px"] = source_bounds
+        if container_bounds is not None:
+            record["container_font_bounds_px"] = container_bounds
+        enriched_texts.append(record)
+
+    updated_page = dict(page_result)
+    updated_page["page_id"] = graph_page_id
+    updated_page["texts"] = enriched_texts
+    updated_page["_owner_layout_contract"] = {
+        "status": "blocked" if blocked_owner_ids else "verified",
+        "page_id": graph_page_id,
+        "owner_ids": list(renderable_owner_ids),
+        "all_owner_ids": list(owner_ids),
+        "blocked_owner_ids": list(blocked_owner_ids),
+        "coordinate_space": "page",
+    }
+    updated_page.pop("_cached_image_bgr", None)
+    return updated_page
+
+
+def enrich_page_layout(
+    page_result: dict,
+    *,
+    owner_graph: object | None = None,
+    layout_regions: object | None = None,
+) -> dict:
+    if owner_graph is not None:
+        return _enrich_owner_page_layout(
+            page_result,
+            owner_graph=owner_graph,
+            layout_regions=layout_regions,
+        )
     texts = page_result.get("texts", [])
     width = int(page_result.get("width", 0) or 0)
     height = int(page_result.get("height", 0) or 0)

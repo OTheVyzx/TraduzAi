@@ -6,6 +6,9 @@ editor choices are handled outside this module and must not be normalized here.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Sequence
 
 import numpy as np
@@ -30,6 +33,76 @@ SOURCE_STYLE_SAFE_FIELDS = {
     "curva_intensidade",
     "rotacao",
 }
+OWNER_STYLE_FORBIDDEN_FIELDS = frozenset(
+    {
+        "id",
+        "text_id",
+        "owner_id",
+        "page_id",
+        "text",
+        "original",
+        "raw_ocr",
+        "normalized_ocr",
+        "normalized_text_final",
+        "translated",
+        "traduzido",
+        "component_ids",
+        "observation_ids",
+        "selected_observation_ids",
+        "semantic_role",
+        "source_payload",
+        "translated_payload",
+        "disposition",
+        "state",
+        "route_action",
+        "execution_tile_id",
+        "action_mask_ref",
+        "layout_region_ids",
+        "layout_regions",
+        "coordinate_space",
+        "bbox",
+        "source_bbox",
+        "text_pixel_bbox",
+        "layout_bbox",
+        "balloon_bbox",
+        "bubble_mask_bbox",
+        "safe_text_box",
+        "layout_safe_bbox",
+        "owner_bbox_page",
+        "component_geometry_sha256",
+        "action_mask",
+        "action_mask_sha256",
+        "protected_art_mask",
+        "protected_art_mask_sha256",
+        "changed_mask",
+        "changed_mask_sha256",
+        "before_sha256",
+        "after_sha256",
+        "render_safe_polygon_page",
+        "render_safe_polygon_sha256",
+        "glyph_mask",
+        "glyph_mask_sha256",
+    }
+)
+AUTO_VISUAL_STYLE_FIELDS = frozenset(
+    SOURCE_STYLE_SAFE_FIELDS
+    | {
+        "tipo",
+        "layout_profile",
+        "style_origin",
+        "style_confidence",
+        "style_source",
+        "tamanho",
+        "font_family",
+        "bold",
+        "italico",
+        "alinhamento",
+        "force_upper",
+        "line_spacing_ratio",
+        "vertical_bias_px",
+        "horizontal_bias_px",
+    }
+)
 
 
 def relative_luminance(rgb: tuple[int, int, int]) -> float:
@@ -46,12 +119,39 @@ def auto_text_color_for_background(background_rgb: tuple[int, int, int]) -> str:
     return "#000000" if relative_luminance(background_rgb) >= 0.25 else "#FFFFFF"
 
 
-def _has_confident_source_style(style: dict) -> bool:
+def source_style_copy_allowed(
+    origin_or_mapping: str | Mapping[str, object] | None,
+    confidence: object | None = None,
+) -> bool:
+    """Return whether source style is explicitly eligible for visual copying."""
+
+    if isinstance(origin_or_mapping, Mapping):
+        origin = origin_or_mapping.get("style_origin")
+        confidence_value = (
+            origin_or_mapping.get("style_confidence")
+            if confidence is None
+            else confidence
+        )
+    else:
+        origin = origin_or_mapping
+        confidence_value = confidence
+
+    if str(origin or "").strip().lower() != "source_detected":
+        return False
+    if isinstance(confidence_value, bool):
+        return False
     try:
-        confidence = float(style.get("style_confidence", 0.0))
+        confidence_number = float(confidence_value)
     except (TypeError, ValueError):
-        confidence = 0.0
-    return style.get("style_origin") == "source_detected" and confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
+        return False
+    return (
+        math.isfinite(confidence_number)
+        and SOURCE_STYLE_CONFIDENCE_THRESHOLD <= confidence_number <= 1.0
+    )
+
+
+def _has_confident_source_style(style: dict) -> bool:
+    return source_style_copy_allowed(style)
 
 
 def _force_black_overrides_source_style(style: dict, force_black_text: bool) -> bool:
@@ -72,7 +172,12 @@ def normalize_auto_typesetting_style(
     *,
     force_black_text: bool = False,
 ) -> dict:
-    normalized = dict(style or {})
+    normalized = {
+        key: deepcopy(value)
+        for key, value in dict(style or {}).items()
+        if key in AUTO_VISUAL_STYLE_FIELDS
+        and key not in OWNER_STYLE_FORBIDDEN_FIELDS
+    }
     preserve_source_style = _has_confident_source_style(normalized)
     force_black_overrides_source = _force_black_overrides_source_style(normalized, force_black_text)
 
@@ -102,7 +207,7 @@ def normalize_auto_typesetting_style(
             if field == "cor" and force_black_overrides_source:
                 continue
             if field in source_style:
-                normalized[field] = source_style[field]
+                normalized[field] = deepcopy(source_style[field])
 
     return normalized
 

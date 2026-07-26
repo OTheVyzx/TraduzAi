@@ -4,6 +4,7 @@ from typesetter.style_policy import (
     CANONICAL_AUTO_FONT,
     normalize_auto_typesetting_style,
     sample_text_background_rgb,
+    source_style_copy_allowed,
 )
 
 
@@ -197,3 +198,75 @@ def test_background_sensor_handles_dark_panel():
     assert rgb[0] < 40
     assert rgb[1] < 40
     assert rgb[2] < 50
+
+
+def test_source_style_copy_threshold_is_finite_and_explicit():
+    assert source_style_copy_allowed("source_detected", 0.69) is False
+    assert source_style_copy_allowed("source_detected", 0.70) is True
+    assert source_style_copy_allowed("source_detected", 0.96) is True
+    assert source_style_copy_allowed("source_detected", "invalid") is False
+    assert source_style_copy_allowed("source_detected", float("inf")) is False
+    assert source_style_copy_allowed("auto", 0.99) is False
+
+
+def test_normalized_visual_style_cannot_carry_owner_semantics():
+    reserved = {
+        "owner_id": "owner_forged",
+        "page_id": "page_forged",
+        "source_payload": "FORGED SOURCE",
+        "translated_payload": "FORGED TRANSLATION",
+        "route_action": "review_required",
+        "action_mask_ref": "owner_masks/forged/action_mask.png",
+        "component_ids": ["component_forged"],
+        "observation_ids": ["observation_forged"],
+        "layout_region_ids": ["region_forged"],
+    }
+
+    normalized = normalize_auto_typesetting_style(
+        {
+            "style_origin": "source_detected",
+            "style_confidence": 0.96,
+            "fonte": "KOMIKAX_.ttf",
+            "cor": "#FFFFFF",
+            **reserved,
+        },
+        (18, 18, 24),
+    )
+
+    assert set(normalized).isdisjoint(reserved)
+    assert normalized["fonte"] == "KOMIKAX_.ttf"
+
+
+def test_normalized_visual_style_is_whitelisted_and_deep_copied():
+    source = {
+        "fonte": "KOMIKAX_.ttf",
+        "cor_gradiente": ["#111111", "#222222"],
+        "sombra_offset": [2, 3],
+        "style_origin": "source_detected",
+        "style_confidence": 0.95,
+        "visible": False,
+        "skip_processing": True,
+        "render_policy": "suppress",
+        "route_reason": "legacy_heuristic",
+        "band_id": "band_forged",
+        "mask_ref": "forged-mask.png",
+        "translation": "FORGED",
+    }
+
+    normalized = normalize_auto_typesetting_style(source, (18, 18, 24))
+
+    assert set(normalized).isdisjoint(
+        {
+            "visible",
+            "skip_processing",
+            "render_policy",
+            "route_reason",
+            "band_id",
+            "mask_ref",
+            "translation",
+        }
+    )
+    normalized["cor_gradiente"].append("#333333")
+    normalized["sombra_offset"][0] = 99
+    assert source["cor_gradiente"] == ["#111111", "#222222"]
+    assert source["sombra_offset"] == [2, 3]

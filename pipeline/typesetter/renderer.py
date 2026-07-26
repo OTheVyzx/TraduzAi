@@ -13,6 +13,7 @@ import sys
 import unicodedata
 import json
 import copy
+from hashlib import sha256
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
@@ -32,6 +33,11 @@ if matplotlib.get_backend().lower() != "agg":
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
+
+try:
+    from ownership.model import OwnerGlyphPatch, OwnerGraph
+except ImportError:  # pragma: no cover - supports package imports
+    from ..ownership.model import OwnerGlyphPatch, OwnerGraph
 
 try:
     from layout.simple_text_geometry import (
@@ -6504,7 +6510,191 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
                 _merge_qa_flags(text, ["fit_below_minimum_legible", "item_card_joint_layout_failed"])
 
 
-def build_render_blocks(texts: list[dict]) -> list[dict]:
+def _owner_identity(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{label} must be a canonical non-empty string")
+    return value
+
+
+def _owner_record_contract(record: dict) -> str:
+    """Stable subset used to reject divergent duplicates for one owner."""
+
+    keys = (
+        "owner_id",
+        "page_id",
+        "coordinate_space",
+        "source_payload",
+        "translated_payload",
+        "translated",
+        "disposition",
+        "state",
+        "route_action",
+        "execution_tile_id",
+        "action_mask_ref",
+        "component_ids",
+        "observation_ids",
+        "selected_observation_ids",
+        "layout_region_ids",
+        "layout_regions",
+        "render_safe_polygon_page",
+        "safe_text_box",
+        "layout_safe_bbox",
+        "source_font_bounds_px",
+        "container_font_bounds_px",
+        "tipo",
+        "content_class",
+        "layout_category",
+        "layout_profile",
+        "block_profile",
+        "background_rgb",
+        "estilo",
+        "style",
+        "style_evidence",
+        "style_origin",
+        "style_confidence",
+        "style_source",
+    )
+    payload = {key: record.get(key) for key in keys if key in record}
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _assert_owner_record_matches_graph(record: dict, owner: object, page_id: str) -> None:
+    owner_id = _owner_identity(getattr(owner, "owner_id", None), label="owner_id")
+    record_page_id = str(record.get("page_id") or page_id).strip()
+    if record_page_id != page_id:
+        raise ValueError(f"owner {owner_id} text record belongs to another page")
+    if str(record.get("coordinate_space") or "page").strip().lower() != "page":
+        raise ValueError(f"owner {owner_id} renderer requires page-space geometry")
+
+    scalar_fields = (
+        ("source_payload", getattr(owner, "source_payload", "")),
+        ("translated_payload", getattr(owner, "translated_payload", None)),
+        ("translated", getattr(owner, "translated_payload", None)),
+        ("disposition", getattr(owner, "disposition", "")),
+        ("state", getattr(owner, "state", "")),
+        ("route_action", getattr(owner, "route_action", "")),
+        ("execution_tile_id", getattr(owner, "execution_tile_id", None)),
+        ("action_mask_ref", getattr(owner, "action_mask_ref", None)),
+    )
+    for key, expected in scalar_fields:
+        if key in record and record.get(key) != expected:
+            raise ValueError(f"owner {owner_id} text record diverges at {key}")
+    list_fields = (
+        "component_ids",
+        "observation_ids",
+        "selected_observation_ids",
+    )
+    for key in list_fields:
+        if key in record and list(record.get(key) or []) != list(getattr(owner, key, []) or []):
+            raise ValueError(f"owner {owner_id} text record diverges at {key}")
+
+
+def _owner_visual_profile(record: dict) -> dict:
+    visual_source: dict = {}
+    if isinstance(record.get("estilo"), dict):
+        visual_source.update(copy.deepcopy(record["estilo"]))
+    evidence = record.get("style_evidence")
+    if isinstance(evidence, dict):
+        visual_source.update(copy.deepcopy(evidence))
+    for key in ("style_origin", "style_confidence", "style_source"):
+        if record.get(key) is not None:
+            visual_source.setdefault(key, record[key])
+    background = _coerce_rgb_tuple(record.get("background_rgb")) or (255, 255, 255)
+    return normalize_auto_typesetting_style(visual_source, background)
+
+
+def _build_owner_render_blocks(texts: list[dict], owner_graph: object) -> list[dict]:
+    if not isinstance(owner_graph, OwnerGraph):
+        raise TypeError("verified owner renderer requires an OwnerGraph instance")
+    owner_graph.require_valid()
+    page_id = _owner_identity(owner_graph.page_id, label="owner graph page_id")
+    owners = list(owner_graph.owners)
+    owner_ids = [
+        _owner_identity(getattr(owner, "owner_id", None), label="owner_id")
+        for owner in owners
+    ]
+    if len(set(owner_ids)) != len(owner_ids):
+        raise ValueError("owner graph contains duplicate owner_id values")
+    owner_by_id = dict(zip(owner_ids, owners, strict=True))
+
+    records_by_owner: dict[str, list[dict]] = {owner_id: [] for owner_id in owner_ids}
+    for raw_record in texts:
+        if not isinstance(raw_record, dict):
+            raise ValueError("owner renderer text records must be mappings")
+        owner_id = _owner_identity(raw_record.get("owner_id"), label="text owner_id")
+        if owner_id not in owner_by_id:
+            raise ValueError(f"owner renderer references unknown owner_id: {owner_id}")
+        record = copy.deepcopy(raw_record)
+        _assert_owner_record_matches_graph(record, owner_by_id[owner_id], page_id)
+        records_by_owner[owner_id].append(record)
+
+    blocks: list[dict] = []
+    for owner_id, owner in zip(owner_ids, owners, strict=True):
+        records = records_by_owner[owner_id]
+        if not records:
+            raise ValueError(f"owner renderer is missing text record for {owner_id}")
+        contracts = {_owner_record_contract(record) for record in records}
+        if len(contracts) != 1:
+            raise ValueError(f"owner renderer received divergent duplicates for {owner_id}")
+
+        translated_payload = getattr(owner, "translated_payload", None)
+        if not isinstance(translated_payload, str) or not translated_payload.strip():
+            raise ValueError(f"owner {owner_id} has no complete translated payload")
+        block = records[0]
+        block.update(
+            {
+                "id": owner_id,
+                "owner_id": owner_id,
+                "page_id": page_id,
+                "coordinate_space": "page",
+                "text": str(getattr(owner, "source_payload", "") or ""),
+                "original": str(getattr(owner, "source_payload", "") or ""),
+                "source_payload": str(getattr(owner, "source_payload", "") or ""),
+                "translated_payload": translated_payload,
+                "translated": translated_payload,
+                "disposition": str(getattr(owner, "disposition", "") or ""),
+                "state": str(getattr(owner, "state", "") or ""),
+                "route_action": str(getattr(owner, "route_action", "") or ""),
+                "execution_tile_id": getattr(owner, "execution_tile_id", None),
+                "action_mask_ref": getattr(owner, "action_mask_ref", None),
+                "component_ids": list(getattr(owner, "component_ids", []) or []),
+                "observation_ids": list(getattr(owner, "observation_ids", []) or []),
+                "selected_observation_ids": list(
+                    getattr(owner, "selected_observation_ids", []) or []
+                ),
+                "semantic_role": str(getattr(owner, "semantic_role", "") or ""),
+                "_owner_mode": True,
+                "_owner_render_mode": True,
+                "_owner_duplicate_count": len(records),
+            }
+        )
+        visual_profile = _owner_visual_profile(block)
+        block["visual_profile"] = copy.deepcopy(visual_profile)
+        block["estilo"] = copy.deepcopy(visual_profile)
+        block["style"] = copy.deepcopy(visual_profile)
+        blocks.append(block)
+    return blocks
+
+
+def build_render_blocks(
+    texts: list[dict],
+    *,
+    owner_graph: object | None = None,
+) -> list[dict]:
+    if owner_graph is not None:
+        return _build_owner_render_blocks(texts, owner_graph)
+    if any(
+        isinstance(text, dict)
+        and (text.get("_owner_mode") or text.get("_owner_render_mode"))
+        for text in texts
+    ):
+        raise ValueError("owner render records require an explicit OwnerGraph")
     simple_layout_only = os.getenv("TRADUZAI_SIMPLE_LAYOUT_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
     _apply_visual_item_card_row_slots(texts)
     for text in texts:
@@ -11479,7 +11669,154 @@ def _select_overbroad_white_balloon_text_evidence_target(text_data: dict, target
     return derived
 
 
+def _canonical_owner_render_polygon(value: object) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        raise ValueError("owner render safe polygon must contain at least three points")
+    points: list[tuple[int, int]] = []
+    for raw_point in value:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+            raise ValueError("owner render safe polygon contains an invalid point")
+        if not all(
+            isinstance(coordinate, int) and not isinstance(coordinate, bool)
+            for coordinate in raw_point
+        ):
+            raise ValueError("owner render safe polygon coordinates must be canonical integers")
+        x, y = raw_point
+        if x < 0 or y < 0:
+            raise ValueError("owner render safe polygon contains a negative coordinate")
+        points.append((x, y))
+    if float(abs(cv2.contourArea(np.asarray(points, dtype=np.int32)))) <= 0.0:
+        raise ValueError("owner render safe polygon has no area")
+    return tuple(points)
+
+
+def _owner_font_interval(value: object, *, label: str) -> tuple[int, int] | None:
+    if value in (None, []):
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{label} must be [minimum_px, maximum_px]")
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ValueError(f"{label} must contain canonical positive integers")
+    lower, upper = value
+    if lower <= 0 or upper < lower:
+        raise ValueError(f"{label} must be an ordered positive interval")
+    return lower, upper
+
+
+def _plan_owner_text_layout(text_data: dict) -> dict:
+    polygon = _canonical_owner_render_polygon(
+        text_data.get("render_safe_polygon_page")
+    )
+    x_values = [point[0] for point in polygon]
+    y_values = [point[1] for point in polygon]
+    safe_bbox = [min(x_values), min(y_values), max(x_values), max(y_values)]
+    if safe_bbox[2] <= safe_bbox[0] or safe_bbox[3] <= safe_bbox[1]:
+        raise ValueError("owner render safe polygon has an invalid bounding box")
+
+    source_bounds = _owner_font_interval(
+        text_data.get("source_font_bounds_px"),
+        label="source_font_bounds_px",
+    )
+    container_bounds = _owner_font_interval(
+        text_data.get("container_font_bounds_px"),
+        label="container_font_bounds_px",
+    )
+    supplied_bounds = [bounds for bounds in (source_bounds, container_bounds) if bounds]
+    if supplied_bounds:
+        lower = max(bounds[0] for bounds in supplied_bounds)
+        upper = min(bounds[1] for bounds in supplied_bounds)
+        if upper < lower:
+            raise ValueError("owner source and container font bounds do not intersect")
+        target_size = int(upper)
+    else:
+        style_seed = text_data.get("visual_profile") or text_data.get("estilo") or {}
+        try:
+            target_size = int(style_seed.get("tamanho", 24) or 24)
+        except (AttributeError, TypeError, ValueError):
+            target_size = 24
+        target_size = max(_MIN_FONT_SIZE, min(96, target_size))
+        lower, upper = _MIN_FONT_SIZE, target_size
+
+    estilo = _canonical_render_style(
+        text_data.get("visual_profile") or text_data.get("estilo") or {}
+    )
+    width = max(4, int(safe_bbox[2]) - int(safe_bbox[0]))
+    height = max(4, int(safe_bbox[3]) - int(safe_bbox[1]))
+    padding_y = min(6, max(0, height // 20))
+    inset_x = min(6, max(0, width // 30))
+    max_width = max(4, width - (inset_x * 2))
+    max_height = max(4, height - (padding_y * 2))
+    outline_px = int(estilo.get("contorno_px", 0) or 0) if estilo.get("contorno") else 0
+    layout_profile = str(text_data.get("layout_profile") or "white_balloon")
+    return {
+        "target_bbox": list(safe_bbox),
+        "position_bbox": list(safe_bbox),
+        "capacity_bbox": list(safe_bbox),
+        "layout_safe_bbox": list(safe_bbox),
+        "layout_safe_reason": "verified_owner_safe_polygon",
+        "safe_text_box": list(safe_bbox),
+        "render_safe_polygon_page": [list(point) for point in polygon],
+        "font_size_bounds_px": [int(lower), int(upper)],
+        "layout_shape": _infer_layout_shape_from_bbox(safe_bbox, "texto"),
+        "balloon_geo": "rect",
+        "layout_profile": layout_profile,
+        "width_ratio": 1.0,
+        "max_width": max_width,
+        "max_height": max_height,
+        "padding_y": padding_y,
+        "vertical_anchor": "center",
+        "alignment": "center",
+        "font_name": estilo.get("fonte", CANONICAL_FONT_FILE),
+        "target_size": target_size,
+        "text_color": estilo.get("cor", "#000000"),
+        "background_rgb": list(_coerce_rgb_tuple(text_data.get("background_rgb")) or []),
+        "cor_gradiente": estilo.get("cor_gradiente", []),
+        "outline_color": estilo.get("contorno", ""),
+        "outline_px": outline_px,
+        "glow": bool(estilo.get("glow", False)),
+        "glow_cor": estilo.get("glow_cor", ""),
+        "glow_px": int(estilo.get("glow_px", 0) or 0),
+        "sombra": bool(estilo.get("sombra", False)),
+        "sombra_cor": estilo.get("sombra_cor", ""),
+        "sombra_offset": estilo.get("sombra_offset", [0, 0]),
+        "curva": bool(estilo.get("curva", False)),
+        "curva_direcao": str(estilo.get("curva_direcao", "") or ""),
+        "curva_intensidade": float(estilo.get("curva_intensidade", 0.0) or 0.0),
+        "rotation_deg": 0.0,
+        "rotation_source": "verified_owner_layout",
+        "line_spacing_ratio": 0.20,
+        "vertical_bias_px": 0,
+        "horizontal_bias_px": 0,
+        "_target_source": "verified_owner_safe_polygon",
+        "_style_origin": text_data.get("style_origin") or "",
+        "_validated_source_target_bbox": [],
+        "_anchor_capacity_locked": False,
+        "_simple_anchor_capacity_expanded": False,
+        "_simple_anchor_capacity_reason": "",
+        "_font_search_cap": int(upper),
+        "_font_search_floor": int(lower),
+        "_font_search_emergency_floor": int(lower),
+        "_follow_original_ocr_size": False,
+        "_prefer_original_font_size": False,
+        "_source_font_size_px": 0,
+        "_follow_english_anchor_position": False,
+        "_position_on_capacity_bbox": True,
+        "_center_on_balloon_bbox": True,
+        "_anchor_center_only_layout": False,
+        "_owner_render_mode": True,
+    }
+
+
 def plan_text_layout(text_data: dict) -> dict:
+    if (
+        text_data.get("_owner_mode")
+        or text_data.get("_owner_render_mode")
+        or (
+            text_data.get("owner_id")
+            and text_data.get("render_safe_polygon_page")
+        )
+    ):
+        return _plan_owner_text_layout(text_data)
     _propagate_dark_connected_text_anchor_to_type(text_data)
     _sanitize_overbroad_text_geometry_for_layout(text_data)
     _propagate_dark_connected_text_anchor_to_type(text_data)
@@ -14487,7 +14824,12 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     _expand_dark_visual_underfit_layout_capacity(text_data, plan)
     _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
-    original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    original_scale_bbox = (
+        _original_text_mask_bbox_for_scale(text_data)
+        if not plan.get("_owner_render_mode")
+        and _should_enforce_original_text_scale_contract(text_data)
+        else None
+    )
     if original_scale_bbox is not None:
         _merge_qa_flags(text_data, ["original_text_scale_size_experiment"])
     x1, y1, x2, y2 = plan["target_bbox"]
@@ -14556,7 +14898,16 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         _persist_fit_attempts(text_data, plan, text, contract_candidate, int(contract_candidate.get("font_size", 0) or 0))
         return contract_candidate
 
-    category_min, category_max = _category_font_bounds(text_data)
+    if plan.get("_owner_render_mode"):
+        owner_bounds = _owner_font_interval(
+            plan.get("font_size_bounds_px"),
+            label="font_size_bounds_px",
+        )
+        if owner_bounds is None:
+            raise ValueError("owner render plan is missing font_size_bounds_px")
+        category_min, category_max = owner_bounds
+    else:
+        category_min, category_max = _category_font_bounds(text_data)
     height_limit = position_height if use_capacity_position else box_height
     if original_scale_bbox is not None:
         font_size = min(category_max, 96)
@@ -17217,8 +17568,278 @@ def _render_text_block_on_expanded_canvas_if_needed(
 
 
 
+def _normalized_owner_payload(value: object) -> str:
+    return " ".join(unicodedata.normalize("NFC", str(value or "")).split())
+
+
+def _owner_canvas_polygon_mask(
+    value: object,
+    *,
+    width: int,
+    height: int,
+    label: str,
+) -> np.ndarray:
+    polygon = _canonical_owner_render_polygon(value)
+    if any(x >= width or y >= height for x, y in polygon):
+        raise ValueError(f"{label} escapes page geometry")
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.asarray(polygon, dtype=np.int32)], 255)
+    return mask
+
+
+def _owner_bbox_is_within(
+    inner: object,
+    outer: object,
+) -> bool:
+    inner_bbox = _layout_bbox(inner)
+    outer_bbox = _layout_bbox(outer)
+    if inner_bbox is None or outer_bbox is None:
+        return False
+    return bool(
+        outer_bbox[0] <= inner_bbox[0] < inner_bbox[2] <= outer_bbox[2]
+        and outer_bbox[1] <= inner_bbox[1] < inner_bbox[3] <= outer_bbox[3]
+    )
+
+
+def _render_owner_text_block(
+    img: Image.Image,
+    text_data: dict,
+    *,
+    pre_render_np: np.ndarray | None = None,
+) -> None:
+    """Render visual chunks without changing the owner's semantic payload."""
+
+    payload = text_data.get("translated_payload")
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("owner render block is missing its translated payload")
+    if text_data.get("translated") != payload:
+        raise ValueError("owner render alias diverges from translated_payload")
+
+    regions = [
+        copy.deepcopy(region)
+        for region in list(text_data.get("layout_regions", []) or [])
+        if isinstance(region, dict)
+    ]
+    regions.sort(
+        key=lambda region: (
+            int(region.get("order", 0) or 0),
+            str(region.get("layout_region_id") or ""),
+        )
+    )
+    if len(regions) <= 1:
+        plan = plan_text_layout(text_data)
+        _render_single_text_block(img, text_data, plan, pre_render_np=pre_render_np)
+        return
+
+    areas: list[float] = []
+    for region in regions:
+        bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+        if bbox is None:
+            raise ValueError("owner layout region is missing a canonical bbox_page")
+        areas.append(float(max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))))
+    total_area = sum(areas)
+    chunks = _split_text_for_connected_balloons(
+        payload,
+        len(regions),
+        [area / total_area for area in areas],
+    )
+    if len(chunks) != len(regions) or any(not chunk.strip() for chunk in chunks):
+        raise ValueError("owner visual chunk partition is incomplete")
+    if _normalized_owner_payload(" ".join(chunks)) != _normalized_owner_payload(payload):
+        raise ValueError("owner visual chunks do not reconstruct translated_payload")
+
+    owner_plan = plan_text_layout(text_data)
+    font_bounds = _owner_font_interval(
+        owner_plan.get("font_size_bounds_px"),
+        label="font_size_bounds_px",
+    )
+    if font_bounds is None:
+        raise ValueError("connected owner is missing common font-size bounds")
+    minimum_font_size, maximum_font_size = font_bounds
+
+    selected_image: Image.Image | None = None
+    selected_children: list[dict] | None = None
+    common_font_size = 0
+    joint_fit_attempts: list[dict] = []
+    child_safe_boxes = [
+        [int(value) for value in bbox]
+        for region in regions
+        if (bbox := _layout_bbox(region.get("bbox_page") or region.get("bbox")))
+        is not None
+    ]
+    if len(child_safe_boxes) != len(regions):
+        raise ValueError("owner visual chunk is missing verified bbox geometry")
+
+    for candidate_size in range(maximum_font_size, minimum_font_size - 1, -1):
+        trial_image = img.copy()
+        trial_children: list[dict] = []
+        candidate_reason = "ok"
+
+        for index, (region, chunk) in enumerate(zip(regions, chunks, strict=True)):
+            bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+            polygon = region.get("safe_polygon_page")
+            if bbox is None or polygon is None:
+                raise ValueError("owner visual chunk is missing verified geometry")
+            child = copy.deepcopy(text_data)
+            for legacy_geometry_key in (
+                "source_bbox",
+                "text_pixel_bbox",
+                "line_polygons",
+                "source_line_polygons",
+            ):
+                child.pop(legacy_geometry_key, None)
+            child.update(
+                {
+                    "bbox": list(bbox),
+                    "translated": chunk,
+                    "translated_payload": chunk,
+                    "layout_regions": [copy.deepcopy(region)],
+                    "layout_region_ids": [str(region.get("layout_region_id") or "")],
+                    "render_safe_polygon_page": copy.deepcopy(polygon),
+                    "safe_text_box": list(bbox),
+                    "layout_safe_bbox": list(bbox),
+                    "layout_bbox": list(bbox),
+                    "balloon_bbox": list(bbox),
+                    "balloon_subregions": [],
+                    "connected_lobe_bboxes": [],
+                    "source_font_bounds_px": [candidate_size, candidate_size],
+                    "container_font_bounds_px": [candidate_size, candidate_size],
+                    "visual_chunk_index": index,
+                    "visual_chunk_count": len(chunks),
+                    "_owner_render_mode": True,
+                }
+            )
+            child_plan = plan_text_layout(child)
+            if not _fits_in_box(
+                chunk,
+                str(child_plan.get("font_name") or ""),
+                candidate_size,
+                int(child_plan.get("max_width", 0) or 0),
+                int(child_plan.get("max_height", 0) or 0),
+                float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+            ):
+                candidate_reason = "nominal_overflow"
+                break
+
+            before_child = np.asarray(trial_image.convert("RGB"), dtype=np.uint8).copy()
+            _render_single_text_block(
+                trial_image,
+                child,
+                child_plan,
+                pre_render_np=pre_render_np,
+            )
+            _finalize_render_completion_contract(child)
+            after_child = np.asarray(trial_image.convert("RGB"), dtype=np.uint8)
+            changed_child = np.any(after_child != before_child, axis=2)
+            region_mask = _owner_canvas_polygon_mask(
+                polygon,
+                width=img.width,
+                height=img.height,
+                label=f"owner layout region {region.get('layout_region_id') or index}",
+            )
+            child_is_valid = bool(
+                child.get("render_completed")
+                and str(child.get("fit_status") or "").strip().lower() == "ok"
+                and int(child.get("font_size_final", 0) or 0) == candidate_size
+                and np.any(changed_child)
+                and not np.any(changed_child & (region_mask == 0))
+                and _owner_bbox_is_within(child.get("render_bbox"), bbox)
+            )
+            if not child_is_valid:
+                candidate_reason = "render_outside_layout_region"
+                break
+            trial_children.append(child)
+
+        candidate_valid = len(trial_children) == len(regions)
+        joint_fit_attempts.append(
+            {
+                "font_px": int(candidate_size),
+                "status": "ok" if candidate_valid else "overflow",
+                "reason": candidate_reason,
+            }
+        )
+        if candidate_valid:
+            selected_image = trial_image
+            selected_children = trial_children
+            common_font_size = candidate_size
+            break
+
+    if selected_image is None or selected_children is None:
+        text_data.pop("render_bbox", None)
+        text_data["fit_status"] = "below_minimum_legible"
+        text_data["render_completed"] = False
+        text_data["font_size_final"] = 0
+        text_data["minimum_legible_font_px"] = int(minimum_font_size)
+        _merge_qa_flags(text_data, ["fit_below_minimum_legible"])
+        text_data["fit_attempts"] = joint_fit_attempts[-4:]
+        text_data["_render_debug"] = {
+            "joint_font_fit_status": "below_minimum_legible",
+            "joint_font_fit_attempts": joint_fit_attempts,
+            "child_safe_text_boxes": child_safe_boxes,
+        }
+        text_data["visual_chunks"] = [
+            {
+                "owner_id": text_data.get("owner_id"),
+                "layout_region_id": str(region.get("layout_region_id") or ""),
+                "visual_chunk_index": index,
+                "visual_chunk_count": len(chunks),
+                "text": chunk,
+                "font_size": 0,
+            }
+            for index, (region, chunk) in enumerate(
+                zip(regions, chunks, strict=True)
+            )
+        ]
+        text_data["translated"] = payload
+        text_data["translated_payload"] = payload
+        return
+
+    img.paste(selected_image)
+    children = selected_children
+
+    aggregate = _aggregate_split_render_blocks(children)
+    if aggregate is not None:
+        _copy_render_debug_fields(text_data, aggregate)
+    text_data["fit_status"] = "ok"
+    text_data["font_size_final"] = int(common_font_size)
+    text_data["minimum_legible_font_px"] = int(minimum_font_size)
+    text_data["render_completed"] = True
+    text_data["fit_attempts"] = joint_fit_attempts[-4:]
+    text_data["qa_flags"] = [
+        flag
+        for flag in list(text_data.get("qa_flags") or [])
+        if str(flag) != "fit_below_minimum_legible"
+    ]
+    render_debug = dict(text_data.get("_render_debug") or {})
+    render_debug["joint_font_fit_status"] = "ok"
+    render_debug["joint_font_size_px"] = int(common_font_size)
+    render_debug["joint_font_fit_attempts"] = joint_fit_attempts
+    text_data["_render_debug"] = render_debug
+    text_data["visual_chunks"] = [
+        {
+            "owner_id": text_data.get("owner_id"),
+            "layout_region_id": str(region.get("layout_region_id") or ""),
+            "visual_chunk_index": index,
+            "visual_chunk_count": len(chunks),
+            "text": chunk,
+            "font_size": int(child.get("font_size_final", common_font_size) or common_font_size),
+        }
+        for index, (region, chunk, child) in enumerate(
+            zip(regions, chunks, children, strict=True)
+        )
+    ]
+    text_data["translated"] = payload
+    text_data["translated_payload"] = payload
+
+
 def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None, pre_render_np=None):
     del img_size
+    if text_data.get("_owner_render_mode"):
+        return _render_owner_text_block(
+            img,
+            text_data,
+            pre_render_np=pre_render_np,
+        )
     if str(text_data.get("content_class") or "").strip().lower() == "sfx":
         from sfx.renderer import render_sfx_layer
 
@@ -18597,7 +19218,228 @@ def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], 
 
 
 
-def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
+def _owner_array_sha256(value: np.ndarray) -> str:
+    array = np.asarray(value)
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(dimension) for dimension in array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _owner_component_geometry_sha256(
+    owner: object,
+    owner_graph: object,
+    *,
+    shape: tuple[int, int],
+) -> str:
+    component_by_id = {
+        _owner_identity(getattr(component, "component_id", None), label="component_id"): component
+        for component in list(getattr(owner_graph, "components", []) or [])
+    }
+    entries: list[tuple[str, tuple[int, int, int, int]]] = []
+    height, width = shape
+    for raw_component_id in list(getattr(owner, "component_ids", []) or []):
+        component_id = _owner_identity(raw_component_id, label="owner component_id")
+        component = component_by_id.get(component_id)
+        if component is None:
+            raise ValueError(f"owner component geometry is missing: {component_id}")
+        raw_bbox = getattr(component, "bbox_page", None)
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+            raise ValueError(f"owner component bbox is malformed: {component_id}")
+        if any(isinstance(value, bool) for value in raw_bbox):
+            raise ValueError(f"owner component bbox is malformed: {component_id}")
+        try:
+            bbox = tuple(int(value) for value in raw_bbox)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"owner component bbox is malformed: {component_id}") from exc
+        x1, y1, x2, y2 = bbox
+        if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1 or x2 > width or y2 > height:
+            raise ValueError(f"owner component bbox escapes page geometry: {component_id}")
+        entries.append((component_id, bbox))
+    entries.sort(key=lambda item: item[0])
+    if not entries or len({component_id for component_id, _bbox in entries}) != len(entries):
+        raise ValueError("owner component geometry is empty or duplicated")
+    payload = json.dumps(
+        [[component_id, list(bbox)] for component_id, bbox in entries],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _owner_safe_polygon_evidence(
+    value: object,
+    *,
+    shape: tuple[int, int],
+) -> tuple[tuple[tuple[int, int], ...], np.ndarray, str]:
+    polygon = _canonical_owner_render_polygon(value)
+    height, width = shape
+    if any(x >= width or y >= height for x, y in polygon):
+        raise ValueError("owner render safe polygon escapes page geometry")
+    polygon_mask = np.zeros(shape, dtype=np.uint8)
+    cv2.fillPoly(polygon_mask, [np.asarray(polygon, dtype=np.int32)], 255)
+    payload = json.dumps(polygon, separators=(",", ":"))
+    return polygon, polygon_mask, sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _owner_layout_region_union_mask(
+    block: dict,
+    *,
+    shape: tuple[int, int],
+    fallback_mask: np.ndarray,
+) -> np.ndarray:
+    regions = [
+        region
+        for region in list(block.get("layout_regions", []) or [])
+        if isinstance(region, dict)
+    ]
+    if not regions:
+        return fallback_mask.copy()
+    height, width = shape
+    union_mask = np.zeros(shape, dtype=np.uint8)
+    for index, region in enumerate(regions):
+        region_mask = _owner_canvas_polygon_mask(
+            region.get("safe_polygon_page"),
+            width=width,
+            height=height,
+            label=f"owner layout region {region.get('layout_region_id') or index}",
+        )
+        union_mask[region_mask > 0] = 255
+    if not np.any(union_mask):
+        raise ValueError("owner renderer layout-region union is empty")
+    return union_mask
+
+
+def _owner_mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    ys, xs = np.nonzero(mask > 0)
+    if not len(xs):
+        return None
+    return (
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    )
+
+
+def _render_owner_band_image(
+    band_rgb: np.ndarray,
+    ocr_page: dict,
+    owner_graph: object,
+) -> OwnerGlyphPatch:
+    if not isinstance(owner_graph, OwnerGraph):
+        raise TypeError("verified owner renderer requires an OwnerGraph instance")
+    owner_graph.require_valid()
+    if not isinstance(band_rgb, np.ndarray) or band_rgb.dtype != np.uint8:
+        raise ValueError("owner renderer requires a uint8 RGB page")
+    if band_rgb.ndim != 3 or band_rgb.shape[2] != 3 or not band_rgb.size:
+        raise ValueError("owner renderer requires a non-empty RGB page")
+    height, width = band_rgb.shape[:2]
+    page_width = int(ocr_page.get("width", width) or width)
+    page_height = int(ocr_page.get("height", height) or height)
+    if (page_height, page_width) != (height, width):
+        raise ValueError("owner renderer input shape does not match canonical page dimensions")
+
+    graph_page_id = _owner_identity(
+        getattr(owner_graph, "page_id", None),
+        label="owner graph page_id",
+    )
+    if str(ocr_page.get("page_id") or graph_page_id).strip() != graph_page_id:
+        raise ValueError("owner renderer page_id does not match the owner graph")
+    owners = list(getattr(owner_graph, "owners", []) or [])
+    if len(owners) != 1:
+        raise ValueError("owner renderer executes exactly one owner at a time")
+    owner = owners[0]
+    owner_id = _owner_identity(getattr(owner, "owner_id", None), label="owner_id")
+    execution_tile_id = getattr(owner, "execution_tile_id", None)
+    executor_projections = [
+        projection
+        for projection in list(getattr(owner_graph, "projections", []) or [])
+        if str(getattr(projection, "owner_id", "") or "") == owner_id
+        and str(getattr(projection, "role", "") or "").strip().lower() == "executor"
+    ]
+    if len(executor_projections) != 1:
+        raise ValueError("owner renderer requires exactly one executor projection")
+    projection_tile_id = getattr(executor_projections[0], "tile_id", None)
+    if execution_tile_id != projection_tile_id:
+        raise ValueError("owner renderer executor projection does not match owner execution tile")
+
+    blocks = build_render_blocks(
+        list(ocr_page.get("texts", []) or []),
+        owner_graph=owner_graph,
+    )
+    if len(blocks) != 1 or blocks[0].get("owner_id") != owner_id:
+        raise ValueError("owner renderer did not resolve exactly one owner render block")
+    block = blocks[0]
+    polygon, polygon_mask, polygon_sha256 = _owner_safe_polygon_evidence(
+        block.get("render_safe_polygon_page"),
+        shape=(height, width),
+    )
+    layout_region_union_mask = _owner_layout_region_union_mask(
+        block,
+        shape=(height, width),
+        fallback_mask=polygon_mask,
+    )
+
+    before = np.ascontiguousarray(band_rgb.copy())
+    image = Image.fromarray(before.copy(), mode="RGB")
+    render_text_block(image, block)
+    if "render_completed" not in block:
+        _finalize_render_completion_contract(block)
+    rendered = np.ascontiguousarray(np.asarray(image.convert("RGB"), dtype=np.uint8))
+    changed = np.any(rendered != before, axis=2)
+    glyph_mask = np.where(changed, 255, 0).astype(np.uint8)
+    glyph_bbox = _owner_mask_bbox(glyph_mask)
+    fit_status = str(block.get("fit_status") or "render_incomplete").strip().lower()
+    render_completed = bool(block.get("render_completed"))
+    if glyph_bbox is None:
+        render_completed = False
+        if fit_status in {"", "ok", "render_incomplete"}:
+            fit_status = "render_changed_no_pixels"
+    if np.any(changed & (polygon_mask == 0)):
+        render_completed = False
+        fit_status = "render_outside_safe_polygon"
+    if np.any(changed & (layout_region_union_mask == 0)):
+        render_completed = False
+        fit_status = "render_outside_layout_regions"
+
+    return OwnerGlyphPatch(
+        owner_id=owner_id,
+        page_id=graph_page_id,
+        coordinate_space="page",
+        result_rgb=rendered,
+        glyph_mask=glyph_mask,
+        glyph_bbox_page=glyph_bbox,
+        render_completed=render_completed,
+        fit_status=fit_status,
+        before_sha256=_owner_array_sha256(before),
+        after_sha256=_owner_array_sha256(rendered),
+        glyph_mask_sha256=_owner_array_sha256(glyph_mask),
+        changed_outside_glyph_mask_pixels=int(
+            np.count_nonzero(changed & (glyph_mask == 0))
+        ),
+        render_safe_polygon_page=polygon,
+        render_safe_polygon_sha256=polygon_sha256,
+        component_geometry_sha256=_owner_component_geometry_sha256(
+            owner,
+            owner_graph,
+            shape=(height, width),
+        ),
+        execution_tile_id=execution_tile_id,
+        projection_role="executor",
+    )
+
+
+def render_band_image(
+    band_rgb: np.ndarray,
+    ocr_page: dict,
+    *,
+    owner_graph: object | None = None,
+) -> np.ndarray | OwnerGlyphPatch:
     """Adapter em-memÃ³ria: renderiza textos traduzidos sobre a banda.
 
     Reusa `build_render_blocks` + `render_text_block` (mesmo caminho da pÃ¡gina).
@@ -18605,6 +19447,8 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     import logging
     from PIL import Image
 
+    if owner_graph is not None:
+        return _render_owner_band_image(band_rgb, ocr_page, owner_graph)
     if band_rgb.size == 0 or not ocr_page.get("texts"):
         return band_rgb.copy()
     _ensure_typeset_trace_metadata(ocr_page)
