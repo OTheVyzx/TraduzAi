@@ -1,0 +1,457 @@
+"""TDD contracts for the pure page-space owner compositor."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from hashlib import sha256
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from compositor.owner_compositor import (  # noqa: E402
+    OwnerCompositionError,
+    compose_page,
+)
+from ownership.model import OwnerGlyphPatch, OwnerMutation  # noqa: E402
+
+
+PAGE_ID = "page_001"
+PAGE_SHAPE = (18, 24, 3)
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(item) for item in array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _polygon_sha256(points: tuple[tuple[int, int], ...]) -> str:
+    return sha256(json.dumps(points, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _original() -> np.ndarray:
+    page = np.full(PAGE_SHAPE, 220, dtype=np.uint8)
+    page[:, :, 1] = 218
+    return page
+
+
+def _box_mask(
+    box: tuple[int, int, int, int],
+    *,
+    shape: tuple[int, int] = PAGE_SHAPE[:2],
+) -> np.ndarray:
+    mask = np.zeros(shape, dtype=np.uint8)
+    x1, y1, x2, y2 = box
+    mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def _component_hash(owner_id: str) -> str:
+    return sha256(f"component:{owner_id}".encode("utf-8")).hexdigest()
+
+
+def _action_mask_ref(owner_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", owner_id).strip("._")
+    identity_hash = sha256(owner_id.encode("utf-8")).hexdigest()[:12]
+    return (
+        f"owner_masks/{safe}--{identity_hash}/tile_{safe}/action_mask.png"
+    )
+
+
+def _mutation(
+    original: np.ndarray,
+    *,
+    owner_id: str = "owner_a",
+    box: tuple[int, int, int, int] = (2, 2, 7, 7),
+    color: tuple[int, int, int] = (40, 52, 64),
+    protected_art_mask: np.ndarray | None = None,
+    projection_role: str = "executor",
+    color_space: str = "RGB",
+) -> OwnerMutation:
+    action_mask = _box_mask(box, shape=original.shape[:2])
+    result = original.copy()
+    result[action_mask > 0] = color
+    changed = np.any(result != original, axis=2)
+    changed_mask = np.where(changed, 255, 0).astype(np.uint8)
+    protected = (
+        np.zeros(original.shape[:2], dtype=np.uint8)
+        if protected_art_mask is None
+        else protected_art_mask.copy()
+    )
+    return OwnerMutation(
+        owner_id=owner_id,
+        page_id=PAGE_ID,
+        coordinate_space="page",
+        action_mask_ref=_action_mask_ref(owner_id),
+        result_rgb=result,
+        action_mask=action_mask,
+        protected_art_mask=protected,
+        changed_mask=changed_mask,
+        engine="test_engine",
+        mask_pixels=int(np.count_nonzero(action_mask)),
+        changed_pixels=int(np.count_nonzero(changed_mask)),
+        changed_outside_owner_pixels=0,
+        protected_art_changed_pixels=int(
+            np.count_nonzero(changed & (protected > 0))
+        ),
+        before_sha256=_array_sha256(original),
+        after_sha256=_array_sha256(result),
+        action_mask_sha256=_array_sha256(action_mask),
+        changed_mask_sha256=_array_sha256(changed_mask),
+        engine_crop_bbox_page=(0, 0, original.shape[1], original.shape[0]),
+        owner_bbox_page=(0, 0, original.shape[1], original.shape[0]),
+        component_geometry_sha256=_component_hash(owner_id),
+        protected_art_mask_sha256=_array_sha256(protected),
+        execution_tile_id=f"tile_{owner_id}",
+        projection_role=projection_role,
+        color_space=color_space,
+    )
+
+
+def _glyph_patch(
+    original: np.ndarray,
+    *,
+    owner_id: str = "owner_a",
+    mutation: OwnerMutation | None = None,
+    box: tuple[int, int, int, int] = (3, 3, 6, 6),
+    color: tuple[int, int, int] = (8, 12, 18),
+    projection_role: str = "executor",
+    color_space: str = "RGB",
+) -> OwnerGlyphPatch:
+    baseline = original if mutation is None else np.asarray(mutation.result_rgb)
+    glyph_mask = _box_mask(box, shape=original.shape[:2])
+    result = baseline.copy()
+    result[glyph_mask > 0] = color
+    safe_polygon = (
+        (0, 0),
+        (original.shape[1] - 1, 0),
+        (original.shape[1] - 1, original.shape[0] - 1),
+        (0, original.shape[0] - 1),
+    )
+    x1, y1, x2, y2 = box
+    return OwnerGlyphPatch(
+        owner_id=owner_id,
+        page_id=PAGE_ID,
+        coordinate_space="page",
+        result_rgb=result,
+        glyph_mask=glyph_mask,
+        glyph_bbox_page=(x1, y1, x2, y2),
+        render_completed=True,
+        fit_status="ok",
+        before_sha256=_array_sha256(baseline),
+        after_sha256=_array_sha256(result),
+        glyph_mask_sha256=_array_sha256(glyph_mask),
+        changed_outside_glyph_mask_pixels=0,
+        render_safe_polygon_page=safe_polygon,
+        render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
+        component_geometry_sha256=(
+            mutation.component_geometry_sha256
+            if mutation is not None
+            else _component_hash(owner_id)
+        ),
+        execution_tile_id=f"tile_{owner_id}",
+        projection_role=projection_role,
+        color_space=color_space,
+    )
+
+
+def _empty_protected(original: np.ndarray) -> np.ndarray:
+    return np.zeros(original.shape[:2], dtype=np.uint8)
+
+
+def test_changed_pixels_must_be_subset_of_owner_action_mask() -> None:
+    original = _original()
+    mutation = _mutation(original)
+    forged_result = np.asarray(mutation.result_rgb).copy()
+    forged_result[12, 18] = (1, 2, 3)
+    forged_changed = np.any(forged_result != original, axis=2)
+    forged_mask = np.where(forged_changed, 255, 0).astype(np.uint8)
+    forged = replace(
+        mutation,
+        result_rgb=forged_result,
+        changed_mask=forged_mask,
+        changed_pixels=int(np.count_nonzero(forged_mask)),
+        changed_outside_owner_pixels=1,
+        after_sha256=_array_sha256(forged_result),
+        changed_mask_sha256=_array_sha256(forged_mask),
+    )
+
+    with pytest.raises(OwnerCompositionError, match="outside.*action mask"):
+        compose_page(original, [forged], [], _empty_protected(original))
+
+
+def test_action_mask_cannot_touch_protected_art() -> None:
+    original = _original()
+    protected = _box_mask((4, 4, 9, 9))
+    mutation = _mutation(original, box=(2, 2, 7, 7))
+
+    with pytest.raises(OwnerCompositionError, match="protected art"):
+        compose_page(original, [mutation], [], protected)
+
+
+@pytest.mark.parametrize("artifact_kind", ["mutation", "glyph"])
+def test_context_only_tile_cannot_write_pixels(artifact_kind: str) -> None:
+    original = _original()
+    mutation = _mutation(original, projection_role="context_only")
+    glyph = _glyph_patch(
+        original,
+        mutation=None,
+        projection_role="context_only",
+    )
+    mutations = [mutation] if artifact_kind == "mutation" else []
+    glyphs = [glyph] if artifact_kind == "glyph" else []
+
+    with pytest.raises(OwnerCompositionError, match="context_only|executor"):
+        compose_page(original, mutations, glyphs, _empty_protected(original))
+
+
+def test_conflicting_owner_mutations_fail_closed() -> None:
+    original = _original()
+    left = _mutation(original, owner_id="owner_a", box=(2, 2, 8, 8))
+    right = _mutation(
+        original,
+        owner_id="owner_b",
+        box=(6, 6, 12, 12),
+        color=(80, 90, 100),
+    )
+
+    result = compose_page(original, [left, right], [], _empty_protected(original))
+
+    assert result.committed is False
+    assert any(conflict.code == "owner_pixel_conflict" for conflict in result.conflicts)
+    np.testing.assert_array_equal(result.final_rgb, original)
+    assert not np.any(result.cleanup_owner_map != "")
+    assert not np.any(result.glyph_owner_map != "")
+
+
+def test_identical_duplicate_patch_for_same_owner_is_applied_once() -> None:
+    original = _original()
+    mutation = _mutation(original)
+    patch = _glyph_patch(original, mutation=mutation)
+
+    result = compose_page(
+        original,
+        [mutation, mutation],
+        [patch, patch],
+        _empty_protected(original),
+    )
+
+    assert result.committed is True
+    assert not result.conflicts
+    assert result.write_counts["cleanup_pixels"] == mutation.changed_pixels
+    assert result.write_counts["glyph_pixels"] == int(
+        np.count_nonzero(patch.glyph_mask)
+    )
+
+
+def test_divergent_duplicate_patch_for_same_owner_blocks() -> None:
+    original = _original()
+    mutation = _mutation(original)
+    first = _glyph_patch(original, mutation=mutation)
+    second = _glyph_patch(
+        original,
+        mutation=mutation,
+        color=(120, 10, 30),
+    )
+
+    result = compose_page(
+        original,
+        [mutation],
+        [first, second],
+        _empty_protected(original),
+    )
+
+    assert result.committed is False
+    assert any(
+        conflict.code == "divergent_duplicate_glyph_patch"
+        for conflict in result.conflicts
+    )
+    np.testing.assert_array_equal(result.final_rgb, original)
+
+
+def test_divergent_duplicate_mutation_blocks_before_glyph_chain_resolution() -> None:
+    original = _original()
+    first = _mutation(original, color=(40, 50, 60))
+    second = _mutation(original, color=(90, 100, 110))
+    glyph = _glyph_patch(original, mutation=first)
+
+    for mutations in ([first, second], [second, first]):
+        result = compose_page(
+            original,
+            mutations,
+            [glyph],
+            _empty_protected(original),
+        )
+        assert result.committed is False
+        assert any(
+            conflict.code == "divergent_duplicate_mutation"
+            for conflict in result.conflicts
+        )
+        np.testing.assert_array_equal(result.final_rgb, original)
+
+
+def test_all_inpaints_precede_all_glyph_patches() -> None:
+    original = _original()
+    mutation = _mutation(original, box=(2, 2, 9, 9), color=(40, 50, 60))
+    patch = _glyph_patch(
+        original,
+        mutation=mutation,
+        box=(4, 4, 7, 7),
+        color=(5, 7, 9),
+    )
+
+    result = compose_page(original, [mutation], [patch], _empty_protected(original))
+
+    assert result.committed is True
+    np.testing.assert_array_equal(result.final_rgb[5, 5], np.array([5, 7, 9]))
+    np.testing.assert_array_equal(result.final_rgb[2, 2], np.array([40, 50, 60]))
+    assert result.cleanup_owner_map[2, 2] == "owner_a"
+    assert result.glyph_owner_map[5, 5] == "owner_a"
+
+
+def test_glyph_only_and_mutation_only_owners_are_supported() -> None:
+    original = _original()
+    cleanup_only = _mutation(
+        original,
+        owner_id="owner_cleanup",
+        box=(1, 1, 6, 6),
+    )
+    glyph_only = _glyph_patch(
+        original,
+        owner_id="owner_glyph",
+        mutation=None,
+        box=(14, 10, 19, 15),
+    )
+
+    result = compose_page(
+        original,
+        [cleanup_only],
+        [glyph_only],
+        _empty_protected(original),
+    )
+
+    assert result.committed is True
+    assert result.cleanup_owner_map[2, 2] == "owner_cleanup"
+    assert result.glyph_owner_map[11, 15] == "owner_glyph"
+
+
+def test_glyph_mask_cannot_touch_global_protected_art() -> None:
+    original = _original()
+    glyph = _glyph_patch(original, mutation=None, box=(14, 10, 19, 15))
+    protected = _box_mask((16, 12, 20, 16))
+
+    with pytest.raises(OwnerCompositionError, match="protected art"):
+        compose_page(original, [], [glyph], protected)
+
+
+def test_diff_from_original_is_subset_of_owned_masks() -> None:
+    original = _original()
+    first = _mutation(original, owner_id="owner_a", box=(1, 1, 5, 5))
+    second = _mutation(
+        original,
+        owner_id="owner_b",
+        box=(12, 10, 18, 15),
+        color=(70, 80, 90),
+    )
+    glyph = _glyph_patch(
+        original,
+        owner_id="owner_b",
+        mutation=second,
+        box=(13, 11, 16, 14),
+    )
+
+    result = compose_page(
+        original,
+        [first, second],
+        [glyph],
+        _empty_protected(original),
+    )
+    changed = np.any(result.final_rgb != original, axis=2)
+    owned = (
+        (np.asarray(first.action_mask) > 0)
+        | (np.asarray(second.action_mask) > 0)
+        | (np.asarray(glyph.glyph_mask) > 0)
+    )
+
+    assert result.committed is True
+    assert not np.any(changed & ~owned)
+
+
+def test_color_space_mismatch_is_rejected() -> None:
+    original = _original()
+    mutation = _mutation(original, color_space="BGR")
+
+    with pytest.raises(OwnerCompositionError, match="RGB|color space"):
+        compose_page(original, [mutation], [], _empty_protected(original))
+
+
+def test_action_mask_ref_accepts_canonical_sanitized_owner_identity() -> None:
+    original = _original()
+    mutation = _mutation(original, owner_id="owner/a")
+
+    result = compose_page(
+        original,
+        [mutation],
+        [],
+        _empty_protected(original),
+    )
+
+    assert result.committed is True
+
+
+@pytest.mark.parametrize(
+    "forged_ref",
+    [
+        "../owner_a/action_mask.png",
+        "untrusted/owner_a/payload.bin",
+        "owner_a",
+    ],
+)
+def test_action_mask_ref_rejects_unbound_or_traversal_paths(
+    forged_ref: str,
+) -> None:
+    original = _original()
+    mutation = replace(_mutation(original), action_mask_ref=forged_ref)
+
+    with pytest.raises(OwnerCompositionError, match="bound to owner_id"):
+        compose_page(original, [mutation], [], _empty_protected(original))
+
+
+def test_composition_hash_is_deterministic() -> None:
+    original = _original()
+    first = _mutation(original, owner_id="owner_a", box=(1, 1, 5, 5))
+    second = _mutation(
+        original,
+        owner_id="owner_b",
+        box=(12, 10, 18, 15),
+        color=(70, 80, 90),
+    )
+
+    forward = compose_page(
+        original,
+        [first, second],
+        [],
+        _empty_protected(original),
+    )
+    reverse = compose_page(
+        original,
+        [second, first],
+        [],
+        _empty_protected(original),
+    )
+
+    assert forward.sha256 == reverse.sha256 == _array_sha256(forward.final_rgb)
+    np.testing.assert_array_equal(forward.final_rgb, reverse.final_rgb)

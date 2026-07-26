@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import PurePosixPath
 import re
+from types import MappingProxyType
 from typing import Any, Iterable
+
+import numpy as np
 
 
 BBox = tuple[int, int, int, int]
@@ -82,6 +85,22 @@ def _immutable_array_sha256(value: Any) -> str:
     digest.update(b"\0")
     digest.update(tobytes(order="C"))
     return digest.hexdigest()
+
+
+def _deep_frozen_array_copy(value: Any) -> Any:
+    """Copy ndarray evidence onto an immutable bytes-backed buffer."""
+
+    if not isinstance(value, np.ndarray):
+        copy_value = getattr(value, "copy", None)
+        return copy_value() if callable(copy_value) else value
+    array = np.ascontiguousarray(value)
+    frozen = np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(
+        array.shape
+    )
+    frozen.setflags(write=False)
+    return frozen
+
+
 ACTIVE_OWNER_STATES = OWNER_STATES - frozenset({"review_required"})
 ROUTE_ALLOWED_STATES = {
     "translate_inpaint_render": ACTIVE_OWNER_STATES,
@@ -254,6 +273,8 @@ class OwnerMutation:
     residual_score: float | None = None
     changed_mask_ref: str | None = None
     execution_tile_id: str | None = None
+    projection_role: str = "executor"
+    color_space: str = "RGB"
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -312,6 +333,7 @@ class OwnerGlyphPatch:
     component_geometry_sha256: str
     execution_tile_id: str | None = None
     projection_role: str = "executor"
+    color_space: str = "RGB"
 
     def __post_init__(self) -> None:
         for field_name in ("result_rgb", "glyph_mask"):
@@ -324,6 +346,52 @@ class OwnerGlyphPatch:
             if callable(setflags):
                 setflags(write=False)
             object.__setattr__(self, field_name, frozen_value)
+
+
+@dataclass(frozen=True)
+class OwnerCompositionConflict:
+    """One deterministic reason why a page composition cannot be committed."""
+
+    code: str
+    phase: str
+    owner_ids: tuple[str, ...]
+    pixel_count: int = 0
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class PageCompositionResult:
+    """Immutable result produced by the pure page-space owner compositor."""
+
+    final_rgb: Any
+    cleanup_owner_map: Any
+    glyph_owner_map: Any
+    conflicts: tuple[OwnerCompositionConflict, ...]
+    write_counts: dict[str, int]
+    sha256: str
+    page_id: str | None = None
+    coordinate_space: str = "page"
+    committed: bool = True
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "final_rgb",
+            "cleanup_owner_map",
+            "glyph_owner_map",
+        ):
+            value = getattr(self, field_name)
+            object.__setattr__(self, field_name, _deep_frozen_array_copy(value))
+        object.__setattr__(self, "conflicts", tuple(self.conflicts))
+        object.__setattr__(
+            self,
+            "write_counts",
+            MappingProxyType(
+                {
+                    str(key): int(value)
+                    for key, value in dict(self.write_counts).items()
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True)
