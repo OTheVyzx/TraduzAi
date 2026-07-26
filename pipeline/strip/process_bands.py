@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+from hashlib import sha256
+import json
 import math
 import os
 import re
@@ -21,11 +23,17 @@ from ownership.ocr_adapter import (
     observation_to_dict,
 )
 from ownership.model import (
+    _action_mask_ref_matches_owner,
+    INPAINT_ROUTE_ACTIONS,
+    OwnerExecutionCommit,
     OwnerGraph,
+    OwnerGlyphPatch,
+    OwnerMutation,
     OwnerProjection,
     OwnerViolation,
     SourceTextComponent,
     TextObservation,
+    TRANSLATION_ROUTE_ACTIONS,
 )
 from ownership.translation import merge_owner_translations, owners_to_translation_page
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
@@ -8451,6 +8459,518 @@ def _propagate_unresolved_visual_card_inpaint_flags(page: dict) -> None:
         text["qa_flags"] = list(dict.fromkeys([*(text.get("qa_flags") or []), *sorted(unsafe_flags)]))
 
 
+def _owner_array_sha256(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(dimension) for dimension in array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _canonical_owner_identity(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{label} must be a canonical non-empty string")
+    return value
+
+
+def _canonical_owner_hash(value: Any, *, label: str) -> str:
+    identity = _canonical_owner_identity(value, label=label)
+    if not re.fullmatch(r"[0-9a-f]{64}", identity):
+        raise ValueError(f"{label} must be a canonical sha256")
+    return identity
+
+
+def _canonical_owner_rgb(
+    value: Any,
+    *,
+    shape: tuple[int, int, int] | None = None,
+    label: str,
+) -> np.ndarray:
+    if (
+        not isinstance(value, np.ndarray)
+        or value.ndim != 3
+        or value.shape[2] != 3
+        or value.dtype != np.uint8
+        or value.shape[0] <= 0
+        or value.shape[1] <= 0
+        or (shape is not None and tuple(value.shape) != tuple(shape))
+    ):
+        raise ValueError(f"{label} must be a canonical RGB uint8 page")
+    return np.ascontiguousarray(value, dtype=np.uint8)
+
+
+def _canonical_owner_mask(
+    value: Any,
+    *,
+    shape: tuple[int, int],
+    label: str,
+) -> np.ndarray:
+    if (
+        not isinstance(value, np.ndarray)
+        or value.ndim != 2
+        or value.shape != shape
+        or value.dtype != np.uint8
+        or not np.all((value == 0) | (value == 255))
+    ):
+        raise ValueError(f"{label} must be a canonical binary uint8 page mask")
+    return np.ascontiguousarray(value, dtype=np.uint8)
+
+
+def _canonical_owner_bbox(
+    value: Any,
+    *,
+    shape: tuple[int, int],
+    label: str,
+) -> tuple[int, int, int, int]:
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 4
+        or not all(isinstance(item, int) and not isinstance(item, bool) for item in value)
+    ):
+        raise ValueError(f"{label} must contain four canonical integers")
+    x1, y1, x2, y2 = (int(item) for item in value)
+    height, width = shape
+    if x1 < 0 or y1 < 0 or x1 >= x2 or y1 >= y2 or x2 > width or y2 > height:
+        raise ValueError(f"{label} is outside canonical page geometry")
+    return x1, y1, x2, y2
+
+
+def _owner_mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int]:
+    positive_y, positive_x = np.nonzero(mask)
+    if positive_x.size <= 0:
+        raise ValueError("owner mask is empty")
+    return (
+        int(positive_x.min()),
+        int(positive_y.min()),
+        int(positive_x.max()) + 1,
+        int(positive_y.max()) + 1,
+    )
+
+
+def _canonical_owner_counter(value: Any, *, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{label} must be a canonical non-negative integer")
+    return value
+
+
+def _owner_mask_is_overbroad(
+    mask: np.ndarray,
+    *,
+    allow_dense_single_glyph: bool = True,
+) -> bool:
+    positive = mask > 0
+    positive_pixels = int(np.count_nonzero(positive))
+    if positive_pixels <= 0:
+        return False
+    height, width = positive.shape
+    if positive_pixels / float(height * width) > 0.35:
+        return True
+    touches_opposite_edges = (
+        np.any(positive[0, :]) and np.any(positive[-1, :])
+    ) or (
+        np.any(positive[:, 0]) and np.any(positive[:, -1])
+    )
+    if touches_opposite_edges:
+        return True
+    positive_y, positive_x = np.nonzero(positive)
+    tight_width = int(positive_x.max() - positive_x.min() + 1)
+    tight_height = int(positive_y.max() - positive_y.min() + 1)
+    tight_bbox_pixels = tight_width * tight_height
+    dense_single_glyph_limit = max(12, int(round(min(height, width) * 0.02)))
+    is_dense_single_glyph = (
+        allow_dense_single_glyph
+        and tight_bbox_pixels <= 4096
+        and min(tight_width, tight_height) <= dense_single_glyph_limit
+        and max(tight_width, tight_height) / float(min(tight_width, tight_height))
+        >= 2.5
+    )
+    if is_dense_single_glyph:
+        return False
+    occupancy = positive_pixels / float(tight_bbox_pixels)
+    if (
+        tight_bbox_pixels >= 256
+        and min(tight_width, tight_height) >= 4
+        and occupancy >= 0.70
+    ):
+        return True
+    tight = positive[
+        int(positive_y.min()) : int(positive_y.max()) + 1,
+        int(positive_x.min()) : int(positive_x.max()) + 1,
+    ].astype(np.uint8)
+    if tight_bbox_pixels >= 256 and occupancy >= 0.45:
+        closed = cv2.morphologyEx(
+            tight,
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+        closed_occupancy = int(np.count_nonzero(closed)) / float(tight_bbox_pixels)
+        if closed_occupancy >= 0.85:
+            return True
+    return False
+
+
+def _owner_polygon_sha256(points: Any) -> str:
+    payload = json.dumps(points, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonical_owner_safe_polygon(
+    value: Any,
+    *,
+    shape: tuple[int, int],
+) -> tuple[tuple[tuple[int, int], ...], np.ndarray]:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        raise ValueError("render safe polygon must contain at least three points")
+    points: list[tuple[int, int]] = []
+    height, width = shape
+    for raw_point in value:
+        if (
+            not isinstance(raw_point, (list, tuple))
+            or len(raw_point) != 2
+            or not all(
+                isinstance(coordinate, int) and not isinstance(coordinate, bool)
+                for coordinate in raw_point
+            )
+        ):
+            raise ValueError("render safe polygon points must be canonical integers")
+        x, y = int(raw_point[0]), int(raw_point[1])
+        if x < 0 or y < 0 or x >= width or y >= height:
+            raise ValueError("render safe polygon escapes page geometry")
+        points.append((x, y))
+    contour = np.asarray(points, dtype=np.int32)
+    if float(abs(cv2.contourArea(contour))) <= 0.0:
+        raise ValueError("render safe polygon has no area")
+    mask = np.zeros(shape, dtype=np.uint8)
+    cv2.fillPoly(mask, [contour], 255)
+    return tuple(points), mask
+
+
+def apply_atomic_owner_execution(
+    original_rgb: np.ndarray,
+    mutation: OwnerMutation,
+    glyph_patch: OwnerGlyphPatch | None,
+) -> OwnerExecutionCommit:
+    """Commit cleanup and glyph rendering as one fail-closed owner transaction."""
+
+    original = _canonical_owner_rgb(original_rgb, label="original_rgb").copy()
+    original_sha256 = _owner_array_sha256(original)
+    empty_rollback_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask: np.ndarray | None = None
+    mutation_result: np.ndarray | None = None
+    mutation_is_safe = False
+
+    def _review(reason: str) -> OwnerExecutionCommit:
+        rollback_mask = (
+            action_mask
+            if action_mask is not None
+            else empty_rollback_mask
+        )
+        if mutation_is_safe and mutation_result is not None and action_mask is not None:
+            rolled_back = mutation_result.copy()
+            rolled_back[action_mask > 0] = original[action_mask > 0]
+        else:
+            rolled_back = original.copy()
+        return OwnerExecutionCommit(
+            owner_id=str(getattr(mutation, "owner_id", "") or ""),
+            page_id=str(getattr(mutation, "page_id", "") or ""),
+            coordinate_space=str(
+                getattr(mutation, "coordinate_space", "") or ""
+            ),
+            result_rgb=rolled_back,
+            mutation=mutation,
+            glyph_patch=glyph_patch,
+            committed=False,
+            cleanup_committed=False,
+            render_committed=False,
+            review_required=True,
+            state="review_required",
+            reason=reason,
+            before_sha256=original_sha256,
+            after_sha256=_owner_array_sha256(rolled_back),
+            rollback_mask_sha256=_owner_array_sha256(rollback_mask),
+            rollback_pixels=int(np.count_nonzero(rollback_mask)),
+            execution_tile_id=getattr(mutation, "execution_tile_id", None),
+        )
+
+    if not isinstance(mutation, OwnerMutation):
+        raise ValueError("mutation must be an OwnerMutation")
+
+    try:
+        owner_id = _canonical_owner_identity(mutation.owner_id, label="mutation owner_id")
+        page_id = _canonical_owner_identity(mutation.page_id, label="mutation page_id")
+        if mutation.coordinate_space != "page":
+            raise ValueError("mutation coordinate space must be page")
+        execution_tile_id = _canonical_owner_identity(
+            mutation.execution_tile_id,
+            label="mutation execution tile_id",
+        )
+        action_mask_ref = _canonical_owner_identity(
+            mutation.action_mask_ref,
+            label="mutation action_mask_ref",
+        )
+        if "\\" in action_mask_ref or not _action_mask_ref_matches_owner(
+            owner_id,
+            action_mask_ref,
+        ):
+            raise ValueError("mutation action_mask_ref is not bound to its owner")
+        _canonical_owner_hash(
+            mutation.component_geometry_sha256,
+            label="mutation component geometry hash",
+        )
+        mutation_result = _canonical_owner_rgb(
+            mutation.result_rgb,
+            shape=tuple(original.shape),
+            label="mutation result_rgb",
+        )
+        page_shape = tuple(original.shape[:2])
+        action_mask = _canonical_owner_mask(
+            mutation.action_mask,
+            shape=page_shape,
+            label="mutation action_mask",
+        )
+        protected_art_mask = _canonical_owner_mask(
+            mutation.protected_art_mask,
+            shape=page_shape,
+            label="mutation protected_art_mask",
+        )
+        protected_art_mask_sha256 = _canonical_owner_hash(
+            mutation.protected_art_mask_sha256,
+            label="mutation protected art mask hash",
+        )
+        if protected_art_mask_sha256 != _owner_array_sha256(protected_art_mask):
+            raise ValueError("mutation protected art mask hash mismatch")
+        changed_mask = _canonical_owner_mask(
+            mutation.changed_mask,
+            shape=page_shape,
+            label="mutation changed_mask",
+        )
+        if not np.any(action_mask):
+            raise ValueError("mutation action mask is empty")
+        if _owner_mask_is_overbroad(action_mask):
+            raise ValueError("mutation action mask is overbroad")
+        if np.any((action_mask > 0) & (protected_art_mask > 0)):
+            raise ValueError("mutation action mask overlaps protected art")
+        owner_bbox = _canonical_owner_bbox(
+            mutation.owner_bbox_page,
+            shape=page_shape,
+            label="mutation owner_bbox_page",
+        )
+        action_bbox = _owner_mask_bbox(action_mask)
+        if not (
+            owner_bbox[0] <= action_bbox[0] < action_bbox[2] <= owner_bbox[2]
+            and owner_bbox[1] <= action_bbox[1] < action_bbox[3] <= owner_bbox[3]
+        ):
+            raise ValueError("mutation action mask escapes owner geometry")
+        engine_crop_bbox = _canonical_owner_bbox(
+            mutation.engine_crop_bbox_page,
+            shape=page_shape,
+            label="mutation engine_crop_bbox_page",
+        )
+        if not (
+            engine_crop_bbox[0] <= action_bbox[0] < action_bbox[2] <= engine_crop_bbox[2]
+            and engine_crop_bbox[1] <= action_bbox[1] < action_bbox[3] <= engine_crop_bbox[3]
+        ):
+            raise ValueError("mutation engine crop does not contain its action mask")
+        _canonical_owner_identity(mutation.engine, label="mutation engine")
+        if mutation.before_sha256 != original_sha256:
+            raise ValueError("mutation before hash does not match original")
+        if mutation.after_sha256 != _owner_array_sha256(mutation_result):
+            raise ValueError("mutation after hash does not match result")
+        if mutation.action_mask_sha256 != _owner_array_sha256(action_mask):
+            raise ValueError("mutation action mask hash mismatch")
+        if mutation.changed_mask_sha256 != _owner_array_sha256(changed_mask):
+            raise ValueError("mutation changed mask hash mismatch")
+        actual_changed = np.any(mutation_result != original, axis=2)
+        if not np.any(actual_changed):
+            raise ValueError("mutation cleanup changed no pixels")
+        if not np.array_equal(changed_mask > 0, actual_changed):
+            raise ValueError("mutation changed mask does not match pixel delta")
+        outside_action = actual_changed & (action_mask == 0)
+        protected_changed = actual_changed & (protected_art_mask > 0)
+        if np.any(outside_action):
+            raise ValueError("mutation changed pixels outside owner action mask")
+        if np.any(protected_changed):
+            raise ValueError("mutation changed protected art pixels")
+        mask_pixels = _canonical_owner_counter(
+            mutation.mask_pixels,
+            label="mutation mask_pixels",
+        )
+        changed_pixels = _canonical_owner_counter(
+            mutation.changed_pixels,
+            label="mutation changed_pixels",
+        )
+        changed_outside_owner_pixels = _canonical_owner_counter(
+            mutation.changed_outside_owner_pixels,
+            label="mutation changed_outside_owner_pixels",
+        )
+        protected_art_changed_pixels = _canonical_owner_counter(
+            mutation.protected_art_changed_pixels,
+            label="mutation protected_art_changed_pixels",
+        )
+        if (
+            mask_pixels != int(np.count_nonzero(action_mask))
+            or changed_pixels != int(np.count_nonzero(actual_changed))
+            or changed_outside_owner_pixels
+            != int(np.count_nonzero(outside_action))
+            or protected_art_changed_pixels
+            != int(np.count_nonzero(protected_changed))
+        ):
+            raise ValueError("mutation pixel counts do not match authoritative masks")
+        mutation_is_safe = True
+    except (TypeError, ValueError) as exc:
+        return _review(f"cleanup_contract_invalid:{exc}")
+
+    if glyph_patch is None:
+        return _review("render_missing")
+    if not isinstance(glyph_patch, OwnerGlyphPatch):
+        return _review("render_contract_invalid:glyph patch type")
+
+    try:
+        if glyph_patch.projection_role != "executor":
+            raise ValueError("context projection cannot produce an owner mutation")
+        if (
+            glyph_patch.owner_id != owner_id
+            or glyph_patch.page_id != page_id
+            or glyph_patch.coordinate_space != "page"
+            or glyph_patch.execution_tile_id != execution_tile_id
+        ):
+            raise ValueError("glyph patch identity does not match cleanup owner")
+        if glyph_patch.render_completed is not True:
+            raise ValueError("render was not completed")
+        if glyph_patch.fit_status != "ok":
+            raise ValueError("render fit status is not safe")
+        glyph_component_geometry_sha256 = _canonical_owner_hash(
+            glyph_patch.component_geometry_sha256,
+            label="glyph patch component geometry hash",
+        )
+        if glyph_component_geometry_sha256 != mutation.component_geometry_sha256:
+            raise ValueError("glyph patch component geometry revision mismatch")
+        rendered_result = _canonical_owner_rgb(
+            glyph_patch.result_rgb,
+            shape=tuple(original.shape),
+            label="glyph patch result_rgb",
+        )
+        glyph_mask = _canonical_owner_mask(
+            glyph_patch.glyph_mask,
+            shape=tuple(original.shape[:2]),
+            label="glyph patch mask",
+        )
+        if not np.any(glyph_mask):
+            raise ValueError("glyph patch mask is empty")
+        if _owner_mask_is_overbroad(glyph_mask):
+            raise ValueError("glyph patch mask is overbroad")
+        glyph_bbox = _canonical_owner_bbox(
+            glyph_patch.glyph_bbox_page,
+            shape=tuple(original.shape[:2]),
+            label="glyph patch bbox_page",
+        )
+        if glyph_bbox != _owner_mask_bbox(glyph_mask):
+            raise ValueError("glyph patch bbox does not match its glyph mask")
+        safe_polygon, safe_polygon_mask = _canonical_owner_safe_polygon(
+            glyph_patch.render_safe_polygon_page,
+            shape=tuple(original.shape[:2]),
+        )
+        safe_polygon_sha256 = _canonical_owner_hash(
+            glyph_patch.render_safe_polygon_sha256,
+            label="glyph patch render safe polygon hash",
+        )
+        if safe_polygon_sha256 != _owner_polygon_sha256(safe_polygon):
+            raise ValueError("glyph patch render safe polygon hash mismatch")
+        if np.any((glyph_mask > 0) & (safe_polygon_mask == 0)):
+            raise ValueError("glyph patch escapes render safe polygon")
+        if glyph_patch.before_sha256 != mutation.after_sha256:
+            raise ValueError("glyph patch hash chain does not match cleanup result")
+        if glyph_patch.after_sha256 != _owner_array_sha256(rendered_result):
+            raise ValueError("glyph patch after hash does not match result")
+        if glyph_patch.glyph_mask_sha256 != _owner_array_sha256(glyph_mask):
+            raise ValueError("glyph patch mask hash mismatch")
+        render_changed = np.any(rendered_result != mutation_result, axis=2)
+        changed_outside_glyph = render_changed & (glyph_mask == 0)
+        if not np.any(render_changed):
+            raise ValueError("glyph render changed no pixels")
+        if np.any(changed_outside_glyph):
+            raise ValueError("glyph render changed pixels outside its mask")
+        if np.any((glyph_mask > 0) & (protected_art_mask > 0)):
+            raise ValueError("glyph patch overlaps protected art")
+        changed_outside_glyph_count = _canonical_owner_counter(
+            glyph_patch.changed_outside_glyph_mask_pixels,
+            label="glyph patch changed_outside_glyph_mask_pixels",
+        )
+        if changed_outside_glyph_count != int(np.count_nonzero(changed_outside_glyph)):
+            raise ValueError("glyph patch outside-mask count mismatch")
+    except (TypeError, ValueError) as exc:
+        return _review(f"render_contract_invalid:{exc}")
+
+    final = original.copy()
+    final[action_mask > 0] = mutation_result[action_mask > 0]
+    final[glyph_mask > 0] = rendered_result[glyph_mask > 0]
+    if _owner_array_sha256(final) != glyph_patch.after_sha256:
+        return _review("render_contract_invalid:composed result hash mismatch")
+    return OwnerExecutionCommit(
+        owner_id=owner_id,
+        page_id=page_id,
+        coordinate_space="page",
+        result_rgb=final,
+        mutation=mutation,
+        glyph_patch=glyph_patch,
+        committed=True,
+        cleanup_committed=True,
+        render_committed=True,
+        review_required=False,
+        state="rendered",
+        reason="owner_cleanup_and_render_committed",
+        before_sha256=original_sha256,
+        after_sha256=_owner_array_sha256(final),
+        rollback_mask_sha256=mutation.action_mask_sha256,
+        rollback_pixels=0,
+        execution_tile_id=execution_tile_id,
+    )
+
+
+def _owner_rollback_mask_matches_mutation(
+    translated_page: dict,
+    text: dict,
+    action_mask: np.ndarray,
+) -> bool:
+    mutation = translated_page.get("_strip_owner_mutation")
+    if not isinstance(mutation, dict):
+        return False
+    owner_id = str(text.get("owner_id") or "").strip()
+    action_mask_ref = str(text.get("action_mask_ref") or "").strip()
+    page_id = str(translated_page.get("_owner_page_id") or "").strip()
+    tile_id = str(translated_page.get("_owner_tile_id") or "").strip()
+    if (
+        not owner_id
+        or not action_mask_ref
+        or not _action_mask_ref_matches_owner(owner_id, action_mask_ref)
+        or str(mutation.get("owner_id") or "").strip() != owner_id
+        or str(mutation.get("page_id") or "").strip() != page_id
+        or str(mutation.get("coordinate_space") or "").strip() != "page"
+        or str(mutation.get("execution_tile_id") or "").strip() != tile_id
+        or str(mutation.get("action_mask_ref") or "").strip() != action_mask_ref
+    ):
+        return False
+    try:
+        expected_hash = _canonical_owner_hash(
+            mutation.get("action_mask_sha256"),
+            label="rollback mutation action mask hash",
+        )
+        mask_pixels = _canonical_owner_counter(
+            mutation.get("mask_pixels"),
+            label="rollback mutation mask_pixels",
+        )
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        expected_hash == _owner_array_sha256(action_mask)
+        and mask_pixels == int(np.count_nonzero(action_mask))
+    )
+
+
 def _apply_atomic_inpaint_render_rollback(
     band: Band,
     cleaned_slice: np.ndarray,
@@ -8481,9 +9001,38 @@ def _apply_atomic_inpaint_render_rollback(
         x2, y2 = max(0, min(width, x2)), max(0, min(height, y2))
         return [x1, y1, x2, y2] if x2 > x1 and y2 > y1 else None
 
+    def _mark_review(
+        text: dict,
+        *,
+        restored_pixels: int,
+        fit_status: str,
+        font_size_final: float | None,
+        minimum_legible: float | None,
+        mask_authority: str,
+    ) -> None:
+        text["route_action"] = "review_required"
+        text["route_reason"] = "atomic_inpaint_render_rollback"
+        flags = [str(flag) for flag in text.get("qa_flags") or [] if str(flag)]
+        if "pure_inpaint_unresolved" not in flags:
+            flags.append("pure_inpaint_unresolved")
+        text["qa_flags"] = flags
+        metrics = text.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["atomic_inpaint_render_rollback"] = {
+                "restored_pixels": int(restored_pixels),
+                "fit_status": fit_status,
+                "font_size_final": font_size_final,
+                "minimum_legible_font_px": minimum_legible,
+                "mask_authority": mask_authority,
+            }
+
     for text in list(translated_page.get("texts") or []):
         if not isinstance(text, dict):
             continue
+        owner_scoped = bool(
+            str(text.get("owner_id") or "").strip()
+            or str(text.get("action_mask_ref") or "").strip()
+        )
         explicit_render_contract = any(
             key in text
             for key in (
@@ -8494,10 +9043,11 @@ def _apply_atomic_inpaint_render_rollback(
                 "minimum_legible_font_px",
             )
         )
-        if not explicit_render_contract:
+        if not explicit_render_contract and not owner_scoped:
             continue
         render_bbox = _bounded_bbox(text.get("render_bbox"))
-        fit_status = str(text.get("fit_status") or "").strip().lower()
+        raw_fit_status = text.get("fit_status")
+        fit_status = str(raw_fit_status or "").strip().lower()
         try:
             font_size_final = float(text.get("font_size_final"))
         except (TypeError, ValueError):
@@ -8517,9 +9067,14 @@ def _apply_atomic_inpaint_render_rollback(
         )
         render_completed = text.get("render_completed")
         safe_render = bool(
-            render_completed is not False
+            (render_completed is True if owner_scoped else render_completed is not False)
             and render_bbox is not None
-            and fit_status not in {"failed", "rejected", "overflow", "below_minimum_legible"}
+            and (
+                raw_fit_status == "ok"
+                if owner_scoped
+                else fit_status
+                not in {"failed", "rejected", "overflow", "below_minimum_legible"}
+            )
             and not below_minimum
         )
         text["render_completed"] = safe_render
@@ -8527,7 +9082,47 @@ def _apply_atomic_inpaint_render_rollback(
             continue
         text["visible"] = False
         action_mask = text.get("_precomputed_inpaint_mask")
-        if isinstance(action_mask, np.ndarray) and action_mask.shape[:2] == (height, width):
+        if owner_scoped:
+            try:
+                canonical_action_mask = _canonical_owner_mask(
+                    action_mask,
+                    shape=(height, width),
+                    label="owner rollback action mask",
+                )
+                if not np.any(canonical_action_mask):
+                    raise ValueError("owner rollback action mask is empty")
+                if _owner_mask_is_overbroad(canonical_action_mask):
+                    raise ValueError("owner rollback action mask is overbroad")
+            except (TypeError, ValueError):
+                _mark_review(
+                    text,
+                    restored_pixels=0,
+                    fit_status=fit_status,
+                    font_size_final=font_size_final,
+                    minimum_legible=minimum_legible,
+                    mask_authority=(
+                        "missing_authoritative_action_mask"
+                        if action_mask is None
+                        else "invalid_owner_action_mask"
+                    ),
+                )
+                continue
+            if not _owner_rollback_mask_matches_mutation(
+                translated_page,
+                text,
+                canonical_action_mask,
+            ):
+                _mark_review(
+                    text,
+                    restored_pixels=0,
+                    fit_status=fit_status,
+                    font_size_final=font_size_final,
+                    minimum_legible=minimum_legible,
+                    mask_authority="owner_action_mask_provenance_mismatch",
+                )
+                continue
+            restore_mask = canonical_action_mask > 0
+        elif isinstance(action_mask, np.ndarray) and action_mask.shape[:2] == (height, width):
             restore_mask = action_mask > 0
         else:
             restore_mask = np.zeros((height, width), dtype=bool)
@@ -8544,20 +9139,16 @@ def _apply_atomic_inpaint_render_rollback(
             continue
         rolled_cleaned[restore_mask] = original[restore_mask]
         rolled_rendered[restore_mask] = original[restore_mask]
-        text["route_action"] = "review_required"
-        text["route_reason"] = "atomic_inpaint_render_rollback"
-        flags = [str(flag) for flag in text.get("qa_flags") or [] if str(flag)]
-        if "pure_inpaint_unresolved" not in flags:
-            flags.append("pure_inpaint_unresolved")
-        text["qa_flags"] = flags
-        metrics = text.setdefault("qa_metrics", {})
-        if isinstance(metrics, dict):
-            metrics["atomic_inpaint_render_rollback"] = {
-                "restored_pixels": int(np.count_nonzero(restore_mask)),
-                "fit_status": fit_status,
-                "font_size_final": font_size_final,
-                "minimum_legible_font_px": minimum_legible,
-            }
+        _mark_review(
+            text,
+            restored_pixels=int(np.count_nonzero(restore_mask)),
+            fit_status=fit_status,
+            font_size_final=font_size_final,
+            minimum_legible=minimum_legible,
+            mask_authority=(
+                "owner_action_mask" if owner_scoped else "legacy_unverified_bbox"
+            ),
+        )
     return rolled_cleaned, rolled_rendered
 
 
@@ -8567,7 +9158,180 @@ def _run_copy_back_stage(
     cleaned_slice: np.ndarray | None = None,
     rendered_slice: np.ndarray,
     translated_page: dict,
+    owner_execution_commit: OwnerExecutionCommit | None = None,
 ) -> BandImageStageOutput:
+    if not isinstance(translated_page, dict):
+        raise ValueError("copyback translated_page must be a mapping")
+    raw_text_records = translated_page.get("texts")
+    text_records = list(raw_text_records) if isinstance(raw_text_records, list) else []
+    malformed_text_records = raw_text_records is not None and not isinstance(
+        raw_text_records,
+        list,
+    )
+    owner_marker_records = [
+        record
+        for record in text_records
+        if isinstance(record, dict)
+        and ("owner_id" in record or "action_mask_ref" in record)
+    ]
+    operational_owner_records = [
+        record
+        for record in text_records
+        if isinstance(record, dict)
+        and str(record.get("owner_id") or "").strip()
+        and str(record.get("action_mask_ref") or "").strip()
+    ]
+    raw_owner_contract = translated_page.get("_owner_translation_contract")
+    owner_contract = raw_owner_contract if isinstance(raw_owner_contract, dict) else {}
+    raw_expected_owner_ids = owner_contract.get("expected_owner_ids")
+    expected_owner_ids = (
+        list(raw_expected_owner_ids)
+        if isinstance(raw_expected_owner_ids, (list, tuple))
+        else []
+    )
+    malformed_expected_owner_ids = (
+        raw_expected_owner_ids is not None
+        and not isinstance(raw_expected_owner_ids, (list, tuple))
+    )
+    owner_mode_detected = bool(
+        owner_marker_records
+        or expected_owner_ids
+        or malformed_text_records
+        or malformed_expected_owner_ids
+        or "_strip_owner_mutation" in translated_page
+        or (raw_owner_contract is not None and not isinstance(raw_owner_contract, dict))
+    )
+    if owner_execution_commit is not None:
+        commit = owner_execution_commit
+        if (
+            not isinstance(commit, OwnerExecutionCommit)
+            or commit.committed is not True
+            or commit.cleanup_committed is not True
+            or commit.render_committed is not True
+            or commit.review_required is not False
+            or commit.state != "rendered"
+            or commit.coordinate_space != "page"
+        ):
+            raise ValueError("owner copyback requires a valid atomic owner commit")
+        if not isinstance(commit.mutation, OwnerMutation) or not isinstance(
+            commit.glyph_patch,
+            OwnerGlyphPatch,
+        ):
+            raise ValueError("owner copyback requires the complete atomic owner chain")
+        try:
+            recomputed = apply_atomic_owner_execution(
+                band.original_slice,
+                commit.mutation,
+                commit.glyph_patch,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("owner copyback could not revalidate atomic owner chain") from exc
+        comparable_fields = (
+            "owner_id",
+            "page_id",
+            "coordinate_space",
+            "committed",
+            "cleanup_committed",
+            "render_committed",
+            "review_required",
+            "state",
+            "reason",
+            "before_sha256",
+            "after_sha256",
+            "rollback_mask_sha256",
+            "rollback_pixels",
+            "execution_tile_id",
+        )
+        if recomputed.committed is not True or any(
+            getattr(commit, field_name) != getattr(recomputed, field_name)
+            for field_name in comparable_fields
+        ):
+            raise ValueError("owner copyback commit diverges from its atomic owner chain")
+        try:
+            canonical_expected_owner_ids = [
+                _canonical_owner_identity(
+                    owner_id,
+                    label="owner copyback expected owner_id",
+                )
+                for owner_id in expected_owner_ids
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("owner copyback expected owner set is invalid") from exc
+        operational_owner_ids = [
+            str(record.get("owner_id") or "").strip()
+            for record in operational_owner_records
+        ]
+        if (
+            len(owner_marker_records) != len(operational_owner_records)
+            or len(canonical_expected_owner_ids)
+            != len(set(canonical_expected_owner_ids))
+            or len(operational_owner_ids) != len(set(operational_owner_ids))
+            or set(canonical_expected_owner_ids) != set(operational_owner_ids)
+            or any(
+                "\\" in str(record.get("action_mask_ref") or "")
+                or not _action_mask_ref_matches_owner(
+                    str(record.get("owner_id") or "").strip(),
+                    str(record.get("action_mask_ref") or "").strip(),
+                )
+                for record in operational_owner_records
+            )
+        ):
+            raise ValueError("owner copyback owner record set is inconsistent")
+        page_id = str(
+            translated_page.get("_owner_page_id")
+            or translated_page.get("page_id")
+            or ""
+        ).strip()
+        tile_id = str(
+            translated_page.get("_owner_tile_id")
+            or translated_page.get("_band_id")
+            or ""
+        ).strip()
+        coordinate_space = str(
+            translated_page.get("_owner_coordinate_space") or ""
+        ).strip()
+        matching_records = [
+            record
+            for record in operational_owner_records
+            if str(record.get("owner_id") or "").strip() == commit.owner_id
+        ]
+        if (
+            page_id != commit.page_id
+            or tile_id != commit.execution_tile_id
+            or coordinate_space != commit.coordinate_space
+            or len(matching_records) != 1
+        ):
+            raise ValueError("owner copyback commit does not match page owner context")
+        owner_record = matching_records[0]
+        if (
+            str(owner_record.get("page_id") or "").strip() != commit.page_id
+            or str(owner_record.get("action_mask_ref") or "").strip()
+            != commit.mutation.action_mask_ref
+            or str(owner_record.get("route_action") or "").strip()
+            not in (TRANSLATION_ROUTE_ACTIONS & INPAINT_ROUTE_ACTIONS)
+            or str(owner_record.get("state") or "").strip() != "rendered"
+        ):
+            raise ValueError("owner copyback record does not match atomic owner commit")
+        if canonical_expected_owner_ids.count(commit.owner_id) != 1:
+            raise ValueError("owner copyback contract does not authorize atomic owner")
+        committed = _canonical_owner_rgb(
+            commit.result_rgb,
+            label="owner execution commit result_rgb",
+        )
+        rendered = _canonical_owner_rgb(
+            rendered_slice,
+            shape=tuple(committed.shape),
+            label="owner copyback rendered_slice",
+        )
+        if commit.after_sha256 != _owner_array_sha256(committed):
+            raise ValueError("owner execution commit result hash mismatch")
+        if not np.array_equal(committed, recomputed.result_rgb):
+            raise ValueError("owner copyback result diverges from revalidated owner chain")
+        if not np.array_equal(rendered, committed):
+            raise ValueError("owner copyback input diverges from atomic owner commit")
+        return BandImageStageOutput("copy_back", committed)
+    if owner_mode_detected:
+        raise ValueError("operational owner copyback requires an atomic owner commit")
     return BandImageStageOutput(
         "copy_back",
         _apply_copy_back_outside_balloons(

@@ -66,6 +66,22 @@ EXECUTION_ROUTE_ACTIONS = frozenset(
         "inpaint_only",
     }
 )
+
+
+def _immutable_array_sha256(value: Any) -> str:
+    dtype = getattr(getattr(value, "dtype", None), "str", None)
+    shape = getattr(value, "shape", None)
+    tobytes = getattr(value, "tobytes", None)
+    if not isinstance(dtype, str) or shape is None or not callable(tobytes):
+        raise TypeError("owner mutation array evidence must be hashable")
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(dtype.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(dimension) for dimension in shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(tobytes(order="C"))
+    return digest.hexdigest()
 ACTIVE_OWNER_STATES = OWNER_STATES - frozenset({"review_required"})
 ROUTE_ALLOWED_STATES = {
     "translate_inpaint_render": ACTIVE_OWNER_STATES,
@@ -234,6 +250,7 @@ class OwnerMutation:
     engine_crop_bbox_page: BBox
     owner_bbox_page: BBox
     component_geometry_sha256: str
+    protected_art_mask_sha256: str | None = None
     residual_score: float | None = None
     changed_mask_ref: str | None = None
     execution_tile_id: str | None = None
@@ -254,6 +271,12 @@ class OwnerMutation:
             if callable(setflags):
                 setflags(write=False)
             object.__setattr__(self, field_name, frozen_value)
+        if self.protected_art_mask_sha256 is None:
+            object.__setattr__(
+                self,
+                "protected_art_mask_sha256",
+                _immutable_array_sha256(self.protected_art_mask),
+            )
 
     @property
     def changed_outside_action_mask_pixels(self) -> int:
@@ -266,6 +289,74 @@ class OwnerMutation:
     @property
     def result_sha256(self) -> str:
         return self.after_sha256
+
+
+@dataclass(frozen=True)
+class OwnerGlyphPatch:
+    """One owner-scoped rendered glyph result chained to a cleanup mutation."""
+
+    owner_id: str
+    page_id: str
+    coordinate_space: str
+    result_rgb: Any
+    glyph_mask: Any
+    glyph_bbox_page: BBox | None
+    render_completed: bool
+    fit_status: str
+    before_sha256: str
+    after_sha256: str
+    glyph_mask_sha256: str
+    changed_outside_glyph_mask_pixels: int
+    render_safe_polygon_page: tuple[Point, ...]
+    render_safe_polygon_sha256: str
+    component_geometry_sha256: str
+    execution_tile_id: str | None = None
+    projection_role: str = "executor"
+
+    def __post_init__(self) -> None:
+        for field_name in ("result_rgb", "glyph_mask"):
+            value = getattr(self, field_name)
+            copy_value = getattr(value, "copy", None)
+            if not callable(copy_value):
+                continue
+            frozen_value = copy_value()
+            setflags = getattr(frozen_value, "setflags", None)
+            if callable(setflags):
+                setflags(write=False)
+            object.__setattr__(self, field_name, frozen_value)
+
+
+@dataclass(frozen=True)
+class OwnerExecutionCommit:
+    """Atomic outcome of one cleanup-and-render chain for a resolved owner."""
+
+    owner_id: str
+    page_id: str
+    coordinate_space: str
+    result_rgb: Any
+    mutation: OwnerMutation
+    glyph_patch: OwnerGlyphPatch | None
+    committed: bool
+    cleanup_committed: bool
+    render_committed: bool
+    review_required: bool
+    state: str
+    reason: str
+    before_sha256: str
+    after_sha256: str
+    rollback_mask_sha256: str
+    rollback_pixels: int
+    execution_tile_id: str | None = None
+
+    def __post_init__(self) -> None:
+        copy_value = getattr(self.result_rgb, "copy", None)
+        if not callable(copy_value):
+            return
+        frozen_value = copy_value()
+        setflags = getattr(frozen_value, "setflags", None)
+        if callable(setflags):
+            setflags(write=False)
+        object.__setattr__(self, "result_rgb", frozen_value)
 
 
 @dataclass(frozen=True)

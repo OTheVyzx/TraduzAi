@@ -6017,6 +6017,576 @@ def test_unsafe_mask_never_leaves_empty_dark_rectangle():
     assert float(np.mean(output[10:35, 20:75])) == 210.0
 
 
+def test_owner_rollback_without_action_mask_never_falls_back_to_bbox():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((50, 90, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[10:35, 20:75] = 0
+    band = Band(y_top=0, y_bottom=50, original_slice=original.copy())
+    page = {
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "action_mask_ref": "owner_masks/owner_a/action_mask.png",
+                "translated": "TEXTO",
+                "render_completed": False,
+                "fit_status": "failed",
+                "bbox": [20, 10, 75, 35],
+            }
+        ]
+    }
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(rolled_cleaned, cleaned)
+    np.testing.assert_array_equal(rolled_rendered, cleaned)
+    assert page["texts"][0]["route_action"] == "review_required"
+    assert page["texts"][0]["qa_metrics"]["atomic_inpaint_render_rollback"][
+        "restored_pixels"
+    ] == 0
+
+
+def test_owner_action_mask_is_rolled_back_without_successful_render_contract():
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((40, 70, 3), 205, dtype=np.uint8)
+    cleaned = original.copy()
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[12:22, 25:42] = 255
+    cleaned[action_mask > 0] = 15
+    band = Band(y_top=0, y_bottom=40, original_slice=original.copy())
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(action_mask),
+            "mask_pixels": int(np.count_nonzero(action_mask)),
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "translated": "TEXTO",
+                "_precomputed_inpaint_mask": action_mask,
+            }
+        ]
+    }
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(
+        rolled_cleaned[action_mask > 0],
+        original[action_mask > 0],
+    )
+    np.testing.assert_array_equal(
+        rolled_rendered[action_mask > 0],
+        original[action_mask > 0],
+    )
+    assert page["texts"][0]["route_action"] == "review_required"
+    assert page["texts"][0]["visible"] is False
+
+
+def _owner_atomic_copyback_fixture():
+    from hashlib import sha256
+
+    import numpy as np
+    from ownership.model import OwnerGlyphPatch, OwnerMutation
+    from strip import process_bands
+    from strip.types import Band
+
+    original = np.full((20, 30, 3), 210, dtype=np.uint8)
+    original[2:5, 22:26] = (15, 25, 35)
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[8:12, 8:14] = 255
+    cleaned = original.copy()
+    cleaned[action_mask > 0] = (35, 45, 55)
+    changed_mask = np.where(
+        np.any(cleaned != original, axis=2),
+        255,
+        0,
+    ).astype(np.uint8)
+    protected = np.zeros(original.shape[:2], dtype=np.uint8)
+    owner_identity_hash = sha256(b"owner_a").hexdigest()[:12]
+    action_mask_ref = (
+        f"owner_masks/owner_a--{owner_identity_hash}/"
+        "tile_executor/action_mask.png"
+    )
+    mutation = OwnerMutation(
+        owner_id="owner_a",
+        page_id="page_001",
+        coordinate_space="page",
+        action_mask_ref=action_mask_ref,
+        result_rgb=cleaned,
+        action_mask=action_mask,
+        protected_art_mask=protected,
+        changed_mask=changed_mask,
+        engine="fixture",
+        mask_pixels=int(np.count_nonzero(action_mask)),
+        changed_pixels=int(np.count_nonzero(changed_mask)),
+        changed_outside_owner_pixels=0,
+        protected_art_changed_pixels=0,
+        before_sha256=process_bands._owner_array_sha256(original),
+        after_sha256=process_bands._owner_array_sha256(cleaned),
+        action_mask_sha256=process_bands._owner_array_sha256(action_mask),
+        changed_mask_sha256=process_bands._owner_array_sha256(changed_mask),
+        engine_crop_bbox_page=(0, 0, 30, 20),
+        owner_bbox_page=(8, 8, 14, 12),
+        component_geometry_sha256="a" * 64,
+        execution_tile_id="tile_executor",
+    )
+    glyph_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    glyph_mask[9:11, 9:13] = 255
+    rendered = cleaned.copy()
+    rendered[glyph_mask > 0] = (5, 10, 15)
+    glyph_patch = OwnerGlyphPatch(
+        owner_id="owner_a",
+        page_id="page_001",
+        coordinate_space="page",
+        result_rgb=rendered,
+        glyph_mask=glyph_mask,
+        glyph_bbox_page=(9, 9, 13, 11),
+        render_completed=True,
+        fit_status="ok",
+        before_sha256=mutation.after_sha256,
+        after_sha256=process_bands._owner_array_sha256(rendered),
+        glyph_mask_sha256=process_bands._owner_array_sha256(glyph_mask),
+        changed_outside_glyph_mask_pixels=0,
+        render_safe_polygon_page=((8, 8), (14, 8), (14, 12), (8, 12)),
+        render_safe_polygon_sha256=process_bands._owner_polygon_sha256(
+            ((8, 8), (14, 8), (14, 12), (8, 12))
+        ),
+        component_geometry_sha256=mutation.component_geometry_sha256,
+        execution_tile_id="tile_executor",
+        projection_role="executor",
+    )
+    commit = process_bands.apply_atomic_owner_execution(
+        original,
+        mutation,
+        glyph_patch,
+    )
+    assert commit.committed is True
+    band = Band(
+        y_top=0,
+        y_bottom=20,
+        original_slice=original.copy(),
+        rendered_slice=None,
+    )
+    translated_page = {
+        "page_id": "page_001",
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_band_id": "tile_executor",
+        "_owner_coordinate_space": "page",
+        "_owner_translation_contract": {
+            "expected_owner_ids": ["owner_a"],
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "page_id": "page_001",
+                "state": "rendered",
+                "route_action": "translate_inpaint_render",
+                "action_mask_ref": action_mask_ref,
+            }
+        ],
+    }
+    return band, commit, translated_page
+
+
+def test_owner_copyback_bypasses_source_restore_for_neighbor_glyph():
+    import numpy as np
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+
+    output = process_bands._run_copy_back_stage(
+        band,
+        rendered_slice=commit.result_rgb,
+        translated_page=translated_page,
+        owner_execution_commit=commit,
+    ).to_image()
+
+    np.testing.assert_array_equal(output, commit.result_rgb)
+    assert np.all(output[2:5, 22:26] == (15, 25, 35))
+
+
+def test_owner_copyback_rejects_forged_or_cross_page_commit():
+    from dataclasses import replace
+
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    forged_commits = (
+        replace(commit, page_id="page_999"),
+        replace(
+            commit,
+            owner_id="owner_forged",
+            mutation=None,
+            glyph_patch=None,
+        ),
+    )
+
+    for forged in forged_commits:
+        with pytest.raises(ValueError, match="owner copyback"):
+            process_bands._run_copy_back_stage(
+                band,
+                rendered_slice=forged.result_rgb,
+                translated_page=translated_page,
+                owner_execution_commit=forged,
+            )
+
+
+def test_operational_owner_copyback_requires_atomic_commit():
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+
+    with pytest.raises(ValueError, match="atomic owner commit"):
+        process_bands._run_copy_back_stage(
+            band,
+            rendered_slice=commit.result_rgb,
+            translated_page=translated_page,
+        )
+
+
+def test_incomplete_owner_copyback_context_never_falls_back_to_legacy():
+    import copy
+
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    partial_contexts = (
+        {"texts": [{"owner_id": "owner_a"}]},
+        {"texts": [{"action_mask_ref": commit.mutation.action_mask_ref}]},
+        {
+            "texts": [],
+            "_owner_translation_contract": {"expected_owner_ids": ["owner_a"]},
+        },
+        {"texts": {"owner_id": "owner_a"}},
+        {
+            "texts": [],
+            "_owner_translation_contract": {"expected_owner_ids": "owner_a"},
+        },
+        {"texts": [], "_strip_owner_mutation": {}},
+    )
+
+    for partial in partial_contexts:
+        with pytest.raises(ValueError, match="atomic owner commit"):
+            process_bands._run_copy_back_stage(
+                band,
+                rendered_slice=copy.deepcopy(commit.result_rgb),
+                translated_page=partial,
+            )
+
+
+def test_owner_copyback_accepts_official_sfx_inpaint_route():
+    import copy
+    import numpy as np
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    translated_page = copy.deepcopy(translated_page)
+    translated_page["texts"][0]["route_action"] = (
+        "translate_sfx_inpaint_render"
+    )
+
+    output = process_bands._run_copy_back_stage(
+        band,
+        rendered_slice=commit.result_rgb,
+        translated_page=translated_page,
+        owner_execution_commit=commit,
+    ).to_image()
+
+    np.testing.assert_array_equal(output, commit.result_rgb)
+
+
+def test_owner_copyback_rejects_incoherent_owner_record_set():
+    import copy
+
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    partial_extra = copy.deepcopy(translated_page)
+    partial_extra["texts"].append({"owner_id": "owner_partial"})
+    unknown_extra = copy.deepcopy(translated_page)
+    unknown_extra["texts"].append(
+        {
+            "owner_id": "owner_unknown",
+            "action_mask_ref": "owner_masks/owner_unknown--invalid/pair/action_mask.png",
+        }
+    )
+    missing_expected_record = copy.deepcopy(translated_page)
+    missing_expected_record["_owner_translation_contract"]["expected_owner_ids"].append(
+        "owner_missing"
+    )
+
+    for incoherent in (partial_extra, unknown_extra, missing_expected_record):
+        with pytest.raises(ValueError, match="owner copyback"):
+            process_bands._run_copy_back_stage(
+                band,
+                rendered_slice=commit.result_rgb,
+                translated_page=incoherent,
+                owner_execution_commit=commit,
+            )
+
+
+def test_owner_rollback_rejects_noncanonical_or_overbroad_action_masks():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((10, 12, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[2:5, 3:7] = 25
+    band = Band(y_top=0, y_bottom=10, original_slice=original.copy())
+    invalid_masks = (
+        np.full(original.shape[:2], 255, dtype=np.float32),
+        np.full((*original.shape[:2], 1), 255, dtype=np.uint8),
+        np.full((*original.shape[:2], 3), 255, dtype=np.uint8),
+        np.full(original.shape[:2], 255, dtype=np.uint8),
+    )
+
+    for invalid_mask in invalid_masks:
+        page = {
+            "texts": [
+                {
+                    "id": "owner_a",
+                    "owner_id": "owner_a",
+                    "action_mask_ref": "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png",
+                    "translated": "TEXTO",
+                    "render_completed": False,
+                    "fit_status": "failed",
+                    "_precomputed_inpaint_mask": invalid_mask,
+                }
+            ]
+        }
+
+        rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+            band,
+            cleaned,
+            cleaned.copy(),
+            page,
+        )
+
+        np.testing.assert_array_equal(rolled_cleaned, cleaned)
+        np.testing.assert_array_equal(rolled_rendered, cleaned)
+        metrics = page["texts"][0]["qa_metrics"]["atomic_inpaint_render_rollback"]
+        assert metrics["restored_pixels"] == 0
+        assert metrics["mask_authority"] == "invalid_owner_action_mask"
+
+
+def test_owner_render_completed_must_be_explicitly_true():
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((20, 30, 3), 205, dtype=np.uint8)
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[6:10, 8:15] = 255
+    cleaned = original.copy()
+    cleaned[action_mask > 0] = 15
+    band = Band(y_top=0, y_bottom=20, original_slice=original.copy())
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(action_mask),
+            "mask_pixels": int(np.count_nonzero(action_mask)),
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "translated": "TEXTO",
+                "render_bbox": [9, 7, 14, 9],
+                "fit_status": "ok",
+                "_precomputed_inpaint_mask": action_mask,
+            }
+        ]
+    }
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(
+        rolled_cleaned[action_mask > 0],
+        original[action_mask > 0],
+    )
+    np.testing.assert_array_equal(
+        rolled_rendered[action_mask > 0],
+        original[action_mask > 0],
+    )
+    assert page["texts"][0]["route_action"] == "review_required"
+
+
+def test_owner_rollback_mask_must_match_owner_mutation_provenance():
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((30, 50, 3), 205, dtype=np.uint8)
+    original[5:9, 36:43] = (20, 30, 40)
+    cleaned = original.copy()
+    owner_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    owner_mask[12:17, 8:18] = 255
+    cleaned[owner_mask > 0] = 15
+    wrong_neighbor_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    wrong_neighbor_mask[5:9, 36:43] = 255
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(owner_mask),
+            "mask_pixels": int(np.count_nonzero(owner_mask)),
+        },
+        "texts": [
+            {
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "render_completed": False,
+                "fit_status": "failed",
+                "_precomputed_inpaint_mask": wrong_neighbor_mask,
+            }
+        ],
+    }
+    band = Band(y_top=0, y_bottom=30, original_slice=original.copy())
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(rolled_cleaned, cleaned)
+    np.testing.assert_array_equal(rolled_rendered, cleaned)
+    metrics = page["texts"][0]["qa_metrics"]["atomic_inpaint_render_rollback"]
+    assert metrics["restored_pixels"] == 0
+    assert metrics["mask_authority"] == "owner_action_mask_provenance_mismatch"
+
+
+def test_owner_rollback_requires_exact_ok_fit_status():
+    import copy
+
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((20, 30, 3), 205, dtype=np.uint8)
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[6:10, 8:15] = 255
+    cleaned = original.copy()
+    cleaned[action_mask > 0] = 15
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    base_page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(action_mask),
+            "mask_pixels": int(np.count_nonzero(action_mask)),
+        },
+        "texts": [
+            {
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "render_completed": True,
+                "render_bbox": [9, 7, 14, 9],
+                "_precomputed_inpaint_mask": action_mask,
+            }
+        ],
+    }
+    band = Band(y_top=0, y_bottom=20, original_slice=original.copy())
+
+    for fit_status in ("", "banana", "OK-ish", "safe", "OK", " ok ", "Ok"):
+        page = copy.deepcopy(base_page)
+        page["texts"][0]["fit_status"] = fit_status
+        rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+            band,
+            cleaned,
+            cleaned.copy(),
+            page,
+        )
+        np.testing.assert_array_equal(
+            rolled_cleaned[action_mask > 0],
+            original[action_mask > 0],
+        )
+        np.testing.assert_array_equal(
+            rolled_rendered[action_mask > 0],
+            original[action_mask > 0],
+        )
+        assert page["texts"][0]["route_action"] == "review_required"
+
+
 def test_successful_render_keeps_cleaned_pixels_and_translation():
     import numpy as np
     from strip.process_bands import _apply_atomic_inpaint_render_rollback
