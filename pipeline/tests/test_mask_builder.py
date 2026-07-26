@@ -1310,6 +1310,42 @@ class MaskBuilderTests(unittest.TestCase):
 
         self.assertEqual(len(regions), 2)
 
+    def test_mask_builder_cannot_merge_two_pre_resolved_owners(self):
+        texts = [
+            {
+                "owner_id": "own_page_001_top",
+                "bbox": [100, 100, 180, 140],
+                "tipo": "fala",
+            },
+            {
+                "owner_id": "own_page_001_bottom",
+                "bbox": [110, 148, 176, 186],
+                "tipo": "fala",
+            },
+        ]
+
+        regions = build_mask_regions(texts=texts, image_shape=(400, 300, 3))
+
+        self.assertEqual(len(regions), 2)
+        self.assertEqual(
+            {region["owner_id"] for region in regions},
+            {"own_page_001_top", "own_page_001_bottom"},
+        )
+
+    def test_mask_builder_rejects_noncanonical_owner_identity(self):
+        for owner_id in ("  owner_a  ", "", 123):
+            with self.subTest(owner_id=owner_id), self.assertRaises(ValueError):
+                build_mask_regions(
+                    texts=[
+                        {
+                            "owner_id": owner_id,
+                            "bbox": [100, 100, 180, 140],
+                            "tipo": "fala",
+                        }
+                    ],
+                    image_shape=(400, 300, 3),
+                )
+
     def test_text_bbox_proximity_can_merge_without_balloon_bbox_veto(self):
         texts = [
             {"bbox": [100, 100, 150, 130], "balloon_bbox": [90, 90, 151, 140], "tipo": "fala"},

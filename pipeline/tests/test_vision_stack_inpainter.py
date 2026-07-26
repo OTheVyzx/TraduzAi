@@ -4926,7 +4926,18 @@ class VisionStackInpainterTests(unittest.TestCase):
         }
         page = {"texts": [dict(text)]}
 
-        _result, _remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [dict(text)])
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_INPAINT_POLICY": "legacy",
+                "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1",
+            },
+        ):
+            _result, _remaining, stats = _apply_fast_dark_panel_text_fill(
+                image,
+                page,
+                [dict(text)],
+            )
 
         self.assertEqual(stats["dark_panel_fill_count"], 1)
         fill_mask = page.get("_strip_dark_panel_fill_mask")
@@ -8911,6 +8922,780 @@ class VisionStackInpainterTests(unittest.TestCase):
         )
 
         self.assertTrue(np.array_equal(result["expanded_mask"], glyph_mask))
+
+    def test_inpaint_changed_pixels_are_subset_of_action_mask(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import (
+            OwnerMaskEvidence,
+            UnsafeOwnerMaskError,
+            build_owner_mask_plan,
+        )
+        from ownership.model import TextOwner
+
+        class LeakyFixtureInpainter:
+            engine_name = "fixture_leaky"
+
+            def __init__(self):
+                self.calls = 0
+
+            def inpaint(self, image, _mask, **_kwargs):
+                self.calls += 1
+                return np.full_like(image, 17)
+
+        image = np.full((30, 44, 3), 210, dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph[9:19, 12:31] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (12, 9, 31, 19)},
+        )
+
+        page = {
+                "texts": [
+                    {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "execution_tile_id": owner.execution_tile_id,
+                        "disposition": "owned",
+                        "state": "mask_ready",
+                        "route_action": "translate_inpaint_render",
+                        "action_mask_ref": plan.action_mask_ref,
+                        "source_payload": "SOURCE",
+                        "translated_payload": "DESTINO",
+                    }
+                ],
+                "_page_id": "page_001",
+                "_band_id": "tile_executor",
+                "_owner_coordinate_space": "page",
+                "_page_shape": [30, 44],
+                "_owner_component_bboxes_page": {
+                    "cmp_body": [12, 9, 31, 19]
+                },
+                "_owner_execution_projection": {
+                    "owner_id": "own_page_001_body",
+                    "tile_id": "tile_executor",
+                    "role": "executor",
+                    "bbox_page": [12, 9, 31, 19],
+                    "bbox_tile": [12, 9, 31, 19],
+                    "offset_xy": [0, 0],
+                },
+            }
+        engine = LeakyFixtureInpainter()
+        mutation = inpaint_band_image(
+            image,
+            page,
+            owner_mask_plan=plan,
+            owner_inpainter=engine,
+        )
+
+        assert not np.any((mutation.changed_mask > 0) & (plan.action_mask == 0))
+        assert mutation.changed_outside_owner_pixels == 0
+        np.testing.assert_array_equal(
+            mutation.result_rgb[plan.action_mask == 0],
+            image[plan.action_mask == 0],
+        )
+        self.assertEqual(engine.calls, 1)
+
+        page["_owner_component_bboxes_page"]["cmp_body"] = [0, 0, 44, 30]
+        rejected_engine = LeakyFixtureInpainter()
+        with self.assertRaisesRegex(UnsafeOwnerMaskError, "component|geometry"):
+            inpaint_band_image(
+                image,
+                page,
+                owner_mask_plan=plan,
+                owner_inpainter=rejected_engine,
+            )
+        self.assertEqual(rejected_engine.calls, 0)
+
+    def test_protected_art_is_unchanged_even_when_touching_text(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+        from ownership.model import TextOwner
+
+        class LeakyFixtureInpainter:
+            engine_name = "fixture_leaky"
+
+            def inpaint(self, image, _mask, **_kwargs):
+                return np.zeros_like(image)
+
+        image = np.full((34, 48, 3), [180, 120, 70], dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.putText(
+            glyph,
+            "TXT",
+            (10, 21),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            255,
+            1,
+            cv2.LINE_8,
+        )
+        protected = np.zeros(image.shape[:2], dtype=np.uint8)
+        protected[14:27, 35:42] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="touching_glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                    protected_art_mask=protected,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (10, 9, 35, 23)},
+        )
+
+        mutation = inpaint_band_image(
+            image,
+            {
+                "texts": [
+                    {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "execution_tile_id": owner.execution_tile_id,
+                        "disposition": "owned",
+                        "state": "mask_ready",
+                        "route_action": "translate_inpaint_render",
+                        "action_mask_ref": plan.action_mask_ref,
+                        "source_payload": "SOURCE",
+                        "translated_payload": "DESTINO",
+                    }
+                ],
+                "_page_id": "page_001",
+                "_band_id": "tile_executor",
+                "_owner_coordinate_space": "page",
+                "_page_shape": [34, 48],
+                "_owner_component_bboxes_page": {
+                    "cmp_body": [10, 9, 35, 23]
+                },
+                "_owner_execution_projection": {
+                    "owner_id": "own_page_001_body",
+                    "page_id": "page_001",
+                    "tile_id": "tile_executor",
+                    "role": "executor",
+                    "bbox_page": [10, 9, 35, 23],
+                    "bbox_tile": [10, 9, 35, 23],
+                    "offset_xy": [0, 0],
+                },
+            },
+            owner_mask_plan=plan,
+            owner_inpainter=LeakyFixtureInpainter(),
+        )
+
+        np.testing.assert_array_equal(
+            mutation.result_rgb[protected > 0],
+            image[protected > 0],
+        )
+        assert mutation.protected_art_changed_pixels == 0
+
+    def test_owner_inpaint_rejects_tile_space_context_and_page_crop(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import (
+            OwnerMaskEvidence,
+            UnsafeOwnerMaskError,
+            build_owner_mask_plan,
+        )
+        from ownership.model import TextOwner
+
+        class FixtureInpainter:
+            def inpaint(self, image, mask, **_kwargs):
+                result = image.copy()
+                result[mask > 0] = 17
+                return result
+
+        image = np.full((40, 40, 3), 210, dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph[25:30, 12:24] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="page_glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (12, 25, 24, 30)},
+        )
+
+        def context(coordinate_space):
+            return {
+                "texts": [
+                    {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "execution_tile_id": owner.execution_tile_id,
+                        "disposition": "owned",
+                        "state": "mask_ready",
+                        "route_action": "translate_inpaint_render",
+                        "action_mask_ref": plan.action_mask_ref,
+                        "source_payload": "SOURCE",
+                        "translated_payload": "DESTINO",
+                    }
+                ],
+                "_page_id": owner.page_id,
+                "_band_id": owner.execution_tile_id,
+                "_owner_coordinate_space": coordinate_space,
+                "_page_shape": [40, 40],
+                "_owner_component_bboxes_page": {
+                    "cmp_body": [12, 25, 24, 30]
+                },
+                "_owner_execution_projection": {
+                    "owner_id": owner.owner_id,
+                    "page_id": owner.page_id,
+                    "tile_id": owner.execution_tile_id,
+                    "role": "executor",
+                    "bbox_page": [12, 25, 24, 30],
+                    "bbox_tile": [12, 5, 24, 10],
+                    "offset_xy": [0, 20],
+                },
+            }
+
+        for coordinate_space in (None, "tile", " page "):
+            with self.subTest(coordinate_space=coordinate_space):
+                page = context(coordinate_space)
+                with self.assertRaisesRegex(UnsafeOwnerMaskError, "coordinate|page"):
+                    inpaint_band_image(
+                        image,
+                        page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+
+        page = context("page")
+        with self.assertRaisesRegex(UnsafeOwnerMaskError, "shape|source|page"):
+            inpaint_band_image(
+                image[20:40],
+                page,
+                owner_mask_plan=plan,
+                owner_inpainter=FixtureInpainter(),
+            )
+
+        valid_page = context("page")
+        valid_page["_owner_execution_projection"]["bbox_tile"] = [20, 5, 32, 10]
+        valid_page["_owner_execution_projection"]["offset_xy"] = [-8, 20]
+        mutation = inpaint_band_image(
+            image,
+            valid_page,
+            owner_mask_plan=plan,
+            owner_inpainter=FixtureInpainter(),
+        )
+        self.assertEqual(mutation.coordinate_space, "page")
+        self.assertEqual(mutation.result_rgb.shape, image.shape)
+        self.assertTrue(np.any(mutation.changed_mask[25:30, 12:24]))
+
+        malformed_records = []
+        duplicate = context("page")
+        duplicate_record = dict(duplicate["texts"][0])
+        duplicate_record["translated_payload"] = "OUTRA TRADUCAO"
+        duplicate["texts"].append(duplicate_record)
+        malformed_records.append(duplicate)
+        for field, invalid_value in (
+            ("page_id", "page_other"),
+            ("execution_tile_id", "tile_other"),
+            ("source_payload", ""),
+            ("translated_payload", None),
+        ):
+            invalid = context("page")
+            invalid["texts"][0][field] = invalid_value
+            malformed_records.append(invalid)
+
+        for invalid_page in malformed_records:
+            with self.subTest(invalid_record=invalid_page["texts"]):
+                with self.assertRaisesRegex(
+                    UnsafeOwnerMaskError,
+                    "operational|record|payload|identity|eligible",
+                ):
+                    inpaint_band_image(
+                        image,
+                        invalid_page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+
+    def test_owner_inpaint_rejects_wrong_page_or_executor_tile_context(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import (
+            OwnerMaskEvidence,
+            UnsafeOwnerMaskError,
+            build_owner_mask_plan,
+        )
+        from ownership.model import TextOwner
+
+        class FixtureInpainter:
+            def inpaint(self, image, mask, **_kwargs):
+                result = image.copy()
+                result[mask > 0] = 17
+                return result
+
+        image = np.full((24, 36, 3), 210, dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph[8:16, 11:25] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (11, 8, 25, 16)},
+        )
+
+        for page_id, tile_id, role, owner_id in (
+            ("page_999", "tile_executor", "executor", "own_page_001_body"),
+            ("page_001", "tile_neighbor", "executor", "own_page_001_body"),
+            ("page_001", "tile_executor", "context_only", "own_page_001_body"),
+            ("page_001", "tile_executor", "executor", "own_page_001_other"),
+        ):
+            with self.subTest(
+                page_id=page_id,
+                tile_id=tile_id,
+                role=role,
+                owner_id=owner_id,
+            ), self.assertRaises(UnsafeOwnerMaskError):
+                page = {
+                    "texts": [
+                        {
+                            "owner_id": owner_id,
+                            "page_id": page_id,
+                            "execution_tile_id": tile_id,
+                            "disposition": "owned",
+                            "state": "translated",
+                            "route_action": "translate_inpaint_render",
+                            "action_mask_ref": plan.action_mask_ref,
+                            "source_payload": "SOURCE",
+                            "translated_payload": "DESTINO",
+                        }
+                    ],
+                    "_page_id": page_id,
+                    "_band_id": tile_id,
+                    "_owner_coordinate_space": "page",
+                    "_page_shape": [24, 36],
+                    "_owner_component_bboxes_page": {
+                        "cmp_body": [11, 8, 25, 16]
+                    },
+                    "_owner_execution_projection": {
+                        "owner_id": owner_id,
+                        "page_id": page_id,
+                        "tile_id": tile_id,
+                        "role": role,
+                        "bbox_page": [11, 8, 25, 16],
+                        "bbox_tile": [11, 8, 25, 16],
+                        "offset_xy": [0, 0],
+                    },
+                }
+                inpaint_band_image(
+                    image,
+                    page,
+                    owner_mask_plan=plan,
+                    owner_inpainter=FixtureInpainter(),
+                )
+            self.assertEqual(page["texts"][0]["state"], "review_required")
+            self.assertEqual(page["texts"][0]["route_action"], "review_required")
+            self.assertTrue(page.get("_strip_owner_mask_error"))
+
+        for context_band_id in ("tile_neighbor", None, 123, " tile_executor "):
+            with self.subTest(context_band_id=context_band_id):
+                page = {
+                    "texts": [
+                        {
+                            "owner_id": owner.owner_id,
+                            "page_id": owner.page_id,
+                            "execution_tile_id": owner.execution_tile_id,
+                            "disposition": "owned",
+                            "state": "translated",
+                            "route_action": "translate_inpaint_render",
+                            "action_mask_ref": plan.action_mask_ref,
+                            "source_payload": "SOURCE",
+                            "translated_payload": "DESTINO",
+                        }
+                    ],
+                    "_page_id": owner.page_id,
+                    "_owner_coordinate_space": "page",
+                    "_page_shape": [24, 36],
+                    "_owner_component_bboxes_page": {
+                        "cmp_body": [11, 8, 25, 16]
+                    },
+                    "_owner_execution_projection": {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "tile_id": owner.execution_tile_id,
+                        "role": "executor",
+                        "bbox_page": [11, 8, 25, 16],
+                        "bbox_tile": [11, 8, 25, 16],
+                        "offset_xy": [0, 0],
+                    },
+                }
+                if context_band_id is not None:
+                    page["_band_id"] = context_band_id
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(
+                        image,
+                        page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+                self.assertEqual(page["texts"][0]["state"], "review_required")
+                self.assertTrue(page.get("_strip_owner_mask_error"))
+
+        for current_state, current_route, action_mask_ref in (
+            ("review_required", "review_required", None),
+            ("translated", "translate_inpaint_render", None),
+            ("translated", "translate_render_only", None),
+            ("rendered", "translate_inpaint_render", plan.action_mask_ref),
+            ("mask_ready", "translate_inpaint_render", "owner_masks/stale.png"),
+        ):
+            with self.subTest(
+                current_state=current_state,
+                current_route=current_route,
+                action_mask_ref=action_mask_ref,
+            ):
+                page = {
+                    "texts": [
+                        {
+                            "owner_id": owner.owner_id,
+                            "page_id": owner.page_id,
+                            "execution_tile_id": owner.execution_tile_id,
+                            "disposition": "owned",
+                            "state": current_state,
+                            "route_action": current_route,
+                            "action_mask_ref": action_mask_ref,
+                            "source_payload": "SOURCE",
+                            "translated_payload": "DESTINO",
+                        }
+                    ],
+                    "_page_id": owner.page_id,
+                    "_band_id": owner.execution_tile_id,
+                    "_owner_coordinate_space": "page",
+                    "_page_shape": [24, 36],
+                    "_owner_component_bboxes_page": {
+                        "cmp_body": [11, 8, 25, 16]
+                    },
+                    "_owner_execution_projection": {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "tile_id": owner.execution_tile_id,
+                        "role": "executor",
+                        "bbox_page": [11, 8, 25, 16],
+                        "bbox_tile": [11, 8, 25, 16],
+                        "offset_xy": [0, 0],
+                    },
+                }
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(
+                        image,
+                        page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+                self.assertEqual(page["texts"][0]["state"], "review_required")
+                self.assertTrue(page.get("_strip_owner_mask_error"))
+
+        non_owned_page = {
+            "texts": [
+                {
+                    "owner_id": owner.owner_id,
+                    "page_id": owner.page_id,
+                    "execution_tile_id": owner.execution_tile_id,
+                    "disposition": "preserve",
+                    "state": "mask_ready",
+                    "route_action": "translate_inpaint_render",
+                    "action_mask_ref": plan.action_mask_ref,
+                    "source_payload": "SOURCE",
+                    "translated_payload": "DESTINO",
+                }
+            ],
+            "_page_id": owner.page_id,
+            "_band_id": owner.execution_tile_id,
+            "_owner_coordinate_space": "page",
+            "_page_shape": [24, 36],
+            "_owner_component_bboxes_page": {
+                "cmp_body": [11, 8, 25, 16]
+            },
+            "_owner_execution_projection": {
+                "owner_id": owner.owner_id,
+                "page_id": owner.page_id,
+                "tile_id": owner.execution_tile_id,
+                "role": "executor",
+                "bbox_page": [11, 8, 25, 16],
+                "bbox_tile": [11, 8, 25, 16],
+                "offset_xy": [0, 0],
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(
+                image,
+                non_owned_page,
+                owner_mask_plan=plan,
+                owner_inpainter=FixtureInpainter(),
+            )
+        self.assertEqual(non_owned_page["texts"][0]["state"], "review_required")
+        self.assertTrue(non_owned_page.get("_strip_owner_mask_error"))
+
+        projection_only_page = {
+            "texts": [],
+            "_page_id": owner.page_id,
+            "_band_id": owner.execution_tile_id,
+            "_owner_coordinate_space": "page",
+            "_page_shape": [24, 36],
+            "_owner_component_bboxes_page": {
+                "cmp_body": [11, 8, 25, 16]
+            },
+            "_owner_execution_projection": {
+                "owner_id": owner.owner_id,
+                "page_id": owner.page_id,
+                "tile_id": owner.execution_tile_id,
+                "role": "executor",
+                "bbox_page": [11, 8, 25, 16],
+                "bbox_tile": [11, 8, 25, 16],
+                "offset_xy": [0, 0],
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(
+                image,
+                projection_only_page,
+                owner_mask_plan=plan,
+                owner_inpainter=FixtureInpainter(),
+            )
+        self.assertTrue(projection_only_page.get("_strip_owner_mask_error"))
+
+        class NoopInpainter:
+            def inpaint(self, image, _mask, **_kwargs):
+                return image.copy()
+
+        noop_page = {
+            "texts": [
+                {
+                    "owner_id": "own_page_001_body",
+                    "page_id": "page_001",
+                    "execution_tile_id": "tile_executor",
+                    "disposition": "owned",
+                    "state": "mask_ready",
+                    "route_action": "translate_inpaint_render",
+                    "action_mask_ref": plan.action_mask_ref,
+                    "source_payload": "SOURCE",
+                    "translated_payload": "DESTINO",
+                }
+            ],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+            "_owner_coordinate_space": "page",
+            "_page_shape": [24, 36],
+            "_owner_component_bboxes_page": {
+                "cmp_body": [11, 8, 25, 16]
+            },
+            "_owner_execution_projection": {
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "tile_id": "tile_executor",
+                "role": "executor",
+                "bbox_page": [11, 8, 25, 16],
+                "bbox_tile": [11, 8, 25, 16],
+                "offset_xy": [0, 0],
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(
+                image,
+                noop_page,
+                owner_mask_plan=plan,
+                owner_inpainter=NoopInpainter(),
+            )
+        self.assertEqual(noop_page["texts"][0]["state"], "review_required")
+        self.assertEqual(noop_page["texts"][0]["route_action"], "review_required")
+        self.assertTrue(noop_page.get("_strip_owner_mask_error"))
+
+    def test_owner_identity_without_mask_plan_cannot_fall_back_to_legacy_bbox(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import UnsafeOwnerMaskError
+
+        image = np.full((24, 36, 3), 210, dtype=np.uint8)
+        page = {
+            "texts": [
+                {
+                    "owner_id": "own_page_001_body",
+                    "bbox": [8, 7, 28, 18],
+                    "line_polygons": [[[8, 7], [28, 7], [28, 18], [8, 18]]],
+                }
+            ],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+        }
+
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(image, page)
+
+        self.assertEqual(page["texts"][0]["state"], "review_required")
+        self.assertEqual(page["texts"][0]["route_action"], "review_required")
+
+        for malformed_owner_id in (None, 123, "", "   ", " owner "):
+            with self.subTest(malformed_text_owner_id=malformed_owner_id):
+                malformed_owner_page = {
+                    "texts": [
+                        {
+                            "owner_id": malformed_owner_id,
+                            "bbox": [8, 7, 28, 18],
+                            "line_polygons": [
+                                [[8, 7], [28, 7], [28, 18], [8, 18]]
+                            ],
+                        }
+                    ],
+                    "_page_id": "page_001",
+                    "_band_id": "tile_executor",
+                }
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(image, malformed_owner_page)
+                self.assertEqual(
+                    malformed_owner_page["texts"][0]["state"],
+                    "review_required",
+                )
+                self.assertEqual(
+                    malformed_owner_page.get("_strip_owner_mask_error"),
+                    "owner_identity_invalid",
+                )
+
+        projection_only_page = {
+            "texts": [],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+            "_owner_execution_projection": {
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "tile_id": "tile_executor",
+                "role": "executor",
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(image, projection_only_page)
+        self.assertEqual(
+            projection_only_page.get("_strip_owner_mask_error"),
+            "owner_mask_plan_missing",
+        )
+
+        scoped_projection_page = {
+            "texts": [
+                {
+                    "owner_id": "own_page_001_body",
+                    "state": "translated",
+                    "route_action": "translate_inpaint_render",
+                },
+                {
+                    "owner_id": "own_page_001_neighbor",
+                    "state": "translated",
+                    "route_action": "translate_inpaint_render",
+                },
+            ],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+            "_owner_execution_projection": {
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "tile_id": "tile_executor",
+                "role": "executor",
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(image, scoped_projection_page)
+        self.assertEqual(
+            scoped_projection_page["texts"][0]["state"],
+            "review_required",
+        )
+        self.assertEqual(
+            scoped_projection_page["texts"][1]["state"],
+            "translated",
+        )
+
+        for malformed_owner_id in (None, 123, "missing"):
+            with self.subTest(malformed_owner_id=malformed_owner_id):
+                projection = {
+                    "page_id": "page_001",
+                    "tile_id": "tile_executor",
+                    "role": "executor",
+                }
+                if malformed_owner_id != "missing":
+                    projection["owner_id"] = malformed_owner_id
+                malformed_projection_page = {
+                    "texts": [],
+                    "_page_id": "page_001",
+                    "_band_id": "tile_executor",
+                    "_owner_execution_projection": projection,
+                }
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(image, malformed_projection_page)
+                self.assertEqual(
+                    malformed_projection_page.get("_strip_owner_mask_error"),
+                    "owner_mask_plan_missing",
+                )
 
 
 if __name__ == "__main__":

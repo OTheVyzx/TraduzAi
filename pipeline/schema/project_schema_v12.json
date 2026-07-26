@@ -214,7 +214,8 @@
         "disposition",
         "state",
         "route_action",
-        "execution_tile_id"
+        "execution_tile_id",
+        "action_mask_ref"
       ],
       "properties": {
         "owner_id": {
@@ -273,7 +274,8 @@
           "minLength": 1,
           "pattern": "^\\S(?:.*\\S)?$"
         },
-        "execution_tile_id": { "type": ["string", "null"] }
+        "execution_tile_id": { "type": ["string", "null"] },
+        "action_mask_ref": { "type": ["string", "null"] }
       }
     },
     "ownerProjection": {

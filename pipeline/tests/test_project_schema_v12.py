@@ -219,6 +219,7 @@ class ProjectSchemaV12Tests(unittest.TestCase):
                 "state",
                 "route_action",
                 "execution_tile_id",
+                "action_mask_ref",
             },
             "ownerProjection": {
                 "owner_id",

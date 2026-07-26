@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from hashlib import sha256
+from pathlib import PurePosixPath
+import re
 from typing import Any, Iterable
 
 
@@ -10,10 +13,115 @@ BBox = tuple[int, int, int, int]
 Point = tuple[int, int]
 
 FINAL_COMPONENT_DECISIONS = frozenset({"owned", "preserve", "suppress", "review"})
+OWNER_DISPOSITIONS = frozenset({"owned", "review"})
+OWNER_STATES = frozenset(
+    {
+        "discovered",
+        "ocr_ready",
+        "execution_planned",
+        "translated",
+        "mask_ready",
+        "inpainted",
+        "laid_out",
+        "rendered",
+        "verified",
+        "review_required",
+    }
+)
+OWNER_ROUTE_ACTIONS = frozenset(
+    {
+        "translate_inpaint_render",
+        "translate_sfx_inpaint_render",
+        "translate_render_only",
+        "inpaint_only",
+        "review_required",
+    }
+)
+TRANSLATION_ROUTE_ACTIONS = frozenset(
+    {
+        "translate_inpaint_render",
+        "translate_sfx_inpaint_render",
+        "translate_render_only",
+    }
+)
+INPAINT_ROUTE_ACTIONS = frozenset(
+    {
+        "translate_inpaint_render",
+        "translate_sfx_inpaint_render",
+        "inpaint_only",
+    }
+)
 POST_TRANSLATION_STATES = frozenset(
     {"translated", "mask_ready", "inpainted", "laid_out", "rendered", "verified"}
 )
+MASK_REQUIRED_STATES = frozenset(
+    {"mask_ready", "inpainted", "laid_out", "rendered", "verified"}
+)
 EXECUTOR_REQUIRED_STATES = POST_TRANSLATION_STATES | frozenset({"execution_planned"})
+EXECUTION_ROUTE_ACTIONS = frozenset(
+    {
+        "translate_inpaint_render",
+        "translate_sfx_inpaint_render",
+        "translate_render_only",
+        "inpaint_only",
+    }
+)
+ACTIVE_OWNER_STATES = OWNER_STATES - frozenset({"review_required"})
+ROUTE_ALLOWED_STATES = {
+    "translate_inpaint_render": ACTIVE_OWNER_STATES,
+    "translate_sfx_inpaint_render": ACTIVE_OWNER_STATES,
+    "translate_render_only": ACTIVE_OWNER_STATES
+    - frozenset({"mask_ready", "inpainted"}),
+    "inpaint_only": frozenset(
+        {
+            "discovered",
+            "ocr_ready",
+            "execution_planned",
+            "mask_ready",
+            "inpainted",
+            "verified",
+        }
+    ),
+    "review_required": frozenset({"review_required"}),
+}
+
+
+def _is_canonical_page_bbox(value: Any) -> bool:
+    return bool(
+        isinstance(value, (list, tuple))
+        and len(value) == 4
+        and all(isinstance(item, int) and not isinstance(item, bool) for item in value)
+        and min(value) >= 0
+        and value[0] < value[2]
+        and value[1] < value[3]
+    )
+
+
+def _duplicate_values(values: Iterable[Any]) -> tuple[str, ...]:
+    ordered = list(values)
+    duplicates: list[str] = []
+    for index, value in enumerate(ordered):
+        if any(value == previous for previous in ordered[:index]):
+            rendered = str(value)
+            if rendered not in duplicates:
+                duplicates.append(rendered)
+    return tuple(duplicates)
+
+
+def _action_mask_ref_matches_owner(owner_id: str, action_mask_ref: str) -> bool:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", owner_id).strip("._")
+    if not safe:
+        return False
+    identity_hash = sha256(owner_id.encode("utf-8")).hexdigest()[:12]
+    expected_segment = f"{safe}--{identity_hash}"
+    parts = PurePosixPath(action_mask_ref.replace("\\", "/")).parts
+    return bool(
+        len(parts) == 4
+        and parts[0] == "owner_masks"
+        and parts[1] == expected_segment
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == "action_mask.png"
+    )
 
 
 @dataclass(frozen=True)
@@ -87,6 +195,7 @@ class TextOwner:
     state: str
     route_action: str
     execution_tile_id: str | None
+    action_mask_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +208,64 @@ class OwnerProjection:
     bbox_page: BBox
     bbox_tile: BBox
     offset_xy: Point
+
+
+@dataclass(frozen=True)
+class OwnerMutation:
+    """One owner-scoped cleanup result with authoritative pixel evidence."""
+
+    owner_id: str
+    page_id: str
+    coordinate_space: str
+    action_mask_ref: str
+    result_rgb: Any
+    action_mask: Any
+    protected_art_mask: Any
+    changed_mask: Any
+    engine: str
+    mask_pixels: int
+    changed_pixels: int
+    changed_outside_owner_pixels: int
+    protected_art_changed_pixels: int
+    before_sha256: str
+    after_sha256: str
+    action_mask_sha256: str
+    changed_mask_sha256: str
+    engine_crop_bbox_page: BBox
+    owner_bbox_page: BBox
+    component_geometry_sha256: str
+    residual_score: float | None = None
+    changed_mask_ref: str | None = None
+    execution_tile_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "result_rgb",
+            "action_mask",
+            "protected_art_mask",
+            "changed_mask",
+        ):
+            value = getattr(self, field_name)
+            copy_value = getattr(value, "copy", None)
+            if not callable(copy_value):
+                continue
+            frozen_value = copy_value()
+            setflags = getattr(frozen_value, "setflags", None)
+            if callable(setflags):
+                setflags(write=False)
+            object.__setattr__(self, field_name, frozen_value)
+
+    @property
+    def changed_outside_action_mask_pixels(self) -> int:
+        return self.changed_outside_owner_pixels
+
+    @property
+    def original_sha256(self) -> str:
+        return self.before_sha256
+
+    @property
+    def result_sha256(self) -> str:
+        return self.after_sha256
 
 
 @dataclass(frozen=True)
@@ -154,7 +321,249 @@ class OwnerGraph:
         violations = list(self.violations)
         component_ids = {component.component_id for component in self.components}
         observation_ids = {observation.observation_id for observation in self.observations}
+        observations_by_id = {
+            observation.observation_id: observation for observation in self.observations
+        }
         owners_by_id = {owner.owner_id: owner for owner in self.owners}
+
+        for label, identities in (
+            ("component", [component.component_id for component in self.components]),
+            (
+                "observation",
+                [observation.observation_id for observation in self.observations],
+            ),
+            ("owner", [owner.owner_id for owner in self.owners]),
+        ):
+            counts = {
+                identity: identities.count(identity) for identity in set(identities)
+            }
+            for identity, count in sorted(counts.items()):
+                if count > 1:
+                    violations.append(
+                        _violation(
+                            f"{label}_identity_duplicated",
+                            f"Page owner graph contains duplicate {label} identity.",
+                            identity,
+                        )
+                    )
+
+        for component in self.components:
+            if component.page_id != self.page_id:
+                violations.append(
+                    _violation(
+                        "component_page_mismatch",
+                        "Source component belongs to another page.",
+                        component.component_id,
+                        component.page_id,
+                    )
+                )
+            if not _is_canonical_page_bbox(component.bbox_page):
+                violations.append(
+                    _violation(
+                        "component_bbox_invalid",
+                        "Source component bbox_page is not canonical page geometry.",
+                        component.component_id,
+                    )
+                )
+            duplicate_evidence_ids = _duplicate_values(component.evidence_ids)
+            if duplicate_evidence_ids:
+                violations.append(
+                    _violation(
+                        "component_evidence_ids_duplicated",
+                        "Source component contains duplicate evidence identities.",
+                        component.component_id,
+                        *duplicate_evidence_ids,
+                    )
+                )
+        for observation in self.observations:
+            if observation.page_id != self.page_id:
+                violations.append(
+                    _violation(
+                        "observation_page_mismatch",
+                        "Text observation belongs to another page.",
+                        observation.observation_id,
+                        observation.page_id,
+                    )
+                )
+            for field_name, bbox, code in (
+                ("bbox_page", observation.bbox_page, "observation_bbox_invalid"),
+                (
+                    "source_bbox_page",
+                    observation.source_bbox_page,
+                    "observation_source_bbox_invalid",
+                ),
+                (
+                    "text_pixel_bbox_page",
+                    observation.text_pixel_bbox_page,
+                    "observation_text_pixel_bbox_invalid",
+                ),
+            ):
+                if bbox is not None and not _is_canonical_page_bbox(bbox):
+                    violations.append(
+                        _violation(
+                            code,
+                            f"Text observation {field_name} is not canonical page geometry.",
+                            observation.observation_id,
+                        )
+                    )
+            unknown_components = sorted(set(observation.component_ids) - component_ids)
+            if unknown_components:
+                violations.append(
+                    _violation(
+                        "observation_component_unknown",
+                        "Text observation references unknown source components.",
+                        observation.observation_id,
+                        *unknown_components,
+                    )
+                )
+            for field_name, identities in (
+                ("component_ids", observation.component_ids),
+                ("projection_ids", observation.projection_ids),
+            ):
+                duplicates = _duplicate_values(identities)
+                if duplicates:
+                    violations.append(
+                        _violation(
+                            f"observation_{field_name}_duplicated",
+                            f"Text observation contains duplicate {field_name} identities.",
+                            observation.observation_id,
+                            *duplicates,
+                        )
+                    )
+        for owner in self.owners:
+            if owner.page_id != self.page_id:
+                violations.append(
+                    _violation(
+                        "owner_page_mismatch",
+                        "Text owner belongs to another page.",
+                        owner.owner_id,
+                        owner.page_id,
+                    )
+                )
+        for projection in self.projections:
+            if projection.owner_id not in owners_by_id:
+                violations.append(
+                    _violation(
+                        "projection_owner_unknown",
+                        "Owner projection references an unknown owner.",
+                        projection.owner_id,
+                        projection.tile_id,
+                    )
+                )
+            if projection.role not in {"executor", "context_only"}:
+                violations.append(
+                    _violation(
+                        "projection_role_invalid",
+                        "Owner projection role is unsupported.",
+                        projection.owner_id,
+                        projection.tile_id,
+                    )
+                )
+            page_bbox = projection.bbox_page
+            tile_bbox = projection.bbox_tile
+            offset = projection.offset_xy
+            structures_are_valid = (
+                isinstance(page_bbox, (list, tuple))
+                and isinstance(tile_bbox, (list, tuple))
+                and isinstance(offset, (list, tuple))
+                and len(page_bbox) == 4
+                and len(tile_bbox) == 4
+                and len(offset) == 2
+            )
+            values_are_valid = structures_are_valid and all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in (*page_bbox, *tile_bbox, *offset)
+            )
+            geometry_is_valid = (
+                values_are_valid
+                and min(page_bbox) >= 0
+                and page_bbox[0] < page_bbox[2]
+                and page_bbox[1] < page_bbox[3]
+                and tile_bbox[0] < tile_bbox[2]
+                and tile_bbox[1] < tile_bbox[3]
+            )
+            if not geometry_is_valid:
+                violations.append(
+                    _violation(
+                        "projection_bbox_invalid",
+                        "Owner projection has invalid page/tile geometry.",
+                        projection.owner_id,
+                        projection.tile_id,
+                    )
+                )
+                continue
+            offset_x, offset_y = offset
+            expected_page_bbox = (
+                tile_bbox[0] + offset_x,
+                tile_bbox[1] + offset_y,
+                tile_bbox[2] + offset_x,
+                tile_bbox[3] + offset_y,
+            )
+            if tuple(page_bbox) != expected_page_bbox:
+                violations.append(
+                    _violation(
+                        "projection_transform_mismatch",
+                        "Owner projection page geometry does not match tile offset.",
+                        projection.owner_id,
+                        projection.tile_id,
+                    )
+                )
+            projection_owner = owners_by_id.get(projection.owner_id)
+            if projection_owner is not None:
+                owner_component_boxes = [
+                    component.bbox_page
+                    for component in self.components
+                    if component.component_id in set(projection_owner.component_ids)
+                ]
+                boxes_are_canonical = (
+                    len(owner_component_boxes) == len(set(projection_owner.component_ids))
+                    and bool(owner_component_boxes)
+                    and all(
+                        isinstance(box, (list, tuple))
+                        and len(box) == 4
+                        and all(
+                            isinstance(value, int) and not isinstance(value, bool)
+                            for value in box
+                        )
+                        and min(box) >= 0
+                        and box[0] < box[2]
+                        and box[1] < box[3]
+                        for box in owner_component_boxes
+                    )
+                )
+                if boxes_are_canonical:
+                    owner_bbox = (
+                        min(box[0] for box in owner_component_boxes),
+                        min(box[1] for box in owner_component_boxes),
+                        max(box[2] for box in owner_component_boxes),
+                        max(box[3] for box in owner_component_boxes),
+                    )
+                    if tuple(page_bbox) != owner_bbox:
+                        violations.append(
+                            _violation(
+                                "projection_owner_geometry_mismatch",
+                                "Owner projection does not match its component union.",
+                                projection.owner_id,
+                                projection.tile_id,
+                            )
+                        )
+
+        projection_identity_counts: dict[tuple[str, str], int] = {}
+        for projection in self.projections:
+            identity = (projection.owner_id, projection.tile_id)
+            projection_identity_counts[identity] = (
+                projection_identity_counts.get(identity, 0) + 1
+            )
+        for (owner_id, tile_id), count in sorted(projection_identity_counts.items()):
+            if count > 1:
+                violations.append(
+                    _violation(
+                        "owner_projection_duplicated",
+                        "Owner has duplicate projections for one tile.",
+                        owner_id,
+                        tile_id,
+                    )
+                )
 
         dispositions_by_component: dict[str, list[ComponentDisposition]] = {}
         for disposition in self.component_dispositions:
@@ -173,6 +582,36 @@ class OwnerGraph:
                         "component_disposition_invalid",
                         "Source component has an unsupported final disposition.",
                         disposition.component_id,
+                    )
+                )
+            elif disposition.decision in {"owned", "review"}:
+                disposition_owner = owners_by_id.get(disposition.owner_id or "")
+                if disposition_owner is not None:
+                    if disposition_owner.disposition != disposition.decision:
+                        violations.append(
+                            _violation(
+                                "disposition_owner_decision_mismatch",
+                                "Component disposition does not match its owner's disposition.",
+                                disposition.component_id,
+                                disposition_owner.owner_id,
+                            )
+                        )
+                    if disposition.component_id not in disposition_owner.component_ids:
+                        violations.append(
+                            _violation(
+                                "disposition_owner_component_mismatch",
+                                "Component disposition references an owner that does not contain the component.",
+                                disposition.component_id,
+                                disposition_owner.owner_id,
+                            )
+                        )
+            elif disposition.owner_id is not None:
+                violations.append(
+                    _violation(
+                        "disposition_owner_forbidden",
+                        "Preserved or suppressed components cannot retain an owner identity.",
+                        disposition.component_id,
+                        disposition.owner_id,
                     )
                 )
 
@@ -197,6 +636,87 @@ class OwnerGraph:
 
         active_owners_by_component: dict[str, list[str]] = {}
         for owner in self.owners:
+            for field_name, identities in (
+                ("component_ids", owner.component_ids),
+                ("observation_ids", owner.observation_ids),
+                ("selected_observation_ids", owner.selected_observation_ids),
+            ):
+                duplicates = _duplicate_values(identities)
+                if duplicates:
+                    violations.append(
+                        _violation(
+                            f"owner_{field_name}_duplicated",
+                            f"Text owner contains duplicate {field_name} identities.",
+                            owner.owner_id,
+                            *duplicates,
+                        )
+                    )
+
+            disposition_is_valid = owner.disposition in OWNER_DISPOSITIONS
+            state_is_valid = owner.state in OWNER_STATES
+            route_is_valid = owner.route_action in OWNER_ROUTE_ACTIONS
+            if not disposition_is_valid:
+                violations.append(
+                    _violation(
+                        "owner_disposition_invalid",
+                        "Text owner disposition is not canonical.",
+                        owner.owner_id,
+                        owner.disposition,
+                    )
+                )
+            if not state_is_valid:
+                violations.append(
+                    _violation(
+                        "owner_state_invalid",
+                        "Text owner lifecycle state is not canonical.",
+                        owner.owner_id,
+                        owner.state,
+                    )
+                )
+            if not route_is_valid:
+                violations.append(
+                    _violation(
+                        "owner_route_action_invalid",
+                        "Text owner route action is not canonical.",
+                        owner.owner_id,
+                        owner.route_action,
+                    )
+                )
+            if (
+                state_is_valid
+                and route_is_valid
+                and owner.state not in ROUTE_ALLOWED_STATES[owner.route_action]
+            ):
+                violations.append(
+                    _violation(
+                        "owner_state_route_mismatch",
+                        "Text owner state and route action are not a valid lifecycle pair.",
+                        owner.owner_id,
+                        owner.state,
+                        owner.route_action,
+                    )
+                )
+            if owner.disposition == "review" and (
+                owner.state != "review_required"
+                or owner.route_action != "review_required"
+            ):
+                violations.append(
+                    _violation(
+                        "owner_disposition_lifecycle_mismatch",
+                        "Review owner must remain in the review-required lifecycle.",
+                        owner.owner_id,
+                    )
+                )
+
+            owner_component_ids = set(owner.component_ids)
+            if owner.disposition == "owned" and not owner_component_ids:
+                violations.append(
+                    _violation(
+                        "owner_components_missing",
+                        "Owned owner must contain at least one source component.",
+                        owner.owner_id,
+                    )
+                )
             for component_id in owner.component_ids:
                 if component_id not in component_ids:
                     violations.append(
@@ -209,6 +729,26 @@ class OwnerGraph:
                     )
                 if owner.disposition == "owned":
                     active_owners_by_component.setdefault(component_id, []).append(owner.owner_id)
+
+            if disposition_is_valid:
+                for component_id in sorted(owner_component_ids):
+                    component_dispositions = dispositions_by_component.get(
+                        component_id, ()
+                    )
+                    matching_disposition = any(
+                        disposition.decision == owner.disposition
+                        and disposition.owner_id == owner.owner_id
+                        for disposition in component_dispositions
+                    )
+                    if component_dispositions and not matching_disposition:
+                        violations.append(
+                            _violation(
+                                "owner_component_disposition_mismatch",
+                                "Owner component has no matching final disposition.",
+                                owner.owner_id,
+                                component_id,
+                            )
+                        )
 
             unknown_observations = sorted(set(owner.observation_ids) - observation_ids)
             if unknown_observations:
@@ -234,6 +774,50 @@ class OwnerGraph:
                     )
                 )
 
+            evidence_coverage = {
+                component_id
+                for observation_id in owner.observation_ids
+                if observation_id in observations_by_id
+                for component_id in observations_by_id[observation_id].component_ids
+            }
+            selected_coverage = {
+                component_id
+                for observation_id in owner.selected_observation_ids
+                if observation_id in observations_by_id
+                for component_id in observations_by_id[observation_id].component_ids
+            }
+            if owner.disposition == "owned":
+                missing_evidence = sorted(owner_component_ids - evidence_coverage)
+                if missing_evidence:
+                    violations.append(
+                        _violation(
+                            "owner_observation_coverage_incomplete",
+                            "Owned owner observations do not cover every source component.",
+                            owner.owner_id,
+                            *missing_evidence,
+                        )
+                    )
+                missing_selected = sorted(owner_component_ids - selected_coverage)
+                if missing_selected:
+                    violations.append(
+                        _violation(
+                            "owner_selected_coverage_incomplete",
+                            "Owned owner selected observations do not cover every source component.",
+                            owner.owner_id,
+                            *missing_selected,
+                        )
+                    )
+            selected_foreign = sorted(selected_coverage - owner_component_ids)
+            if selected_foreign:
+                violations.append(
+                    _violation(
+                        "owner_selected_observation_contaminated",
+                        "Selected owner observations contain foreign source components.",
+                        owner.owner_id,
+                        *selected_foreign,
+                    )
+                )
+
             owner_projections = [
                 projection for projection in self.projections if projection.owner_id == owner.owner_id
             ]
@@ -255,7 +839,8 @@ class OwnerGraph:
                         )
                     )
                 if (
-                    owner.state in POST_TRANSLATION_STATES
+                    owner.route_action in TRANSLATION_ROUTE_ACTIONS
+                    and owner.state in POST_TRANSLATION_STATES
                     and (
                         not isinstance(owner.translated_payload, str)
                         or not owner.translated_payload.strip()
@@ -265,6 +850,35 @@ class OwnerGraph:
                         _violation(
                             "owner_translation_payload_missing",
                             "Translated owner state requires one non-empty translated payload.",
+                            owner.owner_id,
+                        )
+                    )
+                mask_is_required = (
+                    owner.route_action in INPAINT_ROUTE_ACTIONS
+                    and owner.state in MASK_REQUIRED_STATES
+                )
+                if mask_is_required and (
+                    not isinstance(owner.action_mask_ref, str)
+                    or not owner.action_mask_ref.strip()
+                ):
+                    violations.append(
+                        _violation(
+                            "owner_action_mask_missing",
+                            "Mask-ready owner requires one authoritative action mask reference.",
+                            owner.owner_id,
+                        )
+                    )
+                elif (
+                    mask_is_required
+                    and not _action_mask_ref_matches_owner(
+                        owner.owner_id,
+                        owner.action_mask_ref,
+                    )
+                ):
+                    violations.append(
+                        _violation(
+                            "owner_action_mask_owner_mismatch",
+                            "Action mask reference does not belong to its owner identity.",
                             owner.owner_id,
                         )
                     )
@@ -294,6 +908,20 @@ class OwnerGraph:
                             executors[0].tile_id,
                         )
                     )
+
+            if owner.disposition != "owned" and (
+                owner.state in EXECUTOR_REQUIRED_STATES
+                or owner.route_action in EXECUTION_ROUTE_ACTIONS
+                or bool(owner.action_mask_ref)
+                or bool(executors)
+            ):
+                violations.append(
+                    _violation(
+                        "non_owned_owner_in_execution_plan",
+                        "Non-owned owner cannot retain executable state, route, mask, or projection.",
+                        owner.owner_id,
+                    )
+                )
 
             if (
                 owner.disposition == "review" or owner.state == "review_required"
@@ -422,6 +1050,7 @@ class OwnerGraph:
                     "state": owner.state,
                     "route_action": owner.route_action,
                     "execution_tile_id": owner.execution_tile_id,
+                    "action_mask_ref": owner.action_mask_ref,
                 }
                 for owner in sorted(self.owners, key=lambda item: item.owner_id)
             ],
@@ -580,6 +1209,11 @@ class OwnerGraph:
                         if item.get("execution_tile_id") is not None
                         else None
                     ),
+                    action_mask_ref=(
+                        str(item["action_mask_ref"])
+                        if item.get("action_mask_ref") is not None
+                        else None
+                    ),
                 )
                 for item in data.get("owners") or ()
             ],
@@ -638,10 +1272,14 @@ def _dedupe_and_sort_violations(
 
 
 def _bbox(value: Any) -> BBox:
-    values = list(value or ())
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"bbox must be a list or tuple, got {value!r}")
+    values = list(value)
     if len(values) != 4:
         raise ValueError(f"bbox must have four values, got {values!r}")
-    return tuple(int(item) for item in values)  # type: ignore[return-value]
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in values):
+        raise ValueError(f"bbox coordinates must be canonical integers, got {values!r}")
+    return tuple(values)  # type: ignore[return-value]
 
 
 def _point(value: Any) -> Point:

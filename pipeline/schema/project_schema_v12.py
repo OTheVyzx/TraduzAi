@@ -85,6 +85,7 @@ OWNER_GRAPH_DEFINITIONS: dict[str, Any] = {
             "state",
             "route_action",
             "execution_tile_id",
+            "action_mask_ref",
         ],
         "properties": {
             "owner_id": _OWNER_ID_SCHEMA,
@@ -102,6 +103,7 @@ OWNER_GRAPH_DEFINITIONS: dict[str, Any] = {
             "state": _OWNER_ID_SCHEMA,
             "route_action": _OWNER_ID_SCHEMA,
             "execution_tile_id": {"type": ["string", "null"]},
+            "action_mask_ref": {"type": ["string", "null"]},
         },
     },
     "ownerProjection": {

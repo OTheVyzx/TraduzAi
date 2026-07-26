@@ -38,9 +38,34 @@ except ImportError:  # pragma: no cover - supports direct pipeline path imports
     )
 
 try:
-    from ocr.text_router import ROUTE_ACTIONS, route_action_requires_inpaint
+    from .owner_mask import (
+        OWNER_MASK_COORDINATE_SPACE,
+        OwnerMaskPlan,
+        UnsafeOwnerMaskError,
+        execute_owner_inpaint,
+    )
+except ImportError:  # pragma: no cover - supports direct pipeline path imports
+    from inpainter.owner_mask import (
+        OWNER_MASK_COORDINATE_SPACE,
+        OwnerMaskPlan,
+        UnsafeOwnerMaskError,
+        execute_owner_inpaint,
+    )
+
+try:
+    from ocr.text_router import (
+        INPAINT_ROUTE_ACTIONS,
+        ROUTE_ACTIONS,
+        TRANSLATE_ROUTE_ACTIONS,
+        route_action_requires_inpaint,
+    )
 except ImportError:  # pragma: no cover - supports package imports
-    from ..ocr.text_router import ROUTE_ACTIONS, route_action_requires_inpaint
+    from ..ocr.text_router import (
+        INPAINT_ROUTE_ACTIONS,
+        ROUTE_ACTIONS,
+        TRANSLATE_ROUTE_ACTIONS,
+        route_action_requires_inpaint,
+    )
 
 FAST_FILL_BLOCKING_QA_FLAGS = {
     "bbox_overreach",
@@ -11395,7 +11420,13 @@ def prewarm_band_inpainter(profile: str = "quality"):
     return inpainter
 
 
-def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
+def inpaint_band_image(
+    band_rgb: np.ndarray,
+    ocr_page: dict,
+    *,
+    owner_mask_plan: OwnerMaskPlan | None = None,
+    owner_inpainter=None,
+):
     """Aplica o mesmo round de inpaint do runtime principal na banda do strip."""
     from vision_stack.runtime import (
         _apply_inpainting_round,
@@ -11406,6 +11437,271 @@ def inpaint_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
         _get_inpainter,
         _has_white_balloon_text_residual,
     )
+
+    text_records = [
+        text
+        for text in (ocr_page.get("texts") or [])
+        if isinstance(text, dict)
+    ]
+    owner_records = [text for text in text_records if "owner_id" in text]
+    owner_texts = [
+        text
+        for text in owner_records
+        if isinstance(text.get("owner_id"), str)
+        and text.get("owner_id")
+        and text.get("owner_id") == text.get("owner_id").strip()
+    ]
+    malformed_owner_records = [
+        text for text in owner_records if text not in owner_texts
+    ]
+    execution_projection = ocr_page.get("_owner_execution_projection")
+    execution_projection_declared = "_owner_execution_projection" in ocr_page
+    projection_owner_id = (
+        execution_projection.get("owner_id")
+        if isinstance(execution_projection, dict)
+        and isinstance(execution_projection.get("owner_id"), str)
+        and execution_projection.get("owner_id")
+        and execution_projection.get("owner_id")
+        == execution_projection.get("owner_id").strip()
+        else None
+    )
+
+    def _mark_owner_inpaint_review(owner_id: str | None, reason: str) -> None:
+        for text in owner_records:
+            if owner_id is not None and text.get("owner_id") != owner_id:
+                continue
+            text["state"] = "review_required"
+            text["route_action"] = "review_required"
+            text["action_mask_ref"] = None
+        ocr_page["_strip_owner_mask_error"] = reason
+
+    if malformed_owner_records:
+        _mark_owner_inpaint_review(None, "owner_identity_invalid")
+        raise UnsafeOwnerMaskError(
+            "owner-scoped inpaint received a malformed owner identity"
+        )
+
+    if (owner_records or execution_projection_declared) and owner_mask_plan is None:
+        _mark_owner_inpaint_review(projection_owner_id, "owner_mask_plan_missing")
+        raise UnsafeOwnerMaskError(
+            "owner-scoped inpaint requires an authoritative owner mask plan"
+        )
+
+    if owner_mask_plan is not None:
+        try:
+            if ocr_page.get("_owner_coordinate_space") != OWNER_MASK_COORDINATE_SPACE:
+                raise UnsafeOwnerMaskError(
+                    "owner inpaint context must declare canonical page coordinate space"
+                )
+            page_shape = ocr_page.get("_page_shape")
+            if (
+                not isinstance(page_shape, (list, tuple))
+                or len(page_shape) != 2
+                or not all(
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value > 0
+                    for value in page_shape
+                )
+                or tuple(page_shape) != tuple(band_rgb.shape[:2])
+                or tuple(page_shape) != tuple(owner_mask_plan.action_mask.shape)
+                or tuple(page_shape)
+                != tuple(owner_mask_plan.protected_art_mask.shape)
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner inpaint input and masks must match the canonical page shape"
+                )
+            context_component_bboxes = ocr_page.get(
+                "_owner_component_bboxes_page"
+            )
+            if (
+                owner_mask_plan.component_geometry_verified is not True
+                or not isinstance(context_component_bboxes, dict)
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner inpaint context requires verified component geometry"
+                )
+            normalized_context_component_bboxes = []
+            for component_id, bbox in context_component_bboxes.items():
+                if (
+                    not isinstance(component_id, str)
+                    or not component_id
+                    or component_id != component_id.strip()
+                    or not isinstance(bbox, (list, tuple))
+                    or len(bbox) != 4
+                    or not all(
+                        isinstance(value, int) and not isinstance(value, bool)
+                        for value in bbox
+                    )
+                ):
+                    raise UnsafeOwnerMaskError(
+                        "owner inpaint component geometry is malformed"
+                    )
+                normalized_context_component_bboxes.append(
+                    (component_id, tuple(bbox))
+                )
+            if (
+                tuple(sorted(normalized_context_component_bboxes))
+                != owner_mask_plan.component_bboxes_page
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner mask plan component geometry does not match inpaint context"
+                )
+            context_page_id = ocr_page.get("_page_id")
+            if (
+                not isinstance(context_page_id, str)
+                or not context_page_id
+                or context_page_id != context_page_id.strip()
+                or context_page_id != owner_mask_plan.page_id
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner mask plan page identity does not match inpaint context"
+                )
+            context_tile_id = ocr_page.get("_band_id")
+            if (
+                not isinstance(context_tile_id, str)
+                or not context_tile_id
+                or context_tile_id != context_tile_id.strip()
+                or context_tile_id != owner_mask_plan.execution_tile_id
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner mask plan executor tile does not match inpaint context"
+                )
+            if not isinstance(execution_projection, dict) or (
+                execution_projection.get("role") != "executor"
+                or execution_projection.get("owner_id") != owner_mask_plan.owner_id
+                or (
+                    execution_projection.get("page_id") is not None
+                    and execution_projection.get("page_id")
+                    != owner_mask_plan.page_id
+                )
+                or execution_projection.get("tile_id")
+                != owner_mask_plan.execution_tile_id
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner mask plan does not match an executor owner projection"
+                )
+            page_bbox = execution_projection.get("bbox_page")
+            tile_bbox = execution_projection.get("bbox_tile")
+            offset_xy = execution_projection.get("offset_xy")
+            projection_geometry = (page_bbox, tile_bbox, offset_xy)
+            if not all(
+                isinstance(value, (list, tuple))
+                for value in projection_geometry
+            ) or not (
+                len(page_bbox) == 4
+                and len(tile_bbox) == 4
+                and len(offset_xy) == 2
+                and all(
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    for value in (*page_bbox, *tile_bbox, *offset_xy)
+                )
+                and min(page_bbox) >= 0
+                and page_bbox[0] < page_bbox[2] <= page_shape[1]
+                and page_bbox[1] < page_bbox[3] <= page_shape[0]
+                and tile_bbox[0] < tile_bbox[2]
+                and tile_bbox[1] < tile_bbox[3]
+                and tuple(page_bbox)
+                == (
+                    tile_bbox[0] + offset_xy[0],
+                    tile_bbox[1] + offset_xy[1],
+                    tile_bbox[2] + offset_xy[0],
+                    tile_bbox[3] + offset_xy[1],
+                )
+                and tuple(page_bbox) == owner_mask_plan.owner_bbox_page
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner executor projection has invalid page-space geometry"
+                )
+            action_y, action_x = np.nonzero(owner_mask_plan.action_mask)
+            if (
+                action_x.size <= 0
+                or int(action_x.min()) < page_bbox[0]
+                or int(action_x.max()) >= page_bbox[2]
+                or int(action_y.min()) < page_bbox[1]
+                or int(action_y.max()) >= page_bbox[3]
+            ):
+                raise UnsafeOwnerMaskError(
+                    "owner action mask escapes its page-space projection"
+                )
+            matching_owner_texts = [
+                text
+                for text in owner_texts
+                if text.get("owner_id") == owner_mask_plan.owner_id
+            ]
+            if len(matching_owner_texts) != 1:
+                raise UnsafeOwnerMaskError(
+                    "owner mask plan requires exactly one operational owner record"
+                )
+            for text in matching_owner_texts:
+                state = text.get("state")
+                action_mask_ref = text.get("action_mask_ref")
+                if (
+                    text.get("page_id") != owner_mask_plan.page_id
+                    or text.get("execution_tile_id")
+                    != owner_mask_plan.execution_tile_id
+                    or text.get("disposition") != "owned"
+                    or text.get("route_action") not in INPAINT_ROUTE_ACTIONS
+                    or state != "mask_ready"
+                    or action_mask_ref != owner_mask_plan.action_mask_ref
+                    or not isinstance(text.get("source_payload"), str)
+                    or not text["source_payload"].strip()
+                    or (
+                        text.get("route_action") in TRANSLATE_ROUTE_ACTIONS
+                        and (
+                            not isinstance(text.get("translated_payload"), str)
+                            or not text["translated_payload"].strip()
+                        )
+                    )
+                ):
+                    raise UnsafeOwnerMaskError(
+                        "operational owner record is no longer eligible for inpaint"
+                    )
+            selected_inpainter = owner_inpainter or _get_inpainter("quality")
+            mutation = execute_owner_inpaint(
+                band_rgb,
+                owner_mask_plan,
+                selected_inpainter,
+            )
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            _mark_owner_inpaint_review(owner_mask_plan.owner_id, reason)
+            if (
+                projection_owner_id is not None
+                and projection_owner_id != owner_mask_plan.owner_id
+            ):
+                _mark_owner_inpaint_review(projection_owner_id, reason)
+            if isinstance(exc, UnsafeOwnerMaskError):
+                raise
+            raise UnsafeOwnerMaskError("owner inpaint execution failed closed") from exc
+        for text in ocr_page.get("texts") or []:
+            if (
+                isinstance(text, dict)
+                and text.get("owner_id") == owner_mask_plan.owner_id
+            ):
+                text["action_mask_ref"] = owner_mask_plan.action_mask_ref
+        ocr_page["_strip_owner_mutation"] = {
+            "owner_id": mutation.owner_id,
+            "page_id": mutation.page_id,
+            "coordinate_space": mutation.coordinate_space,
+            "execution_tile_id": mutation.execution_tile_id,
+            "action_mask_ref": mutation.action_mask_ref,
+            "engine": mutation.engine,
+            "mask_pixels": mutation.mask_pixels,
+            "changed_pixels": mutation.changed_pixels,
+            "changed_outside_owner_pixels": mutation.changed_outside_owner_pixels,
+            "protected_art_changed_pixels": mutation.protected_art_changed_pixels,
+            "before_sha256": mutation.before_sha256,
+            "after_sha256": mutation.after_sha256,
+            "action_mask_sha256": mutation.action_mask_sha256,
+            "changed_mask_sha256": mutation.changed_mask_sha256,
+            "engine_crop_bbox_page": list(mutation.engine_crop_bbox_page),
+            "owner_bbox_page": list(mutation.owner_bbox_page),
+            "component_geometry_sha256": mutation.component_geometry_sha256,
+            "residual_score": mutation.residual_score,
+        }
+        return mutation
 
     def _apply_white_balloon_residual_force_fill(
         original_rgb: np.ndarray,
