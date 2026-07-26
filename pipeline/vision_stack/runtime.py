@@ -3653,7 +3653,306 @@ def _clone_page_result(page_result: dict) -> dict:
         **page_result,
         "texts": cloned_texts,
         "_vision_blocks": cloned_blocks,
+        "_ocr_observation_records": copy.deepcopy(
+            list(page_result.get("_ocr_observation_records") or [])
+        ),
+        "owner_observations": copy.deepcopy(
+            list(page_result.get("owner_observations") or [])
+        ),
     }
+
+
+def _ocr_observation_block_value(block, key: str):
+    if isinstance(block, dict):
+        return block.get(key)
+    return getattr(block, key, None)
+
+
+def _raw_ocr_observation_records(
+    blocks: list,
+    texts: list,
+    *,
+    provider: str,
+    attempt_prefix: str = "legacy-build",
+) -> list[dict]:
+    """Snapshot provider output before legacy cleanup, merge, or suppression."""
+
+    records: list[dict] = []
+    block_items = list(blocks or [])
+    text_items = list(texts or [])
+    for index in range(max(len(block_items), len(text_items))):
+        block = block_items[index] if index < len(block_items) else None
+        raw = text_items[index] if index < len(text_items) else ""
+        record = copy.deepcopy(raw) if isinstance(raw, dict) else {"text": str(raw or "")}
+        record.setdefault("provider", str(provider or "unknown_ocr"))
+        record.setdefault("attempt_id", f"{attempt_prefix}-{index + 1:03d}")
+        record.setdefault("provider_record_id", f"{attempt_prefix}-{index + 1:03d}")
+        record.setdefault("legacy_layer_id", f"ocr_{index + 1:03d}")
+        record.setdefault("legacy_selected", False)
+        record.setdefault("accepted", None)
+
+        bbox = (
+            record.get("bbox")
+            or record.get("source_bbox")
+            or _ocr_observation_block_value(block, "xyxy")
+            or _ocr_observation_block_value(block, "bbox")
+        )
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            record["bbox"] = [int(round(float(value))) for value in bbox[:4]]
+        else:
+            record["bbox"] = [0, 0, 0, 0]
+
+        if record.get("confidence") is None:
+            confidence = _ocr_observation_block_value(block, "confidence")
+            try:
+                record["confidence"] = float(confidence or 0.0)
+            except (TypeError, ValueError):
+                record["confidence"] = 0.0
+
+        if not record.get("line_polygons"):
+            polygons = _ocr_observation_block_value(block, "line_polygons")
+            if polygons:
+                record["line_polygons"] = copy.deepcopy(polygons)
+
+        component_ids = record.get("component_ids")
+        if not component_ids:
+            component_ids = _ocr_observation_block_value(block, "component_ids")
+        if component_ids:
+            record["component_ids"] = [str(value) for value in component_ids if value]
+
+        if block is None:
+            record["accepted"] = False
+            record["rejection_reason"] = "unmatched_text_without_block"
+        elif index >= len(text_items):
+            record["accepted"] = False
+            record["rejection_reason"] = "missing_provider_text"
+        records.append(record)
+    return records
+
+
+def _mark_raw_ocr_observation(
+    records: list[dict],
+    index: int,
+    *,
+    accepted: bool,
+    reason: str | None = None,
+) -> None:
+    if index < 0 or index >= len(records):
+        return
+    record = records[index]
+    record["accepted"] = bool(accepted)
+    if accepted:
+        record.pop("rejection_reason", None)
+    elif reason:
+        record["rejection_reason"] = str(reason)
+
+
+def _extend_raw_ocr_observation_records(page_result: dict, records) -> dict:
+    if not isinstance(page_result, dict):
+        return page_result
+    existing = page_result.setdefault("_ocr_observation_records", [])
+    if not isinstance(existing, list):
+        existing = []
+        page_result["_ocr_observation_records"] = existing
+    for record in list(records or []):
+        if isinstance(record, dict):
+            existing.append(copy.deepcopy(record))
+    return page_result
+
+
+def _snapshot_ocr_engine_observations(ocr) -> list[dict]:
+    """Read the current request-scoped OCR sink without depending on one backend."""
+
+    getter = getattr(ocr, "get_last_observation_records", None)
+    if callable(getter):
+        try:
+            value = getter()
+            return [copy.deepcopy(item) for item in list(value or []) if isinstance(item, dict)]
+        except Exception:
+            return []
+    for name in ("_last_observation_records", "_last_ocr_observation_records"):
+        value = getattr(ocr, name, None)
+        if isinstance(value, list):
+            return [copy.deepcopy(item) for item in value if isinstance(item, dict)]
+    return []
+
+
+def _provider_observation_records(records, provider: str, attempt_prefix: str) -> list[dict]:
+    normalized: list[dict] = []
+    for index, item in enumerate(list(records or [])):
+        if not isinstance(item, dict):
+            continue
+        record = copy.deepcopy(item)
+        record.setdefault("provider", provider)
+        record.setdefault("attempt_id", f"{attempt_prefix}-{index + 1:03d}")
+        record.setdefault("provider_record_id", f"{attempt_prefix}-{index + 1:03d}")
+        normalized.append(record)
+    return normalized
+
+
+def _normalize_engine_observation_records_to_tile(records, blocks: list | None = None) -> list[dict]:
+    """Map backend crop-local attempts into the input tile exactly once."""
+
+    normalized: list[dict] = []
+    block_items = list(blocks or [])
+    for record_index, item in enumerate(list(records or [])):
+        if not isinstance(item, dict):
+            continue
+        record = copy.deepcopy(item)
+        source_space = str(record.get("coordinate_space") or "tile").strip().lower()
+        record["source_coordinate_space"] = source_space
+        if source_space == "crop":
+            try:
+                crop_index = int(record.get("crop_index", record_index))
+            except (TypeError, ValueError):
+                crop_index = record_index
+            block = block_items[crop_index] if 0 <= crop_index < len(block_items) else None
+            block_bbox = (
+                _ocr_observation_block_value(block, "xyxy")
+                or _ocr_observation_block_value(block, "bbox")
+            )
+            if isinstance(block_bbox, (list, tuple)) and len(block_bbox) >= 4:
+                offset_x = int(round(float(block_bbox[0])))
+                offset_y = int(round(float(block_bbox[1])))
+                bbox = record.get("bbox")
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    record["bbox"] = [
+                        int(round(float(bbox[0]))) + offset_x,
+                        int(round(float(bbox[1]))) + offset_y,
+                        int(round(float(bbox[2]))) + offset_x,
+                        int(round(float(bbox[3]))) + offset_y,
+                    ]
+                polygons = record.get("line_polygons")
+                if isinstance(polygons, (list, tuple)):
+                    shifted_polygons = []
+                    for polygon in polygons:
+                        if not isinstance(polygon, (list, tuple)):
+                            continue
+                        shifted_polygons.append(
+                            [
+                                [
+                                    int(round(float(point[0]))) + offset_x,
+                                    int(round(float(point[1]))) + offset_y,
+                                ]
+                                for point in polygon
+                                if isinstance(point, (list, tuple)) and len(point) >= 2
+                            ]
+                        )
+                    record["line_polygons"] = shifted_polygons
+                record["crop_origin_tile"] = [offset_x, offset_y]
+                record["coordinate_space"] = "tile"
+            else:
+                record["accepted"] = False
+                record.setdefault("rejection_reason", "crop_projection_block_missing")
+        elif source_space in {"page", "input_page", "band"}:
+            # The OCR engine calls its input image a page. In strip mode that
+            # image is a band/candidate tile, so the outer TileProjection still
+            # has to be applied once.
+            record["coordinate_space"] = "tile"
+        normalized.append(record)
+    return normalized
+
+
+def _owner_projection_page_dict(page_dict: dict, page_result: dict | None = None) -> dict:
+    raw_number = page_dict.get("_source_page_number", page_dict.get("numero"))
+    try:
+        page_number = int(raw_number)
+    except (TypeError, ValueError):
+        page_number = 0
+    page_id = str(page_dict.get("_owner_page_id") or f"page_{page_number:03d}")
+    tile_id = str(
+        page_dict.get("_owner_tile_id")
+        or page_dict.get("_band_id")
+        or (page_result or {}).get("image")
+        or page_id
+    )
+    raw_offset = page_dict.get("_owner_tile_offset_xy")
+    if isinstance(raw_offset, (list, tuple)) and len(raw_offset) >= 2:
+        offset_x, offset_y = int(raw_offset[0]), int(raw_offset[1])
+    else:
+        offset_x, offset_y = 0, int(page_dict.get("_band_y_top") or 0)
+    crop_offset = page_dict.get("_candidate_crop_offset")
+    if (
+        isinstance(crop_offset, (list, tuple))
+        and len(crop_offset) >= 2
+        and not page_dict.get("_owner_tile_offset_includes_candidate_crop")
+    ):
+        offset_x += int(crop_offset[0])
+        offset_y += int(crop_offset[1])
+    return {
+        "page_id": page_id,
+        "tile_id": tile_id,
+        "offset_xy": [offset_x, offset_y],
+    }
+
+
+def _negative_evidence_observation_records(negative_evidence: dict | None) -> list[dict]:
+    if not isinstance(negative_evidence, dict):
+        return []
+    raw_records = [
+        copy.deepcopy(record)
+        for record in list(negative_evidence.get("_ocr_observation_records") or [])
+        if isinstance(record, dict)
+    ]
+    blocks = list(negative_evidence.get("blocks") or [])
+    texts = list(negative_evidence.get("texts") or [])
+    records = _raw_ocr_observation_records(
+        blocks,
+        texts,
+        provider=str(negative_evidence.get("source") or "negative_detect_ocr"),
+        attempt_prefix="negative-evidence",
+    )
+    for record in records:
+        record.setdefault("image_transform", negative_evidence.get("image_transform"))
+    raw_records.extend(records)
+    return raw_records
+
+
+def _attach_runtime_owner_observations(page_result: dict, page_dict: dict) -> dict:
+    """Materialize the authoritative page-space manifest while retaining legacy texts."""
+
+    try:
+        try:
+            from ownership.ocr_adapter import (
+                TileProjection,
+                attach_observation_manifest,
+                collect_page_observations,
+            )
+        except ImportError:
+            from ..ownership.ocr_adapter import (
+                TileProjection,
+                attach_observation_manifest,
+                collect_page_observations,
+            )
+    except ImportError:
+        return page_result
+
+    projection_data = _owner_projection_page_dict(page_dict, page_result)
+    page_result["_owner_projection"] = projection_data
+    records = [
+        copy.deepcopy(record)
+        for record in list(page_result.get("_ocr_observation_records") or [])
+        if isinstance(record, dict)
+    ]
+    records.extend(_negative_evidence_observation_records(page_result.get("_negative_evidence")))
+    legacy_records = _raw_ocr_observation_records(
+        list(page_result.get("_vision_blocks") or []),
+        list(page_result.get("texts") or []),
+        provider="legacy_selected",
+        attempt_prefix="legacy-selected",
+    )
+    for record in legacy_records:
+        record["accepted"] = True
+        record["legacy_selected"] = True
+    records.extend(legacy_records)
+
+    projection = TileProjection(
+        page_id=projection_data["page_id"],
+        tile_id=projection_data["tile_id"],
+        offset_xy=tuple(projection_data["offset_xy"]),
+    )
+    observations = collect_page_observations({"runtime": records}, projection)
+    return attach_observation_manifest(page_result, observations)
 
 
 def _normalized_bbox_list(values) -> list[list[int]]:
@@ -4190,6 +4489,46 @@ def _remap_orientation_recovery_page(
                 if isinstance(polygon, list)
             ]
         block["orientation_recovery_deg"] = int(rotation_deg)
+
+    for record in remapped.get("_ocr_observation_records", []):
+        if not isinstance(record, dict):
+            continue
+        for key in ("bbox", "source_bbox", "layout_bbox", "text_pixel_bbox", "bbox_page"):
+            value = record.get(key)
+            if isinstance(value, (list, tuple)) and len(value) == 4:
+                record[key] = _rotate_bbox_from_view_to_original(
+                    value, rotation_deg, original_shape
+                )
+        for key in ("line_polygons", "polygons", "polygons_page"):
+            polygons = record.get(key)
+            if isinstance(polygons, (list, tuple)):
+                record[key] = [
+                    _rotate_polygon_from_view_to_original(
+                        polygon, rotation_deg, original_shape
+                    )
+                    for polygon in polygons
+                    if isinstance(polygon, (list, tuple))
+                ]
+        record["orientation_recovery_deg"] = int(rotation_deg)
+
+    for observation in remapped.get("owner_observations", []):
+        if not isinstance(observation, dict):
+            continue
+        bbox_page = observation.get("bbox_page")
+        if isinstance(bbox_page, (list, tuple)) and len(bbox_page) == 4:
+            observation["bbox_page"] = _rotate_bbox_from_view_to_original(
+                bbox_page, rotation_deg, original_shape
+            )
+        polygons_page = observation.get("polygons_page")
+        if isinstance(polygons_page, (list, tuple)):
+            observation["polygons_page"] = [
+                _rotate_polygon_from_view_to_original(
+                    polygon, rotation_deg, original_shape
+                )
+                for polygon in polygons_page
+                if isinstance(polygon, (list, tuple))
+            ]
+        observation["orientation_recovery_deg"] = int(rotation_deg)
     return remapped
 
 
@@ -11749,6 +12088,26 @@ def _select_recovery_match(base_texts: list[dict], recovered_text: dict) -> int 
 
 def _integrate_recovery_page(base_page: dict, recovered_page: dict) -> tuple[dict, dict]:
     updated_page = _clone_page_result(base_page)
+    _extend_raw_ocr_observation_records(
+        updated_page,
+        recovered_page.get("_ocr_observation_records") if isinstance(recovered_page, dict) else [],
+    )
+    if isinstance(recovered_page, dict) and recovered_page.get("owner_observations"):
+        existing_observations = updated_page.setdefault("owner_observations", [])
+        known_ids = {
+            str(item.get("observation_id") or "")
+            for item in existing_observations
+            if isinstance(item, dict)
+        }
+        for observation in list(recovered_page.get("owner_observations") or []):
+            if not isinstance(observation, dict):
+                continue
+            observation_id = str(observation.get("observation_id") or "")
+            if observation_id and observation_id in known_ids:
+                continue
+            existing_observations.append(copy.deepcopy(observation))
+            if observation_id:
+                known_ids.add(observation_id)
     recovery_by_index: dict[int, tuple[dict, dict]] = {}
     recovered_texts = recovered_page.get("texts", [])
     recovered_blocks = recovered_page.get("_vision_blocks", [])
@@ -11837,6 +12196,12 @@ def build_page_result(
     editorial_credit_drop_count = 0
     run_on_suspect_count = 0
     run_on_resolved_count = 0
+    raw_observation_records = _raw_ocr_observation_records(
+        blocks,
+        texts,
+        provider=f"{ocr_backend}_raw",
+        attempt_prefix=f"{ocr_backend}-build",
+    )
 
     _emit_stage_progress(progress_callback, "build_blocks", 0.74, "Montando blocos OCR")
     record_decision(
@@ -11855,6 +12220,9 @@ def build_page_result(
         bbox[1] = max(0, min(height, bbox[1]))
         bbox[3] = max(0, min(height, bbox[3]))
         if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            _mark_raw_ocr_observation(
+                raw_observation_records, index - 1, accepted=False, reason="invalid_bbox"
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -11868,6 +12236,12 @@ def build_page_result(
         raw_record = raw_text if isinstance(raw_text, dict) else {}
         raw_text_value = raw_record.get("text") or raw_record.get("translated") or raw_text
         if isinstance(raw_text, dict) and not (raw_record.get("text") or raw_record.get("translated")):
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason="structured_payload",
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -11881,6 +12255,12 @@ def build_page_result(
         confidence = round(float(getattr(block, "confidence", 0.0)), 3)
         raw_text_str = str(raw_text_value or "").strip()
         if is_structured_ocr_payload(raw_text_str):
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason="structured_payload",
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -11893,6 +12273,12 @@ def build_page_result(
             continue
         cleaned = fix_ocr_errors(raw_text_str, idioma_origem=idioma_origem)
         if not cleaned:
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason="empty_after_cleanup",
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -11905,6 +12291,12 @@ def build_page_result(
         informative_qa_flags: list[str] = []
 
         if normalized_source_lang == "en" and _contains_korean_script(cleaned):
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason="korean_text_in_english_source",
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -11938,6 +12330,12 @@ def build_page_result(
                 is_white_balloon_context=early_white_balloon_context,
             )
         if visual_artifact_reason:
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason=visual_artifact_reason,
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -11958,6 +12356,12 @@ def build_page_result(
             block=block,
             is_white_balloon_context=early_white_balloon_context,
         ):
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason="cjk_visual_misread_in_english_source",
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -12017,6 +12421,7 @@ def build_page_result(
             _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
             _repair_text_entry_stale_text_geometry(text_entry)
             page_texts.append(text_entry)
+            _mark_raw_ocr_observation(raw_observation_records, index - 1, accepted=True)
             serialized_block = _apply_text_geometry_to_serialized_block(
                 _serialize_block(block, (height, width)),
                 text_entry,
@@ -12042,6 +12447,9 @@ def build_page_result(
 
         if False and is_editorial_credit(cleaned):
             editorial_credit_drop_count += 1
+            _mark_raw_ocr_observation(
+                raw_observation_records, index - 1, accepted=False, reason="editorial_credit"
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -12054,6 +12462,9 @@ def build_page_result(
             continue
 
         if is_punctuation_only_noise(cleaned):
+            _mark_raw_ocr_observation(
+                raw_observation_records, index - 1, accepted=False, reason="punctuation_only"
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -12114,6 +12525,7 @@ def build_page_result(
             _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
             _repair_text_entry_stale_text_geometry(text_entry)
             page_texts.append(text_entry)
+            _mark_raw_ocr_observation(raw_observation_records, index - 1, accepted=True)
             serialized_block = _apply_text_geometry_to_serialized_block(
                 _serialize_block(block, (height, width)),
                 text_entry,
@@ -12133,10 +12545,16 @@ def build_page_result(
             continue
 
         if is_hallucination(cleaned, bbox, confidence):
+            rejection_reason = (
+                "vlm_failure_phrase" if is_vlm_failure_phrase(cleaned) else "ocr_hallucination"
+            )
+            _mark_raw_ocr_observation(
+                raw_observation_records, index - 1, accepted=False, reason=rejection_reason
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
-                reason="vlm_failure_phrase" if is_vlm_failure_phrase(cleaned) else "ocr_hallucination",
+                reason=rejection_reason,
                 page=page_number,
                 layer=layer_ref,
                 text=cleaned,
@@ -12180,6 +12598,9 @@ def build_page_result(
             )
         if False and is_editorial_credit(cleaned):
             editorial_credit_drop_count += 1
+            _mark_raw_ocr_observation(
+                raw_observation_records, index - 1, accepted=False, reason="editorial_credit"
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -12199,6 +12620,9 @@ def build_page_result(
             is_white_balloon=is_white_balloon,
             image_shape=image_rgb.shape,
         ):
+            _mark_raw_ocr_observation(
+                raw_observation_records, index - 1, accepted=False, reason="ghost_ocr_noise"
+            )
             record_decision(
                 stage="ocr",
                 action="drop_block",
@@ -12340,6 +12764,12 @@ def build_page_result(
             image_shape=image_rgb.shape,
             block_profile=block_profile,
         ):
+            _mark_raw_ocr_observation(
+                raw_observation_records,
+                index - 1,
+                accepted=False,
+                reason="textured_sfx_or_noise",
+            )
             text_entry = {
                 "id": layer_ref,
                 "text_id": layer_ref,
@@ -12389,6 +12819,7 @@ def build_page_result(
             _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
             _repair_text_entry_stale_text_geometry(text_entry)
             page_texts.append(text_entry)
+            _mark_raw_ocr_observation(raw_observation_records, index - 1, accepted=True)
             record_decision(
                 stage="ocr",
                 action="preserve_block",
@@ -12538,6 +12969,7 @@ def build_page_result(
         _apply_balloon_geometry_to_text_entry(text_entry, raw_record, block, (height, width))
         _repair_text_entry_stale_text_geometry(text_entry)
         page_texts.append(text_entry)
+        _mark_raw_ocr_observation(raw_observation_records, index - 1, accepted=True)
         record_decision(
             stage="ocr",
             action="accept_block",
@@ -12627,6 +13059,7 @@ def build_page_result(
         "texts": page_texts,
         "_vision_blocks": vision_blocks,
         "_ui_layout_components": ui_layout_components,
+        "_ocr_observation_records": raw_observation_records,
         "page_profile": page_profile,
         "_ocr_stats": {
             "ocr_run_on_suspect_count": int(run_on_suspect_count),
@@ -13241,6 +13674,7 @@ def _run_negative_evidence_pass(
         "eligible_for_promotion": False,
         "texts": [],
         "blocks": [],
+        "_ocr_observation_records": [],
     }
     try:
         negative_rgb = cv2.bitwise_not(image_rgb.astype(np.uint8, copy=False))
@@ -13274,6 +13708,15 @@ def _run_negative_evidence_pass(
                     crop = _crop_negative_evidence_block(negative_rgb, block)
                 crops.append(crop)
             negative_texts = ocr.recognize_batch(crops) if crops and hasattr(ocr, "recognize_batch") else []
+        engine_records = _normalize_engine_observation_records_to_tile(
+            _snapshot_ocr_engine_observations(ocr), list(negative_blocks or [])
+        )
+        payload["_ocr_observation_records"] = engine_records + _raw_ocr_observation_records(
+            list(negative_blocks or []),
+            list(negative_texts or []),
+            provider="negative_detect_ocr",
+            attempt_prefix="negative-detect-ocr",
+        )
         payload["texts"] = _serialize_negative_evidence_texts(list(negative_texts or []))
         payload["block_count"] = len(payload["blocks"])
         payload["text_count"] = len(payload["texts"])
@@ -13348,6 +13791,14 @@ def _run_detect_ocr_on_image(
     else:
         crops = [detector.crop(image_rgb, block) for block in blocks]
         texts = ocr.recognize_batch(crops) if crops else []
+    primary_engine_observations = _normalize_engine_observation_records_to_tile(
+        _snapshot_ocr_engine_observations(ocr), blocks
+    )
+    primary_full_page_lines = _provider_observation_records(
+        list(getattr(ocr, "_last_full_page_line_records", []) or []),
+        "paddle_full_page_raw_line",
+        "full-page-line",
+    )
     page_result = build_page_result(
         image_path=image_label,
         image_rgb=image_rgb,
@@ -13363,6 +13814,8 @@ def _run_detect_ocr_on_image(
         work_title_aliases=work_title_aliases,
         work_title_user_provided=work_title_user_provided,
     )
+    _extend_raw_ocr_observation_records(page_result, primary_engine_observations)
+    _extend_raw_ocr_observation_records(page_result, primary_full_page_lines)
     page_result = _recover_missing_visual_card_ocr_lines(
         page_result,
         image_rgb,
@@ -13409,7 +13862,18 @@ def _run_detect_ocr_on_image(
             if page_result.get("texts"):
                 page_result, _ = _integrate_recovery_page(page_result, recovery_page)
             else:
+                base_records = copy.deepcopy(
+                    list(page_result.get("_ocr_observation_records") or [])
+                )
                 page_result = recovery_page
+                if base_records:
+                    page_result["_ocr_observation_records"] = base_records + list(
+                        page_result.get("_ocr_observation_records") or []
+                    )
+        if recovery_page:
+            _extend_raw_ocr_observation_records(
+                page_result, recovery_page.get("_ocr_observation_records") or []
+            )
     page_result = _apply_adaptive_cjk_reocr(
         image_rgb=image_rgb,
         image_label=image_label,
@@ -13464,7 +13928,9 @@ def _run_orientation_recovery(
 
     original_shape = image_rgb.shape[:2]
     best_page: dict | None = None
+    best_rotation_deg: int | None = None
     best_score = _orientation_result_score(baseline_page)
+    orientation_attempt_records: list[dict] = []
     for rotation_deg in (90, 180, 270):
         rotated = _rotate_image_for_orientation(image_rgb, rotation_deg)
         _emit_stage_progress(
@@ -13496,11 +13962,44 @@ def _run_orientation_recovery(
             rotated_shape=rotated.shape[:2],
         )
         remapped["image"] = image_label
+        for record_index, raw_record in enumerate(
+            list(remapped.get("_ocr_observation_records") or [])
+        ):
+            if not isinstance(raw_record, dict):
+                continue
+            record = copy.deepcopy(raw_record)
+            original_provider = str(record.get("provider") or "ocr")
+            record["provider"] = f"{original_provider}_orientation"
+            record["orientation_attempt_deg"] = int(rotation_deg)
+            record["attempt_id"] = (
+                f"orientation-{int(rotation_deg)}:"
+                f"{record.get('attempt_id') or record_index + 1}"
+            )
+            record.setdefault(
+                "provider_record_id",
+                f"orientation-{int(rotation_deg)}-{record_index + 1:04d}",
+            )
+            orientation_attempt_records.append(record)
         score = _orientation_result_score(remapped)
         if score > best_score:
             best_page = remapped
             best_score = score
+            best_rotation_deg = int(rotation_deg)
 
+    target_page = best_page if best_page is not None else baseline_page
+    base_records = [
+        copy.deepcopy(record)
+        for record in list(baseline_page.get("_ocr_observation_records") or [])
+        if isinstance(record, dict)
+    ]
+    for record in orientation_attempt_records:
+        selected = best_rotation_deg is not None and int(
+            record.get("orientation_attempt_deg") or 0
+        ) == best_rotation_deg
+        record["orientation_candidate_selected"] = bool(selected)
+        if not selected and not record.get("rejection_reason"):
+            record["rejection_reason"] = "legacy_orientation_candidate_not_selected"
+    target_page["_ocr_observation_records"] = base_records + orientation_attempt_records
     return best_page
 
 
@@ -13678,6 +14177,18 @@ def _recover_missing_visual_card_ocr_lines(
     """
     if not isinstance(page_result, dict) or not isinstance(image_rgb, np.ndarray):
         return page_result
+    page_result = _clone_page_result(page_result)
+    raw_line_records = []
+    for index, raw in enumerate(raw_lines or []):
+        if not isinstance(raw, dict):
+            continue
+        record = copy.deepcopy(raw)
+        record.setdefault("provider", "visual_card_full_page_raw")
+        record.setdefault("attempt_id", f"visual-card-raw-{index + 1:03d}")
+        record.setdefault("provider_record_id", f"visual-card-raw-{index + 1:03d}")
+        record.setdefault("accepted", None)
+        raw_line_records.append(record)
+    _extend_raw_ocr_observation_records(page_result, raw_line_records)
     existing_texts = [text for text in page_result.get("texts", []) if isinstance(text, dict)]
     candidates: list[dict] = []
     for raw in raw_lines or []:
@@ -13728,6 +14239,18 @@ def _recover_missing_visual_card_ocr_lines(
                 x1, y1, x2, y2 = _expand_bbox(bbox, image_rgb.shape, pad_x_ratio=0.02, pad_y_ratio=0.18, min_pad_x=6, min_pad_y=5)
                 crop = image_rgb[y1:y2, x1:x2]
                 retried = list(ocr.recognize_batch([crop]) or [])
+                retry_engine_records = _normalize_engine_observation_records_to_tile(
+                    _snapshot_ocr_engine_observations(ocr),
+                    [{"bbox": [x1, y1, x2, y2]}],
+                )
+                _extend_raw_ocr_observation_records(updated, retry_engine_records)
+                retry_records = _raw_ocr_observation_records(
+                    [{"bbox": list(bbox), "confidence": confidence}],
+                    retried,
+                    provider="visual_card_crop_retry",
+                    attempt_prefix=f"visual-card-retry-{len(group_bboxes):03d}",
+                )
+                _extend_raw_ocr_observation_records(updated, retry_records)
                 retry_text = str(retried[0] if retried else "").strip()
                 raw_len = len("".join(char for char in raw_text if char.isalnum()))
                 retry_len = len("".join(char for char in retry_text if char.isalnum()))
@@ -13896,6 +14419,9 @@ def _apply_adaptive_cjk_reocr(
     _emit_stage_progress(progress_callback, "bbox_expanded_reocr", 0.66, "Re-OCR com bbox expandido")
     try:
         expanded_texts = ocr.recognize_batch(crops)
+        expanded_engine_records = _normalize_engine_observation_records_to_tile(
+            _snapshot_ocr_engine_observations(ocr), expanded_blocks
+        )
     except Exception as exc:
         route_history.append(
             {"stage": "bbox_expanded_reocr", "route": "failed", "reason": str(exc)}
@@ -13917,13 +14443,23 @@ def _apply_adaptive_cjk_reocr(
         work_title_aliases=work_title_aliases,
         work_title_user_provided=work_title_user_provided,
     )
+    _extend_raw_ocr_observation_records(recovery_page, expanded_engine_records)
     if recovery_page.get("texts"):
         if page_result.get("texts"):
             page_result, _ = _integrate_recovery_page(page_result, recovery_page)
         else:
+            base_records = copy.deepcopy(list(page_result.get("_ocr_observation_records") or []))
             page_result = recovery_page
+            if base_records:
+                page_result["_ocr_observation_records"] = base_records + list(
+                    page_result.get("_ocr_observation_records") or []
+                )
         for text in page_result.get("texts", []) or []:
             text.setdefault("qa_flags", [])
+    else:
+        _extend_raw_ocr_observation_records(
+            page_result, recovery_page.get("_ocr_observation_records") or []
+        )
     updated_quality = evaluate_page_quality(
         page_result,
         source_lang=idioma_origem,
@@ -14008,10 +14544,26 @@ def _run_sparse_page_recovery_pass(
 
     recovery_blocks = []
     recovery_texts = []
-    for record in line_records:
+    raw_observation_records = []
+    for record_index, record in enumerate(line_records):
+        if not isinstance(record, dict):
+            continue
+        observation_record = copy.deepcopy(record)
+        observation_record.setdefault("provider", "full_page_recovery_raw")
+        observation_record.setdefault(
+            "attempt_id", f"full-page-recovery-{record_index + 1:03d}"
+        )
+        observation_record.setdefault(
+            "provider_record_id", f"full-page-recovery-{record_index + 1:03d}"
+        )
         bbox = record.get("source_bbox") or record.get("bbox") or []
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            observation_record["accepted"] = False
+            observation_record["rejection_reason"] = "invalid_bbox"
+            raw_observation_records.append(observation_record)
             continue
+        observation_record["accepted"] = True
+        raw_observation_records.append(observation_record)
         bbox = [int(v) for v in bbox]
         recovery_blocks.append(
             SimpleNamespace(
@@ -14028,9 +14580,16 @@ def _run_sparse_page_recovery_pass(
         recovery_texts.append(dict(record))
 
     if not recovery_blocks:
-        return None
+        return {
+            "image": image_label,
+            "width": int(image_rgb.shape[1]),
+            "height": int(image_rgb.shape[0]),
+            "texts": [],
+            "_vision_blocks": [],
+            "_ocr_observation_records": raw_observation_records,
+        }
 
-    return build_page_result(
+    recovery_page = build_page_result(
         image_path=image_label,
         image_rgb=image_rgb,
         blocks=recovery_blocks,
@@ -14045,6 +14604,8 @@ def _run_sparse_page_recovery_pass(
         work_title_aliases=work_title_aliases,
         work_title_user_provided=work_title_user_provided,
     )
+    _extend_raw_ocr_observation_records(recovery_page, raw_observation_records)
+    return recovery_page
 
 
 def _rotated_text_recovery_enabled() -> bool:
@@ -14223,6 +14784,10 @@ def _should_run_rotated_text_recovery(page_result: dict, blocks: list, backend_n
 
 def _append_rotated_recovery_page(base_page: dict, recovered_page: dict) -> tuple[dict, int]:
     updated_page = _clone_page_result(base_page)
+    _extend_raw_ocr_observation_records(
+        updated_page,
+        recovered_page.get("_ocr_observation_records") if isinstance(recovered_page, dict) else [],
+    )
     existing_bboxes = [
         _coerce_bbox(text.get("text_pixel_bbox") or text.get("bbox"))
         for text in list(updated_page.get("texts") or [])
@@ -14318,6 +14883,10 @@ def _run_rotated_text_recovery_pass(
 ) -> dict:
     _emit_stage_progress(progress_callback, "recover_rotated_text", 0.69, "Recuperando texto rotacionado")
     records = ocr.recognize_rotated_full_page_lines(image_rgb)
+    rotated_engine_records = _normalize_engine_observation_records_to_tile(
+        _snapshot_ocr_engine_observations(ocr)
+    )
+    _extend_raw_ocr_observation_records(page_result, rotated_engine_records)
     if not records:
         return page_result
     existing_bboxes = [
@@ -14326,15 +14895,36 @@ def _run_rotated_text_recovery_pass(
         if isinstance(text, dict)
     ]
     existing_bboxes = [bbox for bbox in existing_bboxes if bbox is not None]
-    filtered_records = [
-        record
-        for record in records
-        if not _rotated_record_overlaps_existing(record, existing_bboxes)
-        or (
-            (index := _best_rotated_overlap_index(record, list(page_result.get("texts") or []))) is not None
-            and _rotated_recovery_record_is_better(record, list(page_result.get("texts") or [])[index])
+    filtered_records = []
+    rotated_observation_records = []
+    for record_index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        observation_record = copy.deepcopy(record)
+        observation_record.setdefault("provider", "rotated_full_page_raw")
+        observation_record.setdefault("attempt_id", f"rotated-full-page-{record_index + 1:03d}")
+        observation_record.setdefault(
+            "provider_record_id", f"rotated-full-page-{record_index + 1:03d}"
         )
-    ]
+        overlap_index = _best_rotated_overlap_index(
+            record, list(page_result.get("texts") or [])
+        )
+        keep_record = bool(
+            not _rotated_record_overlaps_existing(record, existing_bboxes)
+            or (
+                overlap_index is not None
+                and _rotated_recovery_record_is_better(
+                    record, list(page_result.get("texts") or [])[overlap_index]
+                )
+            )
+        )
+        observation_record["accepted"] = keep_record
+        if not keep_record:
+            observation_record["rejection_reason"] = "legacy_rotated_overlap_not_better"
+        rotated_observation_records.append(observation_record)
+        if keep_record:
+            filtered_records.append(record)
+    _extend_raw_ocr_observation_records(page_result, rotated_observation_records)
     if not filtered_records:
         return page_result
 
@@ -14404,7 +14994,8 @@ def run_ocr_stage(
     engine_preset = _resolve_runtime_engine_preset(engine_preset_id, idioma_origem)
 
     def _with_engine_preset(result: dict) -> dict:
-        return _attach_engine_preset_metadata(result, engine_preset)
+        result = _attach_engine_preset_metadata(result, engine_preset)
+        return _attach_runtime_owner_observations(result, page_dict)
 
     def _band_image_label() -> str:
         raw_number = page_dict.get("_source_page_number", page_dict.get("numero", 0))
@@ -14437,6 +15028,7 @@ def run_ocr_stage(
                 bubble_inner_bbox=b.get("bubble_inner_bbox"),
                 rotation_deg=b.get("rotation_deg"),
                 rotation_source=b.get("rotation_source"),
+                component_ids=tuple(str(value) for value in b.get("component_ids") or () if value),
             )
         )
 
@@ -14601,6 +15193,15 @@ def run_ocr_stage(
                 crops.append(np.zeros((32, 32, 3), dtype=np.uint8))
         texts = ocr.recognize_batch(crops) if crops else []
 
+    primary_engine_observations = _normalize_engine_observation_records_to_tile(
+        _snapshot_ocr_engine_observations(ocr), blocks
+    )
+    primary_full_page_lines = _provider_observation_records(
+        list(getattr(ocr, "_last_full_page_line_records", []) or []),
+        "paddle_full_page_raw_line",
+        "full-page-line",
+    )
+
     page_result = build_page_result(
         image_path=_band_image_label(),
         image_rgb=image_rgb,
@@ -14616,6 +15217,8 @@ def run_ocr_stage(
         work_title_aliases=work_title_aliases,
         work_title_user_provided=work_title_user_provided,
     )
+    _extend_raw_ocr_observation_records(page_result, primary_engine_observations)
+    _extend_raw_ocr_observation_records(page_result, primary_full_page_lines)
     page_result = _recover_missing_visual_card_ocr_lines(
         page_result,
         image_rgb,
@@ -15495,6 +16098,14 @@ def run_detect_ocr(
 
     engine_preset = _resolve_runtime_engine_preset(engine_preset_id, idioma_origem)
     engine_steps = _runtime_engine_steps(engine_preset)
+    inferred_page_number = infer_page_number(image_path)
+    full_page_owner_context = {
+        "numero": inferred_page_number,
+        "_source_page_number": inferred_page_number,
+        "_owner_page_id": f"page_{int(inferred_page_number or 0):03d}",
+        "_owner_tile_id": f"page_{int(inferred_page_number or 0):03d}_full",
+        "_owner_tile_offset_xy": [0, 0],
+    }
 
     _configure_model_roots(models_dir)
     _emit_stage_progress(progress_callback, "prepare_image", 0.03, "Preparando imagem para OCR")
@@ -15502,11 +16113,12 @@ def run_detect_ocr(
     image_bgr = cv2.imread(image_path)
     if image_bgr is None:
         _emit_stage_progress(progress_callback, "complete", 1.0, "Imagem nao encontrada")
-        return _attach_engine_preset_metadata(
+        missing_page = _attach_engine_preset_metadata(
             {"image": image_path, "width": 0, "height": 0, "texts": [], "_vision_blocks": []},
             engine_preset,
             engine_steps,
         )
+        return _attach_runtime_owner_observations(missing_page, full_page_owner_context)
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     use_koharu_worker = bool(str(vision_worker_path or "").strip())
@@ -15573,7 +16185,8 @@ def run_detect_ocr(
                     "koharu_cjk_fallback": "quick_skip",
                 }
                 _attach_sfx_visual_candidates(page_result, image_rgb)
-                return _attach_engine_preset_metadata(page_result, engine_preset, engine_steps)
+                page_result = _attach_engine_preset_metadata(page_result, engine_preset, engine_steps)
+                return _attach_runtime_owner_observations(page_result, full_page_owner_context)
             page_result = _run_detect_ocr_on_image(
                 image_rgb,
                 image_path,
@@ -15599,7 +16212,8 @@ def run_detect_ocr(
                 "sem_texto_detectado": True,
             }
             _attach_sfx_visual_candidates(page_result, image_rgb)
-            return _attach_engine_preset_metadata(page_result, engine_preset, engine_steps)
+            page_result = _attach_engine_preset_metadata(page_result, engine_preset, engine_steps)
+            return _attach_runtime_owner_observations(page_result, full_page_owner_context)
         page_result = _run_detect_ocr_on_image(
             image_rgb,
             image_path,
@@ -15646,6 +16260,7 @@ def run_detect_ocr(
     except Exception as exc:
         logger.warning("oar-ocr auxiliar falhou em %s: %s", image_path, exc)
     _attach_engine_preset_metadata(page_result, engine_preset, engine_steps)
+    page_result = _attach_runtime_owner_observations(page_result, full_page_owner_context)
 
     _emit_stage_progress(
         progress_callback,

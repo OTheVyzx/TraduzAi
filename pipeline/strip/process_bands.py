@@ -15,6 +15,11 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
+from ownership.ocr_adapter import (
+    TileProjection,
+    collect_page_observations,
+    observation_to_dict,
+)
 from strip.types import Band, BBox
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
@@ -2265,6 +2270,158 @@ def _attach_ocr_trace_metadata(page: dict, *, band_id: str) -> dict:
     return page
 
 
+def _projection_payload(projection: TileProjection) -> dict:
+    return {
+        "page_id": str(projection.page_id),
+        "tile_id": str(projection.tile_id),
+        "offset_xy": [int(projection.offset_xy[0]), int(projection.offset_xy[1])],
+    }
+
+
+def _owner_projection_from_page(page: dict | None) -> TileProjection | None:
+    if not isinstance(page, dict):
+        return None
+    raw = page.get("_owner_tile_projection")
+    if not isinstance(raw, dict):
+        return None
+    offset = raw.get("offset_xy")
+    if not isinstance(offset, (list, tuple)) or len(offset) < 2:
+        return None
+    try:
+        offset_xy = (int(offset[0]), int(offset[1]))
+    except (TypeError, ValueError):
+        return None
+    return TileProjection(
+        page_id=str(raw.get("page_id") or _page_id_for(_source_page_number_from_page(page))),
+        tile_id=str(raw.get("tile_id") or page.get("_band_id") or "band_unknown"),
+        offset_xy=offset_xy,
+    )
+
+
+def _band_owner_projection(band: Band, page: dict, *, band_id: str) -> TileProjection:
+    """Resolve only the geometric tile transform; never infer a semantic owner."""
+
+    page_id = str(page.get("_page_id") or "")
+    offset_xy: tuple[int, int] | None = None
+    for balloon in list(getattr(band, "balloons", None) or []):
+        metadata = dict(getattr(balloon, "metadata", {}) or {})
+        bbox_page = _coerce_bbox(metadata.get("bbox_page"))
+        if bbox_page is None:
+            continue
+        page_id = str(metadata.get("page_id") or page_id)
+        strip_bbox = getattr(balloon, "strip_bbox", None)
+        if strip_bbox is None:
+            continue
+        local_x1 = int(strip_bbox.x1)
+        local_y1 = int(strip_bbox.y1) - int(band.y_top)
+        offset_xy = (
+            int(bbox_page[0]) - local_x1,
+            int(bbox_page[1]) - local_y1,
+        )
+        break
+
+    if not page_id:
+        page_id = _page_id_for(_source_page_number_from_page(page))
+    if offset_xy is None:
+        raw_offset = getattr(band, "strip_offset_xy", None)
+        if (
+            isinstance(raw_offset, (list, tuple))
+            and len(raw_offset) >= 2
+            and (int(raw_offset[0]) != 0 or int(raw_offset[1]) != 0)
+        ):
+            offset_xy = (int(raw_offset[0]), int(raw_offset[1]))
+        else:
+            offset_xy = (0, int(band.y_top))
+    return TileProjection(
+        page_id=page_id,
+        tile_id=str(getattr(band, "tile_id", None) or band_id),
+        offset_xy=offset_xy,
+    )
+
+
+def _append_owner_observation_rows(page: dict, rows: list[dict] | tuple[dict, ...]) -> None:
+    existing = [
+        copy.deepcopy(item)
+        for item in list(page.get("owner_observations") or [])
+        if isinstance(item, dict)
+    ]
+    known_ids = {
+        str(item.get("observation_id"))
+        for item in existing
+        if item.get("observation_id")
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        observation_id = str(row.get("observation_id") or "")
+        if observation_id and observation_id in known_ids:
+            continue
+        existing.append(copy.deepcopy(row))
+        if observation_id:
+            known_ids.add(observation_id)
+    if existing:
+        page["owner_observations"] = existing
+
+
+def _append_owner_observation_records(
+    page: dict,
+    records_by_provider: Mapping[str, list[dict]],
+    projection: TileProjection,
+) -> None:
+    materialized = {
+        str(provider): [copy.deepcopy(record) for record in records if isinstance(record, dict)]
+        for provider, records in records_by_provider.items()
+    }
+    observations = collect_page_observations(materialized, projection)
+    _append_owner_observation_rows(
+        page,
+        [observation_to_dict(observation) for observation in observations],
+    )
+
+
+def _text_records_by_provider(
+    texts: list,
+    *,
+    default_provider: str,
+    legacy_selected: bool,
+) -> dict[str, list[dict]]:
+    records_by_provider: dict[str, list[dict]] = {}
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        record = copy.deepcopy(text)
+        provider = str(
+            record.get("provider")
+            or record.get("ocr_provider")
+            or record.get("ocr_source")
+            or record.get("ocr_mode")
+            or record.get("detector")
+            or default_provider
+        )
+        record["provider"] = provider
+        record.setdefault("legacy_selected", bool(legacy_selected))
+        records_by_provider.setdefault(provider, []).append(record)
+    return records_by_provider
+
+
+def _capture_page_text_observations(
+    page: dict,
+    projection: TileProjection,
+    *,
+    default_provider: str,
+    legacy_selected: bool,
+) -> None:
+    _append_owner_observation_records(
+        page,
+        _text_records_by_provider(
+            list(page.get("texts") or []),
+            default_provider=default_provider,
+            legacy_selected=legacy_selected,
+        ),
+        projection,
+    )
+
+
 def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
     try:
         from debug_tools import get_recorder
@@ -2314,6 +2471,25 @@ def _record_ocr_raw_blocks(page: dict, *, band: Band, band_id: str) -> None:
                 "03_ocr/ocr_raw_blocks.jsonl",
                 {key: value for key, value in payload.items() if value is not None},
             )
+        recorded_ids = {
+            str(value)
+            for value in list(page.get("_debug_recorded_owner_observation_ids") or [])
+            if value
+        }
+        for observation in list(page.get("owner_observations") or []):
+            if not isinstance(observation, dict):
+                continue
+            observation_id = str(observation.get("observation_id") or "")
+            if observation_id and observation_id in recorded_ids:
+                continue
+            recorder.write_jsonl(
+                "03_ocr/owner_observations.jsonl",
+                copy.deepcopy(observation),
+            )
+            if observation_id:
+                recorded_ids.add(observation_id)
+        if recorded_ids:
+            page["_debug_recorded_owner_observation_ids"] = sorted(recorded_ids)
     except Exception:
         return
 
@@ -2540,7 +2716,7 @@ def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None
     page_number = int(source_page_number or page_idx + 1)
     band_index = int(page_idx + 1)
 
-    return {
+    page = {
         "numero": page_number,
         "width": band.strip_slice.shape[1],
         "height": band.strip_slice.shape[0],
@@ -2551,6 +2727,12 @@ def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None
         "_band_index": band_index,
         "_source_page_number": page_number,
     }
+    projection = _band_owner_projection(band, page, band_id=band_id)
+    page["_owner_tile_projection"] = _projection_payload(projection)
+    page["_owner_page_id"] = projection.page_id
+    page["_owner_tile_id"] = projection.tile_id
+    page["_owner_tile_offset_xy"] = list(projection.offset_xy)
+    return page
 
 
 def _apply_copy_back_outside_balloons(
@@ -2760,6 +2942,8 @@ def _merge_translated_page_metadata(ocr_page: dict, translated_page: dict) -> di
         "_pipeline_artifacts",
         "_bubble_regions",
         "_negative_evidence",
+        "_owner_tile_projection",
+        "owner_observations",
     ):
         if (key not in merged_page or merged_page.get(key) in (None, "")) and key in ocr_page:
             merged_page[key] = copy.deepcopy(ocr_page[key])
@@ -3802,6 +3986,8 @@ def _run_direct_paddle_candidate_crop_reocr(crop: np.ndarray, *, idioma_origem: 
     variants.append(("candidate_crop_direct_paddle_inverted", cv2.bitwise_not(swapped), 1.0))
     best_page = {"texts": [], "_vision_blocks": [], "width": crop_width, "height": crop_height}
     best_score = 0.0
+    best_source = ""
+    records_by_provider: dict[str, list[dict]] = {}
     lang = normalize_paddleocr_language(idioma_origem)
     for source, image_bgr, scale in variants:
         try:
@@ -3816,6 +4002,10 @@ def _run_direct_paddle_candidate_crop_reocr(crop: np.ndarray, *, idioma_origem: 
             source=source,
         )
         texts = [text for text in list(page.get("texts") or []) if isinstance(text, dict)]
+        records_by_provider[source] = [
+            dict(copy.deepcopy(text), provider=source, legacy_selected=False)
+            for text in texts
+        ]
         if not texts:
             continue
         text_value = " ".join(str(text.get("text") or "").strip() for text in texts)
@@ -3823,6 +4013,11 @@ def _run_direct_paddle_candidate_crop_reocr(crop: np.ndarray, *, idioma_origem: 
         if score > best_score:
             best_score = score
             best_page = page
+            best_source = source
+    for source, records in records_by_provider.items():
+        for record in records:
+            record["legacy_selected"] = bool(source == best_source)
+    best_page["_owner_observation_records_by_provider"] = records_by_provider
     return best_page
 
 
@@ -4307,6 +4502,63 @@ def _recover_empty_ocr_with_candidate_crops(
     recovered_blocks: list[dict] = []
     attempts = 0
     candidate_count = 0
+    owner_projection = _owner_projection_from_page(page_dict) or _band_owner_projection(
+        band,
+        page_dict,
+        band_id=band_id,
+    )
+    observation_page: dict = {
+        "_owner_tile_projection": _projection_payload(owner_projection),
+        "owner_observations": [],
+    }
+
+    def _capture_candidate_result(
+        result: dict,
+        *,
+        candidate_index: int,
+        crop_left: int,
+        crop_top: int,
+        default_provider: str,
+        rejection_reason: str | None = None,
+    ) -> None:
+        if not isinstance(result, dict):
+            return
+        existing_manifest = [
+            item
+            for item in list(result.get("owner_observations") or [])
+            if isinstance(item, dict)
+        ]
+        _append_owner_observation_rows(
+            observation_page,
+            existing_manifest,
+        )
+        crop_projection = TileProjection(
+            page_id=owner_projection.page_id,
+            tile_id=f"{owner_projection.tile_id}:candidate_crop:{int(candidate_index):03d}",
+            offset_xy=(
+                int(owner_projection.offset_xy[0]) + int(crop_left),
+                int(owner_projection.offset_xy[1]) + int(crop_top),
+            ),
+        )
+        raw_records = result.get("_owner_observation_records_by_provider")
+        if isinstance(raw_records, dict):
+            records_by_provider = {
+                str(provider): [copy.deepcopy(item) for item in list(records or []) if isinstance(item, dict)]
+                for provider, records in raw_records.items()
+            }
+        elif not existing_manifest:
+            records_by_provider = _text_records_by_provider(
+                list(result.get("texts") or []),
+                default_provider=default_provider,
+                legacy_selected=False,
+            )
+        else:
+            records_by_provider = {}
+        if rejection_reason:
+            for records in records_by_provider.values():
+                for record in records:
+                    record["rejection_reason"] = rejection_reason
+        _append_owner_observation_records(observation_page, records_by_provider, crop_projection)
 
     def _call_runtime(crop: np.ndarray, crop_page: dict) -> dict:
         if work_title or work_title_user_provided:
@@ -4461,7 +4713,16 @@ def _recover_empty_ocr_with_candidate_crops(
         crop_result = _call_runtime(crop, crop_page)
         if not isinstance(crop_result, dict):
             continue
-        if _candidate_crop_reocr_result_has_scanlation_credit(crop_result):
+        crop_is_credit = _candidate_crop_reocr_result_has_scanlation_credit(crop_result)
+        _capture_candidate_result(
+            crop_result,
+            candidate_index=candidate_index,
+            crop_left=crop_left,
+            crop_top=crop_top,
+            default_provider="candidate_crop_runtime",
+            rejection_reason="legacy_candidate_crop_scanlation_credit" if crop_is_credit else None,
+        )
+        if crop_is_credit:
             continue
         texts, blocks = _map_crop_ocr_page_to_band(
             crop_result,
@@ -4479,7 +4740,16 @@ def _recover_empty_ocr_with_candidate_crops(
                 crop,
                 idioma_origem=str(page_dict.get("idioma_origem") or page_dict.get("source_language") or "en"),
             )
-            if _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result):
+            direct_is_credit = _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result)
+            _capture_candidate_result(
+                direct_crop_result,
+                candidate_index=candidate_index,
+                crop_left=crop_left,
+                crop_top=crop_top,
+                default_provider="candidate_crop_direct_paddle",
+                rejection_reason="legacy_candidate_crop_scanlation_credit" if direct_is_credit else None,
+            )
+            if direct_is_credit:
                 direct_crop_result = {"texts": [], "_vision_blocks": [], "blocks": []}
             direct_texts, direct_blocks = _map_crop_ocr_page_to_band(
                 direct_crop_result,
@@ -4515,7 +4785,16 @@ def _recover_empty_ocr_with_candidate_crops(
                 crop,
                 idioma_origem=str(page_dict.get("idioma_origem") or page_dict.get("source_language") or "en"),
             )
-            if _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result):
+            direct_is_credit = _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result)
+            _capture_candidate_result(
+                direct_crop_result,
+                candidate_index=candidate_index,
+                crop_left=crop_left,
+                crop_top=crop_top,
+                default_provider="candidate_crop_direct_paddle",
+                rejection_reason="legacy_candidate_crop_scanlation_credit" if direct_is_credit else None,
+            )
+            if direct_is_credit:
                 direct_crop_result = {"texts": [], "_vision_blocks": [], "blocks": []}
             if has_dark_oval_bubble and not has_rect_panel_frame:
                 for direct_text in list(direct_crop_result.get("texts") or []):
@@ -4570,7 +4849,16 @@ def _recover_empty_ocr_with_candidate_crops(
                     crop,
                     idioma_origem=str(page_dict.get("idioma_origem") or page_dict.get("source_language") or "en"),
                 )
-                if _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result):
+                direct_is_credit = _candidate_crop_reocr_result_has_scanlation_credit(direct_crop_result)
+                _capture_candidate_result(
+                    direct_crop_result,
+                    candidate_index=candidate_index,
+                    crop_left=crop_left,
+                    crop_top=crop_top,
+                    default_provider="candidate_crop_direct_paddle",
+                    rejection_reason="legacy_candidate_crop_scanlation_credit" if direct_is_credit else None,
+                )
+                if direct_is_credit:
                     direct_crop_result = {"texts": [], "_vision_blocks": [], "blocks": []}
                 direct_texts, direct_blocks = _map_crop_ocr_page_to_band(
                     direct_crop_result,
@@ -4617,6 +4905,11 @@ def _recover_empty_ocr_with_candidate_crops(
     page = dict(page_dict)
     page["texts"] = recovered_texts
     page["_vision_blocks"] = recovered_blocks
+    page["_owner_tile_projection"] = _projection_payload(owner_projection)
+    _append_owner_observation_rows(
+        page,
+        [item for item in list(observation_page.get("owner_observations") or []) if isinstance(item, dict)],
+    )
     page["_ocr_stats"] = {
         "candidate_crop_reocr_candidate_count": int(candidate_count),
         "candidate_crop_reocr_attempts": int(attempts),
@@ -5091,6 +5384,14 @@ def _recovered_dark_bubble_is_contaminated_by_existing_text(recovered: dict, exi
 def _merge_candidate_crop_recovery_into_ocr_page(ocr_page: dict, recovered_page: dict) -> int:
     if not isinstance(ocr_page, dict) or not isinstance(recovered_page, dict):
         return 0
+    _append_owner_observation_rows(
+        ocr_page,
+        [
+            item
+            for item in list(recovered_page.get("owner_observations") or [])
+            if isinstance(item, dict)
+        ],
+    )
     existing_texts = [text for text in list(ocr_page.get("texts") or []) if isinstance(text, dict)]
     recovered_texts = [text for text in list(recovered_page.get("texts") or []) if isinstance(text, dict)]
     added_texts: list[dict] = []
@@ -5586,6 +5887,25 @@ def fuse_negative_dark_bubble_candidates(normal_page: dict, negative_evidence: d
     added_blocks: list[dict] = []
     added_regions: list[dict] = []
     attached = 0
+    observation_records: list[dict] = []
+
+    def _retain_negative_observation(
+        source: dict,
+        *,
+        bbox: list[int] | None,
+        rejection_reason: str | None = None,
+        legacy_selected: bool = False,
+    ) -> None:
+        record = copy.deepcopy(source)
+        record["provider"] = "negative_detect_ocr"
+        record["legacy_selected"] = bool(legacy_selected)
+        if bbox is not None:
+            record["bbox"] = list(bbox)
+            record.setdefault("source_bbox", list(bbox))
+        if rejection_reason:
+            record["rejection_reason"] = rejection_reason
+        observation_records.append(record)
+
     evidence_items: list[tuple[int, dict, dict | None, list[int] | None, int]] = []
     for original_index, evidence_text in enumerate(evidence_texts):
         fallback_block = evidence_blocks[original_index] if original_index < len(evidence_blocks) else None
@@ -5602,20 +5922,55 @@ def fuse_negative_dark_bubble_candidates(normal_page: dict, negative_evidence: d
     evidence_items.sort(key=lambda item: (item[4], item[0]))
     for index, text, fallback_block, text_bbox, _area in evidence_items:
         if text_bbox is None:
+            _retain_negative_observation(
+                text,
+                bbox=None,
+                rejection_reason="legacy_negative_missing_bbox",
+            )
             continue
         confidence = _negative_evidence_text_confidence(text, fallback_block)
         if confidence and confidence < 0.28:
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_low_confidence",
+            )
             continue
         if _negative_candidate_is_partial_edge_noise(text, text_bbox, confidence):
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_partial_edge_noise",
+            )
             continue
         if _negative_candidate_is_suppressed(text):
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_suppressed_route",
+            )
             continue
         if not _candidate_crop_reocr_text_is_usable(text):
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_unusable_text",
+            )
             continue
         context = _negative_dark_context_metrics(image_rgb, text_bbox)
         if not context:
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_missing_dark_context",
+            )
             continue
         if _float_metric(context.get("dark_ratio"), 0.0) < 0.35 or _float_metric(context.get("bright_ratio"), 1.0) > 0.34:
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_dark_context_mismatch",
+            )
             continue
         candidate = copy.deepcopy(text)
         candidate["bbox"] = list(text_bbox)
@@ -5636,6 +5991,11 @@ def fuse_negative_dark_bubble_candidates(normal_page: dict, negative_evidence: d
                 context=context,
                 index=index,
             )
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                legacy_selected=True,
+            )
             attached += 1
             continue
         built = _build_negative_dark_candidate(
@@ -5647,8 +6007,18 @@ def fuse_negative_dark_bubble_candidates(normal_page: dict, negative_evidence: d
             index=index,
         )
         if built is None:
+            _retain_negative_observation(
+                text,
+                bbox=text_bbox,
+                rejection_reason="legacy_negative_promotion_rejected",
+            )
             continue
         promoted, block, region = built
+        _retain_negative_observation(
+            text,
+            bbox=text_bbox,
+            legacy_selected=True,
+        )
         added_texts.append(promoted)
         added_blocks.append(block)
         if region is not None:
@@ -5669,6 +6039,13 @@ def fuse_negative_dark_bubble_candidates(normal_page: dict, negative_evidence: d
             stats["negative_dark_candidates_promoted"] = int(stats.get("negative_dark_candidates_promoted") or 0) + len(added_texts)
         if attached:
             stats["negative_dark_candidates_attached"] = int(stats.get("negative_dark_candidates_attached") or 0) + attached
+    owner_projection = _owner_projection_from_page(normal_page)
+    if owner_projection is not None and observation_records:
+        _append_owner_observation_records(
+            normal_page,
+            {"negative_detect_ocr": observation_records},
+            owner_projection,
+        )
     return len(added_texts)
 
 
@@ -8200,6 +8577,15 @@ def process_band(
         if (key not in ocr_page or ocr_page.get(key) in (None, "")) and key in page_dict:
             ocr_page[key] = page_dict[key]
     band_id = str(page_dict.get("_band_id") or band_id)
+    owner_projection = _band_owner_projection(band, page_dict, band_id=band_id)
+    ocr_page["_owner_tile_projection"] = _projection_payload(owner_projection)
+    if not list(ocr_page.get("owner_observations") or []):
+        _capture_page_text_observations(
+            ocr_page,
+            owner_projection,
+            default_provider="band_ocr",
+            legacy_selected=True,
+        )
     _attach_ocr_trace_metadata(ocr_page, band_id=band_id)
     _record_ocr_raw_blocks(ocr_page, band=band, band_id=band_id)
     perf.update(dict(ocr_stage.perf_updates))
@@ -8273,6 +8659,27 @@ def process_band(
             ),
         )
         recovered_page = recovery_stage.to_page_dict()
+        combined_observations = {
+            "owner_observations": [
+                copy.deepcopy(item)
+                for item in list(ocr_page.get("owner_observations") or [])
+                if isinstance(item, dict)
+            ]
+        }
+        _append_owner_observation_rows(
+            combined_observations,
+            [
+                item
+                for item in list(recovered_page.get("owner_observations") or [])
+                if isinstance(item, dict)
+            ],
+        )
+        if combined_observations.get("owner_observations"):
+            recovered_page["owner_observations"] = combined_observations["owner_observations"]
+        recovered_page.setdefault(
+            "_owner_tile_projection",
+            _projection_payload(owner_projection),
+        )
         perf.update(dict(recovery_stage.perf_updates))
         if list(recovered_page.get("texts") or []):
             ocr_page = recovered_page

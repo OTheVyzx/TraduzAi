@@ -896,6 +896,361 @@ class PaddleBlockMappingTests(unittest.TestCase):
         self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 1)
         self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 1)
 
+    def test_observation_records_are_reset_for_each_public_request_and_returned_as_a_copy(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class FakePaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                return [[
+                    (
+                        [[10, 10], [70, 10], [70, 28], [10, 28]],
+                        ("HELLO", 0.97),
+                    )
+                ]]
+
+        engine._model = FakePaddleModel()
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
+
+        engine.recognize_blocks_from_page(image, [block], allow_sparse_mapping=True)
+        first_snapshot = engine.get_last_observation_records()
+        self.assertTrue(first_snapshot)
+
+        first_snapshot[0]["text"] = "MUTATED"
+        self.assertEqual(engine.get_last_observation_records()[0]["text"], "HELLO")
+
+        engine.recognize_blocks_from_page(image, [])
+        self.assertEqual(engine.get_last_observation_records(), [])
+        self.assertEqual(engine._last_full_page_line_records, [])
+
+    def test_full_page_observations_preserve_unmapped_provider_lines_with_reason(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class FakePaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                return [[
+                    (
+                        [[10, 10], [70, 10], [70, 28], [10, 28]],
+                        ("INSIDE", 0.98),
+                    ),
+                    (
+                        [[150, 60], [210, 60], [210, 78], [150, 78]],
+                        ("OUTSIDE", 0.91),
+                    ),
+                ]]
+
+        engine._model = FakePaddleModel()
+        image = np.full((100, 240, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(0, 0, 100, 50), confidence=0.95)
+
+        mapped = engine.recognize_blocks_from_page(image, [block], allow_sparse_mapping=True)
+        observations = [
+            record
+            for record in engine.get_last_observation_records()
+            if record["provider"] == "paddle_full_page"
+        ]
+
+        self.assertEqual(mapped[0]["text"], "INSIDE")
+        self.assertEqual([record["text"] for record in observations], ["INSIDE", "OUTSIDE"])
+        self.assertTrue(observations[0]["accepted"])
+        self.assertFalse(observations[1]["accepted"])
+        self.assertEqual(observations[1]["rejection_reason"], "unmapped_to_detector_block")
+        self.assertEqual(observations[1]["bbox"], [150, 60, 210, 78])
+        self.assertEqual(observations[1]["line_polygons"][0][0], [150, 60])
+
+    def test_full_page_observations_preserve_provider_items_rejected_before_mapping(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class FakePaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                return [[
+                    None,
+                    (
+                        [[10, 10], [70, 10], [70, 28], [10, 28]],
+                        ("", 0.88),
+                    ),
+                    (
+                        [[20, 20], [40, 20]],
+                        ("BROKEN", 0.81),
+                    ),
+                ]]
+
+        engine._model = FakePaddleModel()
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
+
+        mapped = engine.recognize_blocks_from_page(
+            image,
+            [block],
+            allow_sparse_mapping=True,
+            crop_fallback_max=0,
+        )
+        observations = [
+            record
+            for record in engine.get_last_observation_records()
+            if record["provider"] == "paddle_full_page"
+        ]
+
+        self.assertEqual(mapped, [""])
+        self.assertEqual(
+            [record["rejection_reason"] for record in observations],
+            ["invalid_provider_item", "empty_text", "invalid_polygon"],
+        )
+        self.assertEqual(observations[1]["bbox"], [10, 10, 70, 28])
+        self.assertEqual(observations[2]["text"], "BROKEN")
+        self.assertTrue(all(not record["accepted"] for record in observations))
+
+    def test_full_page_observations_record_provider_failure(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class BrokenPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                raise RuntimeError("provider unavailable")
+
+        engine._model = BrokenPaddleModel()
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
+
+        engine.recognize_blocks_from_page(image, [block], crop_fallback_max=0)
+        observations = engine.get_last_observation_records()
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["provider"], "paddle_full_page")
+        self.assertEqual(observations[0]["rejection_reason"], "provider_error")
+        self.assertIn("provider unavailable", observations[0]["error"])
+
+    def test_full_page_observations_record_provider_no_output(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class EmptyPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                return [[]]
+
+        engine._model = EmptyPaddleModel()
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
+
+        engine.recognize_blocks_from_page(image, [block], crop_fallback_max=0)
+        observations = engine.get_last_observation_records()
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["provider"], "paddle_full_page")
+        self.assertEqual(observations[0]["rejection_reason"], "no_output")
+
+    def test_crop_retry_observations_keep_empty_losing_and_selected_attempts(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class FakePaddleModel:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                self.calls += 1
+                if self.calls == 1:
+                    return [[]]
+                if self.calls == 2:
+                    return [[[[0, 0], ("NO", 0.70)]]]
+                return [[[[0, 0], ("BETTER TEXT", 0.96)]]]
+
+        engine._model = FakePaddleModel()
+        crop = np.full((32, 80, 3), 255, dtype=np.uint8)
+
+        with patch.object(
+            engine,
+            "_build_paddle_retry_variants",
+            return_value=[crop.copy(), crop.copy()],
+        ):
+            result = engine.recognize_batch([crop])
+
+        observations = [
+            record
+            for record in engine.get_last_observation_records()
+            if record["provider"] == "paddle_crop"
+        ]
+        self.assertEqual(result, ["BETTER TEXT"])
+        self.assertEqual([record["variant"] for record in observations], ["native", "retry_1", "retry_2"])
+        self.assertEqual([record["accepted"] for record in observations], [False, False, True])
+        self.assertEqual(observations[0]["rejection_reason"], "empty_result")
+        self.assertEqual(observations[1]["rejection_reason"], "lower_score")
+        self.assertIsNone(observations[2]["rejection_reason"])
+        for record in observations:
+            self.assertEqual(record["bbox"], [0, 0, 80, 32])
+            self.assertIn("attempt_id", record)
+            self.assertIn("raw_text", record)
+            self.assertIn("confidence", record)
+
+    def test_paddle_batch_observations_keep_their_source_crop_index(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine.batch_size = 8
+
+        class FakePaddleModel:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                self.calls += 1
+                text = "FIRST" if self.calls == 1 else "SECOND"
+                return [[[[0, 0], (text, 0.95)]]]
+
+        engine._model = FakePaddleModel()
+        crops = [
+            np.full((24, 60, 3), 255, dtype=np.uint8),
+            np.full((32, 80, 3), 255, dtype=np.uint8),
+        ]
+
+        result = engine.recognize_batch(crops)
+        accepted = [
+            record
+            for record in engine.get_last_observation_records()
+            if record["provider"] == "paddle_crop" and record["accepted"]
+        ]
+
+        self.assertEqual(result, ["FIRST", "SECOND"])
+        self.assertEqual([record["crop_index"] for record in accepted], [0, 1])
+        self.assertEqual([record["bbox"] for record in accepted], [[0, 0, 60, 24], [0, 0, 80, 32]])
+
+    def test_dedupe_records_rejected_candidate_before_clearing_legacy_text(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        blocks = [
+            SimpleNamespace(xyxy=(10, 10, 80, 40), confidence=0.91),
+            SimpleNamespace(xyxy=(12, 11, 82, 41), confidence=0.80),
+        ]
+        mapped_records = [
+            {"text": "HELLO THERE", "source_bbox": [10, 10, 80, 40], "line_polygons": []},
+            {"text": "HELLO THERE", "source_bbox": [12, 11, 82, 41], "line_polygons": []},
+        ]
+
+        with patch.dict(os.environ, {"TRADUZAI_OCR_DEDUP": "1"}, clear=False), patch.object(
+            engine,
+            "_paddle_ocr_full_page_to_blocks",
+            return_value=mapped_records,
+        ):
+            result = engine.recognize_blocks_from_page(
+                np.full((80, 120, 3), 255, dtype=np.uint8),
+                blocks,
+                allow_sparse_mapping=True,
+            )
+
+        rejected = [
+            record
+            for record in engine.get_last_observation_records()
+            if record["provider"] == "ocr_dedupe"
+        ]
+        self.assertEqual([record["text"] for record in result], ["HELLO THERE", ""])
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["text"], "HELLO THERE")
+        self.assertFalse(rejected[0]["accepted"])
+        self.assertEqual(rejected[0]["rejection_reason"], "duplicate_ocr_record")
+        self.assertEqual(rejected[0]["bbox"], [12, 11, 82, 41])
+
+    def test_rotated_observations_preserve_raw_lines_before_confidence_drop_and_grouping(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+
+        class FakePaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                return [[
+                    (
+                        [[10, 20], [80, 20], [80, 30], [10, 30]],
+                        ("FIRST", 0.96),
+                    ),
+                    (
+                        [[35, 20], [95, 20], [95, 30], [35, 30]],
+                        ("SECOND", 0.94),
+                    ),
+                    (
+                        [[10, 50], [80, 50], [80, 60], [10, 60]],
+                        ("LOW", 0.40),
+                    ),
+                ]]
+
+        engine._model = FakePaddleModel()
+        image = np.full((100, 200, 3), 255, dtype=np.uint8)
+
+        grouped = engine.recognize_rotated_full_page_lines(image, rotations=(90,), min_confidence=0.80)
+        observations = [
+            record
+            for record in engine.get_last_observation_records()
+            if record["provider"] == "paddle_rotated_full_page"
+        ]
+
+        self.assertEqual(len(observations), 3)
+        self.assertLess(len(grouped), len([record for record in observations if record["accepted"]]))
+        low = next(record for record in observations if record["text"] == "LOW")
+        self.assertFalse(low["accepted"])
+        self.assertEqual(low["rejection_reason"], "below_min_confidence")
+        for record in observations:
+            self.assertEqual(record["variant"], "rotation_90")
+            self.assertTrue(record["line_polygons"])
+            for x, y in record["line_polygons"][0]:
+                self.assertGreaterEqual(x, 0)
+                self.assertLess(x, 200)
+                self.assertGreaterEqual(y, 0)
+                self.assertLess(y, 100)
+
+    def test_deskew_observations_keep_recovered_lines_before_replacing_partial_mapping(self):
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+
+        class FakePaddleModel:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del image, det, rec, cls
+                self.calls += 1
+                if self.calls == 1:
+                    return [[
+                        (
+                            [[20, 100], [120, 40], [135, 60], [35, 120]],
+                            ("PARTIAL", 0.93),
+                        ),
+                        (
+                            [[80, 160], [180, 100], [195, 120], [95, 180]],
+                            ("READING", 0.91),
+                        ),
+                    ]]
+                return [[
+                    ([[10, 10], [90, 10], [90, 28], [10, 28]], ("PARTIAL", 0.95)),
+                    ([[10, 36], [70, 36], [70, 54], [10, 54]], ("FULL", 0.94)),
+                    ([[10, 62], [100, 62], [100, 80], [10, 80]], ("READING", 0.96)),
+                ]]
+
+        engine._model = FakePaddleModel()
+        page = np.full((220, 240, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(xyxy=(0, 0, 240, 220), confidence=0.95)
+
+        mapped = engine.recognize_blocks_from_page(page, [block], allow_sparse_mapping=True)
+        observations = engine.get_last_observation_records()
+        full_page = [record["text"] for record in observations if record["provider"] == "paddle_full_page"]
+        deskew = [record["text"] for record in observations if record["provider"] == "paddle_skewed_recovery"]
+
+        self.assertEqual(full_page, ["PARTIAL", "READING"])
+        self.assertEqual(deskew, ["PARTIAL", "FULL", "READING"])
+        self.assertEqual(mapped[0]["text"], "PARTIAL FULL READING")
+
 
 if __name__ == "__main__":
     unittest.main()

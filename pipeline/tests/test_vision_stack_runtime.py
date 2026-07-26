@@ -97,6 +97,7 @@ from vision_stack.runtime import (
     _merge_text_fragments,
     _merge_nearby_bboxes,
     _merge_ocr_clusters,
+    _normalize_engine_observation_records_to_tile,
     _enlarge_koharu_window,
     _ocr_pre_translation_skip_policy,
     _profile_to_ocr_model,
@@ -131,6 +132,203 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_crop_observation_attempts_map_to_their_distinct_tile_blocks_once(self):
+        records = [
+            {
+                "provider": "paddle_crop",
+                "attempt_id": "a",
+                "crop_index": 0,
+                "coordinate_space": "crop",
+                "text": "LEFT",
+                "bbox": [1, 2, 31, 14],
+                "line_polygons": [[[1, 2], [31, 2], [31, 14], [1, 14]]],
+                "accepted": True,
+            },
+            {
+                "provider": "paddle_crop",
+                "attempt_id": "b",
+                "crop_index": 1,
+                "coordinate_space": "crop",
+                "text": "RIGHT",
+                "bbox": [3, 4, 43, 18],
+                "line_polygons": [[[3, 4], [43, 4], [43, 18], [3, 18]]],
+                "accepted": True,
+            },
+        ]
+        blocks = [
+            SimpleNamespace(xyxy=(10, 20, 60, 50)),
+            SimpleNamespace(xyxy=(100, 120, 160, 155)),
+        ]
+
+        mapped = _normalize_engine_observation_records_to_tile(records, blocks)
+
+        self.assertEqual(mapped[0]["bbox"], [11, 22, 41, 34])
+        self.assertEqual(mapped[1]["bbox"], [103, 124, 143, 138])
+        self.assertEqual(mapped[1]["line_polygons"][0][0], [103, 124])
+        self.assertEqual([item["coordinate_space"] for item in mapped], ["tile", "tile"])
+        self.assertEqual([item["source_coordinate_space"] for item in mapped], ["crop", "crop"])
+
+    def test_build_page_result_retains_rejected_raw_ocr_observation_with_reason(self):
+        image = np.full((80, 140, 3), 255, dtype=np.uint8)
+        block = SimpleNamespace(
+            xyxy=(20, 18, 110, 48),
+            confidence=0.77,
+            mask=None,
+            detector="unit-detector",
+            line_polygons=None,
+            source_direction=None,
+            balloon_bbox=None,
+            balloon_polygon=None,
+            balloon_subregions=None,
+            connected_lobe_bboxes=None,
+            connected_lobe_ids=None,
+            connected_lobe_polygons=None,
+            bubble_id=None,
+            bubble_mask_bbox=None,
+            bubble_inner_bbox=None,
+            rotation_deg=None,
+            rotation_source=None,
+            component_ids=("component_001",),
+        )
+
+        page = build_page_result(
+            image_path="band_002",
+            image_rgb=image,
+            blocks=[block],
+            texts=[{"unexpected": "structured payload"}],
+            ocr_backend="paddleocr",
+        )
+
+        self.assertEqual(page["texts"], [])
+        self.assertEqual(len(page["_ocr_observation_records"]), 1)
+        record = page["_ocr_observation_records"][0]
+        self.assertEqual(record["bbox"], [20, 18, 110, 48])
+        self.assertEqual(record["component_ids"], ["component_001"])
+        self.assertFalse(record["accepted"])
+        self.assertEqual(record["rejection_reason"], "structured_payload")
+
+    def test_recovery_merge_retains_unselected_raw_observations_append_only(self):
+        base = {
+            "image": "band_001",
+            "width": 200,
+            "height": 100,
+            "texts": [],
+            "_vision_blocks": [],
+            "_ocr_observation_records": [
+                {"provider": "full_page", "text": "FULL", "bbox": [10, 10, 80, 30]}
+            ],
+        }
+        recovered = {
+            "image": "band_001#recovery",
+            "width": 200,
+            "height": 100,
+            "texts": [{"text": "PARTIAL", "bbox": [10, 10, 60, 30]}],
+            "_vision_blocks": [{"bbox": [10, 10, 60, 30]}],
+            "_ocr_observation_records": [
+                {"provider": "recovery", "text": "PARTIAL", "bbox": [10, 10, 60, 30]}
+            ],
+        }
+
+        updated, selected_recovery = _integrate_recovery_page(base, recovered)
+
+        self.assertEqual(selected_recovery["texts"], [])
+        self.assertEqual(
+            [item["provider"] for item in updated["_ocr_observation_records"]],
+            ["full_page", "recovery"],
+        )
+
+    def test_run_ocr_stage_attaches_all_page_space_observations_before_legacy_drop(self):
+        image = np.full((100, 180, 3), 245, dtype=np.uint8)
+        page_dict = {
+            "numero": 3,
+            "_source_page_number": 3,
+            "_owner_page_id": "page_003",
+            "_owner_tile_id": "page_003_band_014",
+            "_owner_tile_offset_xy": [17, 240],
+            "_vision_blocks": [
+                {
+                    "bbox": [10, 20, 100, 48],
+                    "confidence": 0.91,
+                    "component_ids": ["component_003"],
+                }
+            ],
+        }
+
+        class FakeOcr:
+            _backend = "paddleocr"
+            _last_recognize_blocks_stats = {"full_page_mapped": 1}
+
+            def recognize_blocks_from_page(self, _image, _blocks, **_kwargs):
+                return [{"text": "PARTIAL", "bbox": [10, 20, 72, 48], "confidence": 0.72}]
+
+            def get_last_observation_records(self):
+                return [
+                    {
+                        "provider": "paddle_full_page",
+                        "attempt_id": "primary-full-page",
+                        "text": "PARTIAL AND COMPLETE",
+                        "bbox": [10, 20, 100, 48],
+                        "confidence": 0.94,
+                        "component_ids": ["component_003"],
+                    }
+                ]
+
+        def fake_build_page_result(**_kwargs):
+            return {
+                "image": "band_003",
+                "width": 180,
+                "height": 100,
+                "texts": [],
+                "_vision_blocks": [],
+                "_ocr_observation_records": [
+                    {
+                        "provider": "paddleocr_raw",
+                        "attempt_id": "legacy-build-1",
+                        "text": "PARTIAL",
+                        "bbox": [10, 20, 72, 48],
+                        "confidence": 0.72,
+                        "accepted": False,
+                        "rejection_reason": "legacy_filtered",
+                        "component_ids": ["component_003"],
+                    }
+                ],
+            }
+
+        negative = {
+            "source": "negative_detect_ocr",
+            "texts": [{"text": "NEGATIVE", "bbox": [12, 54, 88, 80], "confidence": 0.83}],
+            "blocks": [{"bbox": [12, 54, 88, 80], "confidence": 0.83}],
+        }
+        with patch.dict(os.environ, {"TRADUZAI_STRIP_QUICK_TEXT_SKIP": "0"}, clear=False), patch(
+            "vision_stack.runtime._get_ocr_engine", return_value=FakeOcr()
+        ), patch(
+            "vision_stack.runtime.build_page_result", side_effect=fake_build_page_result
+        ), patch(
+            "vision_stack.runtime._recover_missing_visual_card_ocr_lines", side_effect=lambda page, *_args, **_kw: page
+        ), patch(
+            "vision_stack.runtime._should_run_rotated_text_recovery", return_value=False
+        ), patch(
+            "vision_stack.runtime._apply_adaptive_cjk_reocr", side_effect=lambda **kwargs: kwargs["page_result"]
+        ), patch(
+            "vision_stack.runtime._reconcile_ocr_with_validated_sources", side_effect=lambda page: page
+        ), patch(
+            "vision_stack.runtime._rescue_empty_page_result_from_raw_system_ui", side_effect=lambda page, **_kw: page
+        ), patch(
+            "vision_stack.runtime._run_negative_evidence_pass", return_value=negative
+        ):
+            result = run_ocr_stage(image, page_dict)
+
+        observations = result["owner_observations"]
+        providers = {item["provider"] for item in observations}
+        self.assertIn("paddle_full_page", providers)
+        self.assertIn("paddleocr_raw", providers)
+        self.assertIn("negative_detect_ocr", providers)
+        self.assertEqual(result["texts"], [])
+        full = next(item for item in observations if item["provider"] == "paddle_full_page")
+        self.assertEqual(full["bbox_page"], [27, 260, 117, 288])
+        rejected = next(item for item in observations if item["provider"] == "paddleocr_raw")
+        self.assertEqual(rejected["rejection_reason"], "legacy_filtered")
+
     def test_visual_card_ocr_recall_rejects_stale_lines_when_current_crop_reocr_is_empty(self):
         image = np.full((360, 600, 3), [28, 52, 112], dtype=np.uint8)
         raw_lines = [
@@ -3401,6 +3599,14 @@ class VisionStackRuntimeTests(unittest.TestCase):
                     "confidence": 0.91,
                 }
             ],
+            "_ocr_observation_records": [
+                {
+                    "provider": "orientation_attempt",
+                    "text": "HELLO",
+                    "bbox": [120, 30, 160, 70],
+                    "line_polygons": [[[120, 30], [160, 30], [160, 70], [120, 70]]],
+                }
+            ],
         }
 
         remapped = _remap_orientation_recovery_page(
@@ -3419,6 +3625,11 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(remapped["texts"][0]["orientation_recovery_deg"], 180)
         self.assertEqual(remapped["_vision_blocks"][0]["bbox"], [40, 30, 80, 70])
         self.assertEqual(remapped["_vision_blocks"][0]["orientation_recovery_deg"], 180)
+        self.assertEqual(remapped["_ocr_observation_records"][0]["bbox"], [40, 30, 80, 70])
+        self.assertEqual(
+            remapped["_ocr_observation_records"][0]["line_polygons"][0][0],
+            [80, 70],
+        )
         self.assertEqual(remapped["_vision_blocks"][0]["mask"].shape, (100, 200))
         self.assertEqual(
             int(np.count_nonzero(remapped["_vision_blocks"][0]["mask"])),
@@ -3437,6 +3648,16 @@ class VisionStackRuntimeTests(unittest.TestCase):
         }
 
         def fake_run(rotated_image, image_label, **_kwargs):
+            rotation = int(image_label.rsplit("#rot", 1)[-1])
+            raw_records = [
+                {
+                    "provider": "paddle_full_page",
+                    "attempt_id": "ocr_attempt_0001",
+                    "text": f"TRY {rotation}",
+                    "bbox": [5, 10, 25, 30],
+                    "accepted": True,
+                }
+            ]
             if image_label.endswith("#rot90"):
                 return {
                     "image": image_label,
@@ -3444,6 +3665,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
                     "height": rotated_image.shape[0],
                     "texts": [{"text": "HELLO", "bbox": [5, 10, 25, 30]}],
                     "_vision_blocks": [{"bbox": [5, 10, 25, 30], "confidence": 0.9}],
+                    "_ocr_observation_records": raw_records,
                 }
             return {
                 "image": image_label,
@@ -3451,6 +3673,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
                 "height": rotated_image.shape[0],
                 "texts": [],
                 "_vision_blocks": [],
+                "_ocr_observation_records": raw_records,
             }
 
         with patch("vision_stack.runtime._run_detect_ocr_on_image", side_effect=fake_run):
@@ -3470,6 +3693,19 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(recovered["texts"][0]["bbox"], [10, 15, 30, 35])
         self.assertEqual(recovered["_vision_blocks"][0]["bbox"], [10, 15, 30, 35])
         self.assertFalse(recovered["sem_texto_detectado"])
+        attempts = recovered["_ocr_observation_records"]
+        self.assertEqual({item["orientation_attempt_deg"] for item in attempts}, {90, 180, 270})
+        self.assertEqual(
+            [item["orientation_attempt_deg"] for item in attempts if item["orientation_candidate_selected"]],
+            [90],
+        )
+        self.assertTrue(
+            all(
+                item.get("rejection_reason") == "legacy_orientation_candidate_not_selected"
+                for item in attempts
+                if not item["orientation_candidate_selected"]
+            )
+        )
 
     def test_build_page_result_accepts_rich_ocr_items_and_preserves_metadata(self):
         block = SimpleNamespace(

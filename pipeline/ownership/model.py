@@ -43,10 +43,22 @@ class TextObservation:
     confidence: float
     provider: str
     bbox_page: BBox
+    polygons_page: tuple[tuple[Point, ...], ...] = ()
     tile_provenance: tuple[str, ...] = ()
     coverage_score: float | None = None
     language_score: float | None = None
     rejection_reason: str | None = None
+    legacy_selected: bool = False
+    provider_variant: str = ""
+    attempt_id: str = ""
+    provider_record_id: str | None = None
+    projection_ids: tuple[str, ...] = ()
+    raw_text: str | None = None
+    source_bbox_page: BBox | None = None
+    text_pixel_bbox_page: BBox | None = None
+    line_texts: tuple[str, ...] = ()
+    rotation_deg: float | None = None
+    rotation_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -360,10 +372,37 @@ class OwnerGraph:
                     "confidence": float(observation.confidence),
                     "provider": observation.provider,
                     "bbox_page": list(observation.bbox_page),
+                    "polygons_page": [
+                        [list(point) for point in polygon]
+                        for polygon in observation.polygons_page
+                    ],
                     "tile_provenance": list(observation.tile_provenance),
                     "coverage_score": observation.coverage_score,
                     "language_score": observation.language_score,
                     "rejection_reason": observation.rejection_reason,
+                    "legacy_selected": bool(observation.legacy_selected),
+                    "provider_variant": observation.provider_variant,
+                    "attempt_id": observation.attempt_id,
+                    "provider_record_id": observation.provider_record_id,
+                    "projection_ids": list(observation.projection_ids),
+                    "raw_text": observation.raw_text,
+                    "source_bbox_page": (
+                        list(observation.source_bbox_page)
+                        if observation.source_bbox_page is not None
+                        else None
+                    ),
+                    "text_pixel_bbox_page": (
+                        list(observation.text_pixel_bbox_page)
+                        if observation.text_pixel_bbox_page is not None
+                        else None
+                    ),
+                    "line_texts": list(observation.line_texts),
+                    "rotation_deg": (
+                        float(observation.rotation_deg)
+                        if observation.rotation_deg is not None
+                        else None
+                    ),
+                    "rotation_source": observation.rotation_source,
                 }
                 for observation in sorted(
                     self.observations, key=lambda item: item.observation_id
@@ -466,6 +505,10 @@ class OwnerGraph:
                     confidence=float(item.get("confidence") or 0.0),
                     provider=str(item.get("provider") or ""),
                     bbox_page=_bbox(item.get("bbox_page")),
+                    polygons_page=tuple(
+                        tuple((int(point[0]), int(point[1])) for point in polygon)
+                        for polygon in item.get("polygons_page") or ()
+                    ),
                     tile_provenance=tuple(
                         str(value) for value in item.get("tile_provenance") or ()
                     ),
@@ -474,6 +517,35 @@ class OwnerGraph:
                     rejection_reason=(
                         str(item["rejection_reason"])
                         if item.get("rejection_reason") is not None
+                        else None
+                    ),
+                    legacy_selected=bool(item.get("legacy_selected", False)),
+                    provider_variant=str(item.get("provider_variant") or ""),
+                    attempt_id=str(item.get("attempt_id") or ""),
+                    provider_record_id=(
+                        str(item["provider_record_id"])
+                        if item.get("provider_record_id") is not None
+                        else None
+                    ),
+                    projection_ids=tuple(
+                        str(value) for value in item.get("projection_ids") or ()
+                    ),
+                    raw_text=(
+                        (
+                            str(item["raw_text"])
+                            if item.get("raw_text") is not None
+                            else None
+                        )
+                        if "raw_text" in item
+                        else str(item.get("text") or "")
+                    ),
+                    source_bbox_page=_optional_bbox(item.get("source_bbox_page")),
+                    text_pixel_bbox_page=_optional_bbox(item.get("text_pixel_bbox_page")),
+                    line_texts=tuple(str(value) for value in item.get("line_texts") or ()),
+                    rotation_deg=_optional_float(item.get("rotation_deg")),
+                    rotation_source=(
+                        str(item["rotation_source"])
+                        if item.get("rotation_source") is not None
                         else None
                     ),
                 )
@@ -585,3 +657,7 @@ def _polygon(value: Any) -> tuple[Point, ...]:
 
 def _optional_float(value: Any) -> float | None:
     return float(value) if value is not None else None
+
+
+def _optional_bbox(value: Any) -> BBox | None:
+    return _bbox(value) if value is not None else None

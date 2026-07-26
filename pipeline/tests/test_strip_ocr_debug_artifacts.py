@@ -15,7 +15,15 @@ from strip.run import (
     _reconcile_overlapping_band_ocr_fragments_before_translation,
     run_chapter,
 )
-from strip.process_bands import _band_to_page_dict, process_band
+from strip.process_bands import (
+    BandStageOutput,
+    _band_to_page_dict,
+    _merge_candidate_crop_recovery_into_ocr_page,
+    _recover_empty_ocr_with_candidate_crops,
+    _run_direct_paddle_candidate_crop_reocr,
+    fuse_negative_dark_bubble_candidates,
+    process_band,
+)
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
 
@@ -137,6 +145,42 @@ def test_translate_stage_metadata_merge_preserves_band_trace_ids():
     assert merged["_band_id"] == "page_002_band_004"
     assert merged["_band_y_top"] == 1200
     assert merged["texts"][0]["bbox"] == [1, 2, 3, 4]
+
+
+def test_translate_stage_metadata_merge_preserves_owner_observations_append_only():
+    from strip.process_bands import _merge_translated_page_metadata
+
+    observation = {
+        "observation_id": "observation_keep",
+        "page_id": "page_002",
+        "component_ids": [],
+        "text": "SOURCE",
+        "confidence": 0.88,
+        "provider": "candidate_crop",
+        "bbox_page": [10, 20, 80, 44],
+        "polygons_page": [],
+        "tile_provenance": ["band_a"],
+        "coverage_score": None,
+        "language_score": None,
+        "rejection_reason": None,
+        "legacy_selected": False,
+    }
+
+    merged = _merge_translated_page_metadata(
+        {
+            "texts": [{"id": "ocr_001", "text": "SOURCE"}],
+            "owner_observations": [observation],
+            "_owner_tile_projection": {
+                "page_id": "page_002",
+                "tile_id": "band_a",
+                "offset_xy": [0, 100],
+            },
+        },
+        {"texts": [{"id": "ocr_001", "translated": "FONTE"}]},
+    )
+
+    assert merged["owner_observations"] == [observation]
+    assert merged["_owner_tile_projection"]["offset_xy"] == [0, 100]
 
 
 def test_candidate_text_matching_rejects_edge_overlap_from_next_balloon():
@@ -620,6 +664,339 @@ def test_process_band_writes_ocr_raw_blocks_jsonl_with_confidence_and_trace(tmp_
         assert decision["trace_ids_in_band"] == ["ocr_001@page_001_band_000"]
     finally:
         bind_recorder(None)
+
+
+def test_process_band_attaches_page_space_owner_observations_and_debug_manifest(tmp_path):
+    class ObservationRuntime:
+        def run_ocr_stage(self, _image_rgb, page_dict):
+            assert page_dict["_owner_page_id"] == "page_001"
+            assert page_dict["_owner_tile_id"] == "tile_page_001_a"
+            assert page_dict["_owner_tile_offset_xy"] == [-5, 0]
+            return {
+                "image": page_dict["_band_id"],
+                "width": 120,
+                "height": 80,
+                "texts": [
+                    {
+                        "id": "ocr_001",
+                        "text": "WHOLE BODY",
+                        "bbox": [10, 12, 50, 40],
+                        "line_polygons": [
+                            [[10, 12], [50, 12], [50, 40], [10, 40]],
+                        ],
+                        "confidence": 0.93,
+                        "ocr_source": "paddle_full_page",
+                    }
+                ],
+                "_vision_blocks": [{"bbox": [10, 12, 50, 40], "confidence": 0.93}],
+            }
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="owner-observations")
+    bind_recorder(recorder)
+    try:
+        balloon = Balloon(BBox(10, 112, 50, 140), confidence=0.93)
+        balloon.metadata = {
+            "bbox_page": [5, 12, 45, 40],
+            "page_id": "page_001",
+            "region_id": "region_must_not_become_semantic_owner",
+        }
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[balloon],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            tile_id="tile_page_001_a",
+        )
+
+        process_band(
+            band,
+            runtime=ObservationRuntime(),
+            translator=FakeTranslator(),
+            inpainter=FakeInpainter(),
+            typesetter=FakeTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+        observations = band.ocr_result["owner_observations"]
+        assert len(observations) == 1
+        assert observations[0]["bbox_page"] == [5, 12, 45, 40]
+        assert observations[0]["polygons_page"] == [
+            [[5, 12], [45, 12], [45, 40], [5, 40]],
+        ]
+        assert observations[0]["provider"] == "paddle_full_page"
+        assert observations[0]["component_ids"] == []
+        assert "owner_id" not in observations[0]
+        assert "semantic_owner" not in observations[0]
+
+        manifest_path = tmp_path / "debug" / "e2e" / "03_ocr" / "owner_observations.jsonl"
+        rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["observation_id"] == observations[0]["observation_id"]
+        assert rows[0]["bbox_page"] == [5, 12, 45, 40]
+        assert rows[0]["run_id"] == "owner-observations"
+    finally:
+        bind_recorder(None)
+
+
+def test_candidate_crop_observation_is_projected_before_legacy_filters():
+    class CropRuntime:
+        def run_ocr_stage(self, image_rgb, _page_dict):
+            height, width = image_rgb.shape[:2]
+            return {
+                "width": width,
+                "height": height,
+                "texts": [
+                    {
+                        "text": "COMPLETE CANDIDATE BODY",
+                        "bbox": [2, 3, min(width, 32), min(height, 17)],
+                        "line_polygons": [
+                            [[2, 3], [min(width, 32), 3], [min(width, 32), min(height, 17)], [2, min(height, 17)]],
+                        ],
+                        "confidence": 0.88,
+                        "ocr_source": "adaptive_crop",
+                    }
+                ],
+                "_vision_blocks": [{"bbox": [2, 3, min(width, 32), min(height, 17)]}],
+            }
+
+    balloon = Balloon(BBox(20, 130, 90, 175), confidence=0.50)
+    balloon.metadata = {
+        "bbox_page": [12, 30, 82, 75],
+        "page_id": "page_002",
+        "region_id": "region_not_an_owner",
+    }
+    band = Band(
+        y_top=100,
+        y_bottom=200,
+        balloons=[balloon],
+        strip_slice=np.full((100, 140, 3), 255, dtype=np.uint8),
+        original_slice=np.full((100, 140, 3), 255, dtype=np.uint8),
+        tile_id="tile_page_002_a",
+    )
+    page_dict = _band_to_page_dict(band, page_idx=0, source_page_number=2)
+    strong_evidence = {
+        "has_inner_dark_text": True,
+        "significant_component_count": 3,
+        "significant_area": 360,
+        "inner_light_component_count": 0,
+        "inner_light_area": 0,
+        "bright_pixel_ratio": 0.5,
+        "dark_pixel_ratio": 0.05,
+    }
+
+    with patch("strip.detect_balloons._inner_dark_text_evidence", return_value=strong_evidence):
+        recovered = _recover_empty_ocr_with_candidate_crops(
+            band,
+            runtime=CropRuntime(),
+            page_dict=page_dict,
+            band_id=page_dict["_band_id"],
+        ).to_page_dict()
+
+    mapped_bbox = recovered["texts"][0]["bbox"]
+    observation = recovered["owner_observations"][0]
+    assert observation["bbox_page"] == [
+        mapped_bbox[0] - 8,
+        mapped_bbox[1],
+        mapped_bbox[2] - 8,
+        mapped_bbox[3],
+    ]
+    assert observation["provider"] == "adaptive_crop"
+    assert observation["component_ids"] == []
+
+
+def test_direct_candidate_crop_retains_every_provider_variant_before_best_selection():
+    calls = 0
+
+    def recognize(_image, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [
+            {
+                "text": f"VARIANT {calls}",
+                "bbox_pts": [[2, 3], [22, 3], [22, 13], [2, 13]],
+                "confidence": 0.50 + calls * 0.01,
+            }
+        ]
+
+    with (
+        patch("ocr_legacy.recognizer_paddle.is_paddle_available", return_value=True),
+        patch("ocr_legacy.recognizer_paddle.run_paddle_primary_recognition", side_effect=recognize),
+    ):
+        result = _run_direct_paddle_candidate_crop_reocr(
+            np.full((30, 50, 3), 255, dtype=np.uint8),
+            idioma_origem="en",
+        )
+
+    records_by_provider = result["_owner_observation_records_by_provider"]
+    assert calls == 6
+    assert list(records_by_provider) == [
+        "candidate_crop_direct_paddle_native",
+        "candidate_crop_direct_paddle_native_x2",
+        "candidate_crop_direct_paddle",
+        "candidate_crop_direct_paddle_x2",
+        "candidate_crop_direct_paddle_native_inverted",
+        "candidate_crop_direct_paddle_inverted",
+    ]
+    assert [records[0]["text"] for records in records_by_provider.values()] == [
+        "VARIANT 1",
+        "VARIANT 2",
+        "VARIANT 3",
+        "VARIANT 4",
+        "VARIANT 5",
+        "VARIANT 6",
+    ]
+
+
+def test_candidate_crop_merge_preserves_observation_when_legacy_overlap_rejects_text():
+    base_page = {
+        "texts": [{"text": "BASE BODY", "bbox": [10, 10, 80, 36]}],
+        "_vision_blocks": [{"bbox": [10, 10, 80, 36]}],
+        "owner_observations": [
+            {
+                "observation_id": "observation_base",
+                "page_id": "page_001",
+                "component_ids": [],
+                "text": "BASE BODY",
+                "confidence": 0.9,
+                "provider": "full_page",
+                "bbox_page": [10, 110, 80, 136],
+                "polygons_page": [],
+                "tile_provenance": ["band_a"],
+                "coverage_score": None,
+                "language_score": None,
+                "rejection_reason": None,
+                "legacy_selected": True,
+            }
+        ],
+    }
+    recovered_page = {
+        "texts": [{"text": "PARTIAL", "bbox": [12, 11, 76, 34]}],
+        "_vision_blocks": [{"bbox": [12, 11, 76, 34]}],
+        "owner_observations": [
+            {
+                "observation_id": "observation_candidate",
+                "page_id": "page_001",
+                "component_ids": [],
+                "text": "PARTIAL",
+                "confidence": 0.82,
+                "provider": "candidate_crop",
+                "bbox_page": [12, 111, 76, 134],
+                "polygons_page": [],
+                "tile_provenance": ["band_a:candidate_0"],
+                "coverage_score": None,
+                "language_score": None,
+                "rejection_reason": None,
+                "legacy_selected": False,
+            }
+        ],
+    }
+
+    merged = _merge_candidate_crop_recovery_into_ocr_page(base_page, recovered_page)
+
+    assert merged == 0
+    assert [row["observation_id"] for row in base_page["owner_observations"]] == [
+        "observation_base",
+        "observation_candidate",
+    ]
+
+
+def test_empty_primary_ocr_observations_survive_candidate_recovery_replacement():
+    failed_observation = {
+        "observation_id": "observation_primary_failed",
+        "page_id": "page_001",
+        "component_ids": [],
+        "text": "",
+        "confidence": 0.2,
+        "provider": "full_page",
+        "bbox_page": [10, 20, 70, 40],
+        "polygons_page": [],
+        "tile_provenance": ["band_a"],
+        "coverage_score": None,
+        "language_score": None,
+        "rejection_reason": "empty_text",
+        "legacy_selected": False,
+    }
+    candidate_observation = {
+        **failed_observation,
+        "observation_id": "observation_candidate_recovered",
+        "text": "RECOVERED BODY",
+        "provider": "candidate_crop",
+        "rejection_reason": None,
+    }
+
+    class EmptyRuntime:
+        def run_ocr_stage(self, _image_rgb, _page_dict):
+            return {
+                "texts": [],
+                "_vision_blocks": [],
+                "owner_observations": [failed_observation],
+            }
+
+    band = Band(
+        y_top=0,
+        y_bottom=80,
+        balloons=[Balloon(BBox(10, 12, 70, 40), confidence=0.9)],
+        strip_slice=np.full((80, 100, 3), 255, dtype=np.uint8),
+        original_slice=np.full((80, 100, 3), 255, dtype=np.uint8),
+    )
+    recovered_page = {
+        "texts": [{"id": "ocr_001", "text": "RECOVERED BODY", "bbox": [10, 12, 70, 40]}],
+        "_vision_blocks": [{"bbox": [10, 12, 70, 40], "confidence": 0.9}],
+        "owner_observations": [candidate_observation],
+    }
+
+    with patch(
+        "strip.process_bands._recover_empty_ocr_with_candidate_crops",
+        return_value=BandStageOutput("ocr_candidate_recovery", recovered_page),
+    ):
+        process_band(
+            band,
+            runtime=EmptyRuntime(),
+            translator=FakeTranslator(),
+            inpainter=FakeInpainter(),
+            typesetter=FakeTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+    assert [
+        row["observation_id"] for row in band.ocr_result["owner_observations"]
+    ] == [
+        "observation_primary_failed",
+        "observation_candidate_recovered",
+    ]
+
+
+def test_negative_candidate_rejection_is_retained_in_page_space():
+    page = {
+        "texts": [],
+        "_vision_blocks": [],
+        "_owner_tile_projection": {
+            "page_id": "page_002",
+            "tile_id": "band_negative",
+            "offset_xy": [-5, 80],
+        },
+    }
+    negative_evidence = {
+        "texts": [{"text": "HIDDEN BODY", "bbox": [10, 20, 30, 40], "confidence": 0.10}],
+        "blocks": [{"bbox": [10, 20, 30, 40], "confidence": 0.10}],
+    }
+
+    promoted = fuse_negative_dark_bubble_candidates(
+        page,
+        negative_evidence,
+        np.full((80, 80, 3), 20, dtype=np.uint8),
+    )
+
+    assert promoted == 0
+    assert len(page["owner_observations"]) == 1
+    observation = page["owner_observations"][0]
+    assert observation["provider"] == "negative_detect_ocr"
+    assert observation["bbox_page"] == [5, 100, 25, 120]
+    assert observation["rejection_reason"] == "legacy_negative_low_confidence"
+    assert observation["component_ids"] == []
 
 
 def test_write_inpaint_blocks_debug_includes_trace_ids(tmp_path):
