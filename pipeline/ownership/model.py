@@ -13,6 +13,7 @@ FINAL_COMPONENT_DECISIONS = frozenset({"owned", "preserve", "suppress", "review"
 POST_TRANSLATION_STATES = frozenset(
     {"translated", "mask_ready", "inpainted", "laid_out", "rendered", "verified"}
 )
+EXECUTOR_REQUIRED_STATES = POST_TRANSLATION_STATES | frozenset({"execution_planned"})
 
 
 @dataclass(frozen=True)
@@ -250,7 +251,7 @@ class OwnerGraph:
                             owner.owner_id,
                         )
                     )
-                if not executors:
+                if owner.state in EXECUTOR_REQUIRED_STATES and not executors:
                     violations.append(
                         _violation(
                             "owner_executor_missing",
@@ -267,7 +268,7 @@ class OwnerGraph:
                             *(projection.tile_id for projection in executors),
                         )
                     )
-                elif owner.execution_tile_id != executors[0].tile_id:
+                elif executors and owner.execution_tile_id != executors[0].tile_id:
                     violations.append(
                         _violation(
                             "owner_executor_identity_mismatch",
