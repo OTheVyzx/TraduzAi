@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 if TYPE_CHECKING:
-    from ownership.model import SourceTextComponent
+    from ownership.model import OwnerGraph, OwnerProjection, SourceTextComponent, TextObservation
+    from ownership.ocr_adapter import TileProjection
 
 
 @dataclass
@@ -89,6 +90,34 @@ class Band:
     @property
     def height(self) -> int:
         return max(0, self.y_bottom - self.y_top)
+
+
+@dataclass(frozen=True)
+class BandEvidenceResult:
+    """Immutable-enough control-plane snapshot collected before translation."""
+
+    page_id: str
+    tile_id: str
+    band_index: int
+    source_page_number: Optional[int]
+    band: Band
+    tile_projection: "TileProjection"
+    ocr_page: dict
+    observations: list["TextObservation"] = field(default_factory=list)
+    components: list["SourceTextComponent"] = field(default_factory=list)
+    terminal_reason: Optional[str] = None
+    perf: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OwnerExecutionResult:
+    """Auditable result of applying one owner projection to one execution tile."""
+
+    band: Band
+    graph: "OwnerGraph"
+    projection: "OwnerProjection"
+    mutated: bool
+    skipped_reason: Optional[str] = None
 
 
 @dataclass

@@ -20,7 +20,8 @@ from ownership.ocr_adapter import (
     collect_page_observations,
     observation_to_dict,
 )
-from strip.types import Band, BBox
+from ownership.model import OwnerGraph, OwnerProjection, SourceTextComponent, TextObservation
+from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
 
@@ -2271,11 +2272,18 @@ def _attach_ocr_trace_metadata(page: dict, *, band_id: str) -> dict:
 
 
 def _projection_payload(projection: TileProjection) -> dict:
-    return {
+    payload = {
         "page_id": str(projection.page_id),
         "tile_id": str(projection.tile_id),
         "offset_xy": [int(projection.offset_xy[0]), int(projection.offset_xy[1])],
+        "coordinate_space": str(projection.coordinate_space),
+        "projection_id": str(projection.resolved_projection_id),
     }
+    if projection.page_size is not None:
+        payload["page_size"] = [int(value) for value in projection.page_size]
+    if projection.tile_size is not None:
+        payload["tile_size"] = [int(value) for value in projection.tile_size]
+    return payload
 
 
 def _owner_projection_from_page(page: dict | None) -> TileProjection | None:
@@ -2291,10 +2299,26 @@ def _owner_projection_from_page(page: dict | None) -> TileProjection | None:
         offset_xy = (int(offset[0]), int(offset[1]))
     except (TypeError, ValueError):
         return None
+    page_size_raw = raw.get("page_size")
+    tile_size_raw = raw.get("tile_size")
+
+    def _size(value) -> tuple[int, int] | None:
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return None
+        try:
+            width, height = int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return None
+        return (width, height) if width > 0 and height > 0 else None
+
     return TileProjection(
         page_id=str(raw.get("page_id") or _page_id_for(_source_page_number_from_page(page))),
         tile_id=str(raw.get("tile_id") or page.get("_band_id") or "band_unknown"),
         offset_xy=offset_xy,
+        coordinate_space=str(raw.get("coordinate_space") or "tile"),
+        projection_id=str(raw.get("projection_id") or ""),
+        page_size=_size(page_size_raw),
+        tile_size=_size(tile_size_raw),
     )
 
 
@@ -2332,10 +2356,26 @@ def _band_owner_projection(band: Band, page: dict, *, band_id: str) -> TileProje
             offset_xy = (int(raw_offset[0]), int(raw_offset[1]))
         else:
             offset_xy = (0, int(band.y_top))
+    tile_height, tile_width = (
+        band.strip_slice.shape[:2]
+        if isinstance(band.strip_slice, np.ndarray) and band.strip_slice.ndim >= 2
+        else (max(1, int(band.height)), max(1, int(page.get("width") or 1)))
+    )
+    page_size_raw = page.get("_source_page_size")
+    page_size = None
+    if isinstance(page_size_raw, (list, tuple)) and len(page_size_raw) >= 2:
+        try:
+            candidate = (int(page_size_raw[0]), int(page_size_raw[1]))
+        except (TypeError, ValueError):
+            candidate = (0, 0)
+        if candidate[0] > 0 and candidate[1] > 0:
+            page_size = candidate
     return TileProjection(
         page_id=page_id,
         tile_id=str(getattr(band, "tile_id", None) or band_id),
         offset_xy=offset_xy,
+        page_size=page_size,
+        tile_size=(int(tile_width), int(tile_height)),
     )
 
 
@@ -8446,6 +8486,350 @@ def _apply_smart_skip_real(page: dict, perf: dict) -> bool:
     return False
 
 
+def _observation_from_manifest_row(
+    row: Mapping[str, Any],
+    projection: TileProjection,
+) -> TextObservation:
+    """Rehydrate the append-only OCR manifest without changing its identity."""
+
+    bbox = _coerce_bbox(row.get("bbox_page")) or [0, 0, 0, 0]
+    polygons: list[tuple[tuple[int, int], ...]] = []
+    for polygon in list(row.get("polygons_page") or []):
+        points = tuple(
+            (int(round(float(point[0]))), int(round(float(point[1]))))
+            for point in list(polygon or [])
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        )
+        if points:
+            polygons.append(points)
+
+    def _optional_bbox(value) -> tuple[int, int, int, int] | None:
+        parsed = _coerce_bbox(value)
+        return tuple(parsed) if parsed is not None else None
+
+    def _optional_float(value) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return TextObservation(
+        observation_id=str(row.get("observation_id") or ""),
+        page_id=str(row.get("page_id") or projection.page_id),
+        component_ids=tuple(sorted({str(value) for value in row.get("component_ids") or () if value})),
+        text=str(row.get("text") or ""),
+        confidence=float(row.get("confidence") or 0.0),
+        provider=str(row.get("provider") or "unknown_ocr"),
+        bbox_page=tuple(int(value) for value in bbox),
+        polygons_page=tuple(polygons),
+        tile_provenance=tuple(
+            sorted(
+                {
+                    str(value)
+                    for value in (row.get("tile_provenance") or (projection.tile_id,))
+                    if value
+                }
+            )
+        ),
+        coverage_score=_optional_float(row.get("coverage_score")),
+        language_score=_optional_float(row.get("language_score")),
+        rejection_reason=(
+            str(row.get("rejection_reason")) if row.get("rejection_reason") else None
+        ),
+        legacy_selected=bool(row.get("legacy_selected")),
+        provider_variant=str(row.get("provider_variant") or ""),
+        attempt_id=str(row.get("attempt_id") or "primary"),
+        provider_record_id=(
+            str(row.get("provider_record_id"))
+            if row.get("provider_record_id") not in (None, "")
+            else None
+        ),
+        projection_ids=tuple(
+            sorted(
+                {
+                    str(value)
+                    for value in (row.get("projection_ids") or (projection.resolved_projection_id,))
+                    if value
+                }
+            )
+        ),
+        raw_text=(str(row.get("raw_text")) if row.get("raw_text") is not None else None),
+        source_bbox_page=_optional_bbox(row.get("source_bbox_page")),
+        text_pixel_bbox_page=_optional_bbox(row.get("text_pixel_bbox_page")),
+        line_texts=tuple(str(value) for value in row.get("line_texts") or ()),
+        rotation_deg=_optional_float(row.get("rotation_deg")),
+        rotation_source=(
+            str(row.get("rotation_source")) if row.get("rotation_source") else None
+        ),
+    )
+
+
+def collect_band_evidence(
+    band: Band,
+    *,
+    runtime,
+    page_idx: int,
+    tile_projection: TileProjection,
+    components: tuple[SourceTextComponent, ...] | list[SourceTextComponent] = (),
+    connected_reasoner_config: dict | None = None,
+    band_history: list[dict] | None = None,
+    source_page_number: int | None = None,
+    precomputed_ocr_page: dict | None = None,
+    obra: str = "",
+    work_title_user_provided: bool = False,
+    idioma_origem: str = "en",
+    layout_page_image_bgr: np.ndarray | None = None,
+    layout_page_y_top: int = 0,
+    gpu_stage_lock=None,
+    ocr_stage_lock=None,
+) -> BandEvidenceResult:
+    """Collect every OCR/recovery observation without invoking a mutating stage."""
+
+    collection_band = copy.deepcopy(band)
+    process_band(
+        collection_band,
+        runtime=runtime,
+        translator=None,
+        inpainter=None,
+        typesetter=None,
+        page_idx=page_idx,
+        idioma_origem=idioma_origem,
+        obra=obra,
+        work_title_user_provided=work_title_user_provided,
+        connected_reasoner_config=connected_reasoner_config,
+        band_history=band_history,
+        source_page_number=source_page_number,
+        precomputed_ocr_page=precomputed_ocr_page,
+        layout_page_image_bgr=layout_page_image_bgr,
+        layout_page_y_top=layout_page_y_top,
+        gpu_stage_lock=gpu_stage_lock,
+        ocr_stage_lock=ocr_stage_lock,
+        control_plane_only=True,
+        source_page_size=tile_projection.page_size,
+        owner_tile_projection=tile_projection,
+    )
+    ocr_page = copy.deepcopy(dict(collection_band.ocr_result or {"texts": []}))
+    ocr_page["_owner_tile_projection"] = _projection_payload(tile_projection)
+    observations = tuple(
+        _observation_from_manifest_row(row, tile_projection)
+        for row in list(ocr_page.get("owner_observations") or [])
+        if isinstance(row, Mapping) and row.get("observation_id")
+    )
+    if not collection_band.balloons:
+        terminal_reason = "no_balloons"
+    elif not list(ocr_page.get("texts") or []):
+        terminal_reason = "no_texts"
+    else:
+        terminal_reason = None
+    return BandEvidenceResult(
+        page_id=str(tile_projection.page_id),
+        tile_id=str(tile_projection.tile_id),
+        band_index=int(page_idx),
+        source_page_number=source_page_number,
+        band=band,
+        tile_projection=tile_projection,
+        ocr_page=ocr_page,
+        observations=list(observations),
+        components=list(components),
+        terminal_reason=terminal_reason,
+        perf=copy.deepcopy(dict(collection_band.perf or {})),
+    )
+
+
+def execute_owner_tile(
+    band: Band,
+    *,
+    runtime,
+    translator,
+    inpainter,
+    typesetter,
+    graph: OwnerGraph,
+    projection: OwnerProjection,
+    evidence: BandEvidenceResult | None = None,
+    page_idx: int = 0,
+    **process_kwargs,
+) -> OwnerExecutionResult:
+    """Apply only an executor projection; context projections are strict no-ops."""
+
+    if projection.role != "executor":
+        return OwnerExecutionResult(
+            band=band,
+            graph=graph,
+            projection=projection,
+            mutated=False,
+            skipped_reason="context_only_projection",
+        )
+    owner = next((item for item in graph.owners if item.owner_id == projection.owner_id), None)
+    if owner is None:
+        raise ValueError(f"unknown owner projection: {projection.owner_id}")
+    if owner.execution_tile_id != projection.tile_id:
+        raise ValueError("owner execution tile does not match executor projection")
+    if str(getattr(band, "tile_id", None) or projection.tile_id) != projection.tile_id:
+        raise ValueError("executor projection does not match band tile identity")
+    graph.require_valid()
+    process_band(
+        band,
+        runtime=runtime,
+        translator=translator,
+        inpainter=inpainter,
+        typesetter=typesetter,
+        page_idx=page_idx,
+        precollected_evidence=evidence,
+        **process_kwargs,
+    )
+    return OwnerExecutionResult(
+        band=band,
+        graph=graph,
+        projection=projection,
+        mutated=band.cleaned_slice is not None or band.rendered_slice is not None,
+    )
+
+
+def _execute_translation_ready_band(
+    band: Band,
+    *,
+    ocr_page: dict,
+    translator,
+    inpainter,
+    typesetter,
+    page_idx: int,
+    context: dict | None,
+    glossario: dict | None,
+    idioma_origem: str,
+    idioma_destino: str,
+    obra: str,
+    models_dir: str,
+    ollama_host: str,
+    ollama_model: str,
+    translation_context: dict | None,
+    ordered_context_after_translate_callback,
+    source_page_number: int | None,
+    band_id: str,
+    perf: dict,
+    total_start: float,
+    gpu_stage_lock,
+    inpaint_stage_lock,
+    typeset_stage_lock,
+) -> Band:
+    """Execute mutating stages from a frozen, translation-ready snapshot."""
+
+    durations = perf.setdefault("durations_sec", {})
+
+    def _run_locked(stage: str, lock, callback):
+        total_started = time.perf_counter()
+        context_manager = lock if lock is not None else nullcontext()
+        with context_manager:
+            compute_started = time.perf_counter()
+            output = callback()
+            compute_elapsed = time.perf_counter() - compute_started
+        total_elapsed = time.perf_counter() - total_started
+        wait_elapsed = max(0.0, total_elapsed - compute_elapsed)
+        durations[stage] = round(total_elapsed, 4)
+        durations[f"{stage}_wait"] = round(wait_elapsed, 4)
+        durations[f"{stage}_compute"] = round(max(0.0, compute_elapsed), 4)
+        perf[f"_t_{stage}_ms"] = round(total_elapsed * 1000.0, 3)
+        perf[f"_t_{stage}_wait_ms"] = round(
+            wait_elapsed * 1000.0,
+            3,
+        )
+        perf[f"_t_{stage}_compute_ms"] = round(max(0.0, compute_elapsed) * 1000.0, 3)
+        return output
+
+    if _smart_skip_shadow_enabled():
+        _apply_smart_skip_shadow(ocr_page, perf)
+
+    stage_start = time.perf_counter()
+    translate_stage = _run_translate_stage(
+        ocr_page,
+        translator=translator,
+        context=context,
+        glossario=glossario,
+        idioma_origem=idioma_origem,
+        idioma_destino=idioma_destino,
+        obra=obra,
+        models_dir=models_dir,
+        ollama_host=ollama_host,
+        ollama_model=ollama_model,
+        translation_context=translation_context,
+    )
+    translate_elapsed = time.perf_counter() - stage_start
+    durations["translate"] = round(translate_elapsed, 4)
+    perf["_t_translate_ms"] = round(translate_elapsed * 1000.0, 3)
+
+    translated_page = translate_stage.to_page_dict()
+    _attach_ocr_trace_metadata(translated_page, band_id=band_id)
+    if callable(ordered_context_after_translate_callback):
+        ordered_context_after_translate_callback(copy.deepcopy(translated_page))
+
+    inpaint_lock = inpaint_stage_lock if inpaint_stage_lock is not None else gpu_stage_lock
+    inpaint_stage = _run_locked(
+        "inpaint",
+        inpaint_lock,
+        lambda: _run_inpaint_stage(
+            band,
+            inpainter=inpainter,
+            translated_page=translated_page,
+            band_index=page_idx + 1,
+            source_page_number=source_page_number,
+        ),
+    )
+    cleaned = inpaint_stage.to_image()
+    perf.update(dict(inpaint_stage.perf_updates))
+    typeset_stage = _run_locked(
+        "typeset",
+        typeset_stage_lock,
+        lambda: _run_typeset_stage(
+            cleaned,
+            typesetter=typesetter,
+            translated_page=translated_page,
+        ),
+    )
+    atomic_cleaned, atomic_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        typeset_stage.to_image(),
+        translated_page,
+    )
+    stage_start = time.perf_counter()
+    copy_back_stage = _run_copy_back_stage(
+        band,
+        cleaned_slice=atomic_cleaned,
+        rendered_slice=atomic_rendered,
+        translated_page=translated_page,
+    )
+    copyback_elapsed = time.perf_counter() - stage_start
+    durations["copy_back"] = round(copyback_elapsed, 4)
+    perf["_t_copy_back_ms"] = round(copyback_elapsed * 1000.0, 3)
+    _record_copyback_decision(
+        band=band,
+        band_id=band_id,
+        source_page_number=source_page_number,
+        translated_page=translated_page,
+        applied=True,
+        reason="copyback_outside_balloons",
+    )
+    _record_band_stage_visual_debug(
+        band=band,
+        band_id=band_id,
+        source_page_number=source_page_number,
+        post_typeset=atomic_rendered,
+        post_copyback=copy_back_stage.to_image(),
+    )
+    perf["text_count"] = int(len(translated_page.get("texts") or []))
+    perf["total_sec"] = round(time.perf_counter() - total_start, 4)
+    translated_page["_perf"] = dict(perf)
+    _commit_band_outputs(
+        band,
+        cleaned_slice=atomic_cleaned,
+        rendered_slice=copy_back_stage.to_image(),
+        ocr_result=translated_page,
+    )
+    band.perf = dict(perf)
+    return band
+
+
 def process_band(
     band: Band,
     runtime,
@@ -8474,6 +8858,10 @@ def process_band(
     ocr_stage_lock=None,
     inpaint_stage_lock=None,
     typeset_stage_lock=None,
+    control_plane_only: bool = False,
+    precollected_evidence: BandEvidenceResult | None = None,
+    source_page_size: tuple[int, int] | None = None,
+    owner_tile_projection: TileProjection | None = None,
 ) -> Band:
 
 
@@ -8539,7 +8927,70 @@ def process_band(
         else:
             perf["total_sec"] = round(time.perf_counter() - total_start, 4)
         band.perf = dict(perf)
+
+    if precollected_evidence is not None:
+        if control_plane_only:
+            raise ValueError("precollected_evidence cannot be combined with control_plane_only")
+        ocr_page = copy.deepcopy(dict(precollected_evidence.ocr_page))
+        source_page_number = (
+            source_page_number
+            if source_page_number is not None
+            else precollected_evidence.source_page_number
+        )
+        band_id = str(ocr_page.get("_band_id") or band_id)
+        perf.update(copy.deepcopy(dict(precollected_evidence.perf or {})))
+        perf.setdefault("durations_sec", durations)
+        perf["owner_control_plane_snapshot_reused"] = True
+        if not list(ocr_page.get("texts") or []):
+            original = band.original_slice if band.original_slice is not None else band.strip_slice
+            _commit_band_outputs(
+                band,
+                cleaned_slice=original,
+                rendered_slice=original,
+                ocr_result={**ocr_page, "texts": [], "_vision_blocks": []},
+            )
+            _record_copyback_decision(
+                band=band,
+                band_id=band_id,
+                source_page_number=source_page_number,
+                translated_page=band.ocr_result,
+                applied=False,
+                reason=precollected_evidence.terminal_reason or "no_texts",
+            )
+            _finish(band.ocr_result)
+            return band
+        return _execute_translation_ready_band(
+            band,
+            ocr_page=ocr_page,
+            translator=translator,
+            inpainter=inpainter,
+            typesetter=typesetter,
+            page_idx=page_idx,
+            context=context,
+            glossario=glossario,
+            idioma_origem=idioma_origem,
+            idioma_destino=idioma_destino,
+            obra=obra,
+            models_dir=models_dir,
+            ollama_host=ollama_host,
+            ollama_model=ollama_model,
+            translation_context=translation_context,
+            ordered_context_after_translate_callback=ordered_context_after_translate_callback,
+            source_page_number=source_page_number,
+            band_id=band_id,
+            perf=perf,
+            total_start=total_start,
+            gpu_stage_lock=gpu_stage_lock,
+            inpaint_stage_lock=inpaint_stage_lock,
+            typeset_stage_lock=typeset_stage_lock,
+        )
+
     if not band.balloons:
+        if control_plane_only:
+            band.ocr_result = {"texts": [], "_vision_blocks": [], "_band_id": band_id}
+            perf["owner_control_plane_only"] = True
+            _finish(band.ocr_result)
+            return band
         original = band.original_slice if band.original_slice is not None else band.strip_slice
         _commit_band_outputs(
             band,
@@ -8559,6 +9010,8 @@ def process_band(
         return band
 
     page_dict = _band_to_page_dict(band, page_idx, source_page_number=source_page_number)
+    if source_page_size is not None:
+        page_dict["_source_page_size"] = [int(value) for value in source_page_size]
     ocr_lock = ocr_stage_lock if ocr_stage_lock is not None else gpu_stage_lock
     ocr_stage = _run_with_stage_lock(
         "ocr",
@@ -8577,7 +9030,11 @@ def process_band(
         if (key not in ocr_page or ocr_page.get(key) in (None, "")) and key in page_dict:
             ocr_page[key] = page_dict[key]
     band_id = str(page_dict.get("_band_id") or band_id)
-    owner_projection = _band_owner_projection(band, page_dict, band_id=band_id)
+    owner_projection = owner_tile_projection or _band_owner_projection(
+        band,
+        page_dict,
+        band_id=band_id,
+    )
     ocr_page["_owner_tile_projection"] = _projection_payload(owner_projection)
     if not list(ocr_page.get("owner_observations") or []):
         _capture_page_text_observations(
@@ -8750,6 +9207,11 @@ def process_band(
         perf["ocr_partial_dark_bubble_recovered"] = recovered_count
         perf["ocr_text_count"] = int(len(ocr_page.get("texts") or []))
     if not list(ocr_page.get("texts") or []):
+        if control_plane_only:
+            band.ocr_result = {**copy.deepcopy(ocr_page), "texts": [], "_vision_blocks": []}
+            perf["owner_control_plane_only"] = True
+            _finish(band.ocr_result)
+            return band
         original = band.original_slice if band.original_slice is not None else band.strip_slice
         _commit_band_outputs(
             band,
@@ -8859,10 +9321,19 @@ def process_band(
     if _smart_skip_shadow_enabled():
         _apply_smart_skip_shadow(ocr_page, perf)
 
-    stage_start = time.perf_counter()
-    translate_stage = _run_translate_stage(
-        ocr_page,
+    if control_plane_only:
+        band.ocr_result = copy.deepcopy(ocr_page)
+        perf["owner_control_plane_only"] = True
+        _finish(band.ocr_result)
+        return band
+
+    return _execute_translation_ready_band(
+        band,
+        ocr_page=ocr_page,
         translator=translator,
+        inpainter=inpainter,
+        typesetter=typesetter,
+        page_idx=page_idx,
         context=context,
         glossario=glossario,
         idioma_origem=idioma_origem,
@@ -8872,71 +9343,12 @@ def process_band(
         ollama_host=ollama_host,
         ollama_model=ollama_model,
         translation_context=translation_context,
-    )
-    _mark("translate", stage_start)
-
-    translated_page = translate_stage.to_page_dict()
-    _attach_ocr_trace_metadata(translated_page, band_id=band_id)
-    if callable(ordered_context_after_translate_callback):
-        ordered_context_after_translate_callback(copy.deepcopy(translated_page))
-
-    inpaint_lock = inpaint_stage_lock if inpaint_stage_lock is not None else gpu_stage_lock
-    inpaint_stage = _run_with_stage_lock(
-        "inpaint",
-        inpaint_lock,
-        lambda: _run_inpaint_stage(
-            band,
-            inpainter=inpainter,
-            translated_page=translated_page,
-            band_index=page_idx + 1,
-            source_page_number=source_page_number,
-        ),
-    )
-    cleaned = inpaint_stage.to_image()
-    perf.update(dict(inpaint_stage.perf_updates))
-    typeset_stage = _run_with_stage_lock(
-        "typeset",
-        typeset_stage_lock,
-        lambda: _run_typeset_stage(
-            cleaned,
-            typesetter=typesetter,
-            translated_page=translated_page,
-        ),
-    )
-    atomic_cleaned, atomic_rendered = _apply_atomic_inpaint_render_rollback(
-        band,
-        cleaned,
-        typeset_stage.to_image(),
-        translated_page,
-    )
-    stage_start = time.perf_counter()
-    copy_back_stage = _run_copy_back_stage(
-        band,
-        cleaned_slice=atomic_cleaned,
-        rendered_slice=atomic_rendered,
-        translated_page=translated_page,
-    )
-    _mark("copy_back", stage_start)
-    _record_copyback_decision(
-        band=band,
-        band_id=band_id,
+        ordered_context_after_translate_callback=ordered_context_after_translate_callback,
         source_page_number=source_page_number,
-        translated_page=translated_page,
-        applied=True,
-        reason="copyback_outside_balloons",
-    )
-    _record_band_stage_visual_debug(
-        band=band,
         band_id=band_id,
-        source_page_number=source_page_number,
-        post_typeset=atomic_rendered,
-        post_copyback=copy_back_stage.to_image(),
+        perf=perf,
+        total_start=total_start,
+        gpu_stage_lock=gpu_stage_lock,
+        inpaint_stage_lock=inpaint_stage_lock,
+        typeset_stage_lock=typeset_stage_lock,
     )
-    _commit_band_outputs(
-        band,
-        cleaned_slice=atomic_cleaned,
-        rendered_slice=copy_back_stage.to_image(),
-        ocr_result=translated_page,
-    )
-    _finish(band.ocr_result)
-    return band
