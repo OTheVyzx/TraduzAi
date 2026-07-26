@@ -5245,6 +5245,37 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["glossary_hits"][0]["target"], "Núcleo de Mana")
         self.assertEqual(layer["qa_flags"], ["entity_suspect"])
 
+    def test_text_layers_reference_owner_and_component_ids(self) -> None:
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "id": "own_page_001_body",
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "component_ids": ["cmp_page_001_body"],
+                "observation_ids": ["obs_page_001_body"],
+                "semantic_role": "dialogue_body",
+                "route_action": "translate_inpaint_render",
+                "action_mask_ref": "layers/owner-mask/own_page_001_body.png",
+                "layout_region_ids": ["layout_page_001_body"],
+                "text": "HELLO THERE",
+                "bbox": [10, 20, 110, 80],
+                "confidence": 0.97,
+            },
+            translated="OLÁ",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertEqual(layer["owner_id"], "own_page_001_body")
+        self.assertEqual(layer["component_ids"], ["cmp_page_001_body"])
+        self.assertEqual(layer["observation_ids"], ["obs_page_001_body"])
+        self.assertEqual(layer["semantic_role"], "dialogue_body")
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertEqual(layer["action_mask_ref"], "layers/owner-mask/own_page_001_body.png")
+        self.assertEqual(layer["layout_region_ids"], ["layout_page_001_body"])
+
 
     def test_build_text_layer_preserves_smart_skip_audit_for_project_json(self) -> None:
         layer = main.build_text_layer(
@@ -10143,6 +10174,137 @@ class MainEmitTests(unittest.TestCase):
             saved = np.array(Image.open(mask_path).convert("L"))
             self.assertEqual(int(saved[2, 2]), 1)
             self.assertEqual(int(saved[3, 6]), 2)
+
+    def test_build_project_json_includes_serialized_owner_graphs(self) -> None:
+        from ownership.model import (
+            ComponentDisposition,
+            OwnerGraph,
+            SourceTextComponent,
+            TextObservation,
+            TextOwner,
+        )
+
+        graph = OwnerGraph(
+            schema_version=1,
+            page_id="page_001",
+            components=[
+                SourceTextComponent(
+                    component_id="cmp_page_001_body",
+                    page_id="page_001",
+                    bbox_page=(10, 20, 110, 80),
+                    polygon_page=((10, 20), (110, 20), (110, 80), (10, 80)),
+                    detector_sources=("fixture",),
+                )
+            ],
+            observations=[
+                TextObservation(
+                    observation_id="obs_page_001_body",
+                    page_id="page_001",
+                    component_ids=("cmp_page_001_body",),
+                    text="HELLO THERE",
+                    confidence=0.97,
+                    provider="fixture",
+                    bbox_page=(10, 20, 110, 80),
+                )
+            ],
+            owners=[
+                TextOwner(
+                    owner_id="own_page_001_body",
+                    page_id="page_001",
+                    component_ids=["cmp_page_001_body"],
+                    observation_ids=["obs_page_001_body"],
+                    selected_observation_ids=["obs_page_001_body"],
+                    semantic_role="dialogue_body",
+                    source_payload="HELLO THERE",
+                    translated_payload=None,
+                    disposition="owned",
+                    state="ocr_ready",
+                    route_action="translate_inpaint_render",
+                    execution_tile_id=None,
+                )
+            ],
+            projections=[],
+            component_dispositions=[
+                ComponentDisposition(
+                    component_id="cmp_page_001_body",
+                    decision="owned",
+                    owner_id="own_page_001_body",
+                    reason="fixture",
+                )
+            ],
+        )
+
+        project = main.build_project_json(
+            {
+                "obra": "Fixture",
+                "capitulo": 1,
+                "idioma_origem": "en",
+                "idioma_destino": "pt-BR",
+            },
+            {},
+            [{"_owner_graph_snapshot": graph.to_dict(), "_vision_blocks": []}],
+            [
+                {
+                    "texts": [
+                        {
+                            "id": "own_page_001_body",
+                            "owner_id": "own_page_001_body",
+                            "page_id": "page_001",
+                            "component_ids": ["cmp_page_001_body"],
+                            "observation_ids": ["obs_page_001_body"],
+                            "semantic_role": "dialogue_body",
+                            "text": "HELLO THERE",
+                            "translated": "OLÁ",
+                            "bbox": [10, 20, 110, 80],
+                            "source_bbox": [10, 20, 110, 80],
+                            "route_action": "translate_inpaint_render",
+                        }
+                    ]
+                }
+            ],
+            [Path("001.png")],
+            1,
+            0.1,
+        )
+
+        self.assertEqual(project["owner_graph_schema_version"], 1)
+        self.assertEqual(project["owner_graph_status"], "verified")
+        self.assertEqual(project["page_owner_graphs"], [graph.to_dict()])
+        self.assertEqual(project["owner_invariant_summary"]["owner_count"], 1)
+        persisted_layer = project["paginas"][0]["text_layers"][0]
+        persisted_alias = project["paginas"][0]["textos"][0]
+        self.assertEqual(persisted_layer["owner_id"], "own_page_001_body")
+        self.assertEqual(persisted_layer["component_ids"], ["cmp_page_001_body"])
+        self.assertEqual(persisted_layer["observation_ids"], ["obs_page_001_body"])
+        self.assertEqual(persisted_layer["semantic_role"], "dialogue_body")
+        self.assertEqual(
+            persisted_layer["route_action"], "translate_inpaint_render"
+        )
+        self.assertIsNone(persisted_layer.get("action_mask_ref"))
+        self.assertEqual(persisted_layer.get("layout_region_ids", []), [])
+        for field in (
+            "owner_id",
+            "component_ids",
+            "observation_ids",
+            "semantic_role",
+            "route_action",
+            "action_mask_ref",
+            "layout_region_ids",
+        ):
+            self.assertEqual(persisted_alias.get(field), persisted_layer.get(field))
+
+        from project_writer import write_project_json_atomic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            write_project_json_atomic(project_path, project)
+            loaded = json.loads(project_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded["page_owner_graphs"], [graph.to_dict()])
+        self.assertEqual(
+            loaded["paginas"][0]["text_layers"][0]["owner_id"],
+            "own_page_001_body",
+        )
 
     def test_build_project_json_persists_bubble_mask_without_serializing_ndarray(self) -> None:
         import json

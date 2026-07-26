@@ -11621,6 +11621,18 @@ def build_text_layer(
 
     original_ocr_text = dict(ocr_text or {})
     ocr_text = normalize_ocr_record(ocr_text)
+    owner_id = original_ocr_text.get("owner_id") or ocr_text.get("owner_id")
+    component_ids = list(
+        original_ocr_text.get("component_ids") or ocr_text.get("component_ids") or []
+    )
+    observation_ids = list(
+        original_ocr_text.get("observation_ids") or ocr_text.get("observation_ids") or []
+    )
+    layout_region_ids = list(
+        original_ocr_text.get("layout_region_ids")
+        or ocr_text.get("layout_region_ids")
+        or []
+    )
     if (
         str(original_ocr_text.get("route_action") or "").strip().lower() == "translate_sfx_inpaint_render"
         or str(original_ocr_text.get("content_class") or "").strip().lower() == "sfx"
@@ -11732,6 +11744,14 @@ def build_text_layer(
         "merge_reason": ocr_text.get("merge_reason"),
         "ocr_merged_source_count": ocr_text.get("ocr_merged_source_count"),
         "text_instance_id": ocr_text.get("text_instance_id"),
+        "owner_id": owner_id,
+        "component_ids": component_ids,
+        "observation_ids": observation_ids,
+        "semantic_role": original_ocr_text.get("semantic_role")
+        or ocr_text.get("semantic_role"),
+        "action_mask_ref": original_ocr_text.get("action_mask_ref")
+        or ocr_text.get("action_mask_ref"),
+        "layout_region_ids": layout_region_ids,
         "page_id": ocr_text.get("page_id"),
         "band_id": ocr_text.get("band_id"),
         "coordinate_space": ocr_text.get("coordinate_space"),
@@ -11788,7 +11808,11 @@ def build_text_layer(
         "script": ocr_text.get("script"),
         "translate_policy": _sfx_policy_or_default(ocr_text, "translate_policy", "translate"),
         "render_policy": _sfx_policy_or_default(ocr_text, "render_policy", "normal"),
-        "route_action": ocr_text.get("route_action"),
+        "route_action": (
+            original_ocr_text.get("route_action")
+            if owner_id
+            else ocr_text.get("route_action")
+        ),
         "route_reason": ocr_text.get("route_reason"),
         "is_watermark": bool(ocr_text.get("is_watermark", False)),
         "is_non_english": bool(ocr_text.get("is_non_english", False)),
@@ -12900,6 +12924,12 @@ def _sync_page_legacy_aliases(page: dict) -> None:
             "merge_reason": layer.get("merge_reason"),
             "ocr_merged_source_count": layer.get("ocr_merged_source_count"),
             "text_instance_id": layer.get("text_instance_id"),
+            "owner_id": layer.get("owner_id"),
+            "component_ids": list(layer.get("component_ids") or []),
+            "observation_ids": list(layer.get("observation_ids") or []),
+            "semantic_role": layer.get("semantic_role"),
+            "action_mask_ref": layer.get("action_mask_ref"),
+            "layout_region_ids": list(layer.get("layout_region_ids") or []),
             "bbox": _bbox4(
                 layer.get("render_bbox"),
                 _bbox4(
@@ -14971,6 +15001,10 @@ def build_glossary_used_report(config: dict, context: dict, page_text_layers: li
 def build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, elapsed):
     """Build the project.json structure."""
     from layout.region_grouping import group_regions
+    from ownership.project import (
+        build_owner_project_envelope,
+        normalize_owner_text_layer_for_project,
+    )
     from qa.translation_qa import summarize_flags
 
     pages = []
@@ -14988,7 +15022,9 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
             text_layers = list(text_layers) + promoted_sfx
         text_layers = group_regions(text_layers)
         text_layers = [
-            neutralize_removed_decision_fields(normalize_text_geometry(layer))
+            normalize_owner_text_layer_for_project(
+                neutralize_removed_decision_fields(normalize_text_geometry(layer))
+            )
             for layer in text_layers
         ]
         qa_regions.extend(text_layers)
@@ -15072,6 +15108,10 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         _sync_page_legacy_aliases(page)
         pages.append(page)
 
+    owner_project_envelope = build_owner_project_envelope(
+        ocr_results,
+        page_text_layers,
+    )
     return {
         "versao": "2.0",
         "app": "traduzai",
@@ -15100,6 +15140,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "qa": {
             "summary": summarize_flags(qa_regions),
         },
+        **owner_project_envelope,
     }
 
 

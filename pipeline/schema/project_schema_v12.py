@@ -5,7 +5,222 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from ownership.project import (
+    OWNER_GRAPH_SCHEMA_VERSION,
+    OWNER_GRAPH_STATUS_LEGACY_UNVERIFIED,
+    OWNER_GRAPH_STATUS_VERIFIED,
+    OWNER_SUMMARY_FIELDS,
+    owner_project_validation_errors,
+)
+
 SCHEMA_VERSION = "12.0"
+
+_OWNER_ID_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "pattern": r"^\S(?:.*\S)?$",
+}
+_OWNER_BBOX_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "integer"},
+    "minItems": 4,
+    "maxItems": 4,
+}
+_OWNER_POINT_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "integer"},
+    "minItems": 2,
+    "maxItems": 2,
+}
+OWNER_GRAPH_DEFINITIONS: dict[str, Any] = {
+    "sourceTextComponent": {
+        "type": "object",
+        "required": ["component_id", "page_id", "bbox_page"],
+        "properties": {
+            "component_id": _OWNER_ID_SCHEMA,
+            "page_id": _OWNER_ID_SCHEMA,
+            "bbox_page": _OWNER_BBOX_SCHEMA,
+            "polygon_page": {"type": "array", "items": _OWNER_POINT_SCHEMA},
+            "detector_sources": {"type": "array", "items": _OWNER_ID_SCHEMA},
+            "confidence": {"type": ["number", "null"]},
+            "script_evidence": {"type": "array", "items": _OWNER_ID_SCHEMA},
+            "evidence_ids": {"type": "array", "items": _OWNER_ID_SCHEMA},
+            "rotation_deg": {"type": ["number", "null"]},
+            "rotation_source": {"type": ["string", "null"]},
+        },
+    },
+    "textObservation": {
+        "type": "object",
+        "required": [
+            "observation_id",
+            "page_id",
+            "component_ids",
+            "text",
+            "confidence",
+            "provider",
+            "bbox_page",
+        ],
+        "properties": {
+            "observation_id": _OWNER_ID_SCHEMA,
+            "page_id": _OWNER_ID_SCHEMA,
+            "component_ids": {"type": "array", "items": _OWNER_ID_SCHEMA},
+            "text": {"type": "string"},
+            "confidence": {"type": "number"},
+            "provider": _OWNER_ID_SCHEMA,
+            "bbox_page": _OWNER_BBOX_SCHEMA,
+        },
+    },
+    "textOwner": {
+        "type": "object",
+        "required": [
+            "owner_id",
+            "page_id",
+            "component_ids",
+            "observation_ids",
+            "selected_observation_ids",
+            "semantic_role",
+            "source_payload",
+            "translated_payload",
+            "disposition",
+            "state",
+            "route_action",
+            "execution_tile_id",
+        ],
+        "properties": {
+            "owner_id": _OWNER_ID_SCHEMA,
+            "page_id": _OWNER_ID_SCHEMA,
+            "component_ids": {"type": "array", "items": _OWNER_ID_SCHEMA},
+            "observation_ids": {"type": "array", "items": _OWNER_ID_SCHEMA},
+            "selected_observation_ids": {
+                "type": "array",
+                "items": _OWNER_ID_SCHEMA,
+            },
+            "semantic_role": _OWNER_ID_SCHEMA,
+            "source_payload": {"type": "string"},
+            "translated_payload": {"type": ["string", "null"]},
+            "disposition": _OWNER_ID_SCHEMA,
+            "state": _OWNER_ID_SCHEMA,
+            "route_action": _OWNER_ID_SCHEMA,
+            "execution_tile_id": {"type": ["string", "null"]},
+        },
+    },
+    "ownerProjection": {
+        "type": "object",
+        "required": [
+            "owner_id",
+            "tile_id",
+            "role",
+            "bbox_page",
+            "bbox_tile",
+            "offset_xy",
+        ],
+        "properties": {
+            "owner_id": _OWNER_ID_SCHEMA,
+            "tile_id": _OWNER_ID_SCHEMA,
+            "role": _OWNER_ID_SCHEMA,
+            "bbox_page": _OWNER_BBOX_SCHEMA,
+            "bbox_tile": _OWNER_BBOX_SCHEMA,
+            "offset_xy": _OWNER_POINT_SCHEMA,
+        },
+    },
+    "componentDisposition": {
+        "type": "object",
+        "required": ["component_id", "decision", "owner_id"],
+        "properties": {
+            "component_id": _OWNER_ID_SCHEMA,
+            "decision": _OWNER_ID_SCHEMA,
+            "owner_id": {"type": ["string", "null"]},
+            "reason": {"type": ["string", "null"]},
+        },
+    },
+    "ownerViolation": {
+        "type": "object",
+        "required": ["code", "severity", "message", "offenders"],
+        "properties": {
+            "code": _OWNER_ID_SCHEMA,
+            "severity": _OWNER_ID_SCHEMA,
+            "message": {"type": "string"},
+            "offenders": {"type": "array", "items": _OWNER_ID_SCHEMA},
+        },
+    },
+}
+OWNER_GRAPH_DEFINITIONS["ownerGraph"] = {
+    "type": "object",
+    "required": [
+        "schema_version",
+        "page_id",
+        "components",
+        "observations",
+        "owners",
+        "projections",
+        "component_dispositions",
+        "violations",
+    ],
+    "properties": {
+        "schema_version": {"const": OWNER_GRAPH_SCHEMA_VERSION},
+        "page_id": _OWNER_ID_SCHEMA,
+        "components": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/sourceTextComponent"},
+        },
+        "observations": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/textObservation"},
+        },
+        "owners": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/textOwner"},
+        },
+        "projections": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/ownerProjection"},
+        },
+        "component_dispositions": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/componentDisposition"},
+        },
+        "violations": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/ownerViolation"},
+        },
+    },
+}
+
+_OWNER_SUMMARY_PROPERTIES: dict[str, Any] = {
+    field: {"type": "integer", "minimum": 0} for field in OWNER_SUMMARY_FIELDS
+}
+OWNER_GRAPH_STATUS_CONDITIONS: list[dict[str, Any]] = [
+    {
+        "if": {
+            "properties": {
+                "owner_graph_status": {"const": OWNER_GRAPH_STATUS_LEGACY_UNVERIFIED}
+            },
+            "required": ["owner_graph_status"],
+        },
+        "then": {
+            "properties": {
+                "page_owner_graphs": {"maxItems": 0},
+                "owner_invariant_summary": {"maxProperties": 0},
+            },
+        },
+    },
+    {
+        "if": {
+            "properties": {
+                "owner_graph_status": {"const": OWNER_GRAPH_STATUS_VERIFIED}
+            },
+            "required": ["owner_graph_status"],
+        },
+        "then": {
+            "properties": {
+                "page_owner_graphs": {"minItems": 1},
+                "owner_invariant_summary": {
+                    "required": list(OWNER_SUMMARY_FIELDS),
+                },
+            },
+        },
+    },
+]
 
 PROJECT_SCHEMA_V12: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -23,6 +238,10 @@ PROJECT_SCHEMA_V12: dict[str, Any] = {
         "qa",
         "export_report",
         "legacy",
+        "owner_graph_schema_version",
+        "owner_graph_status",
+        "page_owner_graphs",
+        "owner_invariant_summary",
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
@@ -36,12 +255,32 @@ PROJECT_SCHEMA_V12: dict[str, Any] = {
         "qa": {"type": "object"},
         "export_report": {"type": "object"},
         "legacy": {"type": "object"},
+        "owner_graph_schema_version": {"const": OWNER_GRAPH_SCHEMA_VERSION},
+        "owner_graph_status": {
+            "enum": ["verified", OWNER_GRAPH_STATUS_LEGACY_UNVERIFIED]
+        },
+        "page_owner_graphs": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/ownerGraph"},
+        },
+        "owner_invariant_summary": {
+            "type": "object",
+            "properties": _OWNER_SUMMARY_PROPERTIES,
+            "additionalProperties": False,
+        },
     },
+    "$defs": OWNER_GRAPH_DEFINITIONS,
+    "allOf": OWNER_GRAPH_STATUS_CONDITIONS,
 }
 
 
 def iso_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def build_empty_project_v12(
@@ -100,6 +339,10 @@ def build_empty_project_v12(
         "legacy": {
             "paginas": [],
         },
+        "owner_graph_schema_version": OWNER_GRAPH_SCHEMA_VERSION,
+        "owner_graph_status": OWNER_GRAPH_STATUS_LEGACY_UNVERIFIED,
+        "page_owner_graphs": [],
+        "owner_invariant_summary": {},
     }
 
 
@@ -151,7 +394,9 @@ def build_empty_region_v12(*, page: int, index: int) -> dict[str, Any]:
 
 def expected_qa_summary(project: dict[str, Any]) -> dict[str, int]:
     flags = project.get("qa", {}).get("flags", [])
-    total_pages = int(project.get("source", {}).get("page_count") or len(project.get("pages", [])))
+    total_pages = int(
+        project.get("source", {}).get("page_count") or len(project.get("pages", []))
+    )
     summary = {
         "total_pages": total_pages,
         "pages_with_flags": 0,
@@ -187,6 +432,8 @@ def validate_project_v12(project: dict[str, Any]) -> list[str]:
     if not isinstance(project.get("pages"), list):
         errors.append("pages must be a list")
 
+    errors.extend(owner_project_validation_errors(project, require_envelope=True))
+
     qa = project.get("qa")
     if not isinstance(qa, dict):
         errors.append("qa must be an object")
@@ -199,9 +446,13 @@ def validate_project_v12(project: dict[str, Any]) -> list[str]:
             errors.append("qa.flags must be a list")
         if isinstance(summary, dict) and isinstance(flags, list):
             expected = expected_qa_summary(project)
-            normalized_summary = {key: int(summary.get(key, 0) or 0) for key in expected}
+            normalized_summary = {
+                key: int(summary.get(key, 0) or 0) for key in expected
+            }
             if normalized_summary != expected:
-                errors.append(f"qa.summary does not match qa.flags: expected {expected}, got {normalized_summary}")
+                errors.append(
+                    f"qa.summary does not match qa.flags: expected {expected}, got {normalized_summary}"
+                )
 
     return errors
 
@@ -211,4 +462,3 @@ def with_recomputed_qa_summary(project: dict[str, Any]) -> dict[str, Any]:
     updated.setdefault("qa", {}).setdefault("flags", [])
     updated["qa"]["summary"] = expected_qa_summary(updated)
     return updated
-

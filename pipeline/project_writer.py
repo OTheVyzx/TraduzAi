@@ -8,11 +8,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ownership.project import require_owner_project_consistency
+
 
 def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
     route_action = str(layer.get("route_action") or "").strip().lower()
     content_class = str(layer.get("content_class") or "").strip().lower()
-    if route_action == "translate_sfx_inpaint_render" or content_class == "sfx" or isinstance(layer.get("sfx"), dict):
+    if (
+        route_action == "translate_sfx_inpaint_render"
+        or content_class == "sfx"
+        or isinstance(layer.get("sfx"), dict)
+    ):
         layer["tipo"] = "sfx"
         layer["content_class"] = "sfx"
         layer["skip_processing"] = False
@@ -36,11 +42,16 @@ def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
                 layer["sfx"] = sfx
             return
         layer["preserve_original"] = False
-        if str(layer.get("translate_policy") or "").strip().lower() in {"", "translate"}:
+        if str(layer.get("translate_policy") or "").strip().lower() in {
+            "",
+            "translate",
+        }:
             layer["translate_policy"] = "adapt_sfx"
         if str(layer.get("render_policy") or "").strip().lower() in {"", "normal"}:
             layer["render_policy"] = "sfx_style"
-        layer["route_action"] = layer.get("route_action") or "translate_sfx_inpaint_render"
+        layer["route_action"] = (
+            layer.get("route_action") or "translate_sfx_inpaint_render"
+        )
         return
     layer["tipo"] = "text"
     layer["content_class"] = "text"
@@ -53,7 +64,9 @@ def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
     layer.pop("skip_reason", None)
 
 
-def neutralize_project_compatibility_metadata(project: dict[str, Any]) -> dict[str, Any]:
+def neutralize_project_compatibility_metadata(
+    project: dict[str, Any],
+) -> dict[str, Any]:
     for page in project.get("paginas") or []:
         if not isinstance(page, dict):
             continue
@@ -68,9 +81,12 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
     pages = project.get("paginas")
     if not isinstance(pages, list):
         raise ValueError("project.json invalido: 'paginas' precisa ser lista")
+    require_owner_project_consistency(project)
     stats = project.get("estatisticas") or {}
     if "total_paginas" in stats and int(stats["total_paginas"]) != len(pages):
-        raise ValueError("summary mismatch: estatisticas.total_paginas nao bate com paginas")
+        raise ValueError(
+            "summary mismatch: estatisticas.total_paginas nao bate com paginas"
+        )
     qa = project.get("qa") or {}
     summary = qa.get("summary")
     if summary:
@@ -86,7 +102,13 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
         from structured_logger import build_log_summary
 
         expected = build_log_summary(project)
-        for key in ("actual_pages", "processed_pages", "translated_regions", "qa_flags", "critical_flags"):
+        for key in (
+            "actual_pages",
+            "processed_pages",
+            "translated_regions",
+            "qa_flags",
+            "critical_flags",
+        ):
             if log_summary.get(key) != expected.get(key):
                 raise ValueError(f"log.summary nao bate com project.json: {key}")
 

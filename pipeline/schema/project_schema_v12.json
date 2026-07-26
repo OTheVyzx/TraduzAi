@@ -13,7 +13,11 @@
     "entity_flags",
     "qa",
     "export_report",
-    "legacy"
+    "legacy",
+    "owner_graph_schema_version",
+    "owner_graph_status",
+    "page_owner_graphs",
+    "owner_invariant_summary"
   ],
   "properties": {
     "schema_version": { "const": "12.0" },
@@ -69,6 +73,382 @@
       "properties": {
         "paginas": { "type": "array" }
       }
+    },
+    "owner_graph_schema_version": { "const": 1 },
+    "owner_graph_status": {
+      "enum": ["verified", "legacy_unverified"]
+    },
+    "page_owner_graphs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ownerGraph" }
+    },
+    "owner_invariant_summary": {
+      "type": "object",
+      "properties": {
+        "page_count": { "type": "integer", "minimum": 0 },
+        "component_count": { "type": "integer", "minimum": 0 },
+        "observation_count": { "type": "integer", "minimum": 0 },
+        "owner_count": { "type": "integer", "minimum": 0 },
+        "projection_count": { "type": "integer", "minimum": 0 },
+        "violation_count": { "type": "integer", "minimum": 0 },
+        "critical_violation_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
     }
-  }
+  },
+  "$defs": {
+    "sourceTextComponent": {
+      "type": "object",
+      "required": ["component_id", "page_id", "bbox_page"],
+      "properties": {
+        "component_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "page_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "bbox_page": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "polygon_page": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "detector_sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "confidence": { "type": ["number", "null"] },
+        "script_evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "rotation_deg": { "type": ["number", "null"] },
+        "rotation_source": { "type": ["string", "null"] }
+      }
+    },
+    "textObservation": {
+      "type": "object",
+      "required": [
+        "observation_id",
+        "page_id",
+        "component_ids",
+        "text",
+        "confidence",
+        "provider",
+        "bbox_page"
+      ],
+      "properties": {
+        "observation_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "page_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "component_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "text": { "type": "string" },
+        "confidence": { "type": "number" },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "bbox_page": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 4,
+          "maxItems": 4
+        }
+      }
+    },
+    "textOwner": {
+      "type": "object",
+      "required": [
+        "owner_id",
+        "page_id",
+        "component_ids",
+        "observation_ids",
+        "selected_observation_ids",
+        "semantic_role",
+        "source_payload",
+        "translated_payload",
+        "disposition",
+        "state",
+        "route_action",
+        "execution_tile_id"
+      ],
+      "properties": {
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "page_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "component_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "observation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "selected_observation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "semantic_role": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "source_payload": { "type": "string" },
+        "translated_payload": { "type": ["string", "null"] },
+        "disposition": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "state": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "route_action": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "execution_tile_id": { "type": ["string", "null"] }
+      }
+    },
+    "ownerProjection": {
+      "type": "object",
+      "required": [
+        "owner_id",
+        "tile_id",
+        "role",
+        "bbox_page",
+        "bbox_tile",
+        "offset_xy"
+      ],
+      "properties": {
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "tile_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "bbox_page": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "bbox_tile": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "offset_xy": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "componentDisposition": {
+      "type": "object",
+      "required": ["component_id", "decision", "owner_id"],
+      "properties": {
+        "component_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "decision": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "owner_id": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "ownerViolation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "offenders"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "severity": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "message": { "type": "string" },
+        "offenders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        }
+      }
+    },
+    "ownerGraph": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "page_id",
+        "components",
+        "observations",
+        "owners",
+        "projections",
+        "component_dispositions",
+        "violations"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "page_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "components": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sourceTextComponent" }
+        },
+        "observations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/textObservation" }
+        },
+        "owners": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/textOwner" }
+        },
+        "projections": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ownerProjection" }
+        },
+        "component_dispositions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/componentDisposition" }
+        },
+        "violations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ownerViolation" }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "owner_graph_status": { "const": "legacy_unverified" }
+        },
+        "required": ["owner_graph_status"]
+      },
+      "then": {
+        "properties": {
+          "page_owner_graphs": { "maxItems": 0 },
+          "owner_invariant_summary": { "maxProperties": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "owner_graph_status": { "const": "verified" }
+        },
+        "required": ["owner_graph_status"]
+      },
+      "then": {
+        "properties": {
+          "page_owner_graphs": { "minItems": 1 },
+          "owner_invariant_summary": {
+            "required": [
+              "page_count",
+              "component_count",
+              "observation_count",
+              "owner_count",
+              "projection_count",
+              "violation_count",
+              "critical_violation_count"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }
