@@ -20,7 +20,14 @@ from ownership.ocr_adapter import (
     collect_page_observations,
     observation_to_dict,
 )
-from ownership.model import OwnerGraph, OwnerProjection, SourceTextComponent, TextObservation
+from ownership.model import (
+    OwnerGraph,
+    OwnerProjection,
+    OwnerViolation,
+    SourceTextComponent,
+    TextObservation,
+)
+from ownership.translation import merge_owner_translations, owners_to_translation_page
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
@@ -6796,10 +6803,143 @@ def _recover_partial_dark_bubble_ocr_from_texts(
     return merged
 
 
+_OWNER_TRANSLATION_RESPONSE_FIELDS = frozenset(
+    {
+        "translated",
+        "source_text_sent_to_translator",
+        "qa_flags",
+        "entity_flags",
+        "entity_repairs",
+        "glossary_hits",
+        "context_before",
+        "context_after",
+        "translation_blocked_text",
+        "mojibake_audit",
+        "proper_noun_preserved",
+        "source_mojibake_repaired",
+        "source_mojibake_repaired_from",
+    }
+)
+
+
+def _owner_translation_record(owner) -> dict:
+    return {
+        "id": owner.owner_id,
+        "owner_id": owner.owner_id,
+        "page_id": owner.page_id,
+        "text": str(owner.source_payload or ""),
+        "original": str(owner.source_payload or ""),
+        "semantic_role": owner.semantic_role,
+        "tipo": owner.semantic_role,
+        "route_action": owner.route_action,
+        "component_ids": list(owner.component_ids),
+        "observation_ids": list(owner.observation_ids),
+        "selected_observation_ids": list(owner.selected_observation_ids),
+    }
+
+
+def _owner_translation_stage_page(
+    translation_input: dict,
+    merged_graph: OwnerGraph,
+    translated_page: dict,
+) -> dict:
+    request_records = [
+        record
+        for record in list(translation_input.get("texts") or [])
+        if isinstance(record, dict) and record.get("owner_id")
+    ]
+    request_by_owner = {
+        str(record["owner_id"]): record
+        for record in request_records
+    }
+    response_records = [
+        record
+        for record in list(translated_page.get("texts") or [])
+        if isinstance(record, dict)
+    ]
+    response_counts: dict[str, int] = {}
+    response_by_owner: dict[str, dict] = {}
+    for record in response_records:
+        owner_id = str(record.get("owner_id") or "").strip()
+        response_counts[owner_id] = response_counts.get(owner_id, 0) + 1
+        response_by_owner[owner_id] = record
+
+    materialized_owner_ids = set(request_by_owner)
+    materialized_owner_ids.update(
+        owner.owner_id
+        for owner in merged_graph.owners
+        if owner.disposition == "owned"
+        and owner.state == "translated"
+        and owner.route_action == "translate_inpaint_render"
+    )
+    result_texts: list[dict] = []
+    for owner in sorted(merged_graph.owners, key=lambda item: item.owner_id):
+        owner_id = owner.owner_id
+        if owner_id not in materialized_owner_ids:
+            continue
+        result = copy.deepcopy(
+            request_by_owner.get(owner_id) or _owner_translation_record(owner)
+        )
+        response_record = (
+            response_by_owner.get(owner_id, {})
+            if response_counts.get(owner_id, 0) == 1
+            else {}
+        )
+        for field_name in _OWNER_TRANSLATION_RESPONSE_FIELDS:
+            if field_name in response_record:
+                result[field_name] = copy.deepcopy(response_record[field_name])
+        result["owner_id"] = owner_id
+        result["id"] = owner_id
+        result["state"] = owner.state
+        result["route_action"] = owner.route_action
+        result["translated"] = owner.translated_payload or ""
+        if owner.state == "review_required":
+            result["needs_review"] = True
+            result["qa_flags"] = list(
+                dict.fromkeys([*(result.get("qa_flags") or []), "owner_translation_blocked"])
+            )
+        result_texts.append(result)
+
+    result_page = copy.deepcopy(translation_input)
+    contract = dict(result_page.get("_owner_translation_contract") or {})
+    contract["expected_owner_ids"] = sorted(materialized_owner_ids)
+    result_page["_owner_translation_contract"] = contract
+    result_page["texts"] = result_texts
+    result_page["_owner_graph_snapshot"] = merged_graph.to_dict()
+    result_page["_owner_translation_violations"] = [
+        violation.to_dict() for violation in merged_graph.violations
+    ]
+    return result_page
+
+
+def _append_owner_translation_page_count_violation(
+    graph: OwnerGraph,
+    translated_pages,
+) -> None:
+    offender = (
+        f"page_count:{len(translated_pages)}"
+        if isinstance(translated_pages, list)
+        else f"response_type:{type(translated_pages).__name__}"
+    )
+    violation = OwnerViolation(
+        code="owner_translation_page_count_mismatch",
+        severity="critical",
+        message="Owner translation must return exactly one page object.",
+        offenders=(offender,),
+    )
+    if not any(
+        item.code == violation.code and item.offenders == violation.offenders
+        for item in graph.violations
+    ):
+        graph.violations.append(violation)
+        graph.violations.sort(key=lambda item: (item.code, item.offenders, item.message))
+
+
 def _run_translate_stage(
     ocr_page: dict,
     *,
     translator,
+    owner_graph: OwnerGraph | None = None,
     context: dict | None = None,
     glossario: dict | None = None,
     idioma_origem: str = "en",
@@ -6810,6 +6950,43 @@ def _run_translate_stage(
     ollama_model: str = "traduzai-translator",
     translation_context: dict | None = None,
 ) -> BandStageOutput:
+    if owner_graph is not None:
+        translation_input = owners_to_translation_page(owner_graph)
+        if not list(translation_input.get("texts") or []):
+            return BandStageOutput(
+                "translate",
+                _owner_translation_stage_page(translation_input, owner_graph, {"texts": []}),
+            )
+        translated_pages = translator.translate_pages(
+            [copy.deepcopy(translation_input)],
+            obra=obra,
+            context=context or {},
+            glossario=glossario or {},
+            idioma_origem=idioma_origem,
+            idioma_destino=idioma_destino,
+            models_dir=models_dir,
+            ollama_host=ollama_host,
+            ollama_model=ollama_model,
+            translation_context=translation_context,
+        )
+        valid_response = (
+            isinstance(translated_pages, list)
+            and len(translated_pages) == 1
+            and isinstance(translated_pages[0], dict)
+        )
+        translated_page = translated_pages[0] if valid_response else {"texts": []}
+        merged_graph = merge_owner_translations(owner_graph, translated_page)
+        if not valid_response:
+            _append_owner_translation_page_count_violation(merged_graph, translated_pages)
+        return BandStageOutput(
+            "translate",
+            _owner_translation_stage_page(
+                translation_input,
+                merged_graph,
+                translated_page,
+            ),
+        )
+
     translated_pages = translator.translate_pages(
         [ocr_page],
         obra=obra,

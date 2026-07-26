@@ -6,6 +6,7 @@ Agora com consciencia de tipo de texto, contexto local e memoria curta.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -2609,6 +2610,31 @@ def _translate_with_google(
     return translated_pages
 
 
+def _prepare_page_translation_records(
+    ocr_page: dict,
+    glossario: dict,
+) -> list[dict]:
+    """Normalize records while keeping verified owner payloads semantically atomic."""
+
+    from ocr.ocr_normalizer import (
+        merge_same_balloon_fragments_before_translation,
+        normalize_ocr_record,
+    )
+
+    source_records = [
+        text
+        for text in list(ocr_page.get("texts") or [])
+        if isinstance(text, dict)
+    ]
+    if isinstance(ocr_page.get("_owner_translation_contract"), dict):
+        return [copy.deepcopy(text) for text in source_records]
+    records = [
+        normalize_ocr_record(text, glossario)
+        for text in source_records
+    ]
+    return merge_same_balloon_fragments_before_translation(records)
+
+
 def _translate_google_single_page(
     page_idx: int,
     total: int,
@@ -2631,10 +2657,10 @@ def _translate_google_single_page(
     """
     is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
 
-    from ocr.ocr_normalizer import normalize_ocr_record, merge_same_balloon_fragments_before_translation
-
-    texts = merge_same_balloon_fragments_before_translation(
-        [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
+    texts = _prepare_page_translation_records(ocr_page, glossario)
+    owner_translation_contract = isinstance(
+        ocr_page.get("_owner_translation_contract"),
+        dict,
     )
     if not texts:
         if progress_callback:
@@ -2743,7 +2769,11 @@ def _translate_google_single_page(
             pending_texts.append(prepared)
 
     handled_context_indices: set[int] = set()
-    context_groups = _build_translation_context_groups(texts, repaired_sources)
+    context_groups = (
+        []
+        if owner_translation_contract
+        else _build_translation_context_groups(texts, repaired_sources)
+    )
     context_requests: list[tuple[list[int], list[str], str]] = []
     pending_set = set(pending_indices)
     for group in context_groups:
@@ -3049,11 +3079,7 @@ def _translate_with_ollama(
     translated_pages = []
     history_tail: list[dict] = []
     for page_idx, ocr_page in enumerate(ocr_results):
-        from ocr.ocr_normalizer import normalize_ocr_record, merge_same_balloon_fragments_before_translation
-
-        texts = merge_same_balloon_fragments_before_translation(
-            [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
-        )
+        texts = _prepare_page_translation_records(ocr_page, glossario)
         if not texts:
             translated_pages.append({"texts": []})
             if progress_callback:

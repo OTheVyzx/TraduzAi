@@ -244,6 +244,104 @@ def test_same_balloon_financial_principal_fragment_is_merged_before_translation(
     assert translated[0]["texts"][0]["source_text_ids"] == ["ocr_004", "ocr_003"]
 
 
+def test_owner_translation_contract_bypasses_legacy_fragment_merges():
+    _CapturingGoogleTranslator.batches = []
+    shared_geometry = {
+        "balloon_bbox": [10, 10, 190, 140],
+        "bubble_mask_bbox": [10, 10, 190, 140],
+        "band_id": "page_001_band_001",
+        "tipo": "dialogue_body",
+        "route_action": "translate_inpaint_render",
+    }
+    owner_page = {
+        "page_id": "page_001",
+        "_owner_translation_contract": {
+            "schema_version": 1,
+            "page_id": "page_001",
+            "expected_owner_ids": ["owner_a", "owner_b"],
+            "join_key": "owner_id",
+        },
+        "texts": [
+            {
+                **shared_geometry,
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "text": "FIRST COMPLETE OWNER",
+                "bbox": [30, 30, 170, 65],
+                "text_pixel_bbox": [30, 30, 170, 65],
+            },
+            {
+                **shared_geometry,
+                "id": "owner_b",
+                "owner_id": "owner_b",
+                "text": "SECOND COMPLETE OWNER",
+                "bbox": [30, 70, 170, 105],
+                "text_pixel_bbox": [30, 70, 170, 105],
+            },
+        ],
+    }
+
+    with patch("translator.translate._GoogleTranslator", _CapturingGoogleTranslator):
+        translated = translate_pages(
+            ocr_results=[owner_page],
+            obra="obra-teste",
+            context={},
+            glossario={},
+            idioma_origem="en",
+            idioma_destino="pt-BR",
+        )
+
+    assert _CapturingGoogleTranslator.batches == [
+        ["First complete owner", "Second complete owner"]
+    ]
+    assert [item["owner_id"] for item in translated[0]["texts"]] == [
+        "owner_a",
+        "owner_b",
+    ]
+
+
+def test_owner_translation_contract_bypasses_legacy_route_reclassification():
+    _CapturingGoogleTranslator.batches = []
+    owner_page = {
+        "page_id": "page_001",
+        "_owner_translation_contract": {
+            "schema_version": 1,
+            "page_id": "page_001",
+            "expected_owner_ids": ["owner_a"],
+            "join_key": "owner_id",
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "page_id": "page_001",
+                "text": "WE ARE RECRUITING!",
+                "original": "WE ARE RECRUITING!",
+                "semantic_role": "dialogue_body",
+                "tipo": "dialogue_body",
+                "route_action": "translate_inpaint_render",
+                "component_ids": ["component_a"],
+                "observation_ids": ["observation_a"],
+                "selected_observation_ids": ["observation_a"],
+            }
+        ],
+    }
+
+    with patch("translator.translate._GoogleTranslator", _CapturingGoogleTranslator):
+        translated = translate_pages(
+            ocr_results=[owner_page],
+            obra="obra-teste",
+            context={},
+            glossario={},
+            idioma_origem="en",
+            idioma_destino="pt-BR",
+        )
+
+    assert _CapturingGoogleTranslator.batches == [["We are recruiting!"]]
+    assert translated[0]["texts"][0]["owner_id"] == "owner_a"
+    assert translated[0]["texts"][0]["route_action"] == "translate_inpaint_render"
+
+
 def test_project_json_preserves_raw_ocr_and_normalized_text_final(tmp_path):
     image = tmp_path / "001.jpg"
     image.write_bytes(b"fake")
