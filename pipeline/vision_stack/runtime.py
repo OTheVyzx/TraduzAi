@@ -12754,6 +12754,119 @@ def _block_xyxy(block) -> list[int] | None:
     return [x1, y1, x2, y2]
 
 
+def discover_page_source_components(
+    image_rgb: np.ndarray,
+    *,
+    page_id: str,
+    detector_regions: list | tuple = (),
+    glyph_candidates: list | tuple = (),
+):
+    """Adapt runtime detector geometry into OCR-independent source evidence."""
+
+    try:
+        from ownership.discovery import (
+            DetectorRegion,
+            GlyphCandidate,
+            discover_source_text_components,
+        )
+    except ImportError:  # pragma: no cover - package import fallback
+        from ..ownership.discovery import (
+            DetectorRegion,
+            GlyphCandidate,
+            discover_source_text_components,
+        )
+
+    def _value(item, *names, default=None):
+        for name in names:
+            if isinstance(item, dict) and item.get(name) is not None:
+                return item.get(name)
+            value = getattr(item, name, None)
+            if value is not None:
+                return value
+        return default
+
+    def _string_tuple(item, *names) -> tuple[str, ...]:
+        raw = _value(item, *names, default=()) or ()
+        if isinstance(raw, str):
+            return (raw,) if raw else ()
+        if isinstance(raw, dict):
+            return tuple(sorted(str(key) for key, value in raw.items() if value))
+        if not isinstance(raw, (list, tuple, set, frozenset)):
+            return ()
+        return tuple(sorted({str(value) for value in raw if value}))
+
+    normalised_regions = []
+    for item in detector_regions or ():
+        if isinstance(item, DetectorRegion):
+            normalised_regions.append(item)
+            continue
+        bbox = _value(item, "bbox_page", "bbox", "xyxy")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        polygon = _value(item, "polygon_page", "polygon", "line_polygon", default=()) or ()
+        normalised_regions.append(
+            DetectorRegion(
+                bbox_page=tuple(int(round(float(value))) for value in bbox[:4]),
+                polygon_page=tuple(
+                    (int(round(float(point[0]))), int(round(float(point[1]))))
+                    for point in polygon
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ),
+                detector_source=str(
+                    _value(item, "detector_source", "detector", "source", default="region_detector")
+                ),
+                confidence=float(_value(item, "confidence", default=1.0) or 0.0),
+                evidence_id=_value(item, "evidence_id", "region_id"),
+                script_evidence=_string_tuple(item, "script_evidence", "scripts"),
+                rotation_deg=(
+                    float(_value(item, "rotation_deg"))
+                    if _value(item, "rotation_deg") is not None
+                    else None
+                ),
+                rotation_source=_value(item, "rotation_source"),
+            )
+        )
+
+    normalised_glyphs = []
+    for item in glyph_candidates or ():
+        if isinstance(item, GlyphCandidate):
+            normalised_glyphs.append(item)
+            continue
+        bbox = _value(item, "bbox_page", "bbox", "xyxy")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        polygon = _value(item, "polygon_page", "polygon", default=()) or ()
+        normalised_glyphs.append(
+            GlyphCandidate(
+                bbox_page=tuple(int(round(float(value))) for value in bbox[:4]),
+                polygon_page=tuple(
+                    (int(round(float(point[0]))), int(round(float(point[1]))))
+                    for point in polygon
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ),
+                detector_source=str(
+                    _value(item, "detector_source", "detector", "source", default="glyph_scan")
+                ),
+                confidence=float(_value(item, "confidence", default=1.0) or 0.0),
+                evidence_id=_value(item, "evidence_id", "candidate_id"),
+                script_evidence=_string_tuple(item, "script_evidence", "scripts"),
+                rotation_deg=(
+                    float(_value(item, "rotation_deg"))
+                    if _value(item, "rotation_deg") is not None
+                    else None
+                ),
+                rotation_source=_value(item, "rotation_source"),
+            )
+        )
+
+    return discover_source_text_components(
+        image_rgb,
+        page_id=page_id,
+        detector_regions=normalised_regions,
+        glyph_candidates=normalised_glyphs,
+    )
+
+
 def _scan_orphan_white_balloon_blocks(image_rgb: np.ndarray, blocks: list) -> list:
     """Add tight text boxes for white speech balloons missed by strip detection."""
     if image_rgb.size == 0:

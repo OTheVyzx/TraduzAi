@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from ownership.model import SourceTextComponent
 
 
 @dataclass
@@ -46,6 +49,10 @@ class VerticalStrip:
     height: int
     source_page_breaks: list[int] = field(default_factory=list)
     page_x_offsets: list[int] = field(default_factory=list)  # letterbox offset por página
+    source_page_widths: list[int] = field(default_factory=list)
+    source_components_by_page: dict[str, list["SourceTextComponent"]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass

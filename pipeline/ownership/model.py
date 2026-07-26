@@ -25,6 +25,11 @@ class SourceTextComponent:
     bbox_page: BBox
     polygon_page: tuple[Point, ...]
     detector_sources: tuple[str, ...]
+    confidence: float | None = None
+    script_evidence: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
+    rotation_deg: float | None = None
+    rotation_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +335,19 @@ class OwnerGraph:
                     "bbox_page": list(component.bbox_page),
                     "polygon_page": [list(point) for point in component.polygon_page],
                     "detector_sources": list(component.detector_sources),
+                    "confidence": (
+                        float(component.confidence)
+                        if component.confidence is not None
+                        else None
+                    ),
+                    "script_evidence": list(component.script_evidence),
+                    "evidence_ids": list(component.evidence_ids),
+                    "rotation_deg": (
+                        float(component.rotation_deg)
+                        if component.rotation_deg is not None
+                        else None
+                    ),
+                    "rotation_source": component.rotation_source,
                 }
                 for component in sorted(self.components, key=lambda item: item.component_id)
             ],
@@ -412,6 +430,27 @@ class OwnerGraph:
                     polygon_page=_polygon(item.get("polygon_page")),
                     detector_sources=tuple(
                         str(value) for value in item.get("detector_sources") or ()
+                    ),
+                    confidence=(
+                        float(item["confidence"])
+                        if item.get("confidence") is not None
+                        else None
+                    ),
+                    script_evidence=tuple(
+                        str(value) for value in item.get("script_evidence") or ()
+                    ),
+                    evidence_ids=tuple(
+                        str(value) for value in item.get("evidence_ids") or ()
+                    ),
+                    rotation_deg=(
+                        float(item["rotation_deg"])
+                        if item.get("rotation_deg") is not None
+                        else None
+                    ),
+                    rotation_source=(
+                        str(item["rotation_source"])
+                        if item.get("rotation_source") is not None
+                        else None
                     ),
                 )
                 for item in data.get("components") or ()

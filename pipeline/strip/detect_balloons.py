@@ -10,6 +10,179 @@ import numpy as np
 from strip.types import Balloon, BBox, VerticalStrip
 
 
+def _block_value(block, *names, default=None):
+    for name in names:
+        if isinstance(block, dict) and block.get(name) is not None:
+            return block.get(name)
+        value = getattr(block, name, None)
+        if value is not None:
+            return value
+    return default
+
+
+def _normalise_script_evidence(value) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, dict):
+        return sorted(str(key) for key, score in value.items() if score)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return sorted({str(item) for item in value if item})
+    return []
+
+
+def _normalise_line_polygons_strip(block, *, y_offset: int) -> list[list[list[int]]]:
+    raw_polygons = _block_value(block, "line_polygons", "linePolygons", default=()) or ()
+    polygons: list[list[list[int]]] = []
+    for raw_polygon in raw_polygons:
+        if isinstance(raw_polygon, np.ndarray):
+            raw_polygon = raw_polygon.tolist()
+        if not isinstance(raw_polygon, (list, tuple)):
+            continue
+        points: list[list[int]] = []
+        for raw_point in raw_polygon:
+            if isinstance(raw_point, np.ndarray):
+                raw_point = raw_point.tolist()
+            if not isinstance(raw_point, (list, tuple)) or len(raw_point) < 2:
+                continue
+            try:
+                points.append(
+                    [
+                        int(round(float(raw_point[0]))),
+                        int(round(float(raw_point[1]))) + int(y_offset),
+                    ]
+                )
+            except (TypeError, ValueError):
+                continue
+        if len(points) >= 3:
+            polygons.append(points)
+    return polygons
+
+
+def _detector_block_metadata(block, *, y_offset: int, default_source: str) -> dict:
+    raw_source = _block_value(block, "detector_source", "detector", "source")
+    detector_source = (
+        raw_source.strip()
+        if isinstance(raw_source, str) and raw_source.strip()
+        else default_source
+    )
+    metadata: dict = {
+        "detector_source": detector_source,
+        "detector_sources": [detector_source],
+        "candidate_kind": str(
+            _block_value(block, "candidate_kind", "kind", default="text_region")
+            or "text_region"
+        ),
+    }
+    line_polygons = _normalise_line_polygons_strip(block, y_offset=y_offset)
+    if line_polygons:
+        metadata["line_polygons_strip"] = line_polygons
+    script_evidence = _normalise_script_evidence(
+        _block_value(block, "script_evidence", "scripts", "script")
+    )
+    if script_evidence:
+        metadata["script_evidence"] = script_evidence
+    raw_rotation = _block_value(block, "rotation_deg", "rotation")
+    if raw_rotation is not None:
+        try:
+            metadata["rotation_deg"] = float(raw_rotation)
+            metadata["rotation_source"] = str(
+                _block_value(block, "rotation_source", default="detector") or "detector"
+            )
+        except (TypeError, ValueError):
+            pass
+    return metadata
+
+
+def _merge_provenance_metadata(primary: dict, secondary: dict) -> dict:
+    merged = dict(primary or {})
+    collection_keys = {
+        "detector_source",
+        "detector_sources",
+        "line_polygons_strip",
+        "script_evidence",
+        "rotation_candidates",
+        "candidate_kinds",
+    }
+    # NMS orders candidates by confidence, so scalar decisions belong to the
+    # primary candidate.  Secondary evidence may fill a missing value but must
+    # never rewrite the geometry/classification metadata of the winner.
+    for key, value in dict(secondary or {}).items():
+        if key not in collection_keys and key not in merged:
+            merged[key] = value
+    sources = {
+        str(value)
+        for metadata in (primary or {}, secondary or {})
+        for value in [
+            *(metadata.get("detector_sources") or []),
+            metadata.get("detector_source"),
+        ]
+        if value
+    }
+    if sources:
+        merged["detector_sources"] = sorted(sources)
+        merged["detector_source"] = str(
+            (primary or {}).get("detector_source") or sorted(sources)[0]
+        )
+    polygons: list = []
+    seen_polygons: set[tuple] = set()
+    for metadata in (primary or {}, secondary or {}):
+        for polygon in metadata.get("line_polygons_strip") or []:
+            key = tuple(tuple(int(value) for value in point[:2]) for point in polygon)
+            if len(key) >= 3 and key not in seen_polygons:
+                seen_polygons.add(key)
+                polygons.append([list(point) for point in key])
+    if polygons:
+        merged["line_polygons_strip"] = polygons
+    scripts = {
+        str(value)
+        for metadata in (primary or {}, secondary or {})
+        for value in metadata.get("script_evidence") or []
+        if value
+    }
+    if scripts:
+        merged["script_evidence"] = sorted(scripts)
+    candidate_kinds = {
+        str(value)
+        for metadata in (primary or {}, secondary or {})
+        for value in [
+            *(metadata.get("candidate_kinds") or []),
+            metadata.get("candidate_kind"),
+        ]
+        if value
+    }
+    if candidate_kinds:
+        merged["candidate_kinds"] = sorted(candidate_kinds)
+    rotations: dict[tuple[float, str], dict] = {}
+    for metadata in (primary or {}, secondary or {}):
+        for candidate in metadata.get("rotation_candidates") or []:
+            if not isinstance(candidate, dict) or candidate.get("rotation_deg") is None:
+                continue
+            try:
+                angle = float(candidate["rotation_deg"])
+            except (TypeError, ValueError):
+                continue
+            source = str(candidate.get("rotation_source") or "detector")
+            rotations[(angle, source)] = {
+                "rotation_deg": angle,
+                "rotation_source": source,
+            }
+        if metadata.get("rotation_deg") is not None:
+            try:
+                angle = float(metadata["rotation_deg"])
+            except (TypeError, ValueError):
+                continue
+            source = str(metadata.get("rotation_source") or "detector")
+            rotations[(angle, source)] = {
+                "rotation_deg": angle,
+                "rotation_source": source,
+            }
+    if rotations:
+        merged["rotation_candidates"] = [
+            rotations[key] for key in sorted(rotations, key=lambda item: (item[1], item[0]))
+        ]
+    return merged
+
+
 def _iou(a: BBox, b: BBox) -> float:
     """Intersection-over-union entre dois bboxes."""
     x1 = max(a.x1, b.x1)
@@ -45,9 +218,22 @@ def _nms_balloons(balloons: list[Balloon], iou_threshold: float = 0.5) -> list[B
     )
     kept: list[Balloon] = []
     for cand in sorted_balloons:
-        is_dup = any(_iou(cand.strip_bbox, k.strip_bbox) > iou_threshold for k in kept)
-        if not is_dup:
+        duplicate_index = next(
+            (
+                index
+                for index, existing in enumerate(kept)
+                if _iou(cand.strip_bbox, existing.strip_bbox) > iou_threshold
+            ),
+            None,
+        )
+        if duplicate_index is None:
             kept.append(cand)
+            continue
+        existing = kept[duplicate_index]
+        existing.metadata = _merge_provenance_metadata(
+            dict(getattr(existing, "metadata", {}) or {}),
+            dict(getattr(cand, "metadata", {}) or {}),
+        )
     return kept
 
 
@@ -426,6 +612,8 @@ def _scan_dark_balloon_band_candidates(
 
         metadata = _dark_negative_candidate_metadata(image, candidate)
         metadata["dark_band_scan_candidate"] = True
+        metadata["detector_source"] = "dark_balloon_band_scan"
+        metadata["detector_sources"] = ["dark_balloon_band_scan"]
         added_balloon = Balloon(
             strip_bbox=BBox(
                 candidate.x1,
@@ -561,6 +749,11 @@ def _scan_white_balloon_band_candidates(
                         band_bbox.y2 + y_offset,
                     ),
                     confidence=0.56,
+                    metadata={
+                        "detector_source": "white_balloon_band_scan",
+                        "detector_sources": ["white_balloon_band_scan"],
+                        "candidate_kind": "white_balloon_text_region",
+                    },
                 )
             )
             local_existing.append(Balloon(strip_bbox=band_bbox, confidence=0.56))
@@ -742,8 +935,10 @@ def _merge_negative_detect_candidates(
             union = _bbox_union([existing.strip_bbox, candidate.strip_bbox])
             if union is None:
                 continue
-            metadata = dict(getattr(existing, "metadata", {}) or {})
-            metadata.update(dict(getattr(candidate, "metadata", {}) or {}))
+            metadata = _merge_provenance_metadata(
+                dict(getattr(existing, "metadata", {}) or {}),
+                dict(getattr(candidate, "metadata", {}) or {}),
+            )
             merged[best_index] = Balloon(
                 strip_bbox=union,
                 confidence=max(float(existing.confidence), float(candidate.confidence)),
@@ -813,6 +1008,11 @@ def _scan_ui_layout_band_candidates(
                     box.y2 + y_offset,
                 ),
                 confidence=confidence,
+                metadata={
+                    "detector_source": "ui_layout_band_scan",
+                    "detector_sources": ["ui_layout_band_scan"],
+                    "candidate_kind": "ui_layout_text_region",
+                },
             )
         )
         local_existing.append(Balloon(strip_bbox=box, confidence=confidence))
@@ -925,36 +1125,86 @@ def _attach_page_region_identities(strip: VerticalStrip, balloons: list[Balloon]
 
     from ownership.coordinates import ComponentSeed, assign_component_ids
 
-    by_page: dict[str, list[tuple[Balloon, ComponentSeed, list[int]]]] = {}
+    source_widths = [
+        int(value) for value in list(getattr(strip, "source_page_widths", None) or [])
+    ]
+    by_page: dict[str, list[tuple[Balloon, ComponentSeed, list[int], dict]]] = {}
     for balloon in balloons:
         page_index, page_y0, page_x0 = _page_location_for_bbox(strip, balloon.strip_bbox)
         page_id = f"page_{page_index + 1:03d}"
+        page_chunks = _source_page_chunks(strip)
+        page_height = max(1, int(page_chunks[page_index][1] - page_y0))
+        page_width = (
+            source_widths[page_index]
+            if page_index < len(source_widths) and source_widths[page_index] > 0
+            else max(1, int(strip.width) - 2 * page_x0)
+        )
         bbox_page = [
-            int(balloon.strip_bbox.x1) - page_x0,
-            int(balloon.strip_bbox.y1) - page_y0,
-            int(balloon.strip_bbox.x2) - page_x0,
-            int(balloon.strip_bbox.y2) - page_y0,
+            max(0, min(page_width, int(balloon.strip_bbox.x1) - page_x0)),
+            max(0, min(page_height, int(balloon.strip_bbox.y1) - page_y0)),
+            max(0, min(page_width, int(balloon.strip_bbox.x2) - page_x0)),
+            max(0, min(page_height, int(balloon.strip_bbox.y2) - page_y0)),
         ]
         metadata = dict(getattr(balloon, "metadata", {}) or {})
         detector_source = str(
             metadata.get("detector_source")
             or metadata.get("candidate_source")
-            or ("negative" if metadata.get("negative_detect_candidate") else "primary")
+            or ("negative_region_detector" if metadata.get("negative_detect_candidate") else "primary_region_detector")
         )
-        seed = ComponentSeed(tuple(bbox_page), detector_source)
-        by_page.setdefault(page_id, []).append((balloon, seed, bbox_page))
+        detector_sources = sorted(
+            {
+                detector_source,
+                *(str(value) for value in metadata.get("detector_sources") or [] if value),
+            }
+        )
+        metadata["detector_source"] = detector_source
+        metadata["detector_sources"] = detector_sources
+
+        page_polygons: list[list[list[int]]] = []
+        for polygon in metadata.get("line_polygons_strip") or []:
+            page_polygon = [
+                [
+                    max(0, min(page_width, int(round(float(point[0]))) - page_x0)),
+                    max(0, min(page_height, int(round(float(point[1]))) - page_y0)),
+                ]
+                for point in polygon
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            ]
+            if len(page_polygon) >= 3:
+                page_polygons.append(page_polygon)
+        if page_polygons:
+            metadata["line_polygons_page"] = page_polygons
+            if len(page_polygons) == 1:
+                metadata["polygon_page"] = page_polygons[0]
+            else:
+                hull_points = np.asarray(
+                    [point for polygon in page_polygons for point in polygon],
+                    dtype=np.int32,
+                ).reshape((-1, 1, 2))
+                hull = cv2.convexHull(hull_points, clockwise=False, returnPoints=True)
+                metadata["polygon_page"] = [
+                    [int(point[0][0]), int(point[0][1])] for point in hull
+                ]
+        else:
+            x1, y1, x2, y2 = bbox_page
+            metadata["polygon_page"] = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+        seed = ComponentSeed(tuple(bbox_page), "+".join(detector_sources))
+        by_page.setdefault(page_id, []).append((balloon, seed, bbox_page, metadata))
 
     for page_id, entries in by_page.items():
         component_ids = assign_component_ids(page_id, [entry[1] for entry in entries])
-        for (balloon, _seed, bbox_page), component_id in zip(entries, component_ids):
-            balloon.metadata.update(
+        for (balloon, _seed, bbox_page, metadata), component_id in zip(entries, component_ids):
+            metadata.update(
                 {
                     "bbox_page": bbox_page,
                     "coordinate_space": "page",
                     "page_id": page_id,
                     "region_id": component_id,
+                    "evidence_id": component_id,
                 }
             )
+            balloon.metadata = metadata
     return balloons
 
 
@@ -989,7 +1239,15 @@ def detect_strip_balloons(
                 y2=int(b.y2) + y0,
             )
             chunk_balloons.append(
-                Balloon(strip_bbox=bbox, confidence=float(b.confidence))
+                Balloon(
+                    strip_bbox=bbox,
+                    confidence=float(b.confidence),
+                    metadata=_detector_block_metadata(
+                        b,
+                        y_offset=y0,
+                        default_source="primary_region_detector",
+                    ),
+                )
             )
         all_balloons.extend(chunk_balloons)
         if _white_balloon_band_scan_enabled():
@@ -1024,6 +1282,14 @@ def detect_strip_balloons(
                         y2=int(b.y2) + y0,
                     ),
                     confidence=float(b.confidence),
+                    metadata={
+                        **_detector_block_metadata(
+                            b,
+                            y_offset=y0,
+                            default_source="negative_region_detector",
+                        ),
+                        "negative_detect_candidate": True,
+                    },
                 )
                 for b in negative_blocks
             ]

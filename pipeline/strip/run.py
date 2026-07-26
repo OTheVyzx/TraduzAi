@@ -2294,6 +2294,69 @@ def _source_page_bounds(strip: VerticalStrip, page_number: int) -> tuple[int, in
     return 0, int(strip.height)
 
 
+def _discover_source_components_for_strip(strip: VerticalStrip, balloons: list) -> dict[str, list]:
+    """Discover page-space text evidence before any band OCR is accepted."""
+
+    from vision_stack.runtime import discover_page_source_components
+
+    breaks = [int(value) for value in list(strip.source_page_breaks or [])]
+    if not breaks or breaks[0] != 0:
+        breaks.insert(0, 0)
+    if breaks[-1] != int(strip.height):
+        breaks.append(int(strip.height))
+    offsets = [int(value) for value in list(strip.page_x_offsets or [])]
+    source_widths = [
+        int(value) for value in list(getattr(strip, "source_page_widths", None) or [])
+    ]
+    result: dict[str, list] = {}
+
+    for page_index, (page_y0, page_y1) in enumerate(zip(breaks, breaks[1:])):
+        page_id = f"page_{page_index + 1:03d}"
+        page_x0 = offsets[page_index] if page_index < len(offsets) else 0
+        page_x1 = (
+            page_x0 + source_widths[page_index]
+            if page_index < len(source_widths) and source_widths[page_index] > 0
+            else int(strip.width) - page_x0
+        )
+        page_x0 = max(0, min(int(strip.width), page_x0))
+        page_x1 = max(0, min(int(strip.width), page_x1))
+        if page_x1 <= page_x0:
+            page_x0, page_x1 = 0, int(strip.width)
+        page_rgb = strip.image[page_y0:page_y1, page_x0:page_x1, :]
+        detector_regions = []
+        for balloon in balloons:
+            metadata = dict(getattr(balloon, "metadata", {}) or {})
+            if str(metadata.get("page_id") or "") != page_id:
+                continue
+            bbox_page = metadata.get("bbox_page")
+            if not isinstance(bbox_page, (list, tuple)) or len(bbox_page) < 4:
+                continue
+            detector_regions.append(
+                {
+                    "bbox_page": [int(value) for value in bbox_page[:4]],
+                    "polygon_page": metadata.get("polygon_page") or (),
+                    "detector_source": str(
+                        metadata.get("detector_source")
+                        or ("negative_region_detector" if metadata.get("negative_detect_candidate") else "strip_region_detector")
+                    ),
+                    "confidence": float(getattr(balloon, "confidence", 0.0) or 0.0),
+                    "region_id": metadata.get("region_id"),
+                    "evidence_id": metadata.get("evidence_id") or metadata.get("region_id"),
+                    "script_evidence": metadata.get("script_evidence") or (),
+                    "rotation_deg": metadata.get("rotation_deg"),
+                    "rotation_source": metadata.get("rotation_source"),
+                }
+            )
+        result[page_id] = discover_page_source_components(
+            page_rgb,
+            page_id=page_id,
+            detector_regions=detector_regions,
+        )
+
+    strip.source_components_by_page = result
+    return result
+
+
 def _build_scheduler_executor_report(*, band_count: int, page_count: int) -> dict | None:
     mode = _strip_scheduler_executor_mode()
     if not mode:
@@ -5150,6 +5213,14 @@ def run_chapter(
             balloons = detect_strip_balloons(strip, detector=detector)
         if chapter_telemetry is not None:
             chapter_telemetry["balloon_count"] = len(balloons)
+
+        with _timed(chapter_telemetry, "source_component_discovery"):
+            source_components_by_page = _discover_source_components_for_strip(strip, balloons)
+        if chapter_telemetry is not None:
+            chapter_telemetry["source_component_count"] = sum(
+                len(components) for components in source_components_by_page.values()
+            )
+            chapter_telemetry["source_component_page_count"] = len(source_components_by_page)
 
         with _timed(chapter_telemetry, "strip_group_bands"):
             band_margin = _strip_band_margin_px(idioma_origem)

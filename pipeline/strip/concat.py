@@ -25,6 +25,7 @@ def build_strip(
             width=0,
             height=0,
             source_page_breaks=[0],
+            source_page_widths=[],
         )
 
     # Primeira passada: ler imagens
@@ -61,6 +62,7 @@ def build_strip(
         height=total_height,
         source_page_breaks=page_breaks,
         page_x_offsets=page_x_offsets,
+        source_page_widths=[int(image.shape[1]) for image in images],
     )
 
 

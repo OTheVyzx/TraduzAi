@@ -170,6 +170,14 @@ def test_review_required_owner_cannot_enter_render_plan():
 
 def test_graph_serialization_is_deterministic():
     graph = _valid_graph()
+    graph.components[0] = replace(
+        graph.components[0],
+        confidence=0.87,
+        script_evidence=("latin_likely",),
+        evidence_ids=("detector_17", "glyph_04"),
+        rotation_deg=-12.5,
+        rotation_source="detector_orientation",
+    )
     component_b = replace(
         _component("component_b"),
         bbox_page=(400, 500, 600, 560),
@@ -189,6 +197,9 @@ def test_graph_serialization_is_deterministic():
         "component_a",
         "component_b",
     ]
+    assert first["components"][0]["script_evidence"] == ["latin_likely"]
+    assert first["components"][0]["evidence_ids"] == ["detector_17", "glyph_04"]
+    assert first["components"][0]["rotation_deg"] == -12.5
     assert OwnerGraph.from_dict(first).to_dict() == first
 
 

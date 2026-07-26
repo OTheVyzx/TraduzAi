@@ -14,6 +14,38 @@ import cv2
 import numpy as np
 from PIL import Image
 
+
+def test_source_component_runtime_adapter_is_independent_from_accepted_ocr():
+    from vision_stack.runtime import discover_page_source_components
+
+    image = np.full((180, 320, 3), 255, dtype=np.uint8)
+    detector_block = SimpleNamespace(
+        xyxy=(30.0, 40.0, 180.0, 90.0),
+        detector="primary_region_detector",
+        confidence=0.91,
+        region_id="region_p003_001_test",
+        script_evidence=("latin_likely",),
+        rotation_deg=-7.5,
+        rotation_source="line_polygon",
+    )
+
+    components = discover_page_source_components(
+        image,
+        page_id="page_003",
+        detector_regions=[detector_block],
+        glyph_candidates=[],
+    )
+
+    assert len(components) == 1
+    assert components[0].page_id == "page_003"
+    assert components[0].bbox_page == (30, 40, 180, 90)
+    assert components[0].detector_sources == ("primary_region_detector",)
+    assert components[0].confidence == 0.91
+    assert components[0].evidence_ids == ("region_p003_001_test",)
+    assert components[0].script_evidence == ("latin_likely",)
+    assert components[0].rotation_deg == -7.5
+    assert components[0].rotation_source == "line_polygon"
+
 from vision_stack.runtime import (
     _apply_inpainting_round,
     _apply_textured_balloon_band_artifact_cleanup,
