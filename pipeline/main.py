@@ -7095,15 +7095,7 @@ def _write_debug_jsonl_replace(recorder, rel_path: str, entries: list[dict]) -> 
     if not recorder:
         return
     try:
-        target = recorder._root / rel_path
-        stage = recorder._stage_from_rel(rel_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            json.dumps(recorder._header(entry, stage=stage), ensure_ascii=False)
-            for entry in entries
-        ]
-        target.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
-        recorder.register_artifact(stage=stage, rel_path=rel_path, kind="jsonl")
+        recorder.write_jsonl_replace(rel_path, entries)
     except Exception as exc:
         try:
             recorder.event("qa_export_gate", "write_jsonl_replace_failed", {"rel_path": rel_path, "error": str(exc)})
@@ -8363,6 +8355,23 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
         qa = {}
     summary = qa.get("summary") if isinstance(qa.get("summary"), dict) else {}
     export_gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
+    owner_first_rows = [
+        issue
+        for issue in export_gate.get("issues") or []
+        if isinstance(issue, dict)
+        and (issue.get("owner_id") is not None or issue.get("source") == "final_pixel_qa")
+    ]
+    if owner_first_rows:
+        from ownership.artifacts import validate_gate_integrity
+        from qa.export_gate import append_qa_integrity_failure
+
+        integrity_failures = validate_gate_integrity(
+            summary=summary,
+            gate=export_gate,
+            rows=owner_first_rows,
+        )
+        if integrity_failures:
+            append_qa_integrity_failure(export_gate, integrity_failures)
     summary_critical_flags = int(summary.get("critical_flag_count", summary.get("critical_count", 0)) or 0)
     summary_critical_issues = int(
         summary.get("critical_issue_count", export_gate.get("critical_issue_count", 0)) or 0
@@ -8402,6 +8411,20 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
         if isinstance(issue, dict)
     ]
     visual_blockers = [issue for issue in issues if issue.get("severity") == "critical"]
+    final_pixel_reports = qa.get("final_pixel_reports")
+    if isinstance(final_pixel_reports, list):
+        from ownership.artifacts import OwnerArtifactPublisher
+
+        graph_payloads = [
+            graph
+            for graph in project_data.get("page_owner_graphs") or []
+            if isinstance(graph, dict) and str(graph.get("page_id") or "").strip()
+        ]
+        OwnerArtifactPublisher(recorder).publish(
+            graphs={str(graph["page_id"]): graph for graph in graph_payloads},
+            final_pixel_reports=final_pixel_reports,
+            export_gate=export_gate,
+        )
     recorder.write_json("11_qa_export_gate/export_gate.json", export_gate)
     _write_debug_jsonl_replace(recorder, "11_qa_export_gate/qa_issues.jsonl", issues)
     _write_debug_jsonl_replace(recorder, "11_qa_export_gate/visual_blockers.jsonl", visual_blockers)

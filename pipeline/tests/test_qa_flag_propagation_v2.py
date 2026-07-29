@@ -11,6 +11,37 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def test_debug_export_gate_integrity_mismatch_becomes_critical_issue(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-owner-qa")
+    project = {
+        "paginas": [],
+        "qa": {
+            "summary": {"critical_issue_count": 0, "blocking_issue_count": 0},
+            "export_gate": {
+                "status": "BLOCK",
+                "critical_issue_count": 1,
+                "blocking_issue_count": 1,
+                "issues": [
+                    {
+                        "page_id": "page_001",
+                        "owner_id": "owner_a",
+                        "trace_id": "page_001:owner_a:source_visible",
+                        "offenders": ["SOURCE BODY"],
+                        "severity": "critical",
+                        "blocks_export": True,
+                    }
+                ],
+            },
+        },
+    }
+
+    main._write_debug_export_gate_artifacts(recorder, project)
+
+    issues = project["qa"]["export_gate"]["issues"]
+    assert any(issue.get("reason") == "qa_integrity_failure" for issue in issues)
+    assert project["qa"]["export_gate"]["status"] == "BLOCK"
+
+
 def test_clear_non_bubble_panel_mask_flags_accepts_derived_card_panel_mask():
     project = {
         "paginas": [

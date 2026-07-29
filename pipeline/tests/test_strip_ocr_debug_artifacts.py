@@ -28,6 +28,31 @@ from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
 from vision_stack.runtime import build_page_result
 
 
+def test_owner_graph_snapshots_publish_component_and_observation_artifacts(tmp_path):
+    from ownership.artifacts import OwnerArtifactPublisher
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-owner-strip")
+    graph = {
+        "page_id": "page_003",
+        "components": [{"component_id": "component_3", "bbox_page": [1, 2, 30, 20]}],
+        "observations": [],
+        "owners": [],
+        "component_dispositions": [
+            {"component_id": "component_3", "decision": "preserve", "reason": "explicit_credit_policy"}
+        ],
+        "violations": [],
+    }
+    OwnerArtifactPublisher(recorder).publish(graphs={"page_003": graph})
+
+    root = tmp_path / "debug" / "e2e"
+    component = json.loads(
+        (root / "02_strip_detect/page_owner_components.jsonl").read_text(encoding="utf-8")
+    )
+    assert component["page_id"] == "page_003"
+    assert component["owner_id"] is None
+    assert component["disposition"] == "preserve"
+
+
 def test_debug_provenance_rejects_metadata_from_another_run(tmp_path):
     from inpainter import _debug_inpaint_metadata_matches_run, _write_strip_inpaint_debug
 
@@ -442,6 +467,11 @@ def test_run_chapter_writes_pr16_debug_artifacts(tmp_path):
         assert (root / "12_contact_sheets" / "translated_comparison.jpg").exists()
         assert (root / "12_contact_sheets" / "problem_bands.jpg").exists()
         assert (root / "02_strip_detect" / "candidate_text_matching.jsonl").exists()
+        assert (root / "02_strip_detect" / "page_owner_components.jsonl").exists()
+        assert (root / "03_ocr" / "page_owner_observations.jsonl").exists()
+        assert (root / "04_text_normalization_router" / "page_owner_graph.json").exists()
+        assert (root / "09_typeset" / "owner_render_plan.jsonl").exists()
+        assert (root / "11_qa_export_gate" / "owner_invariant_report.json").exists()
 
         breakdown = json.loads(
             (root / "10_copyback_reassemble" / "page_cleanup_breakdown.json").read_text(encoding="utf-8")
@@ -477,7 +507,7 @@ def test_run_chapter_writes_pr16_debug_artifacts(tmp_path):
         )
         assert final_crop["band_id"] == "page_001_band_000"
         assert final_crop["translated_output_page"] == "001.jpg"
-        assert final_crop["crop_bbox_in_translated_page"] == [0, 0, 120, 166]
+        assert final_crop["crop_bbox_in_translated_page"] == [0, 0, 120, 180]
         assert final_crop["final_crop_path"] == "10_copyback_reassemble/final_bands/page_001_band_000.jpg"
     finally:
         bind_recorder(None)

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 import json
 import logging
 
@@ -86,6 +86,28 @@ class DebugRecorder:
             self._append_jsonl(self._root / rel_path, self._header(payload, stage=stage))
         except Exception as exc:
             self._record_error(stage=stage, action="write_jsonl", exc=exc, rel_path=rel_path)
+
+    def write_jsonl_replace(self, rel_path: str, payloads: Iterable[dict[str, Any]]) -> None:
+        """Replace a derived JSONL artifact atomically enough for debug evidence."""
+        if not self.enabled:
+            return
+        stage = self._stage_from_rel(rel_path)
+        try:
+            target = self._root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            rows = [self._header(payload, stage=stage) for payload in payloads]
+            target.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            self.register_artifact(stage=stage, rel_path=rel_path, kind="jsonl")
+        except Exception as exc:
+            self._record_error(
+                stage=stage,
+                action="write_jsonl_replace",
+                exc=exc,
+                rel_path=rel_path,
+            )
 
     def write_image(
         self,

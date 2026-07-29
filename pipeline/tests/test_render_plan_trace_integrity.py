@@ -12,6 +12,14 @@ def _jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def test_owner_artifact_trace_is_composite_and_stable():
+    from ownership.artifacts import composite_owner_trace
+
+    assert composite_owner_trace("page_009", "owner_body", "render") == (
+        "page_009:owner_body:render"
+    )
+
+
 def test_render_band_image_splits_raw_band_plan_from_deduped_final_page_plan(tmp_path):
     from debug_tools import DebugRecorder, bind_recorder
     from typesetter import renderer as renderer_mod

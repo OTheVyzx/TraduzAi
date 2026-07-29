@@ -1083,6 +1083,62 @@ def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> 
     }
 
 
+def append_qa_integrity_failure(
+    export_gate: dict[str, Any], failures: list[str]
+) -> dict[str, Any]:
+    """Add one fail-closed row and make all exported gate counts self-consistent."""
+    failures = list(dict.fromkeys(str(value) for value in failures if str(value).strip()))
+    if not failures:
+        return export_gate
+    issues = [item for item in export_gate.get("issues") or [] if isinstance(item, dict)]
+    if not any(issue.get("reason") == "qa_integrity_failure" for issue in issues):
+        issues.append(
+            {
+                "page": None,
+                "page_id": "run",
+                "owner_id": None,
+                "component_ids": [],
+                "trace_id": "run:qa_integrity:failure",
+                "coordinate_space": "page",
+                "type": "qa_integrity_failure",
+                "issue_scope": "run",
+                "severity": "critical",
+                "blocks_export": True,
+                "source": "owner_artifacts",
+                "reason": "qa_integrity_failure",
+                "flags": ["qa_integrity_failure"],
+                "offenders": failures,
+                "artifact_links": [
+                    "11_qa_export_gate/owner_invariant_report.json",
+                    "11_qa_export_gate/qa_export_gate_consistency.json",
+                ],
+            }
+        )
+    critical = [item for item in issues if item.get("severity") == "critical"]
+    review = [item for item in issues if item.get("severity") == "warning"]
+    blocking = [
+        item
+        for item in issues
+        if item.get("severity") == "critical" or bool(item.get("blocks_export"))
+    ]
+    export_gate.update(
+        {
+            "status": "BLOCK",
+            "allowed": False,
+            "issue_count": len(issues),
+            "blocking_issue_count": len(blocking),
+            "blocking_flag_count": sum(len(item.get("flags") or []) for item in blocking),
+            "critical_issue_count": len(critical),
+            "critical_flag_count": sum(len(item.get("flags") or []) for item in critical),
+            "review_issue_count": len(review),
+            "review_flag_count": sum(len(item.get("flags") or []) for item in review),
+            "needs_review": bool(review),
+            "issues": issues,
+        }
+    )
+    return export_gate
+
+
 def _collect_final_visual_contract_issues(project: dict[str, Any], existing_issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
     qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
     contract = qa.get("post_rerender_final_visual_contract") if isinstance(qa, dict) else None

@@ -1899,6 +1899,36 @@ def _write_page_cleanup_breakdown_debug(breakdown: dict[str, float]) -> None:
         return
 
 
+def _write_owner_debug_artifacts(
+    owner_graphs: dict[str, OwnerGraph],
+    bands: list[Band],
+    compositions: dict[str, PageCompositionResult] | None,
+) -> None:
+    recorder = _get_debug_recorder()
+    if recorder is None or not owner_graphs:
+        return
+    try:
+        from ownership.artifacts import OwnerArtifactPublisher
+
+        executions = [
+            commit
+            for band in bands
+            for commit in list(getattr(band, "owner_execution_commits", None) or [])
+            if isinstance(commit, OwnerExecutionCommit) and commit.committed
+        ]
+        OwnerArtifactPublisher(recorder).publish(
+            graphs=owner_graphs,
+            executions=executions,
+            compositions=compositions,
+        )
+    except Exception as exc:
+        recorder.event(
+            "owner_artifacts",
+            "publish_failed",
+            {"error": str(exc)},
+        )
+
+
 def _dark_text_cleanup_loses_visible_ink(
     before: np.ndarray,
     after: np.ndarray,
@@ -6296,6 +6326,7 @@ def run_chapter(
             _close_inpainter_prewarm(prewarm_handle)
 
     owner_composition_active = owner_graph_mode == "enforce"
+    owner_chapter_composition = None
     if owner_composition_active:
         with _timed(chapter_telemetry, "owner_page_composition"):
             owner_chapter_composition = _compose_owner_output_pages(
@@ -6656,6 +6687,15 @@ def run_chapter(
         output_pages,
         bands,
         owner_mode=owner_composition_active,
+    )
+    _write_owner_debug_artifacts(
+        owner_graphs,
+        bands,
+        (
+            owner_chapter_composition.compositions
+            if owner_chapter_composition is not None
+            else None
+        ),
     )
 
     _write_page_cleanup_breakdown_debug(cleanup_breakdown)
