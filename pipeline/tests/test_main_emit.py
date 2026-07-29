@@ -49,6 +49,11 @@ class MainEmitTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "PASS")
 
+    def test_automatic_owner_mode_rejects_implicit_legacy(self) -> None:
+        self.assertEqual(main._automatic_owner_graph_mode({}), "enforce")
+        with self.assertRaisesRegex(ValueError, "legacy_unverified"):
+            main._automatic_owner_graph_mode({"owner_graph_mode": "legacy"})
+
     def test_emit_swallow_oserror_from_stdout_once(self) -> None:
         stderr = io.StringIO()
 

@@ -153,6 +153,13 @@ class ProjectMigrationTests(unittest.TestCase):
         self.assertEqual(migrated["owner_graph_status"], "legacy_unverified")
         self.assertEqual(migrated["page_owner_graphs"], [])
 
+    def test_legacy_migration_selects_only_explicit_legacy_adapter(self) -> None:
+        from ownership.legacy_adapter import LegacyUnverifiedAdapter, owner_mode_for_project
+
+        project = {"owner_graph_status": "legacy_unverified", "paginas": []}
+        self.assertEqual(owner_mode_for_project(project), "legacy")
+        self.assertIs(LegacyUnverifiedAdapter(project).project, project)
+
     def test_v12_project_is_preserved_and_gets_legacy_alias(self) -> None:
         project = {
             "schema_version": SCHEMA_VERSION,

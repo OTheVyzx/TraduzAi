@@ -669,28 +669,44 @@ def test_shadow_telemetry_counts_graph_violations_by_code() -> None:
     assert counts == {"owner_executor_full_coverage_missing": 1}
 
 
-def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode() -> None:
-    from strip.run import run_chapter
+def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
+    tmp_path, monkeypatch
+) -> None:
+    import strip.run as run
 
-    detector = MagicMock()
-    runtime = MagicMock()
-    translator = MagicMock()
-    inpainter = MagicMock()
-    typesetter = MagicMock()
+    input_path = tmp_path / "001.jpg"
+    cv2.imwrite(str(input_path), np.full((32, 40, 3), 235, dtype=np.uint8))
+    band = Band(y_top=0, y_bottom=32)
+    legacy_process = MagicMock(side_effect=AssertionError("legacy band execution called"))
+    monkeypatch.setattr(run, "detect_strip_balloons", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(run, "group_balloons_into_bands", lambda *_args, **_kwargs: [band])
+    empty_graph = OwnerGraph(
+        schema_version=1,
+        page_id="page_001",
+        components=[],
+        observations=[],
+        owners=[],
+        projections=[],
+    )
+    monkeypatch.setattr(
+        run,
+        "_run_owner_control_plane",
+        lambda *_args, **_kwargs: {"page_001": empty_graph},
+    )
+    monkeypatch.setattr(run, "process_band", legacy_process)
+    monkeypatch.setattr(run, "_start_inpainter_prewarm", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(RuntimeError, match="enforce.*not enabled"):
-        run_chapter(
-            [Path("unused-page.jpg")],
-            Path("unused-output"),
-            detector=detector,
-            runtime=runtime,
-            translator=translator,
-            inpainter=inpainter,
-            typesetter=typesetter,
-            owner_graph_mode="enforce",
-        )
+    pages = run.run_chapter(
+        [input_path],
+        tmp_path / "output",
+        detector=MagicMock(),
+        runtime=MagicMock(),
+        translator=MagicMock(),
+        inpainter=MagicMock(),
+        typesetter=MagicMock(),
+        owner_graph_mode="enforce",
+        skip_page_cleanup_rerender=True,
+    )
 
-    detector.detect.assert_not_called()
-    translator.translate_pages.assert_not_called()
-    inpainter.inpaint_band_image.assert_not_called()
-    typesetter.render_band_image.assert_not_called()
+    assert len(pages) == 1
+    legacy_process.assert_not_called()

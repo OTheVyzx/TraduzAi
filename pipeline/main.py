@@ -62,6 +62,40 @@ REMOVED_AUTOMATIC_DECISION_FIELDS = {
 }
 
 
+def _automatic_owner_graph_mode(config: dict) -> str:
+    requested = str(config.get("owner_graph_mode") or "enforce").strip().lower()
+    if requested not in {"enforce", "shadow", "legacy"}:
+        raise ValueError("owner_graph_mode must be enforce, shadow, or legacy")
+    if requested == "legacy" and str(config.get("owner_graph_status") or "") != "legacy_unverified":
+        raise ValueError("legacy mode requires an explicit legacy_unverified project")
+    return requested
+
+
+def _apply_owner_mode_project_repairs(project_data: dict) -> dict:
+    status = str(project_data.get("owner_graph_status") or "legacy_unverified")
+    if status == "verified":
+        return {
+            "owner_mode": "verified",
+            "legacy_helpers_called": [],
+            "same_balloon_fragments_merged": 0,
+            "cross_page_band_layers_rehomed": 0,
+        }
+    from ownership.legacy_adapter import LegacyUnverifiedAdapter
+
+    adapter = LegacyUnverifiedAdapter(project_data)
+    called = []
+    merged = adapter.call(_merge_same_balloon_fragment_layers, project_data)
+    called.append("_merge_same_balloon_fragment_layers")
+    rehomed = adapter.call(_rehome_cross_page_band_layers, project_data)
+    called.append("_rehome_cross_page_band_layers")
+    return {
+        "owner_mode": "legacy_unverified",
+        "legacy_helpers_called": called,
+        "same_balloon_fragments_merged": int(merged or 0),
+        "cross_page_band_layers_rehomed": int(rehomed or 0),
+    }
+
+
 def _is_art_fragment_review_layer(layer: dict) -> bool:
     reason = str(layer.get("route_reason") or layer.get("skip_reason") or "").strip().lower()
     if reason in {"ocr_art_fragment_suspected", "sfx_art_fragment_suspected"}:
@@ -6334,6 +6368,9 @@ def _hydrate_project_render_metadata_from_debug_candidates(project_data: dict) -
         "restored_missing_candidate_layers": 0,
         "missing_debug_root": False,
     }
+    if str(project_data.get("owner_graph_status") or "") == "verified":
+        audit["skipped_verified_owner_project"] = True
+        return audit
     debug_root = _debug_root_from_project(project_data)
     if debug_root is None:
         audit["missing_debug_root"] = True
@@ -8320,7 +8357,11 @@ def _run_post_rerender_final_visual_contract(
     after_final_project_image_rerender: bool,
     after_late_render_contract_repair: bool,
 ) -> dict:
-    should_refresh_crops = bool(after_final_project_image_rerender or after_late_render_contract_repair)
+    verified_owner_project = str(project_data.get("owner_graph_status") or "") == "verified"
+    should_refresh_crops = bool(
+        not verified_owner_project
+        and (after_final_project_image_rerender or after_late_render_contract_repair)
+    )
     if should_refresh_crops:
         refresh_audit = _refresh_debug_final_band_crops_from_translated(recorder, work_dir)
     else:
@@ -8333,6 +8374,7 @@ def _run_post_rerender_final_visual_contract(
             "missing_count": 0,
             "error_count": 0,
             "skipped_no_final_rerender": True,
+            "skipped_verified_owner_project": verified_owner_project,
         }
     refresh_audit["source"] = "translated_after_final_project_rerender"
     refresh_audit["after_final_project_image_rerender"] = bool(after_final_project_image_rerender)
@@ -9146,6 +9188,8 @@ def _run_pipeline(config_path: str):
                 translation_context=config.get("translation_context") or None,
                 chapter_telemetry=strip_chapter_telemetry,
                 skip_page_cleanup_rerender=bool(config.get("skip_inpaint")),
+                owner_graph_mode=_automatic_owner_graph_mode(config),
+                legacy_project_status=config.get("owner_graph_status"),
             )
         strip_chapter_telemetry["internal_unattributed_sec"] = round(
             max(
@@ -9408,24 +9452,34 @@ def _run_pipeline(config_path: str):
             final_render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
             debug_mask_bbox_repair = _repair_project_bubble_bboxes_from_debug_masks(project_data)
             real_bubble_safe_area_repair = _repair_project_real_bubble_body_safe_areas(project_data)
-            same_balloon_fragments_merged = _merge_same_balloon_fragment_layers(project_data)
+            owner_mode_repairs = _apply_owner_mode_project_repairs(project_data)
+            same_balloon_fragments_merged = owner_mode_repairs[
+                "same_balloon_fragments_merged"
+            ]
             distinct_dark_lobe_payload_merge_repairs = _repair_distinct_dark_lobe_project_payload_merges(
                 list(_iter_project_text_layers(project_data))
             )
             distinct_hidden_nonfragment_restored = _restore_hidden_distinct_nonfragment_layers(project_data)
             same_identity_fragments_suppressed = _suppress_same_identity_merged_fragments(project_data)
-            cross_page_band_layers_rehomed = _rehome_cross_page_band_layers(project_data)
+            cross_page_band_layers_rehomed = owner_mode_repairs[
+                "cross_page_band_layers_rehomed"
+            ]
             broad_fallback_layers_suppressed = _suppress_broad_fallback_merge_layers(project_data)
             final_page_space_after_hydration = _normalize_final_project_page_space_layers(project_data)
             post_page_space_render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
             post_page_space_real_bubble_safe_area_repair = _repair_project_real_bubble_body_safe_areas(project_data)
-            post_page_space_same_balloon_fragments_merged = _merge_same_balloon_fragment_layers(project_data)
+            post_owner_mode_repairs = _apply_owner_mode_project_repairs(project_data)
+            post_page_space_same_balloon_fragments_merged = post_owner_mode_repairs[
+                "same_balloon_fragments_merged"
+            ]
             post_page_space_distinct_dark_lobe_payload_merge_repairs = _repair_distinct_dark_lobe_project_payload_merges(
                 list(_iter_project_text_layers(project_data))
             )
             post_page_space_distinct_hidden_nonfragment_restored = _restore_hidden_distinct_nonfragment_layers(project_data)
             post_page_space_same_identity_fragments_suppressed = _suppress_same_identity_merged_fragments(project_data)
-            post_page_space_cross_page_band_layers_rehomed = _rehome_cross_page_band_layers(project_data)
+            post_page_space_cross_page_band_layers_rehomed = post_owner_mode_repairs[
+                "cross_page_band_layers_rehomed"
+            ]
             scrubbed_local_auxiliary_bboxes = _scrub_project_local_auxiliary_bboxes(project_data)
             final_distinct_dark_lobe_geometry_repairs = _finalize_distinct_dark_lobe_project_geometry(
                 list(_iter_project_text_layers(project_data))
@@ -13687,6 +13741,13 @@ def _rerender_final_project_images_from_metadata(project_data: dict, work_dir: P
     image has already been written.  Rerendering here keeps the visual output in
     sync with the final project.json and export-gate evidence.
     """
+    if str(project_data.get("owner_graph_status") or "") == "verified":
+        return {
+            "pages_checked": 0,
+            "pages_rerendered": 0,
+            "errors": [],
+            "skipped_verified_owner_project": True,
+        }
     pages = project_data.get("paginas") if isinstance(project_data, dict) else None
     if not isinstance(pages, list):
         return {"pages_checked": 0, "pages_rerendered": 0, "errors": []}

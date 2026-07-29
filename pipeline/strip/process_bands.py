@@ -2740,6 +2740,15 @@ class BandImageStageOutput:
         return np.array(self._image, copy=True)
 
 
+@dataclass(frozen=True)
+class OwnerPageExecution:
+    """Atomic page-space results produced without invoking band semantics."""
+
+    graph: OwnerGraph
+    commits: tuple[OwnerExecutionCommit, ...]
+    records: tuple[dict[str, Any], ...]
+
+
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
     """Converte uma Band para o formato dict que vision_stack.runtime aceita."""
     if band.strip_slice is None:
@@ -9593,6 +9602,318 @@ def collect_band_evidence(
         components=list(components),
         terminal_reason=terminal_reason,
         perf=copy.deepcopy(dict(collection_band.perf or {})),
+    )
+
+
+def _single_owner_graph(
+    graph: OwnerGraph,
+    owner_id: str,
+) -> OwnerGraph:
+    """Project one resolved owner without creating or merging semantics."""
+
+    projected = copy.deepcopy(graph)
+    projected.owners = [owner for owner in projected.owners if owner.owner_id == owner_id]
+    if len(projected.owners) != 1:
+        raise ValueError(f"owner graph does not contain exactly one {owner_id!r}")
+    owner = projected.owners[0]
+    component_ids = set(owner.component_ids)
+    observation_ids = set(owner.observation_ids)
+    projected.components = [
+        component for component in projected.components
+        if component.component_id in component_ids
+    ]
+    projected.observations = [
+        observation for observation in projected.observations
+        if observation.observation_id in observation_ids
+    ]
+    projected.projections = [
+        projection for projection in projected.projections
+        if projection.owner_id == owner_id
+    ]
+    projected.component_dispositions = [
+        disposition for disposition in projected.component_dispositions
+        if disposition.component_id in component_ids
+    ]
+    projected.violations = [
+        violation for violation in projected.violations
+        if not set(violation.offenders).isdisjoint(
+            {owner_id, *component_ids, *observation_ids}
+        )
+    ]
+    projected.require_valid()
+    return projected
+
+
+def _page_polygon_mask(
+    shape: tuple[int, int],
+    polygons: list[tuple[tuple[int, int], ...]],
+) -> np.ndarray:
+    mask = np.zeros(shape, dtype=np.uint8)
+    height, width = shape
+    for polygon in polygons:
+        points = np.asarray(polygon, dtype=np.int32)
+        if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] != 2:
+            continue
+        points[:, 0] = np.clip(points[:, 0], 0, max(0, width - 1))
+        points[:, 1] = np.clip(points[:, 1], 0, max(0, height - 1))
+        cv2.fillPoly(mask, [points], 255)
+    return mask
+
+
+def _owner_glyph_raster(
+    page_rgb: np.ndarray,
+    *,
+    support_polygons: list[tuple[tuple[int, int], ...]],
+) -> np.ndarray:
+    """Extract source ink inside OCR support, never authorizing a bbox fill."""
+
+    support = _page_polygon_mask(page_rgb.shape[:2], support_polygons)
+    ys, xs = np.nonzero(support)
+    if xs.size <= 0:
+        raise ValueError("owner OCR support has no page-space pixels")
+    x1, y1 = int(xs.min()), int(ys.min())
+    x2, y2 = int(xs.max()) + 1, int(ys.max()) + 1
+    crop = page_rgb[y1:y2, x1:x2, :3]
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    border = np.concatenate((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
+    background = float(np.median(border)) if border.size else float(np.median(gray))
+    distance = np.abs(gray.astype(np.float32) - background)
+    threshold, _ = cv2.threshold(
+        np.clip(distance, 0, 255).astype(np.uint8),
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+    foreground = (distance >= max(4.0, float(threshold))).astype(np.uint8) * 255
+    local_support = support[y1:y2, x1:x2]
+    foreground[local_support == 0] = 0
+    foreground[local_support == 0] = 0
+    raster = np.zeros(page_rgb.shape[:2], dtype=np.uint8)
+    raster[y1:y2, x1:x2] = foreground
+    if not np.any(raster):
+        raise ValueError("owner OCR support contains no safe source-ink raster")
+    return raster
+
+
+def _owner_layout_regions(graph: OwnerGraph) -> list[dict[str, Any]]:
+    owner = graph.owners[0]
+    components = {
+        component.component_id: component for component in graph.components
+    }
+    regions: list[dict[str, Any]] = []
+    for order, component_id in enumerate(owner.component_ids):
+        component = components[component_id]
+        polygon = component.polygon_page or (
+            (component.bbox_page[0], component.bbox_page[1]),
+            (component.bbox_page[2], component.bbox_page[1]),
+            (component.bbox_page[2], component.bbox_page[3]),
+            (component.bbox_page[0], component.bbox_page[3]),
+        )
+        regions.append(
+            {
+                "layout_region_id": f"{owner.owner_id}__{component_id}",
+                "owner_id": owner.owner_id,
+                "order": order,
+                "bbox_page": list(component.bbox_page),
+                "safe_polygon_page": [list(point) for point in polygon],
+            }
+        )
+    return regions
+
+
+def execute_owner_page_graph(
+    page_rgb: np.ndarray,
+    graph: OwnerGraph,
+    *,
+    translator,
+    inpainter,
+    typesetter,
+    context: dict | None = None,
+    glossario: dict | None = None,
+    idioma_origem: str = "en",
+    idioma_destino: str = "pt-BR",
+    obra: str = "",
+    models_dir: str = "",
+    ollama_host: str = "http://localhost:11434",
+    ollama_model: str = "traduzai-translator",
+    translation_context: dict | None = None,
+) -> OwnerPageExecution:
+    """Execute every page owner once against canonical page pixels."""
+
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+    from layout.balloon_layout import enrich_page_layout
+
+    graph.require_valid()
+    source = np.ascontiguousarray(page_rgb, dtype=np.uint8)
+    translated_stage = _run_translate_stage(
+        {"page_id": graph.page_id, "texts": []},
+        translator=translator,
+        owner_graph=graph,
+        context=context,
+        glossario=glossario,
+        idioma_origem=idioma_origem,
+        idioma_destino=idioma_destino,
+        obra=obra,
+        models_dir=models_dir,
+        ollama_host=ollama_host,
+        ollama_model=ollama_model,
+        translation_context=translation_context,
+    )
+    translated_page = translated_stage.to_page_dict()
+    executed_graph = OwnerGraph.from_dict(translated_page["_owner_graph_snapshot"])
+    records_by_owner = {
+        str(record.get("owner_id") or ""): copy.deepcopy(record)
+        for record in translated_page.get("texts") or []
+        if isinstance(record, dict) and record.get("owner_id")
+    }
+    components = {
+        component.component_id: component for component in executed_graph.components
+    }
+    observations = {
+        observation.observation_id: observation
+        for observation in executed_graph.observations
+    }
+    commits: list[OwnerExecutionCommit] = []
+    final_records: list[dict[str, Any]] = []
+
+    for owner in sorted(executed_graph.owners, key=lambda item: item.owner_id):
+        if owner.disposition != "owned" or owner.state != "translated":
+            continue
+        single = _single_owner_graph(executed_graph, owner.owner_id)
+        single_owner = single.owners[0]
+        record = records_by_owner.get(owner.owner_id, {})
+        record.update(
+            {
+                "owner_id": owner.owner_id,
+                "id": owner.owner_id,
+                "page_id": owner.page_id,
+                "coordinate_space": "page",
+                "source_payload": owner.source_payload,
+                "translated_payload": owner.translated_payload,
+                "translated": owner.translated_payload,
+                "disposition": owner.disposition,
+                "route_action": owner.route_action,
+                "execution_tile_id": owner.execution_tile_id,
+                "component_ids": list(owner.component_ids),
+                "observation_ids": list(owner.observation_ids),
+                "selected_observation_ids": list(owner.selected_observation_ids),
+            }
+        )
+        evidence: list[OwnerMaskEvidence] = []
+        component_bboxes: dict[str, tuple[int, int, int, int]] = {}
+        for component_id in owner.component_ids:
+            component = components[component_id]
+            component_bboxes[component_id] = tuple(component.bbox_page)
+            selected = [
+                observations[observation_id]
+                for observation_id in owner.selected_observation_ids
+                if observation_id in observations
+                and component_id in observations[observation_id].component_ids
+            ]
+            if not selected:
+                raise ValueError(
+                    f"owner {owner.owner_id} has no selected OCR support for {component_id}"
+                )
+            support_polygons: list[tuple[tuple[int, int], ...]] = []
+            for observation in selected:
+                support_polygons.extend(observation.polygons_page)
+                if not observation.polygons_page:
+                    x1, y1, x2, y2 = observation.bbox_page
+                    support_polygons.append(((x1, y1), (x2, y1), (x2, y2), (x1, y2)))
+            evidence.append(
+                OwnerMaskEvidence(
+                    evidence_id=f"{owner.owner_id}__{component_id}__source_ink",
+                    component_id=component_id,
+                    glyph_mask=_owner_glyph_raster(
+                        source,
+                        support_polygons=support_polygons,
+                    ),
+                    observation_id=selected[0].observation_id,
+                )
+            )
+        plan = build_owner_mask_plan(
+            source,
+            single_owner,
+            evidence,
+            owner_component_bboxes_page=component_bboxes,
+        )
+        single_owner.state = "mask_ready"
+        single_owner.action_mask_ref = plan.action_mask_ref
+        owner.state = "mask_ready"
+        owner.action_mask_ref = plan.action_mask_ref
+        record.update(
+            {
+                "state": "mask_ready",
+                "action_mask_ref": plan.action_mask_ref,
+                "bbox": list(plan.owner_bbox_page),
+                "source_bbox": list(plan.owner_bbox_page),
+                "text_pixel_bbox": list(plan.owner_bbox_page),
+            }
+        )
+        inpaint_page = {
+            "page_id": owner.page_id,
+            "width": int(source.shape[1]),
+            "height": int(source.shape[0]),
+            "texts": [copy.deepcopy(record)],
+            "_page_id": owner.page_id,
+            "_band_id": owner.execution_tile_id,
+            "_owner_coordinate_space": "page",
+            "_page_shape": [int(source.shape[0]), int(source.shape[1])],
+            "_owner_component_bboxes_page": {
+                key: list(value) for key, value in component_bboxes.items()
+            },
+            "_owner_execution_projection": {
+                "owner_id": owner.owner_id,
+                "page_id": owner.page_id,
+                "tile_id": owner.execution_tile_id,
+                "role": "executor",
+                "bbox_page": list(plan.owner_bbox_page),
+                "bbox_tile": list(plan.owner_bbox_page),
+                "offset_xy": [0, 0],
+            },
+        }
+        mutation = inpainter.inpaint_band_image(
+            source,
+            inpaint_page,
+            owner_mask_plan=plan,
+        )
+        if not isinstance(mutation, OwnerMutation):
+            raise ValueError("owner inpainter did not return an OwnerMutation")
+        single_owner.state = "inpainted"
+        owner.state = "inpainted"
+        record.update({"state": "inpainted", "action_mask_ref": plan.action_mask_ref})
+        layout_page = enrich_page_layout(
+            {
+                "page_id": owner.page_id,
+                "width": int(source.shape[1]),
+                "height": int(source.shape[0]),
+                "texts": [record],
+            },
+            owner_graph=single,
+            layout_regions=_owner_layout_regions(single),
+        )
+        glyph_patch = typesetter.render_band_image(
+            mutation.result_rgb,
+            layout_page,
+            owner_graph=single,
+        )
+        commit = apply_atomic_owner_execution(source, mutation, glyph_patch)
+        commits.append(commit)
+        if commit.committed:
+            owner.state = "rendered"
+            single_owner.state = "rendered"
+            rendered_record = copy.deepcopy(layout_page["texts"][0])
+            rendered_record["state"] = "rendered"
+            final_records.append(rendered_record)
+        else:
+            owner.state = "review_required"
+            owner.route_action = "review_required"
+
+    executed_graph.require_valid()
+    return OwnerPageExecution(
+        graph=executed_graph,
+        commits=tuple(commits),
+        records=tuple(final_records),
     )
 
 

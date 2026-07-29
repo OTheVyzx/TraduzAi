@@ -42,6 +42,7 @@ from strip.process_bands import (
     _band_id_for,
     _page_id_for,
     collect_band_evidence,
+    execute_owner_page_graph,
     process_band,
 )
 from strip.reassemble import assemble_output_pages
@@ -5827,6 +5828,7 @@ def run_chapter(
     chapter_telemetry: dict | None = None,
     skip_page_cleanup_rerender: bool = False,
     owner_graph_mode: str = "shadow",
+    legacy_project_status: str | None = None,
 
     progress_callback=None,
 ) -> list[OutputPage]:
@@ -5836,11 +5838,8 @@ def run_chapter(
 
     page_paths = image_files
     owner_graph_mode = _normalise_owner_graph_mode(owner_graph_mode)
-    if owner_graph_mode == "enforce":
-        raise RuntimeError(
-            "owner_graph_mode='enforce' is reserved but not enabled until owner-scoped "
-            "translation, inpaint, typeset, and composition are active"
-        )
+    if owner_graph_mode == "legacy" and legacy_project_status != "legacy_unverified":
+        raise ValueError("legacy owner mode requires legacy_project_status='legacy_unverified'")
     run_started = time.perf_counter()
     if chapter_telemetry is not None:
         chapter_telemetry.setdefault("durations_sec", {})
@@ -6053,7 +6052,52 @@ def run_chapter(
 
         running_glossary: dict = dict(glossario or {})
         running_history: list[dict] = []
+        owner_execution_records_by_page: dict[str, list[dict]] = {}
+        if owner_graph_mode == "enforce":
+            band_by_tile = {
+                evidence.tile_id: evidence.band
+                for evidence in owner_evidence_by_band.values()
+            }
+            with _timed(chapter_telemetry, "owner_page_execution"):
+                for page_id, graph in sorted(owner_graphs.items()):
+                    page_number = int(page_id.rsplit("_", 1)[-1])
+                    x1, y1, x2, y2 = _source_page_geometry(
+                        strip,
+                        page_number - 1,
+                    )
+                    execution = execute_owner_page_graph(
+                        original_strip_image[y1:y2, x1:x2].copy(),
+                        graph,
+                        translator=translator,
+                        inpainter=inpainter,
+                        typesetter=typesetter,
+                        context=context,
+                        glossario=running_glossary,
+                        idioma_origem=idioma_origem,
+                        idioma_destino=idioma_destino,
+                        obra=obra,
+                        models_dir=models_dir,
+                        ollama_host=ollama_host,
+                        ollama_model=ollama_model,
+                        translation_context=translation_context,
+                    )
+                    owner_graphs[page_id] = execution.graph
+                    owner_execution_records_by_page[page_id] = [
+                        copy.deepcopy(record) for record in execution.records
+                    ]
+                    for commit in execution.commits:
+                        executor_band = band_by_tile.get(commit.execution_tile_id)
+                        if executor_band is None:
+                            raise ValueError(
+                                f"owner commit references unknown executor tile: {commit.execution_tile_id}"
+                            )
+                        prior = list(
+                            getattr(executor_band, "owner_execution_commits", None) or []
+                        )
+                        executor_band.owner_execution_commits = [*prior, commit]
         overlap_executor = (
+            owner_graph_mode != "enforce"
+            and
             scheduler_executor_report is not None
             and scheduler_executor_report.get("mode") == "overlap_context_release"
         )
@@ -6186,7 +6230,10 @@ def run_chapter(
                             int(scheduler_executor_report.get("processed_band_count", 0) or 0) + 1
                         )
 
-        for idx, band in enumerate([] if overlap_executor else bands):
+        legacy_pixel_bands = (
+            [] if owner_graph_mode == "enforce" else bands
+        )
+        for idx, band in enumerate([] if overlap_executor else legacy_pixel_bands):
             if progress_callback: progress_callback("process", idx, len(bands))
             ordered_context = _build_ordered_band_context_snapshot(
                 running_history,
@@ -6429,6 +6476,23 @@ def run_chapter(
         page.ocr_result = {"_vision_blocks": []}
         page.text_layers = {"texts": []}
 
+    if owner_composition_active:
+        for page_index, page in enumerate(output_pages, start=1):
+            page_id = _page_id_for(page_index)
+            records = [
+                copy.deepcopy(record)
+                for record in owner_execution_records_by_page.get(page_id, [])
+            ]
+            page.text_layers["texts"] = records
+            page.ocr_result.update(
+                {
+                    "page_id": page_id,
+                    "texts": copy.deepcopy(records),
+                    "_owner_graph_mode": "enforce",
+                    "_owner_graph_snapshot": owner_graphs[page_id].to_dict(),
+                }
+            )
+
     for band_index, band in enumerate(bands, start=1):
         if not isinstance(getattr(band, "ocr_result", None), dict):
             continue
@@ -6492,6 +6556,8 @@ def run_chapter(
     finalize_page_metadata_started = time.perf_counter()
     page_metadata_changed = [False for _ in output_pages]
     for page_index, page in enumerate(output_pages):
+        if owner_composition_active:
+            continue
         page_metadata_changed[page_index] = _finalize_output_page_ocr_metadata(
             page,
             page_index + 1,
