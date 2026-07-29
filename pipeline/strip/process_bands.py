@@ -2729,6 +2729,8 @@ class BandImageStageOutput:
     stage_id: str
     _image: np.ndarray = field(repr=False)
     perf_updates: Mapping[str, Any] = field(default_factory=dict)
+    owner_mutation: OwnerMutation | None = None
+    owner_glyph_patch: OwnerGlyphPatch | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_image", np.array(self._image, copy=True))
@@ -8379,7 +8381,9 @@ def _run_inpaint_stage(
     page_for_inpaint["_band_y_top"] = int(band.y_top)
     _normalize_dark_bubble_contracts_for_stage(page_for_inpaint, band.strip_slice)
     _drop_suppressed_records_for_inpaint(page_for_inpaint)
-    cleaned = inpainter.inpaint_band_image(band.strip_slice, page_for_inpaint)
+    cleaned_result = inpainter.inpaint_band_image(band.strip_slice, page_for_inpaint)
+    owner_mutation = cleaned_result if isinstance(cleaned_result, OwnerMutation) else None
+    cleaned = owner_mutation.result_rgb if owner_mutation is not None else cleaned_result
     for key in ("texts", "_vision_blocks"):
         value = page_for_inpaint.get(key)
         if isinstance(value, list):
@@ -8406,6 +8410,7 @@ def _run_inpaint_stage(
         "inpaint",
         cleaned,
         _collect_inpaint_perf_updates(translated_page),
+        owner_mutation=owner_mutation,
     )
 
 
@@ -8414,12 +8419,23 @@ def _run_typeset_stage(
     *,
     typesetter,
     translated_page: dict,
+    owner_mutation: OwnerMutation | None = None,
 ) -> BandImageStageOutput:
     _propagate_unresolved_visual_card_inpaint_flags(translated_page)
     compat_text_fields = _legacy_decision_fields_by_record(translated_page.get("texts"))
     page_for_typeset = _without_legacy_decision_fields_for_stage(translated_page)
     _normalize_dark_bubble_contracts_for_stage(page_for_typeset, cleaned_slice)
-    rendered = typesetter.render_band_image(cleaned_slice, page_for_typeset)
+    rendered_result = typesetter.render_band_image(cleaned_slice, page_for_typeset)
+    owner_glyph_patch = (
+        rendered_result if isinstance(rendered_result, OwnerGlyphPatch) else None
+    )
+    if owner_glyph_patch is not None and owner_mutation is None:
+        raise ValueError("owner glyph patch requires its cleanup mutation")
+    rendered = (
+        owner_glyph_patch.result_rgb
+        if owner_glyph_patch is not None
+        else rendered_result
+    )
     for key in ("texts", "_vision_blocks", "_bubble_regions"):
         value = page_for_typeset.get(key)
         if isinstance(value, list):
@@ -8428,6 +8444,7 @@ def _run_typeset_stage(
     return BandImageStageOutput(
         "typeset",
         rendered,
+        owner_glyph_patch=owner_glyph_patch,
     )
 
 
@@ -9725,20 +9742,42 @@ def _execute_translation_ready_band(
             cleaned,
             typesetter=typesetter,
             translated_page=translated_page,
+            owner_mutation=inpaint_stage.owner_mutation,
         ),
     )
-    atomic_cleaned, atomic_rendered = _apply_atomic_inpaint_render_rollback(
-        band,
-        cleaned,
-        typeset_stage.to_image(),
-        translated_page,
-    )
+    owner_execution_commit: OwnerExecutionCommit | None = None
+    if inpaint_stage.owner_mutation is not None:
+        owner_execution_commit = apply_atomic_owner_execution(
+            band.original_slice,
+            inpaint_stage.owner_mutation,
+            typeset_stage.owner_glyph_patch,
+        )
+        prior_commits = list(getattr(band, "owner_execution_commits", None) or [])
+        band.owner_execution_commits = [*prior_commits, owner_execution_commit]
+        if owner_execution_commit.committed:
+            atomic_cleaned = np.array(inpaint_stage.owner_mutation.result_rgb, copy=True)
+            atomic_rendered = np.array(owner_execution_commit.result_rgb, copy=True)
+        else:
+            atomic_cleaned = np.array(owner_execution_commit.result_rgb, copy=True)
+            atomic_rendered = np.array(owner_execution_commit.result_rgb, copy=True)
+    else:
+        atomic_cleaned, atomic_rendered = _apply_atomic_inpaint_render_rollback(
+            band,
+            cleaned,
+            typeset_stage.to_image(),
+            translated_page,
+        )
     stage_start = time.perf_counter()
     copy_back_stage = _run_copy_back_stage(
         band,
         cleaned_slice=atomic_cleaned,
         rendered_slice=atomic_rendered,
         translated_page=translated_page,
+        owner_execution_commit=(
+            owner_execution_commit
+            if owner_execution_commit is not None and owner_execution_commit.committed
+            else None
+        ),
     )
     copyback_elapsed = time.perf_counter() - stage_start
     durations["copy_back"] = round(copyback_elapsed, 4)

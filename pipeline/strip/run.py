@@ -20,9 +20,14 @@ import time
 import cv2
 import numpy as np
 
+from compositor.owner_compositor import OwnerCompositionError, compose_page
 from ownership.model import (
+    OwnerGlyphPatch,
+    OwnerExecutionCommit,
     OwnerGraph,
     OwnerGraphValidationError,
+    OwnerMutation,
+    PageCompositionResult,
     OwnerProjection,
     OwnerViolation,
     TextObservation,
@@ -441,6 +446,173 @@ def _paste_band_attr_into_image(strip_image, bands: list, attr_name: str):
             continue
         result[y0:y1, :, :] = source
     return result
+
+
+@dataclass(frozen=True)
+class OwnerChapterComposition:
+    """Read-only owner composition outputs before framing and persistence."""
+
+    output_pages: list[OutputPage]
+    clean_pages: list[OutputPage]
+    compositions: dict[str, PageCompositionResult]
+    final_strip_rgb: np.ndarray
+    clean_strip_rgb: np.ndarray
+
+
+def _owner_artifacts_from_bands(
+    bands: list[Band],
+) -> tuple[list[OwnerMutation], list[OwnerGlyphPatch]]:
+    mutations: list[OwnerMutation] = []
+    glyph_patches: list[OwnerGlyphPatch] = []
+    for band in bands:
+        if list(getattr(band, "owner_mutations", None) or []) or list(
+            getattr(band, "owner_glyph_patches", None) or []
+        ):
+            raise OwnerCompositionError(
+                "owner artifacts must arrive through an atomic execution commit"
+            )
+        for commit in list(getattr(band, "owner_execution_commits", None) or []):
+            if not isinstance(commit, OwnerExecutionCommit):
+                raise OwnerCompositionError(
+                    "owner execution artifact is not an atomic execution commit"
+                )
+            if getattr(commit, "committed", False) is not True:
+                continue
+            mutation = getattr(commit, "mutation", None)
+            glyph_patch = getattr(commit, "glyph_patch", None)
+            if not isinstance(mutation, OwnerMutation) or not isinstance(
+                glyph_patch,
+                OwnerGlyphPatch,
+            ):
+                raise OwnerCompositionError(
+                    "committed owner execution is missing its complete atomic chain"
+                )
+            mutations.append(mutation)
+            glyph_patches.append(glyph_patch)
+    return mutations, glyph_patches
+
+
+def _source_page_geometry(
+    strip: VerticalStrip,
+    page_index: int,
+) -> tuple[int, int, int, int]:
+    breaks = [int(value) for value in list(strip.source_page_breaks or [])]
+    if page_index < 0 or page_index + 1 >= len(breaks):
+        raise OwnerCompositionError("owner page index escapes source page breaks")
+    y1, y2 = breaks[page_index], breaks[page_index + 1]
+    offsets = [int(value) for value in list(strip.page_x_offsets or [])]
+    x1 = offsets[page_index] if page_index < len(offsets) else 0
+    widths = [int(value) for value in list(getattr(strip, "source_page_widths", None) or [])]
+    width = widths[page_index] if page_index < len(widths) else int(strip.width) - x1
+    x2 = x1 + width
+    if y1 < 0 or y2 <= y1 or x1 < 0 or x2 <= x1 or y2 > strip.height or x2 > strip.width:
+        raise OwnerCompositionError("owner source page geometry is invalid")
+    return x1, y1, x2, y2
+
+
+def _compose_owner_output_pages(
+    *,
+    original_strip_image: np.ndarray,
+    strip: VerticalStrip,
+    bands: list[Band],
+    balloons: list,
+    target_count: int,
+    protected_art_masks_by_page: dict[str, np.ndarray] | None = None,
+) -> OwnerChapterComposition:
+    """Compose source pages once from owner artifacts, then apply framing only."""
+
+    original_strip = np.asarray(original_strip_image)
+    if (
+        original_strip.dtype != np.uint8
+        or original_strip.ndim != 3
+        or original_strip.shape[2] != 3
+        or tuple(original_strip.shape) != tuple(strip.image.shape)
+    ):
+        raise OwnerCompositionError("owner composition requires the canonical RGB source strip")
+    mutations, glyph_patches = _owner_artifacts_from_bands(bands)
+    page_ids = {str(artifact.page_id) for artifact in [*mutations, *glyph_patches]}
+    source_page_count = max(0, len(list(strip.source_page_breaks or [])) - 1)
+    known_page_ids = {_page_id_for(index + 1) for index in range(source_page_count)}
+    unknown_page_ids = sorted(page_ids - known_page_ids)
+    if unknown_page_ids:
+        raise OwnerCompositionError(
+            f"owner artifacts reference unknown source pages: {unknown_page_ids}"
+        )
+
+    final_strip = original_strip.copy()
+    clean_strip = original_strip.copy()
+    compositions: dict[str, PageCompositionResult] = {}
+    protected_by_page = dict(protected_art_masks_by_page or {})
+    for page_index in range(source_page_count):
+        page_id = _page_id_for(page_index + 1)
+        x1, y1, x2, y2 = _source_page_geometry(strip, page_index)
+        original_page = original_strip[y1:y2, x1:x2].copy()
+        page_mutations = [item for item in mutations if item.page_id == page_id]
+        page_glyphs = [item for item in glyph_patches if item.page_id == page_id]
+        protected = protected_by_page.get(page_id)
+        if protected is None:
+            protected = np.zeros(original_page.shape[:2], dtype=np.uint8)
+            for mutation in page_mutations:
+                candidate = np.asarray(mutation.protected_art_mask)
+                if candidate.shape != protected.shape:
+                    raise OwnerCompositionError(
+                        f"owner protected-art mask shape mismatch for {page_id}"
+                    )
+                protected[candidate > 0] = 255
+
+        clean_result = compose_page(original_page, page_mutations, [], protected)
+        final_result = compose_page(original_page, page_mutations, page_glyphs, protected)
+        if not clean_result.committed or not final_result.committed:
+            conflicts = tuple([*clean_result.conflicts, *final_result.conflicts])
+            raise OwnerCompositionError(
+                f"owner composition blocked for {page_id}",
+                conflicts=conflicts,
+            )
+        clean_strip[y1:y2, x1:x2] = clean_result.final_rgb
+        final_strip[y1:y2, x1:x2] = final_result.final_rgb
+        compositions[page_id] = final_result
+
+    final_strip_view = VerticalStrip(
+        image=final_strip,
+        width=strip.width,
+        height=strip.height,
+        source_page_breaks=list(strip.source_page_breaks),
+        page_x_offsets=list(strip.page_x_offsets),
+        source_page_widths=list(getattr(strip, "source_page_widths", None) or []),
+    )
+    clean_strip_view = VerticalStrip(
+        image=clean_strip,
+        width=strip.width,
+        height=strip.height,
+        source_page_breaks=list(strip.source_page_breaks),
+        page_x_offsets=list(strip.page_x_offsets),
+        source_page_widths=list(getattr(strip, "source_page_widths", None) or []),
+    )
+    output_pages = assemble_output_pages(final_strip_view, balloons, target_count=target_count)
+    clean_pages = assemble_output_pages(clean_strip_view, balloons, target_count=target_count)
+    final_strip.setflags(write=False)
+    clean_strip.setflags(write=False)
+    return OwnerChapterComposition(
+        output_pages=output_pages,
+        clean_pages=clean_pages,
+        compositions=compositions,
+        final_strip_rgb=final_strip,
+        clean_strip_rgb=clean_strip,
+    )
+
+
+def _bind_owner_final_page_images(
+    page: OutputPage,
+    original_page: OutputPage,
+    clean_page: OutputPage,
+) -> None:
+    """Attach derived page stages without changing compositor-owned final bytes."""
+
+    final_before = np.asarray(page.image).copy()
+    page.original_image = original_page.image
+    page.inpainted_image = clean_page.image
+    if not np.array_equal(page.image, final_before):
+        raise OwnerCompositionError("late owner page binding changed final pixels")
 
 
 def _shift_bbox_y(value, delta_y: int) -> list[int] | None:
@@ -1835,7 +2007,12 @@ def _band_debug_id(band: Band, fallback_index: int) -> str:
     return _band_id_for(1, fallback_index)
 
 
-def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Band]) -> None:
+def _write_final_band_crop_debug(
+    output_pages: list[OutputPage],
+    bands: list[Band],
+    *,
+    owner_mode: bool = False,
+) -> None:
     recorder = _get_debug_recorder()
     if recorder is None:
         return
@@ -1846,10 +2023,11 @@ def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Ban
         }
         for band_index, band in enumerate(bands):
             band_id = _band_debug_id(band, band_index)
-            rendered = getattr(band, "rendered_slice", None)
             rendered_rel = f"09_typeset/rendered_bands/{band_id}.jpg"
-            if isinstance(rendered, np.ndarray) and rendered.size:
-                recorder.write_image(rendered_rel, rendered, quality=92)
+            if not owner_mode:
+                rendered = getattr(band, "rendered_slice", None)
+                if isinstance(rendered, np.ndarray) and rendered.size:
+                    recorder.write_image(rendered_rel, rendered, quality=92)
 
             best_page_index = None
             best_overlap = 0
@@ -1887,22 +2065,31 @@ def _write_final_band_crop_debug(output_pages: list[OutputPage], bands: list[Ban
                 if getattr(page, "path", None)
                 else f"{best_page_index + 1:03d}.jpg"
             )
+            row = {
+                "band_id": band_id,
+                "translated_output_page": output_name,
+                "output_page_number": int(best_page_index + 1),
+                "output_page_y_top": page_y_top,
+                "output_page_y_bottom": int(getattr(page, "y_bottom", 0) or 0),
+                "band_y_top": band_y_top,
+                "band_y_bottom": band_y_bottom,
+                "crop_bbox_in_translated_page": [
+                    0,
+                    crop_y1,
+                    int(image.shape[1]),
+                    crop_y2,
+                ],
+                "final_crop_path": final_rel,
+                "trace_ids": list(
+                    trace_ids_by_page.get(best_page_index, {}).get(band_id, [])
+                ),
+            }
+            if not owner_mode:
+                row["post_copyback_path"] = f"10_copyback_reassemble/{band_id}/post_copyback.jpg"
+                row["rendered_band_path"] = rendered_rel
             recorder.write_jsonl(
                 "10_copyback_reassemble/final_band_crops.jsonl",
-                {
-                    "band_id": band_id,
-                    "translated_output_page": output_name,
-                    "output_page_number": int(best_page_index + 1),
-                    "output_page_y_top": page_y_top,
-                    "output_page_y_bottom": int(getattr(page, "y_bottom", 0) or 0),
-                    "band_y_top": band_y_top,
-                    "band_y_bottom": band_y_bottom,
-                    "crop_bbox_in_translated_page": [0, crop_y1, int(image.shape[1]), crop_y2],
-                    "final_crop_path": final_rel,
-                    "post_copyback_path": f"10_copyback_reassemble/{band_id}/post_copyback.jpg",
-                    "rendered_band_path": rendered_rel,
-                    "trace_ids": list(trace_ids_by_page.get(best_page_index, {}).get(band_id, [])),
-                },
+                row,
             )
     except Exception:
         return
@@ -6108,15 +6295,29 @@ def run_chapter(
         with _timed(chapter_telemetry, "inpainter_prewarm_close"):
             _close_inpainter_prewarm(prewarm_handle)
 
-    with _timed(chapter_telemetry, "strip_paste_cleaned"):
-        clean_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
-    with _timed(chapter_telemetry, "strip_paste_rendered"):
-        rendered_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
-    with _timed(chapter_telemetry, "strip_assign_rendered"):
-        strip.image[:, :, :] = rendered_strip_image
-
-    with _timed(chapter_telemetry, "assemble_rendered_pages"):
-        output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
+    owner_composition_active = owner_graph_mode == "enforce"
+    if owner_composition_active:
+        with _timed(chapter_telemetry, "owner_page_composition"):
+            owner_chapter_composition = _compose_owner_output_pages(
+                original_strip_image=original_strip_image,
+                strip=strip,
+                bands=bands,
+                balloons=balloons,
+                target_count=target_count,
+            )
+        output_pages = owner_chapter_composition.output_pages
+        clean_pages = owner_chapter_composition.clean_pages
+        clean_strip_image = np.asarray(owner_chapter_composition.clean_strip_rgb)
+        strip.image[:, :, :] = owner_chapter_composition.final_strip_rgb
+    else:
+        with _timed(chapter_telemetry, "strip_paste_cleaned"):
+            clean_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "cleaned_slice")
+        with _timed(chapter_telemetry, "strip_paste_rendered"):
+            rendered_strip_image = _paste_band_attr_into_image(original_strip_image, bands, "rendered_slice")
+        with _timed(chapter_telemetry, "strip_assign_rendered"):
+            strip.image[:, :, :] = rendered_strip_image
+        with _timed(chapter_telemetry, "assemble_rendered_pages"):
+            output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
     with _timed(chapter_telemetry, "assemble_original_pages"):
         original_pages = assemble_output_pages(
             VerticalStrip(
@@ -6129,18 +6330,19 @@ def run_chapter(
             balloons,
             target_count=target_count,
         )
-    with _timed(chapter_telemetry, "assemble_clean_pages"):
-        clean_pages = assemble_output_pages(
-            VerticalStrip(
-                image=clean_strip_image,
-                width=strip.width,
-                height=strip.height,
-                source_page_breaks=list(strip.source_page_breaks),
-                page_x_offsets=list(strip.page_x_offsets),
-            ),
-            balloons,
-            target_count=target_count,
-        )
+    if not owner_composition_active:
+        with _timed(chapter_telemetry, "assemble_clean_pages"):
+            clean_pages = assemble_output_pages(
+                VerticalStrip(
+                    image=clean_strip_image,
+                    width=strip.width,
+                    height=strip.height,
+                    source_page_breaks=list(strip.source_page_breaks),
+                    page_x_offsets=list(strip.page_x_offsets),
+                ),
+                balloons,
+                target_count=target_count,
+            )
     _write_reassemble_manifest_debug(
         output_pages,
         original_pages,
@@ -6325,8 +6527,15 @@ def run_chapter(
         "cleanup_save": 0.0,
     }
     cleanup_started = time.perf_counter()
-    skip_page_cleanup = bool(skip_page_cleanup_rerender) or _debug_skip_page_cleanup_rerender()
+    skip_page_cleanup = (
+        owner_composition_active
+        or bool(skip_page_cleanup_rerender)
+        or _debug_skip_page_cleanup_rerender()
+    )
     for page_index, (page, original_page, clean_page) in enumerate(zip(output_pages, original_pages, clean_pages)):
+        if owner_composition_active:
+            _bind_owner_final_page_images(page, original_page, clean_page)
+            continue
         page_texts = _page_texts_from_text_layers(page.text_layers)
         stage_page_texts = _texts_without_legacy_decision_fields(page_texts)
         page.original_image = original_page.image
@@ -6443,7 +6652,11 @@ def run_chapter(
 
     with _timed(chapter_telemetry, "write_translated_pages"):
         cleanup_breakdown["cleanup_save"] += _write_output_pages_jpegs(output_pages, output_dir)
-    _write_final_band_crop_debug(output_pages, bands)
+    _write_final_band_crop_debug(
+        output_pages,
+        bands,
+        owner_mode=owner_composition_active,
+    )
 
     _write_page_cleanup_breakdown_debug(cleanup_breakdown)
 

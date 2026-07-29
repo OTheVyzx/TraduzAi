@@ -114,6 +114,27 @@ class DarkPanelCleanupTests(unittest.TestCase):
 
 
 class RunChapterSmokeTests(unittest.TestCase):
+    def test_debug_crops_are_derived_from_final_page_only(self):
+        from strip.run import _write_final_band_crop_debug
+        from strip.types import Band, OutputPage
+
+        final = np.full((30, 40, 3), [17, 91, 203], dtype=np.uint8)
+        stale = np.full((30, 40, 3), [240, 10, 10], dtype=np.uint8)
+        band = Band(y_top=0, y_bottom=30, rendered_slice=stale, ocr_result={"_band_id": "band_001"})
+        page = OutputPage(y_top=0, y_bottom=30, image=final)
+        recorder = MagicMock()
+
+        with patch("strip.run._get_debug_recorder", return_value=recorder):
+            _write_final_band_crop_debug([page], [band], owner_mode=True)
+
+        image_calls = recorder.write_image.call_args_list
+        self.assertEqual(len(image_calls), 1)
+        self.assertIn("final_bands", image_calls[0].args[0])
+        np.testing.assert_array_equal(image_calls[0].args[1], final)
+        row = recorder.write_jsonl.call_args.args[1]
+        self.assertNotIn("post_copyback_path", row)
+        self.assertNotIn("rendered_band_path", row)
+
     def test_write_output_pages_jpegs_can_use_parallel_workers(self):
         from strip.run import _write_output_pages_jpegs
 
