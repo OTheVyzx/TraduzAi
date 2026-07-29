@@ -14059,6 +14059,21 @@ def _apply_recovery_layer_for_page(project: dict, page: dict, rendered_path: Pat
         logger.warning("Falha ao aplicar recovery na pagina renderizada: %s", exc)
 
 
+def _run_final_pixel_gate_sequence(
+    *,
+    page_ids,
+    persist_page,
+    observe_page,
+    evaluate_gate,
+):
+    """Persist every page, observe those bytes, then close the image-write phase."""
+    ordered_page_ids = list(dict.fromkeys(str(page_id) for page_id in page_ids))
+    for page_id in ordered_page_ids:
+        persist_page(page_id)
+    reports = [observe_page(page_id) for page_id in ordered_page_ids]
+    return evaluate_gate(reports)
+
+
 def render_page_image(project, page_idx, output_path):
     """Auxiliar para renderizar a versao final da pagina para visualizacao."""
     from typesetter.renderer import _typeset_single_page
@@ -14105,6 +14120,7 @@ def render_page_image(project, page_idx, output_path):
         _apply_recovery_layer_for_page(project, page, rendered_path)
     except Exception as e:
         sys.stderr.write(f"Falha ao renderizar imagem da pagina: {e}\n")
+        raise
 
 
 def _merge_regional_inpaint_output(

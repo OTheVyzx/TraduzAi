@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 from qa.translation_qa import severity_for_flag
@@ -87,6 +89,192 @@ SCANLATION_CONTEXTUAL_RE = re.compile(
     r"\b(?:WARNING|NOTICE|READ\s+THIS|OFFICIAL\s+SITE|FASTER\s+UPDATES?)\b",
     re.IGNORECASE,
 )
+FINAL_PIXEL_CONTRACTS = {
+    "source_coverage_contract",
+    "owner_graph_contract",
+    "route_state_contract",
+    "pixel_ownership_contract",
+    "final_language_contract",
+    "qa_integrity_contract",
+}
+
+
+def _final_pixel_blocker(
+    *,
+    page_id: str,
+    page_number: int | None,
+    reason: str,
+    owner_id: str | None = None,
+    component_ids: list[str] | None = None,
+    offenders: list[str] | None = None,
+    issue_id: str | None = None,
+    contract: str | None = None,
+) -> dict[str, Any]:
+    issue: dict[str, Any] = {
+        "page": page_number,
+        "page_id": page_id,
+        "type": "final_pixel_contract",
+        "issue_scope": "page",
+        "severity": "critical",
+        "blocks_export": True,
+        "source": "final_pixel_qa",
+        "reason": reason,
+        "flags": [reason],
+        "component_ids": list(component_ids or []),
+        "offenders": list(offenders or []),
+        "artifact_links": ["11_qa_export_gate/final_pixel_ocr.jsonl"],
+    }
+    if owner_id:
+        issue["owner_id"] = owner_id
+    if issue_id:
+        issue["issue_id"] = issue_id
+    if contract:
+        issue["contract"] = contract
+    return issue
+
+
+def _collect_final_pixel_report_issues(project: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fail closed on final persisted pixels for verified owner-graph projects."""
+    if str(project.get("owner_graph_status") or "").strip().lower() != "verified":
+        return []
+
+    pages: list[tuple[str, int | None]] = []
+    for index, page in enumerate(project.get("paginas") or [], start=1):
+        if not isinstance(page, dict):
+            continue
+        try:
+            page_number = int(page.get("numero") or index)
+        except (TypeError, ValueError):
+            page_number = index
+        pages.append((str(page.get("page_id") or f"page_{page_number:03d}"), page_number))
+
+    qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+    raw_reports = qa.get("final_pixel_reports")
+    reports = raw_reports if isinstance(raw_reports, list) else []
+    reports_by_page: dict[str, list[dict[str, Any]]] = {}
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        report_page_id = str(report.get("page_id") or "").strip()
+        if report_page_id:
+            reports_by_page.setdefault(report_page_id, []).append(report)
+
+    issues: list[dict[str, Any]] = []
+    expected_page_ids = {page_id for page_id, _ in pages}
+    for page_id, page_number in pages:
+        matches = reports_by_page.get(page_id, [])
+        if len(matches) != 1:
+            reason = "final_pixel_report_missing" if not matches else "final_pixel_report_duplicate"
+            issues.append(
+                _final_pixel_blocker(page_id=page_id, page_number=page_number, reason=reason)
+            )
+            continue
+        report = matches[0]
+        observer = str(report.get("observer") or "").strip()
+        if report.get("observer_available") is not True or not observer:
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_observer_unavailable",
+                )
+            )
+            continue
+        if report.get("observation_complete") is not True:
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_observation_incomplete",
+                )
+            )
+            continue
+
+        artifact_path = Path(str(report.get("artifact_path") or ""))
+        expected_hash = str(report.get("persisted_sha256") or "").strip().lower()
+        hash_is_well_formed = bool(re.fullmatch(r"[0-9a-f]{64}", expected_hash))
+        try:
+            actual_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            actual_hash = ""
+        if not hash_is_well_formed or actual_hash != expected_hash:
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_artifact_hash_stale",
+                )
+            )
+            continue
+
+        contracts = report.get("contracts")
+        if not isinstance(contracts, dict) or not FINAL_PIXEL_CONTRACTS.issubset(contracts):
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_contracts_incomplete",
+                )
+            )
+            continue
+
+        report_issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+        blocked_contracts_with_issue: set[str] = set()
+        for report_issue in report_issues:
+            if not isinstance(report_issue, dict):
+                continue
+            reason = str(report_issue.get("reason") or "final_pixel_contract_blocked").strip()
+            contract = str(report_issue.get("contract") or "").strip() or None
+            if contract:
+                blocked_contracts_with_issue.add(contract)
+            component_ids = [
+                str(value) for value in report_issue.get("component_ids") or [] if str(value).strip()
+            ]
+            offenders = [
+                str(value) for value in report_issue.get("offenders") or [] if str(value).strip()
+            ]
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason=reason,
+                    owner_id=str(report_issue.get("owner_id") or "").strip() or None,
+                    component_ids=component_ids,
+                    offenders=offenders,
+                    issue_id=str(report_issue.get("issue_id") or "").strip() or None,
+                    contract=contract,
+                )
+            )
+        for contract in sorted(FINAL_PIXEL_CONTRACTS):
+            status = str(contracts.get(contract) or "").strip().upper()
+            if status not in {"PASS", "BLOCK"}:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason="final_pixel_contract_status_invalid",
+                        contract=contract,
+                    )
+                )
+            elif status == "BLOCK" and contract not in blocked_contracts_with_issue:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason="final_pixel_contract_blocked",
+                        contract=contract,
+                    )
+                )
+
+    for extra_page_id in sorted(set(reports_by_page) - expected_page_ids):
+        issues.append(
+            _final_pixel_blocker(
+                page_id=extra_page_id,
+                page_number=None,
+                reason="final_pixel_report_unexpected_page",
+            )
+        )
+    return issues
 
 
 def _page_id_from_identity(identity: str) -> str | None:
@@ -1203,4 +1391,5 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                     "linked_artifacts": artifact_links,
                 }
             )
+    issues.extend(_collect_final_pixel_report_issues(project))
     return issues

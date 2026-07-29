@@ -1,6 +1,18 @@
 from qa.export_gate import evaluate_export_gate
 
 
+def test_verified_owner_export_fails_closed_without_final_pixel_qa():
+    gate = evaluate_export_gate(
+        {
+            "owner_graph_status": "verified",
+            "paginas": [{"numero": 1, "page_id": "page_001", "text_layers": []}],
+            "qa": {},
+        }
+    )
+
+    assert gate["status"] == "BLOCK"
+
+
 def test_export_gate_blocks_inpaint_texture_flattened():
     gate = evaluate_export_gate({"paginas": [{"numero": 1, "text_layers": [{"id": "t1", "band_id": "page_001_band_004", "translated": "Texto", "qa_flags": ["inpaint_texture_flattened"]}]}]})
 

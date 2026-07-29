@@ -25,6 +25,30 @@ class MainEmitTests(unittest.TestCase):
     def tearDown(self) -> None:
         main._detach_work_dir_log_handler()
 
+    def test_no_image_writer_runs_after_final_pixel_observer(self) -> None:
+        events = []
+
+        result = main._run_final_pixel_gate_sequence(
+            page_ids=["page_001", "page_002"],
+            persist_page=lambda page_id: events.append(("persist", page_id)),
+            observe_page=lambda page_id: events.append(("observe", page_id))
+            or {"page_id": page_id},
+            evaluate_gate=lambda reports: events.append(("gate", len(reports)))
+            or {"status": "PASS"},
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("persist", "page_001"),
+                ("persist", "page_002"),
+                ("observe", "page_001"),
+                ("observe", "page_002"),
+                ("gate", 2),
+            ],
+        )
+        self.assertEqual(result["status"], "PASS")
+
     def test_emit_swallow_oserror_from_stdout_once(self) -> None:
         stderr = io.StringIO()
 

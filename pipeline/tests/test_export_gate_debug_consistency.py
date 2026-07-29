@@ -39,6 +39,55 @@ def test_qa_summary_and_export_gate_count_the_same_critical_flags():
     assert gate["status"] == "BLOCK"
 
 
+def test_final_pixel_gate_counts_each_report_issue_once(tmp_path):
+    import hashlib
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"final")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    project = {
+        "owner_graph_status": "verified",
+        "paginas": [{"numero": 1, "page_id": "page_001", "text_layers": []}],
+        "qa": {
+            "final_pixel_reports": [
+                {
+                    "page_id": "page_001",
+                    "artifact_path": str(artifact),
+                    "persisted_sha256": digest,
+                    "observer": "DetectorOcrFinalPixelObserver",
+                    "observer_available": True,
+                    "observation_complete": True,
+                    "contracts": {
+                        "source_coverage_contract": "PASS",
+                        "owner_graph_contract": "PASS",
+                        "route_state_contract": "PASS",
+                        "pixel_ownership_contract": "BLOCK",
+                        "final_language_contract": "PASS",
+                        "qa_integrity_contract": "PASS",
+                    },
+                    "issues": [
+                        {
+                            "issue_id": "pixel_a",
+                            "page_id": "page_001",
+                            "owner_id": "owner_a",
+                            "component_ids": ["component_a"],
+                            "severity": "critical",
+                            "reason": "pixel_change_outside_owned_masks",
+                            "offenders": ["pixel:4"],
+                            "contract": "pixel_ownership_contract",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["critical_issue_count"] == 1
+    assert gate["blocking_issue_count"] == 1
+
+
 def test_export_gate_visual_blocker_carries_traceable_artifact_links():
     project = {
         "paginas": [

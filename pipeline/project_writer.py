@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -9,6 +10,51 @@ from pathlib import Path
 from typing import Any
 
 from ownership.project import require_owner_project_consistency
+
+
+_FINAL_PIXEL_CONTRACTS = {
+    "source_coverage_contract",
+    "owner_graph_contract",
+    "route_state_contract",
+    "pixel_ownership_contract",
+    "final_language_contract",
+    "qa_integrity_contract",
+}
+
+
+def _validate_final_pixel_reports(project: dict[str, Any]) -> None:
+    qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+    reports = qa.get("final_pixel_reports")
+    if reports is None:
+        return
+    if not isinstance(reports, list):
+        raise ValueError("qa.final_pixel_reports precisa ser lista")
+    seen: set[str] = set()
+    for report in reports:
+        if not isinstance(report, dict):
+            raise ValueError("qa.final_pixel_reports contem relatorio invalido")
+        page_id = str(report.get("page_id") or "").strip()
+        if not page_id or page_id in seen:
+            raise ValueError("qa.final_pixel_reports exige page_id unico")
+        seen.add(page_id)
+        contracts = report.get("contracts")
+        if not isinstance(contracts, dict) or not _FINAL_PIXEL_CONTRACTS.issubset(contracts):
+            raise ValueError(f"final pixel contracts incompletos: {page_id}")
+        if not isinstance(report.get("issues"), list):
+            raise ValueError(f"final pixel issues invalidos: {page_id}")
+
+    export_gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
+    if str(export_gate.get("status") or "").upper() != "PASS":
+        return
+    for report in reports:
+        artifact_path = Path(str(report.get("artifact_path") or ""))
+        expected_hash = str(report.get("persisted_sha256") or "").strip().lower()
+        try:
+            actual_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"final pixel artifact indisponivel: {report['page_id']}") from exc
+        if actual_hash != expected_hash:
+            raise ValueError(f"final pixel artifact mudou apos o gate: {report['page_id']}")
 
 
 def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
@@ -82,6 +128,7 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
     if not isinstance(pages, list):
         raise ValueError("project.json invalido: 'paginas' precisa ser lista")
     require_owner_project_consistency(project)
+    _validate_final_pixel_reports(project)
     stats = project.get("estatisticas") or {}
     if "total_paginas" in stats and int(stats["total_paginas"]) != len(pages):
         raise ValueError(
