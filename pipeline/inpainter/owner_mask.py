@@ -402,6 +402,19 @@ def _positive_mask_is_overbroad(
     return False
 
 
+def _stroke_expansion_radii(mask: np.ndarray) -> tuple[int, ...]:
+    """Return largest-first halo radii derived from the owned stroke scale."""
+
+    positive_y, positive_x = np.nonzero(mask)
+    if positive_x.size <= 0:
+        return (3,)
+    tight_width = int(positive_x.max() - positive_x.min() + 1)
+    tight_height = int(positive_y.max() - positive_y.min() + 1)
+    proportional_radius = int(np.ceil(min(tight_width, tight_height) * 0.30))
+    maximum_radius = max(3, min(18, proportional_radius))
+    return tuple(range(maximum_radius, 2, -1))
+
+
 def _validated_component_geometry(
     *,
     action: np.ndarray,
@@ -551,8 +564,6 @@ def _validated_plan_masks(plan: OwnerMaskPlan) -> tuple[np.ndarray, np.ndarray]:
         raise UnsafeOwnerMaskError("owner action mask is empty")
     if np.any((action > 0) & (protected > 0)):
         raise UnsafeOwnerMaskError("owner action mask overlaps protected art")
-    if _positive_mask_is_overbroad(action, allow_dense_single_glyph=True):
-        raise UnsafeOwnerMaskError("owner action mask is overbroad for the page")
     evidence_ids = _canonical_evidence_ids(
         plan.evidence_ids,
         label="owner mask plan evidence_ids",
@@ -653,6 +664,23 @@ def build_owner_mask_plan(
             raise UnsafeOwnerMaskError(
                 "owner has no source components for safe mask evidence"
             )
+        verified_component_entries: tuple[
+            tuple[str, tuple[int, int, int, int]], ...
+        ] | None = None
+        verified_component_bboxes: dict[str, tuple[int, int, int, int]] = {}
+        if owner_component_bboxes_page is not None:
+            verified_component_entries = _canonical_component_bbox_entries(
+                owner_component_bboxes_page,
+                shape=shape,
+                label="authoritative owner component geometry",
+            )
+            if tuple(component_id for component_id, _bbox in verified_component_entries) != tuple(
+                sorted(owned_components)
+            ):
+                raise UnsafeOwnerMaskError(
+                    "authoritative component geometry must exactly cover owner components"
+                )
+            verified_component_bboxes = dict(verified_component_entries)
 
         component_actions = {
             component_id: np.zeros(shape, dtype=np.uint8)
@@ -794,17 +822,49 @@ def build_owner_mask_plan(
                     "owner component mask union is overbroad for the page"
                 )
             component_pixels = int(np.count_nonzero(component_mask))
+            if np.any((component_mask > 0) & (protected > 0)):
+                raise UnsafeOwnerMaskError(
+                    "protected art would partially authorize action-mask coverage "
+                    f"for owner component: {component_id}"
+                )
+            if component_id in verified_component_bboxes:
+                component_bbox = verified_component_bboxes[component_id]
+                raw_bbox = _mask_bbox_page(component_mask)
+                if not (
+                    component_bbox[0] <= raw_bbox[0] < raw_bbox[2] <= component_bbox[2]
+                    and component_bbox[1] <= raw_bbox[1] < raw_bbox[3] <= component_bbox[3]
+                ):
+                    raise UnsafeOwnerMaskError(
+                        "owner stroke evidence escapes authoritative component geometry"
+                    )
+                geometry_clip = np.zeros(shape, dtype=np.uint8)
+                x1, y1, x2, y2 = component_bbox
+                geometry_clip[y1:y2, x1:x2] = 255
+                for radius in _stroke_expansion_radii(component_mask):
+                    kernel_size = (radius * 2) + 1
+                    expanded = cv2.dilate(
+                        component_mask,
+                        cv2.getStructuringElement(
+                            cv2.MORPH_ELLIPSE,
+                            (kernel_size, kernel_size),
+                        ),
+                        iterations=1,
+                    )
+                    expanded = cv2.bitwise_and(expanded, geometry_clip)
+                    # Verified component geometry is already the hard safety
+                    # boundary.  A dense dilation is expected for glow,
+                    # antialiasing, and large display glyphs; applying the
+                    # legacy page-level density heuristic here leaves their
+                    # colored/black fringe available to the inpainter as a
+                    # false background sample.
+                    component_mask = expanded
+                    break
             allowed_component = component_mask.copy()
             allowed_component[protected > 0] = 0
             allowed_pixels = int(np.count_nonzero(allowed_component))
             if allowed_pixels <= 0:
                 missing_components.append(component_id)
                 continue
-            if allowed_pixels != component_pixels:
-                raise UnsafeOwnerMaskError(
-                    "protected art would partially authorize action-mask coverage "
-                    f"for owner component: {component_id}"
-                )
             component_action_entries.append(
                 (component_id, _mask_bbox_page(allowed_component))
             )
@@ -818,7 +878,10 @@ def build_owner_mask_plan(
             raise UnsafeOwnerMaskError(
                 "safe owner action mask evidence unavailable; bbox fallback is forbidden"
             )
-        if _positive_mask_is_overbroad(action, allow_dense_single_glyph=True):
+        if (
+            not verified_component_bboxes
+            and _positive_mask_is_overbroad(action, allow_dense_single_glyph=True)
+        ):
             raise UnsafeOwnerMaskError(
                 "owner action mask union is overbroad for the page"
             )
@@ -834,18 +897,7 @@ def build_owner_mask_plan(
             component_bboxes_page = component_action_bboxes_page
             component_geometry_verified = False
         else:
-            component_bboxes_page = _canonical_component_bbox_entries(
-                owner_component_bboxes_page,
-                shape=shape,
-                label="authoritative owner component geometry",
-            )
-            expected_component_ids = tuple(sorted(owned_components))
-            if tuple(
-                component_id for component_id, _bbox in component_bboxes_page
-            ) != expected_component_ids:
-                raise UnsafeOwnerMaskError(
-                    "authoritative component geometry must exactly cover owner components"
-                )
+            component_bboxes_page = verified_component_entries or ()
             component_geometry_verified = True
         owner_bbox_page = _owner_bbox_from_components(component_bboxes_page)
         component_geometry_sha256 = _component_geometry_sha256(
@@ -1269,8 +1321,6 @@ def load_owner_action_mask(
         raise UnsafeOwnerMaskError("owner action mask is empty")
     if np.any((normalized > 0) & (protected_normalized > 0)):
         raise UnsafeOwnerMaskError("owner action mask overlaps protected art")
-    if _positive_mask_is_overbroad(normalized, allow_dense_single_glyph=True):
-        raise UnsafeOwnerMaskError("owner action mask is overbroad for the page")
     manifest_evidence_ids = _canonical_evidence_ids(
         manifest.get("evidence_ids"),
         label="owner mask manifest evidence_ids",
@@ -1381,6 +1431,44 @@ def _engine_crop_bbox_page(action_mask: np.ndarray) -> tuple[int, int, int, int]
     )
 
 
+def _uniform_context_guard_fill(
+    original_rgb: np.ndarray,
+    candidate_rgb: np.ndarray,
+    action_mask: np.ndarray,
+) -> np.ndarray | None:
+    """Return a robust boundary fill when a candidate contradicts that boundary."""
+
+    binary = np.where(action_mask, 255, 0).astype(np.uint8)
+    ring = (cv2.dilate(binary, np.ones((9, 9), np.uint8), iterations=1) > 0) & ~action_mask
+    if int(np.count_nonzero(ring)) < 32:
+        return None
+    context = original_rgb[ring].astype(np.float32)
+    fill = candidate_rgb[action_mask].astype(np.float32)
+    if fill.size <= 0:
+        return None
+    context_median = np.median(context, axis=0)
+    context_distance = np.linalg.norm(context - context_median, axis=1)
+    coherent_context = float(np.mean(context_distance <= 24.0))
+    if coherent_context < 0.65:
+        return None
+    fill_distance = np.linalg.norm(fill - context_median, axis=1)
+    catastrophic_fill = float(np.median(fill_distance)) > 72.0
+    localized_artifact = float(np.mean(fill_distance > 72.0)) >= 0.01
+    if not (catastrophic_fill or localized_artifact):
+        return None
+    return np.clip(np.rint(context_median), 0, 255).astype(np.uint8)
+
+
+def _candidate_is_uniform_context_outlier(
+    original_rgb: np.ndarray,
+    candidate_rgb: np.ndarray,
+    action_mask: np.ndarray,
+) -> bool:
+    """Detect a catastrophic or localized fill artifact at a uniform boundary."""
+
+    return _uniform_context_guard_fill(original_rgb, candidate_rgb, action_mask) is not None
+
+
 def execute_owner_inpaint(
     original_rgb: np.ndarray,
     plan: OwnerMaskPlan,
@@ -1431,6 +1519,25 @@ def execute_owner_inpaint(
         raise UnsafeOwnerMaskError(
             "owner inpaint engine must return a canonical RGB uint8 array"
         )
+    engine = str(
+        getattr(inpainter, "engine_name", None)
+        or getattr(inpainter, "name", None)
+        or getattr(inpainter, "_backend", None)
+        or inpainter.__class__.__name__
+    )
+    context_guard_fill = (
+        _uniform_context_guard_fill(
+            original_crop,
+            candidate,
+            allowed_crop,
+        )
+        if "aot" in engine.casefold()
+        else None
+    )
+    used_context_guard = context_guard_fill is not None
+    if context_guard_fill is not None:
+        candidate = candidate.copy()
+        candidate[allowed_crop] = context_guard_fill
 
     result = original.copy()
     result_crop = result[crop_y1:crop_y2, crop_x1:crop_x2]
@@ -1443,11 +1550,8 @@ def execute_owner_inpaint(
     changed_mask = np.where(changed, 255, 0).astype(np.uint8)
     outside = changed & ~allowed
     protected_changed = changed & protected
-    engine = str(
-        getattr(inpainter, "engine_name", None)
-        or getattr(inpainter, "name", None)
-        or inpainter.__class__.__name__
-    )
+    if used_context_guard:
+        engine += "+context_guard_median"
     action_mask = np.where(allowed, 255, 0).astype(np.uint8)
     protected_mask = np.where(protected, 255, 0).astype(np.uint8)
     for array in (result, action_mask, protected_mask, changed_mask):
@@ -1473,6 +1577,7 @@ def execute_owner_inpaint(
         engine_crop_bbox_page=(crop_x1, crop_y1, crop_x2, crop_y2),
         owner_bbox_page=plan.owner_bbox_page,
         component_geometry_sha256=plan.component_geometry_sha256,
+        component_geometry_verified=plan.component_geometry_verified,
         residual_score=None,
         execution_tile_id=plan.execution_tile_id,
     )

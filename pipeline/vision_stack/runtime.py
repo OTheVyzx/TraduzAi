@@ -13257,6 +13257,7 @@ def discover_page_source_components(
                     else None
                 ),
                 rotation_source=_value(item, "rotation_source"),
+                support_only=bool(_value(item, "support_only", default=False)),
             )
         )
 

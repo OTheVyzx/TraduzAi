@@ -55,6 +55,43 @@ from main import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_owner_renderer_applies_functional_contrast_on_dark_region(self):
+        canvas = np.full((100, 180, 3), 8, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "id": "owner_dark",
+            "owner_id": "owner_dark",
+            "page_id": "page_001",
+            "translated": "TEXTO LEGIVEL",
+            "translated_payload": "TEXTO LEGIVEL",
+            "layout_regions": [
+                {
+                    "layout_region_id": "owner_dark__component",
+                    "owner_id": "owner_dark",
+                    "order": 0,
+                    "bbox_page": [20, 20, 160, 80],
+                    "safe_polygon_page": [[20, 20], [160, 20], [160, 80], [20, 80]],
+                }
+            ],
+            "render_safe_polygon_page": [[20, 20], [160, 20], [160, 80], [20, 80]],
+            "safe_text_box": [20, 20, 160, 80],
+            "layout_safe_bbox": [20, 20, 160, 80],
+            "layout_bbox": [20, 20, 160, 80],
+            "balloon_bbox": [20, 20, 160, 80],
+            "bbox": [20, 20, 160, 80],
+            "_owner_render_mode": True,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "cor": "#000000"},
+            "visual_profile": {"fonte": "ComicNeue-Bold.ttf", "cor": "#000000"},
+        }
+
+        renderer_mod._render_owner_text_block(image, block)
+
+        rendered = np.asarray(image)
+        changed = np.any(rendered != canvas, axis=2)
+        self.assertTrue(np.any(changed))
+        self.assertGreater(float(rendered[changed].mean()), 150.0)
+        self.assertEqual(block["estilo"]["cor"], "#FFFFFF")
+
     def test_render_band_image_owner_mode_returns_page_space_glyph_patch(self):
         canvas = np.full((120, 180, 3), 235, dtype=np.uint8)
         action_mask_ref = (

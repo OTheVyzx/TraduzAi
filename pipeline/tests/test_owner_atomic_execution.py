@@ -529,6 +529,31 @@ def test_atomic_owner_execution_rejects_dense_solid_masks_below_page_threshold()
     assert "overbroad" in render_commit.reason
 
 
+def test_atomic_owner_execution_accepts_dense_mask_from_verified_component_geometry() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((100, 100, 3), 210, dtype=np.uint8)
+    verified_cleanup = replace(
+        _mutation(
+            original,
+            action_box=(20, 20, 50, 50),
+            owner_bbox_page=(10, 10, 60, 60),
+        ),
+        component_geometry_verified=True,
+    )
+    glyph_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    glyph_mask[24:26, 24:28] = 255
+    glyph_patch = _glyph_patch_for_mask(
+        verified_cleanup,
+        glyph_patch_type,
+        glyph_mask,
+    )
+
+    commit = apply_atomic(original, verified_cleanup, glyph_patch)
+
+    assert commit.committed is True
+    assert commit.review_required is False
+
+
 def test_protected_art_mask_hash_is_immutable_across_execution_chain() -> None:
     apply_atomic, glyph_patch_type, _ = _atomic_api()
     original = _page()

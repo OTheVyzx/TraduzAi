@@ -94,7 +94,7 @@ def test_operational_owner_mask_requires_verified_component_geometry(tmp_path):
     )
     assert verified.component_geometry_verified is True
     assert verified.component_action_bboxes_page == (
-        ("cmp_body_top", (9, 8, 21, 14)),
+        ("cmp_body_top", (7, 6, 23, 16)),
     )
     assert verified.component_bboxes_page == (
         ("cmp_body_top", (7, 6, 23, 16)),
@@ -182,6 +182,67 @@ def test_owner_action_mask_is_union_of_owned_glyph_and_line_evidence():
     np.testing.assert_array_equal(plan.action_mask, expected)
     assert plan.evidence_ids == ("glyph_top", "line_bottom")
     assert int(plan.action_mask[2, 41]) == 0
+
+
+def test_verified_owner_mask_expands_strokes_inside_component_geometry_only():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+
+    image = np.full((30, 40, 3), 240, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[12:14, 18:20] = 255
+    owner = _single_component_owner()
+
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="thin_glyph",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (14, 8, 24, 18)},
+    )
+
+    assert int(plan.action_mask[11, 17]) == 255
+    assert int(plan.action_mask[7, 17]) == 0
+    assert int(plan.action_mask[18, 17]) == 0
+
+
+def test_verified_owner_mask_expands_proportionally_for_glow_without_touching_art():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+
+    image = np.full((100, 140, 3), 240, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    for x_start in (40, 60, 80, 100):
+        glyph[25:69, x_start : x_start + 2] = 255
+    protected = np.zeros(image.shape[:2], dtype=np.uint8)
+    protected[40, 32] = 255
+
+    plan = build_owner_mask_plan(
+        image,
+        _single_component_owner(),
+        [
+            OwnerMaskEvidence(
+                evidence_id="glowing_lines",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+            ),
+            OwnerMaskEvidence(
+                evidence_id="nearby_art",
+                component_id="cmp_foreign",
+                protected_art_mask=protected,
+            ),
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (30, 17, 110, 77)},
+    )
+
+    # A fixed three-pixel radius leaves colored/antialiased glow behind.
+    assert int(plan.action_mask[40, 33]) == 255
+    assert int(plan.action_mask[40, 30]) == 255
+    assert int(plan.action_mask[40, 32]) == 0
+    assert int(plan.action_mask[40, 29]) == 0
 
 
 def test_owner_mask_is_persisted_and_addressable_by_owner_id(tmp_path):
@@ -1187,6 +1248,101 @@ def test_owner_engine_receives_bounded_crop_but_mutation_remains_page_space():
         mutation.result_rgb[plan.action_mask == 0],
         image[plan.action_mask == 0],
     )
+
+
+def test_owner_inpaint_rejects_color_outlier_on_uniform_context():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        build_owner_mask_plan,
+        execute_owner_inpaint,
+    )
+
+    class BlackArtifactInpainter:
+        engine_name = "aot_fixture"
+
+        def inpaint(self, image, mask, **_kwargs):
+            result = image.copy()
+            result[mask > 0] = 0
+            return result
+
+    image = np.full((96, 180, 3), 248, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(
+        glyph,
+        "TITLE",
+        (35, 52),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        255,
+        3,
+        cv2.LINE_AA,
+    )
+    image[glyph > 0] = 12
+    owner = _single_component_owner()
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="uniform_title_glyph",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (30, 24, 150, 60)},
+    )
+
+    mutation = execute_owner_inpaint(image, plan, BlackArtifactInpainter())
+
+    changed_pixels = mutation.result_rgb[mutation.action_mask > 0]
+    assert float(changed_pixels.mean()) > 230.0
+    assert mutation.engine == "aot_fixture+context_guard_median"
+
+
+def test_owner_inpaint_rejects_localized_color_artifact_on_uniform_dark_context():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        build_owner_mask_plan,
+        execute_owner_inpaint,
+    )
+
+    class LocalizedRedArtifactInpainter:
+        engine_name = "aot_fixture"
+
+        def inpaint(self, image, mask, **_kwargs):
+            result = image.copy()
+            result[mask > 0] = 0
+            ys, xs = np.nonzero(mask)
+            artifact_pixels = max(1, int(len(xs) * 0.05))
+            result[ys[-artifact_pixels:], xs[-artifact_pixels:]] = (180, 0, 0)
+            return result
+
+    image = np.zeros((200, 300, 3), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[84:105:4, 90:190] = 255
+    image[glyph > 0] = 245
+    # A source glow can cross the detector component boundary.  A Telea
+    # fallback samples this fringe and smears it back across the cleaned text.
+    image[74:112, 196:212] = (180, 0, 0)
+    owner = _single_component_owner()
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="dark_burst_glyph",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (76, 74, 204, 112)},
+    )
+
+    mutation = execute_owner_inpaint(image, plan, LocalizedRedArtifactInpainter())
+
+    changed_pixels = mutation.result_rgb[mutation.action_mask > 0]
+    assert int(changed_pixels[:, 0].max()) < 64
+    assert mutation.engine == "aot_fixture+context_guard_median"
 
 
 def test_union_overreach_and_nearly_fully_protected_component_fail_closed():

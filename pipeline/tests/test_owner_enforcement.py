@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -20,6 +21,25 @@ def test_new_automatic_run_defaults_to_owner_enforce():
 
     assert main._automatic_owner_graph_mode({}) == "enforce"
     assert main._automatic_owner_graph_mode({"owner_graph_mode": "shadow"}) == "shadow"
+
+
+def test_missing_container_is_deferred_to_evidence_reconciliation():
+    from ownership.model import SourceTextComponent
+    from strip.run import _semantic_regions_for_components
+
+    component = SourceTextComponent(
+        component_id="detector_only",
+        page_id="page_001",
+        bbox_page=(10, 10, 40, 30),
+        polygon_page=((10, 10), (40, 10), (40, 30), (10, 30)),
+        detector_sources=("fixture",),
+        evidence_ids=(),
+    )
+
+    region = _semantic_regions_for_components([component])[0]
+
+    assert region.disposition == "owned"
+    assert region.reason == "semantic_container_missing"
 
 
 def test_verified_graph_never_calls_cross_band_reconcile_or_late_layer_merge(monkeypatch):
@@ -259,6 +279,246 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     assert execution.commits[0].committed is True
     assert execution.records[0]["owner_id"] == "owner_a"
     assert execution.records[0]["translated"] == "DESTINO"
+    assert execution.records[0]["band_id"] == "tile_executor"
+    assert execution.records[0]["render_bbox"] == [16, 12, 25, 15]
+    assert execution.records[0]["fit_status"] == "ok"
+    assert execution.records[0]["safe_text_box"] == [8, 7, 42, 27]
+    assert execution.records[0]["target_bbox"] == [8, 7, 42, 27]
+    assert "missing_render_bbox" not in execution.records[0].get("qa_flags", [])
+    assert "fast_fill_no_glyph_evidence" not in execution.records[0].get("qa_flags", [])
+    assert execution.records[0]["mask_evidence"]["kind"] == "owner_glyph_mask"
+    assert execution.records[0]["mask_evidence"]["raw_mask_pixels"] > 0
+
+    from main import _drop_stale_final_render_geometry
+
+    normalized = _drop_stale_final_render_geometry(dict(execution.records[0]))
+    assert normalized["render_bbox"] == [16, 12, 25, 15]
+    assert normalized["safe_text_box"] == [8, 7, 42, 27]
+    assert normalized["_final_band_render_contract_preserved"] is True
+
+
+def test_owner_source_glyph_raster_is_clipped_to_authoritative_component_geometry():
+    from ownership.model import SourceTextComponent
+    from strip.process_bands import _owner_component_glyph_raster
+
+    page = np.full((30, 60, 3), 245, dtype=np.uint8)
+    page[10:15, 8:18] = 5
+    page[10:15, 38:50] = 5
+    component = SourceTextComponent(
+        component_id="component_a",
+        page_id="page_001",
+        bbox_page=(6, 8, 22, 18),
+        polygon_page=((6, 8), (22, 8), (22, 18), (6, 18)),
+        detector_sources=("fixture",),
+    )
+
+    raster = _owner_component_glyph_raster(
+        page,
+        component=component,
+        support_polygons=(((4, 6), (54, 6), (54, 20), (4, 20)),),
+    )
+
+    assert np.any(raster[10:15, 8:18])
+    assert not np.any(raster[:, :6])
+    assert not np.any(raster[:, 22:])
+
+
+def test_owner_source_glyph_raster_includes_bounded_cleanup_halo():
+    from ownership.model import SourceTextComponent
+    from strip.process_bands import _owner_component_glyph_raster
+
+    page = np.full((30, 40, 3), 245, dtype=np.uint8)
+    page[10:18, 14:22] = 242
+    page[11:17, 15:21] = 225
+    page[12:16, 16:20] = 5
+    component = SourceTextComponent(
+        component_id="component_a",
+        page_id="page_001",
+        bbox_page=(14, 10, 22, 18),
+        polygon_page=((14, 10), (22, 10), (22, 18), (14, 18)),
+        detector_sources=("fixture",),
+    )
+
+    raster = _owner_component_glyph_raster(
+        page,
+        component=component,
+        support_polygons=(((14, 10), (22, 10), (22, 18), (14, 18)),),
+    )
+
+    assert np.any(raster[11, 15:21])
+    assert np.any(raster[16, 15:21])
+    assert not raster[10, 14]
+    assert not np.any(raster[:, :14])
+    assert not np.any(raster[:, 22:])
+
+
+def test_atomic_rejection_revokes_all_owner_write_authority():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _transition_owner_to_review
+
+    graph = _graph()
+    owner = graph.owners[0]
+    owner.action_mask_ref = "owner_masks/owner_a/action.png"
+    reviewed = _transition_owner_to_review(graph, owner.owner_id)
+    reviewed_owner = reviewed.owners[0]
+
+    assert reviewed_owner.disposition == "review"
+    assert reviewed_owner.state == "review_required"
+    assert reviewed_owner.route_action == "review_required"
+    assert reviewed_owner.execution_tile_id is None
+    assert reviewed_owner.action_mask_ref is None
+    assert reviewed.projections == []
+    assert reviewed.component_dispositions[0].decision == "review"
+    assert reviewed.validate() == []
+
+
+def test_owner_layout_safe_polygon_uses_raster_coordinates_at_page_edges():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    component = graph.components[0]
+    graph.components[0] = replace(
+        component,
+        bbox_page=(6, 6, 30, 20),
+        polygon_page=((6, 6), (30, 6), (30, 20), (6, 20)),
+    )
+    graph.projections[0] = replace(
+        graph.projections[0],
+        bbox_page=(6, 6, 30, 20),
+        bbox_tile=(6, 6, 30, 20),
+    )
+
+    regions = _owner_layout_regions(graph, page_width=30, page_height=20)
+
+    assert max(point[0] for point in regions[0]["safe_polygon_page"]) == 29
+    assert max(point[1] for point in regions[0]["safe_polygon_page"]) == 19
+
+
+def test_owner_layout_uses_selected_observation_container_not_source_glyph_bbox():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(2, 3, 36, 24),
+    )
+
+    regions = _owner_layout_regions(graph, page_width=40, page_height=30)
+
+    assert regions[0]["bbox_page"] == [2, 3, 36, 24]
+    assert regions[0]["safe_polygon_page"] == [
+        [2, 3],
+        [35, 3],
+        [35, 23],
+        [2, 23],
+    ]
+
+
+def test_connected_owner_uses_complete_selected_ocr_bbox_as_explicit_container():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    first = graph.components[0]
+    second = replace(
+        first,
+        component_id="component_b",
+        bbox_page=(8, 14, 28, 19),
+        polygon_page=((8, 14), (28, 14), (28, 19), (8, 19)),
+    )
+    graph.components.append(second)
+    graph.owners[0] = replace(
+        graph.owners[0],
+        component_ids=(first.component_id, second.component_id),
+    )
+    graph.observations[0] = replace(
+        graph.observations[0],
+        component_ids=(first.component_id, second.component_id),
+        bbox_page=(4, 3, 32, 22),
+        layout_bbox_page=None,
+    )
+
+    regions = _owner_layout_regions(graph, page_width=40, page_height=30)
+
+    component_union = (
+        min(first.bbox_page[0], second.bbox_page[0]),
+        min(first.bbox_page[1], second.bbox_page[1]),
+        max(first.bbox_page[2], second.bbox_page[2]),
+        max(first.bbox_page[3], second.bbox_page[3]),
+    )
+    expected = [
+        [component_union[0], component_union[1]],
+        [component_union[2] - 1, component_union[1]],
+        [component_union[2] - 1, component_union[3] - 1],
+        [component_union[0], component_union[3] - 1],
+    ]
+    assert len(regions) == 2
+    assert all(region["owner_safe_polygon_page"] == expected for region in regions)
+    assert [region["bbox_page"] for region in regions] == [
+        list(first.bbox_page),
+        list(second.bbox_page),
+    ]
+
+
+def test_review_owner_is_materialized_as_non_rendering_project_record():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import (
+        _owner_non_rendering_record,
+        _transition_owner_to_review,
+    )
+
+    graph = _graph()
+    _transition_owner_to_review(graph, graph.owners[0].owner_id)
+    record = _owner_non_rendering_record(graph, graph.owners[0])
+
+    assert record["owner_id"] == graph.owners[0].owner_id
+    assert record["disposition"] == "review"
+    assert record["state"] == "review_required"
+    assert record["route_action"] == "review_required"
+    assert record["visible"] is False
+    assert record["action_mask_ref"] is None
+    assert record["layout_region_ids"] == []
+
+
+def test_unsafe_owner_mask_fails_closed_as_review_without_crashing_page(monkeypatch):
+    from inpainter.owner_mask import UnsafeOwnerMaskError
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import execute_owner_page_graph
+
+    graph = _graph(state="execution_planned")
+    owner = graph.owners[0]
+    owner.route_action = "translate_inpaint_render"
+    owner.translated_payload = None
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+    page[7:12, 9:24] = 12
+
+    class Translator:
+        @staticmethod
+        def translate_pages(_pages, **_kwargs):
+            return [{"texts": [{"owner_id": owner.owner_id, "translated": "DESTINO"}]}]
+
+    monkeypatch.setattr(
+        "inpainter.owner_mask.build_owner_mask_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UnsafeOwnerMaskError("fixture overbroad mask")
+        ),
+    )
+
+    execution = execute_owner_page_graph(
+        page,
+        graph,
+        translator=Translator(),
+        inpainter=object(),
+        typesetter=object(),
+    )
+
+    assert execution.commits == ()
+    assert execution.graph.owners[0].disposition == "review"
+    assert execution.graph.owners[0].route_action == "review_required"
+    assert execution.records[0]["visible"] is False
+    assert execution.records[0]["route_action"] == "review_required"
 
 
 def test_semantic_modules_do_not_branch_on_work_chapter_page_number_or_band_id():

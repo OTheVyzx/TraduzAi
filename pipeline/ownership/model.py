@@ -191,6 +191,7 @@ class TextObservation:
     coverage_score: float | None = None
     language_score: float | None = None
     rejection_reason: str | None = None
+    legacy_rejection_reason: str | None = None
     legacy_selected: bool = False
     provider_variant: str = ""
     attempt_id: str = ""
@@ -199,6 +200,7 @@ class TextObservation:
     raw_text: str | None = None
     source_bbox_page: BBox | None = None
     text_pixel_bbox_page: BBox | None = None
+    layout_bbox_page: BBox | None = None
     line_texts: tuple[str, ...] = ()
     rotation_deg: float | None = None
     rotation_source: str | None = None
@@ -275,6 +277,7 @@ class OwnerMutation:
     execution_tile_id: str | None = None
     projection_role: str = "executor"
     color_space: str = "RGB"
+    component_geometry_verified: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -544,27 +547,37 @@ class OwnerGraph:
                         observation.page_id,
                     )
                 )
-            for field_name, bbox, code in (
-                ("bbox_page", observation.bbox_page, "observation_bbox_invalid"),
-                (
-                    "source_bbox_page",
-                    observation.source_bbox_page,
-                    "observation_source_bbox_invalid",
-                ),
-                (
-                    "text_pixel_bbox_page",
-                    observation.text_pixel_bbox_page,
-                    "observation_text_pixel_bbox_invalid",
-                ),
-            ):
-                if bbox is not None and not _is_canonical_page_bbox(bbox):
-                    violations.append(
-                        _violation(
-                            code,
-                            f"Text observation {field_name} is not canonical page geometry.",
-                            observation.observation_id,
+            # Rejected provider rows remain immutable audit evidence and are
+            # never eligible for owner selection. Their malformed coordinates
+            # explain the rejection; they must not poison an otherwise valid
+            # executable graph.
+            if observation.rejection_reason is None:
+                for field_name, bbox, code in (
+                    ("bbox_page", observation.bbox_page, "observation_bbox_invalid"),
+                    (
+                        "source_bbox_page",
+                        observation.source_bbox_page,
+                        "observation_source_bbox_invalid",
+                    ),
+                    (
+                        "text_pixel_bbox_page",
+                        observation.text_pixel_bbox_page,
+                        "observation_text_pixel_bbox_invalid",
+                    ),
+                    (
+                        "layout_bbox_page",
+                        observation.layout_bbox_page,
+                        "observation_layout_bbox_invalid",
+                    ),
+                ):
+                    if bbox is not None and not _is_canonical_page_bbox(bbox):
+                        violations.append(
+                            _violation(
+                                code,
+                                f"Text observation {field_name} is not canonical page geometry.",
+                                observation.observation_id,
+                            )
                         )
-                    )
             unknown_components = sorted(set(observation.component_ids) - component_ids)
             if unknown_components:
                 violations.append(
@@ -933,6 +946,22 @@ class OwnerGraph:
                     )
                 )
 
+            rejected_selected = sorted(
+                observation_id
+                for observation_id in owner.selected_observation_ids
+                if observation_id in observations_by_id
+                and observations_by_id[observation_id].rejection_reason is not None
+            )
+            if rejected_selected:
+                violations.append(
+                    _violation(
+                        "owner_selected_observation_rejected",
+                        "Rejected OCR evidence cannot become an executable owner payload.",
+                        owner.owner_id,
+                        *rejected_selected,
+                    )
+                )
+
             evidence_coverage = {
                 component_id
                 for observation_id in owner.observation_ids
@@ -1167,6 +1196,7 @@ class OwnerGraph:
                     "coverage_score": observation.coverage_score,
                     "language_score": observation.language_score,
                     "rejection_reason": observation.rejection_reason,
+                    "legacy_rejection_reason": observation.legacy_rejection_reason,
                     "legacy_selected": bool(observation.legacy_selected),
                     "provider_variant": observation.provider_variant,
                     "attempt_id": observation.attempt_id,
@@ -1181,6 +1211,11 @@ class OwnerGraph:
                     "text_pixel_bbox_page": (
                         list(observation.text_pixel_bbox_page)
                         if observation.text_pixel_bbox_page is not None
+                        else None
+                    ),
+                    "layout_bbox_page": (
+                        list(observation.layout_bbox_page)
+                        if observation.layout_bbox_page is not None
                         else None
                     ),
                     "line_texts": list(observation.line_texts),
@@ -1307,6 +1342,11 @@ class OwnerGraph:
                         if item.get("rejection_reason") is not None
                         else None
                     ),
+                    legacy_rejection_reason=(
+                        str(item["legacy_rejection_reason"])
+                        if item.get("legacy_rejection_reason") is not None
+                        else None
+                    ),
                     legacy_selected=bool(item.get("legacy_selected", False)),
                     provider_variant=str(item.get("provider_variant") or ""),
                     attempt_id=str(item.get("attempt_id") or ""),
@@ -1329,6 +1369,7 @@ class OwnerGraph:
                     ),
                     source_bbox_page=_optional_bbox(item.get("source_bbox_page")),
                     text_pixel_bbox_page=_optional_bbox(item.get("text_pixel_bbox_page")),
+                    layout_bbox_page=_optional_bbox(item.get("layout_bbox_page")),
                     line_texts=tuple(str(value) for value in item.get("line_texts") or ()),
                     rotation_deg=_optional_float(item.get("rotation_deg")),
                     rotation_source=(

@@ -159,6 +159,35 @@ class RunChapterSmokeTests(unittest.TestCase):
             for page in pages:
                 self.assertTrue(page.path.exists())
 
+    def test_write_output_pages_jpegs_converts_internal_rgb_to_opencv_bgr(self):
+        from strip.run import _write_output_pages_jpegs
+
+        page_rgb = np.full((16, 20, 3), [231, 43, 9], dtype=np.uint8)
+        pages = [SimpleNamespace(path=None, image=page_rgb)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "out"
+            _write_output_pages_jpegs(pages, output_dir)
+
+            persisted_bgr = cv2.imread(str(output_dir / "001.jpg"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(persisted_bgr)
+            np.testing.assert_allclose(persisted_bgr[8, 10], [9, 43, 231], atol=3)
+
+    def test_owner_output_pages_are_persisted_losslessly_as_png(self):
+        from strip.run import _write_output_pages_lossless
+
+        image_rgb = np.zeros((12, 18, 3), dtype=np.uint8)
+        image_rgb[:, :] = [233, 41, 7]
+        image_rgb[4:8, 6:12] = [3, 219, 171]
+        pages = [SimpleNamespace(path=None, image=image_rgb)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_output_pages_lossless(pages, Path(tmpdir))
+            self.assertEqual(pages[0].path.suffix, ".png")
+            saved_bgr = cv2.imread(str(pages[0].path), cv2.IMREAD_COLOR)
+            saved_rgb = cv2.cvtColor(saved_bgr, cv2.COLOR_BGR2RGB)
+            np.testing.assert_array_equal(saved_rgb, image_rgb)
+
     def test_strip_band_margin_is_safe_for_all_sources(self):
         from strip.run import _strip_band_margin_px
 

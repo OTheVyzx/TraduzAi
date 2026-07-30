@@ -95,6 +95,23 @@ def test_plain_panel_edges_are_not_promoted_to_text_components() -> None:
     assert components == []
 
 
+def test_support_only_container_does_not_become_source_text_without_glyphs() -> None:
+    image = np.full((220, 420, 3), 245, dtype=np.uint8)
+    detector = DetectorRegion(
+        bbox_page=(20, 20, 400, 200),
+        detector_source="balloon_container",
+        confidence=0.95,
+        support_only=True,
+    )
+
+    assert discover_source_text_components(
+        image,
+        page_id="page_001",
+        detector_regions=[detector],
+        glyph_candidates=[],
+    ) == []
+
+
 def test_periodic_hatching_without_text_is_not_promoted() -> None:
     height, width = 1600, 1000
     image = np.full((height, width, 3), 255, dtype=np.uint8)

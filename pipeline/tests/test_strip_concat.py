@@ -33,6 +33,18 @@ class BuildStripTests(unittest.TestCase):
             self.assertTrue(np.all(strip.image[99, :] == 50))
             self.assertTrue(np.all(strip.image[100, :] == 200))
 
+    def test_build_strip_normalizes_opencv_bgr_input_to_internal_rgb(self):
+        from strip.concat import build_strip
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_bgr = np.full((12, 18, 3), [11, 37, 229], dtype=np.uint8)
+            path = self._write_png(tmp_path, "colored.png", source_bgr)
+
+            strip = build_strip([path])
+
+            np.testing.assert_array_equal(strip.image[4, 7], [229, 37, 11])
+
     def test_build_strip_letterboxes_narrow_pages_with_white(self):
         from strip.concat import build_strip
         with tempfile.TemporaryDirectory() as tmp:

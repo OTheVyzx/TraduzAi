@@ -20,7 +20,7 @@ import time
 import cv2
 import numpy as np
 
-from compositor.owner_compositor import OwnerCompositionError, compose_page
+from compositor.owner_compositor import OwnerCompositionError, _array_sha256, compose_page
 from ownership.model import (
     OwnerGlyphPatch,
     OwnerExecutionCommit,
@@ -454,6 +454,7 @@ class OwnerChapterComposition:
     """Read-only owner composition outputs before framing and persistence."""
 
     output_pages: list[OutputPage]
+    original_pages: list[OutputPage]
     clean_pages: list[OutputPage]
     compositions: dict[str, PageCompositionResult]
     final_strip_rgb: np.ndarray
@@ -571,7 +572,30 @@ def _compose_owner_output_pages(
             )
         clean_strip[y1:y2, x1:x2] = clean_result.final_rgb
         final_strip[y1:y2, x1:x2] = final_result.final_rgb
-        compositions[page_id] = final_result
+        framed_final = final_strip[y1:y2].copy()
+        framed_cleanup_map = np.full(
+            (y2 - y1, int(strip.width)),
+            "",
+            dtype=np.asarray(final_result.cleanup_owner_map).dtype,
+        )
+        framed_glyph_map = np.full(
+            (y2 - y1, int(strip.width)),
+            "",
+            dtype=np.asarray(final_result.glyph_owner_map).dtype,
+        )
+        framed_cleanup_map[:, x1:x2] = np.asarray(final_result.cleanup_owner_map)
+        framed_glyph_map[:, x1:x2] = np.asarray(final_result.glyph_owner_map)
+        compositions[page_id] = PageCompositionResult(
+            final_rgb=framed_final,
+            cleanup_owner_map=framed_cleanup_map,
+            glyph_owner_map=framed_glyph_map,
+            conflicts=final_result.conflicts,
+            write_counts=dict(final_result.write_counts),
+            sha256=_array_sha256(framed_final),
+            page_id=page_id,
+            coordinate_space="page",
+            committed=final_result.committed,
+        )
 
     final_strip_view = VerticalStrip(
         image=final_strip,
@@ -589,12 +613,36 @@ def _compose_owner_output_pages(
         page_x_offsets=list(strip.page_x_offsets),
         source_page_widths=list(getattr(strip, "source_page_widths", None) or []),
     )
-    output_pages = assemble_output_pages(final_strip_view, balloons, target_count=target_count)
-    clean_pages = assemble_output_pages(clean_strip_view, balloons, target_count=target_count)
+    source_breaks = [int(value) for value in strip.source_page_breaks]
+    output_pages = [
+        OutputPage(
+            y_top=y_top,
+            y_bottom=y_bottom,
+            image=final_strip_view.image[y_top:y_bottom].copy(),
+        )
+        for y_top, y_bottom in zip(source_breaks, source_breaks[1:])
+    ]
+    original_pages = [
+        OutputPage(
+            y_top=y_top,
+            y_bottom=y_bottom,
+            image=original_strip[y_top:y_bottom].copy(),
+        )
+        for y_top, y_bottom in zip(source_breaks, source_breaks[1:])
+    ]
+    clean_pages = [
+        OutputPage(
+            y_top=y_top,
+            y_bottom=y_bottom,
+            image=clean_strip_view.image[y_top:y_bottom].copy(),
+        )
+        for y_top, y_bottom in zip(source_breaks, source_breaks[1:])
+    ]
     final_strip.setflags(write=False)
     clean_strip.setflags(write=False)
     return OwnerChapterComposition(
         output_pages=output_pages,
+        original_pages=original_pages,
         clean_pages=clean_pages,
         compositions=compositions,
         final_strip_rgb=final_strip,
@@ -2249,9 +2297,10 @@ def _image_io_worker_count(page_count: int) -> int:
     return min(int(page_count), workers)
 
 
-def _write_jpeg_timed(path: Path, image: np.ndarray, *, quality: int = 92) -> float:
+def _write_jpeg_timed(path: Path, image_rgb: np.ndarray, *, quality: int = 92) -> float:
     started = time.perf_counter()
-    ok = cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    image_bgr = cv2.cvtColor(image_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+    ok = cv2.imwrite(str(path), image_bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
     if not ok:
         raise IOError(f"Falha ao gravar imagem: {path}")
     return time.perf_counter() - started
@@ -2268,6 +2317,29 @@ def _write_output_pages_jpegs(output_pages: list[OutputPage], output_dir: Path, 
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="traduzai-image-io") as pool:
         futures = [pool.submit(_write_jpeg_timed, page.path, page.image, quality=quality) for page in output_pages]
+        return sum(future.result() for future in futures)
+
+
+def _write_png_timed(path: Path, image_rgb: np.ndarray) -> float:
+    started = time.perf_counter()
+    image_bgr = cv2.cvtColor(image_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+    if not cv2.imwrite(str(path), image_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+        raise IOError(f"Falha ao gravar imagem lossless: {path}")
+    return time.perf_counter() - started
+
+
+def _write_output_pages_lossless(
+    output_pages: list[OutputPage],
+    output_dir: Path,
+) -> float:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for index, page in enumerate(output_pages, start=1):
+        page.path = output_dir / f"{index:03d}.png"
+    workers = _image_io_worker_count(len(output_pages))
+    if workers <= 1:
+        return sum(_write_png_timed(page.path, page.image) for page in output_pages)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="traduzai-image-io") as pool:
+        futures = [pool.submit(_write_png_timed, page.path, page.image) for page in output_pages]
         return sum(future.result() for future in futures)
 
 
@@ -2563,13 +2635,23 @@ def _discover_source_components_for_strip(strip: VerticalStrip, balloons: list) 
             bbox_page = metadata.get("bbox_page")
             if not isinstance(bbox_page, (list, tuple)) or len(bbox_page) < 4:
                 continue
+            detector_source = str(
+                metadata.get("detector_source")
+                or (
+                    "negative_region_detector"
+                    if metadata.get("negative_detect_candidate")
+                    else "strip_region_detector"
+                )
+            )
             detector_regions.append(
                 {
                     "bbox_page": [int(value) for value in bbox_page[:4]],
                     "polygon_page": metadata.get("polygon_page") or (),
-                    "detector_source": str(
-                        metadata.get("detector_source")
-                        or ("negative_region_detector" if metadata.get("negative_detect_candidate") else "strip_region_detector")
+                    "detector_source": detector_source,
+                    "support_only": bool(metadata.get("support_only"))
+                    or any(
+                        token in detector_source.casefold()
+                        for token in ("balloon", "ui_layout", "container")
                     ),
                     "confidence": float(getattr(balloon, "confidence", 0.0) or 0.0),
                     "region_id": metadata.get("region_id"),
@@ -5438,6 +5520,19 @@ def _merge_owner_observations(
         raise ValueError(
             f"observation_id collision for {existing.observation_id!r}: conflicting text"
         )
+    layout_candidates = [
+        bbox
+        for bbox in (existing.layout_bbox_page, incoming.layout_bbox_page)
+        if bbox is not None
+    ]
+    layout_bbox_page = (
+        max(
+            layout_candidates,
+            key=lambda bbox: (_bbox_area(tuple(bbox)), tuple(bbox)),
+        )
+        if layout_candidates
+        else None
+    )
     return replace(
         existing,
         component_ids=tuple(sorted(set(existing.component_ids) | set(incoming.component_ids))),
@@ -5461,7 +5556,12 @@ def _merge_owner_observations(
                 sorted({str(existing.rejection_reason), str(incoming.rejection_reason)})
             )
         ),
+        legacy_rejection_reason=(
+            existing.legacy_rejection_reason
+            or incoming.legacy_rejection_reason
+        ),
         legacy_selected=bool(existing.legacy_selected or incoming.legacy_selected),
+        layout_bbox_page=layout_bbox_page,
     )
 
 
@@ -5489,7 +5589,9 @@ def _associate_page_observations(observations, components) -> list[TextObservati
             if intersection <= 0:
                 continue
             component_area = max(1, _bbox_area(tuple(component.bbox_page)))
-            if intersection / float(min(observation_area, component_area)) >= 0.20:
+            component_coverage = intersection / float(component_area)
+            observation_coverage = intersection / float(observation_area)
+            if component_coverage >= 0.20 and observation_coverage >= 0.02:
                 matched.append(component.component_id)
         associated.append(replace(observation, component_ids=tuple(sorted(matched))))
     return associated
@@ -5517,7 +5619,7 @@ def _semantic_regions_for_components(components) -> list[SemanticRegion]:
             region_id=f"review_{component.component_id}",
             component_ids=(component.component_id,),
             semantic_role="dialogue_body",
-            disposition="review",
+            disposition="owned",
             reason="semantic_container_missing",
         )
         for component in sorted(missing_container, key=lambda item: item.component_id)
@@ -5589,8 +5691,10 @@ def _resolve_page_owner_graphs_once(
 def _assign_owner_executor_projections(
     graph: OwnerGraph,
     tile_projections: list[TileProjection],
+    *,
+    page_space_executor: bool = False,
 ) -> OwnerGraph:
-    """Choose one full-coverage executor, then mark every overlap as context-only."""
+    """Choose one scheduler tile while preserving page-space execution geometry."""
 
     assigned = copy.deepcopy(graph)
     components_by_id = {item.component_id: item for item in assigned.components}
@@ -5647,6 +5751,11 @@ def _assign_owner_executor_projections(
             if full_coverage
             else None
         )
+        if executor is None and page_space_executor and candidates:
+            executor = sorted(
+                candidates,
+                key=lambda item: (-item[0], -item[1], item[2]),
+            )[0]
         if executor is None:
             violations.append(
                 OwnerViolation(
@@ -5661,19 +5770,24 @@ def _assign_owner_executor_projections(
         owner.state = "execution_planned"
         for _covered, _edge, tile_id, tile in sorted(candidates, key=lambda item: item[2]):
             offset_x, offset_y = (int(value) for value in tile.offset_xy)
+            is_executor = tile_id == executor[2]
             projections.append(
                 OwnerProjection(
                     owner_id=owner.owner_id,
                     tile_id=tile_id,
-                    role="executor" if tile_id == executor[2] else "context_only",
+                    role="executor" if is_executor else "context_only",
                     bbox_page=owner_bbox,
                     bbox_tile=(
-                        owner_bbox[0] - offset_x,
-                        owner_bbox[1] - offset_y,
-                        owner_bbox[2] - offset_x,
-                        owner_bbox[3] - offset_y,
+                        owner_bbox
+                        if is_executor and page_space_executor
+                        else (
+                            owner_bbox[0] - offset_x,
+                            owner_bbox[1] - offset_y,
+                            owner_bbox[2] - offset_x,
+                            owner_bbox[3] - offset_y,
+                        )
                     ),
-                    offset_xy=(offset_x, offset_y),
+                    offset_xy=(0, 0) if is_executor and page_space_executor else (offset_x, offset_y),
                 )
             )
     assigned.projections = sorted(
@@ -5738,6 +5852,7 @@ def _run_owner_control_plane(
                     for item in evidence_by_page.get(page_id, [])
                     if isinstance(getattr(item, "tile_projection", None), TileProjection)
                 ],
+                page_space_executor=mode == "enforce",
             )
             graphs[page_id] = graph
         violations = graph.validate()
@@ -6044,6 +6159,9 @@ def run_chapter(
                     len(graph.owners) for graph in owner_graphs.values()
                 )
                 chapter_telemetry["owner_graph_shadow_divergence_counts"] = divergence_counts
+            # Publish the resolved graph before page execution so a fail-closed
+            # layout or mask rejection still leaves its complete evidence chain.
+            _write_owner_debug_artifacts(owner_graphs, bands, None)
 
         if chapter_telemetry is not None:
             chapter_telemetry["cross_band_ocr_fragments_reconciled"] = int(
@@ -6384,6 +6502,7 @@ def run_chapter(
                 target_count=target_count,
             )
         output_pages = owner_chapter_composition.output_pages
+        original_pages = owner_chapter_composition.original_pages
         clean_pages = owner_chapter_composition.clean_pages
         clean_strip_image = np.asarray(owner_chapter_composition.clean_strip_rgb)
         strip.image[:, :, :] = owner_chapter_composition.final_strip_rgb
@@ -6396,18 +6515,19 @@ def run_chapter(
             strip.image[:, :, :] = rendered_strip_image
         with _timed(chapter_telemetry, "assemble_rendered_pages"):
             output_pages = assemble_output_pages(strip, balloons, target_count=target_count)
-    with _timed(chapter_telemetry, "assemble_original_pages"):
-        original_pages = assemble_output_pages(
-            VerticalStrip(
-                image=original_strip_image,
-                width=strip.width,
-                height=strip.height,
-                source_page_breaks=list(strip.source_page_breaks),
-                page_x_offsets=list(strip.page_x_offsets),
-            ),
-            balloons,
-            target_count=target_count,
-        )
+    if not owner_composition_active:
+        with _timed(chapter_telemetry, "assemble_original_pages"):
+            original_pages = assemble_output_pages(
+                VerticalStrip(
+                    image=original_strip_image,
+                    width=strip.width,
+                    height=strip.height,
+                    source_page_breaks=list(strip.source_page_breaks),
+                    page_x_offsets=list(strip.page_x_offsets),
+                ),
+                balloons,
+                target_count=target_count,
+            )
     if not owner_composition_active:
         with _timed(chapter_telemetry, "assemble_clean_pages"):
             clean_pages = assemble_output_pages(
@@ -6479,6 +6599,8 @@ def run_chapter(
     if owner_composition_active:
         for page_index, page in enumerate(output_pages, start=1):
             page_id = _page_id_for(page_index)
+            page.owner_graph = owner_graphs[page_id]
+            page.owner_composition = owner_chapter_composition.compositions[page_id]
             records = [
                 copy.deepcopy(record)
                 for record in owner_execution_records_by_page.get(page_id, [])
@@ -6748,7 +6870,11 @@ def run_chapter(
     _write_contact_sheets_debug(original_pages, output_pages, bands)
 
     with _timed(chapter_telemetry, "write_translated_pages"):
-        cleanup_breakdown["cleanup_save"] += _write_output_pages_jpegs(output_pages, output_dir)
+        cleanup_breakdown["cleanup_save"] += (
+            _write_output_pages_lossless(output_pages, output_dir)
+            if owner_composition_active
+            else _write_output_pages_jpegs(output_pages, output_dir)
+        )
     _write_final_band_crop_debug(
         output_pages,
         bands,

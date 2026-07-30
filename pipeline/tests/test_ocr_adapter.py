@@ -53,7 +53,7 @@ def test_full_page_crop_negative_rotated_and_recovery_become_observations() -> N
 def test_adapter_preserves_rejected_candidates_with_reason() -> None:
     observation = record_to_observation(
         {
-            "text": "",
+            "text": "LOW CONFIDENCE SOURCE",
             "bbox": [4, 6, 20, 18],
             "confidence": 0.21,
             "rejection_reason": "legacy_low_confidence_drop",
@@ -62,9 +62,10 @@ def test_adapter_preserves_rejected_candidates_with_reason() -> None:
         _projection(),
     )
 
-    assert observation.text == ""
+    assert observation.text == "LOW CONFIDENCE SOURCE"
     assert observation.confidence == 0.21
-    assert observation.rejection_reason == "legacy_low_confidence_drop"
+    assert observation.rejection_reason is None
+    assert observation.legacy_rejection_reason == "legacy_low_confidence_drop"
     assert observation.provider == "adaptive_crop"
 
 
@@ -117,6 +118,37 @@ def test_ocr_adapter_maps_every_polygon_to_page_space() -> None:
         ((20, 245), (40, 245), (40, 255), (20, 255)),
         ((21, 260), (60, 260), (60, 275), (21, 275)),
     )
+
+
+def test_ocr_adapter_preserves_layout_container_in_page_space() -> None:
+    observation = record_to_observation(
+        {
+            "text": "LONG BODY",
+            "bbox": [20, 20, 100, 48],
+            "bubble_inner_bbox": [5, 8, 180, 90],
+            "provider": "paddle_full_page",
+        },
+        _projection(),
+    )
+
+    assert observation.layout_bbox_page == (22, 248, 197, 330)
+
+
+def test_ocr_adapter_prefers_visual_container_over_tight_text_safe_box() -> None:
+    observation = record_to_observation(
+        {
+            "text": "CARD BODY",
+            "bbox": [40, 30, 120, 58],
+            "safe_text_box": [36, 26, 124, 62],
+            "bubble_inner_bbox": [34, 24, 126, 64],
+            "balloon_bbox": [10, 8, 180, 100],
+            "card_panel_bbox": [5, 4, 190, 108],
+            "provider": "visual_card_full_page",
+        },
+        _projection(),
+    )
+
+    assert observation.layout_bbox_page == (22, 244, 207, 348)
 
 
 def test_ocr_adapter_does_not_assign_semantic_owner_from_band() -> None:

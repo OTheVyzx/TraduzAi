@@ -327,7 +327,8 @@ class VisionStackRuntimeTests(unittest.TestCase):
         full = next(item for item in observations if item["provider"] == "paddle_full_page")
         self.assertEqual(full["bbox_page"], [27, 260, 117, 288])
         rejected = next(item for item in observations if item["provider"] == "paddleocr_raw")
-        self.assertEqual(rejected["rejection_reason"], "legacy_filtered")
+        self.assertIsNone(rejected["rejection_reason"])
+        self.assertEqual(rejected["legacy_rejection_reason"], "legacy_filtered")
 
     def test_visual_card_ocr_recall_rejects_stale_lines_when_current_crop_reocr_is_empty(self):
         image = np.full((360, 600, 3), [28, 52, 112], dtype=np.uint8)

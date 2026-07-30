@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 if TYPE_CHECKING:
-    from ownership.model import OwnerGraph, OwnerProjection, SourceTextComponent, TextObservation
+    from ownership.model import (
+        OwnerGraph,
+        OwnerProjection,
+        PageCompositionResult,
+        SourceTextComponent,
+        TextObservation,
+    )
     from ownership.ocr_adapter import TileProjection
 
 
@@ -133,3 +139,5 @@ class OutputPage:
     text_layers: dict = field(default_factory=dict)
     page_profile: Optional[dict] = None
     inpaint_blocks: Optional[list] = None
+    owner_graph: Optional["OwnerGraph"] = None
+    owner_composition: Optional["PageCompositionResult"] = None

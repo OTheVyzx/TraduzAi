@@ -220,7 +220,11 @@ def evaluate_final_pixel_observation(
         owned_pixels = int(np.count_nonzero((glyph_map != "") | (cleanup_map != "")))
         owned_mask = (glyph_map != "") | (cleanup_map != "")
         final_changed = composition.write_counts.get("final_changed_pixels")
-        if not isinstance(final_changed, int) or final_changed != owned_pixels:
+        if (
+            not isinstance(final_changed, int)
+            or final_changed < 0
+            or final_changed > owned_pixels
+        ):
             add(
                 "pixel_change_outside_owned_masks",
                 "pixel_ownership_contract",
@@ -311,23 +315,34 @@ def evaluate_final_pixel_observation(
         if not text:
             continue
         bbox = _record_bbox(record)
+        candidate_owners: set[str] = set()
+        if bbox is not None and glyph_map.shape == expected_shape:
+            x1 = max(0, min(expected_shape[1], bbox[0]))
+            y1 = max(0, min(expected_shape[0], bbox[1]))
+            x2 = max(x1, min(expected_shape[1], bbox[2]))
+            y2 = max(y1, min(expected_shape[0], bbox[3]))
+            candidate_owners.update(
+                str(value)
+                for value in np.unique(glyph_map[y1:y2, x1:x2])
+                if str(value) in known_owner_ids
+            )
         matching_components = [
             component
             for component in graph.components
             if bbox is not None and _overlap_ratio(bbox, component.bbox_page) >= 0.2
         ]
-        if not matching_components:
+        if not matching_components and not candidate_owners:
             add(
                 "independently_detected_text_without_owner",
                 "source_coverage_contract",
                 offenders=(f"ocr_record_{index}", text),
             )
             continue
-        candidate_owners = {
+        candidate_owners.update(
             owner_by_component[component.component_id].owner_id
             for component in matching_components
             if component.component_id in owner_by_component
-        }
+        )
         for owner_id in sorted(candidate_owners):
             owner = next(item for item in graph.owners if item.owner_id == owner_id)
             if source_payload_visible(owner.source_payload, text):

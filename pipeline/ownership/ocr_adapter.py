@@ -18,6 +18,20 @@ from .model import BBox, Point, TextObservation
 
 
 Polygon = tuple[Point, ...]
+_STRUCTURAL_REJECTION_REASONS = frozenset(
+    {
+        "missing_bbox",
+        "invalid_bbox",
+        "invalid_bbox_order",
+        "invalid_source_bbox",
+        "invalid_text_pixel_bbox",
+        "bbox_outside_tile",
+        "bbox_outside_page",
+        "invalid_polygons",
+        "invalid_confidence",
+        "empty_text",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -179,6 +193,7 @@ def observation_to_dict(observation: TextObservation) -> dict:
         "coverage_score": observation.coverage_score,
         "language_score": observation.language_score,
         "rejection_reason": observation.rejection_reason,
+        "legacy_rejection_reason": observation.legacy_rejection_reason,
         "legacy_selected": bool(observation.legacy_selected),
         "provider_variant": observation.provider_variant,
         "attempt_id": observation.attempt_id,
@@ -193,6 +208,11 @@ def observation_to_dict(observation: TextObservation) -> dict:
         "text_pixel_bbox_page": (
             list(observation.text_pixel_bbox_page)
             if observation.text_pixel_bbox_page is not None
+            else None
+        ),
+        "layout_bbox_page": (
+            list(observation.layout_bbox_page)
+            if observation.layout_bbox_page is not None
             else None
         ),
         "line_texts": list(observation.line_texts),
@@ -283,11 +303,45 @@ def record_to_observation(record: dict, projection: TileProjection) -> TextObser
         projection,
         already_page_space=record.get("text_pixel_bbox_page") is not None,
     )
+    layout_bbox_value = _first_present(
+        record,
+        (
+            "layout_bbox_page",
+            "card_panel_bbox",
+            "_visual_card_bbox_hint",
+            "real_bubble_mask_bbox",
+            "bubble_mask_bbox",
+            "balloon_bbox",
+            "bubble_inner_bbox",
+            "balloon_inner_bbox",
+            "safe_text_box",
+            "layout_safe_bbox",
+        ),
+    )
+    layout_bbox_page = _bbox_to_page(
+        layout_bbox_value,
+        projection,
+        already_page_space=record.get("layout_bbox_page") is not None,
+    )
+    if layout_bbox_page is not None and (
+        layout_bbox_page[2] <= layout_bbox_page[0]
+        or layout_bbox_page[3] <= layout_bbox_page[1]
+        or (
+            projection.page_size is not None
+            and _bbox_exceeds_size(layout_bbox_page, projection.page_size)
+        )
+    ):
+        layout_bbox_page = None
     confidence_value = _first_present(record, ("confidence", "confidence_raw", "score"))
     confidence = _optional_float(confidence_value)
     rotation_value = _first_present(record, ("rotation_deg", "rotation"))
     rotation_deg = _optional_float(rotation_value)
-    rejection_reason = _rejection_reason(record)
+    captured_rejection_reason = _rejection_reason(record)
+    rejection_reason = (
+        captured_rejection_reason
+        if captured_rejection_reason in _STRUCTURAL_REJECTION_REASONS
+        else None
+    )
     if rejection_reason is None and record.get("bbox_page") is None and bbox_value is None:
         rejection_reason = "missing_bbox"
     raw_bbox_value = record.get("bbox_page") if record.get("bbox_page") is not None else bbox_value
@@ -364,6 +418,12 @@ def record_to_observation(record: dict, projection: TileProjection) -> TextObser
         coverage_score=_optional_float(record.get("coverage_score")),
         language_score=_optional_float(record.get("language_score")),
         rejection_reason=rejection_reason,
+        legacy_rejection_reason=(
+            captured_rejection_reason
+            if captured_rejection_reason
+            and captured_rejection_reason != rejection_reason
+            else None
+        ),
         legacy_selected=bool(record.get("legacy_selected", False)),
         provider_variant=provider_variant,
         attempt_id=attempt_id,
@@ -372,6 +432,7 @@ def record_to_observation(record: dict, projection: TileProjection) -> TextObser
         raw_text=str(raw_text_value) if raw_text_value is not None else None,
         source_bbox_page=source_bbox_page,
         text_pixel_bbox_page=text_pixel_bbox_page,
+        layout_bbox_page=layout_bbox_page,
         line_texts=tuple(str(value) for value in record.get("line_texts") or ()),
         rotation_deg=rotation_deg,
         rotation_source=(
@@ -480,6 +541,7 @@ def _union_manifest_observation(existing: dict, incoming: dict) -> dict:
         "bbox_page",
         "source_bbox_page",
         "text_pixel_bbox_page",
+        "layout_bbox_page",
         "coverage_score",
         "language_score",
         "rejection_reason",

@@ -5,12 +5,13 @@ from __future__ import annotations
 import copy
 from hashlib import sha256
 import json
+import logging
 import math
 import os
 import re
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -38,6 +39,9 @@ from ownership.model import (
 from ownership.translation import merge_owner_translations, owners_to_translation_page
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
+
+
+logger = logging.getLogger(__name__)
 
 
 IMAGE_WHITE_BUBBLE_MASK_SOURCE = "image_white_bubble_mask"
@@ -8776,7 +8780,12 @@ def apply_atomic_owner_execution(
         )
         if not np.any(action_mask):
             raise ValueError("mutation action mask is empty")
-        if _owner_mask_is_overbroad(action_mask):
+        if not isinstance(mutation.component_geometry_verified, bool):
+            raise ValueError("mutation component geometry verification must be boolean")
+        if (
+            not mutation.component_geometry_verified
+            and _owner_mask_is_overbroad(action_mask)
+        ):
             raise ValueError("mutation action mask is overbroad")
         if np.any((action_mask > 0) & (protected_art_mask > 0)):
             raise ValueError("mutation action mask overlaps protected art")
@@ -9525,6 +9534,7 @@ def _observation_from_manifest_row(
         raw_text=(str(row.get("raw_text")) if row.get("raw_text") is not None else None),
         source_bbox_page=_optional_bbox(row.get("source_bbox_page")),
         text_pixel_bbox_page=_optional_bbox(row.get("text_pixel_bbox_page")),
+        layout_bbox_page=_optional_bbox(row.get("layout_bbox_page")),
         line_texts=tuple(str(value) for value in row.get("line_texts") or ()),
         rotation_deg=_optional_float(row.get("rotation_deg")),
         rotation_source=(
@@ -9684,7 +9694,23 @@ def _owner_glyph_raster(
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
-    foreground = (distance >= max(4.0, float(threshold))).astype(np.uint8) * 255
+    core = distance >= max(4.0, float(threshold))
+    # JPEG/chroma noise commonly differs from its local background by only
+    # 1-3 levels.  Treating that noise as glyph halo can connect an entire
+    # card or watermark to one owner and makes the positive mask overbroad.
+    # Keep only a meaningful, Otsu-relative antialias fringe around the core.
+    halo_threshold = max(6.0, min(32.0, float(threshold) * 0.35))
+    low_contrast_ink = distance >= halo_threshold
+    connected_halo = cv2.dilate(
+        core.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    ) > 0
+    foreground = np.where(
+        core | (connected_halo & low_contrast_ink),
+        255,
+        0,
+    ).astype(np.uint8)
     local_support = support[y1:y2, x1:x2]
     foreground[local_support == 0] = 0
     foreground[local_support == 0] = 0
@@ -9695,30 +9721,233 @@ def _owner_glyph_raster(
     return raster
 
 
-def _owner_layout_regions(graph: OwnerGraph) -> list[dict[str, Any]]:
+def _owner_component_glyph_raster(
+    page_rgb: np.ndarray,
+    *,
+    component: SourceTextComponent,
+    support_polygons: tuple[tuple[tuple[int, int], ...], ...],
+) -> np.ndarray:
+    """Extract OCR-supported ink plus its cleanup halo inside component geometry."""
+
+    raster = _owner_glyph_raster(
+        page_rgb,
+        support_polygons=list(support_polygons),
+    )
+    x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
+    bounds = np.zeros(page_rgb.shape[:2], dtype=np.uint8)
+    bounds[y1:y2, x1:x2] = 255
+    component_polygons = (
+        [tuple(component.polygon_page)] if component.polygon_page else []
+    )
+    if component_polygons:
+        polygon_mask = _page_polygon_mask(page_rgb.shape[:2], component_polygons)
+        bounds = cv2.bitwise_and(bounds, polygon_mask)
+    clipped = cv2.bitwise_and(raster, bounds)
+    if not np.any(clipped):
+        raise ValueError(
+            f"owner OCR support contains no source ink inside {component.component_id}"
+        )
+    return clipped
+
+
+def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
+    """Revoke every write capability after an atomic owner-chain rejection."""
+
+    owner = next((item for item in graph.owners if item.owner_id == owner_id), None)
+    if owner is None:
+        raise ValueError(f"unknown owner review transition: {owner_id}")
+    owner.disposition = "review"
+    owner.state = "review_required"
+    owner.route_action = "review_required"
+    owner.execution_tile_id = None
+    owner.action_mask_ref = None
+    graph.projections = [
+        projection
+        for projection in graph.projections
+        if projection.owner_id != owner_id
+    ]
+    graph.component_dispositions = [
+        (
+            replace(disposition, decision="review", owner_id=owner_id)
+            if disposition.component_id in set(owner.component_ids)
+            else disposition
+        )
+        for disposition in graph.component_dispositions
+    ]
+    return graph
+
+
+def _owner_layout_regions(
+    graph: OwnerGraph,
+    *,
+    page_width: int,
+    page_height: int,
+) -> list[dict[str, Any]]:
     owner = graph.owners[0]
     components = {
         component.component_id: component for component in graph.components
     }
+    selected_observations = [
+        observation
+        for observation in graph.observations
+        if observation.observation_id in set(owner.selected_observation_ids)
+    ]
+    component_boxes = [components[component_id].bbox_page for component_id in owner.component_ids]
+    owner_component_bbox = (
+        min(box[0] for box in component_boxes),
+        min(box[1] for box in component_boxes),
+        max(box[2] for box in component_boxes),
+        max(box[3] for box in component_boxes),
+    )
+    layout_container_candidates = [
+        tuple(observation.layout_bbox_page)
+        for observation in selected_observations
+        if observation.layout_bbox_page is not None
+        and observation.layout_bbox_page[0] <= owner_component_bbox[0]
+        and observation.layout_bbox_page[1] <= owner_component_bbox[1]
+        and observation.layout_bbox_page[2] >= owner_component_bbox[2]
+        and observation.layout_bbox_page[3] >= owner_component_bbox[3]
+        and observation.layout_bbox_page[2] <= page_width
+        and observation.layout_bbox_page[3] <= page_height
+    ]
+    layout_container_bbox = (
+        min(
+            layout_container_candidates,
+            key=lambda bbox: (
+                (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
+                bbox,
+            ),
+        )
+        if layout_container_candidates
+        else None
+    )
+    selected_covers_connected_owner = (
+        len(owner.component_ids) > 1
+        and any(
+            set(observation.component_ids) == set(owner.component_ids)
+            for observation in selected_observations
+        )
+    )
+    owner_safe_bbox = (
+        layout_container_bbox
+        if layout_container_bbox is not None
+        else owner_component_bbox
+        if selected_covers_connected_owner
+        else None
+    )
+    owner_safe_polygon = (
+        (
+            (owner_safe_bbox[0], owner_safe_bbox[1]),
+            (owner_safe_bbox[2] - 1, owner_safe_bbox[1]),
+            (owner_safe_bbox[2] - 1, owner_safe_bbox[3] - 1),
+            (owner_safe_bbox[0], owner_safe_bbox[3] - 1),
+        )
+        if owner_safe_bbox is not None
+        else None
+    )
     regions: list[dict[str, Any]] = []
     for order, component_id in enumerate(owner.component_ids):
         component = components[component_id]
-        polygon = component.polygon_page or (
-            (component.bbox_page[0], component.bbox_page[1]),
-            (component.bbox_page[2], component.bbox_page[1]),
-            (component.bbox_page[2], component.bbox_page[3]),
-            (component.bbox_page[0], component.bbox_page[3]),
+        region_bbox = layout_container_bbox or tuple(component.bbox_page)
+        polygon = (
+            (
+                (region_bbox[0], region_bbox[1]),
+                (region_bbox[2] - 1, region_bbox[1]),
+                (region_bbox[2] - 1, region_bbox[3] - 1),
+                (region_bbox[0], region_bbox[3] - 1),
+            )
+            if layout_container_bbox is not None
+            else component.polygon_page or (
+                (component.bbox_page[0], component.bbox_page[1]),
+                (component.bbox_page[2] - 1, component.bbox_page[1]),
+                (component.bbox_page[2] - 1, component.bbox_page[3] - 1),
+                (component.bbox_page[0], component.bbox_page[3] - 1),
+            )
+        )
+        raster_polygon = tuple(
+            (
+                max(0, min(int(page_width) - 1, int(point[0]))),
+                max(0, min(int(page_height) - 1, int(point[1]))),
+            )
+            for point in polygon
         )
         regions.append(
             {
                 "layout_region_id": f"{owner.owner_id}__{component_id}",
                 "owner_id": owner.owner_id,
                 "order": order,
-                "bbox_page": list(component.bbox_page),
-                "safe_polygon_page": [list(point) for point in polygon],
+                "bbox_page": list(region_bbox),
+                "safe_polygon_page": [list(point) for point in raster_polygon],
+                **(
+                    {
+                        "owner_safe_polygon_page": [
+                            list(point) for point in owner_safe_polygon
+                        ]
+                    }
+                    if owner_safe_polygon is not None
+                    else {}
+                ),
             }
         )
     return regions
+
+
+def _owner_non_rendering_record(
+    graph: OwnerGraph,
+    owner,
+    *,
+    seed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Materialize a review owner for audit without granting render authority."""
+
+    components = {
+        component.component_id: component for component in graph.components
+    }
+    boxes = [
+        components[component_id].bbox_page
+        for component_id in owner.component_ids
+        if component_id in components
+    ]
+    bbox = (
+        [
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        ]
+        if boxes
+        else [0, 0, 1, 1]
+    )
+    record = copy.deepcopy(seed or {})
+    record.update(
+        {
+            "id": owner.owner_id,
+            "owner_id": owner.owner_id,
+            "page_id": owner.page_id,
+            "coordinate_space": "page",
+            "component_ids": list(owner.component_ids),
+            "observation_ids": list(owner.observation_ids),
+            "selected_observation_ids": list(owner.selected_observation_ids),
+            "semantic_role": owner.semantic_role,
+            "source_payload": owner.source_payload,
+            "text": owner.source_payload,
+            "original": owner.source_payload,
+            "translated_payload": owner.translated_payload,
+            "translated": owner.translated_payload or "",
+            "disposition": owner.disposition,
+            "state": owner.state,
+            "route_action": owner.route_action,
+            "execution_tile_id": None,
+            "action_mask_ref": None,
+            "layout_region_ids": [],
+            "bbox": bbox,
+            "source_bbox": bbox,
+            "text_pixel_bbox": bbox,
+            "visible": False,
+            "render_policy": "review_required",
+        }
+    )
+    return record
 
 
 def execute_owner_page_graph(
@@ -9740,7 +9969,11 @@ def execute_owner_page_graph(
 ) -> OwnerPageExecution:
     """Execute every page owner once against canonical page pixels."""
 
-    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        UnsafeOwnerMaskError,
+        build_owner_mask_plan,
+    )
     from layout.balloon_layout import enrich_page_layout
 
     graph.require_valid()
@@ -9778,6 +10011,13 @@ def execute_owner_page_graph(
 
     for owner in sorted(executed_graph.owners, key=lambda item: item.owner_id):
         if owner.disposition != "owned" or owner.state != "translated":
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=records_by_owner.get(owner.owner_id),
+                )
+            )
             continue
         single = _single_owner_graph(executed_graph, owner.owner_id)
         single_owner = single.owners[0]
@@ -9803,7 +10043,12 @@ def execute_owner_page_graph(
         component_bboxes: dict[str, tuple[int, int, int, int]] = {}
         for component_id in owner.component_ids:
             component = components[component_id]
-            component_bboxes[component_id] = tuple(component.bbox_page)
+            component_bboxes[component_id] = (
+                max(0, int(component.bbox_page[0])),
+                max(0, int(component.bbox_page[1])),
+                min(int(source.shape[1]), int(component.bbox_page[2])),
+                min(int(source.shape[0]), int(component.bbox_page[3])),
+            )
             selected = [
                 observations[observation_id]
                 for observation_id in owner.selected_observation_ids
@@ -9824,19 +10069,45 @@ def execute_owner_page_graph(
                 OwnerMaskEvidence(
                     evidence_id=f"{owner.owner_id}__{component_id}__source_ink",
                     component_id=component_id,
-                    glyph_mask=_owner_glyph_raster(
+                    glyph_mask=_owner_component_glyph_raster(
                         source,
-                        support_polygons=support_polygons,
+                        component=component,
+                        support_polygons=tuple(support_polygons),
                     ),
                     observation_id=selected[0].observation_id,
                 )
             )
-        plan = build_owner_mask_plan(
-            source,
-            single_owner,
-            evidence,
-            owner_component_bboxes_page=component_bboxes,
-        )
+        try:
+            plan = build_owner_mask_plan(
+                source,
+                single_owner,
+                evidence,
+                owner_component_bboxes_page=component_bboxes,
+            )
+        except UnsafeOwnerMaskError as exc:
+            logger.warning(
+                "owner mask rejected: page_id=%s owner_id=%s reason=%s",
+                owner.page_id,
+                owner.owner_id,
+                exc,
+            )
+            _transition_owner_to_review(executed_graph, owner.owner_id)
+            review_seed = copy.deepcopy(record)
+            review_seed["owner_execution_rejection_reason"] = str(exc)
+            review_seed["qa_flags"] = sorted(
+                {
+                    *list(review_seed.get("qa_flags") or []),
+                    "owner_mask_unsafe",
+                }
+            )
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=review_seed,
+                )
+            )
+            continue
         single_owner.state = "mask_ready"
         single_owner.action_mask_ref = plan.action_mask_ref
         owner.state = "mask_ready"
@@ -9890,7 +10161,11 @@ def execute_owner_page_graph(
                 "texts": [record],
             },
             owner_graph=single,
-            layout_regions=_owner_layout_regions(single),
+            layout_regions=_owner_layout_regions(
+                single,
+                page_width=int(source.shape[1]),
+                page_height=int(source.shape[0]),
+            ),
         )
         glyph_patch = typesetter.render_band_image(
             mutation.result_rgb,
@@ -9903,11 +10178,63 @@ def execute_owner_page_graph(
             owner.state = "rendered"
             single_owner.state = "rendered"
             rendered_record = copy.deepcopy(layout_page["texts"][0])
-            rendered_record["state"] = "rendered"
+            safe_bbox = list(
+                rendered_record.get("safe_text_box")
+                or rendered_record.get("layout_safe_bbox")
+                or plan.owner_bbox_page
+            )
+            render_bbox = (
+                list(glyph_patch.glyph_bbox_page)
+                if glyph_patch.glyph_bbox_page is not None
+                else None
+            )
+            rendered_record.update(
+                {
+                    "state": "rendered",
+                    "band_id": owner.execution_tile_id,
+                    "render_completed": bool(glyph_patch.render_completed),
+                    "fit_status": str(glyph_patch.fit_status),
+                    "render_bbox": render_bbox,
+                    "_debug_render_bbox": copy.deepcopy(render_bbox),
+                    "safe_text_box": safe_bbox,
+                    "_debug_safe_text_box": copy.deepcopy(safe_bbox),
+                    "target_bbox": copy.deepcopy(safe_bbox),
+                    "render_safe_polygon_page": [
+                        list(point) for point in glyph_patch.render_safe_polygon_page
+                    ],
+                    "render_layout_contract": {
+                        "owner_id": owner.owner_id,
+                        "coordinate_space": "page",
+                        "block_bbox": copy.deepcopy(render_bbox),
+                        "safe_text_box": copy.deepcopy(safe_bbox),
+                        "fit_status": str(glyph_patch.fit_status),
+                    },
+                    "mask_evidence": {
+                        "kind": "owner_glyph_mask",
+                        "raw_mask_pixels": int(np.count_nonzero(plan.action_mask)),
+                        "expanded_mask_pixels": int(np.count_nonzero(plan.action_mask)),
+                        "evidence_score": 1.0,
+                        "fast_fill_allowed": False,
+                        "fast_fill_reject_reasons": ["owner_atomic_mask"],
+                    },
+                }
+            )
+            rendered_record["qa_flags"] = [
+                flag
+                for flag in rendered_record.get("qa_flags") or []
+                if str(flag)
+                not in {"missing_render_bbox", "fast_fill_no_glyph_evidence"}
+            ]
             final_records.append(rendered_record)
         else:
-            owner.state = "review_required"
-            owner.route_action = "review_required"
+            _transition_owner_to_review(executed_graph, owner.owner_id)
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=record,
+                )
+            )
 
     executed_graph.require_valid()
     return OwnerPageExecution(

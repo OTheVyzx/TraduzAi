@@ -149,6 +149,26 @@ def test_independently_detected_text_without_owner_blocks():
     assert "independently_detected_text_without_owner" in _reasons(report)
 
 
+def test_translated_glyphs_moved_within_layout_are_linked_by_owner_pixel_map():
+    from dataclasses import replace
+
+    graph = _graph(source="ANOTHER WAY", translated="OUTRA MANEIRA")
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=(5, 1, 30, 5),
+        polygon_page=((5, 1), (30, 1), (30, 5), (5, 5)),
+    )
+    composition = _composition(glyph=True)
+
+    report = _evaluate(
+        graph,
+        composition,
+        _observation({"text": "OUTRA MANEIRA", "bbox": [9, 7, 24, 12]}),
+    )
+
+    assert "independently_detected_text_without_owner" not in _reasons(report)
+
+
 def test_missing_owner_glyphs_block_even_when_render_state_is_complete():
     report = _evaluate(
         _graph(state="rendered"),
@@ -174,6 +194,16 @@ def test_pixel_change_outside_owned_masks_blocks():
         _observation({"text": "CORPO TRADUZIDO", "bbox": [6, 6, 28, 16]}),
     )
     assert "pixel_change_outside_owned_masks" in _reasons(report)
+
+
+def test_later_owned_write_may_restore_pixels_without_becoming_outside_write():
+    report = _evaluate(
+        _graph(),
+        _composition(changed_pixels=70),
+        _observation({"text": "CORPO TRADUZIDO", "bbox": [6, 6, 28, 16]}),
+    )
+
+    assert "pixel_change_outside_owned_masks" not in _reasons(report)
 
 
 def test_material_persisted_pixel_change_outside_owner_maps_blocks():

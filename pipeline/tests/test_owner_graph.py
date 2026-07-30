@@ -472,6 +472,26 @@ def test_component_and_observation_bboxes_must_be_canonical_page_geometry():
     } <= _codes(graph)
 
 
+def test_explicitly_rejected_malformed_observation_remains_auditable_not_executable():
+    graph = _valid_graph()
+    graph.observations.append(
+        replace(
+            _observation("observation_rejected", component_ids=()),
+            bbox_page=(0, 0, 0, 0),
+            source_bbox_page=(0, 0, 0, 0),
+            text_pixel_bbox_page=(0, 0, 0, 0),
+            rejection_reason="invalid_bbox",
+        )
+    )
+
+    assert not {
+        "observation_bbox_invalid",
+        "observation_source_bbox_invalid",
+        "observation_text_pixel_bbox_invalid",
+    } & _codes(graph)
+    assert graph.observations[-1].rejection_reason == "invalid_bbox"
+
+
 def test_serialized_bbox_coordinates_cannot_be_coerced_from_non_integers():
     payload = _valid_graph().to_dict()
     payload["components"][0]["bbox_page"][0] = 100.5

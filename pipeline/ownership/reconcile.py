@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
 import re
 from typing import Iterable, Sequence
 
@@ -17,6 +18,10 @@ from .model import (
     TextObservation,
     TextOwner,
 )
+
+
+_SELECTED_INK_MIN_SAFETY_MARGIN_PX = 3
+_SELECTED_INK_MAX_SAFETY_MARGIN_PX = 18
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,129 @@ def _bbox_iou(left: BBox, right: BBox) -> float:
         return 0.0
     union = _bbox_area(left) + _bbox_area(right) - intersection
     return intersection / float(max(1, union))
+
+
+def _observation_polygon_bbox(polygon: Sequence[Sequence[int]]) -> BBox | None:
+    if len(polygon) < 3:
+        return None
+    try:
+        xs = [int(point[0]) for point in polygon]
+        ys = [int(point[1]) for point in polygon]
+    except (IndexError, TypeError, ValueError):
+        return None
+    if min(xs) < 0 or min(ys) < 0:
+        return None
+    return min(xs), min(ys), max(xs) + 1, max(ys) + 1
+
+
+def _selected_ink_safety_margin(bbox: BBox) -> int:
+    """Reserve the same proportional halo that owner-mask dilation may consume."""
+
+    width = max(1, bbox[2] - bbox[0])
+    height = max(1, bbox[3] - bbox[1])
+    proportional = int(math.ceil(min(width, height) * 0.30))
+    return max(
+        _SELECTED_INK_MIN_SAFETY_MARGIN_PX,
+        min(_SELECTED_INK_MAX_SAFETY_MARGIN_PX, proportional),
+    )
+
+
+def _expand_owned_components_to_selected_ink(
+    components: Sequence[SourceTextComponent],
+    observations: Sequence[TextObservation],
+    owners: Sequence[TextOwner],
+) -> list[SourceTextComponent]:
+    """Include every selected OCR line in one authoritative owner component."""
+
+    component_by_id = {component.component_id: component for component in components}
+    observation_by_id = {
+        observation.observation_id: observation for observation in observations
+    }
+    assigned_boxes: dict[str, list[BBox]] = {
+        component.component_id: [component.bbox_page] for component in components
+    }
+    for owner in owners:
+        if owner.disposition != "owned":
+            continue
+        owner_component_ids = set(owner.component_ids)
+        for observation_id in owner.selected_observation_ids:
+            observation = observation_by_id.get(observation_id)
+            if observation is None:
+                continue
+            candidate_ids = sorted(
+                owner_component_ids.intersection(observation.component_ids)
+            )
+            if not candidate_ids:
+                continue
+            polygon_boxes = [
+                box
+                for polygon in observation.polygons_page
+                if (box := _observation_polygon_bbox(polygon)) is not None
+            ]
+            if not polygon_boxes:
+                polygon_boxes = [observation.bbox_page]
+            safety_margin = _selected_ink_safety_margin(_bbox_union(polygon_boxes))
+            for polygon_bbox in polygon_boxes:
+                polygon_bbox = (
+                    max(0, polygon_bbox[0] - safety_margin),
+                    max(0, polygon_bbox[1] - safety_margin),
+                    polygon_bbox[2] + safety_margin,
+                    polygon_bbox[3] + safety_margin,
+                )
+                polygon_center = (
+                    (polygon_bbox[0] + polygon_bbox[2]) / 2.0,
+                    (polygon_bbox[1] + polygon_bbox[3]) / 2.0,
+                )
+
+                def assignment_rank(component_id: str) -> tuple[int, float, str]:
+                    component_bbox = component_by_id[component_id].bbox_page
+                    intersection = (
+                        max(
+                            0,
+                            min(polygon_bbox[2], component_bbox[2])
+                            - max(polygon_bbox[0], component_bbox[0]),
+                        )
+                        * max(
+                            0,
+                            min(polygon_bbox[3], component_bbox[3])
+                            - max(polygon_bbox[1], component_bbox[1]),
+                        )
+                    )
+                    component_center = (
+                        (component_bbox[0] + component_bbox[2]) / 2.0,
+                        (component_bbox[1] + component_bbox[3]) / 2.0,
+                    )
+                    distance = (
+                        (polygon_center[0] - component_center[0]) ** 2
+                        + (polygon_center[1] - component_center[1]) ** 2
+                    )
+                    return -intersection, distance, component_id
+
+                assigned_boxes[min(candidate_ids, key=assignment_rank)].append(
+                    polygon_bbox
+                )
+
+    expanded: list[SourceTextComponent] = []
+    for component in components:
+        boxes = assigned_boxes[component.component_id]
+        bbox = _bbox_union(boxes)
+        if bbox == component.bbox_page:
+            expanded.append(component)
+            continue
+        x1, y1, x2, y2 = bbox
+        expanded.append(
+            replace(
+                component,
+                bbox_page=bbox,
+                polygon_page=(
+                    (x1, y1),
+                    (x2 - 1, y1),
+                    (x2 - 1, y2 - 1),
+                    (x1, y2 - 1),
+                ),
+            )
+        )
+    return expanded
 
 
 def _canonical_observation(
@@ -334,6 +462,88 @@ def _atomic_payload(selected: Sequence[TextObservation]) -> str:
     )
 
 
+def _multi_ocr_confirms_non_text(
+    region: _ResolvedRegion,
+    evidence: Sequence[TextObservation],
+) -> bool:
+    """Return true only for weak geometry repeatedly confirmed to contain no text."""
+
+    if len(evidence) < 3 or any(str(item.text).strip() for item in evidence):
+        return False
+    if any(component.script_evidence for component in region.components):
+        return False
+    return True
+
+
+_EXTERNAL_IDENTIFIER_RE = re.compile(
+    r"(?ix)(?:"
+    r"https?://|www\.|discord(?:\.gg|app\.com/invite)/|"
+    r"\b[a-z0-9][a-z0-9.-]+\.(?:com|net|org|io|gg|co|me|tv)\b"
+    r")"
+)
+
+
+def _is_nontranslatable_external_identifier(payload: str) -> bool:
+    """Recognize URLs/invite handles whose source pixels are intentional."""
+
+    normalized = " ".join(str(payload or "").split())
+    credit_roles = re.findall(r"(?i)(?:^|\s)(?:TL|PR|RD|TS|CL)\s*:", normalized)
+    return bool(
+        normalized
+        and (
+            _EXTERNAL_IDENTIFIER_RE.search(normalized)
+            or len(credit_roles) >= 3
+        )
+    )
+
+
+def _scanlation_apparatus_cutoff(
+    observations: Sequence[TextObservation],
+) -> int | None:
+    """Find a page-space boundary for explicit scanlation/promotional matter."""
+
+    strong_y: list[int] = []
+    weak_by_family: dict[str, list[int]] = {
+        "contact": [],
+        "commission": [],
+        "discord": [],
+        "patreon": [],
+        "recruiting": [],
+        "support": [],
+    }
+    for observation in observations:
+        text = "".join(char for char in str(observation.text).casefold() if char.isalnum())
+        if not text or len(text) > 180 or float(observation.confidence) < 0.60:
+            continue
+        y1 = int(observation.bbox_page[1])
+        if any(marker in text for marker in ("wescanlate", "nonstopscans", "scanspresents")):
+            strong_y.append(y1)
+        if "joinourdiscord" in text:
+            weak_by_family["discord"].append(y1)
+        if "discordcominvite" in text:
+            weak_by_family["discord"].append(y1)
+        if "youcancontactus" in text or "contactusatoursite" in text:
+            weak_by_family["contact"].append(y1)
+        if "commissionyourfavorite" in text or "commissionyourseries" in text:
+            weak_by_family["commission"].append(y1)
+        if (
+            "haveapatreon" in text
+            or "nowhaveapatreon" in text
+            or "specialthankstoourpatreon" in text
+            or "patreoncom" in text
+        ):
+            weak_by_family["patreon"].append(y1)
+        if "scansisrecruiting" in text or "translatorsopen" in text:
+            weak_by_family["recruiting"].append(y1)
+        if "supportusat" in text or "paypalcom" in text or "koficom" in text:
+            weak_by_family["support"].append(y1)
+    candidates = list(strong_y)
+    present_weak_families = [values for values in weak_by_family.values() if values]
+    if len(present_weak_families) >= 2:
+        candidates.extend(min(values) for values in present_weak_families)
+    return max(0, min(candidates) - 100) if candidates else None
+
+
 def build_page_owner_graph(
     *,
     page_id: str,
@@ -355,6 +565,11 @@ def build_page_owner_graph(
         for region in regions
         for component in region.components
     }
+    region_role_by_component = {
+        component.component_id: region.semantic_role
+        for region in regions
+        for component in region.components
+    }
     blocked_component_ids: set[str] = set()
     audit_reasons: dict[str, str] = {}
 
@@ -369,8 +584,18 @@ def build_page_owner_graph(
             if component_id in region_key_by_component
         }
         if len(region_keys) > 1:
-            audit_reasons[observation.observation_id] = "cross_semantic_region"
-            blocked_component_ids.update(known_ids)
+            semantic_roles = {
+                region_role_by_component[component_id]
+                for component_id in known_ids
+                if component_id in region_role_by_component
+            }
+            if len(semantic_roles) > 1:
+                audit_reasons[observation.observation_id] = "cross_semantic_region"
+                blocked_component_ids.update(known_ids)
+            else:
+                audit_reasons[observation.observation_id] = (
+                    "cross_region_same_role_observation"
+                )
 
     canonical_observations = [
         replace(
@@ -382,6 +607,7 @@ def build_page_owner_graph(
         )
         for observation in canonical_observations
     ]
+    scanlation_cutoff = _scanlation_apparatus_cutoff(canonical_observations)
 
     for component in ordered_components:
         if component.page_id != page_id:
@@ -433,6 +659,23 @@ def build_page_owner_graph(
                 )
             )
 
+        if (
+            requested_disposition == "owned"
+            and scanlation_cutoff is not None
+            and min(component.bbox_page[1] for component in region.components)
+            >= scanlation_cutoff
+        ):
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="preserve",
+                    owner_id=None,
+                    reason="policy:scanlation_apparatus",
+                )
+                for component_id in component_ids
+            )
+            continue
+
         if requested_disposition in {"preserve", "suppress"}:
             dispositions.extend(
                 ComponentDisposition(
@@ -450,6 +693,48 @@ def build_page_owner_graph(
             canonical_observations,
         )
         audit_reasons.update(region_rejections)
+        if (
+            requested_disposition == "owned"
+            and not evidence
+            and not any(component.script_evidence for component in region.components)
+            and not any(
+                _bbox_iou(
+                    observation.bbox_page,
+                    _bbox_union(component.bbox_page for component in region.components),
+                )
+                > 0.0
+                for observation in canonical_observations
+            )
+        ):
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="suppress",
+                    owner_id=None,
+                    reason="no_ocr_evidence_non_text",
+                )
+                for component_id in component_ids
+            )
+            continue
+        if requested_disposition == "owned" and _multi_ocr_confirms_non_text(
+            region,
+            evidence,
+        ):
+            for observation in evidence:
+                audit_reasons.setdefault(
+                    observation.observation_id,
+                    "multi_ocr_confirmed_non_text",
+                )
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="suppress",
+                    owner_id=None,
+                    reason="multi_ocr_confirmed_non_text",
+                )
+                for component_id in component_ids
+            )
+            continue
         if blocked_component_ids.intersection(component_ids):
             selected = []
             for observation in evidence:
@@ -461,8 +746,27 @@ def build_page_owner_graph(
                         observation.observation_id
                     ] = "owner_blocked_by_cross_semantic_observation"
         payload = _atomic_payload(selected)
+        if (
+            requested_disposition == "owned"
+            and payload
+            and _is_nontranslatable_external_identifier(payload)
+        ):
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="preserve",
+                    owner_id=None,
+                    reason="policy:nontranslatable_external_identifier",
+                )
+                for component_id in component_ids
+            )
+            continue
         final_disposition = requested_disposition
-        if requested_disposition == "owned" and (not selected or not payload):
+        if requested_disposition == "owned" and (
+            not selected
+            or not payload
+            or region.reason == "semantic_container_missing"
+        ):
             final_disposition = "review"
         owner_id = _stable_owner_id(page_id, region.semantic_role, component_ids)
         owner = TextOwner(
@@ -499,6 +803,69 @@ def build_page_owner_graph(
             for component_id in component_ids
         )
 
+    component_disposition_by_id = {
+        disposition.component_id: disposition for disposition in dispositions
+    }
+    owned_component_ids = {
+        component_id
+        for owner in owners
+        if owner.disposition == "owned"
+        for component_id in owner.component_ids
+    }
+    redundant_review_owner_ids: set[str] = set()
+    for owner in owners:
+        if (
+            owner.disposition != "review"
+            or str(owner.source_payload).strip()
+            or owner.observation_ids
+            or not owner.component_ids
+            or any(
+                component_disposition_by_id.get(component_id) is None
+                or component_disposition_by_id[component_id].reason
+                != "semantic_container_missing"
+                for component_id in owner.component_ids
+            )
+        ):
+            continue
+        outer_bbox = _bbox_union(
+            component_by_id[component_id].bbox_page
+            for component_id in owner.component_ids
+        )
+        if any(
+            outer_bbox[0] <= component_by_id[component_id].bbox_page[0]
+            and outer_bbox[1] <= component_by_id[component_id].bbox_page[1]
+            and outer_bbox[2] >= component_by_id[component_id].bbox_page[2]
+            and outer_bbox[3] >= component_by_id[component_id].bbox_page[3]
+            for component_id in owned_component_ids
+        ):
+            redundant_review_owner_ids.add(owner.owner_id)
+
+    if redundant_review_owner_ids:
+        redundant_component_ids = {
+            component_id
+            for owner in owners
+            if owner.owner_id in redundant_review_owner_ids
+            for component_id in owner.component_ids
+        }
+        owners = [
+            owner
+            for owner in owners
+            if owner.owner_id not in redundant_review_owner_ids
+        ]
+        dispositions = [
+            (
+                replace(
+                    disposition,
+                    decision="suppress",
+                    owner_id=None,
+                    reason="redundant_container_without_ocr_evidence",
+                )
+                if disposition.component_id in redundant_component_ids
+                else disposition
+            )
+            for disposition in dispositions
+        ]
+
     canonical_observations = [
         replace(
             observation,
@@ -509,6 +876,11 @@ def build_page_owner_graph(
         )
         for observation in canonical_observations
     ]
+    ordered_components = _expand_owned_components_to_selected_ink(
+        ordered_components,
+        canonical_observations,
+        owners,
+    )
 
     return OwnerGraph(
         schema_version=1,

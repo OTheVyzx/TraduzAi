@@ -603,6 +603,10 @@ class OCREngine:
         self._processor = None
         self._ocr_cache: OrderedDict[str, str] = OrderedDict()
         self._last_batch_cache_stats = {"ocr_cache_hits": 0, "ocr_cache_misses": 0}
+        # Linhas da passagem Paddle de pagina inteira. A associacao aos blocos
+        # pode descartar uma linha valida quando o detector fragmenta um cartao
+        # visual; o runtime usa esta evidencia apenas em recuperacao localizada.
+        self._last_full_page_line_records: list[dict] = []
         self._observation_records_local = threading.local()
         self._load_model()
 
@@ -1751,6 +1755,7 @@ class OCREngine:
                 )
                 scale_x = scaled_w / float(max(1, input_w))
                 scale_y = scaled_h / float(max(1, input_h))
+        self._last_full_page_line_records = []
         try:
             result = self._model.ocr(model_input, det=True, rec=True, cls=False)
         except Exception as exc:
@@ -1810,6 +1815,7 @@ class OCREngine:
                 page_rgb = page_bgr
 
         assigned: list[list[dict]] = [[] for _ in blocks]
+        full_page_line_records: list[dict] = []
 
         for item in raw_lines:
             if not item or len(item) < 2:
@@ -1896,6 +1902,22 @@ class OCREngine:
                 continue
 
             confidence = float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0
+            full_page_line_records.append(
+                {
+                    "text": str(text).strip(),
+                    "source_bbox": list(line_bbox),
+                    "bbox": list(line_bbox),
+                    "text_pixel_bbox": _derive_text_pixel_bbox(
+                        page_rgb,
+                        line_bbox,
+                        [normalized_polygon] if normalized_polygon else [],
+                    ) or list(line_bbox),
+                    "line_polygons": [normalized_polygon] if normalized_polygon else [],
+                    "confidence": confidence,
+                    "detector": "paddle_full_page_line",
+                }
+            )
+
             best_index = None
             best_score = 0.0
             for idx, block_bbox in enumerate(block_bboxes):
@@ -1983,6 +2005,7 @@ class OCREngine:
                 record
             )
 
+        self._last_full_page_line_records = full_page_line_records
         if non_empty == 0:
             return None
 

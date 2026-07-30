@@ -49,10 +49,109 @@ class MainEmitTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "PASS")
 
+    def test_verified_owner_runtime_observes_each_persisted_final_page(self) -> None:
+        from dataclasses import replace
+        from test_final_pixel_qa import _composition, _graph, _observation
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = Path(tmpdir) / "translated" / "001.jpg"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"persisted-final-page")
+            observation = replace(
+                _observation(),
+                image_path=artifact,
+                persisted_sha256="a" * 64,
+            )
+
+            class Observer:
+                def __init__(self):
+                    self.calls = []
+
+                def observe(self, image_path, *, source_language):
+                    self.calls.append((Path(image_path), source_language))
+                    return observation
+
+            observer = Observer()
+            output_page = SimpleNamespace(
+                owner_graph=_graph(),
+                owner_composition=_composition(),
+            )
+            project = {
+                "_work_dir": tmpdir,
+                "owner_graph_status": "verified",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "page_id": "page_001",
+                        "image_layers": {
+                            "rendered": {"path": "translated/001.jpg"}
+                        },
+                    }
+                ],
+            }
+
+            reports = main._observe_verified_owner_final_pages(
+                project_data=project,
+                output_pages=[output_page],
+                observer=observer,
+                source_language="en",
+            )
+
+        self.assertEqual(observer.calls, [(artifact, "en")])
+        self.assertEqual(reports[0]["page_id"], "page_001")
+        self.assertEqual(reports[0]["artifact_path"], str(artifact))
+        self.assertEqual(reports[0]["persisted_sha256"], "a" * 64)
+        self.assertTrue(reports[0]["observer_available"])
+        self.assertTrue(reports[0]["observation_complete"])
+        self.assertEqual(reports[0]["observer"], "Observer")
+        self.assertIn("ocr_records", reports[0])
+
     def test_automatic_owner_mode_rejects_implicit_legacy(self) -> None:
         self.assertEqual(main._automatic_owner_graph_mode({}), "enforce")
         with self.assertRaisesRegex(ValueError, "legacy_unverified"):
             main._automatic_owner_graph_mode({"owner_graph_mode": "legacy"})
+
+    def test_verified_owner_output_disables_legacy_main_pixel_writers(self) -> None:
+        pages = [
+            SimpleNamespace(
+                owner_graph=object(),
+                owner_composition=object(),
+                ocr_result={"_owner_graph_mode": "enforce"},
+            )
+        ]
+
+        self.assertTrue(main._owner_pages_have_final_pixel_authority(pages))
+        self.assertFalse(
+            main._owner_pages_have_final_pixel_authority(
+                [SimpleNamespace(ocr_result={"_owner_graph_mode": "shadow"})]
+            )
+        )
+
+    def test_write_rgb_jpeg_preserves_asymmetric_red_blue_channels(self) -> None:
+        image_rgb = np.full((12, 18, 3), [233, 41, 7], dtype=np.uint8)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "rgb.jpg"
+            main._write_rgb_jpeg(target, image_rgb, quality=100)
+
+            persisted_bgr = cv2.imread(str(target), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(persisted_bgr)
+            np.testing.assert_allclose(persisted_bgr[6, 9], [7, 41, 233], atol=3)
+
+    def test_write_rgb_jpeg_uses_lossless_encoding_for_png_target(self) -> None:
+        image_rgb = np.zeros((12, 18, 3), dtype=np.uint8)
+        image_rgb[:, :, 0] = np.arange(18, dtype=np.uint8)
+        image_rgb[:, :, 1] = np.arange(12, dtype=np.uint8)[:, None]
+        image_rgb[:, :, 2] = 197
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "rgb.png"
+            main._write_rgb_jpeg(target, image_rgb)
+
+            persisted_bgr = cv2.imread(str(target), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(persisted_bgr)
+            persisted_rgb = cv2.cvtColor(persisted_bgr, cv2.COLOR_BGR2RGB)
+            np.testing.assert_array_equal(persisted_rgb, image_rgb)
 
     def test_emit_swallow_oserror_from_stdout_once(self) -> None:
         stderr = io.StringIO()
@@ -1895,6 +1994,38 @@ class MainEmitTests(unittest.TestCase):
             self.assertIn("dark_text_underfilled", row["flags"])
             self.assertIn("dark_text_underfilled_height_ratio", row["metrics"])
             self.assertIn("dark_text_underfilled_area_ratio", row["metrics"])
+
+    def test_final_rerender_visual_qa_ignores_legacy_band_crops_for_verified_page_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            recorder = DebugRecorder(root, enabled=True, run_id="run-owner")
+            audit = main._qa_translated_final_crops_against_layers(
+                recorder,
+                {
+                    "owner_graph_status": "verified",
+                    "page_owner_graphs": [{"page_id": "page_001"}],
+                    "paginas": [
+                        {
+                            "numero": 1,
+                            "text_layers": [
+                                {
+                                    "id": "owner_a",
+                                    "owner_id": "owner_a",
+                                    "_owner_mode": True,
+                                    "state": "rendered",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                root,
+            )
+
+            self.assertEqual(audit["source"], "verified_page_owner_composition")
+            self.assertEqual(audit["row_count"], 0)
+            self.assertEqual(audit["fail_count"], 0)
 
     def test_persist_real_bubble_mask_layer_rejects_bbox_fallback_source(self) -> None:
         import numpy as np

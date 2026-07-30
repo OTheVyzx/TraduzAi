@@ -499,7 +499,30 @@ def test_components_in_same_visual_container_form_one_body_owner() -> None:
     assert graph.owners[0].source_payload == "COMPLETE TWO LINE SOURCE BODY"
 
 
-def test_partial_only_tiles_are_shadow_divergence_and_enforce_blocker() -> None:
+def test_page_wide_ocr_bbox_is_not_associated_to_every_small_component() -> None:
+    from strip.run import _associate_page_observations
+
+    components = [
+        _component(),
+        replace(
+            _component(),
+            component_id="component_b",
+            bbox_page=(300, 300, 340, 340),
+            polygon_page=((300, 300), (340, 300), (340, 340), (300, 340)),
+        ),
+    ]
+    broad = replace(
+        _observation(),
+        component_ids=(),
+        bbox_page=(0, 0, 1000, 1000),
+    )
+
+    associated = _associate_page_observations([broad], components)
+
+    assert associated[0].component_ids == ()
+
+
+def test_partial_only_tiles_use_page_space_executor_in_enforce_mode() -> None:
     from strip.run import _run_owner_control_plane
 
     partial = TileProjection(
@@ -532,19 +555,27 @@ def test_partial_only_tiles_are_shadow_divergence_and_enforce_blocker() -> None:
     }
     executor.assert_not_called()
 
-    with pytest.raises(OwnerGraphValidationError) as exc_info:
-        _run_owner_control_plane(
-            [band],
-            owner_graph_mode="enforce",
-            collector=lambda _band: evidence,
-            resolver=lambda _page_id, _evidence: _graph(),
-            executor=executor,
-        )
+    enforce_graphs = _run_owner_control_plane(
+        [band],
+        owner_graph_mode="enforce",
+        collector=lambda _band: evidence,
+        resolver=lambda _page_id, _evidence: _graph(),
+        executor=executor,
+    )
 
-    assert "owner_executor_full_coverage_missing" in {
-        violation.code for violation in exc_info.value.violations
+    graph = enforce_graphs["page_001"]
+    assert "owner_executor_full_coverage_missing" not in {
+        violation.code for violation in graph.violations
     }
-    executor.assert_not_called()
+    assert graph.owners[0].execution_tile_id == "tile_partial"
+    executor_projection = next(
+        projection for projection in graph.projections if projection.role == "executor"
+    )
+    assert executor_projection.tile_id == "tile_partial"
+    assert executor_projection.bbox_page == (30, 30, 70, 70)
+    assert executor_projection.bbox_tile == executor_projection.bbox_page
+    assert executor_projection.offset_xy == (0, 0)
+    executor.assert_called_once()
 
 
 def test_executor_tie_uses_lexicographically_stable_tile_id() -> None:

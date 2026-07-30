@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -88,6 +89,66 @@ def test_one_body_seen_in_multiple_tiles_has_one_owner() -> None:
     assert graph.owners[0].component_ids == ["line_top", "line_bottom"]
     assert graph.owners[0].selected_observation_ids == ["body_full"]
     assert graph.owners[0].source_payload == "ONE COMPLETE BODY"
+
+
+def test_selected_multiline_observation_expands_undercropped_component_geometry() -> None:
+    components = [
+        _component("line_top", (100, 130, 300, 170)),
+        _component("line_bottom", (110, 180, 290, 220)),
+    ]
+    observation = replace(
+        _observation(
+            "body_full",
+            ("line_top", "line_bottom"),
+            "ONE COMPLETE BODY",
+            (90, 90, 310, 220),
+        ),
+        polygons_page=(
+            ((90, 90), (310, 90), (310, 125), (90, 125)),
+            ((100, 135), (300, 135), (300, 165), (100, 165)),
+            ((110, 185), (290, 185), (290, 215), (110, 215)),
+        ),
+    )
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=components,
+        observations=[observation],
+        semantic_regions=[
+            SemanticRegion("body", ("line_top", "line_bottom"), "body")
+        ],
+    )
+
+    expanded = {component.component_id: component for component in graph.components}
+    assert expanded["line_top"].bbox_page == (72, 72, 329, 184)
+    assert max(point[0] for point in expanded["line_top"].polygon_page) == 328
+    assert max(point[1] for point in expanded["line_top"].polygon_page) == 183
+    assert expanded["line_bottom"].bbox_page == (92, 167, 309, 234)
+
+
+def test_selected_ink_geometry_reserves_proportional_glyph_halo() -> None:
+    component = _component("glowing_line", (100, 100, 300, 130))
+    observation = replace(
+        _observation(
+            "glowing_ocr",
+            (component.component_id,),
+            "GLOWING SOURCE",
+            component.bbox_page,
+        ),
+        polygons_page=(
+            ((100, 100), (299, 100), (299, 129), (100, 129)),
+        ),
+    )
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[observation],
+        semantic_regions=[SemanticRegion("body", (component.component_id,), "body")],
+    )
+
+    expanded = graph.components[0]
+    assert expanded.bbox_page == (91, 91, 309, 139)
 
 
 def test_partial_observation_never_replaces_full_coverage() -> None:
@@ -217,6 +278,296 @@ def test_cross_semantic_observation_blocks_both_affected_regions() -> None:
         "cross_role": "cross_semantic_region",
         "title_clean": "owner_blocked_by_cross_semantic_observation",
     }
+
+
+def test_cross_region_observation_with_same_role_does_not_veto_local_readings() -> None:
+    components = [
+        _component("line_top", (100, 100, 300, 140)),
+        _component("line_bottom", (100, 160, 300, 200)),
+    ]
+    observations = [
+        _observation("top_clean", ("line_top",), "FIRST LINE", (100, 100, 300, 140)),
+        _observation(
+            "bottom_clean",
+            ("line_bottom",),
+            "SECOND LINE",
+            (100, 160, 300, 200),
+        ),
+        _observation(
+            "macro_over_both",
+            ("line_top", "line_bottom"),
+            "FIRST LINE SECOND LINE",
+            (100, 100, 300, 200),
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=components,
+        observations=observations,
+        semantic_regions=[
+            SemanticRegion("top", ("line_top",), "dialogue_body"),
+            SemanticRegion("bottom", ("line_bottom",), "dialogue_body"),
+        ],
+    )
+
+    assert {owner.disposition for owner in graph.owners} == {"owned"}
+    assert {owner.source_payload for owner in graph.owners} == {
+        "FIRST LINE",
+        "SECOND LINE",
+    }
+    reasons = {item.observation_id: item.rejection_reason for item in graph.observations}
+    assert reasons["macro_over_both"] == "cross_region_same_role_observation"
+    assert reasons["top_clean"] is None
+    assert reasons["bottom_clean"] is None
+
+
+def test_repeated_empty_ocr_overrides_detector_geometry_confidence() -> None:
+    component = SourceTextComponent(
+        component_id="art_false_positive",
+        page_id="page_001",
+        bbox_page=(100, 100, 360, 280),
+        polygon_page=((100, 100), (360, 100), (360, 280), (100, 280)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.95,
+        script_evidence=(),
+    )
+    observations = [
+        _observation(
+            f"empty_attempt_{index}",
+            (component.component_id,),
+            "",
+            component.bbox_page,
+        )
+        for index in range(3)
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[
+            SemanticRegion("candidate", (component.component_id,), "dialogue_body")
+        ],
+    )
+
+    assert graph.owners == []
+    assert len(graph.component_dispositions) == 1
+    assert graph.component_dispositions[0].decision == "suppress"
+    assert graph.component_dispositions[0].reason == "multi_ocr_confirmed_non_text"
+
+
+def test_empty_container_duplicating_resolved_text_component_is_suppressed() -> None:
+    outer = _component("outer_container", (20, 20, 300, 220))
+    inner = _component("inner_text", (80, 60, 240, 120))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[outer, inner],
+        observations=[
+            _observation(
+                "inner_ocr",
+                (inner.component_id,),
+                "REAL TEXT",
+                inner.bbox_page,
+            )
+        ],
+        semantic_regions=[
+            SemanticRegion(
+                "outer_region",
+                (outer.component_id,),
+                "body",
+                reason="semantic_container_missing",
+            ),
+            SemanticRegion("inner_region", (inner.component_id,), "body"),
+        ],
+    )
+
+    assert [owner.source_payload for owner in graph.owners] == ["REAL TEXT"]
+    decisions = {item.component_id: item for item in graph.component_dispositions}
+    assert decisions[outer.component_id].decision == "suppress"
+    assert decisions[outer.component_id].reason == "redundant_container_without_ocr_evidence"
+
+
+def test_external_url_identifier_is_explicitly_preserved_not_translated() -> None:
+    component = _component("scanlation_url", (20, 20, 180, 42))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[
+            _observation(
+                "url_ocr",
+                (component.component_id,),
+                "www.example-scan.com",
+                component.bbox_page,
+                confidence=0.99,
+            )
+        ],
+        semantic_regions=[
+            SemanticRegion(
+                "url_region",
+                (component.component_id,),
+                "dialogue_body",
+            )
+        ],
+    )
+
+    assert graph.owners == []
+    assert graph.component_dispositions[0].decision == "preserve"
+    assert graph.component_dispositions[0].reason == "policy:nontranslatable_external_identifier"
+
+
+def test_detector_region_without_any_ocr_evidence_is_suppressed() -> None:
+    component = _component("art_false_positive", (30, 30, 90, 70))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[],
+        semantic_regions=[
+            SemanticRegion(
+                "false_positive_region",
+                (component.component_id,),
+                "dialogue_body",
+                reason="semantic_container_missing",
+            )
+        ],
+    )
+
+    assert graph.owners == []
+    assert graph.component_dispositions[0].decision == "suppress"
+    assert graph.component_dispositions[0].reason == "no_ocr_evidence_non_text"
+
+
+def test_text_with_missing_semantic_container_remains_review_required() -> None:
+    component = _component("uncontained_text", (30, 30, 180, 70))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[
+            _observation(
+                "uncontained_ocr",
+                (component.component_id,),
+                "REAL TEXT",
+                component.bbox_page,
+            )
+        ],
+        semantic_regions=[
+            SemanticRegion(
+                "uncontained_region",
+                (component.component_id,),
+                "dialogue_body",
+                reason="semantic_container_missing",
+            )
+        ],
+    )
+
+    assert graph.owners[0].disposition == "review"
+    assert graph.component_dispositions[0].reason == "semantic_container_missing"
+
+
+def test_scanlation_apparatus_below_page_marker_is_explicitly_preserved() -> None:
+    dialogue = _component("dialogue", (100, 20, 300, 70))
+    marker = _component("scan_marker", (80, 400, 340, 440))
+    promo = _component("promo_title", (90, 520, 250, 560))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[dialogue, marker, promo],
+        observations=[
+            _observation("dialogue_ocr", (dialogue.component_id,), "ARE YOU READY?", dialogue.bbox_page),
+            _observation("marker_ocr", (marker.component_id,), "SERIES WE SCANLATE", marker.bbox_page),
+            _observation("promo_ocr", (promo.component_id,), "SUPER CUBE", promo.bbox_page),
+        ],
+        semantic_regions=[
+            SemanticRegion("dialogue_region", (dialogue.component_id,), "dialogue_body"),
+            SemanticRegion("marker_region", (marker.component_id,), "dialogue_body"),
+            SemanticRegion("promo_region", (promo.component_id,), "dialogue_body"),
+        ],
+    )
+
+    assert [owner.source_payload for owner in graph.owners] == ["ARE YOU READY?"]
+    decisions = {item.component_id: item for item in graph.component_dispositions}
+    assert decisions[marker.component_id].decision == "preserve"
+    assert decisions[promo.component_id].decision == "preserve"
+    assert decisions[promo.component_id].reason == "policy:scanlation_apparatus"
+
+
+def test_scanlation_credit_page_uses_independent_contact_and_support_markers() -> None:
+    contact = _component("contact", (20, 500, 240, 530))
+    thanks = _component("thanks", (20, 620, 300, 650))
+    credit = _component("credit_name", (20, 700, 260, 730))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[contact, thanks, credit],
+        observations=[
+            _observation(
+                "contact_ocr",
+                (contact.component_id,),
+                "YOU CAN CONTACT US AT OUR SITE",
+                contact.bbox_page,
+            ),
+            _observation(
+                "thanks_ocr",
+                (thanks.component_id,),
+                "SPECIAL THANKS TO OUR PATREON",
+                thanks.bbox_page,
+            ),
+            _observation(
+                "credit_ocr",
+                (credit.component_id,),
+                "EDITOR NAME",
+                credit.bbox_page,
+            ),
+        ],
+        semantic_regions=[
+            SemanticRegion("contact_region", (contact.component_id,), "body"),
+            SemanticRegion("thanks_region", (thanks.component_id,), "body"),
+            SemanticRegion("credit_region", (credit.component_id,), "body"),
+        ],
+    )
+
+    assert graph.owners == []
+    assert {
+        item.reason for item in graph.component_dispositions
+    } == {"policy:scanlation_apparatus"}
+
+
+def test_scanlation_commission_marker_extends_apparatus_cutoff_upward() -> None:
+    commission = _component("commission", (20, 300, 300, 330))
+    promo_body = _component("promo_body", (20, 360, 300, 390))
+    contact = _component("contact", (20, 600, 300, 630))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[commission, promo_body, contact],
+        observations=[
+            _observation(
+                "commission_ocr",
+                (commission.component_id,),
+                "COMMISSION YOUR FAVORITE SERIES",
+                commission.bbox_page,
+            ),
+            _observation(
+                "promo_ocr",
+                (promo_body.component_id,),
+                "NEW SERIES AVAILABLE",
+                promo_body.bbox_page,
+            ),
+            _observation(
+                "contact_ocr",
+                (contact.component_id,),
+                "YOU CAN CONTACT US AT OUR SITE",
+                contact.bbox_page,
+            ),
+        ],
+        semantic_regions=[
+            SemanticRegion("commission_region", (commission.component_id,), "body"),
+            SemanticRegion("promo_region", (promo_body.component_id,), "body"),
+            SemanticRegion("contact_region", (contact.component_id,), "body"),
+        ],
+    )
+
+    assert graph.owners == []
+    assert {
+        item.reason for item in graph.component_dispositions
+    } == {"policy:scanlation_apparatus"}
 
 
 def test_unassociated_geometry_cannot_be_selected_into_multiple_regions() -> None:

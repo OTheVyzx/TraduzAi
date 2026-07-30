@@ -299,8 +299,60 @@ def test_run_chapter_uses_owner_compositor_as_only_final_pixel_authority(monkeyp
     )
 
     assert result.compositions["page_001"].committed is True
+    assert result.compositions["page_001"].page_id == "page_001"
     assert np.all(result.output_pages[0].image[20, 20] == (20, 80, 160))
     assert np.all(result.output_pages[0].image[61, 70] == (180, 40, 30))
+
+
+def test_owner_reassembly_preserves_source_pages_and_frames_pixel_maps():
+    from compositor.owner_compositor import _array_sha256
+    from strip.run import _compose_owner_output_pages
+    from strip.types import Balloon, BBox, VerticalStrip
+
+    original = np.full((80, 100, 3), 255, dtype=np.uint8)
+    original[:40, 20:80] = 180
+    original[40:, :] = 120
+    strip = VerticalStrip(
+        image=original.copy(),
+        width=100,
+        height=80,
+        source_page_breaks=[0, 40, 80],
+        page_x_offsets=[20, 0],
+        source_page_widths=[60, 100],
+    )
+    crossing_false_positive = Balloon(
+        strip_bbox=BBox(10, 30, 90, 50),
+        confidence=0.9,
+    )
+
+    result = _compose_owner_output_pages(
+        original_strip_image=original,
+        strip=strip,
+        bands=[],
+        balloons=[crossing_false_positive],
+        target_count=2,
+    )
+
+    assert [(page.y_top, page.y_bottom) for page in result.output_pages] == [
+        (0, 40),
+        (40, 80),
+    ]
+    assert [(page.y_top, page.y_bottom) for page in result.original_pages] == [
+        (0, 40),
+        (40, 80),
+    ]
+    for original_page, final_page in zip(result.original_pages, result.output_pages):
+        assert original_page.image.shape == final_page.image.shape
+        np.testing.assert_array_equal(
+            original_page.image,
+            original[original_page.y_top : original_page.y_bottom],
+        )
+    page_one = result.compositions["page_001"]
+    assert page_one.page_id == "page_001"
+    assert page_one.final_rgb.shape == (40, 100, 3)
+    assert page_one.cleanup_owner_map.shape == (40, 100)
+    assert page_one.glyph_owner_map.shape == (40, 100)
+    assert page_one.sha256 == _array_sha256(page_one.final_rgb)
 
 
 def test_run_chapter_output_is_identical_after_band_permutation():

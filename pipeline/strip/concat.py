@@ -33,11 +33,11 @@ def build_strip(
     for i, path in enumerate(page_paths):
         if progress_callback:
             progress_callback("concat", i, len(page_paths))
-        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        img_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
 
-        if img is None:
+        if img_bgr is None:
             raise FileNotFoundError(f"Não consegui ler {path}")
-        images.append(img)
+        images.append(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
 
     max_width = max(img.shape[1] for img in images)
     total_height = sum(img.shape[0] for img in images)

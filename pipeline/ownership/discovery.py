@@ -34,6 +34,7 @@ class DetectorRegion:
     script_evidence: tuple[str, ...] = ()
     rotation_deg: float | None = None
     rotation_source: str | None = None
+    support_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class _Evidence:
     script_evidence: tuple[str, ...] = ()
     rotation_deg: float | None = None
     rotation_source: str | None = None
+    support_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -913,6 +915,7 @@ def _collapse_evidence(group: Sequence[_Evidence]) -> _Evidence:
         ),
         rotation_deg=rotation_deg,
         rotation_source=rotation_source,
+        support_only=all(item.support_only for item in group),
     )
 
 
@@ -991,6 +994,7 @@ def _as_evidence(
         script_evidence=tuple(sorted({str(value) for value in item.script_evidence if value})),
         rotation_deg=(float(item.rotation_deg) if item.rotation_deg is not None else None),
         rotation_source=(str(item.rotation_source) if item.rotation_source else None),
+        support_only=bool(getattr(item, "support_only", False)),
     )
 
 
@@ -1019,7 +1023,8 @@ def _attach_detector_support(
             if _detector_supports_glyph(detector, glyph)
         ]
         if not matches:
-            unsupported_detectors.append(detector)
+            if not detector.support_only:
+                unsupported_detectors.append(detector)
             continue
         detector_area = float(max(1, _bbox_area(detector.bbox_page)))
         matched_glyphs = [supported_glyphs[index] for index in matches]
@@ -1061,7 +1066,8 @@ def _attach_detector_support(
             and not independently_supported_single_line
             and not broad_container_coverage
         ):
-            unsupported_detectors.append(detector)
+            if not detector.support_only:
+                unsupported_detectors.append(detector)
             continue
         for index in matches:
             glyph = supported_glyphs[index]

@@ -17615,6 +17615,13 @@ def _render_owner_text_block(
     if text_data.get("translated") != payload:
         raise ValueError("owner render alias diverges from translated_payload")
 
+    # Owner mode preserves semantic identity, but still needs the same
+    # functional foreground/background contrast policy as regular rendering.
+    # This is visual planning only: it never rewrites or partitions payloads.
+    _apply_auto_style_policy_if_needed(img, text_data)
+    if _should_apply_auto_style_policy(text_data):
+        text_data["visual_profile"] = copy.deepcopy(text_data.get("estilo") or {})
+
     regions = [
         copy.deepcopy(region)
         for region in list(text_data.get("layout_regions", []) or [])

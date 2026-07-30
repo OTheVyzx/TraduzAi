@@ -96,6 +96,28 @@ def _apply_owner_mode_project_repairs(project_data: dict) -> dict:
     }
 
 
+def _write_rgb_jpeg(path: Path, image_rgb, *, quality: int = 92) -> None:
+    """Persist the pipeline's canonical RGB array through OpenCV."""
+    import cv2
+
+    image_bgr = cv2.cvtColor(image_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+    if not cv2.imwrite(str(path), image_bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)]):
+        raise IOError(f"Falha ao gravar imagem RGB: {path}")
+
+
+def _owner_pages_have_final_pixel_authority(output_pages) -> bool:
+    """Return whether every runtime page is a committed owner composition."""
+
+    pages = list(output_pages or [])
+    return bool(pages) and all(
+        isinstance(getattr(page, "ocr_result", None), dict)
+        and page.ocr_result.get("_owner_graph_mode") == "enforce"
+        and getattr(page, "owner_graph", None) is not None
+        and getattr(page, "owner_composition", None) is not None
+        for page in pages
+    )
+
+
 def _is_art_fragment_review_layer(layer: dict) -> bool:
     reason = str(layer.get("route_reason") or layer.get("skip_reason") or "").strip().lower()
     if reason in {"ocr_art_fragment_suspected", "sfx_art_fragment_suspected"}:
@@ -8119,6 +8141,19 @@ def _qa_translated_final_crops_against_layers(recorder, project_data: dict, work
     root = Path(work_dir) / "debug" / "e2e"
     crop_rows = _load_debug_jsonl(root / "10_copyback_reassemble" / "final_band_crops.jsonl")
     project_layers = [layer for layer in _iter_project_text_layers(project_data) if isinstance(layer, dict)]
+    verified_page_owner_composition = bool(
+        str(project_data.get("owner_graph_status") or "").strip().lower() == "verified"
+        and project_data.get("page_owner_graphs")
+        and project_layers
+        and all(str(layer.get("owner_id") or "").strip() for layer in project_layers)
+    )
+    if verified_page_owner_composition:
+        # Final-band crops belong to the superseded tile writer.  Comparing
+        # them with the canonical page-owner composition produces false P0s
+        # (`no_matching_project_layer` / crop mismatch) by construction.  The
+        # owner path is audited by its pixel maps and final-pixel observer.
+        audit["source"] = "verified_page_owner_composition"
+        crop_rows = []
     dark_group_sizes: dict[str, int] = {}
     for layer in project_layers:
         if not _layer_is_dark_final_rerender_subject(layer):
@@ -9163,13 +9198,15 @@ def _run_pipeline(config_path: str):
                 # Chamado internamente por process_band (OCR da banda)
                 pass 
 
+        strip_detector = StripDetector()
+        strip_runtime = StripRuntime()
         strip_chapter_telemetry: dict = {}
         with pipeline_timing.measure("strip_run_chapter"):
             output_pages = run_chapter(
                 image_files=image_files,
                 output_dir=translated_dir,
-                detector=StripDetector(),
-                runtime=StripRuntime(),
+                detector=strip_detector,
+                runtime=strip_runtime,
                 translator=translator_mod,
                 inpainter=_build_strip_inpainter_for_config(config, inpaint_band_image),
                 typesetter=typesetter_mod,
@@ -9207,6 +9244,9 @@ def _run_pipeline(config_path: str):
         ocr_results = [p.ocr_result for p in output_pages]
         page_text_layers = [p.text_layers for p in output_pages]
         total_pages = len(output_pages)
+        owner_pages_have_final_pixel_authority = _owner_pages_have_final_pixel_authority(
+            output_pages
+        )
 
         # Copia imagens processadas para images/ para que o editor as veja como base de inpaint
         with pipeline_timing.measure("sync_inpaint_images"):
@@ -9214,29 +9254,30 @@ def _run_pipeline(config_path: str):
             for p in output_pages:
                 inpaint_target = images_dir / p.path.name
                 if getattr(p, "inpainted_image", None) is not None:
-                    try:
-                        page_texts = _page_texts_from_text_layers(p.text_layers)
-                        fixed_clean, fixed_rendered, did_clamp = _clamp_page_inpaint_to_mask(
-                            original_image=getattr(p, "original_image", None),
-                            clean_image=p.inpainted_image,
-                            rendered_image=getattr(p, "image", None),
-                            page_texts=page_texts,
-                            inpaint_blocks=getattr(p, "inpaint_blocks", None),
-                        )
-                        if did_clamp:
-                            p.inpainted_image = fixed_clean
-                            p.image = fixed_rendered
-                            main_sync_page_clamp_count += 1
-                        dark_clean, dark_changed = _apply_dark_visual_text_geometry_cleanup(
-                            p.inpainted_image,
-                            page_texts,
-                        )
-                        if dark_changed:
-                            p.inpainted_image = dark_clean
-                            main_sync_page_clamp_count += 1
-                    except Exception:
-                        pass
-                    cv2.imwrite(str(inpaint_target), p.inpainted_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    if not owner_pages_have_final_pixel_authority:
+                        try:
+                            page_texts = _page_texts_from_text_layers(p.text_layers)
+                            fixed_clean, fixed_rendered, did_clamp = _clamp_page_inpaint_to_mask(
+                                original_image=getattr(p, "original_image", None),
+                                clean_image=p.inpainted_image,
+                                rendered_image=getattr(p, "image", None),
+                                page_texts=page_texts,
+                                inpaint_blocks=getattr(p, "inpaint_blocks", None),
+                            )
+                            if did_clamp:
+                                p.inpainted_image = fixed_clean
+                                p.image = fixed_rendered
+                                main_sync_page_clamp_count += 1
+                            dark_clean, dark_changed = _apply_dark_visual_text_geometry_cleanup(
+                                p.inpainted_image,
+                                page_texts,
+                            )
+                            if dark_changed:
+                                p.inpainted_image = dark_clean
+                                main_sync_page_clamp_count += 1
+                        except Exception:
+                            pass
+                    _write_rgb_jpeg(inpaint_target, p.inpainted_image, quality=92)
                 else:
                     shutil.copy2(p.path, inpaint_target)
             strip_chapter_telemetry["main_sync_page_clamp_count"] = main_sync_page_clamp_count
@@ -9245,7 +9286,12 @@ def _run_pipeline(config_path: str):
             final_page_space_count = 0
             from PIL import Image as _PILImage
 
-            if bool(config.get("skip_final_page_space_typeset")) or not _main_final_page_space_typeset_enabled():
+            if owner_pages_have_final_pixel_authority:
+                strip_chapter_telemetry["main_final_page_space_typeset_skipped"] = True
+                strip_chapter_telemetry["main_final_page_space_typeset_skip_reason"] = (
+                    "owner_compositor_final_pixel_authority"
+                )
+            elif bool(config.get("skip_final_page_space_typeset")) or not _main_final_page_space_typeset_enabled():
                 strip_chapter_telemetry["main_final_page_space_typeset_skipped"] = True
                 if not bool(config.get("skip_final_page_space_typeset")):
                     strip_chapter_telemetry["main_final_page_space_typeset_skip_reason"] = "opt_in_disabled"
@@ -9327,7 +9373,7 @@ def _run_pipeline(config_path: str):
             for p in output_pages:
                 original_target = originals_dir / p.path.name
                 if getattr(p, "original_image", None) is not None:
-                    cv2.imwrite(str(original_target), p.original_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    _write_rgb_jpeg(original_target, p.original_image, quality=92)
                 else:
                     shutil.copy2(p.path, original_target)
             for stale in originals_dir.glob("*"):
@@ -9742,6 +9788,25 @@ def _run_pipeline(config_path: str):
             ] = final_translated_page_consistency_guard
     except Exception as exc:
         logger.warning("Falha ao aplicar guarda final de consistencia translated/final_band: %s", exc)
+    if str(project_data.get("owner_graph_status") or "") == "verified":
+        try:
+            from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+            with pipeline_timing.measure("final_pixel_observer"):
+                project_data.setdefault("qa", {})["final_pixel_reports"] = (
+                    _observe_verified_owner_final_pages(
+                        project_data=project_data,
+                        output_pages=output_pages,
+                        observer=DetectorOcrFinalPixelObserver(
+                            detector=strip_detector,
+                            runtime=strip_runtime,
+                        ),
+                        source_language=config.get("idioma_origem", "en"),
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Falha ao observar pixels finais persistidos: %s", exc)
+            project_data.setdefault("qa", {})["final_pixel_reports"] = []
     try:
         from qa.export_gate import evaluate_export_gate
 
@@ -14158,6 +14223,72 @@ def _run_final_pixel_gate_sequence(
     return evaluate_gate(reports)
 
 
+def _observe_verified_owner_final_pages(
+    *,
+    project_data: dict,
+    output_pages,
+    observer,
+    source_language: str,
+) -> list[dict]:
+    """Audit persisted owner-mode pages from fresh detector/OCR evidence."""
+
+    if str(project_data.get("owner_graph_status") or "") != "verified":
+        return []
+    from qa.final_pixel_qa import evaluate_final_pixel_observation
+
+    work_dir = Path(project_data.get("_work_dir") or ".")
+    runtime_pages = list(output_pages or [])
+    project_pages = list(project_data.get("paginas") or [])
+    if len(runtime_pages) != len(project_pages):
+        raise ValueError("verified owner output/runtime page count mismatch")
+
+    reports: list[dict] = []
+    for index, (project_page, output_page) in enumerate(
+        zip(project_pages, runtime_pages),
+        start=1,
+    ):
+        page_id = str(project_page.get("page_id") or f"page_{index:03d}")
+        graph = getattr(output_page, "owner_graph", None)
+        composition = getattr(output_page, "owner_composition", None)
+        if graph is None or composition is None:
+            raise ValueError(f"verified owner runtime evidence missing for {page_id}")
+        if str(getattr(graph, "page_id", "")) != page_id:
+            raise ValueError(f"verified owner graph/runtime page mismatch for {page_id}")
+
+        rendered = ((project_page.get("image_layers") or {}).get("rendered") or {}).get("path")
+        if not rendered:
+            raise ValueError(f"verified owner rendered artifact missing for {page_id}")
+        artifact_path = Path(rendered)
+        if not artifact_path.is_absolute():
+            artifact_path = work_dir / artifact_path
+        observation = observer.observe(
+            artifact_path,
+            source_language=str(source_language or "en"),
+        )
+        report = evaluate_final_pixel_observation(
+            graph=graph,
+            composition=composition,
+            observation=observation,
+        )
+        reports.append(
+            {
+                "page_id": report.page_id,
+                "artifact_path": str(artifact_path),
+                "persisted_sha256": report.persisted_sha256,
+                "observer": type(observer).__name__,
+                "observer_available": True,
+                "observation_complete": True,
+                "observed_text_count": int(report.observed_text_count),
+                "passed": bool(report.passed),
+                "contracts": dict(report.contracts),
+                "issues": [issue.to_dict() for issue in report.issues],
+                "detected_blocks": [dict(block) for block in observation.detected_blocks],
+                "ocr_records": [dict(record) for record in observation.ocr_records],
+            }
+        )
+    return reports
+
+
 def render_page_image(project, page_idx, output_path):
     """Auxiliar para renderizar a versao final da pagina para visualizacao."""
     from typesetter.renderer import _typeset_single_page
@@ -15111,16 +15242,22 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
     qa_regions = []
     work_dir = Path(config.get("work_dir")) if config.get("work_dir") else None
     for i, (img, ocr, text_page) in enumerate(zip(image_files, ocr_results, page_text_layers)):
-        text_layers = text_page.get("texts", [])
-        text_layers = _drop_suppressed_ocr_texts(
-            text_layers,
-            config.get("idioma_origem", "en"),
-            sfx_candidates=ocr.get("_sfx_visual_candidates") if isinstance(ocr, dict) else [],
+        text_layers = list(text_page.get("texts", []))
+        verified_owner_page = (
+            isinstance(ocr, dict)
+            and ocr.get("_owner_graph_mode") == "enforce"
+            and isinstance(ocr.get("_owner_graph_snapshot"), dict)
         )
-        promoted_sfx = _promote_sfx_visual_candidates(ocr, existing_texts=text_layers)
-        if promoted_sfx:
-            text_layers = list(text_layers) + promoted_sfx
-        text_layers = group_regions(text_layers)
+        if not verified_owner_page:
+            text_layers = _drop_suppressed_ocr_texts(
+                text_layers,
+                config.get("idioma_origem", "en"),
+                sfx_candidates=ocr.get("_sfx_visual_candidates") if isinstance(ocr, dict) else [],
+            )
+            promoted_sfx = _promote_sfx_visual_candidates(ocr, existing_texts=text_layers)
+            if promoted_sfx:
+                text_layers = list(text_layers) + promoted_sfx
+            text_layers = group_regions(text_layers)
         text_layers = [
             normalize_owner_text_layer_for_project(
                 neutralize_removed_decision_fields(normalize_text_geometry(layer))
