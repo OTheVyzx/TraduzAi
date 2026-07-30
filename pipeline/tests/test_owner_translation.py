@@ -166,6 +166,28 @@ def test_translator_receives_one_complete_payload_per_owner() -> None:
     ]
 
 
+def test_owner_payload_is_unchanged_between_reconcile_and_translation() -> None:
+    from ownership.reconcile import SemanticRegion, build_page_owner_graph
+
+    owners_to_translation_page, _merge_owner_translations = _translation_api()
+    component = _component("body", 0)
+    observation = _observation("body", 0, "HEADER 200MILLION")
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[observation],
+        semantic_regions=[
+            SemanticRegion("body", (component.component_id,), "dialogue_body")
+        ],
+    )
+    source_payload = graph.owners[0].source_payload
+
+    translation_page = owners_to_translation_page(graph)
+
+    assert translation_page["texts"][0]["text"] == source_payload
+    assert translation_page["texts"][0]["original"] == source_payload
+
+
 def test_body_lines_never_reach_translator_as_separate_requests() -> None:
     owners_to_translation_page, _merge_owner_translations = _translation_api()
     line_observations = [

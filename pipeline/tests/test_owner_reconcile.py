@@ -188,6 +188,113 @@ def test_partial_observation_never_replaces_full_coverage() -> None:
     assert partial.rejection_reason == "dominated_subcoverage"
 
 
+def test_complete_consensus_reading_beats_tighter_truncated_reading() -> None:
+    component = _component("numeric_body", (100, 100, 300, 145))
+    observations = [
+        _observation(
+            "truncated_tight",
+            ("numeric_body",),
+            "TOTAL PURCHASE AMOUNT",
+            (100, 100, 300, 145),
+            confidence=0.99,
+        ),
+        _observation(
+            "complete_consensus_a",
+            ("numeric_body",),
+            "TOTAL PURCHASE AMOUNT 200MILLION",
+            (95, 95, 305, 205),
+            confidence=0.91,
+        ),
+        _observation(
+            "complete_consensus_b",
+            ("numeric_body",),
+            "TOTAL PURCHASE AMOUNT 200 MILLION",
+            (94, 94, 306, 206),
+            confidence=0.88,
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("body", ("numeric_body",), "body")],
+    )
+
+    owner = graph.owners[0]
+    assert owner.source_payload in {
+        "TOTAL PURCHASE AMOUNT 200MILLION",
+        "TOTAL PURCHASE AMOUNT 200 MILLION",
+    }
+    assert set(owner.selected_observation_ids) == {
+        "complete_consensus_a",
+        "complete_consensus_b",
+    }
+    assert graph.components[0].bbox_page[3] >= 206
+    truncated = next(
+        item for item in graph.observations if item.observation_id == "truncated_tight"
+    )
+    assert truncated.rejection_reason == "dominated_truncation"
+
+
+def test_incompatible_non_dominated_readings_fail_to_review() -> None:
+    component = _component("single_region", (100, 100, 300, 180))
+    observations = [
+        _observation(
+            "reading_tight",
+            ("single_region",),
+            "TOTAL PURCHASE AMOUNT 200 MILLION",
+            component.bbox_page,
+            confidence=0.99,
+        ),
+        _observation(
+            "reading_wide",
+            ("single_region",),
+            "PLAYER NAME KIM SIMUN",
+            (90, 90, 310, 200),
+            confidence=0.71,
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("body", ("single_region",), "body")],
+    )
+
+    assert graph.owners[0].state == "review_required"
+    assert graph.owners[0].selected_observation_ids == []
+    assert {
+        item.rejection_reason for item in graph.observations
+    } == {"ambiguous_reading"}
+
+
+def test_legacy_rejection_reason_remains_evidence_not_destructive_filter() -> None:
+    component = _component("body", (100, 100, 300, 180))
+    observation = replace(
+        _observation(
+            "legacy_rejected_but_material",
+            ("body",),
+            "COMPLETE MATERIAL BODY",
+            component.bbox_page,
+        ),
+        legacy_rejection_reason="cover_visual_art_ocr",
+    )
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[observation],
+        semantic_regions=[SemanticRegion("body", ("body",), "body")],
+    )
+
+    assert graph.owners[0].source_payload == "COMPLETE MATERIAL BODY"
+    stored = graph.observations[0]
+    assert stored.legacy_rejection_reason == "cover_visual_art_ocr"
+    assert stored.rejection_reason is None
+
+
 def test_equally_supported_divergent_full_readings_require_review() -> None:
     component = _component("body", (100, 100, 300, 160))
     observations = [

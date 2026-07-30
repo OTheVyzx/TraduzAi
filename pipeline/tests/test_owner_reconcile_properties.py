@@ -131,6 +131,50 @@ def test_graph_is_invariant_to_one_two_or_four_tile_partition() -> None:
     assert snapshots[0] == snapshots[1] == snapshots[2]
 
 
+def test_complete_reading_selection_is_permutation_invariant() -> None:
+    components = [_component("numeric_body", 100)]
+    regions = [SemanticRegion("body", ("numeric_body",), "body")]
+    observations = [
+        _observation(
+            "truncated",
+            ("numeric_body",),
+            "TOTAL PURCHASE AMOUNT",
+            (100, 100, 300, 140),
+            0.99,
+            ("tile_top",),
+        ),
+        _observation(
+            "complete_a",
+            ("numeric_body",),
+            "TOTAL PURCHASE AMOUNT 200MILLION",
+            (95, 95, 305, 205),
+            0.9,
+            ("tile_top", "tile_bottom"),
+        ),
+        _observation(
+            "complete_b",
+            ("numeric_body",),
+            "TOTAL PURCHASE AMOUNT 200 MILLION",
+            (94, 94, 306, 206),
+            0.88,
+            ("tile_bottom", "tile_top"),
+        ),
+    ]
+    expected = None
+
+    for order in permutations(observations):
+        graph = build_page_owner_graph(
+            page_id="page_001",
+            components=components,
+            observations=order,
+            semantic_regions=regions,
+        )
+        snapshot = _semantic_snapshot(graph)
+        expected = snapshot if expected is None else expected
+        assert snapshot == expected
+        assert graph.owners[0].source_payload.replace(" ", "").endswith("200MILLION")
+
+
 def test_every_input_order_produces_exactly_one_final_component_disposition() -> None:
     components = [_component("a", 100), _component("b", 180), _component("c", 260)]
     observation = _observation("a_ocr", ("a",), "A", (100, 100, 300, 140), 0.9, ("tile",))

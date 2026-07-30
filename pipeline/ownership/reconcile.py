@@ -9,6 +9,7 @@ import math
 import re
 from typing import Iterable, Sequence
 
+from .evidence import normalize_evidence_tokens, safely_dominates
 from .model import (
     BBox,
     ComponentDisposition,
@@ -293,8 +294,71 @@ def _select_observations(
         if observation.rejection_reason is None and str(observation.text).strip():
             selectable.append((observation, associated))
 
-    full_candidates = [item for item in selectable if item[1] == expected_ids]
+    normalized_tokens = {
+        observation.observation_id: normalize_evidence_tokens(observation.text)
+        for observation, _associated in selectable
+    }
+    corroboration_counts = {
+        observation.observation_id: sum(
+            normalized_tokens[candidate.observation_id]
+            == normalized_tokens[observation.observation_id]
+            for candidate, _candidate_ids in selectable
+        )
+        for observation, _associated in selectable
+    }
+    dominant_by_id: dict[str, TextObservation] = {}
+    for truncated, truncated_ids in selectable:
+        dominators: list[tuple[TextObservation, frozenset[str]]] = []
+        for complete, complete_ids in selectable:
+            if complete.observation_id == truncated.observation_id:
+                continue
+            same_region = bool(
+                truncated_ids
+                and complete_ids
+                and truncated_ids.issubset(complete_ids)
+                and _bbox_iou(complete.bbox_page, truncated.bbox_page) > 0.0
+            )
+            if safely_dominates(
+                complete=complete,
+                truncated=truncated,
+                same_region=same_region,
+                corroboration_count=corroboration_counts[complete.observation_id],
+            ):
+                dominators.append((complete, complete_ids))
+        if dominators:
+            dominant_by_id[truncated.observation_id] = sorted(
+                dominators,
+                key=lambda item: (
+                    _observation_support_rank(item[0], item[1], region_bbox),
+                    str(item[0].provider),
+                    str(item[0].observation_id),
+                ),
+            )[0][0]
+
+    maximal = [
+        item
+        for item in selectable
+        if item[0].observation_id not in dominant_by_id
+    ]
+    full_candidates = [item for item in maximal if item[1] == expected_ids]
     if full_candidates:
+        maximal_payloads = {
+            normalized_tokens[observation.observation_id]
+            for observation, _associated in full_candidates
+        }
+        if len(maximal_payloads) > 1:
+            for observation, _associated in full_candidates:
+                rejection_reasons[observation.observation_id] = "ambiguous_reading"
+            for observation, associated in selectable:
+                if observation.observation_id in rejection_reasons:
+                    continue
+                rejection_reasons[observation.observation_id] = (
+                    "dominated_subcoverage"
+                    if associated != expected_ids
+                    else "dominated_truncation"
+                )
+            return [], [item[0] for item in evidence], rejection_reasons
+
         ranked_full = sorted(
             full_candidates,
             key=lambda item: (
@@ -309,37 +373,41 @@ def _select_observations(
             for item in ranked_full
             if _observation_support_rank(item[0], item[1], region_bbox) == best_support
         ]
-        normalised_payloads = {
-            " ".join(str(item[0].text).split()) for item in equally_supported
-        }
-        if len(normalised_payloads) > 1:
-            for observation, _associated in equally_supported:
-                rejection_reasons[observation.observation_id] = "ambiguous_reading"
-            for observation, associated in selectable:
-                if observation.observation_id not in rejection_reasons:
-                    rejection_reasons[observation.observation_id] = (
-                        "dominated_subcoverage"
-                        if associated != expected_ids
-                        else "dominated_candidate"
-                    )
-            return [], [item[0] for item in evidence], rejection_reasons
-
         selected_observation, _covered = equally_supported[0]
+        selected_group = [
+            selected_observation,
+            *sorted(
+                (
+                    observation
+                    for observation, _associated in full_candidates
+                    if observation.observation_id != selected_observation.observation_id
+                    and normalized_tokens[observation.observation_id]
+                    == normalized_tokens[selected_observation.observation_id]
+                ),
+                key=_observation_order,
+            ),
+        ]
+        selected_ids = {item.observation_id for item in selected_group}
         for observation, associated in selectable:
-            if observation.observation_id == selected_observation.observation_id:
+            if observation.observation_id in selected_ids:
                 continue
             if associated != expected_ids:
                 reason = "dominated_subcoverage"
-            elif observation in [item[0] for item in equally_supported]:
+            elif observation.observation_id in dominant_by_id:
+                reason = "dominated_truncation"
+            elif (
+                normalized_tokens[observation.observation_id]
+                == normalized_tokens[selected_observation.observation_id]
+            ):
                 reason = "duplicate_equivalent"
             else:
                 reason = "dominated_candidate"
             rejection_reasons[observation.observation_id] = reason
-        return [selected_observation], [item[0] for item in evidence], rejection_reasons
+        return selected_group, [item[0] for item in evidence], rejection_reasons
 
     selected: list[TextObservation] = []
     covered: frozenset[str] = frozenset()
-    remaining = list(selectable)
+    remaining = list(maximal)
     while remaining and covered != expected_ids:
         ranked = sorted(
             remaining,
@@ -455,11 +523,21 @@ def _normalise_regions(
 
 
 def _atomic_payload(selected: Sequence[TextObservation]) -> str:
-    return " ".join(
-        part
-        for part in (" ".join(str(item.text).split()) for item in selected)
-        if part
-    )
+    parts: list[str] = []
+    seen_evidence: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    for item in selected:
+        part = " ".join(str(item.text).split())
+        if not part:
+            continue
+        evidence_key = (
+            normalize_evidence_tokens(part),
+            tuple(sorted(str(value) for value in item.component_ids)),
+        )
+        if evidence_key in seen_evidence:
+            continue
+        seen_evidence.add(evidence_key)
+        parts.append(part)
+    return " ".join(parts)
 
 
 def _multi_ocr_confirms_non_text(

@@ -42,6 +42,60 @@ def test_missing_container_is_deferred_to_evidence_reconciliation():
     assert region.reason == "semantic_container_missing"
 
 
+def test_numeric_footer_and_header_reach_translator_as_one_payload():
+    from ownership.model import SourceTextComponent, TextObservation
+    from ownership.reconcile import SemanticRegion, build_page_owner_graph
+    from ownership.translation import owners_to_translation_page
+
+    component = SourceTextComponent(
+        component_id="numeric_body",
+        page_id="page_001",
+        bbox_page=(100, 100, 300, 145),
+        polygon_page=((100, 100), (300, 100), (300, 145), (100, 145)),
+        detector_sources=("fixture",),
+    )
+    observations = [
+        TextObservation(
+            observation_id="truncated",
+            page_id="page_001",
+            component_ids=("numeric_body",),
+            text="TOTAL PURCHASE AMOUNT",
+            confidence=0.99,
+            provider="fixture",
+            bbox_page=(100, 100, 300, 145),
+        ),
+        TextObservation(
+            observation_id="complete_a",
+            page_id="page_001",
+            component_ids=("numeric_body",),
+            text="TOTAL PURCHASE AMOUNT 200MILLION",
+            confidence=0.91,
+            provider="fixture",
+            bbox_page=(95, 95, 305, 205),
+        ),
+        TextObservation(
+            observation_id="complete_b",
+            page_id="page_001",
+            component_ids=("numeric_body",),
+            text="TOTAL PURCHASE AMOUNT 200 MILLION",
+            confidence=0.88,
+            provider="fixture",
+            bbox_page=(94, 94, 306, 206),
+        ),
+    ]
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("body", ("numeric_body",), "body")],
+    )
+
+    page = owners_to_translation_page(graph)
+
+    assert len(page["texts"]) == 1
+    assert page["texts"][0]["text"].replace(" ", "").endswith("200MILLION")
+
+
 def test_verified_graph_never_calls_cross_band_reconcile_or_late_layer_merge(monkeypatch):
     import main
     from ownership.legacy_adapter import LegacyUnverifiedAdapter

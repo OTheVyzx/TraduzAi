@@ -335,6 +335,29 @@ def test_band_permutation_produces_same_owner_manifest() -> None:
     reversed_order = _resolve_page_owner_graphs_once([tile_b, tile_a], resolver=resolver)
 
     assert forward["page_001"].to_dict() == reversed_order["page_001"].to_dict()
+    assert len(forward["page_001"].owners) == 1
+
+
+def test_repeated_band_observations_never_create_duplicate_owner() -> None:
+    from strip.run import _resolve_page_owner_graphs_once
+
+    component = _component()
+    repeated = _observation(tile_id="tile_a")
+    tiles = [
+        SimpleNamespace(
+            page_id="page_001",
+            tile_id=f"tile_{index}",
+            components=[component] if index == 0 else [],
+            observations=[repeated],
+        )
+        for index in range(4)
+    ]
+
+    graph = _resolve_page_owner_graphs_once(tiles)["page_001"]
+
+    assert len(graph.owners) == 1
+    assert len(graph.observations) == 1
+    assert graph.owners[0].observation_ids == [repeated.observation_id]
 
 
 def test_collect_band_evidence_is_read_only_and_disables_mutating_stages() -> None:
