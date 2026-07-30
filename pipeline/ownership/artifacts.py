@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
+from .evidence import build_source_evidence_ledger
+
 
 def composite_owner_trace(page_id: str, owner_id: str | None, event: str) -> str:
     return ":".join(
@@ -146,6 +148,7 @@ class OwnerArtifactPublisher:
         components: list[dict[str, Any]] = []
         observations: list[dict[str, Any]] = []
         render_plan: list[dict[str, Any]] = []
+        evidence_ledger: list[dict[str, Any]] = []
         all_violations: list[dict[str, Any]] = []
 
         for page_id, graph in sorted(graph_snapshots.items()):
@@ -165,6 +168,29 @@ class OwnerArtifactPublisher:
                 for owner in owners
                 for observation_id in owner.get("observation_ids") or []
             }
+            observation_snapshots = {
+                str(item.get("observation_id") or ""): item
+                for item in graph.get("observations") or []
+                if isinstance(item, dict)
+            }
+            graph_sha256 = _canonical_sha256(graph)
+            for record in build_source_evidence_ledger(graph):
+                observation = observation_snapshots.get(record.observation_id) or {}
+                evidence_ledger.append(
+                    {
+                        **record.to_dict(),
+                        **_base_row(
+                            page_id=page_id,
+                            owner_id=record.owner_id,
+                            event=f"source_evidence:{record.observation_id}",
+                            hashes={
+                                "graph_sha256": graph_sha256,
+                                "observation_sha256": _canonical_sha256(observation),
+                            },
+                            offenders=record.component_ids,
+                        ),
+                    }
+                )
             for component in graph.get("components") or []:
                 if not isinstance(component, dict):
                     continue
@@ -260,6 +286,10 @@ class OwnerArtifactPublisher:
                         for page_id in sorted(graph_snapshots)
                     ],
                 },
+            )
+            self.recorder.write_jsonl_replace(
+                "04_text_normalization_router/source_evidence_ledger.jsonl",
+                evidence_ledger,
             )
             self.recorder.write_jsonl_replace(
                 "09_typeset/owner_render_plan.jsonl", render_plan
@@ -385,6 +415,7 @@ class OwnerArtifactPublisher:
             "graph_count": len(graph_snapshots),
             "component_count": len(components),
             "observation_count": len(observations),
+            "source_evidence_count": len(evidence_ledger),
             "render_plan_count": len(render_plan),
             "execution_mask_count": execution_count,
             "composition_count": len(composition_rows),

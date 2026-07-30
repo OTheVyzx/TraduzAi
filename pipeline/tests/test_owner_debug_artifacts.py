@@ -32,6 +32,7 @@ def _graph() -> dict:
                 "owner_id": "owner_a",
                 "component_ids": ["component_a"],
                 "observation_ids": ["observation_a"],
+                "selected_observation_ids": ["observation_a"],
                 "state": "rendered",
                 "route_action": "translate_inpaint_render",
                 "source_payload": "SOURCE BODY",
@@ -106,6 +107,7 @@ def test_every_artifact_row_has_schema_run_page_owner_and_coordinate_space(tmp_p
     row_paths = [
         "02_strip_detect/page_owner_components.jsonl",
         "03_ocr/page_owner_observations.jsonl",
+        "04_text_normalization_router/source_evidence_ledger.jsonl",
         "09_typeset/owner_render_plan.jsonl",
         "10_copyback_reassemble/owner_composition.jsonl",
         "11_qa_export_gate/final_pixel_ocr.jsonl",
@@ -127,6 +129,24 @@ def test_every_artifact_row_has_schema_run_page_owner_and_coordinate_space(tmp_p
     assert (root / "04_text_normalization_router/page_owner_graph.json").is_file()
     assert (root / "06_mask_segmentation/owner_masks/owner_a/action_mask.png").is_file()
     assert (root / "11_qa_export_gate/owner_invariant_report.json").is_file()
+
+
+def test_source_evidence_ledger_is_derived_and_hash_linked(tmp_path):
+    rows = _jsonl(
+        _publish(tmp_path)
+        / "04_text_normalization_router/source_evidence_ledger.jsonl"
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["observation_id"] == "observation_a"
+    assert row["owner_id"] == "owner_a"
+    assert row["disposition"] == "selected"
+    assert row["material"] is True
+    assert set(row["hashes"]) == {
+        "graph_sha256",
+        "observation_sha256",
+    }
 
 
 def test_render_plan_never_contains_review_required_owner(tmp_path):
