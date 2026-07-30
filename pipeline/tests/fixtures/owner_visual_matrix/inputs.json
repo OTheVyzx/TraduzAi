@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256-tree-v1",
+  "inputs": {
+    "mythic_colored_cards": {
+      "environment_variable": "TRADUZAI_MATRIX_MYTHIC_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "f81527eab76a94ae3dc2a231babec28a0a23863dd40abbbd03dee3f8867c618e"
+    },
+    "one_second_cross_tile": {
+      "environment_variable": "TRADUZAI_MATRIX_ONE_SECOND_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "970ee89213bbe065ff2bf11d6ee92bf0f006f2f5e08adc06278a0cd3691f2225"
+    },
+    "grand_finale_dark_panels": {
+      "environment_variable": "TRADUZAI_MATRIX_GRAND_FINALE_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "e9c757213ecd0a4dd53d7cc32ff0334683bf9ccb4e0dd7ab5cff4f465466d7be"
+    }
+  }
+}

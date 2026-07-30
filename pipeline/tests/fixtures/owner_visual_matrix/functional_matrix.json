@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "inputs_path": "inputs.json",
+  "entries": [
+    {
+      "entry_id": "colored_cards_calibration",
+      "work_id": "regressed_genius_creates_mythic_items",
+      "chapter_id": "chapter_40",
+      "split": "calibration",
+      "config_path": "configs/colored_cards.json",
+      "config_sha256": "57845edae1cab65254ba0b655162030f49eb65a29370cdf80e30dc6d3b068a30",
+      "input_key": "mythic_colored_cards",
+      "expected_input_sha256": "f81527eab76a94ae3dc2a231babec28a0a23863dd40abbbd03dee3f8867c618e",
+      "work_dir": "colored_cards_calibration",
+      "categories": [
+        "colored_card",
+        "table_ranking",
+        "translucent_balloon",
+        "primary_ocr_omission",
+        "tight_truncation_vs_complete_numeric_body",
+        "proportional_layout_underfill",
+        "incomplete_final_observation"
+      ],
+      "category_pages": {
+        "colored_card": [1, 2],
+        "table_ranking": [1, 2],
+        "translucent_balloon": [1],
+        "primary_ocr_omission": [2],
+        "tight_truncation_vs_complete_numeric_body": [1],
+        "proportional_layout_underfill": [1, 2],
+        "incomplete_final_observation": [1, 2]
+      }
+    },
+    {
+      "entry_id": "cross_tile_owners_holdout",
+      "work_id": "one_second",
+      "chapter_id": "chapter_5",
+      "split": "holdout",
+      "config_path": "configs/cross_tile_owners.json",
+      "config_sha256": "ae82a21c7981d62e003af993c7aafeb7ab38ce0061a8f28ce12702a22d64490a",
+      "input_key": "one_second_cross_tile",
+      "expected_input_sha256": "970ee89213bbe065ff2bf11d6ee92bf0f006f2f5e08adc06278a0cd3691f2225",
+      "work_dir": "cross_tile_owners_holdout",
+      "categories": [
+        "white_balloon",
+        "burst",
+        "cross_tile_owner",
+        "cross_band_background_continuity",
+        "proportional_layout_underfill",
+        "incomplete_final_observation"
+      ],
+      "category_pages": {
+        "white_balloon": [1, 28],
+        "burst": [28, 55],
+        "cross_tile_owner": [28, 55],
+        "cross_band_background_continuity": [28],
+        "proportional_layout_underfill": [1, 55],
+        "incomplete_final_observation": [1, 28, 55]
+      }
+    },
+    {
+      "entry_id": "dark_panels_holdout",
+      "work_id": "grand_finale",
+      "chapter_id": "chapter_35",
+      "split": "holdout",
+      "config_path": "configs/dark_panels.json",
+      "config_sha256": "81510d49cde6bdb466fe50d35a27ab37d1a9133db51514e53d0f8f3d9e9203a9",
+      "input_key": "grand_finale_dark_panels",
+      "expected_input_sha256": "e9c757213ecd0a4dd53d7cc32ff0334683bf9ccb4e0dd7ab5cff4f465466d7be",
+      "work_dir": "dark_panels_holdout",
+      "categories": [
+        "dark_panel",
+        "text_over_art",
+        "protected_art_contact",
+        "proportional_layout_underfill",
+        "incomplete_final_observation"
+      ],
+      "category_pages": {
+        "dark_panel": [9, 27, 31],
+        "text_over_art": [9, 27, 31],
+        "protected_art_contact": [27],
+        "proportional_layout_underfill": [9, 31],
+        "incomplete_final_observation": [9, 27, 31]
+      }
+    }
+  ]
+}

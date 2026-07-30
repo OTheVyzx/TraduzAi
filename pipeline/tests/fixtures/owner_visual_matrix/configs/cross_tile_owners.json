@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "input_key": "one_second_cross_tile",
+  "obra": "1 Second",
+  "capitulo": 5,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "engine_preset_id": "manhwa_manhua",
+  "mode": "auto",
+  "debug": true,
+  "skip_inpaint": false,
+  "skip_ocr": false,
+  "strict": true,
+  "export_mode": "strict",
+  "inpaint_policy": "pure"
+}

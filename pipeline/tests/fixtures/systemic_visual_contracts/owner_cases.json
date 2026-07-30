@@ -299,6 +299,194 @@
         "primary_ocr_observation_count": 0,
         "source_text_unowned": 0
       }
+    },
+    {
+      "case_id": "case_complete_numeric_body",
+      "category": "tight_truncation_vs_complete_numeric_body",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_numeric_header",
+          "bbox": [330, 410, 670, 475],
+          "polygon": [[330, 410], [670, 410], [670, 475], [330, 475]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        },
+        {
+          "component_id": "component_numeric_value",
+          "bbox": [390, 480, 610, 545],
+          "polygon": [[390, 480], [610, 480], [610, 545], [390, 545]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_numeric_truncated",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_numeric_header"],
+          "text": "TOTAL VALUE",
+          "confidence": 0.98,
+          "bbox": [330, 410, 670, 475],
+          "tile_provenance": ["tile_numeric_top"],
+          "coverage_kind": "truncated"
+        },
+        {
+          "observation_id": "observation_numeric_complete_primary",
+          "provider": "candidate_crop_ocr",
+          "component_ids": ["component_numeric_header", "component_numeric_value"],
+          "text": "TOTAL VALUE 200MILLION",
+          "confidence": 0.94,
+          "bbox": [330, 410, 670, 545],
+          "tile_provenance": ["tile_numeric_top", "tile_numeric_bottom"],
+          "coverage_kind": "complete"
+        },
+        {
+          "observation_id": "observation_numeric_complete_corroborated",
+          "provider": "negative_crop_ocr",
+          "component_ids": ["component_numeric_header", "component_numeric_value"],
+          "text": "TOTAL VALUE 200 MILLION",
+          "confidence": 0.9,
+          "bbox": [328, 408, 672, 548],
+          "tile_provenance": ["tile_numeric_top", "tile_numeric_bottom"],
+          "coverage_kind": "complete"
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_numeric_top", "bbox": [0, 300, 1000, 500], "role": "candidate"},
+        {"tile_id": "tile_numeric_bottom", "bbox": [0, 455, 1000, 680], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "selected_coverage_kind": "complete",
+        "selected_component_ids": ["component_numeric_header", "component_numeric_value"]
+      }
+    },
+    {
+      "case_id": "case_cross_band_gradient",
+      "category": "cross_band_background_continuity",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_gradient_crossing",
+          "bbox": [260, 650, 740, 760],
+          "polygon": [[260, 650], [740, 650], [740, 760], [260, 760]],
+          "detector_sources": ["region_detector", "glyph_scan"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_gradient_crossing",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_gradient_crossing"],
+          "text": "ATOMIC BODY ACROSS PROJECTIONS",
+          "confidence": 0.91,
+          "bbox": [260, 650, 740, 760],
+          "tile_provenance": ["tile_gradient_upper", "tile_gradient_lower"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_gradient_upper", "bbox": [0, 480, 1000, 715], "role": "projection"},
+        {"tile_id": "tile_gradient_lower", "bbox": [0, 690, 1000, 930], "role": "projection"}
+      ],
+      "protected_art": [],
+      "background_fixture": {
+        "kind": "continuous_linear_gradient_with_noise",
+        "axis": "vertical",
+        "start_rgb": [246, 215, 112],
+        "end_rgb": [228, 174, 68],
+        "noise_seed": 17
+      },
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "cleanup_count": 1,
+        "partition_pixel_hashes_equal": true
+      }
+    },
+    {
+      "case_id": "case_proportional_underfill",
+      "category": "proportional_layout_underfill",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_large_short_body",
+          "bbox": [260, 520, 740, 610],
+          "polygon": [[260, 520], [740, 520], [740, 610], [260, 610]],
+          "detector_sources": ["region_detector", "glyph_scan"],
+          "source_ink_height_px": 40
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_large_short_body",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_large_short_body"],
+          "text": "SHORT BODY",
+          "confidence": 0.95,
+          "bbox": [260, 520, 740, 610],
+          "tile_provenance": ["tile_large_body"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_large_body", "bbox": [0, 400, 1000, 760], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "minimum_source_scale_ratio": 0.75,
+        "maximum_source_scale_ratio": 1.35,
+        "underfilled_16px_render_rejected": true
+      }
+    },
+    {
+      "case_id": "case_incomplete_final_observation",
+      "category": "incomplete_final_observation",
+      "page_size": [1000, 1400],
+      "source_components": [
+        {
+          "component_id": "component_final_challenge",
+          "bbox": [300, 820, 700, 900],
+          "polygon": [[300, 820], [700, 820], [700, 900], [300, 900]],
+          "detector_sources": ["region_detector"]
+        }
+      ],
+      "observations": [
+        {
+          "observation_id": "observation_final_challenge",
+          "provider": "full_page_ocr",
+          "component_ids": ["component_final_challenge"],
+          "text": "MATERIAL SOURCE CHALLENGE",
+          "confidence": 0.93,
+          "bbox": [300, 820, 700, 900],
+          "tile_provenance": ["tile_final_challenge"]
+        }
+      ],
+      "tiles": [
+        {"tile_id": "tile_final_challenge", "bbox": [0, 700, 1000, 1040], "role": "candidate"}
+      ],
+      "protected_art": [],
+      "final_observation_fixture": {
+        "detected_block_count": 1,
+        "ocr_record_count": 0,
+        "expected_source_challenge_count": 1,
+        "completed_source_challenge_count": 0
+      },
+      "expected": {
+        "production_exception_count": 0,
+        "owner_count": 1,
+        "translation_count": 1,
+        "render_count": 1,
+        "observation_complete": false,
+        "export_gate_status": "BLOCK"
+      }
     }
   ]
 }
