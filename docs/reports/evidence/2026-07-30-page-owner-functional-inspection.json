@@ -1,0 +1,1227 @@
+{
+  "schema_version": 1,
+  "matrix_root": ".codex-tmp/page_owner_functional_validation_v11_20260730_231434",
+  "inspection_template_sha256": "55c1b6d4da55b2d6a38ef91d4897a6111854c62f610c27b030991e7d36056bad",
+  "inspections": [
+    {
+      "artifact_path": "contact_sheets/burst__cross_tile_owners_holdout__003__001.png",
+      "sha256": "d56ea95fbe3cb3b896f6e5d01b35cb546a0741446f9178f61cca1b25d3032613",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "burst",
+      "owner_or_segment": "burst__cross_tile_owners_holdout__003__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/burst__cross_tile_owners_holdout__003__002.png",
+      "sha256": "7e5bd82c6ed9efb3e8f8e1afee91c188116ea7f6d9c4fc8981fe22dab7c0bab3",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "burst",
+      "owner_or_segment": "burst__cross_tile_owners_holdout__003__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__001.png",
+      "sha256": "50cc1c0fffe3fb0d2a9d8d147392c0eb31f550207f75ed2c876c1811fcc672b4",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__002.png",
+      "sha256": "e6cb3ec4409edafc7e78a5423760fff4841582edc2205d15fa2f9a66adc19909",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__003.png",
+      "sha256": "250840d6b044af36ae47e56294dc5f1d96f809f365c3aac497f164181ef9ff6e",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__003",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__004.png",
+      "sha256": "afd32588955e1ca580b49dbd7387499dd2091edc40e8f99c4ddc65bced377fe8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__004",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__005.png",
+      "sha256": "ded94c2a78d017546170f55eb033efda8b952ab33d3154a2b1d2e667bc4f2800",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__005",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__006.png",
+      "sha256": "3ed6036a47b10408a9b6a5e06e33fce3da121d10b1b846e0439b019ce121d29a",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__007.png",
+      "sha256": "7c236a92958bf605493c36617622d33f7e69b929b0d623b0856dec6e2026554b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__007",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__008.png",
+      "sha256": "e988ea74ba7f884b31bf5fd98c5c697dcf4e12be868f0f6f14537b5572b6c8a7",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__009.png",
+      "sha256": "98e3cab9c83ab28a3abc1db257055fa526839c469f89897df1ee3753e9b574f8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__009",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__010.png",
+      "sha256": "6fe6359285d9761e00d07ce9d8a87367284b44aa789e41ca69e7d4fa84fd5798",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__010",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__011.png",
+      "sha256": "28d0bb6add005114ed65305e5e09423d3769723cb1a1914b49012844bde42d1b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__011",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__012.png",
+      "sha256": "7dcd4a40e8ffdba28f963cceade3d05ac4a2c8b0faad01923832a41054a980e2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__012",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__013.png",
+      "sha256": "39aee486917bc0cac71499c625a24cb78d0a0a2eb219018e0a6cf97566da86dc",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__013",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__014.png",
+      "sha256": "ed7c50d4641cef374a2ae86e1abb0f1e374fd109fdb28c0442da685c50a6193b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__014",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__015.png",
+      "sha256": "5ecf615b784787b1bd63f93082f24d4f0f79ba9b7468a98fc98759acac56c474",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__015",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__001__016.png",
+      "sha256": "ad0336508c8a61b442318d859577624388c72677c03567f6f68f89f4bbd99023",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__001__016",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__001.png",
+      "sha256": "003ade15ddd4f66a4ede433584b64f6e553f9abeaca6a058539b04b6bf2bcf30",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__002.png",
+      "sha256": "15aec5301d57e2761a7d6f1cb9b69568d6ff35df6f849ef4a127efc649b10ef3",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__003.png",
+      "sha256": "5a1d5939f66949ff6b7e6fe09f82b350496a3ecc88322d62a2d01d419b75cc68",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__003",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__004.png",
+      "sha256": "7bb45e575c4c35da08e6708783fda201e6cb2fcd38d06fc2c14950626c563aed",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__004",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__005.png",
+      "sha256": "956675794df36a58d4fd5be52aeac63e70cbdaf870f58ae0c506816278e48314",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__005",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__006.png",
+      "sha256": "a524a6cb57a1788154859603f7e74532e00ae01bf186d1fbb7ea47dcd9b6633e",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__007.png",
+      "sha256": "063ea27d36eb9486b63d2af12a37842d17015bbf08e0561df0c07758d66eafe8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__007",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__008.png",
+      "sha256": "3fc65bc90bb5ed2c2e3b07c5eb75666cae77f685124a716b057f626a5d3c5f01",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__009.png",
+      "sha256": "9e56125e4cf78f782bbe92037d8332596c87468f8328c103bfd46a95b4530966",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__009",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__010.png",
+      "sha256": "176249fe721f2664cb9c3a16d2e98f8db6557b44edd33007c6e9887c48e52a93",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__010",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__011.png",
+      "sha256": "d02a28f857e3c087fc754554f3c9acfa76356e6e82937ae1e99a649cd3eebc31",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__011",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__012.png",
+      "sha256": "66ef6c3bd6b0864c3031c4d9e52b9fc8b552b6107fc7010060b20ccfdfc8ae7b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__012",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__013.png",
+      "sha256": "8444f63ab6446c0623f6f3bb18e9ebe3d6aac509cda611d7ec8b98b18c4df0d1",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__013",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__014.png",
+      "sha256": "bde59a0f16e63fb1555f432f86d26556b5471b7b943d8a240348be4e9b35eb76",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__014",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__015.png",
+      "sha256": "8046cb8923c5119b511df7f81964de0c91800b373b6deaeba62cb0e7c146bec2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__015",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/colored_card__colored_cards_calibration__002__016.png",
+      "sha256": "eea4ebfb484542e37d36ddd4eb6ba88485b534d3db25e2305f7a6394687f182c",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "colored_card",
+      "owner_or_segment": "colored_card__colored_cards_calibration__002__016",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/cross_tile_owner__cross_tile_owners_holdout__003__001.png",
+      "sha256": "d56ea95fbe3cb3b896f6e5d01b35cb546a0741446f9178f61cca1b25d3032613",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "cross_tile_owner",
+      "owner_or_segment": "cross_tile_owner__cross_tile_owners_holdout__003__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/cross_tile_owner__cross_tile_owners_holdout__003__002.png",
+      "sha256": "7e5bd82c6ed9efb3e8f8e1afee91c188116ea7f6d9c4fc8981fe22dab7c0bab3",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "cross_tile_owner",
+      "owner_or_segment": "cross_tile_owner__cross_tile_owners_holdout__003__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__001.png",
+      "sha256": "b6c613ce7f6814332e9fe0861c6059c5894f213a87e5f117608a8a40e1ad18f2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__002.png",
+      "sha256": "86e6a4304a01e8289c060fbdb4c8a4536d3e2b9ee17b73b8bfe99a19e942a146",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__002",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__003.png",
+      "sha256": "c06981fb5f141dcd95673d7fa2527b086e4db637b0a86fee7b865a2096986f1f",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__003",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__004.png",
+      "sha256": "f719d1e2f20a0d46b1d32928d5c2220297d1401776f483a80fc242c28149d332",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__004",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__005.png",
+      "sha256": "620397f26dd87f4a05f2c3c1c32c7fababc75dc5666bd0494c33383ff550db90",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__005",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__006.png",
+      "sha256": "9342fee29912b475a0fb56c58c15587f79a9930f6be36965ae40c20f522111d5",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__007.png",
+      "sha256": "a7b74ac762c2ce4a89439705f4331baa0d2b5f345bd3bd2a53fb9773d2f91a3f",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__007",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__008.png",
+      "sha256": "ebce819b286f8d52bab28a63f3a92a9c48ee9f82d349dfabd113fb368cb33790",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/dark_panel__dark_panels_holdout__003__009.png",
+      "sha256": "f644fc5dd6cc972f32a88eb9511f20a574ce42d57a02d0a24afc0e7fa5280713",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "dark_panel",
+      "owner_or_segment": "dark_panel__dark_panels_holdout__003__009",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__001.png",
+      "sha256": "003ade15ddd4f66a4ede433584b64f6e553f9abeaca6a058539b04b6bf2bcf30",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__002.png",
+      "sha256": "15aec5301d57e2761a7d6f1cb9b69568d6ff35df6f849ef4a127efc649b10ef3",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__003.png",
+      "sha256": "5a1d5939f66949ff6b7e6fe09f82b350496a3ecc88322d62a2d01d419b75cc68",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__003",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__004.png",
+      "sha256": "7bb45e575c4c35da08e6708783fda201e6cb2fcd38d06fc2c14950626c563aed",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__004",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__005.png",
+      "sha256": "956675794df36a58d4fd5be52aeac63e70cbdaf870f58ae0c506816278e48314",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__005",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__006.png",
+      "sha256": "a524a6cb57a1788154859603f7e74532e00ae01bf186d1fbb7ea47dcd9b6633e",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__007.png",
+      "sha256": "063ea27d36eb9486b63d2af12a37842d17015bbf08e0561df0c07758d66eafe8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__007",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__008.png",
+      "sha256": "3fc65bc90bb5ed2c2e3b07c5eb75666cae77f685124a716b057f626a5d3c5f01",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__009.png",
+      "sha256": "9e56125e4cf78f782bbe92037d8332596c87468f8328c103bfd46a95b4530966",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__009",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__010.png",
+      "sha256": "176249fe721f2664cb9c3a16d2e98f8db6557b44edd33007c6e9887c48e52a93",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__010",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__011.png",
+      "sha256": "d02a28f857e3c087fc754554f3c9acfa76356e6e82937ae1e99a649cd3eebc31",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__011",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__012.png",
+      "sha256": "66ef6c3bd6b0864c3031c4d9e52b9fc8b552b6107fc7010060b20ccfdfc8ae7b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__012",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__013.png",
+      "sha256": "8444f63ab6446c0623f6f3bb18e9ebe3d6aac509cda611d7ec8b98b18c4df0d1",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__013",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__014.png",
+      "sha256": "bde59a0f16e63fb1555f432f86d26556b5471b7b943d8a240348be4e9b35eb76",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__014",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__015.png",
+      "sha256": "8046cb8923c5119b511df7f81964de0c91800b373b6deaeba62cb0e7c146bec2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__015",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/primary_ocr_omission__colored_cards_calibration__002__016.png",
+      "sha256": "eea4ebfb484542e37d36ddd4eb6ba88485b534d3db25e2305f7a6394687f182c",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "primary_ocr_omission",
+      "owner_or_segment": "primary_ocr_omission__colored_cards_calibration__002__016",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__001.png",
+      "sha256": "50cc1c0fffe3fb0d2a9d8d147392c0eb31f550207f75ed2c876c1811fcc672b4",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__002.png",
+      "sha256": "e6cb3ec4409edafc7e78a5423760fff4841582edc2205d15fa2f9a66adc19909",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__003.png",
+      "sha256": "250840d6b044af36ae47e56294dc5f1d96f809f365c3aac497f164181ef9ff6e",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__003",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__004.png",
+      "sha256": "afd32588955e1ca580b49dbd7387499dd2091edc40e8f99c4ddc65bced377fe8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__004",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__005.png",
+      "sha256": "ded94c2a78d017546170f55eb033efda8b952ab33d3154a2b1d2e667bc4f2800",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__005",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__006.png",
+      "sha256": "3ed6036a47b10408a9b6a5e06e33fce3da121d10b1b846e0439b019ce121d29a",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__007.png",
+      "sha256": "7c236a92958bf605493c36617622d33f7e69b929b0d623b0856dec6e2026554b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__007",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__008.png",
+      "sha256": "e988ea74ba7f884b31bf5fd98c5c697dcf4e12be868f0f6f14537b5572b6c8a7",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__009.png",
+      "sha256": "98e3cab9c83ab28a3abc1db257055fa526839c469f89897df1ee3753e9b574f8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__009",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__010.png",
+      "sha256": "6fe6359285d9761e00d07ce9d8a87367284b44aa789e41ca69e7d4fa84fd5798",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__010",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__011.png",
+      "sha256": "28d0bb6add005114ed65305e5e09423d3769723cb1a1914b49012844bde42d1b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__011",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__012.png",
+      "sha256": "7dcd4a40e8ffdba28f963cceade3d05ac4a2c8b0faad01923832a41054a980e2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__012",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__013.png",
+      "sha256": "39aee486917bc0cac71499c625a24cb78d0a0a2eb219018e0a6cf97566da86dc",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__013",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__014.png",
+      "sha256": "ed7c50d4641cef374a2ae86e1abb0f1e374fd109fdb28c0442da685c50a6193b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__014",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__015.png",
+      "sha256": "5ecf615b784787b1bd63f93082f24d4f0f79ba9b7468a98fc98759acac56c474",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__015",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__001__016.png",
+      "sha256": "ad0336508c8a61b442318d859577624388c72677c03567f6f68f89f4bbd99023",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__001__016",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__001.png",
+      "sha256": "003ade15ddd4f66a4ede433584b64f6e553f9abeaca6a058539b04b6bf2bcf30",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__002.png",
+      "sha256": "15aec5301d57e2761a7d6f1cb9b69568d6ff35df6f849ef4a127efc649b10ef3",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__003.png",
+      "sha256": "5a1d5939f66949ff6b7e6fe09f82b350496a3ecc88322d62a2d01d419b75cc68",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__003",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__004.png",
+      "sha256": "7bb45e575c4c35da08e6708783fda201e6cb2fcd38d06fc2c14950626c563aed",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__004",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__005.png",
+      "sha256": "956675794df36a58d4fd5be52aeac63e70cbdaf870f58ae0c506816278e48314",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__005",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__006.png",
+      "sha256": "a524a6cb57a1788154859603f7e74532e00ae01bf186d1fbb7ea47dcd9b6633e",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__007.png",
+      "sha256": "063ea27d36eb9486b63d2af12a37842d17015bbf08e0561df0c07758d66eafe8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__007",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__008.png",
+      "sha256": "3fc65bc90bb5ed2c2e3b07c5eb75666cae77f685124a716b057f626a5d3c5f01",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__009.png",
+      "sha256": "9e56125e4cf78f782bbe92037d8332596c87468f8328c103bfd46a95b4530966",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__009",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__010.png",
+      "sha256": "176249fe721f2664cb9c3a16d2e98f8db6557b44edd33007c6e9887c48e52a93",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__010",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__011.png",
+      "sha256": "d02a28f857e3c087fc754554f3c9acfa76356e6e82937ae1e99a649cd3eebc31",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__011",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__012.png",
+      "sha256": "66ef6c3bd6b0864c3031c4d9e52b9fc8b552b6107fc7010060b20ccfdfc8ae7b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__012",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__013.png",
+      "sha256": "8444f63ab6446c0623f6f3bb18e9ebe3d6aac509cda611d7ec8b98b18c4df0d1",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__013",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__014.png",
+      "sha256": "bde59a0f16e63fb1555f432f86d26556b5471b7b943d8a240348be4e9b35eb76",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__014",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__015.png",
+      "sha256": "8046cb8923c5119b511df7f81964de0c91800b373b6deaeba62cb0e7c146bec2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__015",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/table_ranking__colored_cards_calibration__002__016.png",
+      "sha256": "eea4ebfb484542e37d36ddd4eb6ba88485b534d3db25e2305f7a6394687f182c",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "table_ranking",
+      "owner_or_segment": "table_ranking__colored_cards_calibration__002__016",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__001.png",
+      "sha256": "b6c613ce7f6814332e9fe0861c6059c5894f213a87e5f117608a8a40e1ad18f2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__002.png",
+      "sha256": "86e6a4304a01e8289c060fbdb4c8a4536d3e2b9ee17b73b8bfe99a19e942a146",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__002",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__003.png",
+      "sha256": "c06981fb5f141dcd95673d7fa2527b086e4db637b0a86fee7b865a2096986f1f",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__003",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__004.png",
+      "sha256": "f719d1e2f20a0d46b1d32928d5c2220297d1401776f483a80fc242c28149d332",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__004",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__005.png",
+      "sha256": "620397f26dd87f4a05f2c3c1c32c7fababc75dc5666bd0494c33383ff550db90",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__005",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__006.png",
+      "sha256": "9342fee29912b475a0fb56c58c15587f79a9930f6be36965ae40c20f522111d5",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__007.png",
+      "sha256": "a7b74ac762c2ce4a89439705f4331baa0d2b5f345bd3bd2a53fb9773d2f91a3f",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__007",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__008.png",
+      "sha256": "ebce819b286f8d52bab28a63f3a92a9c48ee9f82d349dfabd113fb368cb33790",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/text_over_art__dark_panels_holdout__003__009.png",
+      "sha256": "f644fc5dd6cc972f32a88eb9511f20a574ce42d57a02d0a24afc0e7fa5280713",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "text_over_art",
+      "owner_or_segment": "text_over_art__dark_panels_holdout__003__009",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__001.png",
+      "sha256": "50cc1c0fffe3fb0d2a9d8d147392c0eb31f550207f75ed2c876c1811fcc672b4",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__002.png",
+      "sha256": "e6cb3ec4409edafc7e78a5423760fff4841582edc2205d15fa2f9a66adc19909",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__003.png",
+      "sha256": "250840d6b044af36ae47e56294dc5f1d96f809f365c3aac497f164181ef9ff6e",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__003",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__004.png",
+      "sha256": "afd32588955e1ca580b49dbd7387499dd2091edc40e8f99c4ddc65bced377fe8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__004",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__005.png",
+      "sha256": "ded94c2a78d017546170f55eb033efda8b952ab33d3154a2b1d2e667bc4f2800",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__005",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__006.png",
+      "sha256": "3ed6036a47b10408a9b6a5e06e33fce3da121d10b1b846e0439b019ce121d29a",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__006",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__007.png",
+      "sha256": "7c236a92958bf605493c36617622d33f7e69b929b0d623b0856dec6e2026554b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__007",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__008.png",
+      "sha256": "e988ea74ba7f884b31bf5fd98c5c697dcf4e12be868f0f6f14537b5572b6c8a7",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__008",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__009.png",
+      "sha256": "98e3cab9c83ab28a3abc1db257055fa526839c469f89897df1ee3753e9b574f8",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__009",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__010.png",
+      "sha256": "6fe6359285d9761e00d07ce9d8a87367284b44aa789e41ca69e7d4fa84fd5798",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__010",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__011.png",
+      "sha256": "28d0bb6add005114ed65305e5e09423d3769723cb1a1914b49012844bde42d1b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__011",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__012.png",
+      "sha256": "7dcd4a40e8ffdba28f963cceade3d05ac4a2c8b0faad01923832a41054a980e2",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__012",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__013.png",
+      "sha256": "39aee486917bc0cac71499c625a24cb78d0a0a2eb219018e0a6cf97566da86dc",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__013",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__014.png",
+      "sha256": "ed7c50d4641cef374a2ae86e1abb0f1e374fd109fdb28c0442da685c50a6193b",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__014",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__015.png",
+      "sha256": "5ecf615b784787b1bd63f93082f24d4f0f79ba9b7468a98fc98759acac56c474",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__015",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/translucent_balloon__colored_cards_calibration__001__016.png",
+      "sha256": "ad0336508c8a61b442318d859577624388c72677c03567f6f68f89f4bbd99023",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "translucent_balloon",
+      "owner_or_segment": "translucent_balloon__colored_cards_calibration__001__016",
+      "verdict": "GO",
+      "note": "Pixels nativos limpos e arte preservada."
+    },
+    {
+      "artifact_path": "contact_sheets/white_balloon__cross_tile_owners_holdout__001__001.png",
+      "sha256": "459226b0908984a3be9524ebaa465056ec7147fde95d10471bf1351d76f816f9",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "white_balloon",
+      "owner_or_segment": "white_balloon__cross_tile_owners_holdout__001__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/white_balloon__cross_tile_owners_holdout__001__002.png",
+      "sha256": "3438632bdaf6d885b0956f01ba081ddca3d2ca31c9434320e579f6250ddb45af",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "white_balloon",
+      "owner_or_segment": "white_balloon__cross_tile_owners_holdout__001__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/white_balloon__cross_tile_owners_holdout__003__001.png",
+      "sha256": "d56ea95fbe3cb3b896f6e5d01b35cb546a0741446f9178f61cca1b25d3032613",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "white_balloon",
+      "owner_or_segment": "white_balloon__cross_tile_owners_holdout__003__001",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    },
+    {
+      "artifact_path": "contact_sheets/white_balloon__cross_tile_owners_holdout__003__002.png",
+      "sha256": "7e5bd82c6ed9efb3e8f8e1afee91c188116ea7f6d9c4fc8981fe22dab7c0bab3",
+      "scale": "native",
+      "timestamp": "2026-07-30T23:35:00-03:00",
+      "category": "white_balloon",
+      "owner_or_segment": "white_balloon__cross_tile_owners_holdout__003__002",
+      "verdict": "NO-GO",
+      "note": "Ingles residual ou owner funcional incompleto."
+    }
+  ]
+}
