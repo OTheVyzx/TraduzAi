@@ -30,6 +30,11 @@ try:
 except ImportError:
     from ..ocr.text_router import ROUTE_ACTIONS, route_action_requires_translation
 
+try:
+    from translator.locale_policy import canonical_target_locale, validate_target_locale
+except ImportError:
+    from .locale_policy import canonical_target_locale, validate_target_locale
+
 OLLAMA_HOST = "http://localhost:11434"
 
 GOOGLE_LANGUAGE_ALIASES = {
@@ -1060,7 +1065,15 @@ def _should_block_translation_render(
 ) -> bool:
     del source_text
     normalized_source_lang = normalize_google_language_code(source_lang)
-    critical_lock_flags = {"placeholder_lost", "unrestored_placeholder", "glossary_violation", "forbidden_translation"}
+    critical_lock_flags = {
+        "placeholder_lost",
+        "unrestored_placeholder",
+        "glossary_violation",
+        "forbidden_translation",
+        "translation_locale_mismatch",
+        "numeric_magnitude_mismatch",
+        "pt_pt_long_scale_lexeme",
+    }
     if normalized_source_lang not in {"ja", "ko", "zh-CN", "zh-TW"}:
         return bool(critical_lock_flags & set(qa_flags))
     if tipo == "sfx":
@@ -1589,6 +1602,34 @@ def _apply_translation_render_blocks(
             item["translation_blocked_text"] = translated
             item["translated"] = ""
             item["qa_flags"] = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
+    return translated_pages
+
+
+def _apply_target_locale_validation(
+    translated_pages: list[dict],
+    target_locale: str,
+) -> list[dict]:
+    """Attach deterministic locale evidence without rewriting translations."""
+
+    locale = canonical_target_locale(target_locale)
+    for page in translated_pages:
+        for item in page.get("texts", []) or []:
+            source = str(item.get("original") or item.get("text") or "")
+            target = str(item.get("translated") or "")
+            validation = validate_target_locale(
+                source_text=source,
+                target_text=target,
+                target_locale=locale,
+            )
+            issue_codes = [issue.code for issue in validation.issues]
+            policy_flags: list[str] = issue_codes
+            if validation.status == "blocked":
+                policy_flags.append("translation_locale_mismatch")
+            elif validation.status == "review":
+                policy_flags.append("translation_locale_review")
+            item["target_locale"] = locale
+            item["locale_validation"] = validation.to_dict()
+            item["qa_flags"] = _merge_qa_flags(item.get("qa_flags"), policy_flags)
     return translated_pages
 
 
@@ -2421,6 +2462,7 @@ def translate_pages(
     del qualidade
 
     global _google, _google_health_key, _google_health_ok
+    target_locale = canonical_target_locale(idioma_destino)
     idioma_origem = normalize_google_language_code(idioma_origem)
     idioma_destino = normalize_google_language_code(idioma_destino)
 
@@ -2468,6 +2510,7 @@ def translate_pages(
     logger.info(f"Backend selecionado: {backend}")
     logger.info(f"Idioma Origem: {idioma_origem}")
     logger.info(f"Idioma Destino: {idioma_destino}")
+    logger.info(f"Locale Destino: {target_locale}")
     logger.info(f"Google OK: {google_ok}")
     logger.info(f"-------------------------")
     record_decision(
@@ -2479,6 +2522,7 @@ def translate_pages(
             "ollama_running": bool(ollama.get("running")),
             "idioma_origem": idioma_origem,
             "idioma_destino": idioma_destino,
+            "target_locale": target_locale,
         },
     )
 
@@ -2500,6 +2544,7 @@ def translate_pages(
                 progress_callback,
                 idioma_origem=idioma_origem,
                 idioma_destino=idioma_destino,
+                target_locale=target_locale,
                 semantic_reviewer_model=semantic_model,
                 semantic_reviewer_host=ollama_host,
                 translation_context=translation_context,
@@ -2527,6 +2572,7 @@ def translate_pages(
                 progress_callback,
                 translation_context=translation_context,
                 debug_session=debug_session,
+                target_locale=target_locale,
             )
 
         logger.warning("Nenhum backend de traducao disponivel. Retornando texto original.")
@@ -2570,6 +2616,7 @@ def _translate_with_google(
     semantic_reviewer_host: str = OLLAMA_HOST,
     translation_context: dict | None = None,
     debug_session: _TranslationDebugSession | None = None,
+    target_locale: str | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     translated_pages = []
@@ -2591,6 +2638,7 @@ def _translate_with_google(
             semantic_reviewer_model=semantic_reviewer_model,
             semantic_reviewer_host=semantic_reviewer_host,
             debug_session=debug_session,
+            target_locale=target_locale,
         )
         translated_pages.append(translated)
 
@@ -2600,12 +2648,16 @@ def _translate_with_google(
             context=context,
             glossario=glossario,
             source_lang=idioma_origem,
-            target_lang=idioma_destino,
+            target_lang=canonical_target_locale(target_locale or idioma_destino),
             model=semantic_reviewer_model,
             host=semantic_reviewer_host,
             translation_context=translation_context,
         )
 
+    translated_pages = _apply_target_locale_validation(
+        translated_pages,
+        target_locale or idioma_destino,
+    )
     translated_pages = _apply_translation_render_blocks(translated_pages, idioma_origem)
     return translated_pages
 
@@ -2649,6 +2701,7 @@ def _translate_google_single_page(
     semantic_reviewer_model: str | None,
     semantic_reviewer_host: str,
     debug_session: _TranslationDebugSession | None = None,
+    target_locale: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Translate a single page using Google backend with shared history state.
 
@@ -3063,11 +3116,13 @@ def _translate_with_ollama(
     progress_callback: Callable | None,
     translation_context: dict | None = None,
     debug_session: _TranslationDebugSession | None = None,
+    target_locale: str | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     tc_header = build_translation_context_header(translation_context)
+    locale_for_prompt = canonical_target_locale(target_locale or idioma_destino)
     system = (
-        f"Voce e um tradutor de manga especializado em {idioma_origem}->{idioma_destino}. Responda SOMENTE com JSON array.\n"
+        f"Voce e um tradutor de manga especializado em {idioma_origem}->{locale_for_prompt}. Responda SOMENTE com JSON array.\n"
         f"OBRA: {obra}\n"
         f"PERSONAGENS: {', '.join(context.get('personagens', [])[:8]) or 'N/A'}\n"
         f"GLOSSARIO: {json.dumps(glossario, ensure_ascii=False)}\n"
@@ -3358,7 +3413,11 @@ def _translate_with_ollama(
         if progress_callback:
             progress_callback(page_idx + 1, total, f"[{model}] Pagina {page_idx + 1}/{total}")
 
-    return translated_pages
+    translated_pages = _apply_target_locale_validation(
+        translated_pages,
+        target_locale or idioma_destino,
+    )
+    return _apply_translation_render_blocks(translated_pages, idioma_origem)
 
 
 def _passthrough(
@@ -3419,7 +3478,8 @@ def translate_single_block(block: dict, project: dict):
     global _google
     
     source_lang = project.get("idioma_origem", "en")
-    target_lang = project.get("idioma_destino", "pt-BR")
+    target_locale = canonical_target_locale(project.get("idioma_destino", "pt-BR"))
+    target_lang = target_locale
     
     source_lang = normalize_google_language_code(source_lang)
     target_lang = normalize_google_language_code(target_lang)
@@ -3452,6 +3512,19 @@ def translate_single_block(block: dict, project: dict):
         block.get("qa_flags"),
         _translation_quality_flags(text, final, source_lang),
     )
+    locale_validation = validate_target_locale(
+        source_text=text,
+        target_text=final,
+        target_locale=target_locale,
+    )
+    locale_flags = [issue.code for issue in locale_validation.issues]
+    if locale_validation.status == "blocked":
+        locale_flags.append("translation_locale_mismatch")
+    elif locale_validation.status == "review":
+        locale_flags.append("translation_locale_review")
+    qa_flags = _merge_qa_flags(qa_flags, locale_flags)
+    block["target_locale"] = target_locale
+    block["locale_validation"] = locale_validation.to_dict()
     if _should_block_translation_render(text, final, source_lang, tipo, qa_flags):
         block["translation_blocked_text"] = final
         final = ""

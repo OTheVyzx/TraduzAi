@@ -231,6 +231,43 @@ def test_translation_response_is_joined_by_owner_id_not_list_position() -> None:
     assert not merged.violations
 
 
+def test_locale_blocker_prevents_owner_translation_ready() -> None:
+    _owners_to_translation_page, merge_owner_translations = _translation_api()
+    graph = _graph([("a", "The reward is 2 billion coins.")])
+    target = "A recompensa é de 2 milhões de moedas."
+
+    merged = merge_owner_translations(
+        graph,
+        {
+            "texts": [
+                {
+                    "owner_id": "owner_a",
+                    "translated": target,
+                    "target_locale": "pt-BR",
+                    "locale_validation": {
+                        "status": "blocked",
+                        "issues": [{"code": "numeric_magnitude_mismatch"}],
+                    },
+                    "qa_flags": ["translation_locale_mismatch"],
+                }
+            ]
+        },
+    )
+
+    owner = merged.owners[0]
+    assert owner.state == "review_required"
+    assert owner.translated_payload is None
+    assert "owner_translation_locale_mismatch" in _critical_codes(merged)
+
+
+def test_owner_translation_request_declares_target_locale() -> None:
+    owners_to_translation_page, _merge_owner_translations = _translation_api()
+    page = owners_to_translation_page(_graph([("a", "SOURCE")]), target_locale="pt-BR")
+
+    assert page["_owner_translation_contract"]["target_locale"] == "pt-BR"
+    assert page["texts"][0]["target_locale"] == "pt-BR"
+
+
 def test_missing_owner_translation_becomes_review_required() -> None:
     _owners_to_translation_page, merge_owner_translations = _translation_api()
     graph = _graph([("a", "SOURCE A"), ("b", "SOURCE B")])

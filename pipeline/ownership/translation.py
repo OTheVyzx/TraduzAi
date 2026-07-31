@@ -25,7 +25,11 @@ def _translation_owners(graph: OwnerGraph) -> list[TextOwner]:
     )
 
 
-def owners_to_translation_page(graph: OwnerGraph) -> dict[str, Any]:
+def owners_to_translation_page(
+    graph: OwnerGraph,
+    *,
+    target_locale: str = "pt-BR",
+) -> dict[str, Any]:
     """Serialize each validated semantic owner as exactly one translation record."""
 
     graph.require_valid()
@@ -46,6 +50,7 @@ def owners_to_translation_page(graph: OwnerGraph) -> dict[str, Any]:
                 "component_ids": list(owner.component_ids),
                 "observation_ids": list(owner.observation_ids),
                 "selected_observation_ids": list(owner.selected_observation_ids),
+                "target_locale": target_locale,
             }
         )
     owner_ids = [owner.owner_id for owner in owners]
@@ -57,6 +62,7 @@ def owners_to_translation_page(graph: OwnerGraph) -> dict[str, Any]:
             "page_id": graph.page_id,
             "expected_owner_ids": owner_ids,
             "join_key": "owner_id",
+            "target_locale": target_locale,
         },
     }
 
@@ -194,6 +200,24 @@ def merge_owner_translations(
                 "owner_translation_payload_missing",
                 "A translation response contains an empty translated payload.",
                 empty_payload_ids,
+            )
+        )
+
+    locale_blocked_ids = sorted(
+        owner_id
+        for owner_id, record in record_by_owner.items()
+        if (
+            isinstance(record.get("locale_validation"), dict)
+            and record["locale_validation"].get("status") == "blocked"
+        )
+        or "translation_locale_mismatch" in set(record.get("qa_flags") or [])
+    )
+    if locale_blocked_ids:
+        violations.append(
+            _violation(
+                "owner_translation_locale_mismatch",
+                "A deterministic target-locale mismatch blocks owner translation.",
+                locale_blocked_ids,
             )
         )
 
