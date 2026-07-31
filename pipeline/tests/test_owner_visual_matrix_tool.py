@@ -215,6 +215,33 @@ def test_runner_persists_captured_stdout_and_stderr(tmp_path):
     assert Path(paths["stderr_path"]).read_text(encoding="utf-8") == "owner invariant failed"
 
 
+def test_runner_injects_runtime_models_dir_without_polluting_versioned_config(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools.validate_owner_visual_matrix import _run_entry
+
+    config = tmp_path / "fixture.json"
+    config.write_text(json.dumps({"input_key": "fixture"}), encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        effective = Path(command[-1])
+        captured.update(json.loads(effective.read_text(encoding="utf-8")))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("tools.validate_owner_visual_matrix.subprocess.run", fake_run)
+    _run_entry(
+        {"entry_id": "entry_a", "work_dir": "entry_a"},
+        tmp_path / "matrix.json",
+        tmp_path / "output",
+        {"config_path": config, "source_path": source},
+    )
+
+    assert Path(captured["models_dir"]).resolve() == (PIPELINE / "models").resolve()
+    assert "models_dir" not in json.loads(config.read_text(encoding="utf-8"))
+
+
 def _passing_owner_project(artifact: Path) -> dict:
     digest = sha256(artifact.read_bytes()).hexdigest()
     return {

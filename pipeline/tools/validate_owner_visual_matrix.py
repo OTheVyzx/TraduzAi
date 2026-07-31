@@ -419,6 +419,7 @@ def _run_entry(
         {
             "work_dir": str(target.resolve()),
             "source_path": str(Path(runtime["source_path"]).resolve()),
+            "models_dir": str((Path(__file__).resolve().parents[1] / "models").resolve()),
             "owner_graph_mode": "enforce",
             "allow_p0_export_override": False,
         }
