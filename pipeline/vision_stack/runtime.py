@@ -15148,8 +15148,45 @@ def run_final_pixel_ocr_probe(
                     status = "recognized"
                     reason = "raw_ocr_record_captured"
                 else:
-                    status = "no_usable_ocr"
-                    reason = "ocr_attempt_returned_no_text"
+                    crop = crops[index]
+                    doubled = cv2.resize(
+                        crop,
+                        None,
+                        fx=2.0,
+                        fy=2.0,
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                    gray = cv2.cvtColor(doubled, cv2.COLOR_RGB2GRAY)
+                    gray_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+                    inverted_rgb = 255 - gray_rgb
+                    retry_values = ocr.recognize_batch(
+                        [doubled, gray_rgb, inverted_rgb]
+                    )
+                    if not isinstance(retry_values, (list, tuple)):
+                        retry_values = [retry_values]
+                    record = next(
+                        (
+                            candidate
+                            for retry_value in retry_values
+                            if (
+                                candidate := _final_probe_record(
+                                    retry_value,
+                                    fallback_bbox=target["bbox"],
+                                    target_id=target["target_id"],
+                                )
+                            )
+                            is not None
+                        ),
+                        None,
+                    )
+                    if record is not None:
+                        record["final_probe_variant"] = "anchored_retry_2x"
+                        raw_records.append(record)
+                        status = "recognized"
+                        reason = "anchored_retry_2x_captured"
+                    else:
+                        status = "no_usable_ocr"
+                        reason = "ocr_attempt_returned_no_text_after_variants"
                 attempts.append(
                     {
                         "target_id": target["target_id"],

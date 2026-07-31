@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any
 import unicodedata
 
+import cv2
 import numpy as np
 
 from ownership.model import OwnerGraph, PageCompositionResult
@@ -68,6 +69,7 @@ class FinalPixelQaReport:
 
 def _tokens(value: Any) -> tuple[str, ...]:
     normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    normalized = re.sub(r"(?<=\d)(?=[^\W\d_])|(?<=[^\W\d_])(?=\d)", " ", normalized)
     return tuple(
         token
         for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
@@ -281,6 +283,14 @@ def evaluate_final_pixel_observation(
         for owner in graph.owners
         for component_id in owner.component_ids
     }
+    observations_by_owner = {
+        owner.owner_id: [
+            observation
+            for observation in graph.observations
+            if observation.observation_id in owner.observation_ids
+        ]
+        for owner in graph.owners
+    }
     for owner in graph.owners:
         if owner.state == "review_required" or owner.route_action == "review_required":
             add(
@@ -309,6 +319,59 @@ def evaluate_final_pixel_observation(
                 component_ids=tuple(owner.component_ids),
                 offenders=(owner.owner_id,),
             )
+        selected_tokens = set(_tokens(owner.source_payload))
+        for source_observation in observations_by_owner.get(owner.owner_id, []):
+            if source_observation.observation_id in owner.selected_observation_ids:
+                continue
+            if float(source_observation.confidence) < 0.80:
+                continue
+            candidate_tokens = set(_tokens(source_observation.text))
+            missing_tokens = candidate_tokens - selected_tokens
+            if missing_tokens and len(candidate_tokens) > len(selected_tokens):
+                add(
+                    "source_payload_incomplete",
+                    "source_coverage_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                    offenders=(
+                        source_observation.observation_id,
+                        source_observation.text,
+                        *tuple(sorted(missing_tokens)),
+                    ),
+                )
+
+        if owner.route_action in {
+            "translate_inpaint_render",
+            "translate_sfx_inpaint_render",
+        } and cleanup_map.shape == expected_shape:
+            for component_id in owner.component_ids:
+                component = next(
+                    (item for item in graph.components if item.component_id == component_id),
+                    None,
+                )
+                disposition = dispositions.get(component_id)
+                if component is None or (
+                    disposition is not None
+                    and disposition.decision == "preserve"
+                    and _explicit_preserve_policy(disposition.reason)
+                ):
+                    continue
+                evidence_mask = np.zeros(expected_shape, dtype=np.uint8)
+                polygon = np.asarray(component.polygon_page, dtype=np.int32)
+                if polygon.ndim == 2 and polygon.shape[0] >= 3:
+                    cv2.fillPoly(evidence_mask, [polygon], 1)
+                outside = (evidence_mask > 0) & (cleanup_map != owner.owner_id)
+                if np.any(outside):
+                    add(
+                        "source_evidence_outside_cleanup",
+                        "pixel_ownership_contract",
+                        owner_id=owner.owner_id,
+                        component_ids=(component_id,),
+                        offenders=(
+                            component_id,
+                            f"outside_pixels:{int(np.count_nonzero(outside))}",
+                        ),
+                    )
 
     for index, record in enumerate(observation.ocr_records):
         text = _record_text(record)
@@ -316,6 +379,9 @@ def evaluate_final_pixel_observation(
             continue
         bbox = _record_bbox(record)
         candidate_owners: set[str] = set()
+        anchored_component_id = str(record.get("final_probe_target_id") or "")
+        if anchored_component_id in owner_by_component:
+            candidate_owners.add(owner_by_component[anchored_component_id].owner_id)
         if bbox is not None and glyph_map.shape == expected_shape:
             x1 = max(0, min(expected_shape[1], bbox[0]))
             y1 = max(0, min(expected_shape[0], bbox[1]))
@@ -345,13 +411,24 @@ def evaluate_final_pixel_observation(
         )
         for owner_id in sorted(candidate_owners):
             owner = next(item for item in graph.owners if item.owner_id == owner_id)
-            if source_payload_visible(owner.source_payload, text):
+            source_candidates = [owner.source_payload] + [
+                item.text for item in observations_by_owner.get(owner_id, [])
+            ]
+            visible_source = next(
+                (
+                    source
+                    for source in source_candidates
+                    if source_payload_visible(source, text)
+                ),
+                None,
+            )
+            if visible_source is not None:
                 add(
                     "source_payload_visible",
                     "final_language_contract",
                     owner_id=owner.owner_id,
                     component_ids=tuple(owner.component_ids),
-                    offenders=(text, owner.source_payload),
+                    offenders=(text, visible_source),
                 )
         if not candidate_owners:
             for component in matching_components:
@@ -401,7 +478,48 @@ def evaluate_final_pixels(
     observer: FinalPixelObserver,
     source_language: str = "en",
 ) -> FinalPixelQaReport:
-    observation = observer.observe(Path(image_path), source_language=source_language)
+    dispositions = {
+        item.component_id: item for item in graph.component_dispositions
+    }
+    owner_by_component = {
+        component_id: owner
+        for owner in graph.owners
+        for component_id in owner.component_ids
+    }
+    source_challenges = []
+    for component in graph.components:
+        disposition = dispositions.get(component.component_id)
+        if (
+            disposition is not None
+            and disposition.decision == "preserve"
+            and _explicit_preserve_policy(disposition.reason)
+        ):
+            continue
+        owner = owner_by_component.get(component.component_id)
+        source_challenges.append(
+            {
+                "component_id": component.component_id,
+                "owner_id": owner.owner_id if owner is not None else "",
+                "bbox_page": list(component.bbox_page),
+                "polygon_page": [list(point) for point in component.polygon_page],
+                "source_candidates": [
+                    item.text
+                    for item in graph.observations
+                    if component.component_id in item.component_ids
+                ],
+                "selected_payload": owner.source_payload if owner is not None else "",
+                "preserve_policy": disposition.reason if disposition is not None else "",
+            }
+        )
+    page_match = re.search(r"(\d+)$", graph.page_id)
+    page_number = int(page_match.group(1)) if page_match else 0
+    observation = observer.observe(
+        Path(image_path),
+        source_language=source_language,
+        page_id=graph.page_id,
+        page_number=page_number,
+        source_challenges=source_challenges,
+    )
     if Path(observation.image_path) != Path(image_path):
         raise ValueError("final pixel observer returned evidence for another file")
     return evaluate_final_pixel_observation(

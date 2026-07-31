@@ -265,3 +265,67 @@ def test_source_language_detection_uses_owner_ngrams_not_fixed_phrase_list():
 def test_review_required_owner_blocks_route_state_contract():
     report = _evaluate(_graph(state="review_required"), _composition(glyph=False), _observation())
     assert "owner_route_not_final" in _reasons(report)
+
+
+def test_unselected_high_confidence_source_suffix_blocks_incomplete_payload():
+    from dataclasses import replace
+    from ownership.model import TextObservation
+
+    graph = _graph(source="THE REWARD", translated="A RECOMPENSA")
+    extra = TextObservation(
+        observation_id="observation_suffix",
+        page_id="page_001",
+        component_ids=("component_a",),
+        text="THE REWARD IS 200 MILLION GOLD",
+        confidence=0.96,
+        provider="anchored_crop_2x",
+        bbox_page=(5, 5, 30, 17),
+    )
+    graph.observations.append(extra)
+    graph.owners[0] = replace(
+        graph.owners[0],
+        observation_ids=["observation_a", "observation_suffix"],
+        selected_observation_ids=["observation_a"],
+    )
+
+    report = _evaluate(graph, _composition(), _observation())
+
+    assert "source_payload_incomplete" in _reasons(report)
+
+
+def test_source_observation_polygon_outside_cleanup_map_blocks():
+    from dataclasses import replace
+
+    graph = _graph()
+    graph.owners[0] = replace(
+        graph.owners[0],
+        route_action="translate_inpaint_render",
+    )
+    composition = _composition()
+    cleanup = np.asarray(composition.cleanup_owner_map).copy()
+    cleanup[5:10, 5:18] = "owner_a"
+    composition = replace(composition, cleanup_owner_map=cleanup)
+
+    report = _evaluate(graph, composition, _observation())
+
+    assert "source_evidence_outside_cleanup" in _reasons(report)
+
+
+def test_anchored_final_ocr_blocks_200_million_residual():
+    report = _evaluate(
+        _graph(source="THE REWARD IS 200 MILLION GOLD"),
+        _composition(),
+        _observation({
+            "text": "200MILLION",
+            "bbox": [6, 6, 28, 16],
+            "final_probe_target_id": "component_a",
+        }),
+    )
+
+    assert "source_payload_visible" in _reasons(report)
+
+
+def test_letter_digit_boundary_normalization_detects_200million():
+    from qa.final_pixel_qa import source_payload_visible
+
+    assert source_payload_visible("PAY 200 MILLION GOLD", "200million")

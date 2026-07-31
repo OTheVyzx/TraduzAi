@@ -14286,15 +14286,49 @@ def _observe_verified_owner_final_pages(
         if not artifact_path.is_absolute():
             artifact_path = work_dir / artifact_path
         source_challenges = []
+        dispositions = {
+            str(getattr(item, "component_id", "") or ""): item
+            for item in list(getattr(graph, "component_dispositions", []) or [])
+        }
+        owner_by_component = {
+            str(component_id): owner
+            for owner in list(getattr(graph, "owners", []) or [])
+            for component_id in list(getattr(owner, "component_ids", []) or [])
+        }
+        observations = list(getattr(graph, "observations", []) or [])
         for component in list(getattr(graph, "components", []) or []):
             bbox = getattr(component, "bbox_page", None)
             component_id = str(getattr(component, "component_id", "") or "")
             if not component_id or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
                 continue
+            disposition = dispositions.get(component_id)
+            disposition_reason = str(getattr(disposition, "reason", "") or "")
+            if (
+                str(getattr(disposition, "decision", "") or "") == "preserve"
+                and disposition_reason.strip().casefold().startswith("policy:")
+            ):
+                continue
+            owner = owner_by_component.get(component_id)
+            source_candidates = [
+                str(getattr(item, "text", "") or "")
+                for item in observations
+                if component_id in tuple(getattr(item, "component_ids", ()) or ())
+                and str(getattr(item, "text", "") or "").strip()
+            ]
             source_challenges.append(
                 {
                     "component_id": component_id,
+                    "owner_id": str(getattr(owner, "owner_id", "") or ""),
                     "bbox_page": [int(value) for value in bbox],
+                    "polygon_page": [
+                        [int(x), int(y)]
+                        for x, y in tuple(getattr(component, "polygon_page", ()) or ())
+                    ],
+                    "source_candidates": source_candidates,
+                    "selected_payload": str(
+                        getattr(owner, "source_payload", "") or ""
+                    ),
+                    "preserve_policy": disposition_reason,
                 }
             )
         page_number = int(project_page.get("numero", index) or index)

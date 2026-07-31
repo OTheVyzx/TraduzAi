@@ -204,3 +204,26 @@ def test_empty_page_without_material_components_may_be_complete(tmp_path):
     ).observe(image_path, source_language="en", source_challenges=[])
 
     assert observation.coverage_complete is True
+
+
+def test_component_challenge_runs_anchored_final_crop_ocr(tmp_path):
+    image_path = tmp_path / "final.png"
+    _write_image(image_path)
+    detector = type("EmptyDetector", (), {"detect": lambda self, image: []})()
+    runtime = _Runtime()
+
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+    DetectorOcrFinalPixelObserver(detector=detector, runtime=runtime).observe(
+        image_path,
+        source_language="en",
+        page_id="page_004",
+        page_number=4,
+        source_challenges=[{
+            "component_id": "component_anchored",
+            "bbox_page": [3, 4, 18, 12],
+            "source_candidates": ["THE REWARD IS 200 MILLION GOLD"],
+        }],
+    )
+
+    assert runtime.calls[0][1]["source_challenges"][0]["component_id"] == "component_anchored"
