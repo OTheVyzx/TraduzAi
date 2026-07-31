@@ -222,5 +222,16 @@
       "rotation_deg": -10,
       "container": {"width": 360, "height": 180, "background": "#14213D"}
     }
-  ]
+  ],
+  "validation_thresholds": {
+    "font_top1_min": 0.9,
+    "font_top3_min": 0.98,
+    "category_min": 0.85,
+    "speech_go_rate_min": 0.95,
+    "owner_go_rate_min": 0.9,
+    "fill_delta_e_2000_median_max": 8.0,
+    "fill_delta_e_2000_p95_max": 12.0,
+    "safe_containment_min": 1.0,
+    "catastrophic_high_confidence_mismatch_max": 0
+  }
 }

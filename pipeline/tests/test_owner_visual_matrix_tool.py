@@ -201,6 +201,47 @@ def test_contact_sheets_segment_tall_pages_at_readable_scale(tmp_path):
         assert sheet.height > 100
 
 
+def test_contact_sheets_include_every_declared_visual_category(tmp_path):
+    from PIL import Image
+
+    from tools.validate_owner_visual_matrix import _write_contact_sheets
+
+    output_root = tmp_path / "matrix"
+    work_dir = output_root / "entry_a"
+    for folder in ("originals", "images", "translated"):
+        (work_dir / folder).mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (100, 100), "white").save(work_dir / folder / "001.png")
+    entries = [
+        {
+            "entry_id": "entry_a",
+            "work_dir": "entry_a",
+            "categories": ["white_balloon", "sfx", "hard_negative"],
+            "category_pages": {"white_balloon": 1, "sfx": 1, "hard_negative": 1},
+        }
+    ]
+
+    sheets = _write_contact_sheets(entries, output_root)
+
+    assert set(sheets) == {"hard_negative", "sfx", "white_balloon"}
+    assert sheets["hard_negative"] == sheets["sfx"] == sheets["white_balloon"]
+
+
+def test_inspection_template_deduplicates_identical_pixels_and_keeps_categories(tmp_path):
+    from tools.validate_owner_visual_matrix import build_inspection_template
+
+    artifact = tmp_path / "same.png"
+    artifact.write_bytes(b"same pixels")
+
+    template = build_inspection_template(
+        {"speech": [str(artifact)], "white_balloon": [str(artifact)]},
+        tmp_path,
+    )
+
+    assert len(template["artifacts"]) == 1
+    assert template["artifacts"][0]["category"] == "speech"
+    assert template["artifacts"][0]["categories"] == ["speech", "white_balloon"]
+
+
 def test_runner_persists_captured_stdout_and_stderr(tmp_path):
     from tools.validate_owner_visual_matrix import _persist_runner_logs
 
@@ -335,6 +376,72 @@ def test_matrix_blocks_under_source_scale_owner(tmp_path):
     entry, _ = _write_owner_project(tmp_path, project)
 
     assert "under_source_scale" in validate_entry_result(entry, tmp_path)["contracts"]
+
+
+def test_style_matrix_requires_owner_paired_source_and_final(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_entry_result
+    artifact = tmp_path / "final.png"; artifact.write_bytes(b"pixels")
+    project = _passing_owner_project(artifact)
+    layer = project["paginas"][0]["text_layers"][0]
+    layer["visual_profile_v2"] = {"owner_id": "another", "source_sha256": "a" * 64}
+    layer["style_v2_raster_contract"] = {"status": "applied", "applied_attributes": {"fill": "#fff"}}
+    project["qa"]["style_fidelity"] = {"gate": {"status": "PASS"}, "owners": []}
+    entry, _ = _write_owner_project(tmp_path, project)
+
+    assert "style_owner_pair_mismatch" in validate_entry_result(entry, tmp_path)["contracts"]
+
+
+def test_style_matrix_reports_explicit_fallbacks(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_entry_result
+    artifact = tmp_path / "final.png"; artifact.write_bytes(b"pixels")
+    project = _passing_owner_project(artifact)
+    layer = project["paginas"][0]["text_layers"][0]
+    layer["visual_profile_v2"] = {"owner_id": "owner_a", "source_sha256": "a" * 64, "status": "fallback"}
+    layer["style_v2_raster_contract"] = {"status": "fallback", "applied_attributes": {}}
+    project["qa"]["style_fidelity"] = {"gate": {"status": "PASS"}, "owners": [{"owner_id": "owner_a"}]}
+    entry, _ = _write_owner_project(tmp_path, project)
+
+    result = validate_entry_result(entry, tmp_path)
+    assert result["style_fallback_owner_ids"] == ["owner_a"]
+
+
+def test_style_matrix_cannot_pass_when_functional_gate_is_blocked(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_entry_result
+    artifact = tmp_path / "final.png"; artifact.write_bytes(b"pixels")
+    project = _passing_owner_project(artifact)
+    project["qa"]["export_gate"]["status"] = "BLOCK"
+    project["qa"]["style_fidelity"] = {"gate": {"status": "PASS"}, "owners": []}
+    entry, _ = _write_owner_project(tmp_path, project)
+
+    assert validate_entry_result(entry, tmp_path)["status"] == "BLOCK"
+
+
+def test_style_matrix_enforces_category_thresholds(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_entry_result
+    artifact = tmp_path / "final.png"; artifact.write_bytes(b"pixels")
+    project = _passing_owner_project(artifact)
+    project["qa"]["style_fidelity"] = {
+        "gate": {"status": "PASS"}, "owners": [],
+        "category_metrics": {"colored_card": {"go_rate": 0.70}},
+    }
+    entry, _ = _write_owner_project(tmp_path, project)
+
+    assert "style_category_below_threshold:colored_card" in validate_entry_result(entry, tmp_path)["contracts"]
+
+
+def test_style_matrix_manifest_uses_validator_entries_schema():
+    from tools.validate_owner_visual_matrix import validate_manifest
+    path = PIPELINE / "tests" / "fixtures" / "style_copy_corpus" / "matrix.json"
+    entries = validate_manifest(json.loads(path.read_text(encoding="utf-8")))
+    assert len(entries) == 3
+
+
+def test_style_matrix_separates_calibration_and_holdout_works():
+    path = PIPELINE / "tests" / "fixtures" / "style_copy_corpus" / "matrix.json"
+    entries = json.loads(path.read_text(encoding="utf-8"))["entries"]
+    calibration = {row["work_id"] for row in entries if row["split"] == "calibration"}
+    holdout = {row["work_id"] for row in entries if row["split"] == "holdout"}
+    assert calibration and holdout and calibration.isdisjoint(holdout)
 
 
 def test_matrix_blocks_incomplete_final_ocr_coverage(tmp_path):

@@ -152,14 +152,15 @@ def resolve_entry_runtime(
 ) -> dict[str, Any]:
     """Resolve only versioned configs and hash-pinned external inputs."""
     fixture_root = manifest_path.resolve().parent
+    fixtures_root = fixture_root.parent
     raw_config = Path(str(entry.get("config_path") or ""))
     if raw_config.is_absolute():
         raise MatrixContractError("config_path must be relative to the matrix fixture")
     config_path = (fixture_root / raw_config).resolve()
     try:
-        config_path.relative_to(fixture_root)
+        config_path.relative_to(fixtures_root)
     except ValueError as exc:
-        raise MatrixContractError("config_path escapes the matrix fixture") from exc
+        raise MatrixContractError("config_path escapes the versioned fixtures root") from exc
     if ".codex-tmp" in {part.casefold() for part in config_path.parts}:
         raise MatrixContractError("config_path cannot depend on .codex-tmp")
     if not config_path.is_file():
@@ -219,6 +220,7 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
     project_path = work_dir / "project.json"
     contracts: set[str] = set()
     details: list[str] = []
+    style_fallback_owner_ids: set[str] = set()
     for blocker in entry.get("_preflight_contracts") or []:
         contracts.add(str(blocker))
     details.extend(str(value) for value in entry.get("_preflight_details") or [])
@@ -250,6 +252,18 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
                 continue
             if not str(layer.get("owner_id") or "").strip() or layer.get("render_completed") is not True:
                 continue
+            owner_id = str(layer.get("owner_id") or "").strip()
+            profile = layer.get("visual_profile_v2")
+            raster = layer.get("style_v2_raster_contract")
+            if isinstance(profile, dict) or isinstance(raster, dict):
+                if not isinstance(profile, dict) or str(profile.get("owner_id") or "") != owner_id:
+                    contracts.add("style_owner_pair_mismatch")
+                elif not str(profile.get("source_sha256") or "").strip():
+                    contracts.add("style_source_hash_missing")
+                if not isinstance(raster, dict):
+                    contracts.add("style_final_raster_contract_missing")
+                if str((profile or {}).get("status") or "") == "fallback" or str((raster or {}).get("status") or "") == "fallback":
+                    style_fallback_owner_ids.add(owner_id)
             quality = layer.get("owner_render_quality")
             if not isinstance(quality, dict):
                 layout = layer.get("render_layout_contract")
@@ -302,6 +316,34 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
             or bool(issue.get("blocks_export"))
         ):
             contracts.add(_contract_name(issue))
+    style_fidelity = qa.get("style_fidelity") if isinstance(qa.get("style_fidelity"), dict) else None
+    if style_fidelity is not None:
+        style_gate = style_fidelity.get("gate") if isinstance(style_fidelity.get("gate"), dict) else {}
+        if str(style_gate.get("status") or "MISSING").upper() == "BLOCK":
+            contracts.add("style_fidelity_gate_blocked")
+        audited_owner_ids = {
+            str(row.get("owner_id") or "")
+            for row in style_fidelity.get("owners") or []
+            if isinstance(row, dict) and str(row.get("owner_id") or "")
+        }
+        rendered_profile_ids = {
+            str(layer.get("owner_id") or "")
+            for page in project.get("paginas") or [] if isinstance(page, dict)
+            for layer in page.get("text_layers") or [] if isinstance(layer, dict)
+            if layer.get("render_completed") is True and isinstance(layer.get("visual_profile_v2"), dict)
+        }
+        if audited_owner_ids and not rendered_profile_ids.issubset(audited_owner_ids):
+            contracts.add("style_fidelity_owner_coverage_incomplete")
+        for category, metrics in (style_fidelity.get("category_metrics") or {}).items():
+            if not isinstance(metrics, dict):
+                continue
+            try:
+                go_rate = float(metrics.get("go_rate"))
+            except (TypeError, ValueError):
+                continue
+            threshold = 0.95 if str(category) in {"speech", "white_balloon"} else 0.85
+            if go_rate < threshold:
+                contracts.add(f"style_category_below_threshold:{category}")
     reports = qa.get("final_pixel_reports")
     if not isinstance(reports, list) or not reports:
         contracts.add("final_pixel_report_missing")
@@ -363,6 +405,7 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
         "details": details,
         "page_count": len(seen_pages),
         "export_gate": gate.get("status") or "MISSING",
+        "style_fallback_owner_ids": sorted(style_fallback_owner_ids),
     }
 
 
@@ -562,9 +605,16 @@ def _write_contact_sheets(
     from PIL import Image, ImageDraw
 
     sheets: dict[str, list[str]] = {}
+    cached_pages: dict[tuple[str, str], list[str]] = {}
     sheet_root = output_root / "contact_sheets"
     sheet_root.mkdir(parents=True, exist_ok=True)
-    for category in sorted(REQUIRED_VISUAL_CATEGORIES):
+    declared_categories = {
+        str(category)
+        for entry in entries
+        for category in entry.get("categories", [])
+        if str(category)
+    }
+    for category in sorted(REQUIRED_VISUAL_CATEGORIES | declared_categories):
         category_paths: list[str] = []
         for entry in entries:
             if category not in entry.get("categories", []):
@@ -573,6 +623,11 @@ def _write_contact_sheets(
             if not work_dir.is_absolute():
                 work_dir = output_root / work_dir
             for final_path in _selected_final_paths(entry, category, work_dir):
+                cache_key = (str(entry["entry_id"]), str(final_path.resolve()))
+                if cache_key in cached_pages:
+                    category_paths.extend(cached_pages[cache_key])
+                    continue
+                page_paths: list[str] = []
                 candidates = [
                     work_dir / "originals" / final_path.name,
                     work_dir / "images" / final_path.name,
@@ -625,7 +680,10 @@ def _write_contact_sheets(
                         f"{category}__{safe_entry_id}__{safe_page_id}__{segment_index:03d}.png"
                     )
                     sheet.save(path)
-                    category_paths.append(str(path.resolve()))
+                    resolved_path = str(path.resolve())
+                    category_paths.append(resolved_path)
+                    page_paths.append(resolved_path)
+                cached_pages[cache_key] = page_paths
         if category_paths:
             sheets[category] = category_paths
     return sheets
@@ -635,6 +693,7 @@ def build_inspection_template(
     sheets: dict[str, list[str]], output_root: Path
 ) -> dict[str, Any]:
     artifacts: list[dict[str, Any]] = []
+    by_hash: dict[str, dict[str, Any]] = {}
     root = output_root.resolve()
     for category, paths in sorted(sheets.items()):
         for raw_path in paths:
@@ -645,15 +704,22 @@ def build_inspection_template(
                 raise MatrixContractError(f"inspection artifact outside output root: {artifact}") from exc
             if not artifact.is_file():
                 raise MatrixContractError(f"inspection artifact missing: {relative}")
-            artifacts.append(
-                {
-                    "artifact_path": relative,
-                    "sha256": _sha256_file(artifact),
-                    "required_scale": "native",
-                    "category": category,
-                    "segment": artifact.stem,
-                }
-            )
+            digest = _sha256_file(artifact)
+            if digest in by_hash:
+                categories = by_hash[digest]["categories"]
+                if category not in categories:
+                    categories.append(category)
+                continue
+            row = {
+                "artifact_path": relative,
+                "sha256": digest,
+                "required_scale": "native",
+                "category": category,
+                "categories": [category],
+                "segment": artifact.stem,
+            }
+            artifacts.append(row)
+            by_hash[digest] = row
     return {"schema_version": 1, "artifacts": artifacts}
 
 
@@ -807,9 +873,9 @@ def main(argv: list[str] | None = None) -> int:
         raise MatrixContractError("inputs_path must be relative to the matrix fixture")
     inputs_path = (manifest_path.parent / raw_inputs_path).resolve()
     try:
-        inputs_path.relative_to(manifest_path.parent)
+        inputs_path.relative_to(manifest_path.parent.parent)
     except ValueError as exc:
-        raise MatrixContractError("inputs_path escapes the matrix fixture") from exc
+        raise MatrixContractError("inputs_path escapes the versioned fixtures root") from exc
     if not inputs_path.is_file():
         raise MatrixContractError(f"inputs manifest missing: {inputs_path}")
     inputs_manifest = json.loads(inputs_path.read_text(encoding="utf-8-sig"))
