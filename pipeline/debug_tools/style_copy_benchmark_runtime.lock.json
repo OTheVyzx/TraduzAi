@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "python": "3.12.10",
+    "pillow": "9.5.0",
+    "opencv": "4.11.0",
+    "freetype": "2.6.1",
+    "freetype_provider": "matplotlib.ft2font",
+    "freetype_provider_version": "3.10.8"
+  }
+}

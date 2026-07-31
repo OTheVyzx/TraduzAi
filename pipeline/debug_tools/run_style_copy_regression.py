@@ -19,9 +19,7 @@ DEFAULT_PAGES = [1, 2, 5, 6, 7, 8]
 
 
 def _copy_run(source_run: Path, dest_run: Path) -> None:
-    if dest_run.exists():
-        shutil.rmtree(dest_run)
-    dest_run.mkdir(parents=True, exist_ok=True)
+    dest_run.mkdir(parents=True, exist_ok=False)
 
     for name in ("project.json", "runner_config.json"):
         source = source_run / name
@@ -114,14 +112,16 @@ def _run_style_audit(dest_run: Path) -> dict:
 
 
 def _run_style_score(dest_run: Path) -> dict:
-    report_dir = dest_run / "debug" / "codex_style_audit" / "visual_report"
-    records_path = report_dir / "style_audit_records.jsonl"
-    output_path = report_dir / "style_copy_score.json"
+    dest_run = Path(dest_run).resolve()
+    report_dir = (dest_run / "debug" / "codex_style_audit" / "visual_report").resolve()
+    records_path = (report_dir / "style_audit_records.jsonl").resolve()
+    output_path = (report_dir / "style_copy_score.json").resolve()
     if not records_path.exists():
         return {"returncode": 1, "error": f"missing records: {records_path}"}
     cmd = [
         sys.executable,
-        str(ROOT / "pipeline" / "debug_tools" / "style_copy_score.py"),
+        "-m",
+        "debug_tools.style_copy_score",
         "--records",
         str(records_path),
         "--output",
@@ -129,7 +129,7 @@ def _run_style_score(dest_run: Path) -> dict:
     ]
     proc = subprocess.run(
         cmd,
-        cwd=str(ROOT),
+        cwd=str(ROOT / "pipeline"),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -163,12 +163,16 @@ def main() -> int:
     parser.add_argument("--skip-inpaint", action="store_true")
     args = parser.parse_args()
 
-    source_run = args.source_run
+    source_run = args.source_run.resolve()
     if not source_run.exists():
         raise FileNotFoundError(source_run)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    dest_run = args.output_run or (source_run.parent.parent / f"style_copy_regression_ch3_{timestamp}")
+    dest_run = (
+        args.output_run.resolve()
+        if args.output_run
+        else (source_run.parent.parent / f"style_copy_regression_ch3_{timestamp}").resolve()
+    )
     pages = _parse_pages(args.pages)
 
     _copy_run(source_run, dest_run)
