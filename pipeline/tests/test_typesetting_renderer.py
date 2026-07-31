@@ -12,6 +12,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont
 from layout import balloon_layout as balloon_layout_mod
 from qa.export_gate import evaluate_export_gate
 from typesetter import renderer as renderer_mod
+from typesetter.owner_style import attach_owner_visual_profile, build_owner_visual_profile
 from typesetter.renderer import (
     SafeTextPathFont,
     _MIN_FONT_SIZE,
@@ -215,6 +216,17 @@ class TypesettingRendererTests(unittest.TestCase):
                 }
             ],
         }
+        glyph_mask = np.zeros(canvas.shape[:2], dtype=np.uint8)
+        glyph_mask[52:69, 70:109] = 255
+        profile = build_owner_visual_profile(
+            owner,
+            canvas,
+            components=[component],
+            observations=[observation],
+            glyph_mask=glyph_mask,
+            candidate=page["texts"][0],
+        )
+        page["texts"][0] = attach_owner_visual_profile(page["texts"][0], profile)
 
         def deterministic_render(img, block, *_args, **_kwargs):
             ImageDraw.Draw(img).rectangle((70, 52, 108, 68), fill=(8, 12, 18))

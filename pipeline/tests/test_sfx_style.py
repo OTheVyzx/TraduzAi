@@ -78,3 +78,25 @@ def test_missing_mask_marks_low_confidence_geometry():
 
     assert "sfx_style_missing_mask" in style.qa_flags
     assert "sfx_style_geometry_low_confidence" in style.qa_flags
+
+
+def test_sfx_style_carries_selected_font_tracking_and_slant_from_v2_profile():
+    crop = np.full((80, 160, 3), 255, dtype=np.uint8)
+    mask = np.zeros((80, 160), dtype=np.uint8)
+    mask[20:60, 40:120] = 255
+    crop[mask > 0] = [20, 20, 20]
+    layer = {
+        "visual_profile_v2": {
+            "applied_style": {
+                "font_name": "KOMIKAX_.ttf",
+                "tracking_xh": 0.18,
+                "slant_tangent": -0.12,
+            }
+        }
+    }
+
+    style = extract_manhwa_sfx_style(crop, mask, layer=layer)
+
+    assert style.font_name == "KOMIKAX_.ttf"
+    assert style.tracking_xh == 0.18
+    assert style.slant_tangent == -0.12

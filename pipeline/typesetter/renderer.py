@@ -17,7 +17,7 @@ from hashlib import sha256
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -32,6 +32,7 @@ if matplotlib.get_backend().lower() != "agg":
     matplotlib.use("agg")
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from typesetter.glyph_rasterizer import rasterize_v2_glyph_layers
 from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
 from typesetter.owner_style import validate_owner_visual_profile
 
@@ -1012,6 +1013,122 @@ def _render_safe_text_layer(
             outline_mask = cv2.dilate(mask, kernel, iterations=1)
             _blend_mask_into_image(image_np, outline_mask, lx - outline_px, ly - outline_px, outline_color)
         _blend_mask_into_image(image_np, mask, lx - max(0, outline_px), ly - max(0, outline_px), fill_color)
+
+
+def _render_v2_owner_text_layer(
+    image_np: np.ndarray,
+    text_data: dict,
+    plan: dict,
+    lines: list[str],
+    font: SafeTextPathFont,
+    positions: list[tuple[int, int]],
+) -> bool:
+    """Compose verified owner typography through the shared text/SFX rasterizer."""
+
+    profile = text_data.get("visual_profile_v2")
+    if not isinstance(profile, dict):
+        return False
+    core_rgb = np.zeros_like(image_np)
+    _render_safe_text_layer(
+        core_rgb,
+        lines,
+        font,
+        positions,
+        fill_color="#FFFFFF",
+    )
+    core = np.where(np.max(core_rgb, axis=2) > 0, 255, 0).astype(np.uint8)
+    if not np.any(core):
+        return False
+    safe = np.zeros(core.shape, dtype=np.uint8)
+    polygon = (
+        text_data.get("render_safe_polygon_page")
+        or plan.get("render_safe_polygon_page")
+    )
+    if isinstance(polygon, (list, tuple)) and len(polygon) >= 3:
+        try:
+            points = np.asarray(
+                [[int(round(float(point[0]))), int(round(float(point[1])))] for point in polygon],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(safe, [points], 255)
+        except (TypeError, ValueError, IndexError):
+            safe[:, :] = 0
+    if not np.any(safe):
+        bbox = _layout_bbox(plan.get("safe_text_box") or plan.get("target_bbox"))
+        if bbox is None:
+            return False
+        x1, y1, x2, y2 = bbox
+        safe[max(0, y1) : min(safe.shape[0], y2), max(0, x1) : min(safe.shape[1], x2)] = 255
+
+    applied_style = profile.get("applied_style")
+    applied_style = applied_style if isinstance(applied_style, dict) else {}
+    raster_style: dict[str, Any] = {
+        "fill": plan.get("text_color") or applied_style.get("cor") or "#000000",
+        "tracking_xh": float(applied_style.get("tracking_xh") or 0.0),
+        "slant_tangent": float(applied_style.get("slant_tangent") or 0.0),
+        "width_scale": float(applied_style.get("width_scale") or applied_style.get("scale_x") or 1.0),
+        "scale_y": float(applied_style.get("scale_y") or 1.0),
+        "rotation_deg": float(plan.get("rotation_deg") or applied_style.get("rotacao") or 0.0),
+    }
+    outline_color = str(plan.get("outline_color") or "")
+    outline_px = int(plan.get("outline_px") or 0)
+    if outline_color or outline_px > 0:
+        raster_style["stroke"] = {
+            "color": outline_color or raster_style["fill"],
+            "width_px": outline_px,
+        }
+    if isinstance(applied_style.get("multistroke"), list):
+        raster_style["multistroke"] = copy.deepcopy(applied_style["multistroke"])
+        raster_style.pop("stroke", None)
+    if bool(plan.get("sombra")) and plan.get("sombra_cor"):
+        raster_style["shadow"] = {
+            "color": plan["sombra_cor"],
+            "offset": list(plan.get("sombra_offset") or [2, 2]),
+        }
+    if bool(plan.get("glow")) and plan.get("glow_cor") and int(plan.get("glow_px") or 0) > 0:
+        raster_style["glow"] = {
+            "color": plan["glow_cor"],
+            "width_px": int(plan["glow_px"]),
+        }
+    gradient = plan.get("cor_gradiente")
+    if isinstance(gradient, (list, tuple)) and len(gradient) >= 2:
+        raster_style["gradient"] = list(gradient[:2])
+    result = rasterize_v2_glyph_layers(
+        core,
+        safe,
+        raster_style,
+        source_x_height_px=max(1.0, float(font.size) * 0.70),
+    )
+    text_data["style_v2_raster_contract"] = {
+        "status": result.status,
+        "applied_attributes": copy.deepcopy(result.applied_attributes),
+        "abstained_attributes": copy.deepcopy(result.abstained_attributes),
+        "glyph_core_envelope": list(result.glyph_core_envelope or ()),
+        "effect_envelope": list(result.effect_envelope or ()),
+        "metrics": copy.deepcopy(result.metrics),
+    }
+    if result.status == "review_required":
+        text_data["fit_status"] = "style_core_outside_safe"
+        text_data["route_action"] = "review_required"
+        _merge_qa_flags(text_data, ["style_core_outside_safe"])
+        return True
+    alpha = result.rgba[:, :, 3:4].astype(np.float32) / 255.0
+    image_np[:] = np.clip(
+        result.rgba[:, :, :3].astype(np.float32) * alpha
+        + image_np.astype(np.float32) * (1.0 - alpha),
+        0,
+        255,
+    ).astype(np.uint8)
+    points = cv2.findNonZero(result.rgba[:, :, 3])
+    if points is not None:
+        x, y, width, height = cv2.boundingRect(points)
+        text_data["render_bbox"] = [x, y, x + width, y + height]
+    if result.abstained_attributes:
+        _merge_qa_flags(
+            text_data,
+            [f"style_{name}_abstained" for name in result.abstained_attributes],
+        )
+    return True
 
 
 def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
@@ -14546,9 +14663,13 @@ def _uses_dark_visual_layout_contract(text_data: dict, plan: dict | None = None)
         or ""
     ).strip().lower()
     target_source = str(text_data.get("_render_target_source") or plan.get("_target_source") or "").strip().lower()
+    style_origin = str(
+        text_data.get("style_origin") or plan.get("style_origin") or ""
+    ).strip().lower()
     return bool(
         source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
         or profile in {"dark_bubble", "dark_panel"}
+        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
         or target_source in {
             "dark_bubble_visible_bbox_from_overbroad_target",
             "dark_panel_visual_mask_bbox",
@@ -14665,7 +14786,13 @@ def _expand_dark_visual_underfit_layout_capacity(text_data: dict, plan: dict) ->
     pad_y = max(0, int(plan.get("padding_y", 0) or 0))
     plan["safe_text_box"] = [nsx1, nsy1, nsx2, nsy2]
     plan["layout_safe_bbox"] = [nsx1, nsy1, nsx2, nsy2]
-    plan["layout_safe_reason"] = reason
+    existing_reason = str(text_data.get("layout_safe_reason") or "")
+    published_reason = (
+        existing_reason
+        if existing_reason in {"visual_rect_dark_panel", "visual_rect_inner"}
+        else reason
+    )
+    plan["layout_safe_reason"] = published_reason
     plan["position_bbox"] = [nsx1, nsy1, nsx2, nsy2]
     plan["capacity_bbox"] = [nsx1, nsy1, nsx2, nsy2]
     if reason == "dark_visual_bbox_fallback_safe_promoted":
@@ -14677,7 +14804,7 @@ def _expand_dark_visual_underfit_layout_capacity(text_data: dict, plan: dict) ->
     text_data["safe_text_box"] = list(plan["safe_text_box"])
     text_data["_debug_safe_text_box"] = list(plan["safe_text_box"])
     text_data["layout_safe_bbox"] = list(plan["safe_text_box"])
-    text_data["layout_safe_reason"] = reason
+    text_data["layout_safe_reason"] = published_reason
     _merge_qa_flags(text_data, ["dark_visual_underfit_capacity_expanded", "safe_text_box_recomputed"])
 
 
@@ -16926,6 +17053,19 @@ def _render_single_text_block_unrotated(
             text_data["_render_debug"]["curva"] = True
             text_data["_render_debug"]["curva_direcao"] = plan.get("curva_direcao", "")
             text_data["_render_debug"]["curva_intensidade"] = float(plan.get("curva_intensidade", 0.0) or 0.0)
+            img.paste(Image.fromarray(image_np))
+            if not plan.get("_suppress_render_qa"):
+                _run_render_qa(text_data, plan, background_image=pre_render_np)
+            return
+
+        if _render_v2_owner_text_layer(
+            image_np,
+            text_data,
+            plan,
+            best_lines,
+            best_font,
+            positions,
+        ):
             img.paste(Image.fromarray(image_np))
             if not plan.get("_suppress_render_qa"):
                 _run_render_qa(text_data, plan, background_image=pre_render_np)

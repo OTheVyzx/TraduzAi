@@ -65,3 +65,32 @@ def test_render_sfx_layer_respects_inpaint_block():
 
     assert np.array_equal(rendered, page)
     assert "sfx_render_missing" in layer["qa_flags"]
+
+
+def test_latin_sfx_uses_selected_project_font_not_hershey():
+    page = np.full((140, 200, 3), 230, dtype=np.uint8)
+    layer = _sfx_layer()
+    layer["sfx"]["style"]["font_name"] = "KOMIKAX_.ttf"
+
+    render_sfx_layer(page, layer)
+
+    assert layer["sfx_font_backend"] == "project_font_textpath"
+    assert layer["render_font_name"] == "KOMIKAX_.ttf"
+
+
+def test_sfx_applies_scale_x_and_scale_y():
+    page = np.full((160, 240, 3), 230, dtype=np.uint8)
+    wide = _sfx_layer()
+    wide["bbox"] = [30, 30, 210, 130]
+    wide["sfx"]["style"].update(scale_x=1.25, scale_y=0.70, rotation_deg=0)
+    tall = _sfx_layer()
+    tall["bbox"] = [30, 30, 210, 130]
+    tall["sfx"]["style"].update(scale_x=0.70, scale_y=1.25, rotation_deg=0)
+
+    render_sfx_layer(page, wide)
+    render_sfx_layer(page, tall)
+
+    wide_bbox = wide["render_bbox"]
+    tall_bbox = tall["render_bbox"]
+    assert wide_bbox[2] - wide_bbox[0] > tall_bbox[2] - tall_bbox[0]
+    assert tall_bbox[3] - tall_bbox[1] > wide_bbox[3] - wide_bbox[1]

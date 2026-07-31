@@ -13,6 +13,9 @@ from typesetter.style_extractor import extract_text_style_evidence
 
 @dataclass(frozen=True)
 class SfxStyle:
+    font_name: str
+    tracking_xh: float
+    slant_tangent: float
     fill_color: str
     stroke_color: str
     stroke_width_px: int
@@ -85,7 +88,20 @@ def extract_manhwa_sfx_style(
     if confidence < 0.55 and "sfx_style_low_confidence" not in qa_flags:
         qa_flags.append("sfx_style_low_confidence")
 
+    profile_style = _profile_applied_style(layer)
+    font_name = str(
+        profile_style.get("font_name")
+        or (layer or {}).get("font_name")
+        or text_evidence.font_name
+        or "KOMIKAX_.ttf"
+    )
+    tracking_xh = _finite_float(profile_style.get("tracking_xh"), 0.0)
+    slant_tangent = _finite_float(profile_style.get("slant_tangent"), 0.0)
+
     return SfxStyle(
+        font_name=font_name,
+        tracking_xh=round(tracking_xh, 4),
+        slant_tangent=round(slant_tangent, 4),
         fill_color=fill_color,
         stroke_color=stroke_color,
         stroke_width_px=max(0, int(stroke_width)),
@@ -225,8 +241,29 @@ def _hex_color(rgb: tuple[int, int, int]) -> str:
     return "#{:02X}{:02X}{:02X}".format(*rgb)
 
 
+def _profile_applied_style(layer: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(layer, dict):
+        return {}
+    profile = layer.get("visual_profile_v2")
+    if not isinstance(profile, dict):
+        return {}
+    applied = profile.get("applied_style")
+    return applied if isinstance(applied, dict) else {}
+
+
+def _finite_float(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if np.isfinite(number) else default
+
+
 def _empty_style(flags: list[str]) -> SfxStyle:
     return SfxStyle(
+        font_name="KOMIKAX_.ttf",
+        tracking_xh=0.0,
+        slant_tangent=0.0,
         fill_color="#000000",
         stroke_color="",
         stroke_width_px=0,
