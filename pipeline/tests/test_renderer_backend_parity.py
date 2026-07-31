@@ -7,6 +7,7 @@ from PIL import Image
 
 from scripts import compare_render_backends
 from typesetter import rust_backend
+from typesetter.backend_contract import select_backend_for_style
 
 
 def _write_fixture(root: Path) -> Path:
@@ -26,6 +27,7 @@ def _write_fixture(root: Path) -> Path:
                         "bbox": [30, 25, 190, 115],
                         "balloon_bbox": [30, 25, 190, 115],
                         "safe_text_box": [45, 42, 175, 92],
+                        "bubble_mask_path": "masks/simple_balloon.png",
                         "estilo": {
                             "fonte": "ComicNeue-Bold.ttf",
                             "tamanho": 24,
@@ -90,3 +92,24 @@ def test_compare_render_backends_reports_rust_fallback(monkeypatch, tmp_path):
 
     assert report["results"][0]["fallback_occurred"] is True
     assert "boom" not in report["results"][0].get("error", "")
+
+
+def test_backend_selection_never_silently_drops_effect():
+    selection = select_backend_for_style(
+        "koharu_rust",
+        {"applied_style": {"fill": "#FFFFFF", "shadow": {"offset": [2, 2]}}},
+    )
+
+    assert selection.selected_backend == "python_v2"
+    assert selection.reason == "unsupported_v2_capabilities:shadow"
+
+
+def test_supported_solid_profile_keeps_python_rust_parity():
+    selection = select_backend_for_style(
+        "koharu_rust",
+        {"applied_style": {"font_name": "ComicNeue-Bold.ttf", "fill": "#111111", "stroke": {"width_px": 2}}},
+    )
+
+    assert selection.selected_backend == "koharu_rust"
+    assert selection.status == "supported"
+    assert selection.unsupported_capabilities == ()

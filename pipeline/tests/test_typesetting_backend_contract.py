@@ -1,8 +1,11 @@
 from typesetter.backend_contract import (
+    KOHARU_RUST_CAPABILITIES,
+    PYTHON_V2_CAPABILITIES,
     DEFAULT_FONT_FAMILY,
     TypesettingRenderRequest,
     TypesettingRenderResult,
     build_rust_render_request,
+    select_backend_for_style,
 )
 
 
@@ -90,3 +93,19 @@ def test_result_contract_contains_required_backend_response_fields():
         "fit_status": "ok",
         "backend": "koharu",
     }
+
+
+def test_backend_declares_v2_style_capabilities():
+    assert {"fill", "stroke", "font_family"} <= KOHARU_RUST_CAPABILITIES
+    assert {"glow", "shadow", "gradient", "multistroke", "tracking", "slant"} <= PYTHON_V2_CAPABILITIES
+
+
+def test_profile_with_unsupported_glow_falls_back_to_python():
+    selection = select_backend_for_style(
+        "koharu_rust",
+        {"applied_style": {"font_name": "KOMIKAX_.ttf", "fill": "#FFFFFF", "glow": {"width_px": 6}}},
+    )
+
+    assert selection.selected_backend == "python_v2"
+    assert selection.status == "fallback"
+    assert selection.unsupported_capabilities == ("glow",)

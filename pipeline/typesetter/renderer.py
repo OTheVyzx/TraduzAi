@@ -16675,7 +16675,44 @@ def _try_render_single_text_block_with_rust(
 
     if not rust_backend.rust_renderer_enabled():
         return False
-    if resolved.get("original_text_scale_preferred") or resolved.get("original_text_scale_metrics"):
+    profile = text_data.get("visual_profile_v2")
+    if not isinstance(profile, dict):
+        profile = {
+            "applied_style": {
+                "font_name": plan.get("font_name"),
+                "fill": plan.get("text_color"),
+                "stroke": (
+                    {"color": plan.get("outline_color"), "width_px": plan.get("outline_px")}
+                    if plan.get("outline_color") or plan.get("outline_px")
+                    else None
+                ),
+                "shadow": (
+                    {"color": plan.get("sombra_cor"), "offset": plan.get("sombra_offset")}
+                    if plan.get("sombra")
+                    else None
+                ),
+                "glow": (
+                    {"color": plan.get("glow_cor"), "width_px": plan.get("glow_px")}
+                    if plan.get("glow")
+                    else None
+                ),
+                "gradient": plan.get("cor_gradiente") or None,
+                "rotation_deg": plan.get("rotation_deg") or 0,
+            }
+        }
+    selection = backend_contract.select_backend_for_style("koharu_rust", profile)
+    selection_debug = dict(text_data.get("_render_debug") or {})
+    selection_debug["renderer_backend_requested"] = "koharu_rust"
+    selection_debug["renderer_backend_selected"] = selection.selected_backend
+    selection_debug["renderer_backend_selection_reason"] = selection.reason
+    selection_debug["renderer_backend_unsupported_capabilities"] = list(selection.unsupported_capabilities)
+    text_data["_render_debug"] = selection_debug
+    if selection.status == "review_required":
+        text_data["route_action"] = "review_required"
+        _merge_qa_flags(text_data, ["renderer_backend_capability_review_required"])
+        return True
+    if selection.selected_backend != "koharu_rust":
+        _merge_qa_flags(text_data, ["renderer_backend_capability_fallback_python"])
         return False
 
     try:

@@ -7,6 +7,64 @@ from typing import Any
 DEFAULT_FONT_FAMILY = "ComicNeue-Bold.ttf"
 DEFAULT_FONT_WEIGHT = "bold"
 
+KOHARU_RUST_CAPABILITIES = frozenset(
+    {"fill", "stroke", "font_family", "font_size", "alignment", "rotation", "layout"}
+)
+PYTHON_V2_CAPABILITIES = frozenset(
+    set(KOHARU_RUST_CAPABILITIES)
+    | {"tracking", "slant", "scale_x", "scale_y", "multistroke", "shadow", "glow", "gradient"}
+)
+
+
+@dataclass(frozen=True)
+class BackendSelection:
+    requested_backend: str
+    selected_backend: str
+    status: str
+    required_capabilities: tuple[str, ...]
+    unsupported_capabilities: tuple[str, ...]
+    reason: str
+
+
+def required_style_capabilities(profile: dict[str, Any] | None) -> frozenset[str]:
+    payload = profile if isinstance(profile, dict) else {}
+    style = payload.get("applied_style") if isinstance(payload.get("applied_style"), dict) else payload
+    required = {"fill", "font_family", "font_size", "alignment", "layout"}
+    mappings = {
+        "stroke": "stroke", "contorno": "stroke", "multistroke": "multistroke",
+        "shadow": "shadow", "sombra": "shadow", "glow": "glow",
+        "gradient": "gradient", "cor_gradiente": "gradient", "tracking_xh": "tracking",
+        "slant_tangent": "slant", "width_scale": "scale_x", "scale_x": "scale_x",
+        "scale_y": "scale_y", "rotation_deg": "rotation", "rotacao": "rotation",
+    }
+    for key, capability in mappings.items():
+        value = style.get(key)
+        if value not in (None, False, "", [], {}, 0, 0.0, 1, 1.0):
+            required.add(capability)
+    return frozenset(required)
+
+
+def select_backend_for_style(
+    requested_backend: str,
+    profile: dict[str, Any] | None,
+) -> BackendSelection:
+    requested = str(requested_backend or "python_v2").strip().lower()
+    required = required_style_capabilities(profile)
+    requested_caps = KOHARU_RUST_CAPABILITIES if requested == "koharu_rust" else PYTHON_V2_CAPABILITIES
+    unsupported = tuple(sorted(required - requested_caps))
+    if not unsupported:
+        return BackendSelection(requested, requested, "supported", tuple(sorted(required)), (), "all_capabilities_supported")
+    python_unsupported = tuple(sorted(required - PYTHON_V2_CAPABILITIES))
+    if not python_unsupported:
+        return BackendSelection(
+            requested, "python_v2", "fallback", tuple(sorted(required)), unsupported,
+            "unsupported_v2_capabilities:" + ",".join(unsupported),
+        )
+    return BackendSelection(
+        requested, "review_required", "review_required", tuple(sorted(required)),
+        python_unsupported, "no_backend_supports:" + ",".join(python_unsupported),
+    )
+
 
 def _bbox4(value: Any) -> list[int] | None:
     if not isinstance(value, (list, tuple)) or len(value) != 4:
