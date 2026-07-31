@@ -41,9 +41,10 @@ from ownership.model import (
 from ownership.translation import merge_owner_translations, owners_to_translation_page
 from typesetter.owner_style import (
     attach_owner_visual_profile,
-    build_owner_visual_profile,
+    build_owner_visual_profiles,
 )
 from typesetter.owner_render_quality import OwnerRenderQuality
+from typesetter.style_groups import resolve_contextual_style_groups
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
@@ -10182,6 +10183,68 @@ def _owner_protected_evidence(
     return protected, tuple(sorted(provenance)), confidence
 
 
+def _capture_owner_glyph_masks_before_inpaint(
+    source_rgb: np.ndarray,
+    graph: OwnerGraph,
+) -> dict[str, np.ndarray]:
+    """Capture every renderable owner's glyph pixels before any mutation runs."""
+
+    source = _canonical_owner_rgb(source_rgb, label="owner style capture source")
+    components = {item.component_id: item for item in graph.components}
+    observations = {item.observation_id: item for item in graph.observations}
+    captured: dict[str, np.ndarray] = {}
+    for owner in sorted(graph.owners, key=lambda item: item.owner_id):
+        if (
+            owner.disposition != "owned"
+            or owner.state == "review_required"
+            or owner.route_action not in {
+                "translate_inpaint_render",
+                "translate_sfx_inpaint_render",
+            }
+        ):
+            continue
+        glyph_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+        for component_id in owner.component_ids:
+            component = components.get(component_id)
+            if component is None:
+                continue
+            for observation_id in owner.selected_observation_ids:
+                observation = observations.get(observation_id)
+                if observation is None or component_id not in observation.component_ids:
+                    continue
+                line_count = max(
+                    1,
+                    len(observation.polygons_page),
+                    len(observation.line_texts),
+                )
+                for line_index in range(line_count):
+                    if line_index < len(observation.polygons_page):
+                        support_polygon = observation.polygons_page[line_index]
+                    elif line_count == 1:
+                        x1, y1, x2, y2 = observation.bbox_page
+                        support_polygon = (
+                            (x1, y1),
+                            (x2, y1),
+                            (x2, y2),
+                            (x1, y2),
+                        )
+                    else:
+                        continue
+                    try:
+                        glyph_mask = np.maximum(
+                            glyph_mask,
+                            _owner_component_glyph_raster(
+                                source,
+                                component=component,
+                                support_polygons=(support_polygon,),
+                            ),
+                        )
+                    except ValueError:
+                        continue
+        captured[owner.owner_id] = np.ascontiguousarray(glyph_mask, dtype=np.uint8)
+    return captured
+
+
 def execute_owner_page_graph(
     page_rgb: np.ndarray,
     graph: OwnerGraph,
@@ -10238,6 +10301,18 @@ def execute_owner_page_graph(
         observation.observation_id: observation
         for observation in executed_graph.observations
     }
+    captured_glyph_masks = _capture_owner_glyph_masks_before_inpaint(
+        source,
+        executed_graph,
+    )
+    owner_visual_profiles = resolve_contextual_style_groups(
+        build_owner_visual_profiles(
+            executed_graph,
+            source,
+            glyph_masks_by_owner=captured_glyph_masks,
+            candidates_by_owner=records_by_owner,
+        )
+    )
     commits: list[OwnerExecutionCommit] = []
     final_records: list[dict[str, Any]] = []
 
@@ -10357,14 +10432,11 @@ def execute_owner_page_graph(
                 source_glyph_mask = np.maximum(source_glyph_mask, item.glyph_mask)
             if item.line_mask is not None:
                 source_glyph_mask = np.maximum(source_glyph_mask, item.line_mask)
-        owner_visual_profile = build_owner_visual_profile(
-            owner,
-            source,
-            components=executed_graph.components,
-            observations=selected_observations,
-            glyph_mask=source_glyph_mask,
-            candidate=record,
-        )
+        owner_visual_profile = owner_visual_profiles.get(owner.owner_id)
+        if owner_visual_profile is None:
+            raise ValueError(
+                f"renderable owner {owner.owner_id} is missing pre-inpaint visual profile"
+            )
         record = attach_owner_visual_profile(record, owner_visual_profile)
         foreign_component_masks: list[tuple[str, np.ndarray]] = []
         for foreign_component in executed_graph.components:

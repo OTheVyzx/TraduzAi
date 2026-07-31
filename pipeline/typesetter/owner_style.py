@@ -108,6 +108,43 @@ def _style_evidence(candidate: Mapping[str, Any], *, text_present: bool) -> Styl
     )
 
 
+def _visual_group_contract(
+    owner: object,
+    candidate: Mapping[str, Any],
+    selected_components: Iterable[object],
+) -> tuple[str, str, str]:
+    explicit_fields = (
+        ("style_group_id", "explicit"),
+        ("card_panel_id", "card"),
+        ("balloon_id", "balloon"),
+        ("burst_panel_id", "burst"),
+        ("panel_id", "panel"),
+    )
+    for field_name, kind in explicit_fields:
+        value = str(candidate.get(field_name) or "").strip()
+        if value:
+            role = str(
+                candidate.get("card_panel_role")
+                or candidate.get("style_group_role")
+                or _field(owner, "semantic_role", "body")
+                or "body"
+            ).strip()
+            return f"{kind}:{value}", kind, role
+    evidence_ids = sorted(
+        {
+            str(evidence_id)
+            for component in selected_components
+            for evidence_id in (_field(component, "evidence_ids", ()) or ())
+            if str(evidence_id)
+        }
+    )
+    owner_id = str(_field(owner, "owner_id") or "")
+    role = str(_field(owner, "semantic_role", "body") or "body").strip()
+    if evidence_ids:
+        return f"container:{evidence_ids[0]}", "container", role
+    return f"owner:{owner_id}", "owner", role
+
+
 def _materialize_style(
     candidate: Mapping[str, Any],
     decision: Mapping[str, Any],
@@ -257,9 +294,17 @@ def build_owner_visual_profile(
     candidate_payload = copy.deepcopy(dict(candidate or {}))
     evidence = _style_evidence(candidate_payload, text_present=observed_text)
     decision = decide_style_copy_v2(candidate_payload, evidence).to_dict()
+    group_id, group_kind, group_role = _visual_group_contract(
+        owner,
+        candidate_payload,
+        selected_components,
+    )
     profile: dict[str, Any] = {
         "schema_version": OWNER_VISUAL_PROFILE_SCHEMA_VERSION,
         "owner_id": owner_id,
+        "style_group_id": group_id,
+        "style_group_kind": group_kind,
+        "style_group_role": group_role,
         "source_capture_phase": "pre_inpaint",
         "source_sha256": _source_crop_sha256(source, boxes),
         "component_geometry_sha256": _sha256_bytes(_canonical_json(geometry)),
@@ -290,6 +335,8 @@ def build_owner_visual_profiles(
         key=lambda item: str(_field(item, "owner_id") or ""),
     ):
         if str(_field(owner, "disposition") or "") != "owned":
+            continue
+        if str(_field(owner, "state") or "") == "review_required":
             continue
         if str(_field(owner, "route_action") or "") not in {
             "translate_inpaint_render", "translate_sfx_inpaint_render"
@@ -325,7 +372,18 @@ def attach_owner_visual_profile(
             expected_sha256=existing_hash,
         )
         if existing_hash != normalized["visual_profile_sha256"]:
-            raise ValueError(f"owner {owner_id} has divergent visual profiles")
+            immutable_fields = (
+                "source_sha256",
+                "component_geometry_sha256",
+                "glyph_mask_sha256",
+                "style_evidence_v2",
+            )
+            authorized_group_resolution = bool(
+                normalized.get("style_group_resolution_v2")
+                and all(existing.get(key) == normalized.get(key) for key in immutable_fields)
+            )
+            if not authorized_group_resolution:
+                raise ValueError(f"owner {owner_id} has divergent visual profiles")
     output["visual_profile_v2"] = normalized
     output["visual_profile_sha256"] = normalized["visual_profile_sha256"]
     output["style_copy_status"] = normalized["status"]

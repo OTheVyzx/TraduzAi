@@ -6692,7 +6692,10 @@ def test_owner_style_profile_is_attached_without_mutating_semantic_owner():
     import numpy as np
 
     from ownership.model import TextOwner
-    from strip import process_bands
+    from typesetter.owner_style import (
+        attach_owner_visual_profile,
+        build_owner_visual_profile,
+    )
 
     source = np.full((30, 40, 3), 240, dtype=np.uint8)
     source[8:18, 10:28] = 20
@@ -6723,7 +6726,7 @@ def test_owner_style_profile_is_attached_without_mutating_semantic_owner():
     }
     before = copy.deepcopy(owner.__dict__)
 
-    profile = process_bands.build_owner_visual_profile(
+    profile = build_owner_visual_profile(
         owner,
         source,
         components=[component],
@@ -6731,7 +6734,7 @@ def test_owner_style_profile_is_attached_without_mutating_semantic_owner():
         glyph_mask=glyph,
         candidate={"confidence": 0.96},
     )
-    record = process_bands.attach_owner_visual_profile(
+    record = attach_owner_visual_profile(
         {"owner_id": owner.owner_id}, profile
     )
 
