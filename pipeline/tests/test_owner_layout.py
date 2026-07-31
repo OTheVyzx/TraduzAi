@@ -30,6 +30,11 @@ from ownership.model import (  # noqa: E402
     TextOwner,
 )
 from typesetter import renderer as renderer_mod  # noqa: E402
+from typesetter.owner_style import (  # noqa: E402
+    attach_owner_visual_profile,
+    build_owner_visual_profile,
+    owner_visual_profile_sha256,
+)
 
 
 PAGE_ID = "page_001"
@@ -214,7 +219,15 @@ def _owner_page(
         evidence = (style_evidence_by_owner or {}).get(owner.owner_id)
         if evidence is not None:
             record["style_evidence"] = copy.deepcopy(evidence)
-        texts.append(record)
+        profile = build_owner_visual_profile(
+            owner,
+            np.full((PAGE_HEIGHT, PAGE_WIDTH, 3), 255, dtype=np.uint8),
+            components=graph.components,
+            observations=graph.observations,
+            glyph_mask=np.zeros((PAGE_HEIGHT, PAGE_WIDTH), dtype=np.uint8),
+            candidate=record,
+        )
+        texts.append(attach_owner_visual_profile(record, profile))
 
     return {
         "page_id": graph.page_id,
@@ -254,23 +267,7 @@ def _render_connected_owner_block(
     """Render one connected owner without legacy OCR anchor geometry."""
 
     graph = _owner_graph([("owner_connected", "SOURCE BODY", payload)])
-    page = {
-        "page_id": graph.page_id,
-        "width": PAGE_WIDTH,
-        "height": PAGE_HEIGHT,
-        "texts": [
-            {
-                "owner_id": "owner_connected",
-                "tipo": "fala",
-                "layout_profile": "white_balloon",
-                "estilo": {
-                    "fonte": "ComicNeue-Bold.ttf",
-                    "tamanho": 26,
-                    "cor": "#111111",
-                },
-            }
-        ],
-    }
+    page = _owner_page(graph, layout_regions)
     enriched = balloon_layout_mod.enrich_page_layout(
         page,
         owner_graph=graph,
@@ -865,16 +862,13 @@ def test_renderer_rejects_owner_duplicates_with_divergent_visual_profiles() -> N
     )
     first = copy.deepcopy(enriched["texts"][0])
     second = copy.deepcopy(first)
-    first["style_evidence"] = {
-        "style_origin": "source_detected",
-        "style_confidence": 0.95,
-        "cor": "#111111",
-    }
-    second["style_evidence"] = {
-        "style_origin": "source_detected",
-        "style_confidence": 0.95,
-        "cor": "#AA2211",
-    }
+    second["visual_profile_v2"]["source_sha256"] = "0" * 64
+    second["visual_profile_v2"]["visual_profile_sha256"] = (
+        owner_visual_profile_sha256(second["visual_profile_v2"])
+    )
+    second["visual_profile_sha256"] = second["visual_profile_v2"][
+        "visual_profile_sha256"
+    ]
 
     with pytest.raises(ValueError, match="divergent duplicates"):
         renderer_mod.build_render_blocks(

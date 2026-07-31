@@ -39,6 +39,10 @@ from ownership.model import (
     owner_residual_evidence_sha256,
 )
 from ownership.translation import merge_owner_translations, owners_to_translation_page
+from typesetter.owner_style import (
+    attach_owner_visual_profile,
+    build_owner_visual_profile,
+)
 from typesetter.owner_render_quality import OwnerRenderQuality
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
@@ -10353,6 +10357,15 @@ def execute_owner_page_graph(
                 source_glyph_mask = np.maximum(source_glyph_mask, item.glyph_mask)
             if item.line_mask is not None:
                 source_glyph_mask = np.maximum(source_glyph_mask, item.line_mask)
+        owner_visual_profile = build_owner_visual_profile(
+            owner,
+            source,
+            components=executed_graph.components,
+            observations=selected_observations,
+            glyph_mask=source_glyph_mask,
+            candidate=record,
+        )
+        record = attach_owner_visual_profile(record, owner_visual_profile)
         foreign_component_masks: list[tuple[str, np.ndarray]] = []
         for foreign_component in executed_graph.components:
             if foreign_component.component_id in set(owner.component_ids):

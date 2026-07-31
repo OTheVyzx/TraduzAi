@@ -33,6 +33,7 @@ if matplotlib.get_backend().lower() != "agg":
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
+from typesetter.owner_style import validate_owner_visual_profile
 
 try:
     from ownership.model import OwnerGlyphPatch, OwnerGraph
@@ -6558,6 +6559,9 @@ def _owner_record_contract(record: dict) -> str:
         "style_origin",
         "style_confidence",
         "style_source",
+        "visual_profile_v2",
+        "visual_profile_sha256",
+        "style_copy_status",
     )
     payload = {key: record.get(key) for key in keys if key in record}
     return json.dumps(
@@ -6601,17 +6605,20 @@ def _assert_owner_record_matches_graph(record: dict, owner: object, page_id: str
 
 
 def _owner_visual_profile(record: dict) -> dict:
-    visual_source: dict = {}
-    if isinstance(record.get("estilo"), dict):
-        visual_source.update(copy.deepcopy(record["estilo"]))
-    evidence = record.get("style_evidence")
-    if isinstance(evidence, dict):
-        visual_source.update(copy.deepcopy(evidence))
-    for key in ("style_origin", "style_confidence", "style_source"):
-        if record.get(key) is not None:
-            visual_source.setdefault(key, record[key])
-    background = _coerce_rgb_tuple(record.get("background_rgb")) or (255, 255, 255)
-    return normalize_auto_typesetting_style(visual_source, background)
+    """Read only the immutable V2 sidecar; never reinterpret raw OCR style."""
+
+    owner_id = _owner_identity(record.get("owner_id"), label="text owner_id")
+    raw_profile = record.get("visual_profile_v2")
+    if not isinstance(raw_profile, dict):
+        raise ValueError(f"owner {owner_id} is missing visual_profile_v2")
+    normalized = validate_owner_visual_profile(
+        raw_profile,
+        expected_owner_id=owner_id,
+        expected_sha256=str(record.get("visual_profile_sha256") or ""),
+    )
+    if str(record.get("style_copy_status") or "") != normalized["status"]:
+        raise ValueError(f"owner {owner_id} visual profile status mismatch")
+    return copy.deepcopy(normalized["applied_style"])
 
 
 def _build_owner_render_blocks(texts: list[dict], owner_graph: object) -> list[dict]:
@@ -6637,6 +6644,7 @@ def _build_owner_render_blocks(texts: list[dict], owner_graph: object) -> list[d
             raise ValueError(f"owner renderer references unknown owner_id: {owner_id}")
         record = copy.deepcopy(raw_record)
         _assert_owner_record_matches_graph(record, owner_by_id[owner_id], page_id)
+        _owner_visual_profile(record)
         records_by_owner[owner_id].append(record)
 
     blocks: list[dict] = []

@@ -6685,3 +6685,57 @@ def test_unresolved_pure_visual_card_flags_are_propagated_before_typeset():
     assert "real_inpaint_skipped_unsafe_mask" in card_flags
     assert "weak_text_residual_after_inpaint" in card_flags
     assert page["texts"][1]["qa_flags"] == []
+
+
+def test_owner_style_profile_is_attached_without_mutating_semantic_owner():
+    import copy
+    import numpy as np
+
+    from ownership.model import TextOwner
+    from strip import process_bands
+
+    source = np.full((30, 40, 3), 240, dtype=np.uint8)
+    source[8:18, 10:28] = 20
+    glyph = np.zeros(source.shape[:2], dtype=np.uint8)
+    glyph[8:18, 10:28] = 255
+    owner = TextOwner(
+        owner_id="owner_style",
+        page_id="page_001",
+        component_ids=["component_style"],
+        observation_ids=["observation_style"],
+        selected_observation_ids=["observation_style"],
+        semantic_role="dialogue_body",
+        source_payload="SOURCE BODY",
+        translated_payload="CORPO TRADUZIDO",
+        disposition="owned",
+        state="translated",
+        route_action="translate_inpaint_render",
+        execution_tile_id="tile_executor",
+    )
+    component = {
+        "component_id": "component_style",
+        "bbox_page": [8, 6, 30, 21],
+        "polygon_page": [[8, 6], [30, 6], [30, 21], [8, 21]],
+    }
+    observation = {
+        "observation_id": "observation_style",
+        "text": "SOURCE BODY",
+    }
+    before = copy.deepcopy(owner.__dict__)
+
+    profile = process_bands.build_owner_visual_profile(
+        owner,
+        source,
+        components=[component],
+        observations=[observation],
+        glyph_mask=glyph,
+        candidate={"confidence": 0.96},
+    )
+    record = process_bands.attach_owner_visual_profile(
+        {"owner_id": owner.owner_id}, profile
+    )
+
+    assert record["style_copy_status"] == profile["status"]
+    assert record["visual_profile_sha256"] == profile["visual_profile_sha256"]
+    assert profile["source_capture_phase"] == "pre_inpaint"
+    assert owner.__dict__ == before

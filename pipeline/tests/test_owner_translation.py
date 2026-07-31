@@ -376,6 +376,17 @@ def test_same_owner_observed_in_many_tiles_is_translated_once() -> None:
     ]
 
 
+def test_translation_page_never_serializes_visual_profile_fields() -> None:
+    owners_to_translation_page, _merge_owner_translations = _translation_api()
+    graph = _graph([("a", "COMPLETE SOURCE BODY")])
+
+    translation_page = owners_to_translation_page(graph)
+
+    forbidden = {"visual_profile_v2", "visual_profile_sha256", "style_copy_status"}
+    assert forbidden.isdisjoint(translation_page)
+    assert all(forbidden.isdisjoint(record) for record in translation_page["texts"])
+
+
 def test_run_translate_stage_uses_owner_boundary_and_returns_graph_snapshot() -> None:
     from strip.process_bands import _run_translate_stage
 
