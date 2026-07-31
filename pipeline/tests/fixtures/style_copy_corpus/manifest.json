@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "calibration_plain_balloon",
+      "split": "calibration",
+      "category": "plain_balloon",
+      "work": "synthetic_calibration_alpha",
+      "chapter": "fixture-001",
+      "owner_id": "owner_plain_balloon",
+      "source_image": "cases/calibration_plain_balloon.source.png",
+      "glyph_mask": "cases/calibration_plain_balloon.glyph.png",
+      "context_mask": "cases/calibration_plain_balloon.context.png",
+      "source_text": "PLAIN BODY",
+      "semantic_role": "dialogue_body",
+      "expect": {
+        "fill": "#181818",
+        "stroke": "abstain",
+        "glow": "abstain"
+      }
+    },
+    {
+      "case_id": "calibration_condensed_card",
+      "split": "calibration",
+      "category": "colored_card",
+      "work": "synthetic_calibration_alpha",
+      "chapter": "fixture-002",
+      "owner_id": "owner_condensed_card",
+      "source_image": "cases/calibration_condensed_card.source.png",
+      "glyph_mask": "cases/calibration_condensed_card.glyph.png",
+      "context_mask": "cases/calibration_condensed_card.context.png",
+      "source_text": "CONDENSED CARD",
+      "semantic_role": "system_card",
+      "expect": {
+        "fill": "#F8F8F8",
+        "font_width": "condensed",
+        "background_must_not_be_fill": "#3C96D2"
+      }
+    },
+    {
+      "case_id": "holdout_colored_card",
+      "split": "holdout",
+      "category": "colored_card",
+      "work": "synthetic_holdout_beta",
+      "chapter": "fixture-101",
+      "owner_id": "owner_colored_card",
+      "source_image": "cases/holdout_colored_card.source.png",
+      "glyph_mask": "cases/holdout_colored_card.glyph.png",
+      "context_mask": "cases/holdout_colored_card.context.png",
+      "source_text": "SYSTEM NOTICE",
+      "semantic_role": "system_card",
+      "expect": {
+        "fill": "#FFFFFF",
+        "background_must_not_be_fill": "#D49A30"
+      }
+    },
+    {
+      "case_id": "holdout_burst_effect",
+      "split": "holdout",
+      "category": "burst_sfx",
+      "work": "synthetic_holdout_beta",
+      "chapter": "fixture-102",
+      "owner_id": "owner_burst_effect",
+      "source_image": "cases/holdout_burst_effect.source.png",
+      "glyph_mask": "cases/holdout_burst_effect.glyph.png",
+      "context_mask": "cases/holdout_burst_effect.context.png",
+      "source_text": "BURST",
+      "semantic_role": "sfx",
+      "expect": {
+        "fill": "#F2D94E",
+        "stroke": "#243A9A"
+      }
+    }
+  ]
+}

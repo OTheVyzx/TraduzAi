@@ -11,7 +11,11 @@ PIPELINE_DIR = Path(__file__).resolve().parents[1]
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from typesetter.style_masks import build_typographic_mask_layers, write_typographic_mask_debug
+from typesetter.style_masks import (
+    build_mask_backed_typographic_layers,
+    build_typographic_mask_layers,
+    write_typographic_mask_debug,
+)
 
 
 def _outlined_text() -> np.ndarray:
@@ -53,3 +57,18 @@ def test_mask_debug_writes_only_explicit_debug_artifacts(tmp_path: Path):
     assert output["core_mask"].is_file()
     assert output["stroke_ring_mask"].is_file()
     assert output["background_mask"].is_file()
+
+
+def test_authoritative_glyph_mask_excludes_colored_card_art():
+    image = np.full((100, 220, 3), (60, 150, 210), dtype=np.uint8)
+    image[25:75, 150:205] = (220, 80, 45)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[38:62, 25:125] = 255
+    image[glyph > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    layers = build_mask_backed_typographic_layers(image, glyph, context)
+
+    assert np.array_equal(layers["core_mask"], glyph)
+    assert not np.any(layers["core_mask"][:, 150:205])
+    assert layers["metrics"]["normalization_unit"] == "source_x_height"

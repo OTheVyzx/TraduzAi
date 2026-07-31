@@ -12,7 +12,7 @@ if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
 from typesetter.style_mask_evidence import measure_masked_color_evidence
-from typesetter.style_masks import build_typographic_mask_layers
+from typesetter.style_masks import build_mask_backed_typographic_layers, build_typographic_mask_layers
 
 
 def _outlined_text() -> np.ndarray:
@@ -51,3 +51,19 @@ def test_masked_evidence_abstains_from_plain_text_outline():
         "stroke_ring_matches_background",
         "stroke_ring_not_dominant",
     }
+
+
+def test_mask_backed_fill_ignores_saturated_context_pixels():
+    image = np.full((90, 180, 3), (30, 170, 220), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[30:60, 35:145] = 255
+    image[glyph > 0] = (250, 250, 250)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = measure_masked_color_evidence(
+        image,
+        build_mask_backed_typographic_layers(image, glyph, context),
+    )
+
+    assert evidence.fill_color == "#FAFAFA"
+    assert evidence.stroke_detected is False

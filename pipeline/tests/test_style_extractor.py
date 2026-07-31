@@ -6,6 +6,7 @@ from typesetter.style_extractor import (
     TextStyleEvidence,
     extract_sfx_style_evidence,
     extract_text_style_evidence,
+    extract_text_style_evidence_v2,
 )
 
 
@@ -26,6 +27,28 @@ class FakeScoreFontDetector:
 class RaisingFontDetector:
     def detect(self, crop, allow_default=True):
         raise RuntimeError("font model unavailable")
+
+
+def test_v2_metrics_are_mask_backed_and_x_height_normalized():
+    image = np.full((100, 240, 3), (70, 160, 215), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(glyph, "CARD", (35, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.4, 255, 3, cv2.LINE_8)
+    image[glyph > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_card",
+        semantic_role="system_card",
+    )
+    metrics = evidence.attribute_provenance["typographic_metrics"]
+
+    assert evidence.attributes["fill"].value == "#F8F8F8"
+    assert metrics["normalization_unit"] == "source_x_height"
+    assert metrics["bbox_width_xh"] > metrics["bbox_height_xh"]
+    assert "tracking_xh" in metrics and "slant_tangent" in metrics
 
 
 def test_extracts_black_fill_from_dark_text_on_white_crop():

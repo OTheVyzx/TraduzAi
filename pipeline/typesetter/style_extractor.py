@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, replace
+from typing import Any
 
 import cv2
 import numpy as np
+
+from typesetter.style_contract import (
+    STYLE_V2_ATTRIBUTE_NAMES,
+    StyleAttributeEvidenceV2,
+    StyleEvidenceV2,
+)
+from typesetter.style_mask_evidence import measure_masked_color_evidence
+from typesetter.style_masks import build_mask_backed_typographic_layers
 
 DEFAULT_BALLOON_FONT = "ComicNeue-Bold.ttf"
 IMPACT_FONT_CHOICES = ("KOMIKAX_.ttf", "LuckiestGuy-Regular.ttf")
@@ -39,6 +49,209 @@ class TextStyleEvidence:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _v2_unknown(reason: str) -> StyleAttributeEvidenceV2:
+    return StyleAttributeEvidenceV2(
+        value="unknown",
+        confidence=0.0,
+        top_k=(),
+        margin=0.0,
+        abstention_reason=reason,
+    )
+
+
+def _v2_observed(value: Any, confidence: float) -> StyleAttributeEvidenceV2:
+    score = round(max(0.0, min(1.0, float(confidence))), 4)
+    return StyleAttributeEvidenceV2(
+        value=value,
+        confidence=score,
+        top_k=(value,),
+        margin=score,
+    )
+
+
+def _component_typography_metrics(glyph: np.ndarray) -> dict[str, float]:
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(glyph, 8)
+    components = [
+        (
+            int(stats[label, cv2.CC_STAT_LEFT]),
+            int(stats[label, cv2.CC_STAT_WIDTH]),
+            int(stats[label, cv2.CC_STAT_HEIGHT]),
+            int(stats[label, cv2.CC_STAT_AREA]),
+        )
+        for label in range(1, count)
+        if int(stats[label, cv2.CC_STAT_AREA]) >= 4
+    ]
+    heights = [height for _left, _width, height, _area in components]
+    source_x_height = float(np.median(heights)) if heights else 1.0
+    aspects = [width / max(1.0, float(height)) for _left, width, height, _area in components]
+    ordered = sorted(components)
+    gaps = [
+        max(0, ordered[index + 1][0] - (ordered[index][0] + ordered[index][1]))
+        for index in range(len(ordered) - 1)
+    ]
+    distance = cv2.distanceTransform(glyph, cv2.DIST_L2, 3)
+    positive_distance = distance[distance > 0]
+    half_stroke = float(np.percentile(positive_distance, 70)) if len(positive_distance) else 0.0
+    x, y, width, height = cv2.boundingRect(glyph)
+    rows = np.where(glyph > 0)[0]
+    row_values = np.unique(rows)
+    row_centers = np.asarray(
+        [float(np.mean(np.where(glyph[row] > 0)[0])) for row in row_values],
+        dtype=np.float64,
+    )
+    slant_tangent = (
+        float(np.polyfit(row_values.astype(np.float64), row_centers, 1)[0])
+        if len(row_values) >= 4
+        else 0.0
+    )
+    return {
+        "bbox_height_xh": round(height / source_x_height, 6),
+        "bbox_width_xh": round(width / source_x_height, 6),
+        "component_aspect_median": round(float(np.median(aspects)) if aspects else 0.0, 6),
+        "slant_tangent": round(slant_tangent, 6),
+        "tracking_xh": round(float(np.median(gaps)) / source_x_height if gaps else 0.0, 6),
+        "weight_xh": round((half_stroke * 2.0) / source_x_height, 6),
+    }
+
+
+def extract_text_style_evidence_v2(
+    image_rgb: np.ndarray,
+    glyph_mask: np.ndarray,
+    context_mask: np.ndarray,
+    *,
+    owner_id: str,
+    semantic_role: str,
+) -> StyleEvidenceV2:
+    """Measure source typography only inside an owner's authoritative masks."""
+
+    if not isinstance(owner_id, str) or not owner_id.strip():
+        raise ValueError("owner_id must be a canonical non-empty string")
+    if not isinstance(semantic_role, str) or not semantic_role.strip():
+        raise ValueError("semantic_role must be a canonical non-empty string")
+    layers = build_mask_backed_typographic_layers(image_rgb, glyph_mask, context_mask)
+    glyph = np.asarray(layers["core_mask"], dtype=np.uint8)
+    metrics = dict(layers["metrics"])
+    metrics.update(_component_typography_metrics(glyph))
+    color = measure_masked_color_evidence(image_rgb, layers)
+
+    attributes = {
+        name: _v2_unknown("attribute_not_measured")
+        for name in STYLE_V2_ATTRIBUTE_NAMES
+    }
+    attributes["font_name"] = _v2_unknown("font_matching_required")
+    aspect = float(metrics["component_aspect_median"])
+    width_class = "condensed" if aspect < 0.47 else "expanded" if aspect > 0.82 else "regular"
+    attributes["font_width"] = _v2_observed(width_class, 0.76)
+    weight_ratio = float(metrics["weight_xh"])
+    weight_class = "bold" if weight_ratio >= 0.19 else "regular"
+    attributes["font_weight"] = _v2_observed(weight_class, 0.72)
+    attributes["font_size_px"] = _v2_unknown("functional_layout_owned")
+    attributes["alignment"] = _v2_unknown("functional_layout_owned")
+    attributes["container"] = _v2_unknown("functional_layout_owned")
+    attributes["fill"] = (
+        _v2_observed(color.fill_color, color.fill_confidence)
+        if color.fill_color and color.fill_confidence > 0.0
+        else _v2_unknown("insufficient_fill_evidence")
+    )
+    if color.stroke_detected:
+        stroke_width_xh = float(metrics["normalized_stroke_width"])
+        attributes["stroke"] = _v2_observed(
+            {
+                "color": color.stroke_color,
+                "width_px": max(1, int(round(stroke_width_xh * float(metrics["source_x_height_px"])))),
+                "width_xh": stroke_width_xh,
+            },
+            color.stroke_confidence,
+        )
+    else:
+        attributes["stroke"] = _v2_unknown(
+            color.stroke_abstention_reason or "stroke_not_observed"
+        )
+
+    rgb = np.asarray(image_rgb, dtype=np.uint8)[:, :, :3]
+    glyph_pixels = rgb[glyph > 0]
+    y_coords = np.where(glyph > 0)[0]
+    if len(glyph_pixels) >= 24 and len(set(int(value) for value in y_coords)) >= 4:
+        midpoint = float(np.median(y_coords))
+        top = glyph_pixels[y_coords <= midpoint]
+        bottom = glyph_pixels[y_coords > midpoint]
+        if len(top) >= 8 and len(bottom) >= 8:
+            top_rgb = np.median(top.astype(np.float32), axis=0)
+            bottom_rgb = np.median(bottom.astype(np.float32), axis=0)
+            gradient_delta = float(np.linalg.norm(top_rgb - bottom_rgb))
+            if gradient_delta >= 24.0:
+                top_hex = "#" + "".join(f"{int(round(value)):02X}" for value in top_rgb)
+                bottom_hex = "#" + "".join(f"{int(round(value)):02X}" for value in bottom_rgb)
+                attributes["gradient"] = _v2_observed([top_hex, bottom_hex], min(0.95, gradient_delta / 96.0))
+            else:
+                attributes["gradient"] = _v2_unknown("solid_fill_no_gradient")
+    points = np.column_stack(np.where(glyph > 0)[::-1]).astype(np.float32)
+    if len(points) >= 8:
+        _mean, eigenvectors, eigenvalues = cv2.PCACompute2(points, mean=None)
+        vector = eigenvectors[0]
+        angle = float(np.degrees(np.arctan2(vector[1], vector[0])))
+        if angle > 90.0:
+            angle -= 180.0
+        elif angle < -90.0:
+            angle += 180.0
+        anisotropy = float(eigenvalues[0, 0]) / max(1e-6, float(eigenvalues[1, 0]))
+        attributes["rotation_deg"] = _v2_observed(round(angle, 4), min(0.9, 0.55 + anisotropy / 20.0))
+    effect_mask = np.asarray(layers["effect_ring_mask"]) > 0
+    effect_pixels = rgb[effect_mask]
+    if len(effect_pixels) >= 12:
+        effect_rgb = np.median(effect_pixels.astype(np.float32), axis=0)
+        effect_hex = "#" + "".join(f"{int(round(value)):02X}" for value in effect_rgb)
+        glyph_y, glyph_x = np.where(glyph > 0)
+        effect_y, effect_x = np.where(effect_mask)
+        offset = np.asarray(
+            [float(np.mean(effect_x) - np.mean(glyph_x)), float(np.mean(effect_y) - np.mean(glyph_y))]
+        )
+        x_height = float(metrics["source_x_height_px"])
+        offset_xh = offset / max(1.0, x_height)
+        background_luma = float(np.mean(metrics["background_rgb"]))
+        effect_luma = float(np.mean(effect_rgb))
+        if float(np.linalg.norm(offset_xh)) >= 0.08 and effect_luma < background_luma - 12.0:
+            attributes["shadow"] = _v2_observed(
+                {
+                    "color": effect_hex,
+                    "offset": [int(round(offset[0])), int(round(offset[1]))],
+                    "offset_xh": [round(float(offset_xh[0]), 6), round(float(offset_xh[1]), 6)],
+                },
+                min(0.9, 0.55 + len(effect_pixels) / 500.0),
+            )
+            attributes["glow"] = _v2_unknown("effect_classified_as_shadow")
+        else:
+            attributes["glow"] = _v2_observed(
+                {
+                    "color": effect_hex,
+                    "width_px": max(1, int(round(x_height * 0.19))),
+                    "width_xh": 0.19,
+                },
+                min(0.9, 0.55 + len(effect_pixels) / 500.0),
+            )
+            attributes["shadow"] = _v2_unknown("effect_classified_as_glow")
+    else:
+        attributes["shadow"] = _v2_unknown("no_offset_shadow_evidence")
+        attributes["glow"] = _v2_unknown("no_diffuse_glow_evidence")
+    attributes["curve"] = _v2_unknown("insufficient_curve_evidence")
+
+    metrics["stroke_width_xh"] = float(metrics["normalized_stroke_width"])
+    source = np.ascontiguousarray(rgb).tobytes()
+    source += np.ascontiguousarray(glyph).tobytes()
+    source += np.ascontiguousarray(np.asarray(context_mask) > 0).tobytes()
+    provenance = {
+        "owner": {"owner_id": owner_id, "semantic_role": semantic_role},
+        "typographic_metrics": metrics,
+    }
+    return StyleEvidenceV2(
+        source="owner_mask_v2",
+        text_present=True,
+        attributes=attributes,
+        source_sha256=hashlib.sha256(source).hexdigest(),
+        attribute_provenance=provenance,
+    )
 
 
 def extract_text_style_evidence(
