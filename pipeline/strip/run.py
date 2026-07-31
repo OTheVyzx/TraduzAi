@@ -553,14 +553,12 @@ def _compose_owner_output_pages(
         page_glyphs = [item for item in glyph_patches if item.page_id == page_id]
         protected = protected_by_page.get(page_id)
         if protected is None:
+            # Per-owner masks are validated against their own protected-art
+            # evidence by the compositor.  Their union is not a page-global
+            # mask: a peer owner can legitimately mark this owner's source
+            # text as locally protected.  Only an explicitly supplied page
+            # mask is authoritative at global scope.
             protected = np.zeros(original_page.shape[:2], dtype=np.uint8)
-            for mutation in page_mutations:
-                candidate = np.asarray(mutation.protected_art_mask)
-                if candidate.shape != protected.shape:
-                    raise OwnerCompositionError(
-                        f"owner protected-art mask shape mismatch for {page_id}"
-                    )
-                protected[candidate > 0] = 255
 
         clean_result = compose_page(original_page, page_mutations, [], protected)
         final_result = compose_page(original_page, page_mutations, page_glyphs, protected)

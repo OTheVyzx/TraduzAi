@@ -560,3 +560,54 @@ def test_projection_never_estimates_independent_background_color():
     )
 
     np.testing.assert_array_equal(result.output_pages[0].image, commit.result_rgb)
+
+
+def test_owner_composition_does_not_promote_peer_local_protection_to_global_mask():
+    """One owner's local protection cannot veto a peer's valid action mask."""
+
+    from dataclasses import replace
+
+    from ownership.model import owner_residual_evidence_sha256
+    from strip.run import _compose_owner_output_pages
+
+    original, strip, bands = _chapter_fixture()
+    left_commit = bands[0].owner_execution_commits[0]
+    right_commit = bands[1].owner_execution_commits[0]
+    right_mutation = right_commit.mutation
+    peer_local_protected = np.asarray(right_mutation.protected_art_mask).copy()
+    peer_local_protected[np.asarray(left_commit.mutation.action_mask) > 0] = 255
+    protected_sha256 = _array_sha256(peer_local_protected)
+    right_mutation = replace(
+        right_mutation,
+        protected_art_mask=peer_local_protected,
+        protected_art_mask_sha256=protected_sha256,
+        residual_evidence_sha256=owner_residual_evidence_sha256(
+            owner_id=right_mutation.owner_id,
+            page_id=right_mutation.page_id,
+            before_sha256=right_mutation.before_sha256,
+            after_sha256=right_mutation.after_sha256,
+            action_mask_sha256=right_mutation.action_mask_sha256,
+            protected_art_mask_sha256=protected_sha256,
+            component_geometry_sha256=right_mutation.component_geometry_sha256,
+            residual_score=right_mutation.residual_score,
+            residual_threshold=right_mutation.residual_threshold,
+            residual_method=right_mutation.residual_method,
+            residual_flags=right_mutation.residual_flags,
+        ),
+    )
+    bands[1].owner_execution_commits = [replace(right_commit, mutation=right_mutation)]
+
+    result = _compose_owner_output_pages(
+        original_strip_image=original,
+        strip=strip,
+        bands=bands,
+        balloons=[],
+        target_count=1,
+    )
+
+    composition = result.compositions["page_001"]
+    assert composition.committed is True
+    assert composition.write_counts["cleanup_write:owner-left"] == 1
+    assert composition.write_counts["glyph_write:owner-left"] == 1
+    assert composition.write_counts["cleanup_write:owner-right"] == 1
+    assert composition.write_counts["glyph_write:owner-right"] == 1
