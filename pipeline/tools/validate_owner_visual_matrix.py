@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -30,6 +31,20 @@ REQUIRED_VISUAL_CATEGORIES = frozenset(
     }
 )
 
+REQUIRED_FINAL_PIXEL_CONTRACTS = frozenset(
+    {
+        "source_coverage_contract",
+        "owner_graph_contract",
+        "route_state_contract",
+        "pixel_ownership_contract",
+        "final_language_contract",
+        "layout_legibility_contract",
+        "residual_cleanup_contract",
+        "protected_art_contract",
+        "qa_integrity_contract",
+    }
+)
+
 
 class MatrixContractError(ValueError):
     """Raised when the validation corpus itself is not systemic or fresh."""
@@ -38,7 +53,17 @@ class MatrixContractError(ValueError):
 def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise MatrixContractError(f"matrix entry {index} must be an object")
-    required = ("entry_id", "work_id", "chapter_id", "config_path", "work_dir")
+    required = (
+        "entry_id",
+        "work_id",
+        "chapter_id",
+        "split",
+        "config_path",
+        "config_sha256",
+        "input_key",
+        "expected_input_sha256",
+        "work_dir",
+    )
     missing = [key for key in required if not str(entry.get(key) or "").strip()]
     if missing:
         raise MatrixContractError(
@@ -51,6 +76,8 @@ def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
         raise MatrixContractError(f"matrix entry {index} has invalid categories")
     normalized = dict(entry)
     normalized["categories"] = sorted(set(categories))
+    if normalized["split"] not in {"calibration", "holdout"}:
+        raise MatrixContractError(f"matrix entry {index} has invalid split")
     return normalized
 
 
@@ -61,6 +88,11 @@ def validate_manifest(manifest: Any) -> list[dict[str, Any]]:
     works = {entry["work_id"] for entry in entries}
     if len(works) < 3:
         raise MatrixContractError("matrix requires at least three distinct works")
+    if {entry["split"] for entry in entries} != {"calibration", "holdout"}:
+        raise MatrixContractError("matrix requires calibration and holdout entries")
+    provenance = [(entry["work_id"], entry["chapter_id"]) for entry in entries]
+    if len(provenance) != len(set(provenance)):
+        raise MatrixContractError("work/chapter provenance cannot cross matrix splits")
     output_dirs = [Path(entry["work_dir"]).as_posix().casefold() for entry in entries]
     if len(output_dirs) != len(set(output_dirs)):
         raise MatrixContractError("every matrix entry requires a unique work_dir")
@@ -83,6 +115,93 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_input(path: Path) -> str:
+    """Hash a file or a directory tree with stable relative-path ordering."""
+    path = path.resolve()
+    if path.is_file():
+        return _sha256_file(path)
+    if not path.is_dir():
+        raise MatrixContractError(f"input missing: {path}")
+    digest = sha256()
+    files = sorted(item for item in path.rglob("*") if item.is_file())
+    for item in files:
+        relative = item.relative_to(path).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(_sha256_file(item)))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _canonical_json_sha256(path: Path) -> str:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(canonical).hexdigest()
+
+
+def resolve_entry_runtime(
+    entry: dict[str, Any],
+    manifest_path: Path,
+    inputs_manifest: dict[str, Any],
+    environ: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve only versioned configs and hash-pinned external inputs."""
+    fixture_root = manifest_path.resolve().parent
+    raw_config = Path(str(entry.get("config_path") or ""))
+    if raw_config.is_absolute():
+        raise MatrixContractError("config_path must be relative to the matrix fixture")
+    config_path = (fixture_root / raw_config).resolve()
+    try:
+        config_path.relative_to(fixture_root)
+    except ValueError as exc:
+        raise MatrixContractError("config_path escapes the matrix fixture") from exc
+    if ".codex-tmp" in {part.casefold() for part in config_path.parts}:
+        raise MatrixContractError("config_path cannot depend on .codex-tmp")
+    if not config_path.is_file():
+        raise MatrixContractError(f"versioned config missing: {config_path}")
+    expected_config_hash = str(entry.get("config_sha256") or "").lower()
+    if _canonical_json_sha256(config_path) != expected_config_hash:
+        raise MatrixContractError(f"config hash mismatch: {entry.get('entry_id', 'entry')}")
+    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    if str(config.get("input_key") or "") != str(entry.get("input_key") or ""):
+        raise MatrixContractError(f"config input_key mismatch: {entry.get('entry_id', 'entry')}")
+
+    rows = inputs_manifest.get("inputs") if isinstance(inputs_manifest, dict) else None
+    input_key = str(entry.get("input_key") or "").strip()
+    row = rows.get(input_key) if isinstance(rows, dict) else None
+    if not isinstance(row, dict):
+        raise MatrixContractError(f"input_key missing from inputs manifest: {input_key}")
+    expected_hash = str(row.get("expected_sha256") or "").strip().lower()
+    if expected_hash != str(entry.get("expected_input_sha256") or "").strip().lower():
+        raise MatrixContractError(f"input hash contract mismatch: {input_key}")
+    env_name = str(row.get("environment_variable") or "").strip()
+    raw_source = (environ or os.environ).get(env_name, "")
+    if not raw_source:
+        raise MatrixContractError(f"input environment variable missing: {env_name}")
+    source_path = Path(raw_source).expanduser().resolve()
+    if not source_path.exists():
+        raise MatrixContractError(f"input missing: {source_path}")
+    input_type = str(row.get("input_type") or "")
+    if input_type == "file" and not source_path.is_file():
+        raise MatrixContractError(f"input type mismatch for {input_key}: expected file")
+    if input_type == "directory" and not source_path.is_dir():
+        raise MatrixContractError(f"input type mismatch for {input_key}: expected directory")
+    actual_hash = _sha256_input(source_path)
+    if actual_hash != expected_hash:
+        raise MatrixContractError(f"input hash mismatch: {input_key}")
+    return {
+        "config_path": config_path,
+        "source_path": source_path,
+        "input_sha256": actual_hash,
+        "input_key": input_key,
+    }
+
+
 def _contract_name(issue: Any) -> str:
     if not isinstance(issue, dict):
         return "malformed_gate_issue"
@@ -100,6 +219,9 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
     project_path = work_dir / "project.json"
     contracts: set[str] = set()
     details: list[str] = []
+    for blocker in entry.get("_preflight_contracts") or []:
+        contracts.add(str(blocker))
+    details.extend(str(value) for value in entry.get("_preflight_details") or [])
     if not project_path.is_file():
         contracts.add("project_result_missing")
         return {
@@ -117,6 +239,58 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
         project = {}
     if project.get("owner_graph_status") != "verified":
         contracts.add("owner_graph_unverified")
+    expected_pages: set[str] = set()
+    for page_index, page in enumerate(project.get("paginas") or [], start=1):
+        if not isinstance(page, dict):
+            continue
+        page_id = str(page.get("page_id") or f"page_{int(page.get('numero') or page_index):03d}")
+        expected_pages.add(page_id)
+        for layer in page.get("text_layers") or page.get("textos") or []:
+            if not isinstance(layer, dict):
+                continue
+            if not str(layer.get("owner_id") or "").strip() or layer.get("render_completed") is not True:
+                continue
+            quality = layer.get("owner_render_quality")
+            if not isinstance(quality, dict):
+                layout = layer.get("render_layout_contract")
+                quality = layout.get("owner_render_quality") if isinstance(layout, dict) else None
+            if not isinstance(quality, dict):
+                contracts.add("missing_owner_render_quality_contract")
+            else:
+                quality_status = str(quality.get("status") or "").strip()
+                if quality_status != "ok":
+                    contracts.add(quality_status or "invalid_owner_render_quality_contract")
+                try:
+                    source_ratio = float(quality.get("source_scale_ratio"))
+                except (TypeError, ValueError):
+                    source_ratio = None
+                if source_ratio is not None and source_ratio < 0.75:
+                    contracts.add("under_source_scale")
+                if int(quality.get("outside_safe_pixels", 0) or 0) > 0:
+                    contracts.add("core_pixels_outside_safe_polygon")
+                if not quality.get("rendered_line_core_heights_px"):
+                    contracts.add("missing_rendered_line_core_metrics")
+            if str(layer.get("route_action") or "") in {
+                "translate_inpaint_render",
+                "translate_sfx_inpaint_render",
+            }:
+                residual = layer.get("residual_cleanup_contract")
+                if not isinstance(residual, dict) or residual.get("residual_verified") is not True:
+                    contracts.add("unverified_owner_residual")
+                else:
+                    try:
+                        if float(residual.get("residual_score")) > float(residual.get("residual_threshold")):
+                            contracts.add("owner_residual_above_threshold")
+                    except (TypeError, ValueError):
+                        contracts.add("invalid_owner_residual_contract")
+                protected = layer.get("protected_art_contract")
+                if not isinstance(protected, dict):
+                    contracts.add("missing_protected_art_contract")
+                elif (
+                    int(protected.get("protected_art_changed_pixels", 0) or 0) > 0
+                    or int(protected.get("action_protected_overlap_pixels", 0) or 0) > 0
+                ):
+                    contracts.add("protected_art_contract_violation")
     qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
     gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
     if gate.get("status") != "PASS":
@@ -125,6 +299,7 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
         if isinstance(issue, dict) and (
             str(issue.get("severity") or "").lower() in {"critical", "blocker"}
             or bool(issue.get("blocking"))
+            or bool(issue.get("blocks_export"))
         ):
             contracts.add(_contract_name(issue))
     reports = qa.get("final_pixel_reports")
@@ -144,6 +319,25 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
             contracts.add("final_pixel_observer_unavailable")
         if report.get("observation_complete") is not True:
             contracts.add("final_pixel_observation_incomplete")
+        if report.get("coverage_complete") is not True:
+            failures = [str(value) for value in report.get("coverage_failures") or [] if str(value)]
+            contracts.update(failures or ["final_pixel_coverage_incomplete"])
+        try:
+            expected_challenges = int(report.get("expected_source_challenge_count", 0) or 0)
+            completed_challenges = int(report.get("completed_source_challenge_count", 0) or 0)
+        except (TypeError, ValueError):
+            contracts.add("source_challenge_counts_invalid")
+        else:
+            if completed_challenges < expected_challenges:
+                contracts.add("source_challenge_inconclusive")
+        report_contracts = report.get("contracts")
+        if not isinstance(report_contracts, dict) or not REQUIRED_FINAL_PIXEL_CONTRACTS.issubset(report_contracts):
+            contracts.add("final_pixel_contracts_incomplete")
+        else:
+            for contract_name in REQUIRED_FINAL_PIXEL_CONTRACTS:
+                status = str(report_contracts.get(contract_name) or "").upper()
+                if status != "PASS":
+                    contracts.add(contract_name if status == "BLOCK" else "final_pixel_contract_status_invalid")
         raw_artifact = str(report.get("artifact_path") or "").strip()
         artifact = Path(raw_artifact) if raw_artifact else Path()
         if raw_artifact and not artifact.is_absolute():
@@ -155,6 +349,8 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
             contracts.add("final_artifact_hash_mismatch")
         for issue in report.get("issues") or []:
             contracts.add(_contract_name(issue))
+    if expected_pages and seen_pages != expected_pages:
+        contracts.add("final_pixel_page_coverage_invalid")
     return {
         "entry_id": entry["entry_id"],
         "work_id": entry.get("work_id"),
@@ -206,17 +402,23 @@ def _persist_runner_logs(
     }
 
 
-def _run_entry(entry: dict[str, Any], manifest_path: Path, output_root: Path) -> dict[str, Any]:
+def _run_entry(
+    entry: dict[str, Any],
+    manifest_path: Path,
+    output_root: Path,
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
     target = Path(entry["work_dir"])
     if not target.is_absolute():
         target = output_root / target
     if target.exists():
         raise MatrixContractError(f"fresh matrix work_dir already exists: {target}")
-    config_path = _resolve_from_manifest(manifest_path, entry["config_path"])
+    config_path = Path(runtime["config_path"])
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     config.update(
         {
             "work_dir": str(target.resolve()),
+            "source_path": str(Path(runtime["source_path"]).resolve()),
             "owner_graph_mode": "enforce",
             "allow_p0_export_override": False,
         }
@@ -251,20 +453,33 @@ def _run_entry(entry: dict[str, Any], manifest_path: Path, output_root: Path) ->
     }
 
 
-def _selected_final_path(
+def _selected_final_paths(
     entry: dict[str, Any],
     category: str,
     work_dir: Path,
-) -> Path | None:
+) -> list[Path]:
     final_files = sorted((work_dir / "translated").glob("*"))
     if not final_files:
-        return None
+        return []
     raw_page = (entry.get("category_pages") or {}).get(category, 1)
-    try:
-        page_index = max(1, int(raw_page)) - 1
-    except (TypeError, ValueError):
-        page_index = 0
-    return final_files[min(page_index, len(final_files) - 1)]
+    raw_pages = raw_page if isinstance(raw_page, list) else [raw_page]
+    selected: list[Path] = []
+    for value in raw_pages:
+        try:
+            page_index = max(1, int(value)) - 1
+        except (TypeError, ValueError):
+            page_index = 0
+        candidate = final_files[min(page_index, len(final_files) - 1)]
+        if candidate not in selected:
+            selected.append(candidate)
+    return selected
+
+
+def _selected_final_path(
+    entry: dict[str, Any], category: str, work_dir: Path
+) -> Path | None:
+    selected = _selected_final_paths(entry, category, work_dir)
+    return selected[0] if selected else None
 
 
 def _difference_mask_panel(before, inpaint):
@@ -356,64 +571,152 @@ def _write_contact_sheets(
             work_dir = Path(entry["work_dir"])
             if not work_dir.is_absolute():
                 work_dir = output_root / work_dir
-            final_path = _selected_final_path(entry, category, work_dir)
-            if final_path is None:
-                continue
-            candidates = [
-                work_dir / "originals" / final_path.name,
-                work_dir / "images" / final_path.name,
-                final_path,
-            ]
-            panels = []
-            for candidate in candidates:
-                try:
-                    panel = Image.open(candidate).convert("RGB")
-                except OSError:
-                    panel = Image.new("RGB", (320, 180), "#20252a")
-                panels.append(panel)
-            canonical_size = panels[0].size
-            panels = [
-                panel if panel.size == canonical_size else panel.resize(canonical_size)
-                for panel in panels
-            ]
-            mask_panel = _difference_mask_panel(panels[0], panels[1])
-            owner_panel = _owner_map_panel(work_dir, final_path, panels[0])
-            if owner_panel.size != canonical_size:
-                owner_panel = owner_panel.resize(canonical_size)
-            panels.extend((mask_panel, owner_panel))
-            labels = ("before", "inpaint", "final", "masks", "owner map")
-            panel_width, page_height = canonical_size
-            segment_height = 900
-            safe_entry_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(entry["entry_id"]))
-            for segment_index, y_top in enumerate(
-                range(0, page_height, segment_height),
-                start=1,
-            ):
-                y_bottom = min(page_height, y_top + segment_height)
-                visible_height = y_bottom - y_top
-                sheet = Image.new(
-                    "RGB",
-                    (panel_width * len(panels), visible_height + 44),
-                    "white",
-                )
-                draw = ImageDraw.Draw(sheet)
-                for panel_index, (label, panel) in enumerate(zip(labels, panels)):
-                    crop = panel.crop((0, y_top, panel_width, y_bottom))
-                    sheet.paste(crop, (panel_index * panel_width, 28))
-                    draw.text((panel_index * panel_width + 6, 6), label, fill="black")
-                draw.text(
-                    (6, visible_height + 30),
-                    f"{entry['entry_id']} y={y_top}:{y_bottom}",
-                    fill="black",
-                )
-                path = sheet_root / (
-                    f"{category}__{safe_entry_id}__{segment_index:03d}.png"
-                )
-                sheet.save(path)
-                category_paths.append(str(path.resolve()))
+            for final_path in _selected_final_paths(entry, category, work_dir):
+                candidates = [
+                    work_dir / "originals" / final_path.name,
+                    work_dir / "images" / final_path.name,
+                    final_path,
+                ]
+                panels = []
+                for candidate in candidates:
+                    try:
+                        panel = Image.open(candidate).convert("RGB")
+                    except OSError:
+                        panel = Image.new("RGB", (320, 180), "#20252a")
+                    panels.append(panel)
+                canonical_size = panels[0].size
+                panels = [
+                    panel if panel.size == canonical_size else panel.resize(canonical_size)
+                    for panel in panels
+                ]
+                mask_panel = _difference_mask_panel(panels[0], panels[1])
+                owner_panel = _owner_map_panel(work_dir, final_path, panels[0])
+                if owner_panel.size != canonical_size:
+                    owner_panel = owner_panel.resize(canonical_size)
+                panels.extend((mask_panel, owner_panel))
+                labels = ("before", "inpaint", "final", "masks", "owner map")
+                panel_width, page_height = canonical_size
+                segment_height = 900
+                safe_entry_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(entry["entry_id"]))
+                safe_page_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", final_path.stem)
+                for segment_index, y_top in enumerate(
+                    range(0, page_height, segment_height),
+                    start=1,
+                ):
+                    y_bottom = min(page_height, y_top + segment_height)
+                    visible_height = y_bottom - y_top
+                    sheet = Image.new(
+                        "RGB",
+                        (panel_width * len(panels), visible_height + 44),
+                        "white",
+                    )
+                    draw = ImageDraw.Draw(sheet)
+                    for panel_index, (label, panel) in enumerate(zip(labels, panels)):
+                        crop = panel.crop((0, y_top, panel_width, y_bottom))
+                        sheet.paste(crop, (panel_index * panel_width, 28))
+                        draw.text((panel_index * panel_width + 6, 6), label, fill="black")
+                    draw.text(
+                        (6, visible_height + 30),
+                        f"{entry['entry_id']} page={final_path.name} y={y_top}:{y_bottom}",
+                        fill="black",
+                    )
+                    path = sheet_root / (
+                        f"{category}__{safe_entry_id}__{safe_page_id}__{segment_index:03d}.png"
+                    )
+                    sheet.save(path)
+                    category_paths.append(str(path.resolve()))
         if category_paths:
             sheets[category] = category_paths
     return sheets
+
+
+def build_inspection_template(
+    sheets: dict[str, list[str]], output_root: Path
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    root = output_root.resolve()
+    for category, paths in sorted(sheets.items()):
+        for raw_path in paths:
+            artifact = Path(raw_path).resolve()
+            try:
+                relative = artifact.relative_to(root).as_posix()
+            except ValueError as exc:
+                raise MatrixContractError(f"inspection artifact outside output root: {artifact}") from exc
+            if not artifact.is_file():
+                raise MatrixContractError(f"inspection artifact missing: {relative}")
+            artifacts.append(
+                {
+                    "artifact_path": relative,
+                    "sha256": _sha256_file(artifact),
+                    "required_scale": "native",
+                    "category": category,
+                    "segment": artifact.stem,
+                }
+            )
+    return {"schema_version": 1, "artifacts": artifacts}
+
+
+def validate_inspection_manifest(
+    template: dict[str, Any],
+    manifest: dict[str, Any],
+    output_root: Path,
+) -> list[dict[str, Any]]:
+    template_rows = template.get("artifacts") if isinstance(template, dict) else None
+    inspection_rows = manifest.get("inspections") if isinstance(manifest, dict) else None
+    if not isinstance(template_rows, list) or not isinstance(inspection_rows, list):
+        raise MatrixContractError("inspection template and manifest require artifact lists")
+    expected = {
+        str(row.get("artifact_path") or ""): row
+        for row in template_rows
+        if isinstance(row, dict) and str(row.get("artifact_path") or "")
+    }
+    verified: list[dict[str, Any]] = []
+    required_fields = {
+        "artifact_path",
+        "sha256",
+        "scale",
+        "timestamp",
+        "category",
+        "owner_or_segment",
+        "verdict",
+        "note",
+    }
+    seen: set[str] = set()
+    for index, row in enumerate(inspection_rows):
+        if not isinstance(row, dict) or any(not str(row.get(key) or "").strip() for key in required_fields):
+            raise MatrixContractError(f"inspection fields missing at row {index}")
+        raw_path = str(row["artifact_path"])
+        path = Path(raw_path)
+        if path.is_absolute() or raw_path not in expected:
+            raise MatrixContractError(f"unverified inspection claim: {raw_path}")
+        if raw_path in seen:
+            raise MatrixContractError(f"duplicate inspection claim: {raw_path}")
+        seen.add(raw_path)
+        expected_row = expected[raw_path]
+        artifact = (output_root.resolve() / path).resolve()
+        try:
+            artifact.relative_to(output_root.resolve())
+        except ValueError as exc:
+            raise MatrixContractError(f"inspection path escapes output root: {raw_path}") from exc
+        actual_hash = _sha256_file(artifact) if artifact.is_file() else ""
+        claimed_hash = str(row.get("sha256") or "").lower()
+        if claimed_hash != str(expected_row.get("sha256") or "").lower() or claimed_hash != actual_hash:
+            raise MatrixContractError(f"inspection hash mismatch: {raw_path}")
+        if str(row.get("scale")) != "native":
+            raise MatrixContractError(f"inspection scale must be native: {raw_path}")
+        if str(row.get("category")) != str(expected_row.get("category")):
+            raise MatrixContractError(f"inspection category mismatch: {raw_path}")
+        if str(row.get("owner_or_segment")) != str(expected_row.get("segment")):
+            raise MatrixContractError(f"inspection segment mismatch: {raw_path}")
+        if str(row.get("verdict")).upper() not in {"PASS", "FAIL"}:
+            raise MatrixContractError(f"inspection verdict invalid: {raw_path}")
+        verified.append({**row, "artifact_path": raw_path, "sha256": claimed_hash})
+    missing = sorted(set(expected) - seen)
+    if missing:
+        raise MatrixContractError(
+            "inspection manifest missing required artifacts: " + ", ".join(missing)
+        )
+    return verified
 
 
 def _write_report(
@@ -421,9 +724,15 @@ def _write_report(
     results: list[dict[str, Any]],
     run_results: list[dict[str, Any]],
     sheets: dict[str, list[str]],
+    *,
+    inspected: list[dict[str, Any]] | None = None,
 ) -> None:
     grouped = group_failures_by_contract(results)
-    overall = "GO" if results and all(item["status"] == "PASS" for item in results) else "NO-GO"
+    functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
+    inspection_go = inspected is None or (
+        bool(inspected) and all(str(item.get("verdict")).upper() == "PASS" for item in inspected)
+    )
+    overall = "GO" if functional_go and inspection_go else "NO-GO"
     lines = [
         "# Page-owner systemic validation",
         "",
@@ -451,9 +760,24 @@ def _write_report(
             lines.append(f"- `{contract}`: {', '.join(entry_ids)}")
     else:
         lines.append("- None.")
-    lines.extend(["", "## Contact sheets", ""])
+    lines.extend(["", "## Generated artifacts", ""])
     for category, paths in sorted(sheets.items()):
         lines.append(f"- {category}: " + ", ".join(paths))
+    lines.extend(["", "## Automatically checked", ""])
+    for result in results:
+        lines.append(
+            f"- {result['entry_id']}: project={result.get('project_path', 'n/a')}; "
+            f"gate={result.get('export_gate', 'MISSING')}; status={result['status']}"
+        )
+    lines.extend(["", "## Visually inspected", ""])
+    if inspected:
+        for row in inspected:
+            lines.append(
+                f"- {row['artifact_path']}: sha256={row['sha256']}; "
+                f"verdict={row['verdict']}; note={row['note']}"
+            )
+    else:
+        lines.append("- None verified.")
     lines.extend(["", "## Runner exit evidence", ""])
     for result in run_results:
         lines.append(
@@ -471,21 +795,59 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--inspection-template", type=Path)
+    parser.add_argument("--inspection-manifest", type=Path)
     args = parser.parse_args(argv)
     manifest_path = args.manifest.resolve()
-    entries = validate_manifest(
-        json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    entries = validate_manifest(manifest)
+    raw_inputs_path = Path(str(manifest.get("inputs_path") or "inputs.json"))
+    if raw_inputs_path.is_absolute():
+        raise MatrixContractError("inputs_path must be relative to the matrix fixture")
+    inputs_path = (manifest_path.parent / raw_inputs_path).resolve()
+    try:
+        inputs_path.relative_to(manifest_path.parent)
+    except ValueError as exc:
+        raise MatrixContractError("inputs_path escapes the matrix fixture") from exc
+    if not inputs_path.is_file():
+        raise MatrixContractError(f"inputs manifest missing: {inputs_path}")
+    inputs_manifest = json.loads(inputs_path.read_text(encoding="utf-8-sig"))
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     run_results = []
+    runtimes: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        try:
+            runtimes[entry["entry_id"]] = resolve_entry_runtime(entry, manifest_path, inputs_manifest)
+        except MatrixContractError as exc:
+            entry.setdefault("_preflight_contracts", []).append("matrix_input_preflight_failed")
+            entry.setdefault("_preflight_details", []).append(str(exc))
     if not args.validate_only:
         for entry in entries:
-            run_results.append(_run_entry(entry, manifest_path, output_root))
+            runtime = runtimes.get(entry["entry_id"])
+            if runtime is None:
+                run_results.append({"entry_id": entry["entry_id"], "returncode": 2})
+                continue
+            run_results.append(_run_entry(entry, manifest_path, output_root, runtime))
     results = [validate_entry_result(entry, output_root) for entry in entries]
     sheets = _write_contact_sheets(entries, output_root)
-    _write_report(args.report.resolve(), results, run_results, sheets)
-    return 0 if results and all(item["status"] == "PASS" for item in results) else 2
+    inspection_template = build_inspection_template(sheets, output_root)
+    if args.inspection_template:
+        args.inspection_template.resolve().parent.mkdir(parents=True, exist_ok=True)
+        args.inspection_template.resolve().write_text(
+            json.dumps(inspection_template, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    inspected: list[dict[str, Any]] | None = None
+    if args.inspection_manifest:
+        inspection_manifest = json.loads(args.inspection_manifest.resolve().read_text(encoding="utf-8-sig"))
+        inspected = validate_inspection_manifest(inspection_template, inspection_manifest, output_root)
+    _write_report(args.report.resolve(), results, run_results, sheets, inspected=inspected)
+    functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
+    inspection_go = inspected is None or (
+        bool(inspected) and all(str(item.get("verdict")).upper() == "PASS" for item in inspected)
+    )
+    return 0 if functional_go and inspection_go else 2
 
 
 if __name__ == "__main__":
