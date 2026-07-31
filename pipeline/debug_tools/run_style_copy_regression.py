@@ -161,6 +161,7 @@ def main() -> int:
     parser.add_argument("--output-run", type=Path)
     parser.add_argument("--pages", default=",".join(str(p) for p in DEFAULT_PAGES))
     parser.add_argument("--skip-inpaint", action="store_true")
+    parser.add_argument("--style-mode", choices=("shadow", "render", "enforce"), default="render")
     args = parser.parse_args()
 
     source_run = args.source_run.resolve()
@@ -178,6 +179,11 @@ def main() -> int:
     _copy_run(source_run, dest_run)
     _rewrite_project(dest_run)
     _rewrite_runner_config(dest_run)
+    config_path = dest_run / "runner_config.json"
+    if config_path.exists():
+        runner_config = json.loads(config_path.read_text(encoding="utf-8"))
+        runner_config["style_copy_mode"] = args.style_mode
+        config_path.write_text(json.dumps(runner_config, ensure_ascii=False, indent=2), encoding="utf-8")
 
     project_path = dest_run / "project.json"
     steps: list[dict] = []
@@ -208,6 +214,7 @@ def main() -> int:
         "source_run": str(source_run),
         "output_run": str(dest_run),
         "pages": pages,
+        "style_mode": args.style_mode,
         "steps": steps,
         "audit": audit,
         "score": score,

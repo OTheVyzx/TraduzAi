@@ -23,6 +23,7 @@ from typesetter.style_policy import (
     style_candidate_copy_allowed,
     style_evidence_v2_shadow_policy,
 )
+from qa.style_fidelity import audit_style_fidelity, resolve_original_path
 
 
 CARD_W = 360
@@ -172,7 +173,7 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
     records: list[dict] = []
 
     for page_index, page in enumerate(pages, start=1):
-        image_path = originals_dir / f"{page_index:03d}.jpg"
+        image_path = resolve_original_path(run_dir, page, page_index) or (originals_dir / f"{page_index:03d}.jpg")
         img_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if img_bgr is None:
             continue
@@ -207,6 +208,11 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
             records.append(
                 {
                     "page": page_index,
+                    "owner_id": layer.get("owner_id"),
+                    "source_path": str(image_path.resolve()),
+                    "visual_profile_sha256": layer.get("visual_profile_sha256"),
+                    "source_sha256": (layer.get("visual_profile_v2") or {}).get("source_sha256") if isinstance(layer.get("visual_profile_v2"), dict) else None,
+                    "glyph_mask_sha256": (layer.get("visual_profile_v2") or {}).get("glyph_mask_sha256") if isinstance(layer.get("visual_profile_v2"), dict) else None,
                     "id": layer.get("id") or layer.get("text_id"),
                     "tipo": layer.get("tipo"),
                     "text": str(layer.get("text") or "")[:120],
@@ -222,7 +228,8 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
 
 
 def _read_crop(rec: dict, originals_dir: Path) -> np.ndarray:
-    img = cv2.imread(str(originals_dir / f"{int(rec['page']):03d}.jpg"), cv2.IMREAD_COLOR)
+    source_path = rec.get("source_path") or (originals_dir / f"{int(rec['page']):03d}.jpg")
+    img = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     if img is None:
         return np.full((80, 160, 3), 245, np.uint8)
     x1, y1, x2, y2 = [int(v) for v in rec["bbox"]]
@@ -464,6 +471,12 @@ def main() -> int:
     output_dir = args.output or (run_dir / "debug" / "codex_style_audit" / "visual_report")
     records = _read_project_records(run_dir, originals_dir)
     summary = _write_visual_report(records, run_dir, originals_dir, output_dir)
+    project = json.loads((run_dir / "project.json").read_text(encoding="utf-8"))
+    fidelity = audit_style_fidelity(project, run_dir, mode="render")
+    fidelity_path = output_dir / "style_fidelity_by_owner.json"
+    fidelity_path.write_text(json.dumps(fidelity, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary["style_fidelity"] = fidelity["summary"]
+    summary["style_fidelity_file"] = str(fidelity_path)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0
 

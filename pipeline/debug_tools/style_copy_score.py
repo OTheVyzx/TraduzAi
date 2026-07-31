@@ -396,6 +396,17 @@ def score_real_records(records_path: Path) -> dict[str, Any]:
     }
 
 
+def score_owner_fidelity(records: list[dict[str, Any]]) -> dict[str, Any]:
+    owner_records = [record for record in records if str(record.get("owner_id") or "").strip()]
+    unique_owners = {str(record["owner_id"]) for record in owner_records}
+    return {
+        "records": len(owner_records),
+        "owners": len(unique_owners),
+        "owner_ids": sorted(unique_owners),
+        "missing_profile_hash": sum(1 for record in owner_records if not record.get("visual_profile_sha256")),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--atlas-dir", type=Path, default=DEFAULT_ATLAS_DIR)
@@ -408,7 +419,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "synthetic": score_synthetic(args.atlas_dir),
     }
     if args.records:
+        real_records = _read_records(args.records)
         result["real_ch3"] = score_real_records(args.records)
+        result["owner_fidelity"] = score_owner_fidelity(real_records)
 
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:

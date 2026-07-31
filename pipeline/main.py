@@ -9928,6 +9928,20 @@ def _run_pipeline(config_path: str):
                 project_data,
                 override=bool(config.get("allow_p0_export_override")),
             )
+            from qa.style_fidelity import audit_style_fidelity, merge_style_and_functional_gates
+            style_mode = str(config.get("style_copy_mode") or "shadow").strip().lower()
+            style_fidelity = audit_style_fidelity(project_data, work_dir, mode=style_mode)
+            combined_gate = merge_style_and_functional_gates(export_gate, style_fidelity["gate"])
+            project_data["qa"]["functional_export_gate"] = copy.deepcopy(export_gate)
+            project_data["qa"]["style_fidelity"] = style_fidelity
+            if combined_gate["status"] == "BLOCK" and export_gate.get("status") != "BLOCK":
+                export_gate = copy.deepcopy(export_gate)
+                export_gate["status"] = "BLOCK"
+                export_gate.setdefault("issues", []).append({
+                    "code": "style_fidelity_high_confidence_mismatch",
+                    "severity": "critical",
+                    "owner_ids": style_fidelity["gate"]["blocking_owner_ids"],
+                })
             project_data["qa"]["export_gate"] = export_gate
             _synchronize_qa_summary_with_export_gate(project_data)
             project_data["needs_review"] = export_gate["status"] == "BLOCK"
