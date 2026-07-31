@@ -5,17 +5,17 @@
     "mythic_colored_cards": {
       "environment_variable": "TRADUZAI_MATRIX_MYTHIC_SOURCE",
       "input_type": "directory",
-      "expected_sha256": "f81527eab76a94ae3dc2a231babec28a0a23863dd40abbbd03dee3f8867c618e"
+      "expected_sha256": "78242a961ff07fd1120b6da3156a015bc509a077b06fcc395b24d326071e06d3"
     },
     "one_second_cross_tile": {
       "environment_variable": "TRADUZAI_MATRIX_ONE_SECOND_SOURCE",
       "input_type": "directory",
-      "expected_sha256": "970ee89213bbe065ff2bf11d6ee92bf0f006f2f5e08adc06278a0cd3691f2225"
+      "expected_sha256": "bf8591406a1ed1639d3121178bb85c43383963098aa57b83e1d257e88225b40e"
     },
     "grand_finale_dark_panels": {
       "environment_variable": "TRADUZAI_MATRIX_GRAND_FINALE_SOURCE",
       "input_type": "directory",
-      "expected_sha256": "e9c757213ecd0a4dd53d7cc32ff0334683bf9ccb4e0dd7ab5cff4f465466d7be"
+      "expected_sha256": "fd8ce2fec0e3453f7fae994ac97245ce716bcac2d34ca2e5ce8d1fbf699338af"
     }
   }
 }
