@@ -473,6 +473,69 @@ class FontDetector:
             "value": best_font,
         }
 
+    def shortlist_font_candidates(
+        self,
+        region_rgb: np.ndarray,
+        *,
+        limit: int = 5,
+    ) -> tuple[str, ...]:
+        """Produce a deterministic visual shortlist for rendered-shape matching."""
+
+        if limit <= 0:
+            return ()
+        evidence = self.detect_with_evidence(region_rgb)
+        names = [
+            str(item.get("font_name") or "")
+            for item in evidence.get("top_k", [])
+            if isinstance(item, dict) and str(item.get("font_name") or "")
+        ]
+        if not names:
+            if not self._candidate_fonts:
+                self._candidate_fonts = self._discover_candidate_fonts()
+            names.extend(self._candidate_fonts)
+        return tuple(dict.fromkeys(names))[:limit]
+
+    def match_source_font_shape(
+        self,
+        source_mask: np.ndarray,
+        *,
+        source_text: str,
+        profile: dict[str, object],
+        semantic_role: str,
+        translated_text: str | None = None,
+        source_region_rgb: np.ndarray | None = None,
+    ) -> dict[str, object]:
+        """Refine the detector shortlist against rerendered frozen source text."""
+
+        from typesetter.font_matcher import FontShapeMatcher, load_font_catalog
+
+        catalog = load_font_catalog(
+            self._fonts_dir,
+            self._fonts_dir / "font-map.json",
+        )
+        region = source_region_rgb
+        if region is None:
+            mono = np.where(np.asarray(source_mask) > 0, 0, 255).astype(np.uint8)
+            region = np.dstack((mono, mono, mono))
+        shortlist = self.shortlist_font_candidates(region, limit=max(5, len(catalog)))
+        result = FontShapeMatcher(catalog).match(
+            source_mask,
+            source_text=source_text,
+            translated_text=translated_text,
+            profile=profile,
+            semantic_role=semantic_role,
+            shortlist=shortlist,
+        )
+        return {
+            "abstention_reason": result.abstention_reason,
+            "cache_key": result.cache_key,
+            "confidence": result.confidence,
+            "margin": result.margin,
+            "status": result.status,
+            "top_k": [dict(item) for item in result.top_k],
+            "value": result.value,
+        }
+
     def detect_with_score(
         self,
         region_rgb: np.ndarray,

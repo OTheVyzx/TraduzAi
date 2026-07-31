@@ -91,3 +91,17 @@ def test_fingerprint_builder_averages_multiple_sample_texts_and_scales():
     assert render.call_count == 3
     assert len(detector._fingerprint_samples["ComicNeue-Bold.ttf"]) == 3
     assert np.isclose(np.linalg.norm(detector._fingerprints["ComicNeue-Bold.ttf"]), 1.0)
+
+
+def test_detector_produces_ranked_shortlist_for_rendered_shape_matcher():
+    detector = _loaded_detector()
+    region = np.full((32, 64, 3), 255, dtype=np.uint8)
+
+    with patch.object(
+        detector,
+        "_extract_features",
+        return_value=np.array([1.0, 0.0], dtype=np.float32),
+    ):
+        shortlist = detector.shortlist_font_candidates(region, limit=2)
+
+    assert shortlist == ("Font-A.ttf", "Font-B.ttf")
