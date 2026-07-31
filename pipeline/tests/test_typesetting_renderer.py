@@ -55,6 +55,37 @@ from main import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_owner_renderer_rejects_underfilled_fit_inside_safe_box(self):
+        canvas = np.full((220, 320, 3), 235, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "owner_id": "owner_underfilled",
+            "translated": "OK",
+            "translated_payload": "OK",
+            "render_safe_polygon_page": [[20, 20], [300, 20], [300, 200], [20, 200]],
+            "layout_regions": [],
+            "bbox": [20, 20, 300, 200],
+            "safe_text_box": [20, 20, 300, 200],
+            "layout_safe_bbox": [20, 20, 300, 200],
+            "layout_bbox": [20, 20, 300, 200],
+            "balloon_bbox": [20, 20, 300, 200],
+            "page_width": 320,
+            "page_height": 220,
+            "layout_profile": "white_balloon",
+            "source_font_bounds_px": [12, 12],
+            "container_font_bounds_px": [12, 12],
+            "source_scale_evidence_confidence": 0.0,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "cor": "#111111"},
+            "_owner_render_mode": True,
+        }
+
+        render_text_block(image, block)
+
+        self.assertEqual(block["fit_status"], "below_proportional_legibility")
+        self.assertFalse(block["render_completed"])
+        self.assertEqual(block["route_action"], "review_required")
+        self.assertTrue(np.array_equal(np.asarray(image), canvas))
+
     def test_owner_renderer_applies_functional_contrast_on_dark_region(self):
         canvas = np.full((100, 180, 3), 8, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")

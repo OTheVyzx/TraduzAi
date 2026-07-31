@@ -447,10 +447,11 @@ def test_connected_owner_fails_closed_when_no_common_font_fits_bounds() -> None:
 
     assert block["fit_status"] != "ok"
     assert block["render_completed"] is False
-    assert "fit_below_minimum_legible" in set(block.get("qa_flags") or [])
+    assert block["fit_status"] == "below_proportional_legibility"
+    assert "fit_below_proportional_legibility" in set(block.get("qa_flags") or [])
 
 
-def test_owner_glyph_patch_preserves_below_minimum_fit_status() -> None:
+def test_owner_glyph_patch_preserves_below_proportional_fit_status() -> None:
     payload = (
         "ESTE TEXTO LONGO CABE APENAS MENOR. "
         "OUTRA FRASE LONGA CABE APENAS MENOR."
@@ -487,7 +488,7 @@ def test_owner_glyph_patch_preserves_below_minimum_fit_status() -> None:
 
     assert glyph_patch.glyph_bbox_page is None
     assert glyph_patch.render_completed is False
-    assert glyph_patch.fit_status == "below_minimum_legible"
+    assert glyph_patch.fit_status == "below_proportional_legibility"
 
 
 def test_single_owner_render_ignores_legacy_ocr_anchor_and_centers_in_safe_polygon() -> None:
@@ -514,6 +515,132 @@ def test_single_owner_render_ignores_legacy_ocr_anchor_and_centers_in_safe_polyg
     assert safe_bbox[0] <= render_bbox[0] < render_bbox[2] <= safe_bbox[2]
     assert safe_bbox[1] <= render_bbox[1] < render_bbox[3] <= safe_bbox[3]
     assert render_center == pytest.approx(safe_center, abs=4.0)
+
+
+def test_owner_short_body_grows_beyond_default_24px_to_preserve_source_scale() -> None:
+    safe_bbox = (40, 40, 320, 230)
+    block = {
+        "owner_id": "owner_short_scale",
+        "translated": "NAO!",
+        "translated_payload": "NAO!",
+        "render_safe_polygon_page": [list(point) for point in _polygon_for_bbox(safe_bbox)],
+        "layout_regions": [],
+        "bbox": list(safe_bbox),
+        "safe_text_box": list(safe_bbox),
+        "layout_safe_bbox": list(safe_bbox),
+        "layout_bbox": list(safe_bbox),
+        "balloon_bbox": list(safe_bbox),
+        "page_width": PAGE_WIDTH,
+        "page_height": PAGE_HEIGHT,
+        "layout_profile": "white_balloon",
+        "source_ink_heights_px": [46],
+        "source_x_heights_px": [32.2],
+        "source_scale_evidence_confidence": 0.96,
+        "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#111111"},
+        "_owner_render_mode": True,
+    }
+    canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), (235, 235, 235))
+
+    renderer_mod.render_text_block(canvas, block)
+
+    assert block["render_completed"] is True
+    assert block["fit_status"] == "ok"
+    assert int(block["font_size_final"]) > 24
+    assert block["owner_render_quality"]["status"] == "ok"
+
+
+def test_owner_renderer_does_not_grow_above_source_scale_ceiling() -> None:
+    safe_bbox = (30, 30, 330, 250)
+    block = {
+        "owner_id": "owner_scale_ceiling",
+        "translated": "SIM",
+        "translated_payload": "SIM",
+        "render_safe_polygon_page": [list(point) for point in _polygon_for_bbox(safe_bbox)],
+        "layout_regions": [],
+        "bbox": list(safe_bbox),
+        "safe_text_box": list(safe_bbox),
+        "layout_safe_bbox": list(safe_bbox),
+        "layout_bbox": list(safe_bbox),
+        "balloon_bbox": list(safe_bbox),
+        "page_width": PAGE_WIDTH,
+        "page_height": PAGE_HEIGHT,
+        "layout_profile": "white_balloon",
+        "source_ink_heights_px": [18],
+        "source_x_heights_px": [12.6],
+        "source_scale_evidence_confidence": 0.99,
+        "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#111111"},
+        "_owner_render_mode": True,
+    }
+    canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), (235, 235, 235))
+
+    renderer_mod.render_text_block(canvas, block)
+
+    quality = block["owner_render_quality"]
+    assert block["render_completed"] is True
+    assert quality["status"] == "ok"
+    assert float(quality["source_scale_ratio"]) <= 1.35
+
+
+def test_connected_owner_requires_common_proportional_font() -> None:
+    payload = "PRIMEIRA FRASE COMPLETA. SEGUNDA FRASE COMPLETA."
+    owner_safe_polygon = ((10, 10), (350, 10), (350, 270), (10, 270))
+    regions = [
+        _layout_region("owner_connected", "top", (30, 25, 330, 120), order=0, owner_safe_polygon=owner_safe_polygon),
+        _layout_region("owner_connected", "bottom", (30, 150, 330, 245), order=1, owner_safe_polygon=owner_safe_polygon),
+    ]
+
+    block = _render_connected_owner_block(payload, regions)
+
+    assert block["render_completed"] is True
+    assert len({chunk["font_size"] for chunk in block["visual_chunks"]}) == 1
+    assert all(chunk["render_quality"]["status"] == "ok" for chunk in block["visual_chunks"])
+
+
+def test_impossible_proportional_owner_fit_rolls_back_to_review() -> None:
+    safe_bbox = (20, 20, 150, 42)
+    payload = "ESTE CORPO INTEIRO NAO PODE CABER NESTA REGIAO MINUSCULA"
+    block = {
+        "owner_id": "owner_impossible",
+        "translated": payload,
+        "translated_payload": payload,
+        "render_safe_polygon_page": [list(point) for point in _polygon_for_bbox(safe_bbox)],
+        "layout_regions": [],
+        "bbox": list(safe_bbox),
+        "safe_text_box": list(safe_bbox),
+        "layout_safe_bbox": list(safe_bbox),
+        "layout_bbox": list(safe_bbox),
+        "balloon_bbox": list(safe_bbox),
+        "page_width": PAGE_WIDTH,
+        "page_height": PAGE_HEIGHT,
+        "layout_profile": "white_balloon",
+        "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#111111"},
+        "_owner_render_mode": True,
+    }
+    canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), (235, 235, 235))
+    before = np.asarray(canvas).copy()
+
+    renderer_mod.render_text_block(canvas, block)
+
+    assert block["fit_status"] == "below_proportional_legibility"
+    assert block["render_completed"] is False
+    assert block["route_action"] == "review_required"
+    assert np.array_equal(np.asarray(canvas), before)
+
+
+def test_owner_body_is_never_split_or_truncated_to_fit() -> None:
+    payload = "PRIMEIRA FRASE INTEIRA. SEGUNDA FRASE INTEIRA E SEM TRUNCAMENTO."
+    owner_safe_polygon = ((10, 10), (350, 10), (350, 270), (10, 270))
+    regions = [
+        _layout_region("owner_connected", "top", (20, 20, 340, 125), order=0, owner_safe_polygon=owner_safe_polygon),
+        _layout_region("owner_connected", "bottom", (20, 145, 340, 250), order=1, owner_safe_polygon=owner_safe_polygon),
+    ]
+
+    block = _render_connected_owner_block(payload, regions)
+
+    visual_payload = " ".join(chunk["text"] for chunk in block["visual_chunks"])
+    assert block["translated"] == payload
+    assert block["translated_payload"] == payload
+    assert _normalize_payload(visual_payload) == _normalize_payload(payload)
 
 
 def test_connected_owner_render_ignores_legacy_ocr_anchor_per_region() -> None:

@@ -40,6 +40,11 @@ except ImportError:  # pragma: no cover - supports package imports
     from ..ownership.model import OwnerGlyphPatch, OwnerGraph
 
 try:
+    from typesetter.owner_render_quality import evaluate_owner_render_quality
+except ImportError:  # pragma: no cover - supports package imports
+    from .owner_render_quality import evaluate_owner_render_quality
+
+try:
     from layout.simple_text_geometry import (
         normalize_text_geometry,
         resolve_text_anchor_bbox,
@@ -11729,13 +11734,14 @@ def _plan_owner_text_layout(text_data: dict) -> dict:
             raise ValueError("owner source and container font bounds do not intersect")
         target_size = int(upper)
     else:
-        style_seed = text_data.get("visual_profile") or text_data.get("estilo") or {}
-        try:
-            target_size = int(style_seed.get("tamanho", 24) or 24)
-        except (AttributeError, TypeError, ValueError):
-            target_size = 24
-        target_size = max(_MIN_FONT_SIZE, min(96, target_size))
-        lower, upper = _MIN_FONT_SIZE, target_size
+        page_width, _page_height = _page_dimensions_for_layout(text_data, safe_bbox)
+        lower = max(_MIN_FONT_SIZE, int(math.ceil(max(0, page_width) * 0.012)))
+        container_height = max(1, int(safe_bbox[3]) - int(safe_bbox[1]))
+        container_width = max(1, int(safe_bbox[2]) - int(safe_bbox[0]))
+        # The style's historical 24 px value is only a seed, never a ceiling.
+        # The actual ceiling is derived from verified page/container geometry.
+        upper = min(96, max(lower, container_height - 4, min(container_width, 96)))
+        target_size = int(upper)
 
     estilo = _canonical_render_style(
         text_data.get("visual_profile") or text_data.get("estilo") or {}
@@ -11804,6 +11810,12 @@ def _plan_owner_text_layout(text_data: dict) -> dict:
         "_center_on_balloon_bbox": True,
         "_anchor_center_only_layout": False,
         "_owner_render_mode": True,
+        "source_ink_heights_px": list(text_data.get("source_ink_heights_px") or []),
+        "source_x_heights_px": list(text_data.get("source_x_heights_px") or []),
+        "source_scale_evidence_confidence": float(
+            text_data.get("source_scale_evidence_confidence", 0.0) or 0.0
+        ),
+        "trusted_container": True,
     }
 
 
@@ -17601,6 +17613,181 @@ def _owner_bbox_is_within(
     )
 
 
+def _owner_quality_score(quality: dict) -> tuple[float, float, int]:
+    source_ratio = quality.get("source_scale_ratio")
+    if isinstance(source_ratio, (int, float)) and not isinstance(source_ratio, bool):
+        ratio_distance = abs(float(source_ratio) - 1.0)
+    else:
+        ratio_distance = 0.0
+    occupancy = float(quality.get("safe_height_occupancy", 0.0) or 0.0)
+    return ratio_distance, -occupancy, -int(quality.get("font_size_final", 0) or 0)
+
+
+def _owner_candidate_font_sizes(text_data: dict, plan: dict) -> range:
+    bounds = _owner_font_interval(
+        plan.get("font_size_bounds_px"),
+        label="font_size_bounds_px",
+    )
+    if bounds is None:
+        raise ValueError("owner render plan is missing font_size_bounds_px")
+    lower, upper = bounds
+    minimum = max(lower, _minimum_legible_font_px(text_data, plan))
+    return range(min(96, upper), minimum - 1, -1)
+
+
+def _evaluate_rendered_owner_candidate(
+    *,
+    before_np: np.ndarray,
+    after_image: Image.Image,
+    child: dict,
+    plan: dict,
+    safe_polygon: object,
+) -> dict:
+    after_np = np.asarray(after_image.convert("RGB"), dtype=np.uint8)
+    glyph_core_mask = np.any(after_np != before_np, axis=2).astype(np.uint8)
+    safe_mask = _owner_canvas_polygon_mask(
+        safe_polygon,
+        width=after_image.width,
+        height=after_image.height,
+        label="owner render safe polygon",
+    )
+    quality = evaluate_owner_render_quality(
+        render_bbox=list(child.get("render_bbox") or []),
+        safe_bbox=list(plan.get("safe_text_box") or plan.get("target_bbox") or []),
+        safe_mask=safe_mask,
+        glyph_core_mask=glyph_core_mask,
+        glyph_pixels=int(np.count_nonzero(glyph_core_mask)),
+        font_size_final=int(child.get("font_size_final", 0) or 0),
+        minimum_legible_font_px=int(child.get("minimum_legible_font_px", 0) or 0),
+        source_ink_heights_px=tuple(child.get("source_ink_heights_px") or ()),
+        source_x_heights_px=tuple(child.get("source_x_heights_px") or ()),
+        source_evidence_confidence=float(
+            child.get("source_scale_evidence_confidence", 0.0) or 0.0
+        ),
+        page_width=after_image.width,
+        page_height=after_image.height,
+        translated_text=str(child.get("translated_payload") or child.get("translated") or ""),
+        layout_profile=str(child.get("layout_profile") or plan.get("layout_profile") or ""),
+        trusted_container=bool(plan.get("trusted_container", True)),
+    ).to_dict()
+    child["owner_render_quality"] = quality
+    metrics = child.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["owner_render_quality"] = copy.deepcopy(quality)
+    return quality
+
+
+def _mark_owner_proportional_review(
+    text_data: dict,
+    *,
+    attempts: list[dict],
+    minimum_font_size: int,
+    diagnostic_quality: dict | None = None,
+) -> None:
+    text_data.pop("render_bbox", None)
+    text_data["fit_status"] = "below_proportional_legibility"
+    text_data["render_completed"] = False
+    text_data["font_size_final"] = 0
+    text_data["minimum_legible_font_px"] = int(minimum_font_size)
+    text_data["route_action"] = "review_required"
+    text_data["route_reason"] = "owner_below_proportional_legibility"
+    _merge_qa_flags(
+        text_data,
+        ["fit_below_proportional_legibility", "owner_render_review_required"],
+    )
+    text_data["fit_attempts"] = attempts[-8:]
+    if diagnostic_quality is not None:
+        text_data["owner_render_quality"] = copy.deepcopy(diagnostic_quality)
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["owner_render_quality"] = copy.deepcopy(diagnostic_quality)
+
+
+def _render_single_owner_proportionally(
+    img: Image.Image,
+    text_data: dict,
+    *,
+    pre_render_np: np.ndarray | None,
+) -> None:
+    owner_plan = plan_text_layout(text_data)
+    candidate_sizes = _owner_candidate_font_sizes(text_data, owner_plan)
+    before_np = np.asarray(img.convert("RGB"), dtype=np.uint8).copy()
+    accepted: list[tuple[tuple[float, float, int], Image.Image, dict]] = []
+    attempts: list[dict] = []
+    diagnostic_quality: dict | None = None
+
+    for candidate_size in candidate_sizes:
+        child = copy.deepcopy(text_data)
+        child["source_font_bounds_px"] = [candidate_size, candidate_size]
+        child["container_font_bounds_px"] = [candidate_size, candidate_size]
+        child_plan = plan_text_layout(child)
+        if not _fits_in_box(
+            str(child.get("translated_payload") or ""),
+            str(child_plan.get("font_name") or ""),
+            candidate_size,
+            int(child_plan.get("max_width", 0) or 0),
+            int(child_plan.get("max_height", 0) or 0),
+            float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+        ):
+            attempts.append({"font_px": candidate_size, "status": "overflow", "reason": "nominal_overflow"})
+            continue
+        trial_image = img.copy()
+        _render_single_text_block(
+            trial_image,
+            child,
+            child_plan,
+            pre_render_np=pre_render_np,
+        )
+        _finalize_render_completion_contract(child)
+        quality = _evaluate_rendered_owner_candidate(
+            before_np=before_np,
+            after_image=trial_image,
+            child=child,
+            plan=child_plan,
+            safe_polygon=text_data.get("render_safe_polygon_page"),
+        )
+        diagnostic_quality = quality
+        accepted_ok = bool(
+            child.get("render_completed")
+            and quality.get("status") == "ok"
+            and _owner_bbox_is_within(child.get("render_bbox"), child_plan.get("safe_text_box"))
+        )
+        attempts.append(
+            {
+                "font_px": candidate_size,
+                "status": "ok" if accepted_ok else "rejected",
+                "reason": "ok" if accepted_ok else str(quality.get("status") or "invalid"),
+            }
+        )
+        if accepted_ok:
+            accepted.append((_owner_quality_score(quality), trial_image, child))
+
+    if not accepted:
+        _mark_owner_proportional_review(
+            text_data,
+            attempts=attempts,
+            minimum_font_size=_minimum_legible_font_px(text_data, owner_plan),
+            diagnostic_quality=diagnostic_quality,
+        )
+        return
+
+    _score, selected_image, selected_child = min(accepted, key=lambda item: item[0])
+    img.paste(selected_image)
+    text_data.update(selected_child)
+    text_data["fit_attempts"] = attempts[-8:]
+    text_data["fit_status"] = "ok"
+    text_data["render_completed"] = True
+    text_data["qa_flags"] = [
+        flag
+        for flag in list(text_data.get("qa_flags") or [])
+        if str(flag) not in {
+            "fit_below_minimum_legible",
+            "fit_below_proportional_legibility",
+            "owner_render_review_required",
+        }
+    ]
+
+
 def _render_owner_text_block(
     img: Image.Image,
     text_data: dict,
@@ -17634,8 +17821,11 @@ def _render_owner_text_block(
         )
     )
     if len(regions) <= 1:
-        plan = plan_text_layout(text_data)
-        _render_single_text_block(img, text_data, plan, pre_render_np=pre_render_np)
+        _render_single_owner_proportionally(
+            img,
+            text_data,
+            pre_render_np=pre_render_np,
+        )
         return
 
     areas: list[float] = []
@@ -17667,6 +17857,7 @@ def _render_owner_text_block(
     selected_image: Image.Image | None = None
     selected_children: list[dict] | None = None
     common_font_size = 0
+    selected_joint_score: tuple[float, float, int] | None = None
     joint_fit_attempts: list[dict] = []
     child_safe_boxes = [
         [int(value) for value in bbox]
@@ -17744,10 +17935,18 @@ def _render_owner_text_block(
                 height=img.height,
                 label=f"owner layout region {region.get('layout_region_id') or index}",
             )
+            quality = _evaluate_rendered_owner_candidate(
+                before_np=before_child,
+                after_image=trial_image,
+                child=child,
+                plan=child_plan,
+                safe_polygon=polygon,
+            )
             child_is_valid = bool(
                 child.get("render_completed")
                 and str(child.get("fit_status") or "").strip().lower() == "ok"
                 and int(child.get("font_size_final", 0) or 0) == candidate_size
+                and quality.get("status") == "ok"
                 and np.any(changed_child)
                 and not np.any(changed_child & (region_mask == 0))
                 and _owner_bbox_is_within(child.get("render_bbox"), bbox)
@@ -17766,21 +17965,24 @@ def _render_owner_text_block(
             }
         )
         if candidate_valid:
-            selected_image = trial_image
-            selected_children = trial_children
-            common_font_size = candidate_size
-            break
+            joint_score = max(
+                (_owner_quality_score(child["owner_render_quality"]) for child in trial_children),
+                default=(999.0, 0.0, 0),
+            )
+            if selected_joint_score is None or joint_score < selected_joint_score:
+                selected_joint_score = joint_score
+                selected_image = trial_image
+                selected_children = trial_children
+                common_font_size = candidate_size
 
     if selected_image is None or selected_children is None:
-        text_data.pop("render_bbox", None)
-        text_data["fit_status"] = "below_minimum_legible"
-        text_data["render_completed"] = False
-        text_data["font_size_final"] = 0
-        text_data["minimum_legible_font_px"] = int(minimum_font_size)
-        _merge_qa_flags(text_data, ["fit_below_minimum_legible"])
-        text_data["fit_attempts"] = joint_fit_attempts[-4:]
+        _mark_owner_proportional_review(
+            text_data,
+            attempts=joint_fit_attempts,
+            minimum_font_size=minimum_font_size,
+        )
         text_data["_render_debug"] = {
-            "joint_font_fit_status": "below_minimum_legible",
+            "joint_font_fit_status": "below_proportional_legibility",
             "joint_font_fit_attempts": joint_fit_attempts,
             "child_safe_text_boxes": child_safe_boxes,
         }
@@ -17830,6 +18032,7 @@ def _render_owner_text_block(
             "visual_chunk_count": len(chunks),
             "text": chunk,
             "font_size": int(child.get("font_size_final", common_font_size) or common_font_size),
+            "render_quality": copy.deepcopy(child.get("owner_render_quality") or {}),
         }
         for index, (region, chunk, child) in enumerate(
             zip(regions, chunks, children, strict=True)
