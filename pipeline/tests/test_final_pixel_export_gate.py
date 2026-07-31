@@ -16,6 +16,9 @@ CONTRACTS = {
     "route_state_contract": "PASS",
     "pixel_ownership_contract": "PASS",
     "final_language_contract": "PASS",
+    "layout_legibility_contract": "PASS",
+    "residual_cleanup_contract": "PASS",
+    "protected_art_contract": "PASS",
     "qa_integrity_contract": "PASS",
 }
 
@@ -198,3 +201,178 @@ def test_render_failure_propagates_instead_of_counting_success(tmp_path, monkeyp
         assert "render failed" in str(exc)
     else:
         raise AssertionError("render failure was swallowed")
+
+
+def test_export_gate_blocks_detected_blocks_without_ocr(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    report = project["qa"]["final_pixel_reports"][0]
+    report.update({
+        "detected_block_count": 2,
+        "ocr_record_count": 0,
+        "coverage_complete": False,
+        "coverage_failures": ["detector_blocks_without_usable_ocr"],
+    })
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert "detector_blocks_without_usable_ocr" in _reasons(gate)
+
+
+def test_export_gate_blocks_missing_owner_render_quality_contract(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    project["paginas"][0]["text_layers"] = [{
+        "id": "owner_a",
+        "owner_id": "owner_a",
+        "render_completed": True,
+        "fit_status": "ok",
+        "render_bbox": [10, 10, 30, 20],
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert "missing_owner_render_quality_contract" in _reasons(gate)
+
+
+def test_export_gate_blocks_under_source_scale_owner(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    project["paginas"][0]["text_layers"] = [{
+        "id": "owner_a",
+        "owner_id": "owner_a",
+        "render_completed": True,
+        "fit_status": "ok",
+        "render_bbox": [10, 10, 30, 20],
+        "owner_render_quality": {
+            "schema_version": 1,
+            "status": "under_source_scale",
+            "source_scale_ratio": 0.60,
+            "outside_safe_pixels": 0,
+            "rendered_line_core_heights_px": [8],
+        },
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert "under_source_scale" in _reasons(gate)
+
+
+def _ok_quality():
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "source_scale_ratio": 1.0,
+        "outside_safe_pixels": 0,
+        "rendered_line_core_heights_px": [18],
+    }
+
+
+def test_export_gate_blocks_source_payload_incomplete(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    report = project["qa"]["final_pixel_reports"][0]
+    report["contracts"]["source_coverage_contract"] = "BLOCK"
+    report["issues"] = [{
+        "issue_id": "source-incomplete",
+        "page_id": "page_001",
+        "owner_id": "owner_a",
+        "component_ids": ["component_a"],
+        "severity": "critical",
+        "reason": "source_payload_incomplete",
+        "offenders": ["200 MILLION GOLD"],
+        "contract": "source_coverage_contract",
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert "source_payload_incomplete" in _reasons(gate)
+
+
+def test_export_gate_blocks_unverified_owner_residual(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    project["paginas"][0]["text_layers"] = [{
+        "owner_id": "owner_a",
+        "component_ids": ["component_a"],
+        "route_action": "translate_inpaint_render",
+        "render_completed": True,
+        "fit_status": "ok",
+        "owner_render_quality": _ok_quality(),
+        "residual_cleanup_contract": {"residual_verified": False},
+        "protected_art_contract": {
+            "protected_art_changed_pixels": 0,
+            "action_protected_overlap_pixels": 0,
+        },
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert "unverified_owner_residual" in _reasons(gate)
+
+
+def test_export_gate_blocks_protected_art_contract_violation(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    project["paginas"][0]["text_layers"] = [{
+        "owner_id": "owner_a",
+        "component_ids": ["component_a"],
+        "route_action": "translate_inpaint_render",
+        "render_completed": True,
+        "fit_status": "ok",
+        "owner_render_quality": _ok_quality(),
+        "residual_cleanup_contract": {
+            "residual_verified": True,
+            "residual_score": 0.0,
+            "residual_threshold": 0.01,
+        },
+        "protected_art_contract": {
+            "protected_art_changed_pixels": 4,
+            "action_protected_overlap_pixels": 0,
+        },
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert "protected_art_contract_violation" in _reasons(gate)
+
+
+def test_export_gate_blocks_core_pixels_outside_safe_polygon(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    quality = _ok_quality()
+    quality["outside_safe_pixels"] = 7
+    project["paginas"][0]["text_layers"] = [{
+        "owner_id": "owner_a",
+        "render_completed": True,
+        "fit_status": "ok",
+        "owner_render_quality": quality,
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert "core_pixels_outside_safe_polygon" in _reasons(gate)

@@ -2102,6 +2102,11 @@ class MainEmitTests(unittest.TestCase):
                                     "owner_id": "owner_a",
                                     "_owner_mode": True,
                                     "state": "rendered",
+                                    "owner_render_quality": {
+                                        "status": "ok",
+                                        "outside_safe_pixels": 0,
+                                        "rendered_line_core_heights_px": [18],
+                                    },
                                 }
                             ],
                         }
@@ -2111,7 +2116,10 @@ class MainEmitTests(unittest.TestCase):
             )
 
             self.assertEqual(audit["source"], "verified_page_owner_composition")
-            self.assertEqual(audit["row_count"], 0)
+            self.assertEqual(audit["row_count"], 1)
+            self.assertEqual(audit["pass_count"], 1)
+            self.assertEqual(audit["rows"][0]["owner_id"], "owner_a")
+            self.assertEqual(audit["rows"][0]["metrics"]["coordinate_space"], "page")
             self.assertEqual(audit["fail_count"], 0)
 
     def test_persist_real_bubble_mask_layer_rejects_bbox_fallback_source(self) -> None:

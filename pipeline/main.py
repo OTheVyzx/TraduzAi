@@ -8164,6 +8164,62 @@ def _qa_translated_final_crops_against_layers(recorder, project_data: dict, work
             dark_group_sizes[group_key] = dark_group_sizes.get(group_key, 0) + 1
 
     rows: list[dict] = []
+    if verified_page_owner_composition:
+        for layer in project_layers:
+            owner_id = str(layer.get("owner_id") or "").strip()
+            if not owner_id:
+                continue
+            quality = layer.get("owner_render_quality")
+            if not isinstance(quality, dict):
+                layout_contract = layer.get("render_layout_contract")
+                quality = (
+                    layout_contract.get("owner_render_quality")
+                    if isinstance(layout_contract, dict)
+                    else None
+                )
+            residual = layer.get("residual_cleanup_contract")
+            protected = layer.get("protected_art_contract")
+            owner_flags: list[str] = []
+            if not isinstance(quality, dict):
+                owner_flags.append("missing_owner_render_quality_contract")
+            else:
+                status = str(quality.get("status") or "").strip()
+                if status != "ok":
+                    owner_flags.append(status or "invalid_owner_render_quality_contract")
+                if int(quality.get("outside_safe_pixels", 0) or 0) > 0:
+                    owner_flags.append("core_pixels_outside_safe_polygon")
+                if not quality.get("rendered_line_core_heights_px"):
+                    owner_flags.append("missing_rendered_line_core_metrics")
+            if str(layer.get("route_action") or "") in {
+                "translate_inpaint_render",
+                "translate_sfx_inpaint_render",
+            }:
+                if not isinstance(residual, dict) or residual.get("residual_verified") is not True:
+                    owner_flags.append("unverified_owner_residual")
+                if not isinstance(protected, dict):
+                    owner_flags.append("missing_protected_art_contract")
+                elif (
+                    int(protected.get("protected_art_changed_pixels", 0) or 0) > 0
+                    or int(protected.get("action_protected_overlap_pixels", 0) or 0) > 0
+                ):
+                    owner_flags.append("protected_art_contract_violation")
+            rows.append(
+                {
+                    "band_id": str(layer.get("band_id") or ""),
+                    "page_id": str(layer.get("page_id") or ""),
+                    "owner_id": owner_id,
+                    "translated_output_page": str(layer.get("translated_output_page") or ""),
+                    "trace_ids": [str(layer.get("trace_id") or f"owner:{owner_id}:page_space")],
+                    "status": "fail" if owner_flags else "pass",
+                    "flags": list(dict.fromkeys(owner_flags)),
+                    "metrics": {
+                        "coordinate_space": "page",
+                        "owner_render_quality": quality,
+                        "residual_cleanup_contract": residual,
+                        "protected_art_contract": protected,
+                    },
+                }
+            )
     for crop_row in crop_rows:
         band_id = str(crop_row.get("band_id") or "").strip()
         translated_name = str(crop_row.get("translated_output_page") or "").strip()
@@ -8514,6 +8570,35 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
     except Exception as exc:
         recorder.event("report", "debug_report_failed", {"error": str(exc)})
     return consistency
+
+
+def _synchronize_qa_summary_with_export_gate(project_data: dict) -> dict:
+    """Make persisted summary counts describe the same issues as the export gate."""
+    qa = project_data.setdefault("qa", {})
+    if not isinstance(qa, dict):
+        qa = {}
+        project_data["qa"] = qa
+    summary = qa.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        qa["summary"] = summary
+    gate = qa.get("export_gate")
+    if not isinstance(gate, dict):
+        return summary
+    critical_flags = int(gate.get("critical_flag_count", 0) or 0)
+    critical_issues = int(gate.get("critical_issue_count", 0) or 0)
+    blocking_issues = int(gate.get("blocking_issue_count", 0) or 0)
+    review_issues = int(gate.get("review_issue_count", 0) or 0)
+    summary.update(
+        {
+            "critical_count": critical_flags,
+            "critical_flag_count": critical_flags,
+            "critical_issue_count": critical_issues,
+            "blocking_issue_count": blocking_issues,
+            "highest_severity": "critical" if critical_flags else ("high" if review_issues else "none"),
+        }
+    )
+    return summary
 
 
 def _build_strip_inpainter_for_config(config: dict, real_inpaint_band_image):
@@ -9840,6 +9925,7 @@ def _run_pipeline(config_path: str):
                 override=bool(config.get("allow_p0_export_override")),
             )
             project_data["qa"]["export_gate"] = export_gate
+            _synchronize_qa_summary_with_export_gate(project_data)
             project_data["needs_review"] = export_gate["status"] == "BLOCK"
             project_data["output_review_state"] = _output_review_state_for_export_gate(export_gate)
             if debug_recorder:
@@ -14118,6 +14204,7 @@ def _refresh_project_qa_summary(project: dict) -> None:
         if str(key).startswith("final_") or str(key).endswith("_audit")
     }
     qa["summary"] = {**summarize_flags(regions), **preserved_audits}
+    _synchronize_qa_summary_with_export_gate(project)
 
 
 def _save_project_json(project_json_path: Path, project: dict) -> None:

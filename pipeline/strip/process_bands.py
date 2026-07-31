@@ -10557,6 +10557,30 @@ def execute_owner_page_graph(
                     "render_completed": bool(glyph_patch.render_completed),
                     "fit_status": str(glyph_patch.fit_status),
                     "owner_render_quality": glyph_patch.render_quality_contract.to_dict(),
+                    "residual_cleanup_contract": {
+                        "residual_verified": bool(mutation.residual_verified),
+                        "residual_score": float(mutation.residual_score),
+                        "residual_threshold": float(mutation.residual_threshold),
+                        "residual_method": str(mutation.residual_method),
+                        "residual_flags": list(mutation.residual_flags),
+                        "residual_evidence_sha256": str(
+                            mutation.residual_evidence_sha256 or ""
+                        ),
+                    },
+                    "protected_art_contract": {
+                        "protected_art_changed_pixels": int(
+                            mutation.protected_art_changed_pixels
+                        ),
+                        "action_protected_overlap_pixels": int(
+                            np.count_nonzero(
+                                (np.asarray(mutation.action_mask) > 0)
+                                & (np.asarray(mutation.protected_art_mask) > 0)
+                            )
+                        ),
+                        "protected_art_mask_sha256": str(
+                            mutation.protected_art_mask_sha256 or ""
+                        ),
+                    },
                     "render_bbox": render_bbox,
                     "_debug_render_bbox": copy.deepcopy(render_bbox),
                     "safe_text_box": safe_bbox,

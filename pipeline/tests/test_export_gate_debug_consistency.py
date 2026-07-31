@@ -1,10 +1,53 @@
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qa.export_gate import evaluate_export_gate
 from qa.translation_qa import severity_for_flag, summarize_flags
+
+
+def test_gate_summary_and_debug_counts_match_new_contract_issues(tmp_path):
+    from debug_tools import DebugRecorder
+    import main
+
+    project = {
+        "owner_graph_status": "verified",
+        "paginas": [
+            {
+                "numero": 1,
+                "page_id": "page_001",
+                "text_layers": [
+                    {
+                        "id": "owner_a",
+                        "owner_id": "owner_a",
+                        "render_completed": True,
+                        "route_action": "preserve",
+                    }
+                ],
+            }
+        ],
+        "qa": {"summary": {}, "final_pixel_reports": []},
+    }
+    gate = evaluate_export_gate(project)
+    project["qa"]["export_gate"] = gate
+    main._synchronize_qa_summary_with_export_gate(project)
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-contract-counts")
+    consistency = main._write_debug_export_gate_artifacts(recorder, project)
+    saved = json.loads(
+        (tmp_path / "debug" / "e2e" / "11_qa_export_gate" / "qa_export_gate_consistency.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    summary = project["qa"]["summary"]
+    assert summary["critical_issue_count"] == gate["critical_issue_count"]
+    assert summary["critical_flag_count"] == gate["critical_flag_count"]
+    assert summary["blocking_issue_count"] == gate["blocking_issue_count"]
+    assert consistency["consistent"] is True
+    assert saved["consistent"] is True
 
 
 def test_qa_summary_and_export_gate_count_the_same_critical_flags():
@@ -63,6 +106,9 @@ def test_final_pixel_gate_counts_each_report_issue_once(tmp_path):
                         "route_state_contract": "PASS",
                         "pixel_ownership_contract": "BLOCK",
                         "final_language_contract": "PASS",
+                        "layout_legibility_contract": "PASS",
+                        "residual_cleanup_contract": "PASS",
+                        "protected_art_contract": "PASS",
                         "qa_integrity_contract": "PASS",
                     },
                     "issues": [

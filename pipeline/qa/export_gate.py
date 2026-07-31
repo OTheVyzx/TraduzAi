@@ -95,6 +95,9 @@ FINAL_PIXEL_CONTRACTS = {
     "route_state_contract",
     "pixel_ownership_contract",
     "final_language_contract",
+    "layout_legibility_contract",
+    "residual_cleanup_contract",
+    "protected_art_contract",
     "qa_integrity_contract",
 }
 
@@ -110,6 +113,17 @@ def _final_pixel_blocker(
     issue_id: str | None = None,
     contract: str | None = None,
 ) -> dict[str, Any]:
+    stable_owner = owner_id or "page"
+    stable_trace = f"{page_id}:{stable_owner}:{reason}"
+    artifact_links = [
+        "04_text_normalization_router/page_owner_graph.json",
+        "04_text_normalization_router/source_evidence_ledger.jsonl",
+        "06_mask_segmentation/owner_masks",
+        "08_inpaint/owner_cleanup_contracts.jsonl",
+        "09_typeset/render_plan_final.jsonl",
+        "11_qa_export_gate/final_pixel_ocr.jsonl",
+        "11_qa_export_gate/persisted_artifact_hashes.jsonl",
+    ]
     issue: dict[str, Any] = {
         "page": page_number,
         "page_id": page_id,
@@ -121,8 +135,10 @@ def _final_pixel_blocker(
         "reason": reason,
         "flags": [reason],
         "component_ids": list(component_ids or []),
-        "offenders": list(offenders or []),
-        "artifact_links": ["11_qa_export_gate/final_pixel_ocr.jsonl"],
+        "offenders": list(offenders or [reason]),
+        "trace_id": stable_trace,
+        "artifact_links": artifact_links,
+        "linked_artifacts": artifact_links,
     }
     if owner_id:
         issue["owner_id"] = owner_id
@@ -188,6 +204,26 @@ def _collect_final_pixel_report_issues(project: dict[str, Any]) -> list[dict[str
                     reason="final_pixel_observation_incomplete",
                 )
             )
+            continue
+        if report.get("coverage_complete") is False:
+            failures = [
+                str(value)
+                for value in report.get("coverage_failures") or []
+                if str(value).strip()
+            ] or ["final_pixel_observation_incomplete"]
+            for failure in failures:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason=failure,
+                        offenders=[
+                            f"detected_blocks:{int(report.get('detected_block_count', 0) or 0)}",
+                            f"ocr_records:{int(report.get('ocr_record_count', 0) or 0)}",
+                        ],
+                        contract="qa_integrity_contract",
+                    )
+                )
             continue
 
         artifact_path = Path(str(report.get("artifact_path") or ""))
@@ -274,6 +310,109 @@ def _collect_final_pixel_report_issues(project: dict[str, Any]) -> list[dict[str
                 reason="final_pixel_report_unexpected_page",
             )
         )
+    return issues
+
+
+def _collect_owner_functional_contract_issues(
+    project: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if str(project.get("owner_graph_status") or "").strip().lower() != "verified":
+        return []
+    issues: list[dict[str, Any]] = []
+    for page_index, page in enumerate(project.get("paginas") or [], start=1):
+        if not isinstance(page, dict):
+            continue
+        page_number = int(page.get("numero") or page_index)
+        page_id = str(page.get("page_id") or f"page_{page_number:03d}")
+        for layer in page.get("text_layers") or page.get("textos") or []:
+            if not isinstance(layer, dict):
+                continue
+            owner_id = str(layer.get("owner_id") or "").strip()
+            if not owner_id or layer.get("render_completed") is not True:
+                continue
+            component_ids = [str(value) for value in layer.get("component_ids") or []]
+
+            def add(reason: str, contract: str, offenders: list[str] | None = None) -> None:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason=reason,
+                        owner_id=owner_id,
+                        component_ids=component_ids,
+                        offenders=offenders or [],
+                        contract=contract,
+                    )
+                )
+
+            quality = layer.get("owner_render_quality")
+            if not isinstance(quality, dict):
+                render_contract = layer.get("render_layout_contract")
+                quality = (
+                    render_contract.get("owner_render_quality")
+                    if isinstance(render_contract, dict)
+                    else None
+                )
+            if not isinstance(quality, dict):
+                add(
+                    "missing_owner_render_quality_contract",
+                    "layout_legibility_contract",
+                )
+            else:
+                status = str(quality.get("status") or "").strip()
+                if status != "ok":
+                    add(status or "invalid_owner_render_quality_contract", "layout_legibility_contract")
+                if int(quality.get("outside_safe_pixels", 0) or 0) > 0:
+                    add(
+                        "core_pixels_outside_safe_polygon",
+                        "layout_legibility_contract",
+                        [f"outside_safe_pixels:{quality.get('outside_safe_pixels')}"],
+                    )
+                if not quality.get("rendered_line_core_heights_px"):
+                    add("missing_rendered_line_core_metrics", "layout_legibility_contract")
+                try:
+                    source_scale_ratio = float(quality.get("source_scale_ratio"))
+                except (TypeError, ValueError):
+                    source_scale_ratio = None
+                if (
+                    source_scale_ratio is not None
+                    and source_scale_ratio < 0.75
+                    and status != "under_source_scale"
+                ):
+                    add("under_source_scale", "layout_legibility_contract")
+                try:
+                    x_height_ratio = float(quality.get("x_height_ratio"))
+                except (TypeError, ValueError):
+                    x_height_ratio = None
+                if x_height_ratio is not None and x_height_ratio < 0.75:
+                    add("under_source_x_height", "layout_legibility_contract")
+            if str(layer.get("fit_status") or "") == "below_proportional_legibility":
+                add("below_proportional_legibility", "layout_legibility_contract")
+
+            if str(layer.get("route_action") or "") in {
+                "translate_inpaint_render",
+                "translate_sfx_inpaint_render",
+            }:
+                residual = layer.get("residual_cleanup_contract")
+                if not isinstance(residual, dict) or residual.get("residual_verified") is not True:
+                    add("unverified_owner_residual", "residual_cleanup_contract")
+                else:
+                    try:
+                        score = float(residual.get("residual_score"))
+                        threshold = float(residual.get("residual_threshold"))
+                    except (TypeError, ValueError):
+                        add("invalid_owner_residual_contract", "residual_cleanup_contract")
+                    else:
+                        if score > threshold:
+                            add("owner_residual_above_threshold", "residual_cleanup_contract")
+                protected = layer.get("protected_art_contract")
+                if not isinstance(protected, dict):
+                    add("missing_protected_art_contract", "protected_art_contract")
+                elif (
+                    int(protected.get("protected_art_changed_pixels", 0) or 0) > 0
+                    or int(protected.get("action_protected_overlap_pixels", 0) or 0) > 0
+                ):
+                    add("protected_art_contract_violation", "protected_art_contract")
     return issues
 
 
@@ -1448,4 +1587,5 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                 }
             )
     issues.extend(_collect_final_pixel_report_issues(project))
+    issues.extend(_collect_owner_functional_contract_issues(project))
     return issues

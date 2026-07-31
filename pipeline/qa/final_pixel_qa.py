@@ -22,6 +22,9 @@ _CONTRACT_NAMES = (
     "route_state_contract",
     "pixel_ownership_contract",
     "final_language_contract",
+    "layout_legibility_contract",
+    "residual_cleanup_contract",
+    "protected_art_contract",
     "qa_integrity_contract",
 )
 _RENDER_ROUTES = frozenset(
