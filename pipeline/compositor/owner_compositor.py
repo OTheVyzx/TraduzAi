@@ -783,6 +783,17 @@ def compose_page(
         glyph_owner_map[glyph.changed] = glyph.owner_id
         glyph_pixels += int(np.count_nonzero(glyph.changed))
 
+    cleanup_writes_by_owner = {
+        mutation.owner_id: 1 for mutation in unique_mutations
+    }
+    glyph_writes_by_owner = {
+        glyph.owner_id: 1 for glyph in unique_glyphs
+    }
+    if any(count != 1 for count in cleanup_writes_by_owner.values()):
+        raise OwnerCompositionError("one owner produced multiple cleanup writes")
+    if any(count != 1 for count in glyph_writes_by_owner.values()):
+        raise OwnerCompositionError("one owner produced multiple glyph writes")
+
     final_changed = np.any(canvas != original, axis=2)
     authorized = np.zeros(page_shape, dtype=bool)
     for mutation in unique_mutations:
@@ -804,6 +815,14 @@ def compose_page(
             "glyph_pixels": glyph_pixels,
             "final_changed_pixels": int(np.count_nonzero(final_changed)),
             "owner_count": len(set(owner_ids)),
+            **{
+                f"cleanup_write:{owner_id}": count
+                for owner_id, count in cleanup_writes_by_owner.items()
+            },
+            **{
+                f"glyph_write:{owner_id}": count
+                for owner_id, count in glyph_writes_by_owner.items()
+            },
         },
         sha256=_array_sha256(canvas),
         page_id=page_id,

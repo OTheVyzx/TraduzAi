@@ -36,7 +36,7 @@ def _mutation(
     bbox: tuple[int, int, int, int],
     color: tuple[int, int, int],
 ):
-    from ownership.model import OwnerMutation
+    from ownership.model import OwnerMutation, owner_residual_evidence_sha256
 
     x1, y1, x2, y2 = bbox
     action = np.zeros(original.shape[:2], dtype=np.uint8)
@@ -45,6 +45,24 @@ def _mutation(
     result[action > 0] = color
     changed = np.where(np.any(result != original, axis=2), 255, 0).astype(np.uint8)
     protected = np.zeros(original.shape[:2], dtype=np.uint8)
+    before_sha256 = _array_sha256(original)
+    after_sha256 = _array_sha256(result)
+    action_sha256 = _array_sha256(action)
+    protected_sha256 = _array_sha256(protected)
+    component_sha256 = sha256(owner_id.encode("utf-8")).hexdigest()
+    residual_evidence_sha256 = owner_residual_evidence_sha256(
+        owner_id=owner_id,
+        page_id=page_id,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_sha256,
+        protected_art_mask_sha256=protected_sha256,
+        component_geometry_sha256=component_sha256,
+        residual_score=0.0,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_flags=(),
+    )
     return OwnerMutation(
         owner_id=owner_id,
         page_id=page_id,
@@ -59,13 +77,20 @@ def _mutation(
         changed_pixels=int(np.count_nonzero(changed)),
         changed_outside_owner_pixels=0,
         protected_art_changed_pixels=0,
-        before_sha256=_array_sha256(original),
-        after_sha256=_array_sha256(result),
-        action_mask_sha256=_array_sha256(action),
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_sha256,
         changed_mask_sha256=_array_sha256(changed),
         engine_crop_bbox_page=bbox,
         owner_bbox_page=bbox,
-        component_geometry_sha256=sha256(owner_id.encode("utf-8")).hexdigest(),
+        component_geometry_sha256=component_sha256,
+        protected_art_mask_sha256=protected_sha256,
+        residual_score=0.0,
+        residual_verified=True,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_evidence_sha256=residual_evidence_sha256,
+        component_geometry_verified=True,
         execution_tile_id=f"tile-{owner_id}",
     )
 
@@ -412,3 +437,104 @@ def test_production_composition_succeeds_without_debug_directory(tmp_path, monke
 
     assert result.output_pages[0].image.shape == original.shape
     assert not (tmp_path / "does-not-exist").exists()
+
+
+def test_cross_band_gradient_owner_inpaints_once_in_page_space():
+    from strip.process_bands import apply_atomic_owner_execution
+    from strip.run import _compose_owner_output_pages
+    from strip.types import Band, VerticalStrip
+
+    yy, xx = np.indices((80, 100))
+    original = np.stack(
+        (
+            120 + (xx // 3),
+            90 + (yy // 2),
+            70 + ((xx + yy) // 5),
+        ),
+        axis=2,
+    ).astype(np.uint8)
+    mutation = _mutation(
+        original,
+        owner_id="owner-cross-band",
+        bbox=(18, 24, 72, 58),
+        color=(112, 103, 91),
+    )
+    commit = apply_atomic_owner_execution(
+        original,
+        mutation,
+        _glyph_patch(mutation, bbox=(30, 36, 58, 44)),
+    )
+    assert commit.committed is True
+    bands = [
+        Band(y_top=0, y_bottom=48, original_slice=original[:48].copy()),
+        Band(y_top=32, y_bottom=80, original_slice=original[32:].copy()),
+    ]
+    for band in bands:
+        band.owner_execution_commits = [commit]
+    strip = VerticalStrip(
+        image=original.copy(),
+        width=100,
+        height=80,
+        source_page_breaks=[0, 80],
+        page_x_offsets=[0],
+        source_page_widths=[100],
+    )
+
+    result = _compose_owner_output_pages(
+        original_strip_image=original,
+        strip=strip,
+        bands=bands,
+        balloons=[],
+        target_count=1,
+    )
+
+    composition = result.compositions["page_001"]
+    assert composition.write_counts["cleanup_write:owner-cross-band"] == 1
+    assert composition.write_counts["glyph_write:owner-cross-band"] == 1
+    np.testing.assert_array_equal(result.output_pages[0].image, commit.result_rgb)
+
+
+def test_projection_never_estimates_independent_background_color():
+    from strip.process_bands import apply_atomic_owner_execution
+    from strip.run import _compose_owner_output_pages
+    from strip.types import Band, VerticalStrip
+
+    yy, xx = np.indices((60, 84))
+    original = np.stack((80 + xx, 100 + yy, 60 + ((xx + yy) // 2)), axis=2).astype(
+        np.uint8
+    )
+    mutation = _mutation(
+        original,
+        owner_id="owner-projection-pure",
+        bbox=(20, 18, 64, 46),
+        color=(121, 117, 106),
+    )
+    commit = apply_atomic_owner_execution(
+        original,
+        mutation,
+        _glyph_patch(mutation, bbox=(29, 27, 53, 35)),
+    )
+    bands = [
+        Band(y_top=0, y_bottom=38, original_slice=original[:38].copy()),
+        Band(y_top=22, y_bottom=60, original_slice=original[22:].copy()),
+    ]
+    bands[0].owner_execution_commits = [commit]
+    bands[1].rendered_slice = np.full_like(original[22:], (1, 240, 3))
+    strip = VerticalStrip(
+        image=original.copy(),
+        width=84,
+        height=60,
+        source_page_breaks=[0, 60],
+        page_x_offsets=[0],
+        source_page_widths=[84],
+    )
+
+    result = _compose_owner_output_pages(
+        original_strip_image=original,
+        strip=strip,
+        bands=bands,
+        balloons=[],
+        target_count=1,
+    )
+
+    np.testing.assert_array_equal(result.output_pages[0].image, commit.result_rgb)

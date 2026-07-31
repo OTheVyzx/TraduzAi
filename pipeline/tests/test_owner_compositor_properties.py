@@ -154,3 +154,55 @@ def test_final_hash_covers_exact_composed_array() -> None:
     )
 
     assert result.sha256 == _array_sha256(result.final_rgb)
+
+
+def test_owner_result_is_identical_for_one_two_or_four_tile_partitions() -> None:
+    original = _original()
+    mutation = _mutation(
+        original,
+        owner_id="owner_partition_invariant",
+        box=(3, 3, 20, 14),
+        color=(51, 73, 95),
+    )
+    glyph = _glyph_patch(
+        original,
+        owner_id=mutation.owner_id,
+        mutation=mutation,
+        box=(7, 6, 15, 10),
+    )
+
+    results = [
+        compose_page(
+            original,
+            [mutation] * partition_count,
+            [glyph] * partition_count,
+            _empty_protected(original),
+        )
+        for partition_count in (1, 2, 4)
+    ]
+
+    for result in results[1:]:
+        assert result.sha256 == results[0].sha256
+        np.testing.assert_array_equal(result.final_rgb, results[0].final_rgb)
+        assert result.write_counts == results[0].write_counts
+
+
+def test_one_owner_has_one_cleanup_and_one_render_write() -> None:
+    original = _original()
+    mutation = _mutation(original, owner_id="owner_single_writer", box=(2, 2, 13, 11))
+    glyph = _glyph_patch(
+        original,
+        owner_id=mutation.owner_id,
+        mutation=mutation,
+        box=(5, 4, 10, 8),
+    )
+
+    result = compose_page(
+        original,
+        [mutation, mutation, mutation, mutation],
+        [glyph, glyph, glyph, glyph],
+        _empty_protected(original),
+    )
+
+    assert result.write_counts["cleanup_write:owner_single_writer"] == 1
+    assert result.write_counts["glyph_write:owner_single_writer"] == 1
