@@ -132,6 +132,77 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_final_observer_consumes_raw_records_before_semantic_routing(self):
+        from vision_stack import runtime
+
+        class RawEngine:
+            def recognize_batch(self, crops):
+                return [
+                    {"text": "READ AT ASURACOMIC.NET", "confidence": 0.93}
+                    for _crop in crops
+                ]
+
+        image = np.full((80, 120, 3), 245, dtype=np.uint8)
+        with patch.object(runtime, "_get_ocr_engine", return_value=RawEngine()):
+            result = runtime.run_final_pixel_ocr_probe(
+                image,
+                detected_blocks=[{"bbox": [10, 10, 100, 40]}],
+                source_challenges=[],
+                page_id="page_003",
+                page_number=3,
+                source_language="en",
+            )
+
+        self.assertEqual(result.raw_ocr_records[0]["text"], "READ AT ASURACOMIC.NET")
+        self.assertEqual(result.raw_ocr_records[0]["observation_stage"], "raw_final_pixel_ocr")
+        self.assertTrue(result.coverage_complete)
+
+    def test_final_probe_uses_real_page_identity(self):
+        from vision_stack import runtime
+
+        class Engine:
+            def recognize_batch(self, crops):
+                return [{"text": "TEXTO"} for _crop in crops]
+
+        with patch.object(runtime, "_get_ocr_engine", return_value=Engine()):
+            result = runtime.run_final_pixel_ocr_probe(
+                np.full((50, 90, 3), 230, dtype=np.uint8),
+                detected_blocks=[],
+                source_challenges=[{"component_id": "component_a", "bbox_page": [5, 6, 50, 30]}],
+                page_id="page_027",
+                page_number=27,
+                source_language="en",
+            )
+
+        self.assertEqual(result.page_id, "page_027")
+        self.assertEqual(result.page_number, 27)
+
+    def test_final_probe_records_reason_for_every_material_block(self):
+        from vision_stack import runtime
+
+        class Engine:
+            def recognize_batch(self, crops):
+                return [None for _crop in crops]
+
+        challenges = [
+            {"component_id": "component_a", "bbox_page": [5, 6, 50, 30]},
+            {"component_id": "component_b", "bbox_page": [55, 6, 85, 30]},
+        ]
+        with patch.object(runtime, "_get_ocr_engine", return_value=Engine()):
+            result = runtime.run_final_pixel_ocr_probe(
+                np.full((50, 90, 3), 230, dtype=np.uint8),
+                detected_blocks=[],
+                source_challenges=challenges,
+                page_id="page_001",
+                page_number=1,
+                source_language="en",
+            )
+
+        attempts = {item["target_id"]: item for item in result.ocr_attempts}
+        self.assertEqual(set(attempts), {"component_a", "component_b"})
+        self.assertTrue(all(item["reason"] for item in attempts.values()))
+        self.assertFalse(result.coverage_complete)
+
     def test_crop_observation_attempts_map_to_their_distinct_tile_blocks_once(self):
         records = [
             {

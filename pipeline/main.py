@@ -9043,7 +9043,11 @@ def _run_pipeline(config_path: str):
             _page_texts_from_text_layers,
         )
         from vision_stack.runtime import warmup_visual_stack as _warmup_visual_stack
-        from vision_stack.runtime import _get_detector, run_ocr_stage
+        from vision_stack.runtime import (
+            _get_detector,
+            run_final_pixel_ocr_probe,
+            run_ocr_stage,
+        )
         from translator import translate as translator_mod
         from inpainter import inpaint_band_image
         from typesetter import renderer as typesetter_mod
@@ -9098,6 +9102,25 @@ def _run_pipeline(config_path: str):
                 return _get_detector("max").detect(img, conf_threshold=thresh)
                 
         class StripRuntime:
+            def run_final_pixel_ocr_probe(
+                self,
+                img,
+                *,
+                detected_blocks,
+                source_challenges,
+                page_id,
+                page_number,
+                source_language,
+            ):
+                return run_final_pixel_ocr_probe(
+                    img,
+                    detected_blocks=detected_blocks,
+                    source_challenges=source_challenges,
+                    page_id=page_id,
+                    page_number=page_number,
+                    source_language=source_language,
+                )
+
             def run_ocr_stage(
                 self,
                 img,
@@ -14262,14 +14285,45 @@ def _observe_verified_owner_final_pages(
         artifact_path = Path(rendered)
         if not artifact_path.is_absolute():
             artifact_path = work_dir / artifact_path
+        source_challenges = []
+        for component in list(getattr(graph, "components", []) or []):
+            bbox = getattr(component, "bbox_page", None)
+            component_id = str(getattr(component, "component_id", "") or "")
+            if not component_id or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            source_challenges.append(
+                {
+                    "component_id": component_id,
+                    "bbox_page": [int(value) for value in bbox],
+                }
+            )
+        page_number = int(project_page.get("numero", index) or index)
         observation = observer.observe(
             artifact_path,
             source_language=str(source_language or "en"),
+            page_id=page_id,
+            page_number=page_number,
+            source_challenges=source_challenges,
         )
         report = evaluate_final_pixel_observation(
             graph=graph,
             composition=composition,
             observation=observation,
+        )
+        expected_challenges = int(
+            getattr(
+                observation,
+                "expected_source_challenge_count",
+                len(source_challenges),
+            )
+        )
+        completed_challenges = int(
+            getattr(observation, "completed_source_challenge_count", 0)
+        )
+        coverage_complete = bool(
+            getattr(observation, "coverage_complete", False)
+            and expected_challenges == len(source_challenges)
+            and completed_challenges == expected_challenges
         )
         reports.append(
             {
@@ -14278,7 +14332,22 @@ def _observe_verified_owner_final_pages(
                 "persisted_sha256": report.persisted_sha256,
                 "observer": type(observer).__name__,
                 "observer_available": True,
-                "observation_complete": True,
+                "observation_complete": coverage_complete,
+                "detected_block_count": int(
+                    getattr(observation, "detected_block_count", len(observation.detected_blocks))
+                ),
+                "ocr_record_count": int(
+                    getattr(observation, "ocr_record_count", len(observation.ocr_records))
+                ),
+                "ocr_attempts": [
+                    dict(item) for item in getattr(observation, "ocr_attempts", ())
+                ],
+                "expected_source_challenge_count": expected_challenges,
+                "completed_source_challenge_count": completed_challenges,
+                "coverage_complete": coverage_complete,
+                "coverage_failures": list(
+                    getattr(observation, "coverage_failures", ())
+                ),
                 "observed_text_count": int(report.observed_text_count),
                 "passed": bool(report.passed),
                 "contracts": dict(report.contracts),

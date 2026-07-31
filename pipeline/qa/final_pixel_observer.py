@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 import cv2
 import numpy as np
@@ -20,6 +20,15 @@ class FinalPixelObservation:
     detected_blocks: tuple[dict[str, Any], ...]
     ocr_records: tuple[dict[str, Any], ...]
     source_language: str
+    page_id: str = ""
+    page_number: int = 0
+    detected_block_count: int = 0
+    ocr_record_count: int = 0
+    ocr_attempts: tuple[dict[str, Any], ...] = ()
+    expected_source_challenge_count: int = 0
+    completed_source_challenge_count: int = 0
+    coverage_complete: bool = True
+    coverage_failures: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         image = np.ascontiguousarray(self.image_rgb, dtype=np.uint8).copy()
@@ -36,6 +45,16 @@ class FinalPixelObservation:
             "ocr_records",
             tuple(copy.deepcopy(dict(record)) for record in self.ocr_records),
         )
+        object.__setattr__(
+            self,
+            "ocr_attempts",
+            tuple(copy.deepcopy(dict(attempt)) for attempt in self.ocr_attempts),
+        )
+        object.__setattr__(
+            self,
+            "coverage_failures",
+            tuple(sorted(set(str(value) for value in self.coverage_failures))),
+        )
 
 
 class FinalPixelObserver(Protocol):
@@ -44,6 +63,9 @@ class FinalPixelObserver(Protocol):
         image_path: Path,
         *,
         source_language: str,
+        page_id: str = "",
+        page_number: int = 0,
+        source_challenges: Sequence[dict[str, Any]] = (),
     ) -> FinalPixelObservation: ...
 
 
@@ -79,6 +101,9 @@ class DetectorOcrFinalPixelObserver:
         image_path: Path,
         *,
         source_language: str,
+        page_id: str = "",
+        page_number: int = 0,
+        source_challenges: Sequence[dict[str, Any]] = (),
     ) -> FinalPixelObservation:
         path = Path(image_path)
         payload = path.read_bytes()
@@ -102,25 +127,30 @@ class DetectorOcrFinalPixelObserver:
             raise ValueError("fresh detector returned a non-sequence result")
         detected_blocks = tuple(_detector_block(block) for block in raw_blocks)
 
-        run_ocr_stage = getattr(self._runtime, "run_ocr_stage", None)
-        if not callable(run_ocr_stage):
-            raise TypeError("final pixel OCR runtime has no callable run_ocr_stage method")
-        page = {
-            "numero": 1,
-            "width": int(image_rgb.shape[1]),
-            "height": int(image_rgb.shape[0]),
-            "source_language": str(source_language),
-            "_vision_blocks": [copy.deepcopy(block) for block in detected_blocks],
-            "_final_pixel_fresh_observation": True,
-        }
-        ocr_result = run_ocr_stage(persisted_image_rgb.copy(), page)
-        if not isinstance(ocr_result, dict):
-            raise ValueError("fresh final pixel OCR returned a non-mapping result")
-        raw_records = ocr_result.get("texts") or []
-        if not isinstance(raw_records, list) or any(
+        run_probe = getattr(self._runtime, "run_final_pixel_ocr_probe", None)
+        if not callable(run_probe):
+            raise TypeError(
+                "final pixel OCR runtime has no callable run_final_pixel_ocr_probe method"
+            )
+        probe = run_probe(
+            persisted_image_rgb.copy(),
+            detected_blocks=[copy.deepcopy(block) for block in detected_blocks],
+            source_challenges=[copy.deepcopy(item) for item in source_challenges],
+            page_id=str(page_id or ""),
+            page_number=int(page_number or 0),
+            source_language=str(source_language),
+        )
+
+        def probe_field(name: str, default: Any) -> Any:
+            return probe.get(name, default) if isinstance(probe, dict) else getattr(probe, name, default)
+
+        raw_records = probe_field("raw_ocr_records", ())
+        if not isinstance(raw_records, (list, tuple)) or any(
             not isinstance(record, dict) for record in raw_records
         ):
             raise ValueError("fresh final pixel OCR returned malformed text records")
+        attempts = probe_field("ocr_attempts", ())
+        failures = probe_field("coverage_failures", ())
         return FinalPixelObservation(
             image_path=path,
             persisted_sha256=persisted_sha256,
@@ -128,4 +158,17 @@ class DetectorOcrFinalPixelObserver:
             detected_blocks=detected_blocks,
             ocr_records=tuple(raw_records),
             source_language=str(source_language),
+            page_id=str(page_id or ""),
+            page_number=int(page_number or 0),
+            detected_block_count=len(detected_blocks),
+            ocr_record_count=len(raw_records),
+            ocr_attempts=tuple(attempts),
+            expected_source_challenge_count=int(
+                probe_field("expected_source_challenge_count", len(source_challenges)) or 0
+            ),
+            completed_source_challenge_count=int(
+                probe_field("completed_source_challenge_count", 0) or 0
+            ),
+            coverage_complete=bool(probe_field("coverage_complete", False)),
+            coverage_failures=tuple(failures),
         )

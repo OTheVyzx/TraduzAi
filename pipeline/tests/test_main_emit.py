@@ -57,23 +57,27 @@ class MainEmitTests(unittest.TestCase):
             artifact = Path(tmpdir) / "translated" / "001.jpg"
             artifact.parent.mkdir(parents=True)
             artifact.write_bytes(b"persisted-final-page")
+            graph = _graph()
             observation = replace(
                 _observation(),
                 image_path=artifact,
                 persisted_sha256="a" * 64,
+                expected_source_challenge_count=len(graph.components),
+                completed_source_challenge_count=len(graph.components),
+                coverage_complete=True,
             )
 
             class Observer:
                 def __init__(self):
                     self.calls = []
 
-                def observe(self, image_path, *, source_language):
-                    self.calls.append((Path(image_path), source_language))
+                def observe(self, image_path, *, source_language, **kwargs):
+                    self.calls.append((Path(image_path), source_language, kwargs))
                     return observation
 
             observer = Observer()
             output_page = SimpleNamespace(
-                owner_graph=_graph(),
+                owner_graph=graph,
                 owner_composition=_composition(),
             )
             project = {
@@ -97,7 +101,8 @@ class MainEmitTests(unittest.TestCase):
                 source_language="en",
             )
 
-        self.assertEqual(observer.calls, [(artifact, "en")])
+        self.assertEqual(observer.calls[0][0:2], (artifact, "en"))
+        self.assertEqual(observer.calls[0][2]["page_id"], "page_001")
         self.assertEqual(reports[0]["page_id"], "page_001")
         self.assertEqual(reports[0]["artifact_path"], str(artifact))
         self.assertEqual(reports[0]["persisted_sha256"], "a" * 64)
@@ -105,6 +110,45 @@ class MainEmitTests(unittest.TestCase):
         self.assertTrue(reports[0]["observation_complete"])
         self.assertEqual(reports[0]["observer"], "Observer")
         self.assertIn("ocr_records", reports[0])
+
+    def test_main_does_not_mark_empty_probe_complete(self) -> None:
+        from dataclasses import replace
+        from test_final_pixel_qa import _composition, _graph, _observation
+
+        observation = replace(_observation())
+        object.__setattr__(observation, "coverage_complete", False)
+        object.__setattr__(observation, "coverage_failures", ("empty_material_probe",))
+        observer = SimpleNamespace(observe=lambda *_args, **_kwargs: observation)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = Path(tmpdir) / "translated" / "001.jpg"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"persisted")
+            project = {
+                "_work_dir": tmpdir,
+                "owner_graph_status": "verified",
+                "paginas": [{
+                    "numero": 1,
+                    "page_id": "page_001",
+                    "image_layers": {"rendered": {"path": "translated/001.jpg"}},
+                }],
+            }
+            reports = main._observe_verified_owner_final_pages(
+                project_data=project,
+                output_pages=[SimpleNamespace(owner_graph=_graph(), owner_composition=_composition())],
+                observer=observer,
+                source_language="en",
+            )
+
+        self.assertFalse(reports[0]["observation_complete"])
+        self.assertEqual(reports[0]["coverage_failures"], ["empty_material_probe"])
+
+    def test_main_strip_runtime_exposes_final_probe_bridge(self) -> None:
+        import inspect
+
+        source = inspect.getsource(main._run_pipeline)
+
+        self.assertIn("def run_final_pixel_ocr_probe", source)
+        self.assertIn("return run_final_pixel_ocr_probe(", source)
 
     def test_automatic_owner_mode_rejects_implicit_legacy(self) -> None:
         self.assertEqual(main._automatic_owner_graph_mode({}), "enforce")

@@ -24,10 +24,15 @@ class _Runtime:
     def __init__(self):
         self.calls = []
 
-    def run_ocr_stage(self, image_rgb, page):
-        self.calls.append((image_rgb.copy(), page))
+    def run_final_pixel_ocr_probe(self, image_rgb, **kwargs):
+        self.calls.append((image_rgb.copy(), kwargs))
         return {
-            "texts": [{"text": "SOURCE BODY", "bbox": [3, 4, 18, 12], "confidence": 0.88}],
+            "raw_ocr_records": [{"text": "SOURCE BODY", "bbox": [3, 4, 18, 12], "confidence": 0.88}],
+            "ocr_attempts": [{"target_id": "detector:0", "status": "recognized"}],
+            "expected_source_challenge_count": len(kwargs.get("source_challenges") or []),
+            "completed_source_challenge_count": len(kwargs.get("source_challenges") or []),
+            "coverage_complete": True,
+            "coverage_failures": [],
         }
 
 
@@ -55,7 +60,7 @@ def test_observer_receives_persisted_file_without_project_boxes(tmp_path):
     assert observation.detected_blocks == (
         {"bbox": [3, 4, 18, 12], "confidence": 0.91, "provider": "fresh"},
     )
-    assert runtime.calls[0][1]["_vision_blocks"] == list(observation.detected_blocks)
+    assert runtime.calls[0][1]["detected_blocks"] == list(observation.detected_blocks)
     assert "texts" not in runtime.calls[0][1]
     assert "project_boxes" not in runtime.calls[0][1]
 
@@ -112,3 +117,90 @@ def test_detector_mutation_cannot_change_pixels_seen_by_fresh_ocr(tmp_path):
 
     assert np.any(runtime.calls[0][0] != 0)
     np.testing.assert_array_equal(runtime.calls[0][0], observation.image_rgb)
+
+
+def test_detector_blocks_with_zero_usable_ocr_are_incomplete(tmp_path):
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+    class EmptyProbeRuntime:
+        def run_final_pixel_ocr_probe(self, image_rgb, **kwargs):
+            return {
+                "raw_ocr_records": [],
+                "ocr_attempts": [{"target_id": "detector:0", "status": "no_usable_ocr"}],
+                "expected_source_challenge_count": 0,
+                "completed_source_challenge_count": 0,
+                "coverage_complete": False,
+                "coverage_failures": ["detector_blocks_without_usable_ocr"],
+            }
+
+    image_path = tmp_path / "final.png"
+    _write_image(image_path)
+    observation = DetectorOcrFinalPixelObserver(
+        detector=_Detector(), runtime=EmptyProbeRuntime()
+    ).observe(image_path, source_language="en")
+
+    assert observation.detected_block_count == 1
+    assert observation.ocr_record_count == 0
+    assert observation.coverage_complete is False
+    assert "detector_blocks_without_usable_ocr" in observation.coverage_failures
+
+
+def test_zero_ocr_zero_detector_is_incomplete_when_material_components_exist(tmp_path):
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+    class EmptyDetector:
+        def detect(self, _image_rgb):
+            return []
+
+    class MaterialProbeRuntime:
+        def run_final_pixel_ocr_probe(self, image_rgb, **kwargs):
+            return {
+                "raw_ocr_records": [],
+                "ocr_attempts": [{"target_id": "component_1", "status": "no_usable_ocr"}],
+                "expected_source_challenge_count": 1,
+                "completed_source_challenge_count": 1,
+                "coverage_complete": False,
+                "coverage_failures": ["material_components_without_usable_ocr"],
+            }
+
+    image_path = tmp_path / "final.png"
+    _write_image(image_path)
+    observation = DetectorOcrFinalPixelObserver(
+        detector=EmptyDetector(), runtime=MaterialProbeRuntime()
+    ).observe(
+        image_path,
+        source_language="en",
+        page_id="page_007",
+        page_number=7,
+        source_challenges=[{"component_id": "component_1", "bbox": [2, 2, 20, 14]}],
+    )
+
+    assert observation.coverage_complete is False
+    assert observation.expected_source_challenge_count == 1
+
+
+def test_empty_page_without_material_components_may_be_complete(tmp_path):
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+    class EmptyDetector:
+        def detect(self, _image_rgb):
+            return []
+
+    class EmptyPageRuntime:
+        def run_final_pixel_ocr_probe(self, image_rgb, **kwargs):
+            return {
+                "raw_ocr_records": [],
+                "ocr_attempts": [],
+                "expected_source_challenge_count": 0,
+                "completed_source_challenge_count": 0,
+                "coverage_complete": True,
+                "coverage_failures": [],
+            }
+
+    image_path = tmp_path / "final.png"
+    _write_image(image_path)
+    observation = DetectorOcrFinalPixelObserver(
+        detector=EmptyDetector(), runtime=EmptyPageRuntime()
+    ).observe(image_path, source_language="en", source_challenges=[])
+
+    assert observation.coverage_complete is True

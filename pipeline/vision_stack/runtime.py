@@ -25,7 +25,7 @@ from uuid import uuid4
 import cv2
 import numpy as np
 from PIL import Image
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 if TYPE_CHECKING:
     # Hints para o IDE - Ignorar avisos de resolução pois o sys.path é dinâmico
@@ -14977,6 +14977,232 @@ def _run_rotated_text_recovery_pass(
             details={"recovered_text_count": int(appended)},
         )
     return updated_page
+
+
+@dataclass(frozen=True)
+class FinalPixelProbeResult:
+    page_id: str
+    page_number: int
+    source_language: str
+    detected_blocks: tuple[dict[str, Any], ...]
+    source_challenges: tuple[dict[str, Any], ...]
+    raw_ocr_records: tuple[dict[str, Any], ...]
+    ocr_attempts: tuple[dict[str, Any], ...]
+    expected_source_challenge_count: int
+    completed_source_challenge_count: int
+    coverage_complete: bool
+    coverage_failures: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "detected_blocks",
+            "source_challenges",
+            "raw_ocr_records",
+            "ocr_attempts",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(copy.deepcopy(dict(item)) for item in getattr(self, field_name)),
+            )
+        object.__setattr__(
+            self,
+            "coverage_failures",
+            tuple(sorted(set(str(value) for value in self.coverage_failures))),
+        )
+
+
+def _final_probe_record(
+    value: Any,
+    *,
+    fallback_bbox: list[int] | None,
+    target_id: str,
+) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        record = copy.deepcopy(value)
+    elif isinstance(value, str):
+        record = {"text": value}
+    elif isinstance(value, (list, tuple)) and value and isinstance(value[0], str):
+        record = {"text": value[0]}
+        if len(value) > 1 and isinstance(value[1], (int, float)):
+            record["confidence"] = float(value[1])
+    else:
+        record = {}
+        for source_name, target_name in (
+            ("text", "text"),
+            ("confidence", "confidence"),
+            ("bbox", "bbox"),
+            ("xyxy", "bbox"),
+            ("line_polygons", "line_polygons"),
+        ):
+            if hasattr(value, source_name):
+                record[target_name] = copy.deepcopy(getattr(value, source_name))
+    text = str(
+        record.get("text")
+        or record.get("raw_text")
+        or record.get("original")
+        or ""
+    ).strip()
+    if not text:
+        return None
+    bbox = _coerce_bbox(record.get("bbox") or record.get("source_bbox"))
+    if bbox is None:
+        bbox = fallback_bbox
+    if bbox is None:
+        return None
+    record["text"] = text
+    record["bbox"] = [int(item) for item in bbox]
+    record["final_probe_target_id"] = target_id
+    record["observation_stage"] = "raw_final_pixel_ocr"
+    return record
+
+
+def run_final_pixel_ocr_probe(
+    image_rgb: np.ndarray,
+    *,
+    detected_blocks: Sequence[dict[str, Any]],
+    source_challenges: Sequence[dict[str, Any]],
+    page_id: str,
+    page_number: int,
+    source_language: str,
+) -> FinalPixelProbeResult:
+    """Run OCR directly on final pixels before semantic routing or skip policy."""
+
+    if not isinstance(image_rgb, np.ndarray) or image_rgb.dtype != np.uint8:
+        raise ValueError("final pixel probe requires a uint8 RGB image")
+    if image_rgb.ndim != 3 or image_rgb.shape[2] != 3 or not image_rgb.size:
+        raise ValueError("final pixel probe requires a non-empty RGB image")
+    height, width = image_rgb.shape[:2]
+    detector_rows = [copy.deepcopy(dict(item)) for item in detected_blocks]
+    challenge_rows = [copy.deepcopy(dict(item)) for item in source_challenges]
+    targets: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+
+    def add_target(item: dict[str, Any], *, kind: str, index: int) -> None:
+        target_id = str(
+            item.get("component_id")
+            or item.get("owner_id")
+            or item.get("block_id")
+            or f"{kind}:{index}"
+        )
+        bbox = _coerce_bbox(item.get("bbox_page") or item.get("bbox"))
+        if bbox is None:
+            attempts.append(
+                {
+                    "target_id": target_id,
+                    "target_kind": kind,
+                    "status": "invalid_geometry",
+                    "reason": "missing_canonical_bbox",
+                }
+            )
+            return
+        x1, y1, x2, y2 = bbox
+        bbox = [max(0, x1), max(0, y1), min(width, x2), min(height, y2)]
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            attempts.append(
+                {
+                    "target_id": target_id,
+                    "target_kind": kind,
+                    "status": "invalid_geometry",
+                    "reason": "bbox_outside_page",
+                }
+            )
+            return
+        targets.append(
+            {
+                "target_id": target_id,
+                "target_kind": kind,
+                "bbox": bbox,
+                "source": item,
+            }
+        )
+
+    for index, block in enumerate(detector_rows):
+        add_target(block, kind="detector_block", index=index)
+    for index, challenge in enumerate(challenge_rows):
+        add_target(challenge, kind="source_challenge", index=index)
+
+    raw_records: list[dict[str, Any]] = []
+    recognition_error = ""
+    if targets:
+        ocr = _get_ocr_engine("max", lang=str(source_language or "en"))
+        crops = [
+            image_rgb[target["bbox"][1] : target["bbox"][3], target["bbox"][0] : target["bbox"][2]].copy()
+            for target in targets
+        ]
+        try:
+            raw_values = ocr.recognize_batch(crops)
+            if raw_values is None:
+                raw_values = []
+            if not isinstance(raw_values, (list, tuple)):
+                raw_values = [raw_values]
+            for index, target in enumerate(targets):
+                value = raw_values[index] if index < len(raw_values) else None
+                record = _final_probe_record(
+                    value,
+                    fallback_bbox=target["bbox"],
+                    target_id=target["target_id"],
+                )
+                if record is not None:
+                    raw_records.append(record)
+                    status = "recognized"
+                    reason = "raw_ocr_record_captured"
+                else:
+                    status = "no_usable_ocr"
+                    reason = "ocr_attempt_returned_no_text"
+                attempts.append(
+                    {
+                        "target_id": target["target_id"],
+                        "target_kind": target["target_kind"],
+                        "bbox": list(target["bbox"]),
+                        "status": status,
+                        "reason": reason,
+                    }
+                )
+        except Exception as exc:
+            recognition_error = f"{type(exc).__name__}:{exc}"
+            for target in targets:
+                attempts.append(
+                    {
+                        "target_id": target["target_id"],
+                        "target_kind": target["target_kind"],
+                        "bbox": list(target["bbox"]),
+                        "status": "ocr_error",
+                        "reason": recognition_error,
+                    }
+                )
+
+    expected_challenges = len(challenge_rows)
+    completed_challenges = sum(
+        attempt.get("target_kind") == "source_challenge"
+        and attempt.get("status") not in {"invalid_geometry", "ocr_error"}
+        for attempt in attempts
+    )
+    failures: list[str] = []
+    if recognition_error:
+        failures.append("final_probe_ocr_error")
+    if detector_rows and not raw_records:
+        failures.append("detector_blocks_without_usable_ocr")
+    if challenge_rows and not raw_records:
+        failures.append("material_components_without_usable_ocr")
+    if completed_challenges != expected_challenges:
+        failures.append("source_challenge_coverage_incomplete")
+    if not detector_rows and not challenge_rows:
+        failures = []
+
+    return FinalPixelProbeResult(
+        page_id=str(page_id or ""),
+        page_number=int(page_number or 0),
+        source_language=str(source_language or ""),
+        detected_blocks=tuple(detector_rows),
+        source_challenges=tuple(challenge_rows),
+        raw_ocr_records=tuple(raw_records),
+        ocr_attempts=tuple(attempts),
+        expected_source_challenge_count=expected_challenges,
+        completed_source_challenge_count=completed_challenges,
+        coverage_complete=not failures,
+        coverage_failures=tuple(failures),
+    )
 
 
 def run_ocr_stage(
