@@ -709,7 +709,7 @@ def validate_inspection_manifest(
             raise MatrixContractError(f"inspection category mismatch: {raw_path}")
         if str(row.get("owner_or_segment")) != str(expected_row.get("segment")):
             raise MatrixContractError(f"inspection segment mismatch: {raw_path}")
-        if str(row.get("verdict")).upper() not in {"PASS", "FAIL"}:
+        if str(row.get("verdict")).upper() not in {"GO", "NO-GO"}:
             raise MatrixContractError(f"inspection verdict invalid: {raw_path}")
         verified.append({**row, "artifact_path": raw_path, "sha256": claimed_hash})
     missing = sorted(set(expected) - seen)
@@ -731,7 +731,7 @@ def _write_report(
     grouped = group_failures_by_contract(results)
     functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
     inspection_go = inspected is None or (
-        bool(inspected) and all(str(item.get("verdict")).upper() == "PASS" for item in inspected)
+        bool(inspected) and all(str(item.get("verdict")).upper() == "GO" for item in inspected)
     )
     overall = "GO" if functional_go and inspection_go else "NO-GO"
     lines = [
@@ -846,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_report(args.report.resolve(), results, run_results, sheets, inspected=inspected)
     functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
     inspection_go = inspected is None or (
-        bool(inspected) and all(str(item.get("verdict")).upper() == "PASS" for item in inspected)
+        bool(inspected) and all(str(item.get("verdict")).upper() == "GO" for item in inspected)
     )
     return 0 if functional_go and inspection_go else 2
 

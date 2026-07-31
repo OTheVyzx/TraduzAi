@@ -468,6 +468,42 @@ def test_inspection_manifest_requires_artifact_hash_scale_and_verdict(tmp_path):
         validate_inspection_manifest(template, incomplete, tmp_path)
 
 
+def test_inspection_manifest_uses_plan_go_no_go_vocabulary(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_inspection_manifest
+
+    artifact = tmp_path / "sheet.png"
+    artifact.write_bytes(b"sheet")
+    digest = sha256(b"sheet").hexdigest()
+    template = {
+        "artifacts": [
+            {
+                "artifact_path": "sheet.png",
+                "sha256": digest,
+                "category": "burst",
+                "segment": "entry:1",
+            }
+        ]
+    }
+    for verdict in ("GO", "NO-GO"):
+        manifest = {
+            "inspections": [
+                {
+                    "artifact_path": "sheet.png",
+                    "sha256": digest,
+                    "scale": "native",
+                    "timestamp": "2026-07-30T23:30:00-03:00",
+                    "category": "burst",
+                    "owner_or_segment": "entry:1",
+                    "verdict": verdict,
+                    "note": "inspecionado em pixels nativos",
+                }
+            ]
+        }
+        assert validate_inspection_manifest(template, manifest, tmp_path)[0][
+            "verdict"
+        ] == verdict
+
+
 def test_report_rejects_unverified_inspection_claims(tmp_path):
     from tools.validate_owner_visual_matrix import MatrixContractError, validate_inspection_manifest
 
@@ -492,7 +528,7 @@ def test_report_lists_only_artifacts_actually_inspected(tmp_path):
         [{"entry_id": "a", "categories": ["burst"], "page_count": 1, "export_gate": "PASS", "status": "PASS", "contracts": []}],
         [],
         {"burst": [str(checked), str(unchecked)]},
-        inspected=[{"artifact_path": str(checked), "sha256": sha256(b"a").hexdigest(), "verdict": "PASS", "note": "native check"}],
+        inspected=[{"artifact_path": str(checked), "sha256": sha256(b"a").hexdigest(), "verdict": "GO", "note": "native check"}],
     )
     visual_section = report.read_text(encoding="utf-8").split("## Visually inspected", 1)[1]
     assert str(checked) in visual_section
