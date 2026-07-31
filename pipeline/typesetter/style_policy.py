@@ -13,6 +13,8 @@ from typing import Sequence
 
 import numpy as np
 
+from typesetter.style_contract import StyleEvidenceV2
+
 
 CANONICAL_AUTO_FONT = "ComicNeue-Bold.ttf"
 SOURCE_STYLE_CONFIDENCE_THRESHOLD = 0.70
@@ -103,6 +105,16 @@ AUTO_VISUAL_STYLE_FIELDS = frozenset(
         "horizontal_bias_px",
     }
 )
+
+
+def style_evidence_v2_shadow_policy(evidence: StyleEvidenceV2) -> dict[str, object]:
+    """Expose the v2 rollout decision without changing renderer behavior in shadow mode."""
+    del evidence
+    return {
+        "apply_to_renderer": False,
+        "reason": "shadow_mode_no_runtime_behavior_change",
+        "schema_version": 2,
+    }
 
 
 def relative_luminance(rgb: tuple[int, int, int]) -> float:

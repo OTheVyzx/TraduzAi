@@ -15,17 +15,20 @@ if __package__ in {None, ""}:
 import cv2
 
 from debug_tools import generate_style_benchmark_v2, style_benchmark_report
+from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.style_policy import style_evidence_v2_shadow_policy
 from typesetter.style_extractor import extract_text_style_evidence
 
 
 DEFAULT_SPEC_PATH = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "style_benchmark_v2" / "benchmark_spec.json"
 
 
-def _detected_attributes(image_path: Path) -> dict[str, dict[str, Any]]:
+def _detected_style_payload(image_path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]]:
     image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise FileNotFoundError(image_path)
     evidence = extract_text_style_evidence(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)).to_dict()
+    evidence_v2 = style_evidence_v2_from_v1(evidence)
     stroke_color = evidence.get("stroke_color")
     return {
         "font_name": {"value": evidence.get("font_name", "unknown"), "confidence": evidence.get("font_confidence")},
@@ -43,14 +46,14 @@ def _detected_attributes(image_path: Path) -> dict[str, dict[str, Any]]:
         "gradient": {"value": evidence.get("gradient", "unknown")},
         "rotation_deg": {"value": "unknown"},
         "container": {"value": "unknown"},
-    }
+    }, evidence, evidence_v2.to_dict()
 
 
 def _measure_current_engine(run_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     records = []
     for case in manifest["cases"]:
         for variant, text_key, image_key in (("a", "text_a", "image_a"), ("b", "text_b", "image_b")):
-            attributes = _detected_attributes(run_dir / case[image_key])
+            attributes, evidence_v1, evidence_v2 = _detected_style_payload(run_dir / case[image_key])
             records.append(
                 {
                     "attributes": attributes,
@@ -60,6 +63,11 @@ def _measure_current_engine(run_dir: Path, manifest: dict[str, Any]) -> list[dic
                     "level": case["level"],
                     "seed": case["seed"],
                     "source_text": case[text_key],
+                    "style_evidence_v1": evidence_v1,
+                    "style_evidence_v2": evidence_v2,
+                    "style_evidence_v2_shadow_policy": style_evidence_v2_shadow_policy(
+                        style_evidence_v2_from_v1(evidence_v1)
+                    ),
                     "style_spec": {key: value for key, value in case.items() if key not in {"image_a", "image_b"}},
                     "threshold": None,
                     "variant": variant,

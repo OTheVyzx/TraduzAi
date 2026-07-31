@@ -143,3 +143,29 @@ def test_runner_writes_jsonl_summary_html_and_contact_sheet_inside_the_run(tmp_p
     assert (run_dir / "contact_sheets" / "contact_sheet.jpg").is_file()
     records = (run_dir / "style_benchmark_records.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(records) == 6
+    first_record = json.loads(records[0])
+    assert first_record["style_evidence_v1"]["source"]
+    assert first_record["style_evidence_v2"]["schema_version"] == 2
+    assert first_record["style_evidence_v2_shadow_policy"]["apply_to_renderer"] is False
+
+
+def test_v2_shadow_score_abstains_for_empty_hard_negative_cases(tmp_path: Path):
+    spec_path = Path(__file__).resolve().parent / "fixtures" / "style_benchmark_v2" / "benchmark_spec.json"
+    lock_path = tmp_path / "runtime.lock.json"
+    lock_path.write_text(
+        json.dumps({"schema_version": 1, "runtime": generate_style_benchmark_v2._runtime_metadata()}),
+        encoding="utf-8",
+    )
+
+    run_dir = run_style_benchmark_v2.run_benchmark(
+        spec_path=spec_path,
+        level="all",
+        output_root=tmp_path / "runs",
+        run_id="report-all",
+        seed=1729,
+        runtime_lock_path=lock_path,
+    )
+    summary = json.loads((run_dir / "style_benchmark_summary.json").read_text(encoding="utf-8"))
+
+    assert summary["score"]["gates"]["hard_negative_abstention"] is False
+    assert summary["score_v2_shadow"]["gates"]["hard_negative_abstention"] is True
