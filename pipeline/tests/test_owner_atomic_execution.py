@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ownership import model as owner_model  # noqa: E402
 from ownership.model import OwnerMutation, owner_residual_evidence_sha256  # noqa: E402
 from strip import process_bands  # noqa: E402
+from typesetter.owner_render_quality import OwnerRenderQuality  # noqa: E402
 
 
 def _array_sha256(value: np.ndarray) -> str:
@@ -46,6 +47,32 @@ def _safe_polygon_for_bbox(
 def _polygon_sha256(points: tuple[tuple[int, int], ...]) -> str:
     payload = json.dumps(points, separators=(",", ":"))
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _render_quality(glyph_mask: np.ndarray) -> OwnerRenderQuality:
+    ys, _xs = np.nonzero(glyph_mask)
+    ink_height = int(ys.max() - ys.min() + 1) if len(ys) else 0
+    return OwnerRenderQuality(
+        schema_version=1,
+        status="ok",
+        font_size_final=max(12, ink_height),
+        minimum_legible_font_px=12,
+        source_ink_height_px=None,
+        render_ink_height_px=ink_height,
+        source_x_height_px=None,
+        render_x_height_px=float(ink_height) * 0.7,
+        source_scale_ratio=None,
+        x_height_ratio=None,
+        rendered_line_core_heights_px=(ink_height,) if ink_height else (),
+        safe_height_occupancy=0.25 if ink_height else 0.0,
+        safe_area_occupancy=0.10 if ink_height else 0.0,
+        wrapped_line_count=1 if ink_height else 0,
+        containment_status="ok",
+        outside_safe_pixels=0,
+        page_width=int(glyph_mask.shape[1]),
+        page_height=int(glyph_mask.shape[0]),
+        reasons=(),
+    )
 
 
 def _atomic_api() -> tuple[Any, type[Any], type[Any]]:
@@ -246,6 +273,7 @@ def _glyph_patch(
         render_safe_polygon_page=safe_polygon,
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
+        render_quality_contract=_render_quality(glyph_mask),
         execution_tile_id=mutation.execution_tile_id,
         projection_role=projection_role,
     )
@@ -286,6 +314,7 @@ def _glyph_patch_for_mask(
         render_safe_polygon_page=safe_polygon,
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
+        render_quality_contract=_render_quality(glyph_mask),
         execution_tile_id=mutation.execution_tile_id,
         projection_role="executor",
     )

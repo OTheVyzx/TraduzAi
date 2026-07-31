@@ -6118,7 +6118,11 @@ def _owner_atomic_copyback_fixture():
     from hashlib import sha256
 
     import numpy as np
-    from ownership.model import OwnerGlyphPatch, OwnerMutation
+    from ownership.model import (
+        OwnerGlyphPatch,
+        OwnerMutation,
+        owner_residual_evidence_sha256,
+    )
     from strip import process_bands
     from strip.types import Band
     from typesetter.owner_render_quality import OwnerRenderQuality
@@ -6140,6 +6144,24 @@ def _owner_atomic_copyback_fixture():
         f"owner_masks/owner_a--{owner_identity_hash}/"
         "tile_executor/action_mask.png"
     )
+    before_sha256 = process_bands._owner_array_sha256(original)
+    after_sha256 = process_bands._owner_array_sha256(cleaned)
+    action_mask_sha256 = process_bands._owner_array_sha256(action_mask)
+    protected_art_mask_sha256 = process_bands._owner_array_sha256(protected)
+    component_geometry_sha256 = "a" * 64
+    residual_evidence_sha256 = owner_residual_evidence_sha256(
+        owner_id="owner_a",
+        page_id="page_001",
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        component_geometry_sha256=component_geometry_sha256,
+        residual_score=0.0,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_flags=(),
+    )
     mutation = OwnerMutation(
         owner_id="owner_a",
         page_id="page_001",
@@ -6154,14 +6176,22 @@ def _owner_atomic_copyback_fixture():
         changed_pixels=int(np.count_nonzero(changed_mask)),
         changed_outside_owner_pixels=0,
         protected_art_changed_pixels=0,
-        before_sha256=process_bands._owner_array_sha256(original),
-        after_sha256=process_bands._owner_array_sha256(cleaned),
-        action_mask_sha256=process_bands._owner_array_sha256(action_mask),
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
         changed_mask_sha256=process_bands._owner_array_sha256(changed_mask),
         engine_crop_bbox_page=(0, 0, 30, 20),
         owner_bbox_page=(8, 8, 14, 12),
-        component_geometry_sha256="a" * 64,
+        component_geometry_sha256=component_geometry_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        residual_score=0.0,
+        residual_verified=True,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_evidence_sha256=residual_evidence_sha256,
+        residual_flags=(),
         execution_tile_id="tile_executor",
+        component_geometry_verified=True,
     )
     glyph_mask = np.zeros(original.shape[:2], dtype=np.uint8)
     glyph_mask[9:11, 9:13] = 255
