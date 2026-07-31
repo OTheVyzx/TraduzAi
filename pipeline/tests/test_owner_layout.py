@@ -788,6 +788,64 @@ def _owner_layout_text(
     }
 
 
+def test_owner_layout_source_evidence_is_permutation_stable() -> None:
+    from dataclasses import replace
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _owner_graph([("owner_stable", "SOURCE", "DESTINO")])
+    original = graph.observations[0]
+    first = replace(
+        original,
+        observation_id="obs_a",
+        bbox_page=(24, 28, 176, 44),
+        polygons_page=(((24, 28), (176, 28), (176, 44), (24, 44)),),
+        confidence=0.90,
+        coverage_score=0.80,
+    )
+    second = replace(
+        original,
+        observation_id="obs_b",
+        bbox_page=(24, 50, 176, 74),
+        polygons_page=(((24, 50), (176, 50), (176, 74), (24, 74)),),
+        confidence=0.80,
+        coverage_score=0.90,
+    )
+    graph.observations = [first, second]
+    graph.owners[0] = replace(
+        graph.owners[0],
+        observation_ids=("obs_a", "obs_b"),
+        selected_observation_ids=("obs_b", "obs_a"),
+    )
+    forward = _owner_layout_regions(
+        graph,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+    )[0]
+    graph.observations.reverse()
+    graph.owners[0] = replace(
+        graph.owners[0],
+        observation_ids=("obs_b", "obs_a"),
+        selected_observation_ids=("obs_a", "obs_b"),
+    )
+    reverse = _owner_layout_regions(
+        graph,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+    )[0]
+
+    keys = (
+        "source_ink_heights_px",
+        "source_x_heights_px",
+        "source_ink_height_median_px",
+        "source_x_height_median_px",
+        "source_scale_evidence_confidence",
+        "source_scale_evidence_ids",
+    )
+    assert {key: forward[key] for key in keys} == {
+        key: reverse[key] for key in keys
+    }
+
+
 def test_same_body_lines_share_font_size_and_safe_polygon() -> None:
     safe_polygon = ((120, 42), (320, 42), (320, 218), (120, 218))
     line_records = [

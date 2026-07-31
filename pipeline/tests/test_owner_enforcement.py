@@ -479,6 +479,47 @@ def test_owner_layout_uses_selected_observation_container_not_source_glyph_bbox(
     ]
 
 
+def test_owner_layout_region_derives_source_ink_height_from_selected_polygon():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    graph.observations[0] = replace(
+        graph.observations[0],
+        bbox_page=(6, 10, 34, 18),
+        polygons_page=(((6, 10), (34, 10), (34, 18), (6, 18)),),
+        confidence=0.92,
+        coverage_score=0.95,
+    )
+
+    region = _owner_layout_regions(graph, page_width=40, page_height=30)[0]
+
+    assert region["source_ink_heights_px"] == [8]
+    assert region["source_ink_height_median_px"] == 8.0
+    assert region["source_x_heights_px"] == [5.6]
+    assert region["source_scale_evidence_confidence"] == pytest.approx(0.874)
+    assert region["source_scale_evidence_ids"] == ["observation_a:0"]
+
+
+def test_owner_layout_ignores_overbroad_container_height_as_source_scale():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    graph.observations[0] = replace(
+        graph.observations[0],
+        bbox_page=(7, 11, 31, 19),
+        polygons_page=(((7, 11), (31, 11), (31, 19), (7, 19)),),
+        layout_bbox_page=(1, 1, 39, 29),
+    )
+
+    region = _owner_layout_regions(graph, page_width=40, page_height=30)[0]
+
+    assert region["bbox_page"] == [1, 1, 39, 29]
+    assert region["source_ink_height_median_px"] == 8.0
+    assert region["source_ink_height_median_px"] != 28.0
+
+
 def test_connected_owner_uses_complete_selected_ocr_bbox_as_explicit_container():
     from test_final_pixel_qa import _graph
     from strip.process_bands import _owner_layout_regions

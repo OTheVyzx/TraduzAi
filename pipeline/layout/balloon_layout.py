@@ -8,8 +8,10 @@ import base64
 import copy
 import json
 import logging
+import math
 import os
 import re
+from statistics import median
 import urllib.request
 
 import cv2
@@ -69,6 +71,12 @@ _OWNER_LAYOUT_VISUAL_INPUT_FIELDS = frozenset(
         "source_font_bounds_px",
         "container_font_bounds_px",
         "render_safe_polygon_page",
+        "source_ink_heights_px",
+        "source_x_heights_px",
+        "source_ink_height_median_px",
+        "source_x_height_median_px",
+        "source_scale_evidence_confidence",
+        "source_scale_evidence_ids",
     }
 )
 _OWNER_RENDER_ROUTES = frozenset(
@@ -640,6 +648,58 @@ def _intersect_owner_font_bounds(values: list[list[int]]) -> list[int] | None:
     return [int(lower), int(upper)]
 
 
+def _owner_source_scale_fields(region: dict, *, label: str) -> None:
+    field_names = {
+        "source_ink_heights_px",
+        "source_x_heights_px",
+        "source_ink_height_median_px",
+        "source_x_height_median_px",
+        "source_scale_evidence_confidence",
+        "source_scale_evidence_ids",
+    }
+    if not (field_names & set(region)):
+        return
+    integer_heights = region.get("source_ink_heights_px", [])
+    x_heights = region.get("source_x_heights_px", [])
+    evidence_ids = region.get("source_scale_evidence_ids", [])
+    if not isinstance(integer_heights, (list, tuple)) or any(
+        type(value) is not int or value <= 0 for value in integer_heights
+    ):
+        raise ValueError(f"{label}.source_ink_heights_px must contain positive integers")
+    if not isinstance(x_heights, (list, tuple)) or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+        for value in x_heights
+    ):
+        raise ValueError(f"{label}.source_x_heights_px must contain positive numbers")
+    if len(integer_heights) != len(x_heights):
+        raise ValueError(f"{label} source scale height arrays must align")
+    if not isinstance(evidence_ids, (list, tuple)) or len(evidence_ids) != len(integer_heights):
+        raise ValueError(f"{label}.source_scale_evidence_ids must align with heights")
+    if any(not isinstance(value, str) or not value.strip() for value in evidence_ids):
+        raise ValueError(f"{label}.source_scale_evidence_ids are invalid")
+    confidence = region.get("source_scale_evidence_confidence", 0.0)
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        raise ValueError(f"{label}.source_scale_evidence_confidence is invalid")
+    expected_ink_median = float(median(integer_heights)) if integer_heights else None
+    expected_x_median = float(median(float(value) for value in x_heights)) if x_heights else None
+    if region.get("source_ink_height_median_px") != expected_ink_median:
+        raise ValueError(f"{label}.source_ink_height_median_px is inconsistent")
+    if region.get("source_x_height_median_px") != expected_x_median:
+        raise ValueError(f"{label}.source_x_height_median_px is inconsistent")
+    region["source_ink_heights_px"] = list(integer_heights)
+    region["source_x_heights_px"] = [float(value) for value in x_heights]
+    region["source_scale_evidence_ids"] = list(evidence_ids)
+    region["source_scale_evidence_confidence"] = float(confidence)
+
+
 def _flatten_owner_layout_regions(layout_regions: object) -> list[dict]:
     if layout_regions is None:
         return []
@@ -763,6 +823,7 @@ def _enrich_owner_page_layout(
             bounds = _owner_font_bounds(region.get(key), label=f"{region_id}.{key}")
             if bounds is not None:
                 region[key] = bounds
+        _owner_source_scale_fields(region, label=region_id)
         regions_by_owner[owner_id].append(region)
 
     enriched_texts: list[dict] = []
@@ -883,6 +944,26 @@ def _enrich_owner_page_layout(
                 is not None
             ]
         )
+        source_ink_heights = [
+            int(value)
+            for region in normalized_regions
+            for value in region.get("source_ink_heights_px", [])
+        ]
+        source_x_heights = [
+            float(value)
+            for region in normalized_regions
+            for value in region.get("source_x_heights_px", [])
+        ]
+        source_scale_evidence_ids = [
+            str(value)
+            for region in normalized_regions
+            for value in region.get("source_scale_evidence_ids", [])
+        ]
+        source_scale_confidences = [
+            float(region["source_scale_evidence_confidence"])
+            for region in normalized_regions
+            if region.get("source_ink_heights_px")
+        ]
 
         record = copy.deepcopy(source_records.get(owner_id, {}))
         record.update(
@@ -929,6 +1010,20 @@ def _enrich_owner_page_layout(
                     list(region["bbox_page"]) for region in normalized_regions
                 ],
                 "layout_group_size": len(normalized_regions),
+                "source_ink_heights_px": source_ink_heights,
+                "source_x_heights_px": source_x_heights,
+                "source_ink_height_median_px": (
+                    float(median(source_ink_heights)) if source_ink_heights else None
+                ),
+                "source_x_height_median_px": (
+                    float(median(source_x_heights)) if source_x_heights else None
+                ),
+                "source_scale_evidence_confidence": (
+                    float(median(source_scale_confidences))
+                    if source_scale_confidences
+                    else 0.0
+                ),
+                "source_scale_evidence_ids": source_scale_evidence_ids,
                 "_owner_mode": True,
                 "_owner_layout_verified": True,
             }

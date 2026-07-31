@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Mapping
+from statistics import median
 
 import cv2
 import numpy as np
@@ -9902,6 +9903,61 @@ def _owner_layout_regions(
     regions: list[dict[str, Any]] = []
     for order, component_id in enumerate(owner.component_ids):
         component = components[component_id]
+        scale_entries: list[tuple[int, int, int, str, float]] = []
+        for observation in selected_observations:
+            if component_id not in set(observation.component_ids):
+                continue
+            try:
+                evidence_confidence = max(0.0, min(1.0, float(observation.confidence))) * max(
+                    0.0,
+                    min(1.0, float(observation.coverage_score)),
+                )
+            except (TypeError, ValueError):
+                evidence_confidence = 0.0
+            for polygon_index, source_polygon in enumerate(observation.polygons_page):
+                if not isinstance(source_polygon, (list, tuple)) or len(source_polygon) < 3:
+                    continue
+                try:
+                    points = tuple((int(point[0]), int(point[1])) for point in source_polygon)
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if len(set(points)) < 3 or abs(float(cv2.contourArea(np.asarray(points, dtype=np.int32)))) <= 0.0:
+                    continue
+                polygon_x1 = min(point[0] for point in points)
+                polygon_y1 = min(point[1] for point in points)
+                polygon_x2 = max(point[0] for point in points)
+                polygon_y2 = max(point[1] for point in points)
+                if len(observation.component_ids) == 1:
+                    clipped_x1 = max(0, polygon_x1)
+                    clipped_y1 = max(0, polygon_y1)
+                    clipped_x2 = min(int(page_width), polygon_x2)
+                    clipped_y2 = min(int(page_height), polygon_y2)
+                else:
+                    clipped_x1 = max(int(component.bbox_page[0]), polygon_x1)
+                    clipped_y1 = max(int(component.bbox_page[1]), polygon_y1)
+                    clipped_x2 = min(int(component.bbox_page[2]), polygon_x2)
+                    clipped_y2 = min(int(component.bbox_page[3]), polygon_y2)
+                height = clipped_y2 - clipped_y1
+                if clipped_x2 <= clipped_x1 or height <= 0:
+                    continue
+                scale_entries.append(
+                    (
+                        clipped_y1,
+                        clipped_x1,
+                        height,
+                        f"{observation.observation_id}:{polygon_index}",
+                        evidence_confidence,
+                    )
+                )
+        scale_entries.sort(key=lambda item: (item[0], item[1], item[3]))
+        source_ink_heights = [int(item[2]) for item in scale_entries]
+        source_x_heights = [round(float(item[2]) * 0.70, 3) for item in scale_entries]
+        source_evidence_ids = [item[3] for item in scale_entries]
+        source_evidence_confidence = (
+            round(float(median(item[4] for item in scale_entries)), 6)
+            if scale_entries
+            else 0.0
+        )
         region_bbox = layout_container_bbox or tuple(component.bbox_page)
         polygon = (
             (
@@ -9932,6 +9988,16 @@ def _owner_layout_regions(
                 "order": order,
                 "bbox_page": list(region_bbox),
                 "safe_polygon_page": [list(point) for point in raster_polygon],
+                "source_ink_heights_px": source_ink_heights,
+                "source_x_heights_px": source_x_heights,
+                "source_ink_height_median_px": (
+                    float(median(source_ink_heights)) if source_ink_heights else None
+                ),
+                "source_x_height_median_px": (
+                    float(median(source_x_heights)) if source_x_heights else None
+                ),
+                "source_scale_evidence_confidence": source_evidence_confidence,
+                "source_scale_evidence_ids": source_evidence_ids,
                 **(
                     {
                         "owner_safe_polygon_page": [

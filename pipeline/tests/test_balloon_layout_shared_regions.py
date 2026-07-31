@@ -307,3 +307,50 @@ def test_verified_owner_layout_drops_legacy_render_controls():
 
     for forbidden in ("visible", "skip_processing", "render_policy", "route_reason"):
         assert forbidden not in record
+
+
+def test_connected_owner_preserves_source_scale_evidence_per_region():
+    graph = _verified_owner_graph()
+    owner_polygon = [[60, 30], [300, 30], [300, 210], [60, 210]]
+    regions = [
+        {
+            "layout_region_id": "region_top",
+            "owner_id": "owner_body",
+            "order": 0,
+            "bbox_page": [80, 50, 280, 105],
+            "safe_polygon_page": [[80, 50], [280, 50], [280, 105], [80, 105]],
+            "owner_safe_polygon_page": owner_polygon,
+            "source_ink_heights_px": [18, 20],
+            "source_x_heights_px": [12.6, 14.0],
+            "source_ink_height_median_px": 19.0,
+            "source_x_height_median_px": 13.3,
+            "source_scale_evidence_confidence": 0.91,
+            "source_scale_evidence_ids": ["obs_top:0", "obs_top:1"],
+        },
+        {
+            "layout_region_id": "region_bottom",
+            "owner_id": "owner_body",
+            "order": 1,
+            "bbox_page": [80, 125, 280, 190],
+            "safe_polygon_page": [[80, 125], [280, 125], [280, 190], [80, 190]],
+            "owner_safe_polygon_page": owner_polygon,
+            "source_ink_heights_px": [34],
+            "source_x_heights_px": [23.8],
+            "source_ink_height_median_px": 34.0,
+            "source_x_height_median_px": 23.8,
+            "source_scale_evidence_confidence": 0.88,
+            "source_scale_evidence_ids": ["obs_bottom:0"],
+        },
+    ]
+
+    enriched = enrich_page_layout(
+        {"page_id": "page_001", "width": 320, "height": 240, "texts": []},
+        owner_graph=graph,
+        layout_regions=regions,
+    )
+
+    preserved = enriched["texts"][0]["layout_regions"]
+    assert preserved[0]["source_ink_heights_px"] == [18, 20]
+    assert preserved[1]["source_ink_heights_px"] == [34]
+    assert preserved[0]["source_scale_evidence_ids"] == ["obs_top:0", "obs_top:1"]
+    assert preserved[1]["source_scale_evidence_ids"] == ["obs_bottom:0"]
