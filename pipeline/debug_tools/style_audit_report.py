@@ -18,7 +18,11 @@ import numpy as np
 
 from typesetter.style_extractor import extract_text_style_evidence
 from typesetter.style_contract import style_evidence_v2_from_v1
-from typesetter.style_policy import style_evidence_v2_shadow_policy
+from typesetter.style_policy import (
+    decide_style_copy_v2,
+    style_candidate_copy_allowed,
+    style_evidence_v2_shadow_policy,
+)
 
 
 CARD_W = 360
@@ -26,8 +30,6 @@ CARD_H = 250
 CROP_H = 155
 MARGIN = 14
 FONT = cv2.FONT_HERSHEY_SIMPLEX
-STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD = 0.70
-STYLE_COPY_SFX_PROMOTION_THRESHOLD = 0.66
 
 
 def _bbox4(value: object) -> list[int] | None:
@@ -83,57 +85,17 @@ def _has_applied_style_effect(fields: dict) -> bool:
     )
 
 
-def _float_or_none(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _candidate_confidence_from_fields(layer: dict, fields: tuple[str, ...]) -> float | None:
-    for field in fields:
-        value = _float_or_none(layer.get(field))
-        if value is not None:
-            return value
-    return None
-
-
 def _primary_text_style_candidate_confident(layer: dict) -> bool:
-    confidence = _candidate_confidence_from_fields(
-        layer,
-        ("confidence", "ocr_confidence", "confianca_ocr"),
-    )
-    if confidence is None:
-        return True
-    return confidence >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(layer)
 
 
 def _sfx_style_candidate_confident(layer: dict) -> bool:
-    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
-    sfx_ocr = layer.get("sfx_ocr") if isinstance(layer.get("sfx_ocr"), dict) else {}
-    confidence_values = [
-        _float_or_none(layer.get("sfx_promotion_score")),
-        _float_or_none(sfx.get("promotion_score")),
-        _float_or_none(layer.get("confidence")),
-        _float_or_none(layer.get("ocr_confidence")),
-        _float_or_none(sfx.get("visual_confidence")),
-        _float_or_none(sfx_ocr.get("confidence")),
-        _float_or_none(sfx_ocr.get("ocr_confidence")),
-    ]
-    confidence_values = [value for value in confidence_values if value is not None]
-    if not confidence_values:
-        return True
-    promotion_score = _float_or_none(layer.get("sfx_promotion_score"))
-    if promotion_score is None:
-        promotion_score = _float_or_none(sfx.get("promotion_score"))
-    if promotion_score is not None and promotion_score >= STYLE_COPY_SFX_PROMOTION_THRESHOLD:
-        return True
-    return max(confidence_values) >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(layer)
 
 
 def _style_scan_allowed_for_layer(layer: dict, bbox: list[int]) -> bool:
+    if not style_candidate_copy_allowed(layer):
+        return False
     applied = _applied_style_fields(layer)
     if _has_applied_style_effect(applied):
         return True
@@ -161,6 +123,9 @@ def _style_scan_allowed_for_layer(layer: dict, bbox: list[int]) -> bool:
 
 def _style_scan_skip_reason(layer: dict) -> str:
     route_action = str(layer.get("route_action") or "").strip().lower()
+    render_policy = str(layer.get("render_policy") or "").strip().lower()
+    if route_action == "review_required" or render_policy == "review_required":
+        return "not_style_copy_candidate"
     content_class = str(layer.get("content_class") or "").strip().lower()
     if route_action == "translate_sfx_inpaint_render" or content_class == "sfx":
         if not _sfx_style_candidate_confident(layer):
@@ -238,6 +203,7 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                     reason=_style_scan_skip_reason(layer),
                 )
             evidence_v2 = style_evidence_v2_from_v1(evidence)
+            decision_v2 = decide_style_copy_v2(layer, evidence_v2)
             records.append(
                 {
                     "page": page_index,
@@ -249,6 +215,7 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                     **evidence,
                     "style_evidence_v2": evidence_v2.to_dict(),
                     "style_evidence_v2_shadow_policy": style_evidence_v2_shadow_policy(evidence_v2),
+                    "style_application_decision_v2": decision_v2.to_dict(),
                 }
             )
     return records

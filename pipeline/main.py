@@ -27,7 +27,13 @@ if str(pipeline_root) not in sys.path:
 # Lazy imports are moved inside functions to allow fast --hardware-info and --list-supported-languages calls
 
 from utils.decision_log import configure_decision_trace, finalize_decision_trace
-from typesetter.style_policy import SOURCE_STYLE_CONFIDENCE_THRESHOLD, normalize_auto_typesetting_style
+from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.style_policy import (
+    SOURCE_STYLE_CONFIDENCE_THRESHOLD,
+    decide_style_copy_v2,
+    normalize_auto_typesetting_style,
+    style_candidate_copy_allowed,
+)
 from layout.simple_text_geometry import normalize_text_geometry, resolve_text_anchor_bbox, sanitize_simple_text_geometry
 from ocr.postprocess import apply_language_guards, postprocess_ocr_fragments, split_sfx_inline
 from ocr.text_router import ROUTE_ACTIONS
@@ -40,8 +46,6 @@ _EMIT_STDOUT_FAILED = False
 _PIPELINE_FILE_HANDLER: logging.Handler | None = None
 logger = logging.getLogger(__name__)
 EDITOR_DETECT_OCR_CACHE_SCHEMA_VERSION = 7
-STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD = SOURCE_STYLE_CONFIDENCE_THRESHOLD
-STYLE_COPY_SFX_PROMOTION_THRESHOLD = 0.66
 DARK_PANEL_RECT_MAX_HALF_WIDTH_FROM_TEXT_CENTER = 116
 DARK_PANEL_RECT_MAX_HALF_HEIGHT_FROM_TEXT_CENTER = 64
 SUPPRESSED_OCR_ROUTE_REASONS = {
@@ -10181,58 +10185,18 @@ def _hex_luma(value: object) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def _float_or_none(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _candidate_confidence_from_fields(record: dict, fields: tuple[str, ...]) -> float | None:
-    for field in fields:
-        value = _float_or_none(record.get(field))
-        if value is not None:
-            return value
-    return None
-
-
 def _primary_text_style_candidate_confident(ocr_text: dict) -> bool:
-    confidence = _candidate_confidence_from_fields(
-        ocr_text,
-        ("confidence", "ocr_confidence", "confianca_ocr"),
-    )
-    if confidence is None:
-        return True
-    return confidence >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(ocr_text)
 
 
 def _sfx_style_candidate_confident(ocr_text: dict) -> bool:
-    sfx = ocr_text.get("sfx") if isinstance(ocr_text.get("sfx"), dict) else {}
-    sfx_ocr = ocr_text.get("sfx_ocr") if isinstance(ocr_text.get("sfx_ocr"), dict) else {}
-    confidence_values = [
-        _float_or_none(ocr_text.get("sfx_promotion_score")),
-        _float_or_none(sfx.get("promotion_score")),
-        _float_or_none(ocr_text.get("confidence")),
-        _float_or_none(ocr_text.get("ocr_confidence")),
-        _float_or_none(sfx.get("visual_confidence")),
-        _float_or_none(sfx_ocr.get("confidence")),
-        _float_or_none(sfx_ocr.get("ocr_confidence")),
-    ]
-    confidence_values = [value for value in confidence_values if value is not None]
-    if not confidence_values:
-        return True
-    promotion_score = _float_or_none(ocr_text.get("sfx_promotion_score"))
-    if promotion_score is None:
-        promotion_score = _float_or_none(sfx.get("promotion_score"))
-    if promotion_score is not None and promotion_score >= STYLE_COPY_SFX_PROMOTION_THRESHOLD:
-        return True
-    return max(confidence_values) >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(ocr_text)
 
 
 def _style_evidence_allows_visual_text_without_ocr(ocr_text: dict, evidence: dict | None) -> bool:
     if not evidence:
+        return False
+    if not style_candidate_copy_allowed(ocr_text):
         return False
     route_action = str(ocr_text.get("route_action") or "").strip().lower()
     render_policy = str(ocr_text.get("render_policy") or "").strip().lower()
@@ -10278,18 +10242,8 @@ def _style_evidence_allows_review_text_style_copy(
     translated: str | None,
     evidence: dict | None,
 ) -> bool:
-    if not evidence:
-        return False
-    route_action = str(ocr_text.get("route_action") or "").strip().lower()
-    render_policy = str(ocr_text.get("render_policy") or "").strip().lower()
-    content_class = str(ocr_text.get("content_class") or "").strip().lower()
-    if content_class == "sfx":
-        return False
-    if route_action != "review_required" and render_policy != "review_required":
-        return False
-    if not _review_text_fields_look_renderable(ocr_text, translated):
-        return False
-    return _style_evidence_confidence(evidence) >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
+    del translated, evidence
+    return style_candidate_copy_allowed(ocr_text)
 
 
 def _style_copy_allowed_for_text(ocr_text: dict, translated: str | None = None) -> bool:
@@ -10351,16 +10305,7 @@ def _style_copy_allowed_for_text(ocr_text: dict, translated: str | None = None) 
 
 
 def _style_source_scan_allowed_for_text(ocr_text: dict, translated: str | None = None) -> bool:
-    if _style_copy_allowed_for_text(ocr_text, translated):
-        return True
-    route_action = str(ocr_text.get("route_action") or "").strip().lower()
-    render_policy = str(ocr_text.get("render_policy") or "").strip().lower()
-    if route_action == "review_required" or render_policy == "review_required":
-        content_class = str(ocr_text.get("content_class") or "").strip().lower()
-        return content_class != "sfx" and _review_text_fields_look_renderable(ocr_text, translated)
-    if str(ocr_text.get("detector") or "").strip().lower() == "sfx_visual":
-        return False
-    return False
+    return _style_copy_allowed_for_text(ocr_text, translated)
 
 
 def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = False) -> dict:
@@ -10404,55 +10349,55 @@ def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = 
     return layer
 
 
-def _style_from_evidence(base_style: dict, evidence: dict | None) -> tuple[dict, str, float, str | None]:
+def _style_from_evidence(
+    base_style: dict,
+    evidence: dict | None,
+    candidate: dict | None = None,
+) -> tuple[dict, str, float, str | None]:
     style = dict(base_style)
     confidence = _style_evidence_confidence(evidence)
     source = str((evidence or {}).get("source") or "").strip() or None
-    origin = "source_detected" if confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD else "auto"
+    origin = "auto"
 
     if evidence:
-        if evidence.get("text_color"):
-            style["cor"] = evidence["text_color"]
-        if evidence.get("stroke_color"):
-            style["contorno"] = evidence["stroke_color"]
-        if evidence.get("stroke_width_px") is not None:
-            style["contorno_px"] = evidence["stroke_width_px"]
-        if evidence.get("font_name"):
-            style["fonte"] = evidence["font_name"]
-        if evidence.get("gradient") is True and evidence.get("gradient_colors"):
-            colors = evidence.get("gradient_colors")
-            if isinstance(colors, list) and len(colors) >= 2:
-                style["cor_gradiente"] = [str(colors[0]), str(colors[1])]
-                style["cor"] = str(colors[0])
-        try:
-            shadow_confidence = float(evidence.get("shadow_confidence") or 0.0)
-        except (TypeError, ValueError):
-            shadow_confidence = 0.0
-        if evidence.get("shadow") is True and shadow_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+        evidence_v2 = style_evidence_v2_from_v1(evidence)
+        decision = decide_style_copy_v2(candidate or {}, evidence_v2)
+        applied = decision.applied_attributes
+        applied_confidences = [
+            evidence_v2.attributes[name].confidence
+            for name in applied
+            if name in evidence_v2.attributes
+        ]
+        applied_confidence = max(applied_confidences, default=0.0)
+        origin = "source_detected" if decision.status == "applied" else "auto"
+        if "fill" in applied:
+            style["cor"] = applied["fill"]
+        if "stroke" in applied and isinstance(applied["stroke"], dict):
+            style["contorno"] = applied["stroke"].get("color") or ""
+            style["contorno_px"] = int(applied["stroke"].get("width_px") or 0)
+        if "font_name" in applied:
+            style["fonte"] = applied["font_name"]
+        if "gradient" in applied and isinstance(applied["gradient"], list) and len(applied["gradient"]) >= 2:
+            style["cor_gradiente"] = [str(applied["gradient"][0]), str(applied["gradient"][1])]
+            style["cor"] = str(applied["gradient"][0])
+        if "shadow" in applied and isinstance(applied["shadow"], dict):
             style["sombra"] = True
-            style["sombra_cor"] = evidence.get("shadow_color") or "#000000"
-            style["sombra_offset"] = evidence.get("shadow_offset") if evidence.get("shadow_offset") is not None else [2, 2]
-        try:
-            glow_confidence = float(evidence.get("glow_confidence") or 0.0)
-        except (TypeError, ValueError):
-            glow_confidence = 0.0
-        if evidence.get("glow") is True and glow_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+            style["sombra_cor"] = applied["shadow"].get("color") or "#000000"
+            style["sombra_offset"] = applied["shadow"].get("offset") or [2, 2]
+        if "glow" in applied and isinstance(applied["glow"], dict):
             style["glow"] = True
-            style["glow_cor"] = evidence.get("glow_color") or evidence.get("text_color") or "#FFFFFF"
-            style["glow_px"] = evidence.get("glow_px") if evidence.get("glow_px") is not None else 2
-        try:
-            curve_confidence = float(evidence.get("curve_confidence") or 0.0)
-        except (TypeError, ValueError):
-            curve_confidence = 0.0
-        if evidence.get("curved") is True and curve_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+            style["glow_cor"] = applied["glow"].get("color") or applied.get("fill") or "#FFFFFF"
+            style["glow_px"] = int(applied["glow"].get("width_px") or 2)
+        if "curve" in applied and isinstance(applied["curve"], dict):
             style["curva"] = True
-            style["curva_direcao"] = evidence.get("curve_direction") or "arc_up"
-            try:
-                style["curva_intensidade"] = float(evidence.get("curve_amount") or 0.0)
-            except (TypeError, ValueError):
-                style["curva_intensidade"] = 0.0
+            style["curva_direcao"] = applied["curve"].get("direction") or "arc_up"
+            style["curva_intensidade"] = float(applied["curve"].get("amount") or 0.0)
+        if "rotation_deg" in applied:
+            style["rotacao"] = float(applied["rotation_deg"])
         style["style_origin"] = origin
-        style["style_confidence"] = confidence
+        style["style_confidence"] = (
+            applied_confidence if origin == "source_detected" else confidence
+        )
         if source:
             style["style_source"] = source
 
@@ -11889,7 +11834,16 @@ def build_text_layer(
         str(original_ocr_text.get("route_action") or "").strip().lower() == "translate_sfx_inpaint_render"
         or str(original_ocr_text.get("content_class") or "").strip().lower() == "sfx"
     ):
-        for key in ("content_class", "script", "translate_policy", "render_policy", "route_action", "route_reason", "sfx"):
+        for key in (
+            "content_class",
+            "script",
+            "translate_policy",
+            "render_policy",
+            "route_action",
+            "route_reason",
+            "sfx_promotion_score",
+            "sfx",
+        ):
             if original_ocr_text.get(key) is not None:
                 ocr_text[key] = copy.deepcopy(original_ocr_text[key])
     layer_id = ocr_text.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
@@ -11929,6 +11883,7 @@ def build_text_layer(
     style_input, style_origin, style_confidence, style_source = _style_from_evidence(
         _merge_style(ocr_text.get("estilo")),
         applied_style_evidence,
+        ocr_text,
     )
     if not style_copy_allowed and style_evidence:
         style_origin = "auto"

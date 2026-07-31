@@ -7,8 +7,10 @@ the renderer.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field
+from typing import Any, Literal, Mapping
 
 
 STYLE_V2_ATTRIBUTE_NAMES = (
@@ -22,6 +24,7 @@ STYLE_V2_ATTRIBUTE_NAMES = (
     "shadow",
     "glow",
     "gradient",
+    "curve",
     "rotation_deg",
     "container",
 )
@@ -47,17 +50,90 @@ class StyleEvidenceV2:
     text_present: bool
     attributes: dict[str, StyleAttributeEvidenceV2]
     schema_version: int = 2
+    source_sha256: str = ""
+    attribute_provenance: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "attributes": {name: attribute.to_dict() for name, attribute in self.attributes.items()},
             "schema_version": self.schema_version,
             "source": self.source,
             "text_present": self.text_present,
         }
+        if self.source_sha256:
+            payload["source_sha256"] = self.source_sha256
+        if self.attribute_provenance:
+            payload["attribute_provenance"] = self.attribute_provenance
+        return payload
 
     def measurement_attributes(self) -> dict[str, dict[str, Any]]:
         return {name: attribute.to_dict() for name, attribute in self.attributes.items()}
+
+
+StyleCopyStatus = Literal["applied", "fallback", "not_applicable", "review_required"]
+
+
+@dataclass(frozen=True)
+class StyleApplicationDecisionV2:
+    status: StyleCopyStatus
+    applied_attributes: Mapping[str, Any]
+    abstained_attributes: Mapping[str, str]
+    evidence_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "applied_attributes": dict(self.applied_attributes),
+            "abstained_attributes": dict(self.abstained_attributes),
+            "evidence_sha256": self.evidence_sha256,
+        }
+
+
+def style_evidence_v2_sha256(evidence: StyleEvidenceV2) -> str:
+    canonical = json.dumps(
+        evidence.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def style_evidence_v2_from_dict(payload: Mapping[str, Any]) -> StyleEvidenceV2:
+    """Migrate serialized v2 evidence while preserving its source identity."""
+
+    raw_attributes = payload.get("attributes")
+    raw_attributes = raw_attributes if isinstance(raw_attributes, Mapping) else {}
+    attributes: dict[str, StyleAttributeEvidenceV2] = {}
+    for name in STYLE_V2_ATTRIBUTE_NAMES:
+        raw = raw_attributes.get(name)
+        if not isinstance(raw, Mapping):
+            attributes[name] = _unknown("missing_attribute_evidence")
+            continue
+        top_k = raw.get("top_k")
+        if not isinstance(top_k, (list, tuple)):
+            top_k = ()
+        attributes[name] = StyleAttributeEvidenceV2(
+            value=raw.get("value", "unknown"),
+            confidence=_bounded_confidence(raw.get("confidence")),
+            top_k=tuple(top_k),
+            margin=_bounded_confidence(raw.get("margin")),
+            abstention_reason=str(raw.get("abstention_reason") or ""),
+        )
+    raw_provenance = payload.get("attribute_provenance")
+    provenance = {
+        str(name): dict(value)
+        for name, value in raw_provenance.items()
+        if isinstance(value, Mapping)
+    } if isinstance(raw_provenance, Mapping) else {}
+    return StyleEvidenceV2(
+        source=str(payload.get("source") or "none"),
+        text_present=bool(payload.get("text_present")),
+        attributes=attributes,
+        schema_version=2,
+        source_sha256=str(payload.get("source_sha256") or ""),
+        attribute_provenance=provenance,
+    )
 
 
 def _bounded_confidence(value: object) -> float:
@@ -151,13 +227,21 @@ def style_evidence_v2_from_v1(
         confidence=v1_evidence.get("shadow_confidence"),
         value={
             "color": str(v1_evidence.get("shadow_color") or ""),
-            "offset": list(v1_evidence.get("shadow_offset") or [0, 0])[:2],
+            "offset": list(v1_evidence.get("shadow_offset") or [2, 2])[:2],
         },
     )
     gradient = _effect(
         detected=v1_evidence.get("gradient"),
         confidence=v1_evidence.get("gradient_confidence"),
         value=list(v1_evidence.get("gradient_colors") or [])[:2],
+    )
+    curve = _effect(
+        detected=v1_evidence.get("curved"),
+        confidence=v1_evidence.get("curve_confidence"),
+        value={
+            "direction": str(v1_evidence.get("curve_direction") or "arc_up"),
+            "amount": float(v1_evidence.get("curve_amount") or 0.0),
+        },
     )
 
     attributes = {
@@ -171,6 +255,7 @@ def style_evidence_v2_from_v1(
         "shadow": shadow,
         "glow": glow,
         "gradient": gradient,
+        "curve": curve,
         "rotation_deg": _unknown("legacy_v1_does_not_measure_rotation"),
         "container": _unknown("legacy_v1_does_not_measure_container"),
     }

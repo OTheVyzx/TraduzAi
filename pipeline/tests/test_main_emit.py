@@ -2496,9 +2496,16 @@ class MainEmitTests(unittest.TestCase):
                                 "tipo": "sfx",
                                 "content_class": "sfx",
                                 "script": "hangul",
+                                "confidence": 0.9,
+                                "sfx_promotion_score": 0.9,
                                 "route_action": "translate_sfx_inpaint_render",
                                 "translate_policy": "adapt_sfx",
                                 "render_policy": "sfx_style",
+                                "sfx": {
+                                    "promotion_score": 0.9,
+                                    "source_text": "쿵",
+                                    "adapted_text": "쿵",
+                                },
                             },
                             {
                                 "id": "dialogue-1",
@@ -2541,9 +2548,11 @@ class MainEmitTests(unittest.TestCase):
 
             self.assertEqual(sfx_layer["content_class"], "sfx")
             self.assertEqual(sfx_layer["script"], "hangul")
-            self.assertEqual(sfx_layer["route_action"], "translate_sfx_inpaint_render")
-            self.assertEqual(sfx_layer["translate_policy"], "adapt_sfx")
-            self.assertEqual(sfx_layer["render_policy"], "sfx_style")
+            self.assertEqual(sfx_layer["route_action"], "review_required")
+            self.assertEqual(sfx_layer["route_reason"], "sfx_preserved")
+            self.assertEqual(sfx_layer["translate_policy"], "skip_translation")
+            self.assertEqual(sfx_layer["render_policy"], "preserve_original")
+            self.assertTrue(sfx_layer["preserve_original"])
             self.assertEqual(sfx_layer["translated"], "TUM")
             self.assertEqual(sfx_layer["traduzido"], "TUM")
             self.assertEqual(sfx_layer["sfx"]["source_text"], "\ucff5")
@@ -3856,6 +3865,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 100, 100],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [30, 30, 30],
                 "style_evidence": evidence,
             },
@@ -4007,13 +4020,9 @@ class MainEmitTests(unittest.TestCase):
                 source_image_rgb=source_image_rgb,
             )
 
-        self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.86)
-        self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["cor"], "#FFFFFF")
-        self.assertTrue(layer["estilo"]["glow"])
-        self.assertEqual(layer["estilo"]["glow_cor"], "#74D7FF")
-        self.assertEqual(layer["estilo"]["glow_px"], 4)
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertNotIn("style_evidence", layer)
+        self.assertFalse(layer["estilo"]["glow"])
 
     def test_build_text_layer_applies_high_confidence_shadow_glow_style_evidence(self) -> None:
         evidence = {
@@ -4038,6 +4047,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 100, 100],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [30, 30, 30],
                 "style_evidence": evidence,
             },
@@ -4053,7 +4066,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["estilo"]["sombra_cor"], "#111111")
         self.assertEqual(layer["estilo"]["sombra_offset"], [3, 4])
         self.assertTrue(layer["estilo"]["glow"])
-        self.assertEqual(layer["estilo"]["glow_cor"], "#F8E8FF")
+        self.assertEqual(layer["estilo"]["glow_cor"], "#FFFFFF")
         self.assertEqual(layer["estilo"]["glow_px"], 4)
 
     def test_build_text_layer_keeps_visual_sfx_style_evidence_but_does_not_apply_without_text(self) -> None:
@@ -4491,7 +4504,7 @@ class MainEmitTests(unittest.TestCase):
         }
         crop_shapes = []
 
-        def fake_extract(crop):
+        def fake_extract(crop, **_kwargs):
             crop_shapes.append(tuple(crop.shape))
             return evidence
 
@@ -4669,6 +4682,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 100, 100],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [30, 30, 30],
                 "style_evidence": evidence,
             },
@@ -4706,6 +4723,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 180, 90],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [255, 255, 255],
                 "style_evidence": evidence,
             },

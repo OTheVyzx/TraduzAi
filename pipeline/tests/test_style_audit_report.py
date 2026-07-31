@@ -45,6 +45,7 @@ def test_style_audit_report_separates_detected_evidence_from_applied_style(tmp_p
                         "tipo": "fala",
                         "bbox": [10, 10, 70, 50],
                         "content_class": "text",
+                        "confidence": 0.95,
                         "route_action": "translate_inpaint_render",
                         "style_origin": "auto",
                         "style_confidence": 0.95,

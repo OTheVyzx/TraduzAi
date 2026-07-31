@@ -8,7 +8,11 @@ PIPELINE_DIR = Path(__file__).resolve().parents[1]
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from typesetter.style_contract import StyleEvidenceV2, style_evidence_v2_from_v1
+from typesetter.style_contract import (
+    StyleEvidenceV2,
+    style_evidence_v2_from_dict,
+    style_evidence_v2_from_v1,
+)
 
 
 def test_v2_marks_every_attribute_unknown_when_v1_has_no_text_evidence():
@@ -108,3 +112,24 @@ def test_v2_uses_calibrated_font_match_without_changing_legacy_attributes():
         "top_k": ["LeagueGothic-Regular-VariableFont_wdth.ttf", "ComicNeue-Bold.ttf"],
         "value": "LeagueGothic-Regular-VariableFont_wdth.ttf",
     }
+
+
+def test_shadow_v2_contract_migrates_without_losing_source_or_text_present():
+    original = style_evidence_v2_from_v1(
+        {
+            "source": "masked_source_crop",
+            "text_color": "#FAFAFA",
+            "text_color_confidence": 0.87,
+        }
+    ).to_dict()
+    original["source_sha256"] = "a" * 64
+    original["attribute_provenance"] = {
+        "fill": {"mask_sha256": "b" * 64, "method": "glyph_core"}
+    }
+
+    migrated = style_evidence_v2_from_dict(original)
+
+    assert migrated.source == "masked_source_crop"
+    assert migrated.text_present is True
+    assert migrated.source_sha256 == "a" * 64
+    assert migrated.attribute_provenance["fill"]["method"] == "glyph_core"

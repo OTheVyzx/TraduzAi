@@ -9,15 +9,22 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
-from typesetter.style_contract import StyleEvidenceV2
+from sfx.promotion import VISUAL_PROMOTION_THRESHOLD
+from typesetter.style_contract import (
+    StyleApplicationDecisionV2,
+    StyleAttributeEvidenceV2,
+    StyleEvidenceV2,
+    style_evidence_v2_sha256,
+)
 
 
 CANONICAL_AUTO_FONT = "ComicNeue-Bold.ttf"
 SOURCE_STYLE_CONFIDENCE_THRESHOLD = 0.70
+STYLE_V2_FUNCTIONAL_FIELDS = frozenset({"alignment", "container", "font_size_px"})
 SOURCE_STYLE_SAFE_FIELDS = {
     "fonte",
     "cor",
@@ -115,6 +122,127 @@ def style_evidence_v2_shadow_policy(evidence: StyleEvidenceV2) -> dict[str, obje
         "reason": "shadow_mode_no_runtime_behavior_change",
         "schema_version": 2,
     }
+
+
+def _finite_confidence(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _candidate_confidence(candidate: Mapping[str, object]) -> float | None:
+    for field_name in ("confidence", "ocr_confidence", "confianca_ocr"):
+        confidence = _finite_confidence(candidate.get(field_name))
+        if confidence is not None:
+            return confidence
+    return None
+
+
+def _sfx_promotion_confidence(candidate: Mapping[str, object]) -> float | None:
+    nested = candidate.get("sfx")
+    nested = nested if isinstance(nested, Mapping) else {}
+    for value in (candidate.get("sfx_promotion_score"), nested.get("promotion_score")):
+        confidence = _finite_confidence(value)
+        if confidence is not None:
+            return confidence
+    return None
+
+
+def style_candidate_copy_allowed(candidate: Mapping[str, object]) -> bool:
+    """Gate source-style scanning/application using explicit candidate confidence."""
+
+    route_action = str(candidate.get("route_action") or "").strip().lower()
+    render_policy = str(candidate.get("render_policy") or "").strip().lower()
+    if route_action == "review_required" or render_policy == "review_required":
+        return False
+
+    content_class = str(candidate.get("content_class") or "").strip().lower()
+    detector = str(candidate.get("detector") or "").strip().lower()
+    is_sfx = (
+        content_class == "sfx"
+        or detector == "sfx_visual"
+        or route_action == "translate_sfx_inpaint_render"
+    )
+    if is_sfx:
+        promotion_confidence = _sfx_promotion_confidence(candidate)
+        return (
+            route_action == "translate_sfx_inpaint_render"
+            and promotion_confidence is not None
+            and promotion_confidence >= VISUAL_PROMOTION_THRESHOLD
+        )
+
+    confidence = _candidate_confidence(candidate)
+    return (
+        confidence is not None
+        and SOURCE_STYLE_CONFIDENCE_THRESHOLD <= confidence <= 1.0
+    )
+
+
+def evaluate_style_attribute(
+    name: str,
+    evidence: StyleAttributeEvidenceV2,
+) -> tuple[bool, Any, str]:
+    """Evaluate one visual attribute without borrowing confidence from another."""
+
+    if name in STYLE_V2_FUNCTIONAL_FIELDS:
+        return False, None, "functional_layout_owned"
+    if evidence.value in (None, "", "unknown"):
+        return False, None, evidence.abstention_reason or "attribute_not_observed"
+    if evidence.abstention_reason:
+        return False, None, evidence.abstention_reason
+    confidence = _finite_confidence(evidence.confidence)
+    if confidence is None or confidence < SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+        return False, None, "attribute_confidence_below_threshold"
+    return True, deepcopy(evidence.value), ""
+
+
+def decide_style_copy_v2(
+    candidate: Mapping[str, object],
+    evidence: StyleEvidenceV2,
+) -> StyleApplicationDecisionV2:
+    evidence_sha256 = style_evidence_v2_sha256(evidence)
+    route_action = str(candidate.get("route_action") or "").strip().lower()
+    render_policy = str(candidate.get("render_policy") or "").strip().lower()
+    if not evidence.text_present:
+        return StyleApplicationDecisionV2(
+            status="not_applicable",
+            applied_attributes={},
+            abstained_attributes={name: "no_text_evidence" for name in evidence.attributes},
+            evidence_sha256=evidence_sha256,
+        )
+    if route_action == "review_required" or render_policy == "review_required":
+        return StyleApplicationDecisionV2(
+            status="review_required",
+            applied_attributes={},
+            abstained_attributes={name: "candidate_review_required" for name in evidence.attributes},
+            evidence_sha256=evidence_sha256,
+        )
+    if not style_candidate_copy_allowed(candidate):
+        return StyleApplicationDecisionV2(
+            status="fallback",
+            applied_attributes={},
+            abstained_attributes={name: "candidate_confidence_missing_or_low" for name in evidence.attributes},
+            evidence_sha256=evidence_sha256,
+        )
+
+    applied: dict[str, Any] = {}
+    abstained: dict[str, str] = {}
+    for name, attribute in evidence.attributes.items():
+        allowed, value, reason = evaluate_style_attribute(name, attribute)
+        if allowed:
+            applied[name] = value
+        else:
+            abstained[name] = reason
+    return StyleApplicationDecisionV2(
+        status="applied" if applied else "fallback",
+        applied_attributes=applied,
+        abstained_attributes=abstained,
+        evidence_sha256=evidence_sha256,
+    )
 
 
 def relative_luminance(rgb: tuple[int, int, int]) -> float:
