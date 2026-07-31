@@ -35,6 +35,7 @@ from ownership.model import (
     SourceTextComponent,
     TextObservation,
     TRANSLATION_ROUTE_ACTIONS,
+    owner_residual_evidence_sha256,
 )
 from ownership.translation import merge_owner_translations, owners_to_translation_page
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
@@ -8782,11 +8783,19 @@ def apply_atomic_owner_execution(
             raise ValueError("mutation action mask is empty")
         if not isinstance(mutation.component_geometry_verified, bool):
             raise ValueError("mutation component geometry verification must be boolean")
+        if mutation.component_geometry_verified is not True:
+            raise ValueError("mutation component geometry is not verified")
+        action_positive = action_mask > 0
+        touches_opposite_page_edges = (
+            np.any(action_positive[0, :]) and np.any(action_positive[-1, :])
+        ) or (
+            np.any(action_positive[:, 0]) and np.any(action_positive[:, -1])
+        )
         if (
-            not mutation.component_geometry_verified
-            and _owner_mask_is_overbroad(action_mask)
+            int(np.count_nonzero(action_positive)) / float(action_positive.size) > 0.35
+            or touches_opposite_page_edges
         ):
-            raise ValueError("mutation action mask is overbroad")
+            raise ValueError("mutation action mask is page-wide")
         if np.any((action_mask > 0) & (protected_art_mask > 0)):
             raise ValueError("mutation action mask overlaps protected art")
         owner_bbox = _canonical_owner_bbox(
@@ -8855,6 +8864,51 @@ def apply_atomic_owner_execution(
             != int(np.count_nonzero(protected_changed))
         ):
             raise ValueError("mutation pixel counts do not match authoritative masks")
+        if mutation.residual_verified is not True:
+            raise ValueError("mutation residual evidence is not verified")
+        if (
+            isinstance(mutation.residual_score, bool)
+            or not isinstance(mutation.residual_score, (int, float))
+            or not math.isfinite(float(mutation.residual_score))
+            or float(mutation.residual_score) < 0.0
+        ):
+            raise ValueError("mutation residual score is missing or invalid")
+        if (
+            isinstance(mutation.residual_threshold, bool)
+            or not isinstance(mutation.residual_threshold, (int, float))
+            or not math.isfinite(float(mutation.residual_threshold))
+            or float(mutation.residual_threshold) < 0.0
+        ):
+            raise ValueError("mutation residual threshold is missing or invalid")
+        residual_method = _canonical_owner_identity(
+            mutation.residual_method,
+            label="mutation residual method",
+        )
+        if not isinstance(mutation.residual_flags, tuple) or mutation.residual_flags != tuple(
+            sorted(set(mutation.residual_flags))
+        ):
+            raise ValueError("mutation residual flags are not canonical")
+        residual_evidence_sha256 = _canonical_owner_hash(
+            mutation.residual_evidence_sha256,
+            label="mutation residual evidence hash",
+        )
+        expected_residual_evidence_sha256 = owner_residual_evidence_sha256(
+            owner_id=owner_id,
+            page_id=page_id,
+            before_sha256=mutation.before_sha256,
+            after_sha256=mutation.after_sha256,
+            action_mask_sha256=mutation.action_mask_sha256,
+            protected_art_mask_sha256=protected_art_mask_sha256,
+            component_geometry_sha256=mutation.component_geometry_sha256,
+            residual_score=float(mutation.residual_score),
+            residual_threshold=float(mutation.residual_threshold),
+            residual_method=residual_method,
+            residual_flags=mutation.residual_flags,
+        )
+        if residual_evidence_sha256 != expected_residual_evidence_sha256:
+            raise ValueError("mutation residual evidence hash mismatch")
+        if float(mutation.residual_score) > float(mutation.residual_threshold):
+            raise ValueError("mutation residual score exceeds its verified threshold")
         mutation_is_safe = True
     except (TypeError, ValueError) as exc:
         return _review(f"cleanup_contract_invalid:{exc}")
@@ -9950,6 +10004,108 @@ def _owner_non_rendering_record(
     return record
 
 
+def _owner_protected_evidence(
+    source_rgb: np.ndarray,
+    *,
+    owner_component_ids: set[str],
+    source_glyph_mask: np.ndarray,
+    component_bbox_page: tuple[int, int, int, int],
+    foreign_component_masks: tuple[tuple[str, np.ndarray], ...] | tuple = (),
+    explicit_protected_masks: tuple[tuple[str, np.ndarray], ...] | tuple = (),
+) -> tuple[np.ndarray, tuple[str, ...], float]:
+    """Materialize negative evidence and fail confidence on inseparable art."""
+
+    source = _canonical_owner_rgb(source_rgb, label="protected evidence source")
+    shape = tuple(source.shape[:2])
+    glyph = _canonical_owner_mask(
+        source_glyph_mask,
+        shape=shape,
+        label="protected evidence source glyph mask",
+    )
+    _canonical_owner_bbox(
+        component_bbox_page,
+        shape=shape,
+        label="protected evidence component bbox",
+    )
+    if not owner_component_ids or any(
+        not isinstance(value, str) or not value.strip()
+        for value in owner_component_ids
+    ):
+        raise ValueError("protected evidence owner component identities are invalid")
+
+    protected = np.zeros(shape, dtype=np.uint8)
+    provenance: set[str] = set()
+    for category, records in (
+        ("foreign_component", foreign_component_masks),
+        ("explicit_protected", explicit_protected_masks),
+    ):
+        for record in records:
+            if not isinstance(record, tuple) or len(record) != 2:
+                raise ValueError(f"{category} evidence must be an (id, mask) pair")
+            evidence_id, raw_mask = record
+            evidence_id = _canonical_owner_identity(
+                evidence_id,
+                label=f"{category} evidence id",
+            )
+            mask = _canonical_owner_mask(
+                raw_mask,
+                shape=shape,
+                label=f"{category} evidence mask",
+            )
+            protected = np.maximum(protected, mask)
+            provenance.add(f"{category}:{evidence_id}")
+
+    confidence = 1.0
+    if np.any(glyph):
+        gray = cv2.cvtColor(source, cv2.COLOR_RGB2GRAY)
+        x1, y1, x2, y2 = component_bbox_page
+        local = gray[y1:y2, x1:x2]
+        local_median = float(np.median(local)) if local.size else 255.0
+        foreground = np.zeros(shape, dtype=np.uint8)
+        foreground[
+            (gray.astype(np.float32) <= local_median - 28.0) | (glyph > 0)
+        ] = 255
+        foreground = cv2.morphologyEx(
+            foreground,
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+        count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            foreground,
+            connectivity=8,
+        )
+        glyph_bbox = _owner_mask_bbox(glyph)
+        glyph_height = glyph_bbox[3] - glyph_bbox[1]
+        glyph_width = glyph_bbox[2] - glyph_bbox[0]
+        margin = max(3, int(math.ceil(min(glyph_height, glyph_width) * 0.35)))
+        glyph_contact = cv2.dilate(
+            glyph,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ) > 0
+        for label in range(1, count):
+            component = labels == label
+            if not np.any(component & glyph_contact):
+                continue
+            left, top, width, height, _area = (int(value) for value in stats[label])
+            right = left + width
+            bottom = top + height
+            crosses_support = (
+                left < glyph_bbox[0] - margin
+                or top < glyph_bbox[1] - margin
+                or right > glyph_bbox[2] + margin
+                or bottom > glyph_bbox[3] + margin
+            )
+            if crosses_support:
+                protected[component] = 255
+                provenance.add("connected_foreground_crosses_support")
+                confidence = 0.0
+
+    protected = np.ascontiguousarray(protected, dtype=np.uint8)
+    protected.setflags(write=False)
+    return protected, tuple(sorted(provenance)), confidence
+
+
 def execute_owner_page_graph(
     page_rgb: np.ndarray,
     graph: OwnerGraph,
@@ -10119,6 +10275,68 @@ def execute_owner_page_graph(
                             line_index=line_index,
                         )
                     )
+        source_glyph_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+        for item in evidence:
+            if item.glyph_mask is not None:
+                source_glyph_mask = np.maximum(source_glyph_mask, item.glyph_mask)
+            if item.line_mask is not None:
+                source_glyph_mask = np.maximum(source_glyph_mask, item.line_mask)
+        foreign_component_masks: list[tuple[str, np.ndarray]] = []
+        for foreign_component in executed_graph.components:
+            if foreign_component.component_id in set(owner.component_ids):
+                continue
+            foreign_observations = [
+                observation
+                for observation in executed_graph.observations
+                if foreign_component.component_id in observation.component_ids
+            ]
+            support_polygons = tuple(
+                polygon
+                for observation in foreign_observations
+                for polygon in observation.polygons_page
+            )
+            if not support_polygons:
+                support_polygons = (foreign_component.polygon_page,)
+            try:
+                foreign_mask = _owner_component_glyph_raster(
+                    source,
+                    component=foreign_component,
+                    support_polygons=support_polygons,
+                )
+            except ValueError:
+                continue
+            foreign_component_masks.append(
+                (foreign_component.component_id, foreign_mask)
+            )
+        owner_component_bbox = (
+            min(value[0] for value in component_bboxes.values()),
+            min(value[1] for value in component_bboxes.values()),
+            max(value[2] for value in component_bboxes.values()),
+            max(value[3] for value in component_bboxes.values()),
+        )
+        protected_mask, protected_provenance, protection_confidence = (
+            _owner_protected_evidence(
+                source,
+                owner_component_ids=set(owner.component_ids),
+                source_glyph_mask=source_glyph_mask,
+                component_bbox_page=owner_component_bbox,
+                foreign_component_masks=tuple(foreign_component_masks),
+                explicit_protected_masks=(),
+            )
+        )
+        if np.any(protected_mask):
+            evidence.append(
+                OwnerMaskEvidence(
+                    evidence_id=f"{owner.owner_id}__protected_art",
+                    component_id="__protected_art__",
+                    protected_art_mask=protected_mask,
+                )
+            )
+        record["owner_protected_evidence"] = {
+            "provenance": list(protected_provenance),
+            "confidence": protection_confidence,
+            "protected_pixels": int(np.count_nonzero(protected_mask)),
+        }
         try:
             plan = build_owner_mask_plan(
                 source,

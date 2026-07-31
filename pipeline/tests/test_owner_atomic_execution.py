@@ -15,7 +15,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ownership import model as owner_model  # noqa: E402
-from ownership.model import OwnerMutation  # noqa: E402
+from ownership.model import OwnerMutation, owner_residual_evidence_sha256  # noqa: E402
 from strip import process_bands  # noqa: E402
 
 
@@ -74,6 +74,24 @@ def _mutation(
     changed = np.any(result_rgb != original_rgb, axis=2)
     changed_mask = np.where(changed, 255, 0).astype(np.uint8)
     protected_art_mask = np.zeros(original_rgb.shape[:2], dtype=np.uint8)
+    before_sha256 = _array_sha256(original_rgb)
+    after_sha256 = _array_sha256(result_rgb)
+    action_mask_sha256 = _array_sha256(action_mask)
+    protected_art_mask_sha256 = _array_sha256(protected_art_mask)
+    component_geometry_sha256 = sha256(b"component-geometry").hexdigest()
+    residual_evidence_sha256 = owner_residual_evidence_sha256(
+        owner_id=owner_id,
+        page_id="page_001",
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        component_geometry_sha256=component_geometry_sha256,
+        residual_score=0.0,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_flags=(),
+    )
     return OwnerMutation(
         owner_id=owner_id,
         page_id="page_001",
@@ -88,15 +106,110 @@ def _mutation(
         changed_pixels=int(np.count_nonzero(changed_mask)),
         changed_outside_owner_pixels=0,
         protected_art_changed_pixels=0,
-        before_sha256=_array_sha256(original_rgb),
-        after_sha256=_array_sha256(result_rgb),
-        action_mask_sha256=_array_sha256(action_mask),
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
         changed_mask_sha256=_array_sha256(changed_mask),
         engine_crop_bbox_page=(0, 0, original_rgb.shape[1], original_rgb.shape[0]),
         owner_bbox_page=owner_bbox_page,
-        component_geometry_sha256=sha256(b"component-geometry").hexdigest(),
+        component_geometry_sha256=component_geometry_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        residual_score=0.0,
+        residual_verified=True,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_evidence_sha256=residual_evidence_sha256,
+        residual_flags=(),
         execution_tile_id=execution_tile_id,
+        component_geometry_verified=True,
     )
+
+
+def test_owner_commit_rejects_unverified_residual_score() -> None:
+    apply_atomic, glyph_patch_type, _commit_type = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = replace(
+        _mutation(original),
+        residual_score=None,
+        residual_verified=False,
+    )
+    glyph = _glyph_patch(
+        mutation,
+        glyph_patch_type,
+        render_completed=True,
+        fit_status="ok",
+    )
+
+    commit = apply_atomic(original, mutation, glyph)
+
+    assert commit.committed is False
+    assert commit.review_required is True
+    assert "residual" in commit.reason
+
+
+def test_owner_commit_rejects_residual_above_profile_threshold() -> None:
+    apply_atomic, glyph_patch_type, _commit_type = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = replace(
+        _mutation(original),
+        residual_score=0.25,
+        residual_verified=True,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_evidence_sha256="a" * 64,
+        residual_flags=("dark_residual_pixels",),
+    )
+    glyph = _glyph_patch(
+        mutation,
+        glyph_patch_type,
+        render_completed=True,
+        fit_status="ok",
+    )
+
+    commit = apply_atomic(original, mutation, glyph)
+
+    assert commit.committed is False
+    assert commit.review_required is True
+    assert "residual" in commit.reason
+
+
+def test_residual_threshold_and_evidence_are_part_of_mutation_hash_chain() -> None:
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+
+    assert mutation.residual_verified is True
+    assert mutation.residual_threshold >= 0.0
+    assert mutation.residual_method
+    assert len(mutation.residual_evidence_sha256) == 64
+
+    changed_threshold_hash = owner_residual_evidence_sha256(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        before_sha256=mutation.before_sha256,
+        after_sha256=mutation.after_sha256,
+        action_mask_sha256=mutation.action_mask_sha256,
+        protected_art_mask_sha256=mutation.protected_art_mask_sha256,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+        residual_score=mutation.residual_score,
+        residual_threshold=mutation.residual_threshold + 0.01,
+        residual_method=mutation.residual_method,
+        residual_flags=mutation.residual_flags,
+    )
+    changed_method_hash = owner_residual_evidence_sha256(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        before_sha256=mutation.before_sha256,
+        after_sha256=mutation.after_sha256,
+        action_mask_sha256=mutation.action_mask_sha256,
+        protected_art_mask_sha256=mutation.protected_art_mask_sha256,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+        residual_score=mutation.residual_score,
+        residual_threshold=mutation.residual_threshold,
+        residual_method="tampered_method",
+        residual_flags=mutation.residual_flags,
+    )
+    assert changed_threshold_hash != mutation.residual_evidence_sha256
+    assert changed_method_hash != mutation.residual_evidence_sha256
 
 
 def _glyph_patch(
@@ -538,7 +651,7 @@ def test_atomic_owner_execution_rejects_page_wide_masks() -> None:
 
     assert cleanup_commit.committed is False
     assert render_commit.committed is False
-    assert "overbroad" in cleanup_commit.reason
+    assert "page-wide" in cleanup_commit.reason
     assert "overbroad" in render_commit.reason
     np.testing.assert_array_equal(cleanup_commit.result_rgb, original)
     np.testing.assert_array_equal(render_commit.result_rgb, original)
@@ -552,6 +665,7 @@ def test_atomic_owner_execution_rejects_dense_solid_masks_below_page_threshold()
         action_box=(20, 20, 50, 50),
         owner_bbox_page=(10, 10, 60, 60),
     )
+    dense_cleanup = replace(dense_cleanup, component_geometry_verified=False)
     cleanup_glyph_mask = np.zeros(original.shape[:2], dtype=np.uint8)
     cleanup_glyph_mask[24:26, 24:28] = 255
     cleanup_glyph = _glyph_patch_for_mask(
@@ -577,7 +691,7 @@ def test_atomic_owner_execution_rejects_dense_solid_masks_below_page_threshold()
 
     assert cleanup_commit.committed is False
     assert render_commit.committed is False
-    assert "overbroad" in cleanup_commit.reason
+    assert "component geometry" in cleanup_commit.reason
     assert "overbroad" in render_commit.reason
 
 

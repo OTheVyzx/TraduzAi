@@ -16,9 +16,14 @@ import cv2
 import numpy as np
 
 try:
-    from ownership.model import OwnerMutation, TextOwner
+    from ownership.model import OwnerMutation, TextOwner, owner_residual_evidence_sha256
 except ImportError:  # pragma: no cover - supports package imports
-    from ..ownership.model import OwnerMutation, TextOwner
+    from ..ownership.model import OwnerMutation, TextOwner, owner_residual_evidence_sha256
+
+try:
+    from qa.inpaint_residual import detect_residual_text
+except ImportError:  # pragma: no cover - supports package imports
+    from ..qa.inpaint_residual import detect_residual_text
 
 try:
     from ocr.text_router import INPAINT_ROUTE_ACTIONS
@@ -32,6 +37,8 @@ class UnsafeOwnerMaskError(ValueError):
 
 OWNER_MASK_COORDINATE_SPACE = "page"
 OWNER_MASK_SCHEMA_VERSION = 4
+OWNER_RESIDUAL_THRESHOLD = 0.01
+OWNER_RESIDUAL_METHOD = "detect_residual_text.v1"
 
 
 @dataclass(frozen=True)
@@ -1733,6 +1740,34 @@ def execute_owner_inpaint(
         engine += "+context_guard_median"
     action_mask = np.where(allowed, 255, 0).astype(np.uint8)
     protected_mask = np.where(protected, 255, 0).astype(np.uint8)
+    residual = detect_residual_text(
+        original,
+        result,
+        action_mask,
+        include_unchanged_dark=True,
+        include_light_residual=True,
+    )
+    residual_score = float(residual["score"])
+    if not math.isfinite(residual_score):
+        raise UnsafeOwnerMaskError("owner residual detector returned a non-finite score")
+    residual_flags = tuple(sorted(set(str(flag) for flag in residual.get("flags", ()))))
+    before_sha256 = _array_sha256(original)
+    after_sha256 = _array_sha256(result)
+    action_mask_sha256 = _array_sha256(action_mask)
+    protected_art_mask_sha256 = _array_sha256(protected_mask)
+    residual_evidence_sha256 = owner_residual_evidence_sha256(
+        owner_id=plan.owner_id,
+        page_id=plan.page_id,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        component_geometry_sha256=plan.component_geometry_sha256,
+        residual_score=residual_score,
+        residual_threshold=OWNER_RESIDUAL_THRESHOLD,
+        residual_method=OWNER_RESIDUAL_METHOD,
+        residual_flags=residual_flags,
+    )
     for array in (result, action_mask, protected_mask, changed_mask):
         array.setflags(write=False)
     return OwnerMutation(
@@ -1749,14 +1784,20 @@ def execute_owner_inpaint(
         changed_pixels=int(np.count_nonzero(changed)),
         changed_outside_owner_pixels=int(np.count_nonzero(outside)),
         protected_art_changed_pixels=int(np.count_nonzero(protected_changed)),
-        before_sha256=_array_sha256(original),
-        after_sha256=_array_sha256(result),
-        action_mask_sha256=_array_sha256(action_mask),
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
         changed_mask_sha256=_array_sha256(changed_mask),
         engine_crop_bbox_page=(crop_x1, crop_y1, crop_x2, crop_y2),
         owner_bbox_page=plan.owner_bbox_page,
         component_geometry_sha256=plan.component_geometry_sha256,
         component_geometry_verified=plan.component_geometry_verified,
-        residual_score=None,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        residual_score=residual_score,
+        residual_verified=True,
+        residual_threshold=OWNER_RESIDUAL_THRESHOLD,
+        residual_method=OWNER_RESIDUAL_METHOD,
+        residual_evidence_sha256=residual_evidence_sha256,
+        residual_flags=residual_flags,
         execution_tile_id=plan.execution_tile_id,
     )

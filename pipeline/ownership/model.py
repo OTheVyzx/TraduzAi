@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+import json
 from pathlib import PurePosixPath
 import re
 from types import MappingProxyType
@@ -273,6 +274,11 @@ class OwnerMutation:
     component_geometry_sha256: str
     protected_art_mask_sha256: str | None = None
     residual_score: float | None = None
+    residual_verified: bool = False
+    residual_threshold: float | None = None
+    residual_method: str | None = None
+    residual_evidence_sha256: str | None = None
+    residual_flags: tuple[str, ...] = ()
     changed_mask_ref: str | None = None
     execution_tile_id: str | None = None
     projection_role: str = "executor"
@@ -301,6 +307,11 @@ class OwnerMutation:
                 "protected_art_mask_sha256",
                 _immutable_array_sha256(self.protected_art_mask),
             )
+        object.__setattr__(
+            self,
+            "residual_flags",
+            tuple(sorted(set(str(flag) for flag in self.residual_flags))),
+        )
 
     @property
     def changed_outside_action_mask_pixels(self) -> int:
@@ -314,6 +325,45 @@ class OwnerMutation:
     def result_sha256(self) -> str:
         return self.after_sha256
 
+
+def owner_residual_evidence_sha256(
+    *,
+    owner_id: str,
+    page_id: str,
+    before_sha256: str,
+    after_sha256: str,
+    action_mask_sha256: str,
+    protected_art_mask_sha256: str,
+    component_geometry_sha256: str,
+    residual_score: float,
+    residual_threshold: float,
+    residual_method: str,
+    residual_flags: tuple[str, ...] | list[str],
+) -> str:
+    """Hash the complete, immutable residual verification contract."""
+
+    payload = {
+        "schema": "traduzai.owner-residual-evidence.v1",
+        "owner_id": owner_id,
+        "page_id": page_id,
+        "before_sha256": before_sha256,
+        "after_sha256": after_sha256,
+        "action_mask_sha256": action_mask_sha256,
+        "protected_art_mask_sha256": protected_art_mask_sha256,
+        "component_geometry_sha256": component_geometry_sha256,
+        "residual_score": residual_score,
+        "residual_threshold": residual_threshold,
+        "residual_method": residual_method,
+        "residual_flags": sorted(set(str(flag) for flag in residual_flags)),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 @dataclass(frozen=True)
 class OwnerGlyphPatch:

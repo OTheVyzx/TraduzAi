@@ -177,12 +177,119 @@ def test_owner_action_mask_is_union_of_owned_glyph_and_line_evidence():
             ),
         ],
     )
-
     expected = np.maximum(glyph, line)
     np.testing.assert_array_equal(plan.action_mask, expected)
     assert plan.evidence_ids == ("glyph_top", "line_bottom")
     assert int(plan.action_mask[2, 41]) == 0
 
+
+def test_adjacent_protected_icon_survives_complete_multiline_cleanup():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        build_owner_mask_plan,
+        execute_owner_inpaint,
+    )
+
+    image = np.full((44, 64, 3), 238, dtype=np.uint8)
+    first_line = np.zeros(image.shape[:2], dtype=np.uint8)
+    first_line[10:14, 10:26] = 255
+    second_line = np.zeros(image.shape[:2], dtype=np.uint8)
+    second_line[22:26, 10:30] = 255
+    icon = np.zeros(image.shape[:2], dtype=np.uint8)
+    icon[14:22, 34:42] = 255
+    image[icon > 0] = (16, 32, 180)
+    image[first_line > 0] = 18
+    image[second_line > 0] = 18
+
+    owner = _single_component_owner(owner_id="owner_with_adjacent_icon")
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="line_0",
+                component_id="cmp_body_top",
+                glyph_mask=first_line,
+                observation_id="obs_body",
+                line_index=0,
+            ),
+            OwnerMaskEvidence(
+                evidence_id="line_1",
+                component_id="cmp_body_top",
+                glyph_mask=second_line,
+                observation_id="obs_body",
+                line_index=1,
+            ),
+            OwnerMaskEvidence(
+                evidence_id="icon_protection",
+                component_id="cmp_icon",
+                protected_art_mask=icon,
+            ),
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (6, 6, 46, 30)},
+        expected_line_ids=(("obs_body", 0), ("obs_body", 1)),
+    )
+
+    class FlatInpainter:
+        @staticmethod
+        def inpaint(crop, mask, **_kwargs):
+            result = crop.copy()
+            result[mask > 0] = 238
+            return result
+
+    mutation = execute_owner_inpaint(image, plan, FlatInpainter())
+
+    np.testing.assert_array_equal(mutation.result_rgb[icon > 0], image[icon > 0])
+    assert mutation.protected_art_changed_pixels == 0
+
+
+def test_connected_line_art_crossing_support_is_never_authorized():
+    source = np.full((32, 48, 3), 245, dtype=np.uint8)
+    source[14:17, 8:30] = 12
+    source[7:25, 28:31] = 12
+    source_glyph = np.zeros(source.shape[:2], dtype=np.uint8)
+    source_glyph[14:17, 8:20] = 255
+
+    protected, provenance, confidence = getattr(
+        __import__("strip.process_bands", fromlist=["_owner_protected_evidence"]),
+        "_owner_protected_evidence",
+    )(
+        source,
+        owner_component_ids={"cmp_text"},
+        source_glyph_mask=source_glyph,
+        component_bbox_page=(6, 6, 32, 26),
+        foreign_component_masks=(),
+        explicit_protected_masks=(),
+    )
+
+    assert confidence < 1.0
+    assert "connected_foreground_crosses_support" in provenance
+    assert np.any((protected > 0) & (source_glyph > 0))
+
+
+def test_changed_pixels_remain_subset_of_action_mask():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan, execute_owner_inpaint
+
+    image = np.full((28, 40, 3), 230, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[8:13, 9:21] = 255
+    owner = _single_component_owner(owner_id="owner_changed_subset")
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [OwnerMaskEvidence("glyph", "cmp_body_top", glyph_mask=glyph)],
+        owner_component_bboxes_page={"cmp_body_top": (6, 5, 25, 17)},
+    )
+
+    class WholeCropChanger:
+        @staticmethod
+        def inpaint(crop, _mask, **_kwargs):
+            return np.zeros_like(crop)
+
+    mutation = execute_owner_inpaint(image, plan, WholeCropChanger())
+    changed = np.asarray(mutation.changed_mask) > 0
+    action = np.asarray(mutation.action_mask) > 0
+    assert not np.any(changed & ~action)
 
 def test_selected_multiline_observation_authorizes_every_line_polygon():
     from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
@@ -1621,7 +1728,11 @@ def test_noop_owner_inpaint_is_rejected_and_successful_mutation_is_immutable():
 
     mutation = execute_owner_inpaint(image, plan, ChangingInpainter())
 
-    assert mutation.residual_score is None
+    assert mutation.residual_verified is True
+    assert mutation.residual_score == pytest.approx(0.8)
+    assert mutation.residual_score > mutation.residual_threshold
+    assert mutation.residual_method == "detect_residual_text.v1"
+    assert len(mutation.residual_evidence_sha256) == 64
     assert not mutation.result_rgb.flags.writeable
     assert not mutation.action_mask.flags.writeable
     assert not mutation.protected_art_mask.flags.writeable
