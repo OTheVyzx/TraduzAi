@@ -31,7 +31,7 @@ class UnsafeOwnerMaskError(ValueError):
 
 
 OWNER_MASK_COORDINATE_SPACE = "page"
-OWNER_MASK_SCHEMA_VERSION = 3
+OWNER_MASK_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,7 @@ class OwnerMaskEvidence:
     line_mask: np.ndarray | None = None
     protected_art_mask: np.ndarray | None = None
     observation_id: str | None = None
+    line_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,12 @@ class OwnerMaskPlan:
     owner_bbox_page: tuple[int, int, int, int] = (0, 0, 0, 0)
     component_geometry_sha256: str = ""
     component_geometry_verified: bool = False
+    expected_line_ids: tuple[tuple[str, int], ...] = ()
+    covered_line_ids: tuple[tuple[str, int], ...] = ()
+    expected_line_polygon_count: int = 0
+    covered_line_polygon_count: int = 0
+    uncovered_source_ink_pixels: int = 0
+    coverage_complete: bool = False
     coordinate_space: str = OWNER_MASK_COORDINATE_SPACE
 
 
@@ -75,6 +82,35 @@ def _canonical_identity(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise UnsafeOwnerMaskError(f"{label} must be a canonical non-empty string")
     return value
+
+
+def _canonical_line_ids(
+    values: Any,
+    *,
+    label: str,
+) -> tuple[tuple[str, int], ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise UnsafeOwnerMaskError(f"{label} must be a sequence")
+    result: list[tuple[str, int]] = []
+    for value in values:
+        if (
+            not isinstance(value, Sequence)
+            or isinstance(value, (str, bytes))
+            or len(value) != 2
+        ):
+            raise UnsafeOwnerMaskError(f"{label} contains a malformed line identity")
+        observation_id = _canonical_identity(
+            value[0],
+            label=f"{label} observation_id",
+        )
+        line_index = value[1]
+        if type(line_index) is not int or line_index < 0:
+            raise UnsafeOwnerMaskError(f"{label} line_index must be a non-negative integer")
+        result.append((observation_id, line_index))
+    canonical = tuple(sorted(set(result)))
+    if tuple(result) != canonical:
+        raise UnsafeOwnerMaskError(f"{label} must be sorted and unique")
+    return canonical
 
 
 def _canonical_evidence_ids(values: Any, *, label: str) -> tuple[str, ...]:
@@ -307,6 +343,10 @@ def _safe_owner_ref(
     owner_bbox_page: tuple[int, int, int, int] = (0, 0, 0, 0),
     component_geometry_sha256: str = "",
     component_geometry_verified: bool = False,
+    expected_line_ids: Sequence[tuple[str, int]] = (),
+    covered_line_ids: Sequence[tuple[str, int]] = (),
+    uncovered_source_ink_pixels: int = 0,
+    coverage_complete: bool = False,
 ) -> tuple[str, str]:
     owner_segment = _owner_artifact_segment(owner_id)
     normalized_evidence_ids = tuple(sorted(set(evidence_ids)))
@@ -328,6 +368,10 @@ def _safe_owner_ref(
             "coordinate_space": OWNER_MASK_COORDINATE_SPACE,
             "evidence_ids": normalized_evidence_ids,
             "execution_tile_id": execution_tile_id,
+            "expected_line_ids": [list(value) for value in expected_line_ids],
+            "covered_line_ids": [list(value) for value in covered_line_ids],
+            "uncovered_source_ink_pixels": int(uncovered_source_ink_pixels),
+            "coverage_complete": bool(coverage_complete),
             "observation_ids": normalized_observation_ids,
             "page_id": page_id,
             "owner_bbox_page": list(owner_bbox_page),
@@ -580,6 +624,24 @@ def _validated_plan_masks(plan: OwnerMaskPlan) -> tuple[np.ndarray, np.ndarray]:
     )
     if not observation_ids:
         raise UnsafeOwnerMaskError("owner mask plan has no selected observation provenance")
+    expected_line_ids = _canonical_line_ids(
+        plan.expected_line_ids,
+        label="owner mask plan expected_line_ids",
+    )
+    covered_line_ids = _canonical_line_ids(
+        plan.covered_line_ids,
+        label="owner mask plan covered_line_ids",
+    )
+    if (
+        not expected_line_ids
+        or covered_line_ids != expected_line_ids
+        or plan.expected_line_polygon_count != len(expected_line_ids)
+        or plan.covered_line_polygon_count != len(covered_line_ids)
+        or type(plan.uncovered_source_ink_pixels) is not int
+        or plan.uncovered_source_ink_pixels != 0
+        or plan.coverage_complete is not True
+    ):
+        raise UnsafeOwnerMaskError("owner mask plan line coverage is incomplete")
     (
         component_action_bboxes_page,
         component_bboxes_page,
@@ -608,6 +670,10 @@ def _validated_plan_masks(plan: OwnerMaskPlan) -> tuple[np.ndarray, np.ndarray]:
         owner_bbox_page,
         component_geometry_sha256,
         True,
+        expected_line_ids,
+        covered_line_ids,
+        plan.uncovered_source_ink_pixels,
+        plan.coverage_complete,
     )
     if (
         plan.action_mask_ref != expected_action_ref
@@ -625,6 +691,7 @@ def build_owner_mask_plan(
     evidence: Sequence[OwnerMaskEvidence | Mapping[str, Any]],
     *,
     owner_component_bboxes_page: Mapping[str, Sequence[int]] | None = None,
+    expected_line_ids: Sequence[tuple[str, int]] | None = None,
 ) -> OwnerMaskPlan:
     """Build a mask only from explicit owned glyph/line evidence, never a bbox."""
 
@@ -691,6 +758,32 @@ def build_owner_mask_plan(
         protected_evidence_ids: list[str] = []
         used_observation_ids: list[str] = []
         selected_observations = set(owner.selected_observation_ids)
+        canonical_expected_line_ids = _canonical_line_ids(
+            (
+                expected_line_ids
+                if expected_line_ids is not None
+                else tuple((observation_id, 0) for observation_id in sorted(selected_observations))
+            ),
+            label="expected owner line identities",
+        )
+        if not canonical_expected_line_ids:
+            raise UnsafeOwnerMaskError("owner has no expected line identities")
+        if {
+            observation_id for observation_id, _line_index in canonical_expected_line_ids
+        } != selected_observations:
+            raise UnsafeOwnerMaskError(
+                "expected line identities must exactly cover selected observations"
+            )
+        expected_by_observation: dict[str, tuple[int, ...]] = {
+            observation_id: tuple(
+                line_index
+                for candidate_id, line_index in canonical_expected_line_ids
+                if candidate_id == observation_id
+            )
+            for observation_id in selected_observations
+        }
+        covered_line_ids: set[tuple[str, int]] = set()
+        line_source_masks: dict[tuple[str, int], np.ndarray] = {}
         for record in evidence:
             if not isinstance(record, (OwnerMaskEvidence, Mapping)):
                 raise UnsafeOwnerMaskError("owner mask evidence record is invalid")
@@ -787,6 +880,23 @@ def build_owner_mask_plan(
                 raise UnsafeOwnerMaskError(
                     "owner mask evidence is not bound to a selected observation"
                 )
+            line_index = _evidence_value(record, "line_index")
+            if line_index is None:
+                expected_indices = expected_by_observation.get(observation_id, ())
+                if len(expected_indices) != 1:
+                    raise UnsafeOwnerMaskError(
+                        "owner mask evidence is missing its expected line identity"
+                    )
+                line_index = expected_indices[0]
+            if type(line_index) is not int or line_index < 0:
+                raise UnsafeOwnerMaskError(
+                    "owner mask evidence line identity is malformed"
+                )
+            line_id = (observation_id, line_index)
+            if line_id not in set(canonical_expected_line_ids):
+                raise UnsafeOwnerMaskError(
+                    "owner mask evidence references an unexpected line identity"
+                )
             if (
                 glyph_positive is not None
                 and _positive_mask_is_overbroad(
@@ -807,6 +917,12 @@ def build_owner_mask_plan(
             )
             used_evidence_ids.append(evidence_id)
             used_observation_ids.append(observation_id)
+            covered_line_ids.add(line_id)
+            line_source_masks[line_id] = (
+                positive.copy()
+                if line_id not in line_source_masks
+                else np.maximum(line_source_masks[line_id], positive)
+            )
 
         action = np.zeros(shape, dtype=np.uint8)
         component_action_entries: list[
@@ -886,6 +1002,24 @@ def build_owner_mask_plan(
                 "owner action mask union is overbroad for the page"
             )
 
+        canonical_covered_line_ids = tuple(sorted(covered_line_ids))
+        if canonical_covered_line_ids != canonical_expected_line_ids:
+            missing = sorted(set(canonical_expected_line_ids) - covered_line_ids)
+            raise UnsafeOwnerMaskError(
+                "owner line coverage is incomplete; missing identities: "
+                + ", ".join(f"{observation_id}:{line_index}" for observation_id, line_index in missing)
+            )
+        source_ink = np.zeros(shape, dtype=np.uint8)
+        for line_id in canonical_expected_line_ids:
+            source_ink = np.maximum(source_ink, line_source_masks[line_id])
+        uncovered_source_ink_pixels = int(
+            np.count_nonzero((source_ink > 0) & (action == 0))
+        )
+        if uncovered_source_ink_pixels:
+            raise UnsafeOwnerMaskError(
+                "owner line coverage leaves uncovered source ink pixels"
+            )
+
         action = np.ascontiguousarray(action, dtype=np.uint8)
         protected = np.ascontiguousarray(protected, dtype=np.uint8)
         source_sha256 = _array_sha256(original_rgb)
@@ -932,6 +1066,10 @@ def build_owner_mask_plan(
             owner_bbox_page,
             component_geometry_sha256,
             component_geometry_verified,
+            canonical_expected_line_ids,
+            canonical_covered_line_ids,
+            uncovered_source_ink_pixels,
+            True,
         )
         action.setflags(write=False)
         protected.setflags(write=False)
@@ -952,6 +1090,12 @@ def build_owner_mask_plan(
             owner_bbox_page=owner_bbox_page,
             component_geometry_sha256=component_geometry_sha256,
             component_geometry_verified=component_geometry_verified,
+            expected_line_ids=canonical_expected_line_ids,
+            covered_line_ids=canonical_covered_line_ids,
+            expected_line_polygon_count=len(canonical_expected_line_ids),
+            covered_line_polygon_count=len(canonical_covered_line_ids),
+            uncovered_source_ink_pixels=uncovered_source_ink_pixels,
+            coverage_complete=True,
         )
     except Exception as exc:
         _mark_owner_mask_review(owner)
@@ -999,6 +1143,12 @@ def _mask_manifest(plan: OwnerMaskPlan) -> dict[str, Any]:
         "evidence_ids": list(plan.evidence_ids),
         "protected_evidence_ids": list(plan.protected_evidence_ids),
         "observation_ids": list(plan.observation_ids),
+        "expected_line_ids": [list(value) for value in plan.expected_line_ids],
+        "covered_line_ids": [list(value) for value in plan.covered_line_ids],
+        "expected_line_polygon_count": plan.expected_line_polygon_count,
+        "covered_line_polygon_count": plan.covered_line_polygon_count,
+        "uncovered_source_ink_pixels": plan.uncovered_source_ink_pixels,
+        "coverage_complete": plan.coverage_complete,
         "component_action_bboxes_page": [
             [component_id, list(bbox)]
             for component_id, bbox in plan.component_action_bboxes_page
@@ -1062,6 +1212,12 @@ def _validate_persisted_mask_pair(plan: OwnerMaskPlan, directory: Path) -> None:
         "evidence_ids",
         "protected_evidence_ids",
         "observation_ids",
+        "expected_line_ids",
+        "covered_line_ids",
+        "expected_line_polygon_count",
+        "covered_line_polygon_count",
+        "uncovered_source_ink_pixels",
+        "coverage_complete",
         "component_action_bboxes_page",
         "component_bboxes_page",
         "owner_bbox_page",
@@ -1339,6 +1495,25 @@ def load_owner_action_mask(
         raise UnsafeOwnerMaskError(
             "owner mask manifest has no selected observation provenance"
         )
+    manifest_expected_line_ids = _canonical_line_ids(
+        manifest.get("expected_line_ids"),
+        label="owner mask manifest expected_line_ids",
+    )
+    manifest_covered_line_ids = _canonical_line_ids(
+        manifest.get("covered_line_ids"),
+        label="owner mask manifest covered_line_ids",
+    )
+    if (
+        not manifest_expected_line_ids
+        or manifest_covered_line_ids != manifest_expected_line_ids
+        or manifest.get("expected_line_polygon_count")
+        != len(manifest_expected_line_ids)
+        or manifest.get("covered_line_polygon_count")
+        != len(manifest_covered_line_ids)
+        or manifest.get("uncovered_source_ink_pixels") != 0
+        or manifest.get("coverage_complete") is not True
+    ):
+        raise UnsafeOwnerMaskError("owner mask manifest line coverage is incomplete")
     (
         manifest_component_action_bboxes_page,
         manifest_component_bboxes_page,
@@ -1387,6 +1562,10 @@ def load_owner_action_mask(
         manifest_owner_bbox_page,
         manifest_component_geometry_sha256,
         True,
+        manifest_expected_line_ids,
+        manifest_covered_line_ids,
+        int(manifest.get("uncovered_source_ink_pixels")),
+        bool(manifest.get("coverage_complete")),
     )
     if (
         action_mask_ref != expected_action_ref

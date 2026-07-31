@@ -178,6 +178,58 @@ def _glyph_patch_for_mask(
     )
 
 
+def test_missing_second_line_mask_revokes_entire_owner() -> None:
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        UnsafeOwnerMaskError,
+        build_owner_mask_plan,
+    )
+    from ownership.model import TextOwner
+
+    image = np.full((40, 56, 3), 220, dtype=np.uint8)
+    owner = TextOwner(
+        owner_id="owner_atomic_multiline",
+        page_id="page_001",
+        component_ids=["component_body"],
+        observation_ids=["observation_body"],
+        selected_observation_ids=["observation_body"],
+        semantic_role="dialogue_body",
+        source_payload="FIRST LINE SECOND LINE",
+        translated_payload="PRIMEIRA LINHA SEGUNDA LINHA",
+        disposition="owned",
+        state="translated",
+        route_action="translate_inpaint_render",
+        execution_tile_id="tile_executor",
+    )
+    first_line = np.zeros(image.shape[:2], dtype=np.uint8)
+    first_line[8:11, 10:30] = 255
+
+    with np.testing.assert_raises_regex(
+        UnsafeOwnerMaskError,
+        "line|coverage|identity",
+    ):
+        build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="first_line",
+                    component_id="component_body",
+                    glyph_mask=first_line,
+                    observation_id="observation_body",
+                    line_index=0,
+                )
+            ],
+            expected_line_ids=(("observation_body", 0), ("observation_body", 1)),
+            owner_component_bboxes_page={"component_body": (6, 5, 36, 30)},
+        )
+
+    assert owner.state == "review_required"
+    assert owner.route_action == "review_required"
+    assert owner.execution_tile_id == "tile_executor"
+    assert owner.action_mask_ref is None
+
+
 def _page() -> np.ndarray:
     page = np.full((12, 16, 3), 210, dtype=np.uint8)
     # A translated glyph belonging to a previously committed neighboring owner.

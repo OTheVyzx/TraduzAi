@@ -184,6 +184,114 @@ def test_owner_action_mask_is_union_of_owned_glyph_and_line_evidence():
     assert int(plan.action_mask[2, 41]) == 0
 
 
+def test_selected_multiline_observation_authorizes_every_line_polygon():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+
+    image = np.full((48, 64, 3), 240, dtype=np.uint8)
+    owner = _single_component_owner(owner_id="owner_multiline_complete")
+    line_top = np.zeros(image.shape[:2], dtype=np.uint8)
+    line_top[10:13, 12:32] = 255
+    line_bottom = np.zeros(image.shape[:2], dtype=np.uint8)
+    line_bottom[24:27, 14:34] = 255
+
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="line_top",
+                component_id="cmp_body_top",
+                glyph_mask=line_top,
+                observation_id="obs_body",
+                line_index=0,
+            ),
+            OwnerMaskEvidence(
+                evidence_id="line_bottom",
+                component_id="cmp_body_top",
+                glyph_mask=line_bottom,
+                observation_id="obs_body",
+                line_index=1,
+            ),
+        ],
+        expected_line_ids=(("obs_body", 0), ("obs_body", 1)),
+        owner_component_bboxes_page={"cmp_body_top": (8, 6, 40, 32)},
+    )
+
+    assert plan.expected_line_ids == (("obs_body", 0), ("obs_body", 1))
+    assert plan.covered_line_ids == plan.expected_line_ids
+    assert plan.expected_line_polygon_count == 2
+    assert plan.covered_line_polygon_count == 2
+    assert plan.uncovered_source_ink_pixels == 0
+    assert plan.coverage_complete is True
+
+
+def test_expected_line_identity_missing_before_planner_still_revokes_owner():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        UnsafeOwnerMaskError,
+        build_owner_mask_plan,
+    )
+
+    image = np.full((48, 64, 3), 240, dtype=np.uint8)
+    owner = _single_component_owner(owner_id="owner_multiline_missing")
+    line_top = np.zeros(image.shape[:2], dtype=np.uint8)
+    line_top[10:13, 12:32] = 255
+
+    with pytest.raises(UnsafeOwnerMaskError, match="line|coverage|identity"):
+        build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="line_top",
+                    component_id="cmp_body_top",
+                    glyph_mask=line_top,
+                    observation_id="obs_body",
+                    line_index=0,
+                )
+            ],
+            expected_line_ids=(("obs_body", 0), ("obs_body", 1)),
+            owner_component_bboxes_page={"cmp_body_top": (8, 6, 40, 32)},
+        )
+
+    assert owner.state == "review_required"
+    assert owner.route_action == "review_required"
+    assert owner.action_mask_ref is None
+
+
+def test_unselected_material_complete_evidence_is_audited_for_cleanup():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        UnsafeOwnerMaskError,
+        build_owner_mask_plan,
+    )
+
+    image = np.full((32, 48, 3), 240, dtype=np.uint8)
+    owner = _single_component_owner(owner_id="owner_unselected_material")
+    owner.observation_ids.append("obs_unselected_complete")
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[8:11, 9:30] = 255
+
+    with pytest.raises(UnsafeOwnerMaskError, match="selected observation|line|identity"):
+        build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="unselected_complete",
+                    component_id="cmp_body_top",
+                    glyph_mask=glyph,
+                    observation_id="obs_unselected_complete",
+                    line_index=0,
+                )
+            ],
+            expected_line_ids=(("obs_body", 0),),
+            owner_component_bboxes_page={"cmp_body_top": (6, 5, 34, 16)},
+        )
+
+    assert owner.state == "review_required"
+
+
 def test_verified_owner_mask_expands_strokes_inside_component_geometry_only():
     from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
 

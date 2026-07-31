@@ -10041,6 +10041,27 @@ def execute_owner_page_graph(
         )
         evidence: list[OwnerMaskEvidence] = []
         component_bboxes: dict[str, tuple[int, int, int, int]] = {}
+        selected_observations = [
+            observations[observation_id]
+            for observation_id in owner.selected_observation_ids
+            if observation_id in observations
+        ]
+        expected_line_ids = tuple(
+            sorted(
+                (
+                    observation.observation_id,
+                    line_index,
+                )
+                for observation in selected_observations
+                for line_index in range(
+                    max(
+                        1,
+                        len(observation.polygons_page),
+                        len(observation.line_texts),
+                    )
+                )
+            )
+        )
         for component_id in owner.component_ids:
             component = components[component_id]
             component_bboxes[component_id] = (
@@ -10059,30 +10080,52 @@ def execute_owner_page_graph(
                 raise ValueError(
                     f"owner {owner.owner_id} has no selected OCR support for {component_id}"
                 )
-            support_polygons: list[tuple[tuple[int, int], ...]] = []
             for observation in selected:
-                support_polygons.extend(observation.polygons_page)
-                if not observation.polygons_page:
-                    x1, y1, x2, y2 = observation.bbox_page
-                    support_polygons.append(((x1, y1), (x2, y1), (x2, y2), (x1, y2)))
-            evidence.append(
-                OwnerMaskEvidence(
-                    evidence_id=f"{owner.owner_id}__{component_id}__source_ink",
-                    component_id=component_id,
-                    glyph_mask=_owner_component_glyph_raster(
-                        source,
-                        component=component,
-                        support_polygons=tuple(support_polygons),
-                    ),
-                    observation_id=selected[0].observation_id,
+                line_count = max(
+                    1,
+                    len(observation.polygons_page),
+                    len(observation.line_texts),
                 )
-            )
+                for line_index in range(line_count):
+                    if line_index < len(observation.polygons_page):
+                        support_polygon = observation.polygons_page[line_index]
+                    elif line_count == 1:
+                        x1, y1, x2, y2 = observation.bbox_page
+                        support_polygon = (
+                            (x1, y1),
+                            (x2, y1),
+                            (x2, y2),
+                            (x1, y2),
+                        )
+                    else:
+                        continue
+                    try:
+                        glyph_raster = _owner_component_glyph_raster(
+                            source,
+                            component=component,
+                            support_polygons=(support_polygon,),
+                        )
+                    except ValueError:
+                        continue
+                    evidence.append(
+                        OwnerMaskEvidence(
+                            evidence_id=(
+                                f"{owner.owner_id}__{component_id}__"
+                                f"{observation.observation_id}__line_{line_index:03d}"
+                            ),
+                            component_id=component_id,
+                            glyph_mask=glyph_raster,
+                            observation_id=observation.observation_id,
+                            line_index=line_index,
+                        )
+                    )
         try:
             plan = build_owner_mask_plan(
                 source,
                 single_owner,
                 evidence,
                 owner_component_bboxes_page=component_bboxes,
+                expected_line_ids=expected_line_ids,
             )
         except UnsafeOwnerMaskError as exc:
             logger.warning(
@@ -10108,6 +10151,23 @@ def execute_owner_page_graph(
                 )
             )
             continue
+        if not plan.coverage_complete:
+            _transition_owner_to_review(executed_graph, owner.owner_id)
+            review_seed = copy.deepcopy(record)
+            review_seed["owner_execution_rejection_reason"] = (
+                "owner mask coverage is incomplete"
+            )
+            review_seed["qa_flags"] = sorted(
+                {*list(review_seed.get("qa_flags") or []), "owner_mask_unsafe"}
+            )
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=review_seed,
+                )
+            )
+            continue
         single_owner.state = "mask_ready"
         single_owner.action_mask_ref = plan.action_mask_ref
         owner.state = "mask_ready"
@@ -10119,6 +10179,15 @@ def execute_owner_page_graph(
                 "bbox": list(plan.owner_bbox_page),
                 "source_bbox": list(plan.owner_bbox_page),
                 "text_pixel_bbox": list(plan.owner_bbox_page),
+                "owner_mask_coverage": {
+                    "selected_observation_ids": sorted(owner.selected_observation_ids),
+                    "expected_line_ids": [list(value) for value in plan.expected_line_ids],
+                    "covered_line_ids": [list(value) for value in plan.covered_line_ids],
+                    "expected_line_polygon_count": plan.expected_line_polygon_count,
+                    "covered_line_polygon_count": plan.covered_line_polygon_count,
+                    "uncovered_source_ink_pixels": plan.uncovered_source_ink_pixels,
+                    "coverage_complete": plan.coverage_complete,
+                },
             }
         )
         inpaint_page = {
@@ -10191,6 +10260,9 @@ def execute_owner_page_graph(
             rendered_record.update(
                 {
                     "state": "rendered",
+                    "owner_mask_coverage": copy.deepcopy(
+                        record["owner_mask_coverage"]
+                    ),
                     "band_id": owner.execution_tile_id,
                     "render_completed": bool(glyph_patch.render_completed),
                     "fit_status": str(glyph_patch.fit_status),

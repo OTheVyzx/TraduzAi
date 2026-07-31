@@ -338,6 +338,15 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     assert execution.records[0]["fit_status"] == "ok"
     assert execution.records[0]["safe_text_box"] == [8, 7, 42, 27]
     assert execution.records[0]["target_bbox"] == [8, 7, 42, 27]
+    assert execution.records[0]["owner_mask_coverage"] == {
+        "selected_observation_ids": ["observation_a"],
+        "expected_line_ids": [["observation_a", 0]],
+        "covered_line_ids": [["observation_a", 0]],
+        "expected_line_polygon_count": 1,
+        "covered_line_polygon_count": 1,
+        "uncovered_source_ink_pixels": 0,
+        "coverage_complete": True,
+    }
     assert "missing_render_bbox" not in execution.records[0].get("qa_flags", [])
     assert "fast_fill_no_glyph_evidence" not in execution.records[0].get("qa_flags", [])
     assert execution.records[0]["mask_evidence"]["kind"] == "owner_glyph_mask"
