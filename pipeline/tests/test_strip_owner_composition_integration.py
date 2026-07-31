@@ -142,6 +142,7 @@ def _chapter_fixture():
 def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
     import json
     from ownership.model import OwnerGlyphPatch
+    from typesetter.owner_render_quality import OwnerRenderQuality
 
     before = np.asarray(mutation.result_rgb)
     x1, y1, x2, y2 = bbox
@@ -173,6 +174,27 @@ def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
             json.dumps(polygon, separators=(",", ":")).encode("utf-8")
         ).hexdigest(),
         component_geometry_sha256=mutation.component_geometry_sha256,
+        render_quality_contract=OwnerRenderQuality(
+            schema_version=1,
+            status="ok",
+            font_size_final=14,
+            minimum_legible_font_px=12,
+            source_ink_height_px=None,
+            render_ink_height_px=max(1, y2 - y1),
+            source_x_height_px=None,
+            render_x_height_px=float(max(1, y2 - y1)) * 0.70,
+            source_scale_ratio=None,
+            x_height_ratio=None,
+            rendered_line_core_heights_px=(max(1, y2 - y1),),
+            safe_height_occupancy=0.25,
+            safe_area_occupancy=0.10,
+            wrapped_line_count=1,
+            containment_status="ok",
+            outside_safe_pixels=0,
+            page_width=result.shape[1],
+            page_height=result.shape[0],
+            reasons=(),
+        ),
         execution_tile_id=mutation.execution_tile_id,
     )
 

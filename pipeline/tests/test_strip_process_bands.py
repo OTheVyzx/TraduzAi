@@ -6121,6 +6121,7 @@ def _owner_atomic_copyback_fixture():
     from ownership.model import OwnerGlyphPatch, OwnerMutation
     from strip import process_bands
     from strip.types import Band
+    from typesetter.owner_render_quality import OwnerRenderQuality
 
     original = np.full((20, 30, 3), 210, dtype=np.uint8)
     original[2:5, 22:26] = (15, 25, 35)
@@ -6184,6 +6185,27 @@ def _owner_atomic_copyback_fixture():
             ((8, 8), (14, 8), (14, 12), (8, 12))
         ),
         component_geometry_sha256=mutation.component_geometry_sha256,
+        render_quality_contract=OwnerRenderQuality(
+            schema_version=1,
+            status="ok",
+            font_size_final=14,
+            minimum_legible_font_px=12,
+            source_ink_height_px=None,
+            render_ink_height_px=2,
+            source_x_height_px=None,
+            render_x_height_px=1.4,
+            source_scale_ratio=None,
+            x_height_ratio=None,
+            rendered_line_core_heights_px=(2,),
+            safe_height_occupancy=0.5,
+            safe_area_occupancy=0.2,
+            wrapped_line_count=1,
+            containment_status="ok",
+            outside_safe_pixels=0,
+            page_width=original.shape[1],
+            page_height=original.shape[0],
+            reasons=(),
+        ),
         execution_tile_id="tile_executor",
         projection_role="executor",
     )

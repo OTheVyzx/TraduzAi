@@ -12,6 +12,11 @@ from typing import Any, Iterable
 
 import numpy as np
 
+try:
+    from typesetter.owner_render_quality import OwnerRenderQuality
+except ImportError:  # pragma: no cover - supports package imports
+    from ..typesetter.owner_render_quality import OwnerRenderQuality
+
 
 BBox = tuple[int, int, int, int]
 Point = tuple[int, int]
@@ -384,11 +389,18 @@ class OwnerGlyphPatch:
     render_safe_polygon_page: tuple[Point, ...]
     render_safe_polygon_sha256: str
     component_geometry_sha256: str
+    render_quality_contract: OwnerRenderQuality
     execution_tile_id: str | None = None
     projection_role: str = "executor"
     color_space: str = "RGB"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.render_quality_contract, OwnerRenderQuality):
+            raise TypeError("owner glyph patch requires an OwnerRenderQuality contract")
+        if self.render_completed and self.render_quality_contract.status != "ok":
+            raise ValueError(
+                "completed owner glyph patch requires render quality status=ok"
+            )
         for field_name in ("result_rgb", "glyph_mask"):
             value = getattr(self, field_name)
             copy_value = getattr(value, "copy", None)

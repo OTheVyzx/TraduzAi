@@ -613,3 +613,46 @@ def test_project_writer_removes_stale_sfx_policy_from_normal_text(tmp_path):
     assert layer["content_class"] == "text"
     assert layer["translate_policy"] == "translate"
     assert layer["render_policy"] == "normal"
+
+
+def test_owner_render_quality_round_trips_through_project_writer(tmp_path):
+    path = tmp_path / "project.json"
+    quality = {
+        "schema_version": 1,
+        "status": "ok",
+        "font_size_final": 28,
+        "minimum_legible_font_px": 14,
+        "source_ink_height_px": 22.0,
+        "render_ink_height_px": 22,
+        "source_x_height_px": 15.4,
+        "render_x_height_px": 15.4,
+        "source_scale_ratio": 1.0,
+        "x_height_ratio": 1.0,
+        "rendered_line_core_heights_px": [22],
+        "safe_height_occupancy": 0.40,
+        "safe_area_occupancy": 0.16,
+        "wrapped_line_count": 1,
+        "containment_status": "ok",
+        "outside_safe_pixels": 0,
+        "page_width": 360,
+        "page_height": 280,
+        "reasons": [],
+    }
+    project = {
+        "paginas": [{
+            "text_layers": [{
+                "id": "owner-1",
+                "owner_render_quality": quality,
+                "render_layout_contract": {"owner_render_quality": quality},
+                "qa_flags": [],
+            }],
+        }],
+        "estatisticas": {"total_paginas": 1},
+        "qa": {"summary": {"total": 0}},
+    }
+
+    write_project_json_atomic(path, project)
+
+    layer = json.loads(path.read_text(encoding="utf-8"))["paginas"][0]["text_layers"][0]
+    assert layer["owner_render_quality"] == quality
+    assert layer["render_layout_contract"]["owner_render_quality"] == quality

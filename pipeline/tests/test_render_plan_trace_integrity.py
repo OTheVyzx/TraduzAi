@@ -278,6 +278,56 @@ def test_project_render_plan_final_preserves_source_style_debug_fields(tmp_path)
     assert row["estilo"]["contorno_px"] == 3
 
 
+def test_render_plan_final_preserves_owner_render_quality_contract(tmp_path):
+    from debug_tools import DebugRecorder
+    import main
+
+    quality = {
+        "schema_version": 1,
+        "status": "ok",
+        "font_size_final": 31,
+        "minimum_legible_font_px": 14,
+        "source_ink_height_px": 24.0,
+        "render_ink_height_px": 25,
+        "source_x_height_px": 16.8,
+        "render_x_height_px": 17.5,
+        "source_scale_ratio": 1.041667,
+        "x_height_ratio": 1.041667,
+        "rendered_line_core_heights_px": [25],
+        "safe_height_occupancy": 0.42,
+        "safe_area_occupancy": 0.18,
+        "wrapped_line_count": 1,
+        "containment_status": "ok",
+        "outside_safe_pixels": 0,
+        "page_width": 360,
+        "page_height": 280,
+        "reasons": [],
+    }
+    project = {
+        "paginas": [{
+            "numero": 1,
+            "text_layers": [{
+                "id": "owner_001",
+                "owner_id": "owner_001",
+                "translated": "TEXTO",
+                "render_bbox": [40, 40, 120, 70],
+                "safe_text_box": [20, 20, 140, 90],
+                "render_completed": True,
+                "fit_status": "ok",
+                "owner_render_quality": quality,
+                "render_layout_contract": {"owner_render_quality": quality},
+            }],
+        }],
+    }
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-quality")
+
+    main._write_debug_render_plan_final_from_project(recorder, project)
+
+    row = _jsonl(tmp_path / "debug" / "e2e" / "09_typeset" / "render_plan_final.jsonl")[0]
+    assert row["owner_render_quality"] == quality
+    assert row["render_layout_contract"]["owner_render_quality"] == quality
+
+
 def test_project_render_plan_final_skips_merged_into_primary_layers(tmp_path):
     from debug_tools import DebugRecorder
     import main

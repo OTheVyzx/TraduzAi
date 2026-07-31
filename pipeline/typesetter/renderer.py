@@ -17671,6 +17671,9 @@ def _evaluate_rendered_owner_candidate(
         trusted_container=bool(plan.get("trusted_container", True)),
     ).to_dict()
     child["owner_render_quality"] = quality
+    render_layout_contract = child.get("render_layout_contract")
+    if isinstance(render_layout_contract, dict):
+        render_layout_contract["owner_render_quality"] = copy.deepcopy(quality)
     metrics = child.setdefault("qa_metrics", {})
     if isinstance(metrics, dict):
         metrics["owner_render_quality"] = copy.deepcopy(quality)
@@ -19617,6 +19620,38 @@ def _render_owner_band_image(
         render_completed = False
         fit_status = "render_outside_layout_regions"
 
+    safe_x = [point[0] for point in polygon]
+    safe_y = [point[1] for point in polygon]
+    render_quality_contract = evaluate_owner_render_quality(
+        render_bbox=list(glyph_bbox or []),
+        safe_bbox=[min(safe_x), min(safe_y), max(safe_x), max(safe_y)],
+        safe_mask=np.where(polygon_mask > 0, 1, 0).astype(np.uint8),
+        glyph_core_mask=np.where(glyph_mask > 0, 1, 0).astype(np.uint8),
+        glyph_pixels=int(np.count_nonzero(glyph_mask)),
+        font_size_final=int(block.get("font_size_final", 0) or 0),
+        minimum_legible_font_px=int(block.get("minimum_legible_font_px", 0) or 0),
+        source_ink_heights_px=tuple(block.get("source_ink_heights_px") or ()),
+        source_x_heights_px=tuple(block.get("source_x_heights_px") or ()),
+        source_evidence_confidence=float(
+            block.get("source_scale_evidence_confidence", 0.0) or 0.0
+        ),
+        page_width=width,
+        page_height=height,
+        translated_text=str(block.get("translated_payload") or block.get("translated") or ""),
+        layout_profile=str(block.get("layout_profile") or ""),
+        trusted_container=True,
+    )
+    if render_quality_contract.status != "ok":
+        render_completed = False
+        if fit_status == "ok":
+            fit_status = "below_proportional_legibility"
+    block["owner_render_quality"] = render_quality_contract.to_dict()
+    render_layout_contract = block.get("render_layout_contract")
+    if isinstance(render_layout_contract, dict):
+        render_layout_contract["owner_render_quality"] = (
+            render_quality_contract.to_dict()
+        )
+
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=graph_page_id,
@@ -19639,6 +19674,7 @@ def _render_owner_band_image(
             owner_graph,
             shape=(height, width),
         ),
+        render_quality_contract=render_quality_contract,
         execution_tile_id=execution_tile_id,
         projection_role="executor",
     )

@@ -1556,6 +1556,49 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(consistency["render_plan_sync"]["written_count"], 1)
             self.assertEqual(sync_audit["summary"]["written_count"], 1)
 
+    def test_main_debug_artifact_preserves_owner_render_quality_metrics(self) -> None:
+        quality = {
+            "schema_version": 1,
+            "status": "ok",
+            "font_size_final": 28,
+            "minimum_legible_font_px": 14,
+            "source_ink_height_px": 22.0,
+            "render_ink_height_px": 22,
+            "source_x_height_px": 15.4,
+            "render_x_height_px": 15.4,
+            "source_scale_ratio": 1.0,
+            "x_height_ratio": 1.0,
+            "rendered_line_core_heights_px": [22],
+            "safe_height_occupancy": 0.4,
+            "safe_area_occupancy": 0.16,
+            "wrapped_line_count": 1,
+            "containment_status": "ok",
+            "outside_safe_pixels": 0,
+            "page_width": 360,
+            "page_height": 280,
+            "reasons": [],
+        }
+        row = main._project_render_plan_row(
+            {"numero": 1},
+            {
+                "id": "owner_001",
+                "owner_id": "owner_001",
+                "translated": "TEXTO",
+                "render_bbox": [40, 40, 120, 70],
+                "safe_text_box": [20, 20, 140, 90],
+                "owner_render_quality": quality,
+                "qa_metrics": {"owner_render_quality": quality},
+                "render_layout_contract": {"owner_render_quality": quality},
+            },
+            0,
+        )
+
+        self.assertEqual(row["owner_render_quality"], quality)
+        self.assertEqual(row["qa_metrics"]["owner_render_quality"], quality)
+        self.assertEqual(
+            row["render_layout_contract"]["owner_render_quality"], quality
+        )
+
     def test_refresh_debug_final_band_crops_uses_translated_image_pixels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder

@@ -292,6 +292,8 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     class Typesetter:
         @staticmethod
         def render_band_image(image, _record, *, owner_graph):
+            from typesetter.owner_render_quality import OwnerRenderQuality
+
             owner = owner_graph.owners[0]
             calls.append(("typeset", owner.owner_id))
             result = image.copy()
@@ -317,6 +319,27 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
                 render_safe_polygon_page=polygon,
                 render_safe_polygon_sha256=polygon_hash,
                 component_geometry_sha256=state["mutation"].component_geometry_sha256,
+                render_quality_contract=OwnerRenderQuality(
+                    schema_version=1,
+                    status="ok",
+                    font_size_final=14,
+                    minimum_legible_font_px=12,
+                    source_ink_height_px=None,
+                    render_ink_height_px=3,
+                    source_x_height_px=None,
+                    render_x_height_px=2.1,
+                    source_scale_ratio=None,
+                    x_height_ratio=None,
+                    rendered_line_core_heights_px=(3,),
+                    safe_height_occupancy=0.15,
+                    safe_area_occupancy=0.05,
+                    wrapped_line_count=1,
+                    containment_status="ok",
+                    outside_safe_pixels=0,
+                    page_width=image.shape[1],
+                    page_height=image.shape[0],
+                    reasons=(),
+                ),
                 execution_tile_id=owner.execution_tile_id,
             )
 

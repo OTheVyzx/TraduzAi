@@ -221,6 +221,8 @@ class TypesettingRendererTests(unittest.TestCase):
             block["render_completed"] = True
             block["fit_status"] = "ok"
             block["render_bbox"] = [70, 52, 109, 69]
+            block["font_size_final"] = 18
+            block["minimum_legible_font_px"] = 14
 
         with patch("typesetter.renderer.render_text_block", side_effect=deterministic_render):
             glyph_patch = render_band_image(canvas, page, owner_graph=graph)

@@ -39,6 +39,7 @@ from ownership.model import (
     owner_residual_evidence_sha256,
 )
 from ownership.translation import merge_owner_translations, owners_to_translation_page
+from typesetter.owner_render_quality import OwnerRenderQuality
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
@@ -8933,6 +8934,11 @@ def apply_atomic_owner_execution(
             raise ValueError("render was not completed")
         if glyph_patch.fit_status != "ok":
             raise ValueError("render fit status is not safe")
+        render_quality_contract = glyph_patch.render_quality_contract
+        if not isinstance(render_quality_contract, OwnerRenderQuality):
+            raise ValueError("owner render quality contract is missing")
+        if render_quality_contract.status != "ok":
+            raise ValueError("owner render quality contract is not safe")
         glyph_component_geometry_sha256 = _canonical_owner_hash(
             glyph_patch.component_geometry_sha256,
             label="glyph patch component geometry hash",
@@ -10550,6 +10556,7 @@ def execute_owner_page_graph(
                     "band_id": owner.execution_tile_id,
                     "render_completed": bool(glyph_patch.render_completed),
                     "fit_status": str(glyph_patch.fit_status),
+                    "owner_render_quality": glyph_patch.render_quality_contract.to_dict(),
                     "render_bbox": render_bbox,
                     "_debug_render_bbox": copy.deepcopy(render_bbox),
                     "safe_text_box": safe_bbox,
@@ -10564,6 +10571,7 @@ def execute_owner_page_graph(
                         "block_bbox": copy.deepcopy(render_bbox),
                         "safe_text_box": copy.deepcopy(safe_bbox),
                         "fit_status": str(glyph_patch.fit_status),
+                        "owner_render_quality": glyph_patch.render_quality_contract.to_dict(),
                     },
                     "mask_evidence": {
                         "kind": "owner_glyph_mask",

@@ -296,6 +296,7 @@ class OwnerArtifactPublisher:
             )
 
         execution_count = 0
+        render_quality_rows: list[dict[str, Any]] = []
         for execution in executions or ():
             page_id = str(_field(execution, "page_id") or "")
             owner_id = str(_field(execution, "owner_id") or "")
@@ -310,6 +311,30 @@ class OwnerArtifactPublisher:
                     color_space="GRAY",
                 )
                 execution_count += 1
+            glyph_patch = _field(execution, "glyph_patch")
+            quality = _field(glyph_patch, "render_quality_contract")
+            quality_payload = _snapshot(quality)
+            if page_id and owner_id and quality_payload:
+                render_quality_rows.append(
+                    {
+                        **_base_row(
+                            page_id=page_id,
+                            owner_id=owner_id,
+                            event="render_quality",
+                            hashes={
+                                "render_quality_sha256": _canonical_sha256(
+                                    quality_payload
+                                )
+                            },
+                            offenders=[owner_id],
+                        ),
+                        "render_quality_contract": quality_payload,
+                    }
+                )
+        if executions is not None:
+            self.recorder.write_jsonl_replace(
+                "09_typeset/owner_render_quality.jsonl", render_quality_rows
+            )
 
         composition_rows: list[dict[str, Any]] = []
         for page_id, value in sorted(dict(compositions or {}).items()):
@@ -418,6 +443,7 @@ class OwnerArtifactPublisher:
             "source_evidence_count": len(evidence_ledger),
             "render_plan_count": len(render_plan),
             "execution_mask_count": execution_count,
+            "render_quality_count": len(render_quality_rows),
             "composition_count": len(composition_rows),
             "final_ocr_count": len(final_ocr_rows),
             "pixel_check_count": len(pixel_rows),

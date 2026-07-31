@@ -19,7 +19,12 @@ from compositor.owner_compositor import (  # noqa: E402
     OwnerCompositionError,
     compose_page,
 )
-from ownership.model import OwnerGlyphPatch, OwnerMutation  # noqa: E402
+from ownership.model import (  # noqa: E402
+    OwnerGlyphPatch,
+    OwnerMutation,
+    owner_residual_evidence_sha256,
+)
+from typesetter.owner_render_quality import OwnerRenderQuality  # noqa: E402
 
 
 PAGE_ID = "page_001"
@@ -91,6 +96,24 @@ def _mutation(
         if protected_art_mask is None
         else protected_art_mask.copy()
     )
+    before_sha256 = _array_sha256(original)
+    after_sha256 = _array_sha256(result)
+    action_sha256 = _array_sha256(action_mask)
+    protected_sha256 = _array_sha256(protected)
+    component_sha256 = _component_hash(owner_id)
+    residual_evidence_sha256 = owner_residual_evidence_sha256(
+        owner_id=owner_id,
+        page_id=PAGE_ID,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_sha256,
+        protected_art_mask_sha256=protected_sha256,
+        component_geometry_sha256=component_sha256,
+        residual_score=0.0,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_flags=(),
+    )
     return OwnerMutation(
         owner_id=owner_id,
         page_id=PAGE_ID,
@@ -107,14 +130,20 @@ def _mutation(
         protected_art_changed_pixels=int(
             np.count_nonzero(changed & (protected > 0))
         ),
-        before_sha256=_array_sha256(original),
-        after_sha256=_array_sha256(result),
-        action_mask_sha256=_array_sha256(action_mask),
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_sha256,
         changed_mask_sha256=_array_sha256(changed_mask),
         engine_crop_bbox_page=(0, 0, original.shape[1], original.shape[0]),
         owner_bbox_page=(0, 0, original.shape[1], original.shape[0]),
-        component_geometry_sha256=_component_hash(owner_id),
-        protected_art_mask_sha256=_array_sha256(protected),
+        component_geometry_sha256=component_sha256,
+        protected_art_mask_sha256=protected_sha256,
+        residual_score=0.0,
+        residual_verified=True,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_evidence_sha256=residual_evidence_sha256,
+        component_geometry_verified=True,
         execution_tile_id=f"tile_{owner_id}",
         projection_role=projection_role,
         color_space=color_space,
@@ -162,6 +191,27 @@ def _glyph_patch(
             if mutation is not None
             else _component_hash(owner_id)
         ),
+        render_quality_contract=OwnerRenderQuality(
+            schema_version=1,
+            status="ok",
+            font_size_final=14,
+            minimum_legible_font_px=12,
+            source_ink_height_px=None,
+            render_ink_height_px=max(1, y2 - y1),
+            source_x_height_px=None,
+            render_x_height_px=float(max(1, y2 - y1)) * 0.70,
+            source_scale_ratio=None,
+            x_height_ratio=None,
+            rendered_line_core_heights_px=(max(1, y2 - y1),),
+            safe_height_occupancy=float(y2 - y1) / float(original.shape[0]),
+            safe_area_occupancy=float(np.count_nonzero(glyph_mask)) / float(glyph_mask.size),
+            wrapped_line_count=1,
+            containment_status="ok",
+            outside_safe_pixels=0,
+            page_width=original.shape[1],
+            page_height=original.shape[0],
+            reasons=(),
+        ),
         execution_tile_id=f"tile_{owner_id}",
         projection_role=projection_role,
         color_space=color_space,
@@ -170,6 +220,28 @@ def _glyph_patch(
 
 def _empty_protected(original: np.ndarray) -> np.ndarray:
     return np.zeros(original.shape[:2], dtype=np.uint8)
+
+
+def test_owner_glyph_patch_requires_render_quality_contract() -> None:
+    patch = _glyph_patch(_original())
+
+    assert hasattr(patch, "render_quality_contract")
+    assert patch.render_quality_contract.status == "ok"
+
+
+def test_atomic_owner_commit_rejects_missing_render_quality_contract() -> None:
+    from strip.process_bands import apply_atomic_owner_execution
+
+    original = _original()
+    mutation = _mutation(original)
+    patch = _glyph_patch(original, mutation=mutation)
+    object.__setattr__(patch, "render_quality_contract", None)
+
+    commit = apply_atomic_owner_execution(original, mutation, patch)
+
+    assert commit.committed is False
+    assert commit.review_required is True
+    assert "render quality contract is missing" in commit.reason
 
 
 def test_changed_pixels_must_be_subset_of_owner_action_mask() -> None:

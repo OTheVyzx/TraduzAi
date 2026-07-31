@@ -7296,6 +7296,7 @@ def _project_render_plan_row(page: dict, layer: dict, page_index: int) -> dict |
         "font_size_final": layer.get("font_size_final"),
         "minimum_legible_font_px": layer.get("minimum_legible_font_px"),
         "render_completed": layer.get("render_completed"),
+        "owner_render_quality": copy.deepcopy(layer.get("owner_render_quality")),
     }
     style = layer.get("estilo") if isinstance(layer.get("estilo"), dict) else layer.get("style")
     if isinstance(style, dict):
