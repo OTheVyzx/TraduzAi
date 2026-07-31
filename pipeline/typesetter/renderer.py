@@ -7671,7 +7671,11 @@ def _should_follow_original_ocr_size(text_data: dict) -> bool:
     flags = _qa_flags_set(text_data)
     if (
         source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}
-        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+        or (
+            style_origin == "auto_dark_panel_glow"
+            and source == "derived_white_crop_rejected"
+            and "auto_dark_panel_glow_fallback" in flags
+        )
         or flags
         & {
             "dark_bubble_ellipse_bbox_mask",
