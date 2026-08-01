@@ -25,6 +25,26 @@ class MainEmitTests(unittest.TestCase):
     def tearDown(self) -> None:
         main._detach_work_dir_log_handler()
 
+    def test_style_audit_exception_becomes_qa_integrity_failure_in_enforce(self) -> None:
+        project = {"qa": {}}
+        functional = {"status": "PASS", "allowed": True, "issues": []}
+
+        with patch("qa.style_fidelity.audit_style_fidelity", side_effect=RuntimeError("boom")):
+            gate = main._compose_runtime_export_gate(
+                project,
+                Path("."),
+                {"style_copy_mode": "enforce"},
+                functional,
+            )
+
+        self.assertEqual(gate["status"], "BLOCK")
+        self.assertIn(
+            "qa_integrity_failure",
+            {issue.get("code") for issue in gate["issues"]},
+        )
+        self.assertEqual(project["qa"]["functional_export_gate"]["status"], "PASS")
+        self.assertEqual(project["qa"]["style_fidelity"]["gate"]["status"], "BLOCK")
+
     def test_no_image_writer_runs_after_final_pixel_observer(self) -> None:
         events = []
 

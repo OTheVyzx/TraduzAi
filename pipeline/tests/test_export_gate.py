@@ -1,4 +1,75 @@
+import pytest
+
 from qa.export_gate import evaluate_export_gate
+from qa.gate_composition import compose_export_gate
+
+
+@pytest.mark.parametrize(
+    ("functional", "style", "expected"),
+    [
+        ("PASS", "PASS", "PASS"),
+        ("PASS", "BLOCK", "BLOCK"),
+        ("BLOCK", "PASS", "BLOCK"),
+        ("BLOCK", "BLOCK", "BLOCK"),
+    ],
+)
+def test_export_gate_is_conjunction_of_normalized_subgates(functional, style, expected):
+    gate = compose_export_gate(
+        {"status": functional, "allowed": functional == "PASS", "issues": []},
+        {"status": style, "blocking_owner_ids": ["owner_a"] if style == "BLOCK" else []},
+    )
+
+    assert gate["status"] == expected
+    assert gate["allowed"] is (expected == "PASS")
+
+
+def test_export_gate_recomputes_counts_and_applies_override_once():
+    functional = {
+        "status": "BLOCK",
+        "allowed": True,
+        "critical_issue_count": 0,
+        "issues": [
+            {
+                "code": "english_residual",
+                "severity": "critical",
+                "blocks_export": True,
+                "flags": ["source_payload_visible"],
+            }
+        ],
+    }
+
+    gate = compose_export_gate(functional, {"status": "PASS"}, override=True)
+
+    assert gate["status"] == "OVERRIDDEN"
+    assert gate["allowed"] is True
+    assert gate["override"] is True
+    assert gate["critical_issue_count"] == 1
+    assert gate["blocking_issue_count"] == 1
+
+
+def test_english_residual_remains_in_functional_subgate_only():
+    functional = {
+        "status": "BLOCK",
+        "allowed": False,
+        "issues": [{"code": "english_residual", "severity": "critical", "blocks_export": True}],
+    }
+
+    gate = compose_export_gate(functional, {"status": "PASS"})
+
+    assert gate["subgates"]["functional"]["status"] == "BLOCK"
+    assert gate["subgates"]["style"]["status"] == "PASS"
+    assert {issue["code"] for issue in gate["issues"]} == {"english_residual"}
+
+
+def test_style_mismatch_does_not_reclassify_functional_subgate():
+    gate = compose_export_gate(
+        {"status": "PASS", "allowed": True, "issues": []},
+        {"status": "BLOCK", "blocking_owner_ids": ["owner_a"]},
+    )
+
+    assert gate["subgates"]["functional"]["status"] == "PASS"
+    assert gate["subgates"]["style"]["status"] == "BLOCK"
+    assert gate["issues"][0]["code"] == "style_fidelity_high_confidence_mismatch"
 
 
 def test_verified_owner_export_fails_closed_without_final_pixel_qa():

@@ -8605,6 +8605,51 @@ def _synchronize_qa_summary_with_export_gate(project_data: dict) -> dict:
     return summary
 
 
+def _compose_runtime_export_gate(
+    project_data: dict,
+    work_dir: Path,
+    config: dict,
+    functional_gate: dict,
+) -> dict:
+    """Run the independent style audit and compose both subgates once."""
+
+    from qa.gate_composition import compose_export_gate, qa_integrity_issue
+    from qa.style_fidelity import audit_style_fidelity
+
+    qa = project_data.setdefault("qa", {})
+    style_mode = str(config.get("style_copy_mode") or "shadow").strip().lower()
+    try:
+        style_fidelity = audit_style_fidelity(project_data, work_dir, mode=style_mode)
+        if not isinstance(style_fidelity, dict) or not isinstance(style_fidelity.get("gate"), dict):
+            raise ValueError("style fidelity report or gate is absent")
+    except Exception as exc:
+        enforce = style_mode == "enforce"
+        issue = qa_integrity_issue(exc, scope="style_fidelity")
+        if not enforce:
+            issue["severity"] = "warning"
+            issue["blocks_export"] = False
+        style_fidelity = {
+            "schema_version": 2,
+            "mode": style_mode,
+            "owners": [],
+            "findings": [copy.deepcopy(issue)],
+            "gate": {
+                "status": "BLOCK" if enforce else "PASS",
+                "would_block": True,
+                "blocking_owner_ids": [],
+                "issues": [issue],
+            },
+        }
+    qa["functional_export_gate"] = copy.deepcopy(functional_gate)
+    qa["style_fidelity"] = style_fidelity
+    qa["export_gate"] = compose_export_gate(
+        functional_gate,
+        style_fidelity["gate"],
+        override=bool(config.get("allow_p0_export_override")),
+    )
+    return qa["export_gate"]
+
+
 def _build_strip_inpainter_for_config(config: dict, real_inpaint_band_image):
     from types import SimpleNamespace
 
@@ -9922,27 +9967,23 @@ def _run_pipeline(config_path: str):
             project_data.setdefault("qa", {})["final_pixel_reports"] = []
     try:
         from qa.export_gate import evaluate_export_gate
+        from qa.gate_composition import qa_integrity_issue
 
         with pipeline_timing.measure("evaluate_export_gate"):
-            export_gate = evaluate_export_gate(
+            try:
+                functional_gate = evaluate_export_gate(project_data, override=False)
+            except Exception as exc:
+                functional_gate = {
+                    "status": "BLOCK",
+                    "allowed": False,
+                    "issues": [qa_integrity_issue(exc, scope="functional_export_gate")],
+                }
+            export_gate = _compose_runtime_export_gate(
                 project_data,
-                override=bool(config.get("allow_p0_export_override")),
+                work_dir,
+                config,
+                functional_gate,
             )
-            from qa.style_fidelity import audit_style_fidelity, merge_style_and_functional_gates
-            style_mode = str(config.get("style_copy_mode") or "shadow").strip().lower()
-            style_fidelity = audit_style_fidelity(project_data, work_dir, mode=style_mode)
-            combined_gate = merge_style_and_functional_gates(export_gate, style_fidelity["gate"])
-            project_data["qa"]["functional_export_gate"] = copy.deepcopy(export_gate)
-            project_data["qa"]["style_fidelity"] = style_fidelity
-            if combined_gate["status"] == "BLOCK" and export_gate.get("status") != "BLOCK":
-                export_gate = copy.deepcopy(export_gate)
-                export_gate["status"] = "BLOCK"
-                export_gate.setdefault("issues", []).append({
-                    "code": "style_fidelity_high_confidence_mismatch",
-                    "severity": "critical",
-                    "owner_ids": style_fidelity["gate"]["blocking_owner_ids"],
-                })
-            project_data["qa"]["export_gate"] = export_gate
             _synchronize_qa_summary_with_export_gate(project_data)
             project_data["needs_review"] = export_gate["status"] == "BLOCK"
             project_data["output_review_state"] = _output_review_state_for_export_gate(export_gate)

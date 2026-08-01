@@ -1191,35 +1191,20 @@ def _artifact_links_for_issue(
 
 def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> dict[str, Any]:
     issues = collect_export_blocking_issues(project)
-    critical_issues = [issue for issue in issues if issue.get("severity") == "critical"]
     review_issues = [issue for issue in issues if issue.get("severity") == "warning"]
     blocking_issues = [
         issue
         for issue in issues
         if issue.get("severity") == "critical" or bool(issue.get("blocks_export"))
     ]
-    critical_flag_count = sum(len(issue.get("flags") or []) for issue in critical_issues)
-    review_flag_count = sum(len(issue.get("flags") or []) for issue in review_issues)
-    blocking_flag_count = sum(len(issue.get("flags") or []) for issue in blocking_issues)
-    status = "PASS"
-    if blocking_issues:
-        status = "OVERRIDDEN" if override else "BLOCK"
-    elif any(issue.get("type") == "sfx_inpaint_review" for issue in review_issues):
-        status = "REVIEW"
-    return {
-        "status": status,
-        "allowed": status != "BLOCK",
-        "override": bool(override),
-        "issue_count": len(issues),
-        "blocking_issue_count": len(blocking_issues),
-        "blocking_flag_count": blocking_flag_count,
-        "critical_issue_count": len(critical_issues),
-        "critical_flag_count": critical_flag_count,
-        "review_issue_count": len(review_issues),
-        "review_flag_count": review_flag_count,
-        "needs_review": bool(review_issues),
-        "issues": issues,
-    }
+    from qa.gate_composition import normalize_export_gate
+
+    return normalize_export_gate(
+        issues,
+        blocked=bool(blocking_issues),
+        review=any(issue.get("type") == "sfx_inpaint_review" for issue in review_issues),
+        override=override,
+    )
 
 
 def append_qa_integrity_failure(
