@@ -9222,6 +9222,15 @@ def apply_atomic_owner_execution(
                         "reason": "review_required",
                     }
                 )
+                logger.warning(
+                    "owner materialization mismatch detail: domain=%s attribute=%s "
+                    "reason=%s expected=%r observed=%r",
+                    mismatch.get("domain", "raster"),
+                    mismatch.get("attribute", "*"),
+                    mismatch.get("reason", "unknown"),
+                    mismatch.get("expected"),
+                    mismatch.get("observed"),
+                )
                 raise ValueError(
                     "materialization_mismatch:"
                     f"{mismatch.get('domain', 'raster')}:"
