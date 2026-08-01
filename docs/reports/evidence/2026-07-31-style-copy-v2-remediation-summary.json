@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "plan": "docs/plans/2026-07-31-style-copy-v2-no-go-remediation-implementation.md",
+  "generated_at": "2026-08-01T00:46:51-03:00",
+  "git": {
+    "head": "1bb48d53dd5aa847a640f2d7168059b83a63e44c",
+    "scoped_diff_sha256": "087f7cdb916f918f5fd3561f0186104f08f1ab5994b326cbd04e930300ca50ce"
+  },
+  "run_root": "N:\\TraduzAI_style_runs\\style_copy_v2_remediation_holdout_20260801_001546",
+  "verdicts": {
+    "style": "NO-GO",
+    "functional": "NO-GO",
+    "inspection": "NO-GO",
+    "overall": "NO-GO"
+  },
+  "exit_codes": {
+    "benchmark_enforce": 2,
+    "owner_matrix_initial": 2,
+    "runtime_probe": 2,
+    "owner_matrix_validate_only": 2
+  },
+  "tests": {
+    "style": {"passed": 466, "failed": 53, "new_failures": 0, "subtests": 6},
+    "functional_adjacent": {"passed": 731, "failed": 15, "new_failures": 0},
+    "invariance": {"passed": 44, "deselected": 30},
+    "full": {"passed": 3640, "failed": 249, "skipped": 33, "subtests": 59, "baseline_failed": 249, "new_failures": 0, "resolved_failures": 0}
+  },
+  "runtime": {
+    "before": {"project_count": 3, "rendered_owner_count": 43, "profile_count": 43, "profile_coverage": 1.0, "raster_contract_count": 0, "raster_contract_coverage": 0.0, "applied_attribute_count": 0, "abstained_attribute_count": 559},
+    "after": {"status": "BLOCK", "contracts": ["no_rendered_owners"], "project_count": 3, "rendered_owner_count": 2, "profile_count": 2, "profile_coverage": 1.0, "raster_contract_count": 2, "raster_contract_coverage": 1.0, "applied_attribute_count": 4, "abstained_attribute_count": 30},
+    "abstention_reasons": {"attribute_confidence_below_threshold": 5, "effect_classified_as_shadow": 1, "functional_layout_owned": 3, "insufficient_curve_evidence": 1, "no_text_evidence": 17, "shape_score_below_threshold": 1, "solid_fill_no_gradient": 1, "stroke_ring_not_dominant": 1}
+  },
+  "benchmark": {
+    "status": "BLOCK",
+    "sample_counts": {"font_name": 20, "fill": 20, "stroke": 20, "round_trip": 10, "hard_negative": 6},
+    "measured": {"font_top1": 0.4, "font_top3": 0.0, "fill_classification_precision": 0.55, "stroke_precision": 0.0, "round_trip_rate": 1.0, "hard_negative_abstention_v2_shadow": 1.0},
+    "thresholds": {"font_top1_min": 0.9, "font_top3_min": 0.98, "category_min": 0.85, "speech_go_rate_min": 0.95, "owner_go_rate_min": 0.9, "fill_delta_e_2000_median_max": 8.0, "fill_delta_e_2000_p95_max": 12.0, "safe_containment_min": 1.0, "catastrophic_high_confidence_mismatch_max": 0},
+    "missing_required_metrics": ["categories.minimum_go_rate", "speech.go_rate", "owners.go_rate", "fill_delta_e_2000.median", "fill_delta_e_2000.p95", "safe_containment.rate", "catastrophic_mismatches.count"]
+  },
+  "matrix": {
+    "entry_count": 3,
+    "target_count": 9,
+    "entries": {
+      "style_colored_cards_calibration": {"returncode": 2, "gate": "BLOCK", "status": "BLOCK", "runner_evidence_sha256": "f1be5d390242358b7941c1a862861a93c39be7d48b0fc73ad759280909f001c4"},
+      "style_cross_tile_holdout": {"returncode": 2, "gate": "BLOCK", "status": "BLOCK", "runner_evidence_sha256": "644e419c3fcbf5c874122ac55235e4be49e3cf17bcac4f619c84d12f7d301662"},
+      "style_dark_panels_holdout": {"returncode": 2, "gate": "BLOCK", "status": "BLOCK", "runner_evidence_sha256": "4c24f8168f8216b1a4f8b345d013f7ba087ff96b9ba2e6a7a30188379b032b31"}
+    },
+    "categories": {
+      "colored_card": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "primary_ocr_omission": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "table_ranking": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "translucent_balloon": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "burst": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "cross_tile_owner": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "white_balloon": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "dark_panel": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"},
+      "text_over_art": {"sample_count": 1, "functional": "NO-GO", "style": "NO-GO"}
+    }
+  },
+  "inspections": [
+    {"category": "colored_card", "page_id": "page_001", "owner_id": "owner_p001_024cf5ddf5ea", "artifact": "matrix/contact_sheets/colored_card__style_colored_cards_calibration__page_001__owner_p001_024cf5ddf5ea__001.png", "width": 2292, "height": 195, "sha256": "e2b3eed194407deea11a158f4ff68231b84488a8ed040e119a1310917350dd95", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "primary_ocr_omission", "page_id": "page_001", "owner_id": "owner_p001_0f39ce3adba0", "artifact": "matrix/contact_sheets/primary_ocr_omission__style_colored_cards_calibration__page_001__owner_p001_0f39ce3adba0__001.png", "width": 2238, "height": 158, "sha256": "4f81a6ffc6c81c8606931d49846ffb12d23d1965ffbcbff8a66b94b944364053", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "table_ranking", "page_id": "page_001", "owner_id": "owner_p001_06c2c46ee27f", "artifact": "matrix/contact_sheets/table_ranking__style_colored_cards_calibration__page_001__owner_p001_06c2c46ee27f__001.png", "width": 1572, "height": 172, "sha256": "0496ae150bfd0157e73a61a26454a97dcd1478855530c8c153588692502aec04", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "translucent_balloon", "page_id": "page_001", "owner_id": "owner_p001_0dc05817313b", "artifact": "matrix/contact_sheets/translucent_balloon__style_colored_cards_calibration__page_001__owner_p001_0dc05817313b__001.png", "width": 2436, "height": 229, "sha256": "5df98c587a17f5c84c80a2302b5d6023ded58699cf400156d824d7b03894896e", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "burst", "page_id": "page_002", "owner_id": "owner_p002_7227e479da0d", "artifact": "matrix/contact_sheets/burst__style_cross_tile_holdout__page_002__owner_p002_7227e479da0d__001.png", "width": 1002, "height": 123, "sha256": "44664b457fcc6fcfd7265df61ce28e3fbd96b197497685da37fb40ff5ba38a92", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "cross_tile_owner", "page_id": "page_002", "owner_id": "owner_p002_d9afb32ef935", "artifact": "matrix/contact_sheets/cross_tile_owner__style_cross_tile_holdout__page_002__owner_p002_d9afb32ef935__001.png", "width": 1254, "height": 163, "sha256": "87362b2c6dc9f5ef9e4d329dc78a7e50e91499222817df80356a818fb7952853", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "white_balloon", "page_id": "page_002", "owner_id": "owner_p002_43752a8f8c08", "artifact": "matrix/contact_sheets/white_balloon__style_cross_tile_holdout__page_002__owner_p002_43752a8f8c08__001.png", "width": 1362, "height": 155, "sha256": "29a5c01a40d2ceb807d98e3fa4a959eac75a080b2d5ad4774786ccf325ec3e75", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "dark_panel", "page_id": "page_002", "owner_id": "owner_p002_5a6976dbbf65", "artifact": "matrix/contact_sheets/dark_panel__style_dark_panels_holdout__page_002__owner_p002_5a6976dbbf65__001.png", "width": 1902, "height": 243, "sha256": "d26ef1cea3c801b2de494a6d7079c34c93d98399ceeb87496257448ade81cde8", "functional": "NO-GO", "style": "NO-GO"},
+    {"category": "text_over_art", "page_id": "page_003", "owner_id": "owner_p003_98e72af0685a", "artifact": "matrix/contact_sheets/text_over_art__style_dark_panels_holdout__page_003__owner_p003_98e72af0685a__001.png", "width": 1986, "height": 154, "sha256": "be443e13dd0de2830aeb8e31ab128f753aa49d305645105063cba683aa6b073a", "functional": "NO-GO", "style": "NO-GO"}
+  ],
+  "evidence": {
+    "benchmark_summary": {"path": "benchmark/style-v2-enforce/style_benchmark_summary.json", "sha256": "18f7d8dbb7fdc5c9149a950827924501f766f31b89cb5b79c8343d7f958f3145"},
+    "runtime_probe": {"path": "runtime-probe.json", "sha256": "03ffec23466f1679c6507440e005b688bfd36589019e01517c4237cfdb57ce3f"},
+    "inspection_manifest": {"path": "matrix/style-inspection-v2.json", "sha256": "24709d8f548702ac2ab1b32c731270c4282e316364891b1c0d5aecce43095ba1"},
+    "inspected_matrix_report": {"path": "matrix-report-inspected.md", "sha256": "bb89ebc74a557bef19ac2270953e60cab73f61c6a3e019be9c7c8516e9c49a83"}
+  },
+  "page_specific_rule_added": false,
+  "remaining_blockers": ["final_language_contract", "qa_integrity_failure", "route_state_contract", "source_coverage_contract", "style_fidelity_gate_blocked", "style_fidelity_high_confidence_mismatch", "no_rendered_owners"]
+}
