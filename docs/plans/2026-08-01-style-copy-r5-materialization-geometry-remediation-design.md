@@ -67,29 +67,29 @@ Build a typed observation from layout, selected font, and raster pixels; canonic
 
 ### Materialization intent
 
-The existing immutable visual profile remains the authority for approved and abstained attributes. R5 does not mutate the approved decision during rendering. Contextual group resolution and backend capability selection instead produce a separate immutable materialization plan that records, for every approved attribute, the resolved value or an explicit pre-render abstention/review reason. Generic automatic-style normalization may fill only attributes absent from that plan; it may not overwrite resolved V2 values.
+The existing immutable visual profile remains the authority for approved and abstained attributes. R5 does not mutate the approved decision during rendering. Contextual group resolution first produces a separate resolved intent. After fit, font resolution, unit conversion, and capability resolution — but before rasterization — the selected layout candidate seals one immutable materialization plan. For every approved attribute it records intent value, executable target, resolution kind, and an explicit reason. Generic automatic-style normalization may fill only attributes absent from the resolved intent; it may not overwrite V2 values or derive targets from post-render observations.
 
 Each applied attribute is assigned exactly one materialization domain:
 
 | Domain | Attributes |
 |---|---|
-| layout | `font_size_px`, `alignment`, `container`, safe geometry, occupancy |
-| font | `font_name`, `font_weight`, `font_width`, `slant_tangent`, font-derived width/x-height |
-| raster | `fill`, `stroke`, `multistroke`, `shadow`, `glow`, `gradient`, `rotation_deg`, `tracking_xh`, `width_scale`, `scale_y` |
+| layout | `font_size_px`, `alignment`, `container`, `tracking_xh`, `curve`, safe geometry, glyph poses, occupancy |
+| font | `font_name`, `font_weight`, `font_width`, resolved/fallback font runs and font-derived x-height |
+| raster | `fill`, `stroke`, `multistroke`, `shadow`, `glow`, `gradient`, `rotation_deg`, `slant_tangent`, `width_scale`, `scale_y` |
 
 The domain registry must reject unknown ownership and duplicate ownership.
 
 ### Materialization observation
 
-After layout fit, font resolution, and glyph composition, the renderer creates an immutable owner observation containing:
+After the plan is sealed and the glyph composition executes, the renderer creates an immutable owner observation containing:
 
-- owner/page/profile/geometry identities and hashes;
+- owner/page/profile/intent/plan identities and hashes;
 - canonical observed values by domain;
 - per-attribute status: `materialized | abstained | mismatch | unavailable`;
 - evidence references: layout contract, resolved font identity, glyph/effect envelopes, pixel/color metrics;
 - final render status and reason.
 
-An attribute is `materialized` only when its owning domain measured the applied result. Requested values are never copied into observed fields merely to satisfy equality.
+An attribute is `materialized` only when its owning domain measured the applied result. Requested values are never copied into observed fields merely to satisfy equality. Layout observation comes from final glyph positions and poses; font observation includes primary/fallback spans and the actual instantiated variation axes; raster observation comes from layer/mask/pixel facts. Unit-bearing x-height values resolve to executable pixels in the pre-raster plan.
 
 ### Canonical comparison
 
@@ -102,11 +102,11 @@ Comparison is attribute-specific:
 - enums use a versioned alias map;
 - containers compare page-space geometry identity and safe-region hash.
 
-The raster contract records the approved canonical intent, the resolved materialization plan, and the canonical observation. A mismatch remains fail closed and names the attribute/domain/evidence instead of returning the generic `applied decision mismatch`.
+The raster contract records the approved canonical intent hash, resolved materialization plan, and canonical observation. A mismatch remains fail closed and names the attribute/domain/evidence instead of returning the generic `applied decision mismatch`. The outer glyph-patch envelope, rather than the style contract itself, binds style, owner geometry, delivery, and pixel masks without a circular dependency.
 
 ### Page surfaces and page-space owner geometry
 
-Every published page carries one immutable `PageSurfaceGeometry` containing logical size, framed size, content origin in the frame, content bbox, and a deterministic hash. All logical-page-to-frame conversions for bboxes, polygons, masks, crops, overlays, and contact sheets use this contract. A framed artifact without the matching geometry is not inspectable and fails closed.
+Every published page carries one immutable `PageSurfaceGeometry` explicitly relating `logical_page` to `framed_page`, with logical size, framed size, content origin, derived content bbox, and a deterministic hash. All conversions for bboxes, polygons, arrays, owner maps, final-pixel OCR, crops, overlays, and contact sheets use this contract without resize. A framed artifact without the matching geometry is not inspectable and fails closed.
 
 Every renderable owner receives one `OwnerRenderGeometry` derived before inpaint from:
 
@@ -116,7 +116,7 @@ Every renderable owner receives one `OwnerRenderGeometry` derived before inpaint
 4. all executor/context projections, converted to page space;
 5. foreign-owner protection masks.
 
-The contract contains the semantic body bbox, source-replacement region, independently evidenced layout container and safe polygon(s), connected subregions, component/projection IDs, and a deterministic hash. The source-replacement region may never become the layout container merely because no container was found. Tile projections may transport evidence, but may not reduce the page-space owner geometry. Connected and cross-tile text remains one semantic payload; layout may wrap it but may not split, duplicate, truncate, or independently translate fragments.
+The contract contains typed, deep-frozen per-component polygons, selected-observation geometry, projection offsets/roles, semantic body bbox, source-replacement region, independently evidenced layout container and safe polygon(s), connected subregions, protection hashes, and a deterministic hash. The source-replacement region may never become the layout container merely because no container was found. Tile projections may transport evidence, but may not reduce the page-space owner geometry. Connected and cross-tile text remains one semantic payload; layout may wrap it but may not split, duplicate, truncate, or independently translate fragments.
 
 ### Atomic commit
 
@@ -133,7 +133,7 @@ Rollback continues to preserve the original pixels, marks the owner `review_requ
 
 ## Functional-language contract
 
-Translation remains one request/response per semantic owner. A translated payload cannot be considered delivered unless that same owner commits cleanup and PT-BR glyph pixels. Final-language QA pairs the source challenge with the final owner region and blocks:
+Translation remains one request/response per semantic owner. Before layout/rendering, the owner execution seals an independent authority hash over source payload, complete PT-BR payload, and normalized chunks; the renderer may reference but never construct or rewrite that authority. A translated payload cannot be considered delivered unless ordered glyph-run spans cover the authorized payload exactly once, their individually verifiable core masks union to the patch core mask, and that same owner commits cleanup and PT-BR paint pixels. Core glyph and full paint/effect masks remain distinct, and the compositor enforces `core ⊆ paint` plus `changed pixels ⊆ paint` rather than legacy mask equality. Final-language QA pairs the source challenge with the correctly transformed final owner region and blocks:
 
 - English residual;
 - missing PT-BR render;
@@ -151,7 +151,7 @@ The synthetic benchmark, owner raster QA, and real owner matrix share canonical 
 - owner raster QA owns safe containment, effect-envelope containment, and catastrophic high-confidence decision-to-final mismatches;
 - the exact holdout inspection owns total-owner, speech, and per-category visual GO rates and their sample counts.
 
-A final acceptance aggregator validates schema versions, run identities, input/tool hashes, split provenance, and denominators before applying thresholds. It never manufactures human verdicts from the synthetic atlas or treats the legacy score as authoritative. Missing metrics, missing required categories, zero denominators, hash mismatch, or incomplete native inspection remain `BLOCK`.
+A final acceptance aggregator validates schema versions, a shared acceptance-bundle ID, source/revision/config/input hashes, producer-local run identities, split provenance, and denominators before applying thresholds. The immutable bundle hashes the current bytes of an explicit execution closure, including dirty tracked sources, resolved font assets, runtime lock, translator, inpaint, QA, and export-gate producers—not only Git HEAD. Deterministic closure roots cover lazy imports, while every producer and pipeline subprocess publishes a runtime ledger of repo-local modules actually loaded; any unmanifested module, changed hash, omitted dirty closure file, or missing child ledger is `BLOCK`. The matrix execution summary is a separate mandatory functional input and binds each project plus its export, route, final-language, and residual gates; human inspection GO cannot override an automated gate BLOCK. Benchmark and matrix run IDs are intentionally distinct children of the same bundle. It never manufactures human verdicts from the synthetic atlas or treats the legacy score as authoritative. Missing metrics, missing required categories, zero denominators, bundle/hash mismatch, automated functional BLOCK, or incomplete native inspection remain `BLOCK`.
 
 ## Validation strategy
 
