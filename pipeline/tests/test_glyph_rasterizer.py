@@ -89,6 +89,25 @@ def test_renderer_applies_multistroke_shadow_glow_and_gradient_layers() -> None:
     assert len(colors) >= 4
 
 
+def test_shadow_observation_preserves_executed_offset_when_layer_is_clipped_at_page_edge() -> None:
+    core = np.zeros((120, 120), dtype=np.uint8)
+    core[10:20, 5:15] = 255
+    safe = np.full_like(core, 255)
+
+    result = rasterize_v2_glyph_layers(
+        core,
+        safe,
+        {
+            "fill": "#FFFFFF",
+            "shadow": {"color": "#C8C8C7", "offset": [-11, 10]},
+        },
+        source_x_height_px=20.0,
+    )
+
+    assert result.status == "applied"
+    assert result.observed_attributes["shadow"]["offset"] == [-11, 10]
+
+
 def test_renderer_never_draws_outside_owner_safe_polygon() -> None:
     safe = np.zeros((120, 260), dtype=np.uint8)
     polygon = np.asarray([[35, 15], [225, 15], [205, 105], [55, 105]], dtype=np.int32)

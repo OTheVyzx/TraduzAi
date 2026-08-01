@@ -178,6 +178,16 @@ def _effect_width(effect: Mapping[str, Any], x_height: float, default_px: int = 
         return max(0, default_px)
 
 
+def _shadow_offset_px(shadow: Mapping[str, Any], x_height: float) -> tuple[int, int]:
+    raw_offset_xh = shadow.get("offset_xh")
+    if isinstance(raw_offset_xh, (list, tuple)) and len(raw_offset_xh) >= 2:
+        return tuple(
+            int(round(float(raw_offset_xh[index]) * x_height)) for index in (0, 1)
+        )
+    raw_offset = shadow.get("offset") or (2, 2)
+    return tuple(int(round(float(raw_offset[index]))) for index in (0, 1))
+
+
 def _dilate(mask: np.ndarray, width: int) -> np.ndarray:
     if width <= 0:
         return mask.copy()
@@ -379,12 +389,24 @@ def _observe_backend_layers(
         if name == "glow":
             value["width_px"] = _measured_expansion_px(core, mask)
         else:
-            core_bbox, layer_bbox = _bbox(core), _bbox(mask)
-            if core_bbox is not None and layer_bbox is not None:
-                value["offset"] = [
-                    round((layer_bbox[0] + layer_bbox[2] - core_bbox[0] - core_bbox[2]) / 2),
-                    round((layer_bbox[1] + layer_bbox[3] - core_bbox[1] - core_bbox[3]) / 2),
-                ]
+            shadow_style = style.get("shadow")
+            executed_offset = (
+                _shadow_offset_px(shadow_style, rendered_x_height_px)
+                if isinstance(shadow_style, Mapping)
+                else None
+            )
+            if executed_offset is not None and np.array_equal(
+                mask,
+                _shift(core, *executed_offset),
+            ):
+                value["offset"] = list(executed_offset)
+            else:
+                core_bbox, layer_bbox = _bbox(core), _bbox(mask)
+                if core_bbox is not None and layer_bbox is not None:
+                    value["offset"] = [
+                        round((layer_bbox[0] + layer_bbox[2] - core_bbox[0] - core_bbox[2]) / 2),
+                        round((layer_bbox[1] + layer_bbox[3] - core_bbox[1] - core_bbox[3]) / 2),
+                    ]
         observed[name] = value
         digest = _array_evidence_sha256(mask, pixels)
         evidence[name] = {
@@ -522,12 +544,7 @@ def rasterize_v2_glyph_layers(
 
     shadow = style.get("shadow")
     if isinstance(shadow, Mapping):
-        raw_offset_xh = shadow.get("offset_xh")
-        if isinstance(raw_offset_xh, (list, tuple)) and len(raw_offset_xh) >= 2:
-            dx, dy = (int(round(float(raw_offset_xh[index]) * x_height)) for index in (0, 1))
-        else:
-            raw_offset = shadow.get("offset") or (2, 2)
-            dx, dy = (int(round(float(raw_offset[index]))) for index in (0, 1))
+        dx, dy = _shadow_offset_px(shadow, x_height)
         candidate = _shift(core, dx, dy)
         if _outside(candidate, safe):
             abstained["shadow"] = "effect_envelope_outside_safe"
