@@ -4,12 +4,25 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sys
+import subprocess
 
 import pytest
 
 
 PIPELINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPELINE))
+
+
+def test_direct_matrix_cli_can_load_owner_target_tool():
+    result = subprocess.run(
+        [sys.executable, str(PIPELINE / "tools" / "validate_owner_visual_matrix.py"), "--help"],
+        cwd=PIPELINE.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _entry(work_id: str, work_dir: str, categories: list[str]) -> dict:

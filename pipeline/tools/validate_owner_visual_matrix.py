@@ -17,6 +17,9 @@ import subprocess
 import sys
 from typing import Any, Iterable
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from tools.build_style_owner_target_manifest import (
     OwnerTargetError,
     build_effective_style_config,
