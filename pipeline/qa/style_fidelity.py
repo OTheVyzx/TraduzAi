@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 import statistics
 from typing import Any
@@ -476,7 +478,7 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
         global_findings.append({"code": "incomplete_style_fidelity_coverage"})
     would_block = bool(blocking or global_findings)
     status = "BLOCK" if rollout == "enforce" and would_block else "PASS"
-    return {
+    report = {
         "schema_version": 3,
         "mode": rollout,
         "owners": owners,
@@ -528,6 +530,10 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
             "blocking_owner_ids": sorted(blocking),
         },
     }
+    report["report_sha256"] = hashlib.sha256(
+        json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return report
 
 
 def merge_style_and_functional_gates(functional_gate: dict[str, Any], style_gate: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -262,6 +264,11 @@ def test_owner_qa_emits_safe_containment_with_explicit_denominator(tmp_path):
     assert report["metrics"]["effect_containment"] == {
         "evaluated": 1, "contained": 1, "rate": 1.0,
     }
+    sealed = dict(report)
+    report_sha256 = sealed.pop("report_sha256")
+    assert report_sha256 == hashlib.sha256(
+        json.dumps(sealed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def test_missing_outside_safe_measurement_blocks_instead_of_assuming_zero(tmp_path):
