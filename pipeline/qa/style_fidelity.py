@@ -442,6 +442,14 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                 "source_sha256": profile.get("source_sha256") if profile else None,
                 "glyph_mask_sha256": profile.get("glyph_mask_sha256") if profile else None,
                 "visual_profile_sha256": profile.get("visual_profile_sha256") if profile else None,
+                "raster_contract_sha256": contract.get("contract_sha256") if contract else None,
+                "materialization_plan_sha256": contract.get("materialization_plan_sha256") if contract else None,
+                "materialization_observation_sha256": contract.get("materialization_observation_sha256") if contract else None,
+                "delivery_contract_sha256": (
+                    (layer.get("owner_text_delivery_contract") or {}).get("contract_sha256")
+                    if isinstance(layer.get("owner_text_delivery_contract"), dict) else None
+                ),
+                "owner_render_geometry_sha256": layer.get("owner_render_geometry_sha256"),
                 "profile_status": profile.get("status") if profile else "missing",
                 "attributes": attributes,
                 "fields": copy.deepcopy(attributes),
