@@ -499,6 +499,59 @@ def _thaw_owner_style_json(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True)
+class OwnerStyleRasterContractV2(OwnerStyleRasterContract):
+    """Materialization-aware raster contract used during the V2 migration."""
+
+    render_status: str
+    materialization_status: str
+    style_intent_sha256: str
+    materialization_plan_sha256: str
+    materialization_observation_sha256: str
+    materialization_plan: Mapping[str, Any]
+    materialization_observation: Mapping[str, Any]
+    materialization_comparison: Mapping[str, Any]
+    backend_selection_reason: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for field_name in (
+            "materialization_plan",
+            "materialization_observation",
+            "materialization_comparison",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _freeze_owner_style_json(getattr(self, field_name)),
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = super().to_dict()
+        payload.update(
+            {
+                "render_status": self.render_status,
+                "materialization_status": self.materialization_status,
+                "style_intent_sha256": self.style_intent_sha256,
+                "materialization_plan_sha256": self.materialization_plan_sha256,
+                "materialization_observation_sha256": (
+                    self.materialization_observation_sha256
+                ),
+                "materialization_plan": _thaw_owner_style_json(
+                    self.materialization_plan
+                ),
+                "materialization_observation": _thaw_owner_style_json(
+                    self.materialization_observation
+                ),
+                "materialization_comparison": _thaw_owner_style_json(
+                    self.materialization_comparison
+                ),
+                "backend_selection_reason": self.backend_selection_reason,
+            }
+        )
+        return payload
+
+
 OWNER_STYLE_RASTER_CONTRACT_SCHEMA_VERSION = 1
 OWNER_STYLE_RASTER_CONTRACT_STATUSES = frozenset(
     {"applied", "fallback", "review_required"}
@@ -528,6 +581,19 @@ OWNER_STYLE_RASTER_CONTRACT_FIELDS = frozenset(
         "rendered_patch_sha256",
         "rendered_after_sha256",
         "contract_sha256",
+    }
+)
+OWNER_STYLE_RASTER_CONTRACT_V2_FIELDS = OWNER_STYLE_RASTER_CONTRACT_FIELDS | frozenset(
+    {
+        "render_status",
+        "materialization_status",
+        "style_intent_sha256",
+        "materialization_plan_sha256",
+        "materialization_observation_sha256",
+        "materialization_plan",
+        "materialization_observation",
+        "materialization_comparison",
+        "backend_selection_reason",
     }
 )
 OWNER_STYLE_RASTER_HASH_FIELDS = (
@@ -562,7 +628,7 @@ OWNER_STYLE_RASTER_SEGMENT_FIELDS = frozenset(
 
 
 def owner_style_raster_contract_sha256(
-    value: OwnerStyleRasterContract | Mapping[str, Any],
+    value: OwnerStyleRasterContract | OwnerStyleRasterContractV2 | Mapping[str, Any],
 ) -> str:
     """Return the canonical self-hash for an owner style raster contract."""
 
@@ -670,7 +736,7 @@ def validate_owner_style_raster_segment(
     return payload
 
 
-def validate_owner_style_raster_contract(
+def _validate_owner_style_raster_contract_v1(
     value: OwnerStyleRasterContract | Mapping[str, Any],
     *,
     expected_owner_id: str | None = None,
@@ -817,6 +883,165 @@ def validate_owner_style_raster_contract(
     return payload
 
 
+def _v2_legacy_projections(
+    materialization_plan: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    attribute_plans = materialization_plan.get("attribute_plans")
+    if not isinstance(attribute_plans, Mapping):
+        raise ValueError("materialization plan attribute projections are missing")
+    requested = {
+        str(name): _thaw_owner_style_json(row.get("intent_value"))
+        for name, row in sorted(attribute_plans.items())
+        if isinstance(row, Mapping)
+    }
+    status = str(comparison.get("status") or "")
+    applied: dict[str, Any] = {}
+    abstained: dict[str, Any] = {}
+    mismatch_reasons = {
+        str(row.get("attribute")): str(row.get("reason") or "materialization_mismatch")
+        for row in comparison.get("mismatches") or []
+        if isinstance(row, Mapping) and row.get("attribute")
+    }
+    for name, raw in sorted(attribute_plans.items()):
+        if not isinstance(raw, Mapping):
+            raise ValueError("materialization plan attribute projection is invalid")
+        kind = str(raw.get("resolution_kind") or "")
+        if status == "match" and kind in {"exact", "policy_adjusted", "derived"}:
+            applied[str(name)] = _thaw_owner_style_json(raw.get("target_value"))
+        elif kind == "abstained":
+            abstained[str(name)] = str(raw.get("reason") or "approved_abstention")
+        elif kind == "superseded":
+            winner = str(raw.get("superseded_by") or "")
+            abstained[str(name)] = f"superseded_by:{winner}"
+        else:
+            abstained[str(name)] = mismatch_reasons.get(
+                str(name), "materialization_not_match"
+            )
+    return requested, applied, abstained
+
+
+def _validate_owner_style_raster_contract_v2(
+    value: OwnerStyleRasterContractV2 | Mapping[str, Any],
+    *,
+    expected_owner_id: str | None = None,
+    expected_page_id: str | None = None,
+) -> dict[str, Any]:
+    from typesetter.style_materialization import (
+        compare_materialization_payloads,
+        validate_materialization_observation,
+        validate_materialization_plan,
+    )
+
+    payload = value.to_dict() if isinstance(value, OwnerStyleRasterContractV2) else _thaw_owner_style_json(value)
+    if not isinstance(payload, dict):
+        raise TypeError("owner style raster contract v2 must be a mapping")
+    if set(payload) != OWNER_STYLE_RASTER_CONTRACT_V2_FIELDS:
+        raise ValueError("owner style raster contract v2 materialization fields are invalid")
+    if payload.get("schema_version") != 2:
+        raise ValueError("owner style raster contract v2 schema_version is unsupported")
+    owner_id = str(payload.get("owner_id") or "").strip()
+    page_id = str(payload.get("page_id") or "").strip()
+    if not owner_id or not page_id:
+        raise ValueError("owner style raster contract v2 identity is missing")
+    if expected_owner_id is not None and owner_id != expected_owner_id:
+        raise ValueError("owner style raster contract owner identity mismatch")
+    if expected_page_id is not None and page_id != expected_page_id:
+        raise ValueError("owner style raster contract page identity mismatch")
+    for field_name in (
+        *OWNER_STYLE_RASTER_HASH_FIELDS,
+        "style_intent_sha256",
+        "materialization_plan_sha256",
+        "materialization_observation_sha256",
+    ):
+        value_sha = payload.get(field_name)
+        if not isinstance(value_sha, str) or not _OWNER_STYLE_SHA256_RE.fullmatch(value_sha):
+            raise ValueError(f"owner style raster contract malformed sha256: {field_name}")
+    if payload.get("render_status") not in {"completed", "failed"}:
+        raise ValueError("owner style raster contract v2 render_status is invalid")
+    if payload.get("materialization_status") not in {"match", "mismatch", "review_required"}:
+        raise ValueError("owner style raster contract v2 materialization_status is invalid")
+    if not isinstance(payload.get("backend_selection_reason"), str) or not payload["backend_selection_reason"].strip():
+        raise ValueError("owner style raster contract v2 backend selection reason is missing")
+    plan = validate_materialization_plan(payload.get("materialization_plan") or {})
+    observation = validate_materialization_observation(
+        payload.get("materialization_observation") or {}
+    )
+    if plan["owner_id"] != owner_id or plan["page_id"] != page_id:
+        raise ValueError("materialization plan owner/page binding mismatch")
+    if plan["visual_profile_sha256"] != payload["visual_profile_sha256"]:
+        raise ValueError("materialization plan visual profile binding mismatch")
+    if plan["intent_sha256"] != payload["style_intent_sha256"]:
+        raise ValueError("materialization intent binding mismatch")
+    if plan["plan_sha256"] != payload["materialization_plan_sha256"]:
+        raise ValueError("materialization plan hash binding mismatch")
+    if observation["owner_id"] != owner_id or observation["page_id"] != page_id:
+        raise ValueError("materialization observation owner/page binding mismatch")
+    if observation["visual_profile_sha256"] != payload["visual_profile_sha256"]:
+        raise ValueError("materialization observation visual profile binding mismatch")
+    if observation["plan_sha256"] != plan["plan_sha256"]:
+        raise ValueError("materialization observation plan binding mismatch")
+    if observation["observation_sha256"] != payload["materialization_observation_sha256"]:
+        raise ValueError("materialization observation hash binding mismatch")
+    recomputed = compare_materialization_payloads(plan, observation).to_dict()
+    serialized_comparison = payload.get("materialization_comparison")
+    if not isinstance(serialized_comparison, dict) or serialized_comparison != recomputed:
+        raise ValueError("materialization comparison does not match recomputed evidence")
+    if payload["materialization_status"] != recomputed["status"]:
+        raise ValueError("materialization status does not match comparison")
+    expected_status = (
+        "applied"
+        if payload["render_status"] == "completed" and recomputed["status"] == "match"
+        else "review_required"
+    )
+    if payload.get("status") != expected_status:
+        raise ValueError("materialization legacy status projection mismatch")
+    requested, applied, abstained = _v2_legacy_projections(plan, recomputed)
+    if payload.get("requested_attributes") != requested:
+        raise ValueError("materialization requested projection mismatch")
+    if payload.get("applied_attributes") != applied:
+        raise ValueError("materialization applied projection mismatch")
+    if payload.get("abstained_attributes") != abstained:
+        raise ValueError("materialization abstained projection mismatch")
+    for field_name in (
+        "glyph_core_envelope",
+        "effect_envelope",
+        "render_metrics",
+    ):
+        if not isinstance(payload.get(field_name), dict):
+            raise ValueError(f"owner style raster contract v2 {field_name} must be a mapping")
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list) or capabilities != sorted(set(str(item) for item in capabilities)):
+        raise ValueError("owner style raster contract v2 capabilities are not canonical")
+    if not isinstance(payload.get("segments"), list):
+        raise ValueError("owner style raster contract v2 segments must be a list")
+    if payload.get("contract_sha256") != owner_style_raster_contract_sha256(payload):
+        raise ValueError("owner style raster contract v2 hash mismatch")
+    return payload
+
+
+def validate_owner_style_raster_contract(
+    value: OwnerStyleRasterContract | OwnerStyleRasterContractV2 | Mapping[str, Any],
+    *,
+    expected_owner_id: str | None = None,
+    expected_page_id: str | None = None,
+) -> dict[str, Any]:
+    payload = value.to_dict() if isinstance(value, OwnerStyleRasterContract) else _thaw_owner_style_json(value)
+    if not isinstance(payload, dict):
+        raise TypeError("owner style raster contract must be a mapping")
+    if payload.get("schema_version") == 2:
+        return _validate_owner_style_raster_contract_v2(
+            value,
+            expected_owner_id=expected_owner_id,
+            expected_page_id=expected_page_id,
+        )
+    return _validate_owner_style_raster_contract_v1(
+        value,
+        expected_owner_id=expected_owner_id,
+        expected_page_id=expected_page_id,
+    )
+
+
 @dataclass(frozen=True)
 class OwnerGlyphPatch:
     """One owner-scoped rendered glyph result chained to a cleanup mutation."""
@@ -837,7 +1062,7 @@ class OwnerGlyphPatch:
     render_safe_polygon_sha256: str
     component_geometry_sha256: str
     render_quality_contract: OwnerRenderQuality
-    style_raster_contract: OwnerStyleRasterContract
+    style_raster_contract: OwnerStyleRasterContract | OwnerStyleRasterContractV2
     execution_tile_id: str | None = None
     projection_role: str = "executor"
     color_space: str = "RGB"
@@ -845,7 +1070,10 @@ class OwnerGlyphPatch:
     def __post_init__(self) -> None:
         if not isinstance(self.render_quality_contract, OwnerRenderQuality):
             raise TypeError("owner glyph patch requires an OwnerRenderQuality contract")
-        if not isinstance(self.style_raster_contract, OwnerStyleRasterContract):
+        if not isinstance(
+            self.style_raster_contract,
+            (OwnerStyleRasterContract, OwnerStyleRasterContractV2),
+        ):
             raise TypeError("owner glyph patch requires a style raster contract")
         validate_owner_style_raster_contract(
             self.style_raster_contract,

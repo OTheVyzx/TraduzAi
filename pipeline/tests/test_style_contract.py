@@ -20,6 +20,7 @@ from typesetter.style_contract import (
 from ownership import model as ownership_model
 from style_v2_fixtures import (
     valid_owner_style_raster_contract,
+    valid_owner_style_raster_contract_v2,
     valid_owner_style_raster_segment,
 )
 
@@ -29,6 +30,45 @@ def test_owner_style_raster_contract_api_is_defined_at_ownership_boundary():
     assert callable(
         getattr(ownership_model, "owner_style_raster_contract_sha256", None)
     )
+
+
+def test_owner_raster_contract_v2_binds_plan_observation_and_comparison():
+    contract = valid_owner_style_raster_contract_v2()
+
+    payload = ownership_model.validate_owner_style_raster_contract(contract)
+
+    assert payload["schema_version"] == 2
+    assert payload["style_intent_sha256"] == payload["materialization_plan"]["intent_sha256"]
+    assert payload["materialization_plan_sha256"] == payload["materialization_plan"]["plan_sha256"]
+    assert payload["materialization_observation_sha256"] == payload["materialization_observation"]["observation_sha256"]
+    assert payload["materialization_comparison"]["status"] == "match"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["materialization_plan", "materialization_observation", "materialization_comparison"],
+)
+def test_owner_raster_contract_v2_rejects_tampered_materialization(field):
+    payload = valid_owner_style_raster_contract_v2().to_dict()
+    if field == "materialization_plan":
+        payload[field]["rendered_x_height_px"] = 99
+    elif field == "materialization_observation":
+        payload[field]["attributes"]["fill"]["canonical_value"] = "#000000"
+    else:
+        payload[field]["status"] = "mismatch"
+    payload["contract_sha256"] = ownership_model.owner_style_raster_contract_sha256(payload)
+
+    with pytest.raises(ValueError, match="materialization"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_raster_contract_v2_rejects_divergent_legacy_projections():
+    payload = valid_owner_style_raster_contract_v2().to_dict()
+    payload["applied_attributes"]["fill"] = "#000000"
+    payload["contract_sha256"] = ownership_model.owner_style_raster_contract_sha256(payload)
+
+    with pytest.raises(ValueError, match="projection"):
+        ownership_model.validate_owner_style_raster_contract(payload)
 
 
 def test_v2_contract_exposes_tracking_slant_width_and_vertical_scale():

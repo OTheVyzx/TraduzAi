@@ -160,6 +160,77 @@ def valid_owner_style_raster_contract(
     return OwnerStyleRasterContract(**raw)
 
 
+def valid_owner_style_raster_contract_v2(
+    *,
+    owner_id: str = "owner_p001_fixture",
+    page_id: str = "page_001",
+):
+    from ownership import model as ownership_model
+    from typesetter.style_materialization import (
+        build_materialization_observation,
+        build_materialization_plan,
+        build_resolved_style_intent,
+        compare_materialization,
+    )
+
+    v2_type = getattr(ownership_model, "OwnerStyleRasterContractV2")
+    base = valid_owner_style_raster_contract(
+        owner_id=owner_id,
+        page_id=page_id,
+    ).to_dict()
+    intent = build_resolved_style_intent(
+        owner_id=owner_id,
+        page_id=page_id,
+        visual_profile_sha256=base["visual_profile_sha256"],
+        decision_sha256="a" * 64,
+        group_resolution_sha256="b" * 64,
+        approved={"fill": "#fff"},
+        approved_abstentions={},
+        attribute_provenance={"fill": {"evidence_id": "fixture-fill"}},
+    )
+    plan = build_materialization_plan(
+        intent=intent,
+        render_layout_contract_sha256="c" * 64,
+        targets={"fill": "#FFFFFF"},
+        resolution_kinds={"fill": "exact"},
+        rendered_x_height_px=20,
+    )
+    observation = build_materialization_observation(
+        plan=plan,
+        domain_observations={
+            "raster": {
+                "fill": {
+                    "value": "#FFFFFF",
+                    "evidence_kind": "layer_pixels_and_mask",
+                    "evidence_sha256": "d" * 64,
+                }
+            }
+        },
+        render_completed=True,
+    )
+    comparison = compare_materialization(plan, observation)
+    base.update(
+        {
+            "schema_version": 2,
+            "status": "applied",
+            "render_status": "completed",
+            "materialization_status": "match",
+            "style_intent_sha256": intent.intent_sha256,
+            "materialization_plan_sha256": plan.plan_sha256,
+            "materialization_observation_sha256": observation.observation_sha256,
+            "materialization_plan": plan.to_dict(),
+            "materialization_observation": observation.to_dict(),
+            "materialization_comparison": comparison.to_dict(),
+            "backend_selection_reason": "fixture_observable_backend",
+            "requested_attributes": {"fill": "#fff"},
+            "applied_attributes": {"fill": "#FFFFFF"},
+            "abstained_attributes": {},
+        }
+    )
+    base["contract_sha256"] = owner_style_raster_contract_sha256(base)
+    return v2_type(**base)
+
+
 def _mask_bbox(mask: np.ndarray) -> list[int]:
     ys, xs = np.nonzero(mask > 0)
     if not len(xs):

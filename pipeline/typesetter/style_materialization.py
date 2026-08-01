@@ -815,6 +815,112 @@ def validate_materialization_observation(
     return payload
 
 
+def validate_materialization_plan(
+    plan: OwnerStyleMaterializationPlan | Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = plan.to_dict() if isinstance(plan, OwnerStyleMaterializationPlan) else _thaw(plan)
+    required = {
+        "schema_version",
+        "owner_id",
+        "page_id",
+        "visual_profile_sha256",
+        "intent_sha256",
+        "render_layout_contract_sha256",
+        "rendered_x_height_px",
+        "unit_resolution_sha256",
+        "attribute_plans",
+        "plan_sha256",
+    }
+    if set(payload) != required:
+        raise ValueError("materialization plan has incomplete schema")
+    if payload.get("schema_version") != 1:
+        raise ValueError("materialization plan schema version is unsupported")
+    for field in (
+        "visual_profile_sha256",
+        "intent_sha256",
+        "render_layout_contract_sha256",
+        "unit_resolution_sha256",
+        "plan_sha256",
+    ):
+        _require_sha256(str(payload.get(field) or ""), field=field)
+    if not isinstance(payload.get("attribute_plans"), dict):
+        raise ValueError("materialization plan attribute_plans must be a mapping")
+    contract = {key: value for key, value in payload.items() if key != "plan_sha256"}
+    if _contract_sha256(contract) != payload["plan_sha256"]:
+        raise ValueError("materialization plan hash mismatch")
+    return payload
+
+
+def materialization_plan_from_dict(
+    value: OwnerStyleMaterializationPlan | Mapping[str, Any],
+) -> OwnerStyleMaterializationPlan:
+    payload = validate_materialization_plan(value)
+    attribute_plans: dict[str, MaterializationAttributePlan] = {}
+    expected_fields = {
+        "name",
+        "domain",
+        "intent_value",
+        "target_value",
+        "resolution_kind",
+        "reason",
+        "superseded_by",
+        "evidence_ids",
+    }
+    for name, raw in sorted(payload["attribute_plans"].items()):
+        if not isinstance(raw, Mapping) or set(raw) != expected_fields:
+            raise ValueError(f"materialization attribute plan schema mismatch: {name}")
+        if raw.get("name") != name or raw.get("domain") != ATTRIBUTE_DOMAIN.get(name):
+            raise ValueError(f"materialization attribute plan identity/domain mismatch: {name}")
+        attribute_plans[name] = MaterializationAttributePlan(
+            name=name,
+            domain=raw["domain"],
+            intent_value=_deep_freeze(raw.get("intent_value")),
+            target_value=_deep_freeze(raw.get("target_value")),
+            resolution_kind=raw["resolution_kind"],
+            reason=str(raw.get("reason") or ""),
+            superseded_by=str(raw.get("superseded_by") or ""),
+            evidence_ids=tuple(str(item) for item in raw.get("evidence_ids") or ()),
+        )
+    return OwnerStyleMaterializationPlan(
+        schema_version=payload["schema_version"],
+        owner_id=str(payload["owner_id"]),
+        page_id=str(payload["page_id"]),
+        visual_profile_sha256=str(payload["visual_profile_sha256"]),
+        intent_sha256=str(payload["intent_sha256"]),
+        render_layout_contract_sha256=str(payload["render_layout_contract_sha256"]),
+        rendered_x_height_px=float(payload["rendered_x_height_px"]),
+        unit_resolution_sha256=str(payload["unit_resolution_sha256"]),
+        attribute_plans=MappingProxyType(attribute_plans),
+        plan_sha256=str(payload["plan_sha256"]),
+    )
+
+
+def materialization_observation_from_dict(
+    value: OwnerStyleMaterializationObservation | Mapping[str, Any],
+) -> OwnerStyleMaterializationObservation:
+    payload = validate_materialization_observation(value)
+    return OwnerStyleMaterializationObservation(
+        schema_version=int(payload["schema_version"]),
+        owner_id=str(payload["owner_id"]),
+        page_id=str(payload["page_id"]),
+        visual_profile_sha256=str(payload["visual_profile_sha256"]),
+        plan_sha256=str(payload["plan_sha256"]),
+        attributes=_deep_freeze(payload["attributes"]),
+        render_completed=bool(payload["render_completed"]),
+        observation_sha256=str(payload["observation_sha256"]),
+    )
+
+
+def compare_materialization_payloads(
+    plan: OwnerStyleMaterializationPlan | Mapping[str, Any],
+    observation: OwnerStyleMaterializationObservation | Mapping[str, Any],
+) -> MaterializationComparison:
+    return compare_materialization(
+        materialization_plan_from_dict(plan),
+        materialization_observation_from_dict(observation),
+    )
+
+
 def _compare_target(name: str, expected: Any, observed: Any) -> AttributeComparison:
     if name == "font_name":
         expected_payload = _thaw(expected)
