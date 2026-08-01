@@ -659,7 +659,9 @@ def test_atomic_commit_does_not_compare_functional_layout_to_style_decision() ->
     assert commit.committed is True
 
 
-def test_atomic_commit_rolls_back_true_material_divergence_with_precise_reason() -> None:
+def test_atomic_commit_rolls_back_true_material_divergence_with_precise_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     apply_atomic, glyph_patch_type, _ = _atomic_api()
     original = np.full((12, 16, 3), 220, dtype=np.uint8)
     mutation = _mutation(original)
@@ -692,6 +694,7 @@ def test_atomic_commit_rolls_back_true_material_divergence_with_precise_reason()
         "render_contract_invalid:materialization_mismatch:"
         "raster:fill:canonical_value_mismatch"
     )
+    assert "expected='#FFFFFF' observed='#FF0000'" in caplog.text
     assert np.array_equal(commit.result_rgb, original)
 
 
