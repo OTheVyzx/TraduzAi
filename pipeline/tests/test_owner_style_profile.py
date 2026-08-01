@@ -226,11 +226,15 @@ def test_divergent_profiles_for_same_owner_are_rejected() -> None:
         observations=graph.observations, glyph_mask=_glyph_mask(page),
         candidate={"confidence": 0.96},
     )
-    first = attach_owner_visual_profile({"owner_id": "owner_a"}, profile)
+    first = attach_owner_visual_profile(
+        {"owner_id": "owner_a", "coordinate_space": "logical_page"}, profile
+    )
     divergent = copy.deepcopy(profile)
     divergent["source_sha256"] = "0" * 64
     divergent["visual_profile_sha256"] = owner_visual_profile_sha256(divergent)
-    second = attach_owner_visual_profile({"owner_id": "owner_a"}, divergent)
+    second = attach_owner_visual_profile(
+        {"owner_id": "owner_a", "coordinate_space": "logical_page"}, divergent
+    )
 
     with pytest.raises(ValueError, match="divergent duplicates"):
         renderer_mod._build_owner_render_blocks([first, second], graph)

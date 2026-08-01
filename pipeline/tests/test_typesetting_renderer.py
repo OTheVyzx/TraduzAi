@@ -51,6 +51,7 @@ from ownership.model import (
     validate_owner_style_raster_contract,
 )
 from ownership.render_geometry import build_owner_render_geometry
+from ownership.delivery import seal_owner_text_execution_authority
 
 from main import (
     _apply_dark_panel_style_groups,
@@ -542,6 +543,13 @@ class TypesettingRendererTests(unittest.TestCase):
             },
             protected_art_mask_sha256=protected_sha256,
         )
+        execution_authority = seal_owner_text_execution_authority(
+            owner_id=owner.owner_id,
+            page_id=owner.page_id,
+            source_payload=owner.source_payload,
+            translated_payload=owner.translated_payload,
+            normalized_chunks=[owner.translated_payload],
+        )
         page = {
             "page_id": "page_001",
             "width": 180,
@@ -575,6 +583,8 @@ class TypesettingRendererTests(unittest.TestCase):
                     "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 22},
                     "owner_render_geometry": render_geometry.to_dict(),
                     "owner_render_geometry_sha256": render_geometry.geometry_sha256,
+                    "owner_text_execution_authority": execution_authority.to_dict(),
+                    "text_execution_authority_sha256": execution_authority.authority_sha256,
                 }
             ],
         }
