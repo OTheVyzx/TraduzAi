@@ -142,6 +142,7 @@ def _chapter_fixture():
 def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
     import json
     from ownership.model import OwnerGlyphPatch
+    from style_v2_fixtures import valid_owner_style_raster_contract
     from typesetter.owner_render_quality import OwnerRenderQuality
 
     before = np.asarray(mutation.result_rgb)
@@ -194,6 +195,14 @@ def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
             page_width=result.shape[1],
             page_height=result.shape[0],
             reasons=(),
+        ),
+        style_raster_contract=valid_owner_style_raster_contract(
+            owner_id=mutation.owner_id,
+            page_id=mutation.page_id,
+            before=before,
+            result=result,
+            glyph_mask=mask,
+            component_geometry_sha256=mutation.component_geometry_sha256,
         ),
         execution_tile_id=mutation.execution_tile_id,
     )

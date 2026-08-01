@@ -212,6 +212,12 @@ class TypesettingRendererTests(unittest.TestCase):
                     "balloon_bbox": [30, 20, 150, 100],
                     "layout_bbox": [30, 20, 150, 100],
                     "bbox": [30, 20, 150, 100],
+                    "confidence": 0.95,
+                    "style_evidence": {
+                        "source": "primary_ocr",
+                        "text_color": "#f4f4f4",
+                        "text_color_confidence": 0.95,
+                    },
                     "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 22},
                 }
             ],
@@ -229,12 +235,27 @@ class TypesettingRendererTests(unittest.TestCase):
         page["texts"][0] = attach_owner_visual_profile(page["texts"][0], profile)
 
         def deterministic_render(img, block, *_args, **_kwargs):
-            ImageDraw.Draw(img).rectangle((70, 52, 108, 68), fill=(8, 12, 18))
+            ImageDraw.Draw(img).rectangle((70, 52, 108, 68), fill=(244, 244, 244))
             block["render_completed"] = True
             block["fit_status"] = "ok"
             block["render_bbox"] = [70, 52, 109, 69]
             block["font_size_final"] = 18
             block["minimum_legible_font_px"] = 14
+            core = np.zeros(canvas.shape[:2], dtype=np.uint8)
+            core[52:69, 70:109] = 255
+            rgba = np.zeros((*canvas.shape[:2], 4), dtype=np.uint8)
+            rgba[core > 0] = (244, 244, 244, 255)
+            return renderer_mod.GlyphRasterResult(
+                status="applied",
+                rgba=rgba,
+                glyph_core_mask=core,
+                effect_mask=np.zeros_like(core),
+                glyph_core_envelope=(70, 52, 109, 69),
+                effect_envelope=None,
+                applied_attributes={"fill": "#f4f4f4"},
+                abstained_attributes={},
+                metrics={"core_pixels_outside_safe": 0},
+            )
 
         with patch("typesetter.renderer.render_text_block", side_effect=deterministic_render):
             glyph_patch = render_band_image(canvas, page, owner_graph=graph)
@@ -255,6 +276,34 @@ class TypesettingRendererTests(unittest.TestCase):
             glyph_patch.render_safe_polygon_page,
             ((30, 20), (150, 20), (150, 100), (30, 100)),
         )
+        raster_contract = glyph_patch.style_raster_contract.to_dict()
+        self.assertEqual(raster_contract["owner_id"], glyph_patch.owner_id)
+        self.assertEqual(raster_contract["page_id"], glyph_patch.page_id)
+        self.assertEqual(
+            raster_contract["visual_profile_sha256"],
+            profile["visual_profile_sha256"],
+        )
+        self.assertEqual(
+            raster_contract["profile_component_geometry_sha256"],
+            profile["component_geometry_sha256"],
+        )
+        self.assertEqual(
+            raster_contract["execution_component_geometry_sha256"],
+            glyph_patch.component_geometry_sha256,
+        )
+        self.assertEqual(raster_contract["applied_attributes"]["fill"], "#f4f4f4")
+        self.assertEqual(
+            raster_contract["rendered_after_sha256"],
+            glyph_patch.after_sha256,
+        )
+        self.assertEqual(
+            raster_contract["rendered_patch_sha256"],
+            renderer_mod._owner_masked_pixels_sha256(
+                glyph_patch.result_rgb,
+                glyph_patch.glyph_mask,
+            ),
+        )
+        self.assertNotIn("style_v2_raster_contract", page["texts"][0])
 
     def test_owner_renderer_rejects_unvalidated_graph_object(self):
         class ForgedGraph:
@@ -269,6 +318,53 @@ class TypesettingRendererTests(unittest.TestCase):
                 {"page_id": "page_001", "width": 30, "height": 20, "texts": []},
                 owner_graph=ForgedGraph(),
             )
+
+    def test_owner_style_raster_fallback_and_review_never_claim_applied_style(self):
+        for status in ("fallback", "review_required"):
+            with self.subTest(status=status):
+                profile = {
+                    "status": status,
+                    "style_evidence_v2": {
+                        "attributes": {
+                            "fill": {
+                                "value": "#f4f4f4",
+                                "confidence": 0.25,
+                            }
+                        }
+                    },
+                    "style_application_decision_v2": {
+                        "status": status,
+                        "applied_attributes": {},
+                        "abstained_attributes": {
+                            "fill": "attribute_confidence_below_threshold"
+                        },
+                    },
+                }
+                raster_result = renderer_mod.GlyphRasterResult(
+                    status="applied",
+                    rgba=np.zeros((4, 4, 4), dtype=np.uint8),
+                    glyph_core_mask=np.zeros((4, 4), dtype=np.uint8),
+                    effect_mask=np.zeros((4, 4), dtype=np.uint8),
+                    glyph_core_envelope=None,
+                    effect_envelope=None,
+                    applied_attributes={"fill": "#f4f4f4"},
+                    abstained_attributes={},
+                    metrics={},
+                )
+
+                resolved = renderer_mod._owner_style_contract_attributes(
+                    profile,
+                    raster_result,
+                    render_completed=True,
+                )
+
+                self.assertEqual(resolved[0], status)
+                self.assertEqual(resolved[1], {"fill": "#f4f4f4"})
+                self.assertEqual(resolved[2], {})
+                self.assertEqual(
+                    resolved[3],
+                    {"fill": "attribute_confidence_below_threshold"},
+                )
 
     def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
         text = {

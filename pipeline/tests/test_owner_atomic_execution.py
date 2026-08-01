@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ownership import model as owner_model  # noqa: E402
 from ownership.model import OwnerMutation, owner_residual_evidence_sha256  # noqa: E402
 from strip import process_bands  # noqa: E402
+from style_v2_fixtures import valid_owner_style_raster_contract  # noqa: E402
 from typesetter.owner_render_quality import OwnerRenderQuality  # noqa: E402
 
 
@@ -274,6 +275,14 @@ def _glyph_patch(
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
         render_quality_contract=_render_quality(glyph_mask),
+        style_raster_contract=valid_owner_style_raster_contract(
+            owner_id=mutation.owner_id,
+            page_id=mutation.page_id,
+            before=np.asarray(mutation.result_rgb),
+            result=rendered_rgb,
+            glyph_mask=glyph_mask,
+            component_geometry_sha256=mutation.component_geometry_sha256,
+        ),
         execution_tile_id=mutation.execution_tile_id,
         projection_role=projection_role,
     )
@@ -315,6 +324,14 @@ def _glyph_patch_for_mask(
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
         render_quality_contract=_render_quality(glyph_mask),
+        style_raster_contract=valid_owner_style_raster_contract(
+            owner_id=mutation.owner_id,
+            page_id=mutation.page_id,
+            before=np.asarray(mutation.result_rgb),
+            result=rendered_rgb,
+            glyph_mask=glyph_mask,
+            component_geometry_sha256=mutation.component_geometry_sha256,
+        ),
         execution_tile_id=mutation.execution_tile_id,
         projection_role="executor",
     )

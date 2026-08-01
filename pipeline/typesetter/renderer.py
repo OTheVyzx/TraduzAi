@@ -32,14 +32,24 @@ if matplotlib.get_backend().lower() != "agg":
     matplotlib.use("agg")
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
-from typesetter.glyph_rasterizer import rasterize_v2_glyph_layers
+from typesetter.glyph_rasterizer import GlyphRasterResult, rasterize_v2_glyph_layers
 from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
 from typesetter.owner_style import validate_owner_visual_profile
 
 try:
-    from ownership.model import OwnerGlyphPatch, OwnerGraph
+    from ownership.model import (
+        OwnerGlyphPatch,
+        OwnerGraph,
+        OwnerStyleRasterContract,
+        owner_style_raster_contract_sha256,
+    )
 except ImportError:  # pragma: no cover - supports package imports
-    from ..ownership.model import OwnerGlyphPatch, OwnerGraph
+    from ..ownership.model import (
+        OwnerGlyphPatch,
+        OwnerGraph,
+        OwnerStyleRasterContract,
+        owner_style_raster_contract_sha256,
+    )
 
 try:
     from typesetter.owner_render_quality import evaluate_owner_render_quality
@@ -1022,12 +1032,12 @@ def _render_v2_owner_text_layer(
     lines: list[str],
     font: SafeTextPathFont,
     positions: list[tuple[int, int]],
-) -> bool:
+) -> GlyphRasterResult | None:
     """Compose verified owner typography through the shared text/SFX rasterizer."""
 
     profile = text_data.get("visual_profile_v2")
     if not isinstance(profile, dict):
-        return False
+        return None
     core_rgb = np.zeros_like(image_np)
     _render_safe_text_layer(
         core_rgb,
@@ -1038,7 +1048,7 @@ def _render_v2_owner_text_layer(
     )
     core = np.where(np.max(core_rgb, axis=2) > 0, 255, 0).astype(np.uint8)
     if not np.any(core):
-        return False
+        return None
     safe = np.zeros(core.shape, dtype=np.uint8)
     polygon = (
         text_data.get("render_safe_polygon_page")
@@ -1056,7 +1066,7 @@ def _render_v2_owner_text_layer(
     if not np.any(safe):
         bbox = _layout_bbox(plan.get("safe_text_box") or plan.get("target_bbox"))
         if bbox is None:
-            return False
+            return None
         x1, y1, x2, y2 = bbox
         safe[max(0, y1) : min(safe.shape[0], y2), max(0, x1) : min(safe.shape[1], x2)] = 255
 
@@ -1099,19 +1109,15 @@ def _render_v2_owner_text_layer(
         raster_style,
         source_x_height_px=max(1.0, float(font.size) * 0.70),
     )
-    text_data["style_v2_raster_contract"] = {
-        "status": result.status,
-        "applied_attributes": copy.deepcopy(result.applied_attributes),
-        "abstained_attributes": copy.deepcopy(result.abstained_attributes),
-        "glyph_core_envelope": list(result.glyph_core_envelope or ()),
-        "effect_envelope": list(result.effect_envelope or ()),
-        "metrics": copy.deepcopy(result.metrics),
-    }
+    decision = profile.get("style_application_decision_v2")
+    decision = decision if isinstance(decision, dict) else {}
+    if "font_name" in dict(decision.get("applied_attributes") or {}):
+        result.applied_attributes["font_name"] = font.font_path.name
     if result.status == "review_required":
         text_data["fit_status"] = "style_core_outside_safe"
         text_data["route_action"] = "review_required"
         _merge_qa_flags(text_data, ["style_core_outside_safe"])
-        return True
+        return result
     alpha = result.rgba[:, :, 3:4].astype(np.float32) / 255.0
     image_np[:] = np.clip(
         result.rgba[:, :, :3].astype(np.float32) * alpha
@@ -1128,7 +1134,7 @@ def _render_v2_owner_text_layer(
             text_data,
             [f"style_{name}_abstained" for name in result.abstained_attributes],
         )
-    return True
+    return result
 
 
 def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
@@ -16809,17 +16815,25 @@ def _try_render_single_text_block_with_rust(
 
 def _render_single_text_block(
     img: Image.Image, text_data: dict, plan: dict, pre_render_np=None,
-) -> None:
+) -> GlyphRasterResult | None:
     rotation_deg = _normalize_rotation_deg(plan.get("rotation_deg", 0))
     if rotation_deg == 0:
-        _render_single_text_block_unrotated(img, text_data, plan, pre_render_np=pre_render_np)
-        return
+        return _render_single_text_block_unrotated(
+            img,
+            text_data,
+            plan,
+            pre_render_np=pre_render_np,
+        )
 
     sentinel = _coerce_rgb_tuple(plan.get("background_rgb")) or _rotation_sentinel_rgb(plan)
     scratch = Image.new("RGB", img.size, sentinel)
     unrotated_plan = _plan_for_unrotated_sideways_render(plan, img.size)
     scratch_text_data = dict(text_data)
-    _render_single_text_block_unrotated(scratch, scratch_text_data, unrotated_plan)
+    raster_result = _render_single_text_block_unrotated(
+        scratch,
+        scratch_text_data,
+        unrotated_plan,
+    )
 
     scratch_np = np.array(scratch)
     alpha_mask = np.any(scratch_np != np.array(sentinel, dtype=np.uint8), axis=2).astype(np.uint8) * 255
@@ -16877,11 +16891,12 @@ def _render_single_text_block(
         render_debug["final_safe_text_box"] = plan.get("safe_text_box")
     text_data["_render_debug"] = render_debug
     _run_render_qa(text_data, plan)
+    return raster_result
 
 
 def _render_single_text_block_unrotated(
     img: Image.Image, text_data: dict, plan: dict, pre_render_np=None,
-) -> None:
+) -> GlyphRasterResult | None:
     """Core rendering logic for a single text block (no subregion recursion)."""
     text = text_data.get("translated", "")
     if not text:
@@ -17099,18 +17114,19 @@ def _render_single_text_block_unrotated(
                 _run_render_qa(text_data, plan, background_image=pre_render_np)
             return
 
-        if _render_v2_owner_text_layer(
+        raster_result = _render_v2_owner_text_layer(
             image_np,
             text_data,
             plan,
             best_lines,
             best_font,
             positions,
-        ):
+        )
+        if raster_result is not None:
             img.paste(Image.fromarray(image_np))
             if not plan.get("_suppress_render_qa"):
                 _run_render_qa(text_data, plan, background_image=pre_render_np)
-            return
+            return raster_result
 
         if plan["sombra"] and plan["sombra_cor"]:
             dx, dy = plan["sombra_offset"]
@@ -17900,11 +17916,18 @@ def _render_single_owner_proportionally(
     text_data: dict,
     *,
     pre_render_np: np.ndarray | None,
-) -> None:
+) -> GlyphRasterResult | None:
     owner_plan = plan_text_layout(text_data)
     candidate_sizes = _owner_candidate_font_sizes(text_data, owner_plan)
     before_np = np.asarray(img.convert("RGB"), dtype=np.uint8).copy()
-    accepted: list[tuple[tuple[float, float, int], Image.Image, dict]] = []
+    accepted: list[
+        tuple[
+            tuple[float, float, int],
+            Image.Image,
+            dict,
+            GlyphRasterResult | None,
+        ]
+    ] = []
     attempts: list[dict] = []
     diagnostic_quality: dict | None = None
 
@@ -17924,7 +17947,7 @@ def _render_single_owner_proportionally(
             attempts.append({"font_px": candidate_size, "status": "overflow", "reason": "nominal_overflow"})
             continue
         trial_image = img.copy()
-        _render_single_text_block(
+        raster_result = _render_single_text_block(
             trial_image,
             child,
             child_plan,
@@ -17952,7 +17975,9 @@ def _render_single_owner_proportionally(
             }
         )
         if accepted_ok:
-            accepted.append((_owner_quality_score(quality), trial_image, child))
+            accepted.append(
+                (_owner_quality_score(quality), trial_image, child, raster_result)
+            )
 
     if not accepted:
         _mark_owner_proportional_review(
@@ -17963,7 +17988,10 @@ def _render_single_owner_proportionally(
         )
         return
 
-    _score, selected_image, selected_child = min(accepted, key=lambda item: item[0])
+    _score, selected_image, selected_child, raster_result = min(
+        accepted,
+        key=lambda item: item[0],
+    )
     img.paste(selected_image)
     text_data.update(selected_child)
     text_data["fit_attempts"] = attempts[-8:]
@@ -17978,6 +18006,7 @@ def _render_single_owner_proportionally(
             "owner_render_review_required",
         }
     ]
+    return raster_result
 
 
 def _render_owner_text_block(
@@ -17985,7 +18014,7 @@ def _render_owner_text_block(
     text_data: dict,
     *,
     pre_render_np: np.ndarray | None = None,
-) -> None:
+) -> GlyphRasterResult | None:
     """Render visual chunks without changing the owner's semantic payload."""
 
     payload = text_data.get("translated_payload")
@@ -18013,12 +18042,11 @@ def _render_owner_text_block(
         )
     )
     if len(regions) <= 1:
-        _render_single_owner_proportionally(
+        return _render_single_owner_proportionally(
             img,
             text_data,
             pre_render_np=pre_render_np,
         )
-        return
 
     areas: list[float] = []
     for region in regions:
@@ -19632,6 +19660,203 @@ def _owner_array_sha256(value: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def _owner_masked_pixels_sha256(
+    image_rgb: np.ndarray,
+    mask: np.ndarray,
+) -> str:
+    image = np.ascontiguousarray(image_rgb, dtype=np.uint8)
+    binary_mask = np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("owner masked pixel hash requires an RGB image")
+    if binary_mask.shape != image.shape[:2]:
+        raise ValueError("owner masked pixel hash shape mismatch")
+    digest = sha256()
+    digest.update(b"traduzai.masked-rgb.v1\0")
+    digest.update(_owner_array_sha256(binary_mask).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(image[binary_mask > 0].tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _owner_style_mask_envelope(mask: np.ndarray) -> dict[str, Any]:
+    binary_mask = np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8)
+    return {
+        "bbox_page": list(_owner_mask_bbox(binary_mask) or ()),
+        "mask_sha256": _owner_array_sha256(binary_mask),
+        "pixel_count": int(np.count_nonzero(binary_mask)),
+    }
+
+
+def _owner_style_contract_attributes(
+    profile: dict[str, Any],
+    raster_result: GlyphRasterResult | None,
+    *,
+    render_completed: bool,
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, str]]:
+    evidence = profile.get("style_evidence_v2")
+    raw_evidence = evidence.get("attributes") if isinstance(evidence, dict) else {}
+    raw_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+    requested = {
+        str(name): copy.deepcopy(value.get("value", "unknown"))
+        for name, value in raw_evidence.items()
+        if isinstance(value, dict)
+    }
+    decision = profile.get("style_application_decision_v2")
+    decision = decision if isinstance(decision, dict) else {}
+    decision_applied = dict(decision.get("applied_attributes") or {})
+    decision_abstained = {
+        str(name): str(reason or "profile_abstained")
+        for name, reason in dict(decision.get("abstained_attributes") or {}).items()
+    }
+    for name, value in decision_applied.items():
+        requested.setdefault(str(name), copy.deepcopy(value))
+    for name in decision_abstained:
+        requested.setdefault(name, "unknown")
+
+    if not render_completed:
+        return (
+            "review_required",
+            requested,
+            {},
+            {
+                name: decision_abstained.get(name, "render_not_completed")
+                for name in requested
+            },
+        )
+    if str(profile.get("status") or "") != "applied":
+        status = (
+            "review_required"
+            if str(profile.get("status") or "") == "review_required"
+            else "fallback"
+        )
+        return (
+            status,
+            requested,
+            {},
+            {
+                name: decision_abstained.get(name, "profile_not_applied")
+                for name in requested
+            },
+        )
+
+    runtime_applied = (
+        dict(raster_result.applied_attributes)
+        if raster_result is not None
+        else {}
+    )
+    runtime_abstained = (
+        dict(raster_result.abstained_attributes)
+        if raster_result is not None
+        else {}
+    )
+    applied: dict[str, Any] = {}
+    abstained = dict(decision_abstained)
+    for name in decision_applied:
+        if name in runtime_applied:
+            applied[name] = copy.deepcopy(runtime_applied[name])
+            abstained.pop(name, None)
+        else:
+            abstained[name] = str(
+                runtime_abstained.get(name) or "backend_did_not_apply_attribute"
+            )
+    for name in requested:
+        if name not in applied and name not in abstained:
+            abstained[name] = "attribute_not_resolved"
+    return ("applied" if applied else "fallback", requested, applied, abstained)
+
+
+def _build_owner_style_raster_contract(
+    *,
+    owner_id: str,
+    page_id: str,
+    profile: dict[str, Any],
+    execution_component_geometry_sha256: str,
+    before: np.ndarray,
+    rendered: np.ndarray,
+    glyph_mask: np.ndarray,
+    render_completed: bool,
+    raster_result: GlyphRasterResult | None,
+    render_quality_contract: object,
+) -> OwnerStyleRasterContract:
+    normalized_profile = validate_owner_visual_profile(
+        profile,
+        expected_owner_id=owner_id,
+        expected_sha256=str(profile.get("visual_profile_sha256") or ""),
+    )
+    status, requested, applied, abstained = _owner_style_contract_attributes(
+        normalized_profile,
+        raster_result,
+        render_completed=render_completed,
+    )
+    core_mask = (
+        raster_result.glyph_core_mask
+        if raster_result is not None
+        and raster_result.glyph_core_mask.shape == glyph_mask.shape
+        else glyph_mask
+    )
+    effect_mask = (
+        raster_result.effect_mask
+        if raster_result is not None
+        and raster_result.effect_mask.shape == glyph_mask.shape
+        else np.zeros_like(glyph_mask)
+    )
+    raster_metrics = (
+        copy.deepcopy(raster_result.metrics) if raster_result is not None else {}
+    )
+    raster_metrics.update(
+        {
+            "core_pixel_count": int(np.count_nonzero(core_mask)),
+            "effect_pixel_count": int(np.count_nonzero(effect_mask)),
+            "owner_render_quality": render_quality_contract.to_dict(),
+        }
+    )
+    raw: dict[str, Any] = {
+        "schema_version": 1,
+        "page_id": page_id,
+        "owner_id": owner_id,
+        "visual_profile_sha256": normalized_profile["visual_profile_sha256"],
+        "profile_component_geometry_sha256": normalized_profile[
+            "component_geometry_sha256"
+        ],
+        "execution_component_geometry_sha256": (
+            execution_component_geometry_sha256
+        ),
+        "source_artifact_sha256": normalized_profile["source_sha256"],
+        "source_glyph_mask_sha256": normalized_profile["glyph_mask_sha256"],
+        "status": status,
+        "backend": "python_ft2font",
+        "backend_version": str(getattr(matplotlib, "__version__", "unknown")),
+        "capabilities": tuple(
+            sorted(
+                {
+                    "fill",
+                    "font_name",
+                    "glow",
+                    "gradient",
+                    "rotation_deg",
+                    "shadow",
+                    "stroke",
+                }
+            )
+        ),
+        "requested_attributes": requested,
+        "applied_attributes": applied,
+        "abstained_attributes": abstained,
+        "glyph_core_envelope": _owner_style_mask_envelope(core_mask),
+        "effect_envelope": _owner_style_mask_envelope(effect_mask),
+        "render_metrics": raster_metrics,
+        "segments": (),
+        "rendered_before_sha256": _owner_array_sha256(before),
+        "rendered_patch_sha256": _owner_masked_pixels_sha256(
+            rendered,
+            glyph_mask,
+        ),
+        "rendered_after_sha256": _owner_array_sha256(rendered),
+    }
+    raw["contract_sha256"] = owner_style_raster_contract_sha256(raw)
+    return OwnerStyleRasterContract(**raw)
+
+
 def _owner_component_geometry_sha256(
     owner: object,
     owner_graph: object,
@@ -19789,7 +20014,7 @@ def _render_owner_band_image(
 
     before = np.ascontiguousarray(band_rgb.copy())
     image = Image.fromarray(before.copy(), mode="RGB")
-    render_text_block(image, block)
+    raster_result = render_text_block(image, block)
     if "render_completed" not in block:
         _finalize_render_completion_contract(block)
     rendered = np.ascontiguousarray(np.asarray(image.convert("RGB"), dtype=np.uint8))
@@ -19841,6 +20066,29 @@ def _render_owner_band_image(
             render_quality_contract.to_dict()
         )
 
+    component_geometry_sha256 = _owner_component_geometry_sha256(
+        owner,
+        owner_graph,
+        shape=(height, width),
+    )
+    raw_profile = block.get("visual_profile_v2")
+    if not isinstance(raw_profile, dict):
+        raise ValueError("owner renderer lost visual_profile_v2 before raster binding")
+    style_raster_contract = _build_owner_style_raster_contract(
+        owner_id=owner_id,
+        page_id=graph_page_id,
+        profile=raw_profile,
+        execution_component_geometry_sha256=component_geometry_sha256,
+        before=before,
+        rendered=rendered,
+        glyph_mask=glyph_mask,
+        render_completed=render_completed,
+        raster_result=(
+            raster_result if isinstance(raster_result, GlyphRasterResult) else None
+        ),
+        render_quality_contract=render_quality_contract,
+    )
+
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=graph_page_id,
@@ -19858,12 +20106,9 @@ def _render_owner_band_image(
         ),
         render_safe_polygon_page=polygon,
         render_safe_polygon_sha256=polygon_sha256,
-        component_geometry_sha256=_owner_component_geometry_sha256(
-            owner,
-            owner_graph,
-            shape=(height, width),
-        ),
+        component_geometry_sha256=component_geometry_sha256,
         render_quality_contract=render_quality_contract,
+        style_raster_contract=style_raster_contract,
         execution_tile_id=execution_tile_id,
         projection_role="executor",
     )

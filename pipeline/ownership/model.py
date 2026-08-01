@@ -717,6 +717,7 @@ class OwnerGlyphPatch:
     render_safe_polygon_sha256: str
     component_geometry_sha256: str
     render_quality_contract: OwnerRenderQuality
+    style_raster_contract: OwnerStyleRasterContract
     execution_tile_id: str | None = None
     projection_role: str = "executor"
     color_space: str = "RGB"
@@ -724,6 +725,24 @@ class OwnerGlyphPatch:
     def __post_init__(self) -> None:
         if not isinstance(self.render_quality_contract, OwnerRenderQuality):
             raise TypeError("owner glyph patch requires an OwnerRenderQuality contract")
+        if not isinstance(self.style_raster_contract, OwnerStyleRasterContract):
+            raise TypeError("owner glyph patch requires a style raster contract")
+        validate_owner_style_raster_contract(
+            self.style_raster_contract,
+            expected_owner_id=self.owner_id,
+            expected_page_id=self.page_id,
+        )
+        if (
+            self.style_raster_contract.execution_component_geometry_sha256
+            != self.component_geometry_sha256
+        ):
+            raise ValueError(
+                "owner glyph patch style raster contract geometry mismatch"
+            )
+        if self.style_raster_contract.rendered_after_sha256 != self.after_sha256:
+            raise ValueError(
+                "owner glyph patch style raster contract after hash mismatch"
+            )
         if self.render_completed and self.render_quality_contract.status != "ok":
             raise ValueError(
                 "completed owner glyph patch requires render quality status=ok"

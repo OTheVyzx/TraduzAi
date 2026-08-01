@@ -292,6 +292,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     class Typesetter:
         @staticmethod
         def render_band_image(image, _record, *, owner_graph):
+            from style_v2_fixtures import valid_owner_style_raster_contract
             from typesetter.owner_render_quality import OwnerRenderQuality
 
             owner = owner_graph.owners[0]
@@ -339,6 +340,16 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
                     page_width=image.shape[1],
                     page_height=image.shape[0],
                     reasons=(),
+                ),
+                style_raster_contract=valid_owner_style_raster_contract(
+                    owner_id=owner.owner_id,
+                    page_id=owner.page_id,
+                    before=image,
+                    result=result,
+                    glyph_mask=glyph,
+                    component_geometry_sha256=(
+                        state["mutation"].component_geometry_sha256
+                    ),
                 ),
                 execution_tile_id=owner.execution_tile_id,
             )

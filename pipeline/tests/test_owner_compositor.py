@@ -25,6 +25,7 @@ from ownership.model import (  # noqa: E402
     owner_residual_evidence_sha256,
 )
 from typesetter.owner_render_quality import OwnerRenderQuality  # noqa: E402
+from style_v2_fixtures import valid_owner_style_raster_contract  # noqa: E402
 
 
 PAGE_ID = "page_001"
@@ -212,6 +213,18 @@ def _glyph_patch(
             page_height=original.shape[0],
             reasons=(),
         ),
+        style_raster_contract=valid_owner_style_raster_contract(
+            owner_id=owner_id,
+            page_id=PAGE_ID,
+            before=baseline,
+            result=result,
+            glyph_mask=glyph_mask,
+            component_geometry_sha256=(
+                mutation.component_geometry_sha256
+                if mutation is not None
+                else _component_hash(owner_id)
+            ),
+        ),
         execution_tile_id=f"tile_{owner_id}",
         projection_role=projection_role,
         color_space=color_space,
@@ -220,6 +233,14 @@ def _glyph_patch(
 
 def _empty_protected(original: np.ndarray) -> np.ndarray:
     return np.zeros(original.shape[:2], dtype=np.uint8)
+
+
+def test_owner_glyph_patch_requires_style_raster_contract() -> None:
+    original = np.full(PAGE_SHAPE, 230, dtype=np.uint8)
+    valid_patch = _glyph_patch(original)
+
+    with pytest.raises(TypeError, match="style raster contract"):
+        replace(valid_patch, style_raster_contract=None)
 
 
 def test_owner_glyph_patch_requires_render_quality_contract() -> None:

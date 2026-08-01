@@ -6123,6 +6123,7 @@ def _owner_atomic_copyback_fixture():
         OwnerMutation,
         owner_residual_evidence_sha256,
     )
+    from style_v2_fixtures import valid_owner_style_raster_contract
     from strip import process_bands
     from strip.types import Band
     from typesetter.owner_render_quality import OwnerRenderQuality
@@ -6235,6 +6236,14 @@ def _owner_atomic_copyback_fixture():
             page_width=original.shape[1],
             page_height=original.shape[0],
             reasons=(),
+        ),
+        style_raster_contract=valid_owner_style_raster_contract(
+            owner_id="owner_a",
+            page_id="page_001",
+            before=cleaned,
+            result=rendered,
+            glyph_mask=glyph_mask,
+            component_geometry_sha256=mutation.component_geometry_sha256,
         ),
         execution_tile_id="tile_executor",
         projection_role="executor",
