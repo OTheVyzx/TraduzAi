@@ -847,7 +847,10 @@ def _resolved_intent_panel(page, target, size, geometry):
     )
     if layer is None:
         raise MatrixContractError("missing_owner_materialization_intent")
-    plan = layer.get("owner_render_geometry") or layer.get("render_layout_contract")
+    # The render layout is the materialization intent. ``owner_render_geometry``
+    # describes the source owner's semantic/component geometry and deliberately
+    # has a different coordinate-space contract.
+    plan = layer.get("render_layout_contract") or layer.get("owner_render_geometry")
     if not isinstance(plan, dict):
         raise MatrixContractError("missing_owner_materialization_plan")
     bbox = None

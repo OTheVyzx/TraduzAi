@@ -402,6 +402,43 @@ def test_contact_sheet_transforms_logical_owner_crop_into_framed_space(tmp_path)
     assert metadata["panels"]["observed_raster"]["observation_sha256"]
 
 
+def test_resolved_intent_uses_render_layout_contract_not_source_owner_geometry():
+    from strip.page_surface_geometry import PageSurfaceGeometry
+    from tools.validate_owner_visual_matrix import _resolved_intent_panel
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=69,
+        logical_height=160,
+        frame_width=80,
+        frame_height=160,
+        content_origin_xy=(5, 0),
+    )
+    page = {
+        "text_layers": [{
+            "owner_id": "owner_a",
+            "translated": "CORPO COMPLETO",
+            "coordinate_space": "page",
+            "owner_render_geometry": {
+                "logical_space": "logical_page",
+                "semantic_body_bbox_page": [8, 90, 34, 116],
+            },
+            "render_layout_contract": {
+                "coordinate_space": "logical_page",
+                "safe_text_box": [10, 98, 32, 111],
+            },
+        }],
+    }
+
+    _, metadata = _resolved_intent_panel(
+        page,
+        {"owner_id": "owner_a"},
+        (80, 160),
+        geometry,
+    )
+
+    assert metadata["render_bbox_frame"] == [15, 98, 37, 111]
+
+
 def test_contact_sheet_blocks_logical_target_without_page_geometry(tmp_path):
     from PIL import Image
     from tools.validate_owner_visual_matrix import MatrixContractError, _write_contact_sheets
