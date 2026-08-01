@@ -175,7 +175,7 @@ def test_owner_mode_does_not_call_mask_or_renderer_semantic_merge_helpers():
         assert not (called & forbidden), path
 
 
-def test_enforce_executes_one_atomic_page_space_chain_per_owner():
+def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     from inpainter.owner_mask import execute_owner_inpaint
     from ownership.model import (
         ComponentDisposition,
@@ -266,6 +266,19 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     cv2.putText(page, "SRC", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (8, 8, 8), 1)
     calls = []
     state = {}
+    from typesetter import style_capture as style_capture_module
+
+    original_extract = style_capture_module.extract_text_style_evidence_v2
+
+    def tracked_extract(*args, **kwargs):
+        calls.append(("style_extract", kwargs.get("source_phase")))
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(
+        style_capture_module,
+        "extract_text_style_evidence_v2",
+        tracked_extract,
+    )
 
     class Translator:
         @staticmethod
@@ -379,7 +392,12 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
         typesetter=Typesetter(),
     )
 
-    assert calls == [("translate", 1), ("inpaint", "owner_a"), ("typeset", "owner_a")]
+    assert calls == [
+        ("style_extract", "pre_inpaint"),
+        ("translate", 1),
+        ("inpaint", "owner_a"),
+        ("typeset", "owner_a"),
+    ]
     assert len(execution.commits) == 1
     assert execution.commits[0].committed is True
     assert execution.records[0]["owner_id"] == "owner_a"

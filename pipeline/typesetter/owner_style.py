@@ -25,6 +25,7 @@ from typesetter.style_policy import (
     decide_style_copy_v2,
     normalize_auto_typesetting_style,
 )
+from typesetter.style_capture import validate_owner_style_capture
 
 
 OWNER_VISUAL_PROFILE_SCHEMA_VERSION = 2
@@ -97,6 +98,12 @@ def _mask_sha256(mask: np.ndarray | None, shape: tuple[int, int]) -> str:
 
 
 def _style_evidence(candidate: Mapping[str, Any], *, text_present: bool) -> StyleEvidenceV2:
+    raw_capture = candidate.get("owner_style_capture")
+    if isinstance(raw_capture, Mapping):
+        capture = validate_owner_style_capture(raw_capture)
+        if isinstance(capture.style_evidence_v2, StyleEvidenceV2):
+            return capture.style_evidence_v2
+        return style_evidence_v2_from_v1({"source": "none"})
     raw_v2 = candidate.get("style_evidence_v2")
     if isinstance(raw_v2, Mapping):
         return style_evidence_v2_from_dict(raw_v2)

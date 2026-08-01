@@ -51,6 +51,39 @@ def test_v2_metrics_are_mask_backed_and_x_height_normalized():
     assert "tracking_xh" in metrics and "slant_tangent" in metrics
 
 
+def test_v2_explicit_masks_exclude_neighboring_art_from_effect_evidence():
+    image = np.full((80, 160, 3), 245, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[30:42, 42:82] = 255
+    image[glyph > 0] = (15, 15, 15)
+    context = np.zeros_like(glyph)
+    context[10:70, 15:145] = 255
+    context[glyph > 0] = 0
+    stroke = np.zeros_like(glyph)
+    effect = np.zeros_like(glyph)
+    effect[24:48, 35:90] = 255
+    effect[glyph > 0] = 0
+    foreign_art = np.zeros_like(glyph)
+    foreign_art[24:48, 86:110] = 255
+    image[foreign_art > 0] = (220, 20, 180)
+    effect[foreign_art > 0] = 0
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        stroke_ring_mask=stroke,
+        effect_region_mask=effect,
+        owner_id="owner_a",
+        semantic_role="dialogue_body",
+        source_phase="pre_inpaint",
+    )
+
+    assert evidence.attribute_provenance["owner"]["source_phase"] == "pre_inpaint"
+    assert evidence.attributes["fill"].value == "#0F0F0F"
+    assert evidence.attributes["glow"].value == "unknown"
+
+
 def test_extracts_black_fill_from_dark_text_on_white_crop():
     crop = np.full((80, 160, 3), 255, dtype=np.uint8)
     crop[25:55, 40:120] = 0

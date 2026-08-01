@@ -16,6 +16,7 @@ from ownership.model import (
 )
 from typesetter.style_capture import (
     build_owner_style_capture,
+    build_style_capture_masks,
     validate_owner_style_capture,
 )
 
@@ -135,3 +136,57 @@ def test_capture_hash_rejects_tampering() -> None:
 
     with pytest.raises(ValueError, match="hash mismatch"):
         validate_owner_style_capture(payload)
+
+
+def test_capture_extracts_fill_from_authoritative_owner_masks() -> None:
+    graph = _graph(0.93)
+    source = np.full_like(SOURCE, (245, 245, 245))
+    glyph = np.zeros(source.shape[:2], dtype=np.uint8)
+    glyph[11:18, 12:28] = 255
+    source[glyph > 0] = (18, 70, 190)
+
+    capture = build_owner_style_capture(
+        graph,
+        "owner_a",
+        source,
+        glyph_mask=glyph,
+    )
+
+    assert capture.style_evidence_v2.attributes["fill"].value == "#1246BE"
+    assert capture.style_evidence_v2.attribute_provenance["fill"]["masks"] == (
+        "owner_glyph_core",
+    )
+    assert capture.glyph_mask_sha256 != capture.context_mask_sha256
+
+
+def test_context_mask_excludes_foreign_owner_and_protected_art() -> None:
+    graph = _graph(0.93)
+    glyph = np.zeros(SOURCE.shape[:2], dtype=np.uint8)
+    glyph[11:18, 12:28] = 255
+    foreign = np.zeros_like(glyph)
+    foreign[8:14, 28:34] = 255
+    protected = np.zeros_like(glyph)
+    protected[18:23, 8:15] = 255
+
+    masks = build_style_capture_masks(
+        graph,
+        "owner_a",
+        SOURCE.shape[:2],
+        glyph_mask=glyph,
+        foreign_owner_mask=foreign,
+        protected_art_mask=protected,
+    )
+
+    assert not np.any((masks.context_mask > 0) & (foreign > 0))
+    assert not np.any((masks.context_mask > 0) & (protected > 0))
+    assert not np.any((masks.context_mask > 0) & (masks.glyph_core_mask > 0))
+    assert not np.any((masks.effect_region_mask > 0) & (foreign > 0))
+
+
+@pytest.mark.parametrize("pixel_count", [0, 4])
+def test_empty_or_too_small_glyph_mask_fails_closed(pixel_count: int) -> None:
+    glyph = np.zeros(SOURCE.shape[:2], dtype=np.uint8)
+    glyph.flat[:pixel_count] = 255
+
+    with pytest.raises(ValueError, match="insufficient"):
+        build_owner_style_capture(_graph(0.93), "owner_a", SOURCE, glyph_mask=glyph)

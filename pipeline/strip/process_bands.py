@@ -10363,6 +10363,44 @@ def _capture_owner_glyph_masks_before_inpaint(
     return captured
 
 
+def _capture_owner_protected_art_masks_before_inpaint(
+    source_rgb: np.ndarray,
+    graph: OwnerGraph,
+    glyph_masks_by_owner: Mapping[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Freeze owner-local negative evidence before translation or mutation."""
+
+    components = {component.component_id: component for component in graph.components}
+    protected_by_owner: dict[str, np.ndarray] = {}
+    for owner in sorted(graph.owners, key=lambda item: item.owner_id):
+        if owner.owner_id not in glyph_masks_by_owner or not owner.component_ids:
+            continue
+        boxes = [components[item].bbox_page for item in owner.component_ids if item in components]
+        if not boxes:
+            continue
+        component_bbox = (
+            min(int(item[0]) for item in boxes),
+            min(int(item[1]) for item in boxes),
+            max(int(item[2]) for item in boxes),
+            max(int(item[3]) for item in boxes),
+        )
+        foreign_masks = _owner_foreign_component_masks(
+            source_rgb,
+            graph,
+            owner_component_ids=set(owner.component_ids),
+        )
+        protected, _provenance, _confidence = _owner_protected_evidence(
+            source_rgb,
+            owner_component_ids=set(owner.component_ids),
+            source_glyph_mask=glyph_masks_by_owner[owner.owner_id],
+            component_bbox_page=component_bbox,
+            foreign_component_masks=foreign_masks,
+            explicit_protected_masks=(),
+        )
+        protected_by_owner[owner.owner_id] = protected
+    return protected_by_owner
+
+
 def execute_owner_page_graph(
     page_rgb: np.ndarray,
     graph: OwnerGraph,
@@ -10392,10 +10430,18 @@ def execute_owner_page_graph(
 
     graph.require_valid()
     source = np.ascontiguousarray(page_rgb, dtype=np.uint8)
+    captured_glyph_masks = _capture_owner_glyph_masks_before_inpaint(source, graph)
+    captured_protected_art_masks = _capture_owner_protected_art_masks_before_inpaint(
+        source,
+        graph,
+        captured_glyph_masks,
+    )
     captures_by_owner = build_owner_style_captures(
         graph,
         source,
         promotions_by_owner=style_promotions_by_owner,
+        glyph_masks_by_owner=captured_glyph_masks,
+        protected_art_masks_by_owner=captured_protected_art_masks,
     )
     translated_stage = _run_translate_stage(
         {"page_id": graph.page_id, "texts": []},
@@ -10428,10 +10474,6 @@ def execute_owner_page_graph(
         observation.observation_id: observation
         for observation in executed_graph.observations
     }
-    captured_glyph_masks = _capture_owner_glyph_masks_before_inpaint(
-        source,
-        executed_graph,
-    )
     owner_visual_profiles = resolve_contextual_style_groups(
         build_owner_visual_profiles(
             executed_graph,

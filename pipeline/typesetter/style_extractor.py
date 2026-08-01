@@ -121,8 +121,11 @@ def extract_text_style_evidence_v2(
     glyph_mask: np.ndarray,
     context_mask: np.ndarray,
     *,
+    stroke_ring_mask: np.ndarray | None = None,
+    effect_region_mask: np.ndarray | None = None,
     owner_id: str,
     semantic_role: str,
+    source_phase: str = "pre_inpaint",
 ) -> StyleEvidenceV2:
     """Measure source typography only inside an owner's authoritative masks."""
 
@@ -130,7 +133,42 @@ def extract_text_style_evidence_v2(
         raise ValueError("owner_id must be a canonical non-empty string")
     if not isinstance(semantic_role, str) or not semantic_role.strip():
         raise ValueError("semantic_role must be a canonical non-empty string")
-    layers = build_mask_backed_typographic_layers(image_rgb, glyph_mask, context_mask)
+    shape = np.asarray(image_rgb).shape[:2]
+    glyph_input = np.where(np.asarray(glyph_mask) > 0, 255, 0).astype(np.uint8)
+    context_input = np.where(np.asarray(context_mask) > 0, 255, 0).astype(np.uint8)
+    if glyph_input.shape != shape or context_input.shape != shape:
+        raise ValueError("style capture masks must match image dimensions")
+    explicit_stroke = (
+        np.zeros(shape, dtype=np.uint8)
+        if stroke_ring_mask is None
+        else np.where(np.asarray(stroke_ring_mask) > 0, 255, 0).astype(np.uint8)
+    )
+    explicit_effect = (
+        np.zeros(shape, dtype=np.uint8)
+        if effect_region_mask is None
+        else np.where(np.asarray(effect_region_mask) > 0, 255, 0).astype(np.uint8)
+    )
+    if explicit_stroke.shape != shape or explicit_effect.shape != shape:
+        raise ValueError("explicit style masks must match image dimensions")
+    analysis_support = np.maximum.reduce(
+        (context_input, glyph_input, explicit_stroke, explicit_effect)
+    )
+    layers = build_mask_backed_typographic_layers(
+        image_rgb,
+        glyph_input,
+        analysis_support,
+    )
+    if stroke_ring_mask is not None:
+        layers["stroke_ring_mask"] = cv2.bitwise_and(
+            np.asarray(layers["stroke_ring_mask"], dtype=np.uint8),
+            explicit_stroke,
+        )
+    if effect_region_mask is not None:
+        layers["effect_ring_mask"] = cv2.bitwise_and(
+            np.asarray(layers["effect_ring_mask"], dtype=np.uint8),
+            explicit_effect,
+        )
+    layers["background_mask"] = context_input
     glyph = np.asarray(layers["core_mask"], dtype=np.uint8)
     metrics = dict(layers["metrics"])
     metrics.update(_component_typography_metrics(glyph))
@@ -240,9 +278,20 @@ def extract_text_style_evidence_v2(
     metrics["stroke_width_xh"] = float(metrics["normalized_stroke_width"])
     source = np.ascontiguousarray(rgb).tobytes()
     source += np.ascontiguousarray(glyph).tobytes()
-    source += np.ascontiguousarray(np.asarray(context_mask) > 0).tobytes()
+    source += np.ascontiguousarray(context_input > 0).tobytes()
+    source += np.ascontiguousarray(explicit_stroke > 0).tobytes()
+    source += np.ascontiguousarray(explicit_effect > 0).tobytes()
+    source += source_phase.encode("utf-8")
     provenance = {
-        "owner": {"owner_id": owner_id, "semantic_role": semantic_role},
+        "owner": {
+            "owner_id": owner_id,
+            "semantic_role": semantic_role,
+            "source_phase": source_phase,
+        },
+        "fill": {"masks": ("owner_glyph_core",)},
+        "stroke": {"masks": ("owner_stroke_ring", "owner_glyph_core")},
+        "shadow": {"masks": ("owner_effect_region", "owner_clean_context")},
+        "glow": {"masks": ("owner_effect_region", "owner_clean_context")},
         "typographic_metrics": metrics,
     }
     return StyleEvidenceV2(

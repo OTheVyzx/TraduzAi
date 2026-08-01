@@ -28,6 +28,7 @@ from typesetter.owner_style import (  # noqa: E402
     build_owner_visual_profiles,
     owner_visual_profile_sha256,
 )
+from typesetter.style_capture import build_owner_style_capture  # noqa: E402
 
 
 def _fixture() -> tuple[np.ndarray, OwnerGraph]:
@@ -146,6 +147,34 @@ def test_owner_profile_round_trips_to_renderer() -> None:
     record = attach_owner_visual_profile({"owner_id": "owner_a"}, profile)
 
     assert renderer_mod._owner_visual_profile(record) == profile["applied_style"]
+
+
+def test_owner_profile_consumes_masked_capture_instead_of_legacy_empty_evidence() -> None:
+    page, graph = _fixture()
+    glyph = np.zeros(page.shape[:2], dtype=np.uint8)
+    glyph[10:14, 12:20] = 255
+    capture = build_owner_style_capture(
+        graph,
+        "owner_a",
+        page,
+        glyph_mask=glyph,
+    )
+
+    profile = build_owner_visual_profile(
+        graph.owners[0],
+        page,
+        components=graph.components,
+        observations=graph.observations,
+        glyph_mask=glyph,
+        candidate={
+            "confidence": capture.candidate_confidence,
+            "route_action": capture.route_action,
+            "owner_style_capture": capture.to_dict(),
+        },
+    )
+
+    assert profile["style_evidence_v2"] == capture.style_evidence_v2.to_dict()
+    assert profile["style_evidence_v2"]["source"] == "owner_mask_v2"
 
 
 def test_style_profile_cannot_change_owner_semantic_signature() -> None:

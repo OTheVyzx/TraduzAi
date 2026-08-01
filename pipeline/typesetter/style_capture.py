@@ -8,9 +8,12 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+import cv2
 import numpy as np
 
 from sfx.promotion import VISUAL_PROMOTION_THRESHOLD
+from typesetter.style_contract import StyleEvidenceV2, style_evidence_v2_from_dict
+from typesetter.style_extractor import extract_text_style_evidence_v2
 from typesetter.style_policy import SOURCE_STYLE_CONFIDENCE_THRESHOLD
 
 
@@ -58,6 +61,121 @@ def _source_artifact_sha256(source_rgb: np.ndarray) -> str:
     return _sha256(header + b"\0" + source.tobytes(order="C"))
 
 
+def _binary_mask(value: np.ndarray, shape: tuple[int, int], *, label: str) -> np.ndarray:
+    mask = np.asarray(value)
+    if mask.shape != shape:
+        raise ValueError(f"{label} must match the source page")
+    return np.ascontiguousarray(np.where(mask > 0, 255, 0), dtype=np.uint8)
+
+
+def _mask_sha256(mask: np.ndarray) -> str:
+    canonical = np.ascontiguousarray(mask, dtype=np.uint8)
+    header = _canonical_json({"shape": list(canonical.shape), "dtype": str(canonical.dtype)})
+    return _sha256(header + b"\0" + canonical.tobytes(order="C"))
+
+
+@dataclass(frozen=True)
+class StyleCaptureMasks:
+    """Canonical page masks used by the pre-inpaint style extractor."""
+
+    glyph_core_mask: np.ndarray
+    stroke_ring_mask: np.ndarray
+    context_mask: np.ndarray
+    effect_region_mask: np.ndarray
+    foreign_owner_mask: np.ndarray
+    protected_art_mask: np.ndarray
+    support_mask: np.ndarray
+
+
+def build_style_capture_masks(
+    graph: object,
+    owner_id: str,
+    shape: tuple[int, int],
+    *,
+    glyph_mask: np.ndarray,
+    foreign_owner_mask: np.ndarray | None = None,
+    protected_art_mask: np.ndarray | None = None,
+) -> StyleCaptureMasks:
+    """Build non-overlapping owner masks without sampling foreign visual content."""
+
+    owners = [item for item in (_field(graph, "owners", []) or []) if str(_field(item, "owner_id") or "") == owner_id]
+    if len(owners) != 1:
+        raise ValueError(f"style masks require exactly one owner {owner_id!r}")
+    owner = owners[0]
+    glyph = _binary_mask(glyph_mask, shape, label="glyph mask")
+    if int(np.count_nonzero(glyph)) < 8:
+        raise ValueError("glyph mask has insufficient source text evidence")
+    component_ids = {str(item) for item in (_field(owner, "component_ids", []) or [])}
+    support = np.zeros(shape, dtype=np.uint8)
+    for component in (_field(graph, "components", []) or []):
+        if str(_field(component, "component_id") or "") not in component_ids:
+            continue
+        polygon = _field(component, "polygon_page", ()) or ()
+        if len(polygon) >= 3:
+            points = np.asarray([[int(x), int(y)] for x, y in polygon], dtype=np.int32)
+            cv2.fillPoly(support, [points], 255)
+        else:
+            x1, y1, x2, y2 = (int(item) for item in _field(component, "bbox_page"))
+            support[max(0, y1):min(shape[0], y2), max(0, x1):min(shape[1], x2)] = 255
+    if int(np.count_nonzero(support)) < 12:
+        raise ValueError("owner support mask has insufficient area")
+    glyph = cv2.bitwise_and(glyph, support)
+    if int(np.count_nonzero(glyph)) < 8:
+        raise ValueError("glyph mask has insufficient owner-supported evidence")
+    foreign = (
+        np.zeros(shape, dtype=np.uint8)
+        if foreign_owner_mask is None
+        else _binary_mask(foreign_owner_mask, shape, label="foreign owner mask")
+    )
+    protected = (
+        np.zeros(shape, dtype=np.uint8)
+        if protected_art_mask is None
+        else _binary_mask(protected_art_mask, shape, label="protected art mask")
+    )
+    forbidden = cv2.bitwise_or(foreign, protected)
+    glyph[forbidden > 0] = 0
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(glyph, 8)
+    heights = [
+        int(stats[label, cv2.CC_STAT_HEIGHT])
+        for label in range(1, count)
+        if int(stats[label, cv2.CC_STAT_AREA]) >= 4
+    ]
+    if not heights:
+        raise ValueError("glyph mask has insufficient measurable components")
+    x_height = max(1.0, float(np.median(heights)))
+    stroke_radius = max(1, int(round(x_height * 0.16)))
+    effect_radius = max(stroke_radius + 1, int(round(x_height * 0.48)))
+    stroke_dilated = cv2.dilate(
+        glyph,
+        np.ones((stroke_radius * 2 + 1, stroke_radius * 2 + 1), dtype=np.uint8),
+    )
+    effect_dilated = cv2.dilate(
+        glyph,
+        np.ones((effect_radius * 2 + 1, effect_radius * 2 + 1), dtype=np.uint8),
+    )
+    allowed = (support > 0) & (forbidden == 0)
+    stroke_ring = np.where(
+        allowed & (stroke_dilated > 0) & (glyph == 0), 255, 0
+    ).astype(np.uint8)
+    effect_region = np.where(
+        allowed & (effect_dilated > 0) & (stroke_dilated == 0), 255, 0
+    ).astype(np.uint8)
+    context = np.where(
+        allowed & (effect_dilated == 0), 255, 0
+    ).astype(np.uint8)
+    if int(np.count_nonzero(context)) < 12:
+        raise ValueError("context mask has insufficient clean background evidence")
+    return StyleCaptureMasks(
+        glyph_core_mask=np.ascontiguousarray(glyph),
+        stroke_ring_mask=np.ascontiguousarray(stroke_ring),
+        context_mask=np.ascontiguousarray(context),
+        effect_region_mask=np.ascontiguousarray(effect_region),
+        foreign_owner_mask=np.ascontiguousarray(foreign),
+        protected_art_mask=np.ascontiguousarray(protected),
+        support_mask=np.ascontiguousarray(support),
+    )
+
+
 @dataclass(frozen=True)
 class OwnerStyleCapture:
     """Source-side style eligibility that never enters semantic translation."""
@@ -83,6 +201,11 @@ class OwnerStyleCapture:
     capture_sha256: str
 
     def to_dict(self) -> dict[str, Any]:
+        style_evidence = (
+            self.style_evidence_v2.to_dict()
+            if isinstance(self.style_evidence_v2, StyleEvidenceV2)
+            else self.style_evidence_v2
+        )
         return {
             "schema_version": self.schema_version,
             "page_id": self.page_id,
@@ -102,7 +225,7 @@ class OwnerStyleCapture:
             "promotion_status": self.promotion_status,
             "promotion_provenance": list(self.promotion_provenance),
             "eligible": self.eligible,
-            "style_evidence_v2": self.style_evidence_v2,
+            "style_evidence_v2": style_evidence,
             "font_match_evidence": self.font_match_evidence,
             "capture_sha256": self.capture_sha256,
         }
@@ -153,7 +276,11 @@ def validate_owner_style_capture(
             sorted(str(item) for item in payload.get("promotion_provenance") or ())
         ),
         eligible=bool(payload.get("eligible")),
-        style_evidence_v2=payload.get("style_evidence_v2"),
+        style_evidence_v2=(
+            style_evidence_v2_from_dict(payload["style_evidence_v2"])
+            if isinstance(payload.get("style_evidence_v2"), Mapping)
+            else None
+        ),
         font_match_evidence=payload.get("font_match_evidence"),
         capture_sha256=serialized_hash,
     )
@@ -167,6 +294,9 @@ def build_owner_style_capture(
     promotion_status: str | None = None,
     promotion_confidence: float | None = None,
     promotion_provenance: Iterable[str] = (),
+    glyph_mask: np.ndarray | None = None,
+    foreign_owner_mask: np.ndarray | None = None,
+    protected_art_mask: np.ndarray | None = None,
 ) -> OwnerStyleCapture:
     """Derive eligibility only from selected source observations and promotion facts."""
 
@@ -211,6 +341,27 @@ def build_owner_style_capture(
             and candidate_confidence is not None
             and candidate_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
         )
+    masks = None
+    style_evidence = None
+    if glyph_mask is not None:
+        masks = build_style_capture_masks(
+            graph,
+            owner_id,
+            tuple(np.asarray(source_rgb).shape[:2]),
+            glyph_mask=glyph_mask,
+            foreign_owner_mask=foreign_owner_mask,
+            protected_art_mask=protected_art_mask,
+        )
+        style_evidence = extract_text_style_evidence_v2(
+            source_rgb,
+            masks.glyph_core_mask,
+            masks.context_mask,
+            stroke_ring_mask=masks.stroke_ring_mask,
+            effect_region_mask=masks.effect_region_mask,
+            owner_id=owner_id,
+            semantic_role=str(_field(owner, "semantic_role") or "text"),
+            source_phase="pre_inpaint",
+        )
     payload: dict[str, Any] = {
         "schema_version": OWNER_STYLE_CAPTURE_SCHEMA_VERSION,
         "page_id": str(_field(owner, "page_id") or _field(graph, "page_id") or ""),
@@ -219,16 +370,22 @@ def build_owner_style_capture(
         "route_action": route_action,
         "source_artifact_sha256": _source_artifact_sha256(source_rgb),
         "source_text_sha256": _sha256(str(_field(owner, "source_payload") or "").encode("utf-8")),
-        "glyph_mask_sha256": _SHA256_EMPTY_MASK,
-        "context_mask_sha256": _SHA256_EMPTY_MASK,
-        "effect_region_mask_sha256": _SHA256_EMPTY_MASK,
+        "glyph_mask_sha256": (
+            _mask_sha256(masks.glyph_core_mask) if masks is not None else _SHA256_EMPTY_MASK
+        ),
+        "context_mask_sha256": (
+            _mask_sha256(masks.context_mask) if masks is not None else _SHA256_EMPTY_MASK
+        ),
+        "effect_region_mask_sha256": (
+            _mask_sha256(masks.effect_region_mask) if masks is not None else _SHA256_EMPTY_MASK
+        ),
         "candidate_kind": candidate_kind,
         "candidate_confidence": candidate_confidence,
         "candidate_confidence_provenance": list(selected_ids),
         "promotion_status": normalized_promotion_status,
         "promotion_provenance": list(provenance),
         "eligible": eligible,
-        "style_evidence_v2": None,
+        "style_evidence_v2": style_evidence.to_dict() if style_evidence is not None else None,
         "font_match_evidence": None,
     }
     payload["capture_sha256"] = _capture_sha256(payload)
@@ -240,6 +397,8 @@ def build_owner_style_captures(
     source_rgb: np.ndarray,
     *,
     promotions_by_owner: Mapping[str, Mapping[str, Any]] | None = None,
+    glyph_masks_by_owner: Mapping[str, np.ndarray] | None = None,
+    protected_art_masks_by_owner: Mapping[str, np.ndarray] | None = None,
 ) -> dict[str, OwnerStyleCapture]:
     """Capture all renderable owners in stable owner-id order."""
 
@@ -256,21 +415,50 @@ def build_owner_style_captures(
             continue
         owner_id = str(_field(owner, "owner_id") or "")
         promotion = promotions.get(owner_id) or {}
-        captures[owner_id] = build_owner_style_capture(
-            graph,
-            owner_id,
-            source_rgb,
-            promotion_status=promotion.get("promotion_status"),
-            promotion_confidence=promotion.get("promotion_confidence"),
-            promotion_provenance=promotion.get("promotion_provenance") or (),
-        )
+        foreign_mask = np.zeros(np.asarray(source_rgb).shape[:2], dtype=np.uint8)
+        for foreign_owner_id, foreign_glyph in (glyph_masks_by_owner or {}).items():
+            if foreign_owner_id != owner_id:
+                foreign_mask = np.maximum(
+                    foreign_mask,
+                    _binary_mask(
+                        foreign_glyph,
+                        tuple(foreign_mask.shape),
+                        label="foreign owner glyph mask",
+                    ),
+                )
+        kwargs = {
+            "promotion_status": promotion.get("promotion_status"),
+            "promotion_confidence": promotion.get("promotion_confidence"),
+            "promotion_provenance": promotion.get("promotion_provenance") or (),
+        }
+        try:
+            captures[owner_id] = build_owner_style_capture(
+                graph,
+                owner_id,
+                source_rgb,
+                **kwargs,
+                glyph_mask=(glyph_masks_by_owner or {}).get(owner_id),
+                foreign_owner_mask=foreign_mask,
+                protected_art_mask=(protected_art_masks_by_owner or {}).get(owner_id),
+            )
+        except ValueError as exc:
+            if "insufficient" not in str(exc):
+                raise
+            captures[owner_id] = build_owner_style_capture(
+                graph,
+                owner_id,
+                source_rgb,
+                **kwargs,
+            )
     return captures
 
 
 __all__ = [
     "OWNER_STYLE_CAPTURE_SCHEMA_VERSION",
     "OwnerStyleCapture",
+    "StyleCaptureMasks",
     "build_owner_style_capture",
     "build_owner_style_captures",
+    "build_style_capture_masks",
     "validate_owner_style_capture",
 ]
