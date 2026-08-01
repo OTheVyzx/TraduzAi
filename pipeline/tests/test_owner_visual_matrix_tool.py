@@ -311,6 +311,112 @@ def test_contact_sheets_include_every_declared_visual_category(tmp_path):
     assert sheets["hard_negative"] == sheets["sfx"] == sheets["white_balloon"]
 
 
+def test_contact_sheet_transforms_logical_owner_crop_into_framed_space(tmp_path):
+    from PIL import Image
+    from strip.page_surface_geometry import PageSurfaceGeometry
+    from tools.validate_owner_visual_matrix import _write_contact_sheets
+
+    output_root = tmp_path / "matrix"
+    work_dir = output_root / "entry_narrow"
+    for folder in ("originals", "images", "translated"):
+        (work_dir / folder).mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (80, 160), "white").save(work_dir / folder / "001.png")
+    geometry = PageSurfaceGeometry.build(
+        logical_width=69,
+        logical_height=160,
+        frame_width=80,
+        frame_height=160,
+        content_origin_xy=(5, 0),
+    )
+    (work_dir / "project.json").write_text(json.dumps({
+        "paginas": [{
+            "numero": 1,
+            "page_id": "page_001",
+            "page_surface_geometry": geometry.to_dict(),
+            "page_surface_geometry_sha256": geometry.geometry_sha256,
+            "image_layers": {"rendered": {"path": "translated/001.png"}},
+            "text_layers": [{
+                "owner_id": "owner_a",
+                "translated": "CORPO COMPLETO",
+                "render_layout_contract": {
+                    "coordinate_space": "logical_page",
+                    "render_bbox": [10, 98, 32, 111],
+                },
+            }],
+        }],
+        "page_owner_graphs": [{
+            "page_id": "page_001",
+            "owners": [{"owner_id": "owner_a", "component_ids": ["component_a"]}],
+            "components": [{
+                "component_id": "component_a",
+                "bbox_page": [10, 98, 32, 111],
+                "polygon_page": [[10, 98], [32, 98], [32, 111], [10, 111]],
+            }],
+        }],
+    }), encoding="utf-8")
+    entries = [{
+        "entry_id": "entry_narrow",
+        "work_dir": "entry_narrow",
+        "categories": ["cross_tile_owner"],
+        "targets": [{
+            "page_id": "page_001",
+            "owner_id": "owner_a",
+            "component_ids": ["component_a"],
+            "category": "cross_tile_owner",
+            "expected_artifact_space": "framed_page",
+            "source_crop": {
+                "bbox_page": [10, 98, 32, 111],
+                "coordinate_space": "logical_page",
+            },
+        }],
+    }]
+
+    sheets = _write_contact_sheets(entries, output_root)
+    metadata_path = Path(sheets["cross_tile_owner"][0]).with_suffix(".metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert metadata["bbox_logical"] == [10, 98, 32, 111]
+    assert metadata["artifact_bbox_frame"] == [15, 98, 37, 111]
+    assert metadata["page_surface_geometry_sha256"] == geometry.geometry_sha256
+    assert metadata["owner_map"]["polygons_frame"][0][0] == [15, 98]
+    assert metadata["owner_map"]["polygons_frame"][0][2] == [37, 111]
+    assert set(metadata["panels"]) == {
+        "source", "masks_evidence", "requested_resolved",
+        "observed_raster", "final", "safe_geometry",
+    }
+    assert all(panel["source_sha256"] for panel in metadata["panels"].values())
+    assert metadata["panels"]["requested_resolved"]["plan_sha256"]
+    assert metadata["panels"]["observed_raster"]["observation_sha256"]
+
+
+def test_contact_sheet_blocks_logical_target_without_page_geometry(tmp_path):
+    from PIL import Image
+    from tools.validate_owner_visual_matrix import MatrixContractError, _write_contact_sheets
+
+    output_root = tmp_path / "matrix"
+    work_dir = output_root / "entry_missing"
+    for folder in ("originals", "images", "translated"):
+        (work_dir / folder).mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (80, 160), "white").save(work_dir / folder / "001.png")
+    (work_dir / "project.json").write_text(json.dumps({
+        "paginas": [{"numero": 1, "page_id": "page_001", "image_layers": {"rendered": {"path": "translated/001.png"}}}],
+        "page_owner_graphs": [{"page_id": "page_001", "owners": [{"owner_id": "owner_a", "component_ids": ["component_a"]}]}],
+    }), encoding="utf-8")
+    entries = [{
+        "entry_id": "entry_missing", "work_dir": "entry_missing",
+        "categories": ["cross_tile_owner"],
+        "targets": [{
+            "page_id": "page_001", "owner_id": "owner_a",
+            "component_ids": ["component_a"], "category": "cross_tile_owner",
+            "expected_artifact_space": "framed_page",
+            "source_crop": {"bbox_page": [10, 98, 32, 111], "coordinate_space": "logical_page"},
+        }],
+    }]
+
+    with pytest.raises(MatrixContractError, match="missing_page_surface_geometry"):
+        _write_contact_sheets(entries, output_root)
+
+
 def test_inspection_template_deduplicates_identical_pixels_and_keeps_categories(tmp_path):
     from PIL import Image
 

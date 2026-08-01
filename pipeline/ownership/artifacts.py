@@ -357,6 +357,10 @@ class OwnerArtifactPublisher:
                     "write_counts": dict(payload.get("write_counts") or {}),
                     "owner_ids": owner_ids,
                     "conflicts": conflicts,
+                    "page_surface_geometry": payload.get("page_surface_geometry"),
+                    "page_surface_geometry_sha256": payload.get(
+                        "page_surface_geometry_sha256"
+                    ),
                 }
             )
         if compositions is not None:

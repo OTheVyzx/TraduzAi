@@ -64,6 +64,8 @@ class FinalPixelQaReport:
     contracts: dict[str, str]
     passed: bool
     observed_text_count: int
+    geometry_projection_count: int = 0
+    owner_support_bbox_frame: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issues", tuple(self.issues))
@@ -208,6 +210,28 @@ def evaluate_final_pixel_observation(
                 component_ids=(component.component_id,),
                 offenders=(component.component_id,),
             )
+
+    geometry = composition.page_surface_geometry
+    geometry_hash = str(composition.page_surface_geometry_sha256 or "")
+    if composition.coordinate_space != "framed_page":
+        add("composition_not_in_framed_page", "qa_integrity_contract")
+    if geometry is None or not geometry_hash:
+        add("missing_page_surface_geometry", "qa_integrity_contract")
+    elif geometry.geometry_sha256 != geometry_hash:
+        add("page_surface_geometry_hash_mismatch", "qa_integrity_contract")
+    observation_geometry_hash = str(
+        getattr(observation, "page_surface_geometry_sha256", "") or ""
+    )
+    if geometry is not None and not observation_geometry_hash:
+        add("missing_observation_page_surface_geometry", "qa_integrity_contract")
+    elif observation_geometry_hash and observation_geometry_hash != geometry_hash:
+        add("observation_page_surface_geometry_mismatch", "qa_integrity_contract")
+    if str(getattr(observation, "observation_space", "") or "") != "logical_page":
+        add("observation_coordinate_space_invalid", "qa_integrity_contract")
+    if geometry is not None and int(
+        getattr(observation, "geometry_projection_count", 0) or 0
+    ) != 1:
+        add("geometry_projection_count_invalid", "qa_integrity_contract")
 
     glyph_map = np.asarray(composition.glyph_owner_map)
     cleanup_map = np.asarray(composition.cleanup_owner_map)
@@ -360,7 +384,19 @@ def evaluate_final_pixel_observation(
                 ):
                     continue
                 evidence_mask = np.zeros(expected_shape, dtype=np.uint8)
-                polygon = np.asarray(component.polygon_page, dtype=np.int32)
+                raw_polygon = component.polygon_page
+                if geometry is not None:
+                    try:
+                        raw_polygon = geometry.logical_polygon_to_frame(raw_polygon)
+                    except ValueError:
+                        add(
+                            "owner_polygon_outside_page_surface",
+                            "qa_integrity_contract",
+                            owner_id=owner.owner_id,
+                            component_ids=(component_id,),
+                        )
+                        continue
+                polygon = np.asarray(raw_polygon, dtype=np.int32)
                 if polygon.ndim == 2 and polygon.shape[0] >= 3:
                     cv2.fillPoly(evidence_mask, [polygon], 1)
                 outside = (evidence_mask > 0) & (cleanup_map != owner.owner_id)
@@ -385,11 +421,18 @@ def evaluate_final_pixel_observation(
         anchored_component_id = str(record.get("final_probe_target_id") or "")
         if anchored_component_id in owner_by_component:
             candidate_owners.add(owner_by_component[anchored_component_id].owner_id)
-        if bbox is not None and glyph_map.shape == expected_shape:
-            x1 = max(0, min(expected_shape[1], bbox[0]))
-            y1 = max(0, min(expected_shape[0], bbox[1]))
-            x2 = max(x1, min(expected_shape[1], bbox[2]))
-            y2 = max(y1, min(expected_shape[0], bbox[3]))
+        frame_bbox = bbox
+        if bbox is not None and geometry is not None:
+            try:
+                frame_bbox = geometry.logical_bbox_to_frame(bbox)
+            except ValueError:
+                frame_bbox = None
+                add("observation_bbox_outside_logical_page", "qa_integrity_contract")
+        if frame_bbox is not None and glyph_map.shape == expected_shape:
+            x1 = max(0, min(expected_shape[1], frame_bbox[0]))
+            y1 = max(0, min(expected_shape[0], frame_bbox[1]))
+            x2 = max(x1, min(expected_shape[1], frame_bbox[2]))
+            y2 = max(y1, min(expected_shape[0], frame_bbox[3]))
             candidate_owners.update(
                 str(value)
                 for value in np.unique(glyph_map[y1:y2, x1:x2])
@@ -463,6 +506,16 @@ def evaluate_final_pixel_observation(
         )
         for name in _CONTRACT_NAMES
     }
+    owner_support = (glyph_map != "") | (cleanup_map != "")
+    support_bbox = None
+    if owner_support.ndim == 2 and np.any(owner_support):
+        ys, xs = np.where(owner_support)
+        support_bbox = (
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max()) + 1,
+            int(ys.max()) + 1,
+        )
     return FinalPixelQaReport(
         page_id=graph.page_id,
         persisted_sha256=observation.persisted_sha256,
@@ -470,6 +523,8 @@ def evaluate_final_pixel_observation(
         contracts=contracts,
         passed=not any(issue.severity == "critical" for issue in issues),
         observed_text_count=len(observation.ocr_records),
+        geometry_projection_count=(1 if geometry is not None else 0),
+        owner_support_bbox_frame=support_bbox,
     )
 
 

@@ -143,3 +143,10 @@ class OutputPage:
     owner_graph: Optional["OwnerGraph"] = None
     owner_composition: Optional["PageCompositionResult"] = None
     page_surface_geometry: Optional["PageSurfaceGeometry"] = None
+
+    @property
+    def page_surface_geometry_sha256(self) -> Optional[str]:
+        """Expose the bound frame contract without duplicating mutable state."""
+
+        geometry = self.page_surface_geometry
+        return str(geometry.geometry_sha256) if geometry is not None else None

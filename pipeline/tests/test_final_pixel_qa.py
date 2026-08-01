@@ -76,6 +76,7 @@ def _graph(*, source="SOURCE BODY", translated="CORPO TRADUZIDO", state="rendere
 
 def _composition(*, glyph=True, changed_pixels=None, conflicts=()):
     from ownership.model import PageCompositionResult
+    from strip.page_surface_geometry import PageSurfaceGeometry
 
     final = np.full((24, 40, 3), 230, dtype=np.uint8)
     cleanup_map = np.full((24, 40), "", dtype="<U16")
@@ -84,6 +85,13 @@ def _composition(*, glyph=True, changed_pixels=None, conflicts=()):
         glyph_map[7:12, 9:24] = "owner_a"
         final[7:12, 9:24] = 20
     owned = int(np.count_nonzero((cleanup_map != "") | (glyph_map != "")))
+    geometry = PageSurfaceGeometry.build(
+        logical_width=40,
+        logical_height=24,
+        frame_width=40,
+        frame_height=24,
+        content_origin_xy=(0, 0),
+    )
     return PageCompositionResult(
         final_rgb=final,
         cleanup_owner_map=cleanup_map,
@@ -97,12 +105,24 @@ def _composition(*, glyph=True, changed_pixels=None, conflicts=()):
         },
         sha256="a" * 64,
         page_id="page_001",
+        coordinate_space="framed_page",
         committed=not conflicts,
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        page_surface_geometry=geometry,
     )
 
 
 def _observation(*records):
     from qa.final_pixel_observer import FinalPixelObservation
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=40,
+        logical_height=24,
+        frame_width=40,
+        frame_height=24,
+        content_origin_xy=(0, 0),
+    )
 
     return FinalPixelObservation(
         image_path=Path("final.png"),
@@ -114,6 +134,8 @@ def _observation(*records):
         ),
         ocr_records=tuple(records),
         source_language="en",
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        geometry_projection_count=1,
     )
 
 
@@ -129,6 +151,52 @@ def _evaluate(graph, composition, observation):
 
 def _reasons(report):
     return {issue.reason for issue in report.issues}
+
+
+def test_final_pixel_qa_projects_logical_owner_geometry_to_frame_once():
+    from ownership.model import PageCompositionResult
+    from qa.final_pixel_observer import FinalPixelObservation
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=40,
+        logical_height=24,
+        frame_width=50,
+        frame_height=24,
+        content_origin_xy=(5, 0),
+    )
+    final = np.full((24, 50, 3), 230, dtype=np.uint8)
+    cleanup = np.full((24, 50), "", dtype="<U16")
+    glyph = np.full((24, 50), "", dtype="<U16")
+    glyph[7:12, 14:29] = "owner_a"
+    composition = PageCompositionResult(
+        final_rgb=final,
+        cleanup_owner_map=cleanup,
+        glyph_owner_map=glyph,
+        conflicts=(),
+        write_counts={"cleanup_pixels": 0, "glyph_pixels": 75, "final_changed_pixels": 75, "owner_count": 1},
+        sha256="a" * 64,
+        page_id="page_001",
+        coordinate_space="framed_page",
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        page_surface_geometry=geometry,
+    )
+    observation = FinalPixelObservation(
+        image_path=Path("final.png"),
+        persisted_sha256="b" * 64,
+        image_rgb=final,
+        detected_blocks=(),
+        ocr_records=(),
+        source_language="en",
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        geometry_projection_count=1,
+    )
+
+    report = _evaluate(_graph(), composition, observation)
+
+    assert report.geometry_projection_count == 1
+    assert report.owner_support_bbox_frame == (14, 7, 29, 12)
+    assert "missing_owner_glyphs" not in _reasons(report)
 
 
 def test_source_payload_visible_in_final_pixels_blocks_with_empty_metadata_flags():

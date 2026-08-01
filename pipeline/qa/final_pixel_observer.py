@@ -11,6 +11,8 @@ from typing import Any, Protocol, Sequence
 import cv2
 import numpy as np
 
+from strip.page_surface_geometry import PageSurfaceGeometry
+
 
 @dataclass(frozen=True)
 class FinalPixelObservation:
@@ -29,6 +31,9 @@ class FinalPixelObservation:
     completed_source_challenge_count: int = 0
     coverage_complete: bool = True
     coverage_failures: tuple[str, ...] = ()
+    observation_space: str = "logical_page"
+    page_surface_geometry_sha256: str = ""
+    geometry_projection_count: int = 0
 
     def __post_init__(self) -> None:
         image = np.ascontiguousarray(self.image_rgb, dtype=np.uint8).copy()
@@ -66,6 +71,7 @@ class FinalPixelObserver(Protocol):
         page_id: str = "",
         page_number: int = 0,
         source_challenges: Sequence[dict[str, Any]] = (),
+        page_surface_geometry: PageSurfaceGeometry | dict[str, Any] | None = None,
     ) -> FinalPixelObservation: ...
 
 
@@ -104,6 +110,7 @@ class DetectorOcrFinalPixelObserver:
         page_id: str = "",
         page_number: int = 0,
         source_challenges: Sequence[dict[str, Any]] = (),
+        page_surface_geometry: PageSurfaceGeometry | dict[str, Any] | None = None,
     ) -> FinalPixelObservation:
         path = Path(image_path)
         payload = path.read_bytes()
@@ -114,6 +121,31 @@ class DetectorOcrFinalPixelObserver:
             raise ValueError(f"persisted final page is not a decodable RGB image: {path}")
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         persisted_image_rgb = image_rgb.copy()
+        geometry = page_surface_geometry
+        if isinstance(geometry, dict):
+            geometry = PageSurfaceGeometry.from_dict(geometry)
+        if geometry is not None and not isinstance(geometry, PageSurfaceGeometry):
+            raise TypeError("final pixel observer requires PageSurfaceGeometry")
+        if geometry is not None and image_rgb.shape[:2] != (
+            geometry.frame_height,
+            geometry.frame_width,
+        ):
+            raise ValueError("persisted final page shape does not match page surface geometry")
+
+        prepared_challenges: list[dict[str, Any]] = []
+        for raw in source_challenges:
+            challenge = copy.deepcopy(dict(raw))
+            if geometry is not None:
+                raw_bbox = challenge.get("challenge_bbox_logical") or challenge.get("bbox_page")
+                if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+                    raise ValueError("source challenge is missing logical bbox")
+                logical_bbox = tuple(int(value) for value in raw_bbox)
+                frame_bbox = geometry.logical_bbox_to_frame(logical_bbox)
+                challenge["coordinate_space"] = "logical_page"
+                challenge["challenge_bbox_logical"] = list(logical_bbox)
+                challenge["artifact_bbox_frame"] = list(frame_bbox)
+                challenge["page_surface_geometry_sha256"] = geometry.geometry_sha256
+            prepared_challenges.append(challenge)
 
         detect = getattr(self._detector, "detect", None)
         if not callable(detect):
@@ -135,10 +167,11 @@ class DetectorOcrFinalPixelObserver:
         probe = run_probe(
             persisted_image_rgb.copy(),
             detected_blocks=[copy.deepcopy(block) for block in detected_blocks],
-            source_challenges=[copy.deepcopy(item) for item in source_challenges],
+            source_challenges=prepared_challenges,
             page_id=str(page_id or ""),
             page_number=int(page_number or 0),
             source_language=str(source_language),
+            page_surface_geometry=(geometry.to_dict() if geometry is not None else None),
         )
 
         def probe_field(name: str, default: Any) -> Any:
@@ -151,16 +184,31 @@ class DetectorOcrFinalPixelObserver:
             raise ValueError("fresh final pixel OCR returned malformed text records")
         attempts = probe_field("ocr_attempts", ())
         failures = probe_field("coverage_failures", ())
+        observed_blocks = list(detected_blocks)
+        if geometry is not None:
+            observed_blocks = []
+            for raw_block in detected_blocks:
+                block = copy.deepcopy(dict(raw_block))
+                raw_bbox = block.get("bbox")
+                try:
+                    frame_bbox = tuple(int(value) for value in raw_bbox)
+                    logical_bbox = geometry.frame_bbox_to_logical(frame_bbox)
+                except (TypeError, ValueError):
+                    continue
+                block["artifact_bbox_frame"] = list(frame_bbox)
+                block["bbox"] = list(logical_bbox)
+                block["coordinate_space"] = "logical_page"
+                observed_blocks.append(block)
         return FinalPixelObservation(
             image_path=path,
             persisted_sha256=persisted_sha256,
             image_rgb=persisted_image_rgb,
-            detected_blocks=detected_blocks,
+            detected_blocks=tuple(observed_blocks),
             ocr_records=tuple(raw_records),
             source_language=str(source_language),
             page_id=str(page_id or ""),
             page_number=int(page_number or 0),
-            detected_block_count=len(detected_blocks),
+            detected_block_count=len(observed_blocks),
             ocr_record_count=len(raw_records),
             ocr_attempts=tuple(attempts),
             expected_source_challenge_count=int(
@@ -171,4 +219,11 @@ class DetectorOcrFinalPixelObserver:
             ),
             coverage_complete=bool(probe_field("coverage_complete", False)),
             coverage_failures=tuple(failures),
+            observation_space=str(probe_field("observation_space", "logical_page")),
+            page_surface_geometry_sha256=(
+                geometry.geometry_sha256 if geometry is not None else ""
+            ),
+            geometry_projection_count=int(
+                probe_field("geometry_projection_count", 1 if geometry is not None else 0) or 0
+            ),
         )

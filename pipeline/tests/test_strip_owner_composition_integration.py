@@ -350,14 +350,16 @@ def test_owner_typeset_patch_without_cleanup_mutation_fails_closed():
 
 def test_owner_final_page_binding_preserves_composed_bytes_without_late_clamp():
     from strip.run import _bind_owner_final_page_images
+    from strip.page_surface_geometry import PageSurfaceGeometry
     from strip.types import OutputPage
 
     final = np.full((30, 40, 3), [17, 91, 203], dtype=np.uint8)
     clean = np.full((30, 40, 3), [210, 220, 230], dtype=np.uint8)
     original = np.full((30, 40, 3), 240, dtype=np.uint8)
-    page = OutputPage(y_top=0, y_bottom=30, image=final.copy())
-    clean_page = OutputPage(y_top=0, y_bottom=30, image=clean.copy())
-    original_page = OutputPage(y_top=0, y_bottom=30, image=original.copy())
+    geometry = PageSurfaceGeometry.build(logical_width=40, logical_height=30, frame_width=40, frame_height=30, content_origin_xy=(0, 0))
+    page = OutputPage(y_top=0, y_bottom=30, image=final.copy(), page_surface_geometry=geometry)
+    clean_page = OutputPage(y_top=0, y_bottom=30, image=clean.copy(), page_surface_geometry=geometry)
+    original_page = OutputPage(y_top=0, y_bottom=30, image=original.copy(), page_surface_geometry=geometry)
 
     _bind_owner_final_page_images(page, original_page, clean_page)
 
@@ -668,3 +670,38 @@ def test_owner_composition_does_not_promote_peer_local_protection_to_global_mask
     assert composition.write_counts["glyph_write:owner-left"] == 1
     assert composition.write_counts["cleanup_write:owner-right"] == 1
     assert composition.write_counts["glyph_write:owner-right"] == 1
+
+
+def test_narrow_page_owner_composition_publishes_logical_to_framed_geometry():
+    from strip.process_bands import apply_atomic_owner_execution
+    from strip.run import _compose_owner_output_pages
+    from strip.types import Band, VerticalStrip
+
+    logical = np.full((80, 690, 3), 240, dtype=np.uint8)
+    framed = np.zeros((80, 800, 3), dtype=np.uint8)
+    framed[:, 55:745] = logical
+    strip = VerticalStrip(
+        image=framed.copy(), width=800, height=80,
+        source_page_breaks=[0, 80], page_x_offsets=[55], source_page_widths=[690],
+    )
+    mutation = _mutation(logical, owner_id="owner-narrow", bbox=(109, 20, 318, 60), color=(20, 80, 160))
+    commit = apply_atomic_owner_execution(
+        logical, mutation, _glyph_patch(mutation, bbox=(120, 30, 128, 34))
+    )
+    assert commit.committed is True
+    band = Band(y_top=0, y_bottom=80, original_slice=framed.copy())
+    band.owner_execution_commits = [commit]
+
+    result = _compose_owner_output_pages(
+        original_strip_image=framed, strip=strip, bands=[band], balloons=[], target_count=1,
+    )
+
+    geometry = result.output_pages[0].page_surface_geometry
+    assert geometry.logical_width == 690
+    assert geometry.frame_width == 800
+    assert geometry.content_origin_xy == (55, 0)
+    composition = result.compositions["page_001"]
+    assert composition.coordinate_space == "framed_page"
+    assert composition.final_rgb.shape[:2] == (80, 800)
+    assert composition.page_surface_geometry_sha256 == geometry.geometry_sha256
+    assert composition.page_surface_geometry.geometry_sha256 == geometry.geometry_sha256

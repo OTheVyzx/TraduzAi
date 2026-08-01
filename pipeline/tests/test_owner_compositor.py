@@ -292,6 +292,33 @@ def test_owner_compositor_rejects_legacy_page_coordinate_alias() -> None:
         compose_page(original, [mutation], [], _empty_protected(original))
 
 
+def test_published_framed_composition_deserialize_requires_geometry_and_shapes() -> None:
+    from strip.page_surface_geometry import PageSurfaceGeometry
+    from ownership.model import PageCompositionResult
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=24, logical_height=18, frame_width=30, frame_height=18,
+        content_origin_xy=(3, 0),
+    )
+    internal = compose_page(_original(), [], [], _empty_protected(_original()))
+    assert internal.coordinate_space == "logical_page"
+    payload = PageCompositionResult(
+        final_rgb=geometry.logical_array_to_frame(internal.final_rgb, fill_value=0),
+        cleanup_owner_map=geometry.logical_array_to_frame(internal.cleanup_owner_map, fill_value=""),
+        glyph_owner_map=geometry.logical_array_to_frame(internal.glyph_owner_map, fill_value=""),
+        conflicts=(), write_counts={}, sha256="a" * 64, page_id=PAGE_ID,
+        coordinate_space="framed_page",
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        page_surface_geometry=geometry,
+    ).to_dict()
+
+    assert PageCompositionResult.from_dict(payload, enforce=True).coordinate_space == "framed_page"
+    with pytest.raises(ValueError, match="page surface geometry"):
+        PageCompositionResult.from_dict({**payload, "page_surface_geometry": None}, enforce=True)
+    with pytest.raises(ValueError, match="geometry hash"):
+        PageCompositionResult.from_dict({**payload, "page_surface_geometry_sha256": "f" * 64}, enforce=True)
+
+
 def test_atomic_owner_commit_rejects_missing_render_quality_contract() -> None:
     from strip.process_bands import apply_atomic_owner_execution
 

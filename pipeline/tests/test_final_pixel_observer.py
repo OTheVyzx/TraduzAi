@@ -227,3 +227,43 @@ def test_component_challenge_runs_anchored_final_crop_ocr(tmp_path):
     )
 
     assert runtime.calls[0][1]["source_challenges"][0]["component_id"] == "component_anchored"
+
+
+def test_final_pixel_observer_transforms_logical_challenge_for_framed_crop(tmp_path):
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    image_path = tmp_path / "framed.png"
+    image_rgb = np.full((160, 80, 3), [31, 97, 203], dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
+    assert ok
+    image_path.write_bytes(encoded.tobytes())
+    geometry = PageSurfaceGeometry.build(
+        logical_width=69,
+        logical_height=160,
+        frame_width=80,
+        frame_height=160,
+        content_origin_xy=(5, 0),
+    )
+    runtime = _Runtime()
+
+    observation = DetectorOcrFinalPixelObserver(
+        detector=type("EmptyDetector", (), {"detect": lambda self, image: []})(),
+        runtime=runtime,
+    ).observe(
+        image_path,
+        source_language="en",
+        source_challenges=[{
+            "component_id": "component_narrow",
+            "bbox_page": [10, 98, 32, 111],
+            "coordinate_space": "logical_page",
+        }],
+        page_surface_geometry=geometry,
+    )
+
+    challenge = runtime.calls[0][1]["source_challenges"][0]
+    assert challenge["challenge_bbox_logical"] == [10, 98, 32, 111]
+    assert challenge["artifact_bbox_frame"] == [15, 98, 37, 111]
+    assert challenge["page_surface_geometry_sha256"] == geometry.geometry_sha256
+    assert runtime.calls[0][1]["page_surface_geometry"]["geometry_sha256"] == geometry.geometry_sha256
+    assert observation.page_surface_geometry_sha256 == geometry.geometry_sha256

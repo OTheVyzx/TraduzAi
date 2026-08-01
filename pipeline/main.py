@@ -9572,7 +9572,16 @@ def _run_pipeline(config_path: str):
     # Wrap up
     emit_progress("typeset", 100, 98, message="Finalizando projeto...")
     with pipeline_timing.measure("build_project_json"):
-        project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
+        project_data = build_project_json(
+            config,
+            context,
+            ocr_results,
+            page_text_layers,
+            image_files,
+            total_pages,
+            time.time() - start_time,
+            output_pages=output_pages,
+        )
     with pipeline_timing.measure("normalize_project_render_geometry"):
         synced_render_bboxes = _normalize_project_render_balloon_bboxes(project_data)
         if synced_render_bboxes:
@@ -14371,8 +14380,21 @@ def _observe_verified_owner_final_pages(
         page_id = str(project_page.get("page_id") or f"page_{index:03d}")
         graph = getattr(output_page, "owner_graph", None)
         composition = getattr(output_page, "owner_composition", None)
+        surface_geometry = getattr(output_page, "page_surface_geometry", None)
         if graph is None or composition is None:
             raise ValueError(f"verified owner runtime evidence missing for {page_id}")
+        if surface_geometry is None:
+            raise ValueError(f"verified owner page surface geometry missing for {page_id}")
+        geometry_hash = str(getattr(surface_geometry, "geometry_sha256", "") or "")
+        if not geometry_hash:
+            raise ValueError(f"verified owner page surface geometry invalid for {page_id}")
+        if str(getattr(composition, "page_surface_geometry_sha256", "") or "") != geometry_hash:
+            raise ValueError(f"verified owner composition geometry mismatch for {page_id}")
+        project_geometry_hash = str(
+            project_page.get("page_surface_geometry_sha256") or ""
+        )
+        if project_geometry_hash and project_geometry_hash != geometry_hash:
+            raise ValueError(f"verified owner project geometry mismatch for {page_id}")
         if str(getattr(graph, "page_id", "")) != page_id:
             raise ValueError(f"verified owner graph/runtime page mismatch for {page_id}")
 
@@ -14417,6 +14439,7 @@ def _observe_verified_owner_final_pages(
                     "component_id": component_id,
                     "owner_id": str(getattr(owner, "owner_id", "") or ""),
                     "bbox_page": [int(value) for value in bbox],
+                    "coordinate_space": "logical_page",
                     "polygon_page": [
                         [int(x), int(y)]
                         for x, y in tuple(getattr(component, "polygon_page", ()) or ())
@@ -14435,6 +14458,7 @@ def _observe_verified_owner_final_pages(
             page_id=page_id,
             page_number=page_number,
             source_challenges=source_challenges,
+            page_surface_geometry=surface_geometry,
         )
         report = evaluate_final_pixel_observation(
             graph=graph,
@@ -14480,6 +14504,13 @@ def _observe_verified_owner_final_pages(
                     getattr(observation, "coverage_failures", ())
                 ),
                 "observed_text_count": int(report.observed_text_count),
+                "geometry_projection_count": int(report.geometry_projection_count),
+                "owner_support_bbox_frame": (
+                    list(report.owner_support_bbox_frame)
+                    if report.owner_support_bbox_frame is not None
+                    else None
+                ),
+                "page_surface_geometry_sha256": geometry_hash,
                 "passed": bool(report.passed),
                 "contracts": dict(report.contracts),
                 "issues": [issue.to_dict() for issue in report.issues],
@@ -15430,7 +15461,17 @@ def build_glossary_used_report(config: dict, context: dict, page_text_layers: li
     }
 
 
-def build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, elapsed):
+def build_project_json(
+    config,
+    context,
+    ocr_results,
+    page_text_layers,
+    image_files,
+    total_pages,
+    elapsed,
+    *,
+    output_pages=None,
+):
     """Build the project.json structure."""
     from layout.region_grouping import group_regions
     from ownership.project import (
@@ -15442,6 +15483,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
     pages = []
     qa_regions = []
     work_dir = Path(config.get("work_dir")) if config.get("work_dir") else None
+    runtime_output_pages = list(output_pages or [])
     for i, (img, ocr, text_page) in enumerate(zip(image_files, ocr_results, page_text_layers)):
         text_layers = list(text_page.get("texts", []))
         verified_owner_page = (
@@ -15487,6 +15529,24 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
             for block in inpaint_blocks
         ]
 
+        surface_geometry = None
+        if i < len(runtime_output_pages):
+            surface_geometry = getattr(
+                runtime_output_pages[i], "page_surface_geometry", None
+            )
+        geometry_payload = (
+            surface_geometry.to_dict()
+            if surface_geometry is not None and hasattr(surface_geometry, "to_dict")
+            else None
+        )
+        page_profile = dict(ocr.get("page_profile") or {})
+        if geometry_payload is not None:
+            page_profile.update({
+                "logical_width": int(geometry_payload["logical_width"]),
+                "logical_height": int(geometry_payload["logical_height"]),
+                "frame_width": int(geometry_payload["frame_width"]),
+                "frame_height": int(geometry_payload["frame_height"]),
+            })
         page = {
             "numero": i + 1,
             "image_layers": {
@@ -15528,12 +15588,21 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
                 },
             },
             "inpaint_blocks": inpaint_blocks,
-            "page_profile": ocr.get("page_profile"),
+            "page_profile": page_profile or None,
             "page_quality": ocr.get("page_quality"),
             "route_history": ocr.get("route_history") or [],
             "vision_engine": page_engine,
             "text_layers": text_layers,
         }
+        if geometry_payload is not None:
+            page.update({
+                "logical_width": int(geometry_payload["logical_width"]),
+                "logical_height": int(geometry_payload["logical_height"]),
+                "frame_width": int(geometry_payload["frame_width"]),
+                "frame_height": int(geometry_payload["frame_height"]),
+                "page_surface_geometry": geometry_payload,
+                "page_surface_geometry_sha256": geometry_payload["geometry_sha256"],
+            })
         if work_dir is not None:
             _persist_real_bubble_mask_layer_for_page(
                 page,

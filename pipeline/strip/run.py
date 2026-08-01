@@ -46,6 +46,7 @@ from strip.process_bands import (
     process_band,
 )
 from strip.reassemble import assemble_output_pages
+from strip.page_surface_geometry import PageSurfaceGeometry
 from strip.types import Band, BandEvidenceResult, OutputPage, VerticalStrip
 
 
@@ -512,6 +513,19 @@ def _source_page_geometry(
     return x1, y1, x2, y2
 
 
+def _page_surface_geometry(strip: VerticalStrip, page_index: int) -> PageSurfaceGeometry:
+    """Describe logical source pixels inside the already published frame."""
+
+    x1, y1, x2, y2 = _source_page_geometry(strip, page_index)
+    return PageSurfaceGeometry.build(
+        logical_width=x2 - x1,
+        logical_height=y2 - y1,
+        frame_width=int(strip.width),
+        frame_height=y2 - y1,
+        content_origin_xy=(x1, 0),
+    )
+
+
 def _compose_owner_output_pages(
     *,
     original_strip_image: np.ndarray,
@@ -544,10 +558,13 @@ def _compose_owner_output_pages(
     final_strip = original_strip.copy()
     clean_strip = original_strip.copy()
     compositions: dict[str, PageCompositionResult] = {}
+    page_geometries: list[PageSurfaceGeometry] = []
     protected_by_page = dict(protected_art_masks_by_page or {})
     for page_index in range(source_page_count):
         page_id = _page_id_for(page_index + 1)
         x1, y1, x2, y2 = _source_page_geometry(strip, page_index)
+        surface_geometry = _page_surface_geometry(strip, page_index)
+        page_geometries.append(surface_geometry)
         original_page = original_strip[y1:y2, x1:x2].copy()
         page_mutations = [item for item in mutations if item.page_id == page_id]
         page_glyphs = [item for item in glyph_patches if item.page_id == page_id]
@@ -571,18 +588,12 @@ def _compose_owner_output_pages(
         clean_strip[y1:y2, x1:x2] = clean_result.final_rgb
         final_strip[y1:y2, x1:x2] = final_result.final_rgb
         framed_final = final_strip[y1:y2].copy()
-        framed_cleanup_map = np.full(
-            (y2 - y1, int(strip.width)),
-            "",
-            dtype=np.asarray(final_result.cleanup_owner_map).dtype,
+        framed_cleanup_map = surface_geometry.logical_array_to_frame(
+            np.asarray(final_result.cleanup_owner_map), fill_value=""
         )
-        framed_glyph_map = np.full(
-            (y2 - y1, int(strip.width)),
-            "",
-            dtype=np.asarray(final_result.glyph_owner_map).dtype,
+        framed_glyph_map = surface_geometry.logical_array_to_frame(
+            np.asarray(final_result.glyph_owner_map), fill_value=""
         )
-        framed_cleanup_map[:, x1:x2] = np.asarray(final_result.cleanup_owner_map)
-        framed_glyph_map[:, x1:x2] = np.asarray(final_result.glyph_owner_map)
         compositions[page_id] = PageCompositionResult(
             final_rgb=framed_final,
             cleanup_owner_map=framed_cleanup_map,
@@ -591,8 +602,10 @@ def _compose_owner_output_pages(
             write_counts=dict(final_result.write_counts),
             sha256=_array_sha256(framed_final),
             page_id=page_id,
-            coordinate_space="page",
+            coordinate_space="framed_page",
             committed=final_result.committed,
+            page_surface_geometry_sha256=surface_geometry.geometry_sha256,
+            page_surface_geometry=surface_geometry,
         )
 
     final_strip_view = VerticalStrip(
@@ -617,24 +630,27 @@ def _compose_owner_output_pages(
             y_top=y_top,
             y_bottom=y_bottom,
             image=final_strip_view.image[y_top:y_bottom].copy(),
+            page_surface_geometry=page_geometries[index],
         )
-        for y_top, y_bottom in zip(source_breaks, source_breaks[1:])
+        for index, (y_top, y_bottom) in enumerate(zip(source_breaks, source_breaks[1:]))
     ]
     original_pages = [
         OutputPage(
             y_top=y_top,
             y_bottom=y_bottom,
             image=original_strip[y_top:y_bottom].copy(),
+            page_surface_geometry=page_geometries[index],
         )
-        for y_top, y_bottom in zip(source_breaks, source_breaks[1:])
+        for index, (y_top, y_bottom) in enumerate(zip(source_breaks, source_breaks[1:]))
     ]
     clean_pages = [
         OutputPage(
             y_top=y_top,
             y_bottom=y_bottom,
             image=clean_strip_view.image[y_top:y_bottom].copy(),
+            page_surface_geometry=page_geometries[index],
         )
-        for y_top, y_bottom in zip(source_breaks, source_breaks[1:])
+        for index, (y_top, y_bottom) in enumerate(zip(source_breaks, source_breaks[1:]))
     ]
     final_strip.setflags(write=False)
     clean_strip.setflags(write=False)
@@ -656,6 +672,18 @@ def _bind_owner_final_page_images(
     """Attach derived page stages without changing compositor-owned final bytes."""
 
     final_before = np.asarray(page.image).copy()
+    geometries = (
+        page.page_surface_geometry,
+        original_page.page_surface_geometry,
+        clean_page.page_surface_geometry,
+    )
+    hashes = {
+        geometry.geometry_sha256
+        for geometry in geometries
+        if isinstance(geometry, PageSurfaceGeometry)
+    }
+    if len(hashes) != 1 or any(geometry is None for geometry in geometries):
+        raise OwnerCompositionError("owner page stages have divergent page surface geometry")
     page.original_image = original_page.image
     page.inpainted_image = clean_page.image
     if not np.array_equal(page.image, final_before):
@@ -1887,6 +1915,16 @@ def _write_reassemble_manifest_debug(
                     "y_bottom": int(getattr(page, "y_bottom", 0) or 0),
                     "height": height,
                     "width": width,
+                    "page_surface_geometry": (
+                        page.page_surface_geometry.to_dict()
+                        if isinstance(page.page_surface_geometry, PageSurfaceGeometry)
+                        else None
+                    ),
+                    "page_surface_geometry_sha256": (
+                        page.page_surface_geometry.geometry_sha256
+                        if isinstance(page.page_surface_geometry, PageSurfaceGeometry)
+                        else None
+                    ),
                 }
             )
         recorder.write_json(

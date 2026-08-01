@@ -19,6 +19,33 @@ from typesetter.renderer import build_render_blocks  # noqa: E402
 
 
 class MainEmitTests(unittest.TestCase):
+    def test_project_json_publishes_logical_and_frame_dimensions(self) -> None:
+        from strip.page_surface_geometry import PageSurfaceGeometry
+
+        geometry = PageSurfaceGeometry.build(
+            logical_width=690,
+            logical_height=1600,
+            frame_width=800,
+            frame_height=1600,
+            content_origin_xy=(55, 0),
+        )
+        project = main.build_project_json(
+            {},
+            {},
+            [{"texts": []}],
+            [{"texts": []}],
+            [Path("001.png")],
+            1,
+            0.1,
+            output_pages=[SimpleNamespace(page_surface_geometry=geometry)],
+        )
+
+        page = project["paginas"][0]
+        self.assertEqual((page["logical_width"], page["frame_width"]), (690, 800))
+        self.assertEqual((page["logical_height"], page["frame_height"]), (1600, 1600))
+        self.assertEqual(page["page_surface_geometry"]["content_bbox_frame"], [55, 0, 745, 1600])
+        self.assertEqual(page["page_surface_geometry_sha256"], geometry.geometry_sha256)
+
     def setUp(self) -> None:
         main._EMIT_STDOUT_FAILED = False
 
@@ -96,9 +123,11 @@ class MainEmitTests(unittest.TestCase):
                     return observation
 
             observer = Observer()
+            composition = _composition()
             output_page = SimpleNamespace(
                 owner_graph=graph,
-                owner_composition=_composition(),
+                owner_composition=composition,
+                page_surface_geometry=composition.page_surface_geometry,
             )
             project = {
                 "_work_dir": tmpdir,
@@ -154,7 +183,11 @@ class MainEmitTests(unittest.TestCase):
             }
             reports = main._observe_verified_owner_final_pages(
                 project_data=project,
-                output_pages=[SimpleNamespace(owner_graph=_graph(), owner_composition=_composition())],
+                output_pages=[SimpleNamespace(
+                    owner_graph=_graph(),
+                    owner_composition=(composition := _composition()),
+                    page_surface_geometry=composition.page_surface_geometry,
+                )],
                 observer=observer,
                 source_language="en",
             )

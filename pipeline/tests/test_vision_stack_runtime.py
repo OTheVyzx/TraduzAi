@@ -132,6 +132,51 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_final_probe_crops_frame_bbox_and_returns_logical_evidence(self):
+        from strip.page_surface_geometry import PageSurfaceGeometry
+        from vision_stack import runtime
+
+        geometry = PageSurfaceGeometry.build(
+            logical_width=69,
+            logical_height=160,
+            frame_width=80,
+            frame_height=160,
+            content_origin_xy=(5, 0),
+        )
+
+        class Engine:
+            def __init__(self):
+                self.shapes = []
+
+            def recognize_batch(self, crops):
+                self.shapes.extend(list(crop.shape[:2]) for crop in crops)
+                return [{"text": "SOURCE BODY"} for _crop in crops]
+
+        engine = Engine()
+        with patch.object(runtime, "_get_ocr_engine", return_value=engine):
+            result = runtime.run_final_pixel_ocr_probe(
+                np.full((160, 80, 3), 230, dtype=np.uint8),
+                detected_blocks=[],
+                source_challenges=[{
+                    "component_id": "component_a",
+                    "challenge_bbox_logical": [10, 98, 32, 111],
+                    "artifact_bbox_frame": [15, 98, 37, 111],
+                    "coordinate_space": "logical_page",
+                    "page_surface_geometry_sha256": geometry.geometry_sha256,
+                }],
+                page_id="page_002",
+                page_number=2,
+                source_language="en",
+                page_surface_geometry=geometry.to_dict(),
+            )
+
+        self.assertEqual(engine.shapes, [[13, 22]])
+        self.assertEqual(result.raw_ocr_records[0]["bbox"], [10, 98, 32, 111])
+        self.assertEqual(result.raw_ocr_records[0]["artifact_bbox_frame"], [15, 98, 37, 111])
+        self.assertEqual(result.observation_space, "logical_page")
+        self.assertEqual(result.page_surface_geometry_sha256, geometry.geometry_sha256)
+        self.assertEqual(result.geometry_projection_count, 1)
+
     def test_final_observer_consumes_raw_records_before_semantic_routing(self):
         from vision_stack import runtime
 

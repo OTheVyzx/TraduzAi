@@ -10,6 +10,8 @@ from tools.build_style_owner_target_manifest import (
     build_effective_style_config,
     discover_owner_targets,
     selected_owner_target,
+    source_crop_contract,
+    verify_matrix_target,
 )
 
 
@@ -53,3 +55,46 @@ def test_style_matrix_forces_enforce_without_mutating_functional_config():
     assert effective["style_copy_mode"] == "enforce"
     assert effective["style_inspection_required"] is True
     assert shared["style_copy_mode"] == "shadow"
+
+
+def test_verify_matrix_target_binds_logical_crop_to_framed_artifact(tmp_path):
+    from PIL import Image
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=40,
+        logical_height=24,
+        frame_width=50,
+        frame_height=24,
+        content_origin_xy=(5, 0),
+    )
+    source = tmp_path / "source.png"
+    Image.new("RGB", (50, 24), "white").save(source)
+    project = _project()
+    project["paginas"][0].update({
+        "page_surface_geometry": geometry.to_dict(),
+        "page_surface_geometry_sha256": geometry.geometry_sha256,
+        "image_layers": {"base": {"path": "source.png"}},
+    })
+    logical_bbox = [5, 5, 30, 17]
+    frame_bbox = list(geometry.logical_bbox_to_frame(tuple(logical_bbox)))
+    source_crop = source_crop_contract(
+        source,
+        logical_bbox,
+        artifact_bbox_frame=frame_bbox,
+        coordinate_space="logical_page",
+    )
+    source_crop.pop("artifact_bbox_frame")
+    target = {
+        "page_id": "page_001",
+        "owner_id": "owner_a",
+        "component_ids": ["component_a"],
+        "expected_artifact_space": "framed_page",
+        "source_crop": source_crop,
+    }
+
+    result = verify_matrix_target(target, project, project_root=tmp_path)
+
+    assert result["verified"] is True
+    assert result["artifact_bbox_frame"] == [10, 5, 35, 17]
+    assert result["page_surface_geometry_sha256"] == geometry.geometry_sha256

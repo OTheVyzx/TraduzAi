@@ -99,6 +99,9 @@ def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
             and int(source_crop.get("height") or 0) > 0
             and len(str(source_crop.get("sha256") or "")) == 64
         )
+        if str(source_crop.get("coordinate_space") or ""):
+            crop_valid = crop_valid and source_crop.get("coordinate_space") == "logical_page"
+            crop_valid = crop_valid and target.get("expected_artifact_space") == "framed_page"
         if missing_target or not isinstance(component_ids, list) or not component_ids or not crop_valid:
             raise MatrixContractError(f"matrix entry {index} target {target_index} is incomplete")
         normalized_target = dict(target)
@@ -121,6 +124,16 @@ def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
 def validate_manifest(manifest: Any) -> list[dict[str, Any]]:
     if not isinstance(manifest, dict) or not isinstance(manifest.get("entries"), list):
         raise MatrixContractError("matrix manifest must contain entries[]")
+    has_logical_targets = any(
+        str(((target.get("source_crop") or {}).get("coordinate_space") or ""))
+        == "logical_page"
+        for entry in manifest.get("entries") or []
+        if isinstance(entry, dict)
+        for target in entry.get("targets") or []
+        if isinstance(target, dict)
+    )
+    if has_logical_targets and manifest.get("schema_version") != 3:
+        raise MatrixContractError("matrix schema v3 is required for logical page targets")
     entries = [_canonical_entry(entry, index) for index, entry in enumerate(manifest["entries"])]
     works = {entry["work_id"] for entry in entries}
     if len(works) < 3:
@@ -144,12 +157,63 @@ def validate_manifest(manifest: Any) -> list[dict[str, Any]]:
     return entries
 
 
+def _page_surface_geometry(page: dict[str, Any]):
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    payload = page.get("page_surface_geometry")
+    if not isinstance(payload, dict):
+        raise MatrixContractError("missing_page_surface_geometry")
+    try:
+        geometry = PageSurfaceGeometry.from_dict(payload)
+    except (TypeError, ValueError) as exc:
+        raise MatrixContractError("invalid_page_surface_geometry") from exc
+    if str(page.get("page_surface_geometry_sha256") or "") != geometry.geometry_sha256:
+        raise MatrixContractError("page_surface_geometry_hash_mismatch")
+    return geometry
+
+
+def _project_page_by_id(project: dict[str, Any], page_id: str) -> dict[str, Any]:
+    for index, page in enumerate(project.get("paginas") or [], start=1):
+        if not isinstance(page, dict):
+            continue
+        candidate = str(page.get("page_id") or f"page_{int(page.get('numero') or index):03d}")
+        if candidate == page_id:
+            return page
+    raise MatrixContractError(f"page_target_not_found:{page_id}")
+
+
+def _target_artifact_bbox_frame(
+    target: dict[str, Any], page: dict[str, Any]
+) -> tuple[list[int], Any | None]:
+    source_crop = target.get("source_crop") or {}
+    bbox = [int(value) for value in source_crop.get("bbox_page") or []]
+    if len(bbox) != 4:
+        raise MatrixContractError("source_crop_bbox_invalid")
+    if str(source_crop.get("coordinate_space") or "") == "logical_page":
+        geometry = _page_surface_geometry(page)
+        if str(target.get("expected_artifact_space") or "") != "framed_page":
+            raise MatrixContractError("expected_artifact_space_invalid")
+        return list(geometry.logical_bbox_to_frame(tuple(bbox))), geometry
+    return bbox, None
+
+
 def _sha256_file(path: Path) -> str:
     digest = sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_payload_sha256(payload: Any) -> str:
+    return sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _sha256_input(path: Path) -> str:
@@ -301,14 +365,23 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
             metrics["owner_count"] += 1
             base_path = ((resolved_target["page"].get("image_layers") or {}).get("base") or {}).get("path")
             try:
+                artifact_bbox, geometry = _target_artifact_bbox_frame(
+                    target, resolved_target["page"]
+                )
                 actual_crop = source_crop_contract(
                     (work_dir / str(base_path)).resolve(),
                     list(target["source_crop"]["bbox_page"]),
+                    artifact_bbox_frame=(artifact_bbox if geometry is not None else None),
+                    coordinate_space=("logical_page" if geometry is not None else None),
                 )
+            except MatrixContractError as exc:
+                contracts.add(str(exc))
             except (OSError, ValueError, TypeError):
                 contracts.add("source_crop_missing_or_invalid")
             else:
-                if actual_crop != target["source_crop"]:
+                expected_crop = dict(target["source_crop"])
+                actual_crop.pop("artifact_bbox_frame", None)
+                if actual_crop != expected_crop:
                     contracts.add("source_crop_hash_or_dimension_mismatch")
     for category, metrics in category_metrics.items():
         if metrics["owner_count"] < metrics["minimum_count"]:
@@ -747,13 +820,66 @@ def _difference_mask_panel(before, inpaint):
     return ImageOps.colorize(binary, black="#111820", white="#ff3b30").convert("RGB")
 
 
-def _owner_map_panel(work_dir: Path, final_path: Path, fallback):
+def _resolved_intent_panel(page, target, size, geometry):
+    from PIL import Image, ImageDraw
+
+    owner_id = str(target.get("owner_id") or "")
+    layer = next(
+        (
+            row for row in page.get("text_layers") or page.get("textos") or []
+            if isinstance(row, dict) and str(row.get("owner_id") or "") == owner_id
+        ),
+        None,
+    )
+    if layer is None:
+        raise MatrixContractError("missing_owner_materialization_intent")
+    plan = layer.get("owner_render_geometry") or layer.get("render_layout_contract")
+    if not isinstance(plan, dict):
+        raise MatrixContractError("missing_owner_materialization_plan")
+    bbox = None
+    for key in ("safe_text_box", "render_bbox", "target_bbox", "bbox"):
+        raw = plan.get(key) or layer.get(key)
+        if isinstance(raw, (list, tuple)) and len(raw) == 4:
+            bbox = tuple(int(value) for value in raw)
+            break
+    if bbox is None:
+        raise MatrixContractError("missing_owner_materialization_bbox")
+    coordinate_space = str(plan.get("coordinate_space") or "")
+    if coordinate_space == "logical_page":
+        bbox = geometry.logical_bbox_to_frame(bbox)
+    elif coordinate_space != "framed_page":
+        raise MatrixContractError("owner_materialization_coordinate_space_invalid")
+    panel = Image.new("RGB", size, "#111820")
+    draw = ImageDraw.Draw(panel)
+    draw.rectangle(bbox, outline="#34c759", width=3)
+    payload = str(layer.get("translated") or layer.get("text") or "").strip()
+    if payload:
+        draw.multiline_text((bbox[0] + 4, bbox[1] + 4), payload, fill="white", spacing=3)
+    return panel, {
+        "plan_sha256": str(
+            layer.get("materialization_plan_sha256")
+            or plan.get("geometry_sha256")
+            or plan.get("sha256")
+            or _canonical_payload_sha256(plan)
+        ),
+        "render_bbox_frame": list(bbox),
+    }
+
+
+def _owner_map_panel(
+    work_dir: Path,
+    final_path: Path,
+    fallback,
+    *,
+    return_metadata: bool = False,
+):
     from PIL import Image, ImageDraw
 
     try:
         project = json.loads((work_dir / "project.json").read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
-        return fallback.copy()
+        result = fallback.copy()
+        return (result, {}) if return_metadata else result
     pages = list(project.get("paginas") or [])
     page_index = 0
     for index, page in enumerate(pages):
@@ -761,7 +887,8 @@ def _owner_map_panel(work_dir: Path, final_path: Path, fallback):
         if rendered and Path(rendered).name == final_path.name:
             page_index = index
             break
-    page_id = f"page_{page_index + 1:03d}"
+    page = pages[page_index] if page_index < len(pages) else {}
+    page_id = str(page.get("page_id") or f"page_{page_index + 1:03d}")
     graph = next(
         (
             item
@@ -771,7 +898,12 @@ def _owner_map_panel(work_dir: Path, final_path: Path, fallback):
         None,
     )
     if not graph:
-        return fallback.copy()
+        result = fallback.copy()
+        return (result, {}) if return_metadata else result
+    try:
+        geometry = _page_surface_geometry(page)
+    except MatrixContractError:
+        geometry = None
     try:
         canvas = Image.open(work_dir / "originals" / final_path.name).convert("RGBA")
     except OSError:
@@ -791,6 +923,7 @@ def _owner_map_panel(work_dir: Path, final_path: Path, fallback):
         (175, 82, 222, 110),
     )
     owner_colors: dict[str, tuple[int, int, int, int]] = {}
+    polygons_frame: list[list[list[int]]] = []
     for component in graph.get("components") or []:
         component_id = str(component.get("component_id") or "")
         owner_id = str(owner_by_component.get(component_id) or component_id)
@@ -799,14 +932,28 @@ def _owner_map_panel(work_dir: Path, final_path: Path, fallback):
             palette[len(owner_colors) % len(palette)],
         )
         polygon = component.get("polygon_page") or []
+        if geometry is not None and polygon:
+            polygon = geometry.logical_polygon_to_frame(polygon)
         points = [tuple(map(int, point[:2])) for point in polygon if len(point) >= 2]
         if len(points) >= 3:
+            polygons_frame.append([[int(x), int(y)] for x, y in points])
             draw.polygon(points, fill=color, outline=color[:3] + (255,), width=3)
         else:
             bbox = component.get("bbox_page") or []
             if len(bbox) >= 4:
+                if geometry is not None:
+                    bbox = geometry.logical_bbox_to_frame(tuple(int(value) for value in bbox[:4]))
                 draw.rectangle(tuple(map(int, bbox[:4])), fill=color, outline=color[:3] + (255,), width=3)
-    return Image.alpha_composite(canvas, overlay).convert("RGB")
+    result = Image.alpha_composite(canvas, overlay).convert("RGB")
+    metadata = {
+        "page_id": page_id,
+        "page_surface_geometry_sha256": (
+            geometry.geometry_sha256 if geometry is not None else None
+        ),
+        "coordinate_space": "framed_page" if geometry is not None else "page",
+        "polygons_frame": polygons_frame,
+    }
+    return (result, metadata) if return_metadata else result
 
 
 def _write_contact_sheets(
@@ -839,6 +986,22 @@ def _write_contact_sheets(
                     category_paths.extend(cached_pages[cache_key])
                     continue
                 page_paths: list[str] = []
+                try:
+                    project = json.loads(
+                        (work_dir / "project.json").read_text(encoding="utf-8-sig")
+                    )
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise MatrixContractError("project_result_invalid") from exc
+                page = _project_page_by_id(project, str(target.get("page_id") or ""))
+                strict_geometry = str(
+                    ((target.get("source_crop") or {}).get("coordinate_space") or "")
+                ) == "logical_page"
+                artifact_bbox = None
+                surface_geometry = None
+                if strict_geometry:
+                    artifact_bbox, surface_geometry = _target_artifact_bbox_frame(
+                        target, page
+                    )
                 candidates = [
                     work_dir / "originals" / final_path.name,
                     work_dir / "images" / final_path.name,
@@ -849,31 +1012,94 @@ def _write_contact_sheets(
                     try:
                         panel = Image.open(candidate).convert("RGB")
                     except OSError:
+                        if strict_geometry:
+                            raise MatrixContractError(
+                                f"inspection_artifact_missing:{candidate}"
+                            )
                         panel = Image.new("RGB", (320, 180), "#20252a")
                     base_panels.append(panel)
                 canonical_size = base_panels[0].size
-                base_panels = [
-                    panel if panel.size == canonical_size else panel.resize(canonical_size)
-                    for panel in base_panels
-                ]
-                owner_panel = _owner_map_panel(work_dir, final_path, base_panels[0])
+                if strict_geometry and any(panel.size != canonical_size for panel in base_panels):
+                    raise MatrixContractError("inspection_artifact_dimension_mismatch")
+                if not strict_geometry:
+                    base_panels = [
+                        panel if panel.size == canonical_size else panel.resize(canonical_size)
+                        for panel in base_panels
+                    ]
+                owner_panel, owner_metadata = _owner_map_panel(
+                    work_dir,
+                    final_path,
+                    base_panels[0],
+                    return_metadata=True,
+                )
                 if owner_panel.size != canonical_size:
+                    if strict_geometry:
+                        raise MatrixContractError("owner_map_dimension_mismatch")
                     owner_panel = owner_panel.resize(canonical_size)
                 raw_bbox = ((target.get("source_crop") or {}).get("bbox_page"))
                 if isinstance(raw_bbox, list) and len(raw_bbox) == 4:
-                    bbox = tuple(int(value) for value in raw_bbox)
+                    bbox = tuple(
+                        artifact_bbox
+                        if artifact_bbox is not None
+                        else (int(value) for value in raw_bbox)
+                    )
                     base_panels = [panel.crop(bbox) for panel in base_panels]
                     owner_panel = owner_panel.crop(bbox)
                 evidence_panel = _difference_mask_panel(base_panels[0], base_panels[1])
+                panel_contracts: dict[str, dict[str, Any]] = {}
+                if strict_geometry:
+                    requested_panel, intent_metadata = _resolved_intent_panel(
+                        page, target, canonical_size, surface_geometry
+                    )
+                    if isinstance(raw_bbox, list) and len(raw_bbox) == 4:
+                        requested_panel = requested_panel.crop(bbox)
+                    observed_panel = _difference_mask_panel(base_panels[1], base_panels[2])
+                    artifact_hashes = [_sha256_file(path) for path in candidates]
+                    observation_sha = _canonical_payload_sha256({
+                        "inpaint_sha256": artifact_hashes[1],
+                        "final_sha256": artifact_hashes[2],
+                        "page_surface_geometry_sha256": surface_geometry.geometry_sha256,
+                    })
+                    panel_contracts = {
+                        "source": {
+                            "artifact_path": str(candidates[0].resolve()),
+                            "source_sha256": artifact_hashes[0],
+                        },
+                        "masks_evidence": {
+                            "artifact_path": str(candidates[1].resolve()),
+                            "source_sha256": artifact_hashes[1],
+                        },
+                        "requested_resolved": {
+                            "artifact_path": "derived:owner_materialization_intent",
+                            "source_sha256": intent_metadata["plan_sha256"],
+                            **intent_metadata,
+                        },
+                        "observed_raster": {
+                            "artifact_path": str(candidates[2].resolve()),
+                            "source_sha256": artifact_hashes[2],
+                            "observation_sha256": observation_sha,
+                        },
+                        "final": {
+                            "artifact_path": str(candidates[2].resolve()),
+                            "source_sha256": artifact_hashes[2],
+                        },
+                        "safe_geometry": {
+                            "artifact_path": "derived:owner_graph_geometry",
+                            "source_sha256": _canonical_payload_sha256(owner_metadata),
+                        },
+                    }
+                else:
+                    requested_panel = base_panels[0].copy()
+                    observed_panel = base_panels[1]
                 panels = [
                     base_panels[0],
                     evidence_panel,
-                    base_panels[0].copy(),
-                    base_panels[1],
+                    requested_panel,
+                    observed_panel,
                     base_panels[2],
                     owner_panel,
                 ]
-                labels = ("source", "masks/evidence", "requested", "raster", "final", "safe-region")
+                labels = ("source", "masks/evidence", "requested/resolved", "observed raster", "final", "safe geometry")
                 canonical_size = panels[0].size
                 panel_width, page_height = canonical_size
                 segment_height = 900
@@ -908,6 +1134,27 @@ def _write_contact_sheets(
                         f"{category}__{safe_entry_id}__{safe_page_id}__{segment_index:03d}.png"
                     )
                     sheet.save(path)
+                    metadata = {
+                        "schema_version": 1,
+                        "entry_id": str(entry["entry_id"]),
+                        "page_id": str(target.get("page_id") or ""),
+                        "owner_id": str(target.get("owner_id") or ""),
+                        "bbox_logical": list(raw_bbox) if isinstance(raw_bbox, list) else None,
+                        "artifact_bbox_frame": list(artifact_bbox) if artifact_bbox is not None else None,
+                        "page_surface_geometry_sha256": (
+                            surface_geometry.geometry_sha256
+                            if surface_geometry is not None
+                            else None
+                        ),
+                        "crop_dimensions": [panel_width, page_height],
+                        "owner_map": owner_metadata,
+                        "panels": panel_contracts,
+                        "sheet_sha256": _sha256_file(path),
+                    }
+                    path.with_suffix(".metadata.json").write_text(
+                        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
                     resolved_path = str(path.resolve())
                     category_paths.append(resolved_path)
                     page_paths.append(resolved_path)
@@ -951,7 +1198,14 @@ def build_inspection_template(
                 "segment": artifact.stem,
                 "width": width,
                 "height": height,
-                "panels": ["source", "masks/evidence", "requested", "raster", "final", "safe-region"],
+                "panels": [
+                    "source",
+                    "masks_evidence",
+                    "requested_resolved",
+                    "observed_raster",
+                    "final",
+                    "safe_geometry",
+                ],
             }
             artifacts.append(row)
             by_hash[digest] = row

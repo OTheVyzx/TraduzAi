@@ -14992,6 +14992,9 @@ class FinalPixelProbeResult:
     completed_source_challenge_count: int
     coverage_complete: bool
     coverage_failures: tuple[str, ...]
+    observation_space: str = "logical_page"
+    page_surface_geometry_sha256: str = ""
+    geometry_projection_count: int = 0
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -15046,12 +15049,14 @@ def _final_probe_record(
     if not text:
         return None
     bbox = _coerce_bbox(record.get("bbox") or record.get("source_bbox"))
+    used_fallback_bbox = bbox is None
     if bbox is None:
         bbox = fallback_bbox
     if bbox is None:
         return None
     record["text"] = text
     record["bbox"] = [int(item) for item in bbox]
+    record["_bbox_from_fallback"] = used_fallback_bbox
     record["final_probe_target_id"] = target_id
     record["observation_stage"] = "raw_final_pixel_ocr"
     return record
@@ -15065,6 +15070,7 @@ def run_final_pixel_ocr_probe(
     page_id: str,
     page_number: int,
     source_language: str,
+    page_surface_geometry: dict[str, Any] | Any | None = None,
 ) -> FinalPixelProbeResult:
     """Run OCR directly on final pixels before semantic routing or skip policy."""
 
@@ -15073,6 +15079,18 @@ def run_final_pixel_ocr_probe(
     if image_rgb.ndim != 3 or image_rgb.shape[2] != 3 or not image_rgb.size:
         raise ValueError("final pixel probe requires a non-empty RGB image")
     height, width = image_rgb.shape[:2]
+    geometry = page_surface_geometry
+    if isinstance(geometry, dict):
+        from strip.page_surface_geometry import PageSurfaceGeometry
+
+        geometry = PageSurfaceGeometry.from_dict(geometry)
+    if geometry is not None:
+        from strip.page_surface_geometry import PageSurfaceGeometry
+
+        if not isinstance(geometry, PageSurfaceGeometry):
+            raise TypeError("final pixel probe requires PageSurfaceGeometry")
+        if (height, width) != (geometry.frame_height, geometry.frame_width):
+            raise ValueError("final pixel probe frame shape does not match page surface geometry")
     detector_rows = [copy.deepcopy(dict(item)) for item in detected_blocks]
     challenge_rows = [copy.deepcopy(dict(item)) for item in source_challenges]
     targets: list[dict[str, Any]] = []
@@ -15085,7 +15103,35 @@ def run_final_pixel_ocr_probe(
             or item.get("block_id")
             or f"{kind}:{index}"
         )
-        bbox = _coerce_bbox(item.get("bbox_page") or item.get("bbox"))
+        if kind == "source_challenge" and geometry is not None:
+            if str(item.get("page_surface_geometry_sha256") or "") != geometry.geometry_sha256:
+                attempts.append({
+                    "target_id": target_id,
+                    "target_kind": kind,
+                    "status": "invalid_geometry",
+                    "reason": "page_surface_geometry_hash_mismatch",
+                })
+                return
+            logical_bbox = _coerce_bbox(
+                item.get("challenge_bbox_logical") or item.get("bbox_page")
+            )
+            artifact_bbox = _coerce_bbox(item.get("artifact_bbox_frame"))
+            if logical_bbox is None or artifact_bbox is None:
+                bbox = None
+            else:
+                expected_frame = list(geometry.logical_bbox_to_frame(tuple(logical_bbox)))
+                if artifact_bbox != expected_frame:
+                    attempts.append({
+                        "target_id": target_id,
+                        "target_kind": kind,
+                        "status": "invalid_geometry",
+                        "reason": "artifact_bbox_frame_mismatch",
+                    })
+                    return
+                bbox = artifact_bbox
+        else:
+            logical_bbox = None
+            bbox = _coerce_bbox(item.get("artifact_bbox_frame") or item.get("bbox_page") or item.get("bbox"))
         if bbox is None:
             attempts.append(
                 {
@@ -15113,6 +15159,7 @@ def run_final_pixel_ocr_probe(
                 "target_id": target_id,
                 "target_kind": kind,
                 "bbox": bbox,
+                "logical_bbox": logical_bbox,
                 "source": item,
             }
         )
@@ -15124,6 +15171,40 @@ def run_final_pixel_ocr_probe(
 
     raw_records: list[dict[str, Any]] = []
     recognition_error = ""
+
+    def project_record(
+        record: dict[str, Any] | None,
+        target: dict[str, Any],
+        *,
+        crop_scale: float = 1.0,
+    ) -> dict[str, Any] | None:
+        if record is None:
+            return None
+        frame_bbox = list(target["bbox"])
+        if not bool(record.pop("_bbox_from_fallback", False)):
+            raw_bbox = [int(round(float(value) / crop_scale)) for value in record["bbox"]]
+            crop_h = target["bbox"][3] - target["bbox"][1]
+            crop_w = target["bbox"][2] - target["bbox"][0]
+            if 0 <= raw_bbox[0] < raw_bbox[2] <= crop_w and 0 <= raw_bbox[1] < raw_bbox[3] <= crop_h:
+                frame_bbox = [
+                    raw_bbox[0] + target["bbox"][0],
+                    raw_bbox[1] + target["bbox"][1],
+                    raw_bbox[2] + target["bbox"][0],
+                    raw_bbox[3] + target["bbox"][1],
+                ]
+            else:
+                frame_bbox = raw_bbox
+        record["artifact_bbox_frame"] = frame_bbox
+        if geometry is not None:
+            try:
+                record["bbox"] = list(geometry.frame_bbox_to_logical(tuple(frame_bbox)))
+            except ValueError:
+                return None
+        else:
+            record["bbox"] = frame_bbox
+        record["coordinate_space"] = "logical_page" if geometry is not None else "page"
+        return record
+
     if targets:
         ocr = _get_ocr_engine("max", lang=str(source_language or "en"))
         crops = [
@@ -15143,6 +15224,7 @@ def run_final_pixel_ocr_probe(
                     fallback_bbox=target["bbox"],
                     target_id=target["target_id"],
                 )
+                record = project_record(record, target)
                 if record is not None:
                     raw_records.append(record)
                     status = "recognized"
@@ -15179,6 +15261,8 @@ def run_final_pixel_ocr_probe(
                         ),
                         None,
                     )
+                    if record is not None:
+                        record = project_record(record, target, crop_scale=2.0)
                     if record is not None:
                         record["final_probe_variant"] = "anchored_retry_2x"
                         raw_records.append(record)
@@ -15238,6 +15322,11 @@ def run_final_pixel_ocr_probe(
         expected_source_challenge_count=expected_challenges,
         completed_source_challenge_count=completed_challenges,
         coverage_complete=not failures,
+        observation_space="logical_page",
+        page_surface_geometry_sha256=(
+            geometry.geometry_sha256 if geometry is not None else ""
+        ),
+        geometry_projection_count=(1 if geometry is not None else 0),
         coverage_failures=tuple(failures),
     )
 

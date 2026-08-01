@@ -1,0 +1,24 @@
+{
+  "schema_version": 3,
+  "entries": [
+    {
+      "entry_id": "narrow_page",
+      "targets": [
+        {
+          "page_id": "page_002",
+          "owner_id": "owner_p002_d9afb32ef935",
+          "component_ids": ["region_p002_003_8cd5da326a"],
+          "category": "cross_tile_owner",
+          "expected_artifact_space": "framed_page",
+          "source_crop": {
+            "bbox_page": [109, 985, 318, 1104],
+            "width": 209,
+            "height": 119,
+            "sha256": "e4c60408223dfef9a4f0236b41b07c603b983420e9ca5a3715a030ccb1532c31",
+            "coordinate_space": "logical_page"
+          }
+        }
+      ]
+    }
+  ]
+}

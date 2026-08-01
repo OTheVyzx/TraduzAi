@@ -1151,6 +1151,7 @@ class PageCompositionResult:
     coordinate_space: str = "logical_page"
     committed: bool = True
     page_surface_geometry_sha256: str | None = None
+    page_surface_geometry: Any = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -1170,6 +1171,77 @@ class PageCompositionResult:
                     for key, value in dict(self.write_counts).items()
                 }
             ),
+        )
+        if self.coordinate_space == "framed_page" and self.page_surface_geometry is None:
+            raise ValueError("framed page composition requires page surface geometry")
+        if self.page_surface_geometry is None and self.page_surface_geometry_sha256:
+            raise ValueError("page surface geometry hash requires geometry")
+        if self.page_surface_geometry is not None:
+            try:
+                from strip.page_surface_geometry import PageSurfaceGeometry
+
+                geometry = (
+                    self.page_surface_geometry
+                    if isinstance(self.page_surface_geometry, PageSurfaceGeometry)
+                    else PageSurfaceGeometry.from_dict(self.page_surface_geometry)
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                raise ValueError("page surface geometry is invalid") from exc
+            if geometry.geometry_sha256 != self.page_surface_geometry_sha256:
+                raise ValueError("page surface geometry hash mismatch")
+            expected_shape = (
+                (geometry.frame_height, geometry.frame_width)
+                if self.coordinate_space == "framed_page"
+                else (geometry.logical_height, geometry.logical_width)
+            )
+            if any(
+                tuple(np.asarray(value).shape[:2]) != expected_shape
+                for value in (self.final_rgb, self.cleanup_owner_map, self.glyph_owner_map)
+            ):
+                raise ValueError("page surface geometry shape mismatch")
+            object.__setattr__(self, "page_surface_geometry", geometry)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "final_rgb": np.asarray(self.final_rgb).tolist(),
+            "cleanup_owner_map": np.asarray(self.cleanup_owner_map).tolist(),
+            "glyph_owner_map": np.asarray(self.glyph_owner_map).tolist(),
+            "conflicts": [vars(item) for item in self.conflicts],
+            "write_counts": dict(self.write_counts),
+            "sha256": self.sha256,
+            "page_id": self.page_id,
+            "coordinate_space": self.coordinate_space,
+            "committed": self.committed,
+            "page_surface_geometry_sha256": self.page_surface_geometry_sha256,
+            "page_surface_geometry": (
+                self.page_surface_geometry.to_dict()
+                if self.page_surface_geometry is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any], *, enforce: bool = False) -> "PageCompositionResult":
+        coordinate_space = str(data.get("coordinate_space") or "")
+        geometry_payload = data.get("page_surface_geometry")
+        if enforce and coordinate_space == "framed_page" and not isinstance(geometry_payload, Mapping):
+            raise ValueError("framed page composition requires page surface geometry")
+        if enforce and coordinate_space not in {"logical_page", "framed_page"}:
+            raise ValueError("page composition uses legacy coordinate space")
+        conflicts = tuple(
+            OwnerCompositionConflict(**item)
+            for item in data.get("conflicts") or ()
+        )
+        return cls(
+            final_rgb=np.asarray(data["final_rgb"], dtype=np.uint8),
+            cleanup_owner_map=np.asarray(data["cleanup_owner_map"], dtype=str),
+            glyph_owner_map=np.asarray(data["glyph_owner_map"], dtype=str),
+            conflicts=conflicts,
+            write_counts=dict(data.get("write_counts") or {}),
+            sha256=str(data.get("sha256") or ""), page_id=data.get("page_id"),
+            coordinate_space=coordinate_space, committed=bool(data.get("committed", True)),
+            page_surface_geometry_sha256=data.get("page_surface_geometry_sha256"),
+            page_surface_geometry=geometry_payload,
         )
 
 
