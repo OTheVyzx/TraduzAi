@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any
 
 from typesetter.owner_style import (
-    owner_visual_profile_sha256,
     validate_owner_visual_profile,
 )
+from typesetter.style_materialization import build_resolved_style_intent
 
 
 GROUP_CONFIDENCE_THRESHOLD = 0.70
@@ -93,10 +95,55 @@ def _copy_effect_style(
     target["effect_class"] = effect_class
 
 
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _attribute_candidates_by_name(
+    members: list[tuple[str, dict[str, Any]]],
+) -> dict[str, list[tuple[float, str, str, Any]]]:
+    return {
+        name: _observed_candidates(members, name)
+        for name in sorted(GROUP_SAFE_ATTRIBUTES)
+    }
+
+
+def _group_conflicts(
+    candidates_by_name: Mapping[str, list[tuple[float, str, str, Any]]],
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    for name, candidates in candidates_by_name.items():
+        distinct = {stable for _confidence_value, stable, _owner_id, _value in candidates}
+        if len(distinct) <= 1:
+            continue
+        conflicts.append(
+            {
+                "attribute": name,
+                "candidates": [
+                    {
+                        "owner_id": owner_id,
+                        "confidence": confidence,
+                        "value": copy.deepcopy(value),
+                    }
+                    for confidence, _stable, owner_id, value in candidates
+                ],
+                "resolution": "preserve_owner_local_or_abstain",
+            }
+        )
+    return conflicts
+
+
 def resolve_contextual_style_groups(
     profiles_by_owner: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Share only font family/effect class; never merge semantic owners."""
+    """Derive group intent without mutating an approved owner profile."""
 
     normalized = {
         str(owner_id): validate_owner_visual_profile(
@@ -113,75 +160,83 @@ def resolve_contextual_style_groups(
     resolved: dict[str, dict[str, Any]] = {}
     for group_id, raw_members in sorted(groups.items()):
         members = sorted(raw_members, key=lambda item: item[0])
-        font_candidates = _observed_candidates(members, "font_name")
-        selected_font = copy.deepcopy(font_candidates[0][3]) if font_candidates else None
-        font_donor = font_candidates[0][2] if font_candidates else None
-        font_conflict = len({item[1] for item in font_candidates}) > 1
-        effect_class, effect_value, effect_donor, effect_conflict = _selected_effect(members)
-        donor_by_id = {owner_id: profile for owner_id, profile in members}
+        candidates_by_name = _attribute_candidates_by_name(members)
+        group_conflicts = _group_conflicts(candidates_by_name)
+        conflicting_names = {row["attribute"] for row in group_conflicts}
 
         for owner_id, profile in members:
-            output = copy.deepcopy(profile)
-            decision = output.get("style_application_decision_v2")
+            decision = profile.get("style_application_decision_v2")
             decision = copy.deepcopy(dict(decision)) if isinstance(decision, Mapping) else {}
             applied = decision.get("applied_attributes")
             applied = copy.deepcopy(dict(applied)) if isinstance(applied, Mapping) else {}
-            style = output.get("applied_style")
-            style = copy.deepcopy(dict(style)) if isinstance(style, Mapping) else {}
+            abstained = decision.get("abstained_attributes")
+            abstained = copy.deepcopy(dict(abstained)) if isinstance(abstained, Mapping) else {}
             inherited: list[str] = []
+            donors: dict[str, str] = {}
+            attribute_provenance: dict[str, Any] = {
+                name: {
+                    "source": "owner_local_decision",
+                    "owner_id": owner_id,
+                    "evidence_id": f"{owner_id}:{name}",
+                }
+                for name in applied
+            }
 
-            current_font = _attribute(output, "font_name").get("value", "unknown")
-            current_font_confidence = _confidence(_attribute(output, "font_name"))
-            if selected_font is not None:
-                applied["font_name"] = copy.deepcopy(selected_font)
-                style["fonte"] = copy.deepcopy(selected_font)
-                if owner_id != font_donor and (
-                    current_font != selected_font
-                    or current_font_confidence < GROUP_CONFIDENCE_THRESHOLD
-                ):
-                    inherited.append("font_name")
+            for name in sorted(GROUP_SAFE_ATTRIBUTES):
+                if name in applied:
+                    continue
+                candidates = candidates_by_name[name]
+                if not candidates:
+                    continue
+                if name in conflicting_names:
+                    abstained[name] = "group_conflict_requires_owner_local_evidence"
+                    continue
+                _confidence_value, _stable, donor_owner_id, donor_value = candidates[0]
+                applied[name] = copy.deepcopy(donor_value)
+                abstained.pop(name, None)
+                inherited.append(name)
+                donors[name] = donor_owner_id
+                attribute_provenance[name] = {
+                    "source": "group_inheritance",
+                    "donor_owner_id": donor_owner_id,
+                    "evidence_id": f"{donor_owner_id}:{name}",
+                }
 
-            if effect_class != "none" and effect_value is not None:
-                applied[effect_class] = copy.deepcopy(effect_value)
-                donor_style = donor_by_id.get(effect_donor or "", {}).get("applied_style")
-                _copy_effect_style(
-                    style,
-                    donor_style if isinstance(donor_style, Mapping) else {},
-                    effect_class,
-                )
-                current_effect = _attribute(output, effect_class)
-                if owner_id != effect_donor and (
-                    current_effect.get("value", "unknown") != effect_value
-                    or _confidence(current_effect) < GROUP_CONFIDENCE_THRESHOLD
-                ):
-                    inherited.append("effect_class")
-            else:
-                style["effect_class"] = "none"
-
-            decision["applied_attributes"] = applied
-            if applied:
-                decision["status"] = "applied"
-                output["status"] = "applied"
-            output["style_application_decision_v2"] = decision
-            output["applied_style"] = style
-            output["style_group_resolution_v2"] = {
-                "schema_version": 2,
+            resolution_contract: dict[str, Any] = {
+                "schema_version": 3,
                 "group_id": group_id,
-                "group_kind": str(output.get("style_group_kind") or "unknown"),
-                "group_role": str(output.get("style_group_role") or "body"),
+                "owner_id": owner_id,
+                "group_kind": str(profile.get("style_group_kind") or "unknown"),
+                "group_role": str(profile.get("style_group_role") or "body"),
                 "member_count": len(members),
-                "font_donor_owner_id": font_donor,
-                "effect_donor_owner_id": effect_donor,
-                "effect_class": effect_class,
-                "inherited_fields": sorted(inherited),
-                "conflict_resolved": bool(font_conflict or effect_conflict),
+                "member_profile_sha256": {
+                    member_owner_id: member_profile["visual_profile_sha256"]
+                    for member_owner_id, member_profile in members
+                },
+                "donors": donors,
+                "inherited_attributes": sorted(inherited),
+                "conflicts": copy.deepcopy(group_conflicts),
                 "safe_attributes": sorted(GROUP_SAFE_ATTRIBUTES),
             }
-            output["visual_profile_sha256"] = owner_visual_profile_sha256(output)
-            resolved[owner_id] = validate_owner_visual_profile(
-                output,
-                expected_owner_id=owner_id,
+            resolution_sha256 = _canonical_sha256(resolution_contract)
+            resolution_contract["group_resolution_sha256"] = resolution_sha256
+            decision_sha256 = _canonical_sha256(decision)
+            intent = build_resolved_style_intent(
+                owner_id=owner_id,
+                page_id=str(profile.get("page_id") or f"style:{owner_id}"),
+                visual_profile_sha256=profile["visual_profile_sha256"],
+                decision_sha256=decision_sha256,
+                group_resolution_sha256=resolution_sha256,
+                approved=applied,
+                approved_abstentions=abstained,
+                attribute_provenance=attribute_provenance,
             )
+            resolved[owner_id] = {
+                "visual_profile_v2": copy.deepcopy(profile),
+                "visual_profile_sha256": profile["visual_profile_sha256"],
+                "style_group_resolution_v3": resolution_contract,
+                "style_resolved_intent_v1": intent.to_dict(),
+            }
     if set(resolved) != set(normalized):
         raise ValueError("style group resolution changed owner cardinality")
     return resolved

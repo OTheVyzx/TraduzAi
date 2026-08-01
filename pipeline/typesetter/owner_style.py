@@ -398,8 +398,11 @@ def attach_owner_visual_profile(
     """Attach a verified visual profile without mutating its semantic record."""
 
     output = copy.deepcopy(dict(record))
-    owner_id = str(output.get("owner_id") or profile.get("owner_id") or "")
-    normalized = validate_owner_visual_profile(profile, expected_owner_id=owner_id)
+    envelope = copy.deepcopy(dict(profile))
+    nested_profile = envelope.get("visual_profile_v2")
+    raw_profile = nested_profile if isinstance(nested_profile, Mapping) else envelope
+    owner_id = str(output.get("owner_id") or raw_profile.get("owner_id") or "")
+    normalized = validate_owner_visual_profile(raw_profile, expected_owner_id=owner_id)
     existing = output.get("visual_profile_v2")
     if isinstance(existing, Mapping):
         existing_hash = str(output.get("visual_profile_sha256") or "")
@@ -424,4 +427,12 @@ def attach_owner_visual_profile(
     output["visual_profile_v2"] = normalized
     output["visual_profile_sha256"] = normalized["visual_profile_sha256"]
     output["style_copy_status"] = normalized["status"]
+    if isinstance(nested_profile, Mapping):
+        if envelope.get("visual_profile_sha256") != normalized["visual_profile_sha256"]:
+            raise ValueError("owner visual profile envelope hash mismatch")
+        for field_name in ("style_group_resolution_v3", "style_resolved_intent_v1"):
+            value = envelope.get(field_name)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"owner visual profile envelope is missing {field_name}")
+            output[field_name] = copy.deepcopy(dict(value))
     return output
