@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "origin": {
+    "generation": "R4",
+    "report": "docs/reports/evidence/2026-07-31-style-copy-v2-remediation-summary.json",
+    "verdict": "NO-GO"
+  },
+  "cases": {
+    "card_fill_stroke_glow": {
+      "category": "colored_card",
+      "source": "ELIXIR OF LIFE",
+      "translated": "ELIXIR DA VIDA",
+      "shape": [120, 280],
+      "glyph_boxes": [[58, 42, 91, 78], [104, 42, 137, 78], [150, 42, 183, 78], [196, 42, 229, 78]],
+      "safe_bbox": [8, 8, 272, 112],
+      "style": {
+        "fill": "#FFF4B0",
+        "stroke": {"color": "#5B3600", "width_px": 2},
+        "glow": {"color": "#FFD75A", "width_px": 3}
+      }
+    },
+    "canonical_fill_alias": {
+      "category": "materialization_equivalence",
+      "target_fill": "#FFFFFF",
+      "observed_fill": "fff",
+      "expected_committed": true
+    },
+    "material_fill_difference": {
+      "category": "materialization_divergence",
+      "target_fill": "#FFFFFF",
+      "observed_fill": "#FF0000",
+      "expected_reason": "render_contract_invalid:materialization_mismatch:raster:fill:canonical_value_mismatch"
+    },
+    "cross_tile_framed_output": {
+      "category": "cross_tile_owner",
+      "source": "THAT IS WHY YOU SHOULD HAVE GONE BEFORE",
+      "translated": "É POR ISSO QUE VOCÊ DEVERIA TER IDO ANTES",
+      "logical_size": [720, 1300],
+      "frame_size": [830, 1300],
+      "content_origin_xy": [55, 0],
+      "logical_bbox": [109, 985, 318, 1104],
+      "expected_frame_bbox": [164, 985, 373, 1104]
+    },
+    "white_balloon": {
+      "category": "white_balloon",
+      "source": "LET'S GO",
+      "translated": "VAMOS",
+      "shape": [100, 240],
+      "glyph_boxes": [[70, 38, 100, 66], [112, 38, 142, 66]],
+      "safe_bbox": [18, 10, 222, 90],
+      "style": {"fill": "#202020"}
+    },
+    "burst": {
+      "category": "burst",
+      "source": "NO!",
+      "translated": "NÃO!",
+      "shape": [100, 240],
+      "glyph_boxes": [[72, 36, 104, 68], [116, 36, 148, 68]],
+      "safe_bbox": [12, 8, 228, 92],
+      "style": {"fill": "#FFFFFF", "stroke": {"color": "#111111", "width_px": 2}}
+    },
+    "dark_panel": {
+      "category": "dark_panel",
+      "source": "SOMETHING MOVED",
+      "translated": "ALGO SE MOVEU",
+      "shape": [110, 260],
+      "glyph_boxes": [[58, 38, 92, 72], [105, 38, 139, 72], [152, 38, 186, 72]],
+      "safe_bbox": [10, 8, 250, 102],
+      "style": {"fill": "#F4F2FF", "stroke": {"color": "#2E236E", "width_px": 2}}
+    },
+    "text_over_art": {
+      "category": "text_over_art",
+      "source": "BEAST KING",
+      "translated": "REI DAS FERAS",
+      "shape": [120, 280],
+      "glyph_boxes": [[78, 42, 112, 78], [124, 42, 158, 78], [170, 42, 204, 78]],
+      "safe_bbox": [40, 16, 240, 104],
+      "protected_art_bbox": [0, 0, 32, 120],
+      "style": {"fill": "#FFFFFF", "stroke": {"color": "#261872", "width_px": 2}}
+    }
+  }
+}

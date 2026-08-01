@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -98,3 +100,26 @@ def test_verify_matrix_target_binds_logical_crop_to_framed_artifact(tmp_path):
     assert result["verified"] is True
     assert result["artifact_bbox_frame"] == [10, 5, 35, 17]
     assert result["page_surface_geometry_sha256"] == geometry.geometry_sha256
+
+
+def test_exact_nine_owner_targets_and_source_hashes_are_unchanged():
+    matrix_path = Path(__file__).parent / "fixtures" / "style_copy_corpus" / "matrix.json"
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    expected = {
+        ("style_colored_cards_calibration", "page_001", "owner_p001_024cf5ddf5ea"): ([246, 10391, 628, 10542], "2a2f55262ed94479e8ee1819a8eb5e932e7a1a5af5b56b5a6f984da0ba6b2404"),
+        ("style_colored_cards_calibration", "page_001", "owner_p001_06c2c46ee27f"): ([340, 4052, 602, 4180], "8f17bc734c4946c6eea066e001a30e7900cb1fa54e4d0971f2bc4cd786ede261"),
+        ("style_colored_cards_calibration", "page_001", "owner_p001_0dc05817313b"): ([198, 6057, 604, 6242], "4f145ec82428d6deb3c6b427baa450411e0af75774bdde0c3bdf26523c0b40dc"),
+        ("style_colored_cards_calibration", "page_001", "owner_p001_0f39ce3adba0"): ([169, 11133, 542, 11247], "00e896e3eabc1003c611cfd8fb5ac847534c1847c10a8bf99f5506229bdf4f23"),
+        ("style_cross_tile_holdout", "page_002", "owner_p002_43752a8f8c08"): ([391, 484, 618, 595], "2c2147610a183eeb8e7500ce5d44c5aba4d0f43fc7f09682646345eb89b2ee10"),
+        ("style_cross_tile_holdout", "page_002", "owner_p002_7227e479da0d"): ([76, 54, 243, 133], "23aa55bd1525fab675a524e9856f5beea464a0eea07c87ab77508180c7048dbe"),
+        ("style_cross_tile_holdout", "page_002", "owner_p002_d9afb32ef935"): ([109, 985, 318, 1104], "e4c60408223dfef9a4f0236b41b07c603b983420e9ca5a3715a030ccb1532c31"),
+        ("style_dark_panels_holdout", "page_002", "owner_p002_5a6976dbbf65"): ([107, 1915, 424, 2114], "3596b34910f6cb295478af3daa875224b742e8ebc250735e4c7db86e6b0aeeab"),
+        ("style_dark_panels_holdout", "page_003", "owner_p003_98e72af0685a"): ([183, 572, 514, 682], "054fe2c77ba95ef21ccc6c4f9d90975f2293938e10649419304a19b1efcfc5c3"),
+    }
+    actual = {}
+    for entry in matrix["entries"]:
+        for target in entry["targets"]:
+            key = (entry["entry_id"], target["page_id"], target["owner_id"])
+            actual[key] = (target["source_crop"]["bbox_page"], target["source_crop"]["sha256"])
+            assert target["source_crop"]["coordinate_space"] == "logical_page"
+    assert actual == expected
