@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import pytest
 
@@ -1270,6 +1271,19 @@ def test_atomic_owner_execution_rejects_dense_solid_masks_below_page_threshold()
     assert render_commit.committed is False
     assert "component geometry" in cleanup_commit.reason
     assert "overbroad" in render_commit.reason
+
+
+def test_dense_effect_envelope_is_allowed_only_when_locally_supported_by_glyph_core() -> None:
+    core = np.zeros((100, 100), dtype=np.uint8)
+    core[35:65, 40:42] = 255
+    core[35:65, 58:60] = 255
+    local_effect = cv2.dilate(core, np.ones((9, 9), dtype=np.uint8))
+    forged_fill = np.zeros_like(core)
+    forged_fill[25:75, 25:75] = 255
+
+    assert process_bands._owner_mask_is_overbroad(local_effect)
+    assert not process_bands._owner_paint_mask_is_overbroad(local_effect, core)
+    assert process_bands._owner_paint_mask_is_overbroad(forged_fill, core)
 
 
 def test_atomic_owner_execution_accepts_dense_mask_from_verified_component_geometry() -> None:

@@ -8689,6 +8689,38 @@ def _owner_mask_is_overbroad(
     return False
 
 
+def _owner_paint_mask_is_overbroad(
+    paint_mask: np.ndarray,
+    glyph_core_mask: np.ndarray,
+) -> bool:
+    """Reject broad fills while allowing dense effects locally backed by glyph ink."""
+
+    if not _owner_mask_is_overbroad(paint_mask):
+        return False
+    if _owner_mask_is_overbroad(glyph_core_mask):
+        return True
+    core = np.asarray(glyph_core_mask) > 0
+    paint = np.asarray(paint_mask) > 0
+    if not np.any(core) or np.any(core & ~paint):
+        return True
+    paint_only = paint & ~core
+    if not np.any(paint_only):
+        return False
+    core_y, core_x = np.nonzero(core)
+    core_width = int(core_x.max() - core_x.min() + 1)
+    core_height = int(core_y.max() - core_y.min() + 1)
+    maximum_local_effect_px = max(
+        4.0,
+        min(core_width, core_height) * 0.75,
+    )
+    distance_from_core = cv2.distanceTransform(
+        np.where(core, 0, 255).astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    return float(np.max(distance_from_core[paint_only])) > maximum_local_effect_px
+
+
 def _owner_polygon_sha256(points: Any) -> str:
     payload = json.dumps(points, separators=(",", ":"))
     return sha256(payload.encode("utf-8")).hexdigest()
@@ -9061,7 +9093,7 @@ def apply_atomic_owner_execution(
             raise ValueError("glyph patch core/paint mask is empty")
         if np.any((glyph_core_mask > 0) & (paint_mask == 0)):
             raise ValueError("glyph core mask escapes paint mask")
-        if _owner_mask_is_overbroad(paint_mask):
+        if _owner_paint_mask_is_overbroad(paint_mask, glyph_core_mask):
             raise ValueError("glyph patch paint mask is overbroad")
         glyph_bbox = _canonical_owner_bbox(
             glyph_patch.glyph_bbox_page,
