@@ -6078,7 +6078,7 @@ def test_owner_action_mask_is_rolled_back_without_successful_render_contract():
         "_strip_owner_mutation": {
             "owner_id": "owner_a",
             "page_id": "page_001",
-            "coordinate_space": "page",
+            "coordinate_space": "logical_page",
             "execution_tile_id": "tile_executor",
             "action_mask_ref": action_mask_ref,
             "action_mask_sha256": _owner_array_sha256(action_mask),
@@ -6150,6 +6150,14 @@ def _owner_atomic_copyback_fixture():
     action_mask_sha256 = process_bands._owner_array_sha256(action_mask)
     protected_art_mask_sha256 = process_bands._owner_array_sha256(protected)
     component_geometry_sha256 = "a" * 64
+    from test_owner_atomic_execution import _render_geometry
+
+    render_geometry = _render_geometry(
+        owner_id="owner_a",
+        bbox=(8, 8, 14, 12),
+        shape=original.shape[:2],
+        protected_art_mask_sha256=protected_art_mask_sha256,
+    )
     residual_evidence_sha256 = owner_residual_evidence_sha256(
         owner_id="owner_a",
         page_id="page_001",
@@ -6166,7 +6174,7 @@ def _owner_atomic_copyback_fixture():
     mutation = OwnerMutation(
         owner_id="owner_a",
         page_id="page_001",
-        coordinate_space="page",
+        coordinate_space="logical_page",
         action_mask_ref=action_mask_ref,
         result_rgb=cleaned,
         action_mask=action_mask,
@@ -6184,6 +6192,7 @@ def _owner_atomic_copyback_fixture():
         engine_crop_bbox_page=(0, 0, 30, 20),
         owner_bbox_page=(8, 8, 14, 12),
         component_geometry_sha256=component_geometry_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
         protected_art_mask_sha256=protected_art_mask_sha256,
         residual_score=0.0,
         residual_verified=True,
@@ -6201,7 +6210,7 @@ def _owner_atomic_copyback_fixture():
     glyph_patch = OwnerGlyphPatch(
         owner_id="owner_a",
         page_id="page_001",
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=rendered,
         glyph_mask=glyph_mask,
         glyph_bbox_page=(9, 9, 13, 11),
@@ -6216,6 +6225,8 @@ def _owner_atomic_copyback_fixture():
             ((8, 8), (14, 8), (14, 12), (8, 12))
         ),
         component_geometry_sha256=mutation.component_geometry_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
         render_quality_contract=OwnerRenderQuality(
             schema_version=1,
             status="ok",
@@ -6265,7 +6276,7 @@ def _owner_atomic_copyback_fixture():
         "_owner_page_id": "page_001",
         "_owner_tile_id": "tile_executor",
         "_band_id": "tile_executor",
-        "_owner_coordinate_space": "page",
+        "_owner_coordinate_space": "logical_page",
         "_owner_translation_contract": {
             "expected_owner_ids": ["owner_a"],
         },
@@ -6492,7 +6503,7 @@ def test_owner_render_completed_must_be_explicitly_true():
         "_strip_owner_mutation": {
             "owner_id": "owner_a",
             "page_id": "page_001",
-            "coordinate_space": "page",
+            "coordinate_space": "logical_page",
             "execution_tile_id": "tile_executor",
             "action_mask_ref": action_mask_ref,
             "action_mask_sha256": _owner_array_sha256(action_mask),
@@ -6554,7 +6565,7 @@ def test_owner_rollback_mask_must_match_owner_mutation_provenance():
         "_strip_owner_mutation": {
             "owner_id": "owner_a",
             "page_id": "page_001",
-            "coordinate_space": "page",
+            "coordinate_space": "logical_page",
             "execution_tile_id": "tile_executor",
             "action_mask_ref": action_mask_ref,
             "action_mask_sha256": _owner_array_sha256(owner_mask),
@@ -6610,7 +6621,7 @@ def test_owner_rollback_requires_exact_ok_fit_status():
         "_strip_owner_mutation": {
             "owner_id": "owner_a",
             "page_id": "page_001",
-            "coordinate_space": "page",
+            "coordinate_space": "logical_page",
             "execution_tile_id": "tile_executor",
             "action_mask_ref": action_mask_ref,
             "action_mask_sha256": _owner_array_sha256(action_mask),

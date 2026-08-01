@@ -40,6 +40,13 @@ from ownership.model import (
     validate_owner_style_raster_contract,
 )
 from ownership.translation import merge_owner_translations, owners_to_translation_page
+from ownership.render_geometry import (
+    OwnerRenderGeometry,
+    build_owner_render_geometry,
+    owner_source_replacement_bbox,
+    positive_evidence_excluding_protected,
+    release_source_replacement_from_protection,
+)
 from typesetter.owner_style import (
     attach_owner_visual_profile,
     build_owner_visual_profiles,
@@ -8772,8 +8779,8 @@ def apply_atomic_owner_execution(
     try:
         owner_id = _canonical_owner_identity(mutation.owner_id, label="mutation owner_id")
         page_id = _canonical_owner_identity(mutation.page_id, label="mutation page_id")
-        if mutation.coordinate_space != "page":
-            raise ValueError("mutation coordinate space must be page")
+        if mutation.coordinate_space != "logical_page":
+            raise ValueError("mutation uses legacy coordinate space; logical_page required")
         execution_tile_id = _canonical_owner_identity(
             mutation.execution_tile_id,
             label="mutation execution tile_id",
@@ -8790,6 +8797,10 @@ def apply_atomic_owner_execution(
         _canonical_owner_hash(
             mutation.component_geometry_sha256,
             label="mutation component geometry hash",
+        )
+        mutation_render_geometry_sha256 = _canonical_owner_hash(
+            mutation.owner_render_geometry_sha256,
+            label="mutation owner render geometry hash",
         )
         mutation_result = _canonical_owner_rgb(
             mutation.result_rgb,
@@ -8963,7 +8974,7 @@ def apply_atomic_owner_execution(
         if (
             glyph_patch.owner_id != owner_id
             or glyph_patch.page_id != page_id
-            or glyph_patch.coordinate_space != "page"
+            or glyph_patch.coordinate_space != "logical_page"
             or glyph_patch.execution_tile_id != execution_tile_id
         ):
             raise ValueError("glyph patch identity does not match cleanup owner")
@@ -8982,6 +8993,25 @@ def apply_atomic_owner_execution(
         )
         if glyph_component_geometry_sha256 != mutation.component_geometry_sha256:
             raise ValueError("glyph patch component geometry revision mismatch")
+        glyph_render_geometry_sha256 = _canonical_owner_hash(
+            glyph_patch.owner_render_geometry_sha256,
+            label="glyph patch owner render geometry hash",
+        )
+        if glyph_render_geometry_sha256 != mutation_render_geometry_sha256:
+            raise ValueError("glyph patch owner render geometry revision mismatch")
+        owner_render_geometry = (
+            glyph_patch.owner_render_geometry
+            if isinstance(glyph_patch.owner_render_geometry, OwnerRenderGeometry)
+            else OwnerRenderGeometry.from_dict(glyph_patch.owner_render_geometry)
+        )
+        if (
+            owner_render_geometry.geometry_sha256 != glyph_render_geometry_sha256
+            or owner_render_geometry.owner_id != owner_id
+            or owner_render_geometry.page_id != page_id
+            or owner_render_geometry.protected_art_mask_sha256
+            != mutation.protected_art_mask_sha256
+        ):
+            raise ValueError("owner render geometry binding mismatch")
         rendered_result = _canonical_owner_rgb(
             glyph_patch.result_rgb,
             shape=tuple(original.shape),
@@ -9210,7 +9240,7 @@ def apply_atomic_owner_execution(
     return OwnerExecutionCommit(
         owner_id=owner_id,
         page_id=page_id,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=final,
         mutation=mutation,
         glyph_patch=glyph_patch,
@@ -9246,7 +9276,7 @@ def _owner_rollback_mask_matches_mutation(
         or not _action_mask_ref_matches_owner(owner_id, action_mask_ref)
         or str(mutation.get("owner_id") or "").strip() != owner_id
         or str(mutation.get("page_id") or "").strip() != page_id
-        or str(mutation.get("coordinate_space") or "").strip() != "page"
+        or str(mutation.get("coordinate_space") or "").strip() != "logical_page"
         or str(mutation.get("execution_tile_id") or "").strip() != tile_id
         or str(mutation.get("action_mask_ref") or "").strip() != action_mask_ref
     ):
@@ -9507,7 +9537,7 @@ def _run_copy_back_stage(
             or commit.render_committed is not True
             or commit.review_required is not False
             or commit.state != "rendered"
-            or commit.coordinate_space != "page"
+            or commit.coordinate_space != "logical_page"
         ):
             raise ValueError("owner copyback requires a valid atomic owner commit")
         if not isinstance(commit.mutation, OwnerMutation) or not isinstance(
@@ -10044,6 +10074,8 @@ def _owner_layout_regions(
     *,
     page_width: int,
     page_height: int,
+    source_replacement_bbox: tuple[int, int, int, int] | None = None,
+    owner_render_geometry: OwnerRenderGeometry | None = None,
 ) -> list[dict[str, Any]]:
     owner = graph.owners[0]
     components = {
@@ -10072,16 +10104,39 @@ def _owner_layout_regions(
         and observation.layout_bbox_page[2] <= page_width
         and observation.layout_bbox_page[3] <= page_height
     ]
-    layout_container_bbox = (
-        min(
-            layout_container_candidates,
-            key=lambda bbox: (
-                (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
-                bbox,
-            ),
+    if owner_render_geometry is not None:
+        if (
+            owner_render_geometry.owner_id != owner.owner_id
+            or owner_render_geometry.page_id != graph.page_id
+            or owner_render_geometry.page_width != page_width
+            or owner_render_geometry.page_height != page_height
+        ):
+            raise ValueError("owner layout render geometry identity mismatch")
+        layout_container_bbox = owner_render_geometry.layout_container_bbox_page
+        layout_container_polygon = owner_render_geometry.layout_container_polygon_page
+    else:
+        layout_container_bbox = (
+            min(
+                layout_container_candidates,
+                key=lambda bbox: (
+                    (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
+                    bbox,
+                ),
+            )
+            if layout_container_candidates
+            else None
         )
-        if layout_container_candidates
-        else None
+        layout_container_polygon = None
+    semantic_role = str(owner.semantic_role or "").strip().casefold()
+    layout_safe_bbox = (
+        _owner_dialogue_container_safe_bbox(layout_container_bbox)
+        if layout_container_bbox is not None
+        and bool(layout_container_candidates)
+        and any(
+            token in semantic_role
+            for token in ("dialogue", "speech", "thought")
+        )
+        else layout_container_bbox
     )
     selected_covers_connected_owner = (
         len(owner.component_ids) > 1
@@ -10098,6 +10153,9 @@ def _owner_layout_regions(
         else None
     )
     owner_safe_polygon = (
+        tuple(layout_container_polygon)
+        if layout_container_polygon is not None
+        else
         (
             (owner_safe_bbox[0], owner_safe_bbox[1]),
             (owner_safe_bbox[2] - 1, owner_safe_bbox[1]),
@@ -10167,6 +10225,9 @@ def _owner_layout_regions(
         )
         region_bbox = layout_container_bbox or tuple(component.bbox_page)
         polygon = (
+            tuple(layout_container_polygon)
+            if layout_container_polygon is not None
+            else
             (
                 (region_bbox[0], region_bbox[1]),
                 (region_bbox[2] - 1, region_bbox[1]),
@@ -10195,6 +10256,11 @@ def _owner_layout_regions(
                 "order": order,
                 "bbox_page": list(region_bbox),
                 "safe_polygon_page": [list(point) for point in raster_polygon],
+                "owner_render_geometry_sha256": (
+                    owner_render_geometry.geometry_sha256
+                    if owner_render_geometry is not None
+                    else None
+                ),
                 "source_ink_heights_px": source_ink_heights,
                 "source_x_heights_px": source_x_heights,
                 "source_ink_height_median_px": (
@@ -10251,7 +10317,7 @@ def _owner_non_rendering_record(
             "id": owner.owner_id,
             "owner_id": owner.owner_id,
             "page_id": owner.page_id,
-            "coordinate_space": "page",
+            "coordinate_space": "logical_page",
             "component_ids": list(owner.component_ids),
             "observation_ids": list(owner.observation_ids),
             "selected_observation_ids": list(owner.selected_observation_ids),
@@ -10594,7 +10660,7 @@ def execute_owner_page_graph(
                 "owner_id": owner.owner_id,
                 "id": owner.owner_id,
                 "page_id": owner.page_id,
-                "coordinate_space": "page",
+                "coordinate_space": "logical_page",
                 "source_payload": owner.source_payload,
                 "translated_payload": owner.translated_payload,
                 "translated": owner.translated_payload,
@@ -10741,6 +10807,76 @@ def execute_owner_page_graph(
                 explicit_protected_masks=(),
             )
         )
+        source_replacement_bbox = owner_source_replacement_bbox(
+            single,
+            owner.owner_id,
+        )
+        protected_mask = release_source_replacement_from_protection(
+            protected_mask,
+            source_replacement_bbox,
+            foreign_component_masks=foreign_component_masks,
+        )
+        container_evidence = [
+            {
+                "evidence_id": f"{observation.observation_id}:layout_container",
+                "source": "balloon_inner_polygon",
+                "bbox_page": tuple(observation.layout_bbox_page),
+                "confidence": float(observation.confidence),
+            }
+            for observation in selected_observations
+            if observation.layout_bbox_page is not None
+        ]
+        owner_render_geometry = build_owner_render_geometry(
+            single,
+            owner.owner_id,
+            page_width=int(source.shape[1]),
+            page_height=int(source.shape[0]),
+            container_evidence=container_evidence,
+            protected_art_mask_sha256=_owner_array_sha256(protected_mask),
+        )
+        if owner_render_geometry.source_replacement_bbox_page != source_replacement_bbox:
+            raise ValueError("owner cleanup footprint diverged from render geometry")
+        record["owner_render_geometry"] = owner_render_geometry.to_dict()
+        record["owner_render_geometry_sha256"] = owner_render_geometry.geometry_sha256
+        if owner_render_geometry.status != "ready":
+            _transition_owner_to_review(executed_graph, owner.owner_id)
+            review_seed = copy.deepcopy(record)
+            review_seed["owner_execution_rejection_reason"] = owner_render_geometry.reason
+            review_seed["qa_flags"] = sorted(
+                {*list(review_seed.get("qa_flags") or []), "owner_render_geometry_review"}
+            )
+            final_records.append(
+                _owner_non_rendering_record(executed_graph, owner, seed=review_seed)
+            )
+            continue
+        owner_layout_regions = _owner_layout_regions(
+            single,
+            page_width=int(source.shape[1]),
+            page_height=int(source.shape[0]),
+            owner_render_geometry=owner_render_geometry,
+        )
+        evidence = [
+            replace(
+                item,
+                glyph_mask=(
+                    positive_evidence_excluding_protected(
+                        item.glyph_mask,
+                        protected_mask,
+                    )
+                    if item.glyph_mask is not None
+                    else None
+                ),
+                line_mask=(
+                    positive_evidence_excluding_protected(
+                        item.line_mask,
+                        protected_mask,
+                    )
+                    if item.line_mask is not None
+                    else None
+                ),
+            )
+            for item in evidence
+        ]
         if np.any(protected_mask):
             evidence.append(
                 OwnerMaskEvidence(
@@ -10761,6 +10897,7 @@ def execute_owner_page_graph(
                 evidence,
                 owner_component_bboxes_page=component_bboxes,
                 expected_line_ids=expected_line_ids,
+                owner_render_geometry_sha256=owner_render_geometry.geometry_sha256,
             )
         except UnsafeOwnerMaskError as exc:
             logger.warning(
@@ -10832,7 +10969,7 @@ def execute_owner_page_graph(
             "texts": [copy.deepcopy(record)],
             "_page_id": owner.page_id,
             "_band_id": owner.execution_tile_id,
-            "_owner_coordinate_space": "page",
+            "_owner_coordinate_space": "logical_page",
             "_page_shape": [int(source.shape[0]), int(source.shape[1])],
             "_owner_component_bboxes_page": {
                 key: list(value) for key, value in component_bboxes.items()
@@ -10969,7 +11106,7 @@ def execute_owner_page_graph(
                     ],
                     "render_layout_contract": {
                         "owner_id": owner.owner_id,
-                        "coordinate_space": "page",
+                        "coordinate_space": "logical_page",
                         "block_bbox": copy.deepcopy(render_bbox),
                         "safe_text_box": copy.deepcopy(safe_bbox),
                         "fit_status": str(glyph_patch.fit_status),

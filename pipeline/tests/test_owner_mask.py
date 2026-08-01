@@ -1357,7 +1357,7 @@ def test_line_polygon_without_stroke_raster_cannot_authorize_cleanup():
     assert owner.state == "review_required"
 
 
-def test_owner_mask_and_mutation_declare_page_coordinate_space(tmp_path):
+def test_owner_mask_and_mutation_bind_logical_page_render_geometry(tmp_path):
     from inpainter.owner_mask import (
         OwnerMaskEvidence,
         UnsafeOwnerMaskError,
@@ -1389,14 +1389,18 @@ def test_owner_mask_and_mutation_declare_page_coordinate_space(tmp_path):
             )
         ],
         owner_component_bboxes_page={"cmp_body_top": (12, 25, 24, 30)},
+        owner_render_geometry_sha256="b" * 64,
     )
 
-    assert plan.coordinate_space == "page"
+    assert plan.coordinate_space == "logical_page"
+    assert plan.owner_render_geometry_sha256 == "b" * 64
     persisted = persist_owner_mask_plan(plan, tmp_path)
     manifest = json.loads(persisted.with_name("manifest.json").read_text(encoding="utf-8"))
-    assert manifest["coordinate_space"] == "page"
+    assert manifest["coordinate_space"] == "logical_page"
+    assert manifest["owner_render_geometry_sha256"] == "b" * 64
     mutation = execute_owner_inpaint(image, plan, ChangingInpainter())
-    assert mutation.coordinate_space == "page"
+    assert mutation.coordinate_space == "logical_page"
+    assert mutation.owner_render_geometry_sha256 == "b" * 64
     assert mutation.result_rgb.shape == image.shape
     assert mutation.action_mask.shape == image.shape[:2]
 
@@ -1456,7 +1460,7 @@ def test_owner_engine_receives_bounded_crop_but_mutation_remains_page_space():
     assert spy.received_shape[0] < 400
     assert spy.received_shape[1] < image.shape[1]
     assert spy.received_mask_shape == spy.received_shape[:2]
-    assert mutation.coordinate_space == "page"
+    assert mutation.coordinate_space == "logical_page"
     assert mutation.result_rgb.shape == image.shape
     assert mutation.action_mask.shape == image.shape[:2]
     np.testing.assert_array_equal(

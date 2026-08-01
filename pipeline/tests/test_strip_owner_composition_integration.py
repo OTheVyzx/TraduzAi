@@ -28,6 +28,25 @@ def _action_ref(owner_id: str) -> str:
     return f"owner_masks/{safe}--{identity}/mask/action_mask.png"
 
 
+def _render_geometry(owner_id: str, page_id: str, bbox, shape, protected_sha256):
+    from ownership.model import OwnerGraph, OwnerProjection, SourceTextComponent, TextObservation, TextOwner
+    from ownership.render_geometry import build_owner_render_geometry
+
+    height, width = shape
+    component_id = f"component-{owner_id}"
+    observation_id = f"observation-{owner_id}"
+    x1, y1, x2, y2 = bbox
+    polygon = ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+    graph = OwnerGraph(
+        2, page_id,
+        [SourceTextComponent(component_id, page_id, bbox, polygon, ("fixture",))],
+        [TextObservation(observation_id, page_id, (component_id,), "SOURCE", 1.0, "fixture", bbox, polygons_page=(polygon,))],
+        [TextOwner(owner_id, page_id, [component_id], [observation_id], [observation_id], "freeform_sfx", "SOURCE", "ALVO", "owned", "translated", "translate_inpaint_render", f"tile-{owner_id}")],
+        [OwnerProjection(owner_id, f"tile-{owner_id}", "executor", (0, 0, width, height), (0, 0, width, height), (0, 0))],
+    )
+    return build_owner_render_geometry(graph, owner_id, page_width=width, page_height=height, protected_art_mask_sha256=protected_sha256)
+
+
 def _mutation(
     original: np.ndarray,
     *,
@@ -50,6 +69,7 @@ def _mutation(
     action_sha256 = _array_sha256(action)
     protected_sha256 = _array_sha256(protected)
     component_sha256 = sha256(owner_id.encode("utf-8")).hexdigest()
+    render_geometry = _render_geometry(owner_id, page_id, bbox, original.shape[:2], protected_sha256)
     residual_evidence_sha256 = owner_residual_evidence_sha256(
         owner_id=owner_id,
         page_id=page_id,
@@ -66,7 +86,7 @@ def _mutation(
     return OwnerMutation(
         owner_id=owner_id,
         page_id=page_id,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         action_mask_ref=_action_ref(owner_id),
         result_rgb=result,
         action_mask=action,
@@ -84,6 +104,7 @@ def _mutation(
         engine_crop_bbox_page=bbox,
         owner_bbox_page=bbox,
         component_geometry_sha256=component_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
         protected_art_mask_sha256=protected_sha256,
         residual_score=0.0,
         residual_verified=True,
@@ -157,10 +178,17 @@ def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
         (min(before.shape[1] - 1, x2 + 4), min(before.shape[0] - 1, y2 + 4)),
         (max(0, x1 - 4), min(before.shape[0] - 1, y2 + 4)),
     )
+    render_geometry = _render_geometry(
+        mutation.owner_id,
+        mutation.page_id,
+        mutation.owner_bbox_page,
+        before.shape[:2],
+        str(mutation.protected_art_mask_sha256),
+    )
     return OwnerGlyphPatch(
         owner_id=mutation.owner_id,
         page_id=mutation.page_id,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=result,
         glyph_mask=mask,
         glyph_bbox_page=bbox,
@@ -204,6 +232,8 @@ def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
             glyph_mask=mask,
             component_geometry_sha256=mutation.component_geometry_sha256,
         ),
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
         execution_tile_id=mutation.execution_tile_id,
     )
 
@@ -604,7 +634,25 @@ def test_owner_composition_does_not_promote_peer_local_protection_to_global_mask
             residual_flags=right_mutation.residual_flags,
         ),
     )
-    bands[1].owner_execution_commits = [replace(right_commit, mutation=right_mutation)]
+    render_geometry = _render_geometry(
+        right_mutation.owner_id,
+        right_mutation.page_id,
+        right_mutation.owner_bbox_page,
+        original.shape[:2],
+        protected_sha256,
+    )
+    right_mutation = replace(
+        right_mutation,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+    )
+    right_glyph = replace(
+        right_commit.glyph_patch,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
+    )
+    bands[1].owner_execution_commits = [
+        replace(right_commit, mutation=right_mutation, glyph_patch=right_glyph)
+    ]
 
     result = _compose_owner_output_pages(
         original_strip_image=original,

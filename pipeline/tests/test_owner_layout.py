@@ -29,6 +29,7 @@ from ownership.model import (  # noqa: E402
     TextObservation,
     TextOwner,
 )
+from ownership.render_geometry import build_owner_render_geometry  # noqa: E402
 from typesetter import renderer as renderer_mod  # noqa: E402
 from typesetter.owner_style import (  # noqa: E402
     attach_owner_visual_profile,
@@ -185,11 +186,48 @@ def _owner_page(
     texts = []
     for owner in graph.owners:
         component = component_by_id[owner.component_ids[0]]
+        owner_regions = [
+            region for region in layout_regions if region["owner_id"] == owner.owner_id
+        ]
+        owner_polygons = [
+            region["owner_safe_polygon_page"]
+            for region in owner_regions
+            if region.get("owner_safe_polygon_page")
+        ]
+        if owner_polygons:
+            container_polygon = owner_polygons[0]
+        else:
+            boxes = [tuple(region["bbox_page"]) for region in owner_regions]
+            container_polygon = _polygon_for_bbox(
+                (
+                    min(box[0] for box in boxes),
+                    min(box[1] for box in boxes),
+                    max(box[2] for box in boxes),
+                    max(box[3] for box in boxes),
+                )
+            )
+        render_geometry = build_owner_render_geometry(
+            graph,
+            owner.owner_id,
+            page_width=PAGE_WIDTH,
+            page_height=PAGE_HEIGHT,
+            container_evidence={
+                "evidence_id": f"{owner.owner_id}:fixture_container",
+                "source": "balloon_inner_polygon",
+                "polygon_page": container_polygon,
+                "confidence": 1.0,
+            },
+            protected_art_mask_sha256=renderer_mod._owner_array_sha256(
+                np.zeros((PAGE_HEIGHT, PAGE_WIDTH), dtype=np.uint8)
+            ),
+        )
+        for region in owner_regions:
+            region["owner_render_geometry_sha256"] = render_geometry.geometry_sha256
         record = {
             "id": owner.owner_id,
             "owner_id": owner.owner_id,
             "page_id": owner.page_id,
-            "coordinate_space": "page",
+            "coordinate_space": "logical_page",
             "text": owner.source_payload,
             "original": owner.source_payload,
             "translated": owner.translated_payload,
@@ -207,6 +245,8 @@ def _owner_page(
             "page_width": PAGE_WIDTH,
             "page_height": PAGE_HEIGHT,
             "layout_profile": "white_balloon",
+            "owner_render_geometry": render_geometry.to_dict(),
+            "owner_render_geometry_sha256": render_geometry.geometry_sha256,
             "estilo": {
                 "fonte": "ComicNeue-Bold.ttf",
                 "tamanho": 26,

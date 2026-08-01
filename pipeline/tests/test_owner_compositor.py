@@ -21,9 +21,15 @@ from compositor.owner_compositor import (  # noqa: E402
 )
 from ownership.model import (  # noqa: E402
     OwnerGlyphPatch,
+    OwnerGraph,
     OwnerMutation,
+    OwnerProjection,
+    SourceTextComponent,
+    TextObservation,
+    TextOwner,
     owner_residual_evidence_sha256,
 )
+from ownership.render_geometry import build_owner_render_geometry  # noqa: E402
 from typesetter.owner_render_quality import OwnerRenderQuality  # noqa: E402
 from style_v2_fixtures import valid_owner_style_raster_contract  # noqa: E402
 
@@ -69,6 +75,23 @@ def _component_hash(owner_id: str) -> str:
     return sha256(f"component:{owner_id}".encode("utf-8")).hexdigest()
 
 
+def _render_geometry(owner_id: str, protected_sha256: str):
+    bbox = (2, 2, 12, 12)
+    polygon = ((2, 2), (12, 2), (12, 12), (2, 12))
+    graph = OwnerGraph(
+        2,
+        PAGE_ID,
+        [SourceTextComponent(f"component_{owner_id}", PAGE_ID, bbox, polygon, ("fixture",))],
+        [TextObservation(f"observation_{owner_id}", PAGE_ID, (f"component_{owner_id}",), "SOURCE", 1.0, "fixture", bbox, polygons_page=(polygon,))],
+        [TextOwner(owner_id, PAGE_ID, [f"component_{owner_id}"], [f"observation_{owner_id}"], [f"observation_{owner_id}"], "freeform_sfx", "SOURCE", "ALVO", "owned", "translated", "translate_inpaint_render", f"tile_{owner_id}")],
+        [OwnerProjection(owner_id, f"tile_{owner_id}", "executor", (0, 0, PAGE_SHAPE[1], PAGE_SHAPE[0]), (0, 0, PAGE_SHAPE[1], PAGE_SHAPE[0]), (0, 0))],
+    )
+    return build_owner_render_geometry(
+        graph, owner_id, page_width=PAGE_SHAPE[1], page_height=PAGE_SHAPE[0],
+        protected_art_mask_sha256=protected_sha256,
+    )
+
+
 def _action_mask_ref(owner_id: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", owner_id).strip("._")
     identity_hash = sha256(owner_id.encode("utf-8")).hexdigest()[:12]
@@ -101,6 +124,7 @@ def _mutation(
     after_sha256 = _array_sha256(result)
     action_sha256 = _array_sha256(action_mask)
     protected_sha256 = _array_sha256(protected)
+    render_geometry = _render_geometry(owner_id, protected_sha256)
     component_sha256 = _component_hash(owner_id)
     residual_evidence_sha256 = owner_residual_evidence_sha256(
         owner_id=owner_id,
@@ -118,7 +142,7 @@ def _mutation(
     return OwnerMutation(
         owner_id=owner_id,
         page_id=PAGE_ID,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         action_mask_ref=_action_mask_ref(owner_id),
         result_rgb=result,
         action_mask=action_mask,
@@ -138,6 +162,7 @@ def _mutation(
         engine_crop_bbox_page=(0, 0, original.shape[1], original.shape[0]),
         owner_bbox_page=(0, 0, original.shape[1], original.shape[0]),
         component_geometry_sha256=component_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
         protected_art_mask_sha256=protected_sha256,
         residual_score=0.0,
         residual_verified=True,
@@ -172,10 +197,16 @@ def _glyph_patch(
         (0, original.shape[0] - 1),
     )
     x1, y1, x2, y2 = box
+    protected_sha256 = (
+        str(mutation.protected_art_mask_sha256)
+        if mutation is not None
+        else _array_sha256(np.zeros(original.shape[:2], dtype=np.uint8))
+    )
+    render_geometry = _render_geometry(owner_id, protected_sha256)
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=PAGE_ID,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=result,
         glyph_mask=glyph_mask,
         glyph_bbox_page=(x1, y1, x2, y2),
@@ -225,6 +256,8 @@ def _glyph_patch(
                 else _component_hash(owner_id)
             ),
         ),
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
         execution_tile_id=f"tile_{owner_id}",
         projection_role=projection_role,
         color_space=color_space,
@@ -248,6 +281,15 @@ def test_owner_glyph_patch_requires_render_quality_contract() -> None:
 
     assert hasattr(patch, "render_quality_contract")
     assert patch.render_quality_contract.status == "ok"
+
+
+def test_owner_compositor_rejects_legacy_page_coordinate_alias() -> None:
+    original = _original()
+    mutation = _mutation(original)
+    object.__setattr__(mutation, "coordinate_space", "page")
+
+    with pytest.raises(OwnerCompositionError, match="legacy coordinate space"):
+        compose_page(original, [mutation], [], _empty_protected(original))
 
 
 def test_atomic_owner_commit_rejects_missing_render_quality_contract() -> None:

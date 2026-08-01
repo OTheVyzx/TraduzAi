@@ -48,8 +48,10 @@ except ImportError:
 
 try:
     from ownership.model import OwnerGraph
+    from ownership.render_geometry import OwnerRenderGeometry
 except ImportError:  # pragma: no cover - supports package imports
     from ..ownership.model import OwnerGraph
+    from ..ownership.render_geometry import OwnerRenderGeometry
 
 
 _OWNER_LAYOUT_VISUAL_INPUT_FIELDS = frozenset(
@@ -80,6 +82,8 @@ _OWNER_LAYOUT_VISUAL_INPUT_FIELDS = frozenset(
         "source_x_height_median_px",
         "source_scale_evidence_confidence",
         "source_scale_evidence_ids",
+        "owner_render_geometry",
+        "owner_render_geometry_sha256",
     }
 )
 _OWNER_RENDER_ROUTES = frozenset(
@@ -969,12 +973,27 @@ def _enrich_owner_page_layout(
         ]
 
         record = copy.deepcopy(source_records.get(owner_id, {}))
+        raw_render_geometry = record.get("owner_render_geometry")
+        if isinstance(raw_render_geometry, dict):
+            render_geometry = OwnerRenderGeometry.from_dict(raw_render_geometry)
+            if (
+                render_geometry.owner_id != owner_id
+                or render_geometry.page_id != graph_page_id
+                or render_geometry.geometry_sha256
+                != str(record.get("owner_render_geometry_sha256") or "")
+                or any(
+                    str(region.get("owner_render_geometry_sha256") or "")
+                    != render_geometry.geometry_sha256
+                    for region in normalized_regions
+                )
+            ):
+                raise ValueError(f"verified render owner {owner_id} geometry binding mismatch")
         record.update(
             {
                 "id": owner_id,
                 "owner_id": owner_id,
                 "page_id": graph_page_id,
-                "coordinate_space": "page",
+                "coordinate_space": "logical_page",
                 "component_ids": list(getattr(owner, "component_ids", []) or []),
                 "observation_ids": list(getattr(owner, "observation_ids", []) or []),
                 "selected_observation_ids": list(
@@ -1048,7 +1067,7 @@ def _enrich_owner_page_layout(
         "owner_ids": list(renderable_owner_ids),
         "all_owner_ids": list(owner_ids),
         "blocked_owner_ids": list(blocked_owner_ids),
-        "coordinate_space": "page",
+        "coordinate_space": "logical_page",
     }
     updated_page.pop("_cached_image_bgr", None)
     return updated_page

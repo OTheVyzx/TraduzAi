@@ -56,6 +56,7 @@ try:
         owner_style_raster_segment_sha256,
         validate_owner_style_raster_segment,
     )
+    from ownership.render_geometry import OwnerRenderGeometry
 except ImportError:  # pragma: no cover - supports package imports
     from ..ownership.model import (
         OwnerGlyphPatch,
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - supports package imports
         owner_style_raster_segment_sha256,
         validate_owner_style_raster_segment,
     )
+    from ..ownership.render_geometry import OwnerRenderGeometry
 
 try:
     from typesetter.owner_render_quality import evaluate_owner_render_quality
@@ -7318,6 +7320,8 @@ def _owner_record_contract(record: dict) -> str:
         "visual_profile_v2",
         "visual_profile_sha256",
         "style_copy_status",
+        "owner_render_geometry",
+        "owner_render_geometry_sha256",
     )
     payload = {key: record.get(key) for key in keys if key in record}
     return json.dumps(
@@ -7334,8 +7338,8 @@ def _assert_owner_record_matches_graph(record: dict, owner: object, page_id: str
     record_page_id = str(record.get("page_id") or page_id).strip()
     if record_page_id != page_id:
         raise ValueError(f"owner {owner_id} text record belongs to another page")
-    if str(record.get("coordinate_space") or "page").strip().lower() != "page":
-        raise ValueError(f"owner {owner_id} renderer requires page-space geometry")
+    if str(record.get("coordinate_space") or "").strip().lower() != "logical_page":
+        raise ValueError(f"owner {owner_id} renderer requires logical_page geometry")
 
     scalar_fields = (
         ("source_payload", getattr(owner, "source_payload", "")),
@@ -7421,7 +7425,7 @@ def _build_owner_render_blocks(texts: list[dict], owner_graph: object) -> list[d
                 "id": owner_id,
                 "owner_id": owner_id,
                 "page_id": page_id,
-                "coordinate_space": "page",
+                "coordinate_space": "logical_page",
                 "text": str(getattr(owner, "source_payload", "") or ""),
                 "original": str(getattr(owner, "source_payload", "") or ""),
                 "source_payload": str(getattr(owner, "source_payload", "") or ""),
@@ -20986,6 +20990,19 @@ def _render_owner_band_image(
     if len(blocks) != 1 or blocks[0].get("owner_id") != owner_id:
         raise ValueError("owner renderer did not resolve exactly one owner render block")
     block = blocks[0]
+    raw_render_geometry = block.get("owner_render_geometry")
+    if not isinstance(raw_render_geometry, dict):
+        raise ValueError("owner renderer requires authenticated render geometry")
+    owner_render_geometry = OwnerRenderGeometry.from_dict(raw_render_geometry)
+    if (
+        owner_render_geometry.owner_id != owner_id
+        or owner_render_geometry.page_id != graph_page_id
+        or owner_render_geometry.page_width != width
+        or owner_render_geometry.page_height != height
+        or owner_render_geometry.geometry_sha256
+        != str(block.get("owner_render_geometry_sha256") or "")
+    ):
+        raise ValueError("owner renderer render geometry binding mismatch")
     polygon, polygon_mask, polygon_sha256 = _owner_safe_polygon_evidence(
         block.get("render_safe_polygon_page"),
         shape=(height, width),
@@ -21082,7 +21099,7 @@ def _render_owner_band_image(
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=graph_page_id,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=rendered,
         glyph_mask=glyph_mask,
         glyph_bbox_page=glyph_bbox,
@@ -21099,6 +21116,8 @@ def _render_owner_band_image(
         component_geometry_sha256=component_geometry_sha256,
         render_quality_contract=render_quality_contract,
         style_raster_contract=style_raster_contract,
+        owner_render_geometry_sha256=owner_render_geometry.geometry_sha256,
+        owner_render_geometry=owner_render_geometry,
         execution_tile_id=execution_tile_id,
         projection_role="executor",
     )

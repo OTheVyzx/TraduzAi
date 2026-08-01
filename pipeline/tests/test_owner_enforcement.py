@@ -224,6 +224,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                 provider="fixture",
                 bbox_page=bbox,
                 polygons_page=(polygon,),
+                layout_bbox_page=(4, 3, 48, 32),
             )
         ],
         owners=[
@@ -313,6 +314,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
             owner = owner_graph.owners[0]
             profile_record = _record["texts"][0]
             visual_profile = profile_record["visual_profile_v2"]
+            render_geometry = profile_record["owner_render_geometry"]
             calls.append(("typeset", owner.owner_id))
             result = image.copy()
             result[12:15, 16:25] = 3
@@ -324,7 +326,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
             return OwnerGlyphPatch(
                 owner_id=owner.owner_id,
                 page_id=owner.page_id,
-                coordinate_space="page",
+                coordinate_space="logical_page",
                 result_rgb=result,
                 glyph_mask=glyph,
                 glyph_bbox_page=(16, 12, 25, 15),
@@ -381,6 +383,8 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                         "style_application_decision_v2"
                     ],
                 ),
+                owner_render_geometry_sha256=render_geometry["geometry_sha256"],
+                owner_render_geometry=render_geometry,
                 execution_tile_id=owner.execution_tile_id,
             )
 
@@ -411,8 +415,8 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     assert execution.records[0]["style_v2_raster_contract"] == (
         execution.commits[0].glyph_patch.style_raster_contract.to_dict()
     )
-    assert execution.records[0]["safe_text_box"] == [8, 7, 42, 27]
-    assert execution.records[0]["target_bbox"] == [8, 7, 42, 27]
+    assert execution.records[0]["safe_text_box"] == [4, 3, 48, 32]
+    assert execution.records[0]["target_bbox"] == [4, 3, 48, 32]
     assert execution.records[0]["owner_mask_coverage"] == {
         "selected_observation_ids": ["observation_a"],
         "expected_line_ids": [["observation_a", 0]],
@@ -431,7 +435,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
 
     normalized = _drop_stale_final_render_geometry(dict(execution.records[0]))
     assert normalized["render_bbox"] == [16, 12, 25, 15]
-    assert normalized["safe_text_box"] == [8, 7, 42, 27]
+    assert normalized["safe_text_box"] == [4, 3, 48, 32]
     assert normalized["_final_band_render_contract_preserved"] is True
 
 
@@ -670,6 +674,10 @@ def test_unsafe_owner_mask_fails_closed_as_review_without_crashing_page(monkeypa
     owner = graph.owners[0]
     owner.route_action = "translate_inpaint_render"
     owner.translated_payload = None
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 40, 24),
+    )
     page = np.full((24, 40, 3), 230, dtype=np.uint8)
     page[7:12, 9:24] = 12
 
@@ -698,6 +706,111 @@ def test_unsafe_owner_mask_fails_closed_as_review_without_crashing_page(monkeypa
     assert execution.graph.owners[0].route_action == "review_required"
     assert execution.records[0]["visible"] is False
     assert execution.records[0]["route_action"] == "review_required"
+    assert "style_v2_raster_contract" not in execution.records[0]
+
+
+def test_dialogue_without_independent_container_stops_before_inpaint():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import execute_owner_page_graph
+
+    graph = _graph(state="execution_planned")
+    owner = graph.owners[0]
+    owner.route_action = "translate_inpaint_render"
+    owner.translated_payload = None
+    graph.observations[0] = replace(graph.observations[0], layout_bbox_page=None)
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+
+    class Translator:
+        @staticmethod
+        def translate_pages(_pages, **_kwargs):
+            return [{"texts": [{"owner_id": owner.owner_id, "translated": "DESTINO"}]}]
+
+    class MustNotRun:
+        @staticmethod
+        def inpaint_band_image(*_args, **_kwargs):
+            raise AssertionError("inpaint must not run without independent container")
+
+        @staticmethod
+        def render_band_image(*_args, **_kwargs):
+            raise AssertionError("typeset must not run without independent container")
+
+    execution = execute_owner_page_graph(
+        page,
+        graph,
+        translator=Translator(),
+        inpainter=MustNotRun(),
+        typesetter=MustNotRun(),
+    )
+
+    assert execution.commits == ()
+    assert execution.records[0]["route_action"] == "review_required"
+    assert execution.records[0]["owner_render_geometry"]["status"] == "review_required"
+    assert execution.records[0]["owner_execution_rejection_reason"] == "missing_independent_dialogue_container"
+
+
+def test_only_source_replacement_is_released_before_positive_evidence_sanitization(
+    monkeypatch,
+):
+    from inpainter.owner_mask import UnsafeOwnerMaskError
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import execute_owner_page_graph
+
+    graph = _graph(state="execution_planned")
+    owner = graph.owners[0]
+    owner.route_action = "translate_inpaint_render"
+    owner.translated_payload = None
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 40, 24),
+    )
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+    glyph = np.zeros(page.shape[:2], dtype=np.uint8)
+    glyph[7:12, 9:24] = 255
+    raw_protected = np.full_like(glyph, 255)
+    sanitizer_inputs = []
+
+    class Translator:
+        @staticmethod
+        def translate_pages(_pages, **_kwargs):
+            return [{"texts": [{"owner_id": owner.owner_id, "translated": "DESTINO"}]}]
+
+    monkeypatch.setattr(
+        "strip.process_bands._owner_component_glyph_raster",
+        lambda *_args, **_kwargs: glyph.copy(),
+    )
+    monkeypatch.setattr(
+        "strip.process_bands._owner_protected_evidence",
+        lambda *_args, **_kwargs: (raw_protected.copy(), ("fixture",), 0.0),
+    )
+
+    def capture_sanitizer(positive_mask, protected_mask):
+        sanitizer_inputs.append(protected_mask.copy())
+        result = positive_mask.copy()
+        result[protected_mask > 0] = 0
+        return result
+
+    monkeypatch.setattr(
+        "strip.process_bands.positive_evidence_excluding_protected",
+        capture_sanitizer,
+    )
+    monkeypatch.setattr(
+        "inpainter.owner_mask.build_owner_mask_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UnsafeOwnerMaskError("stop after evidence capture")
+        ),
+    )
+
+    execute_owner_page_graph(
+        page,
+        graph,
+        translator=Translator(),
+        inpainter=object(),
+        typesetter=object(),
+    )
+
+    assert sanitizer_inputs
+    assert int(sanitizer_inputs[0][8, 12]) == 0
+    assert int(sanitizer_inputs[0][18, 32]) == 255
 
 
 def test_semantic_modules_do_not_branch_on_work_chapter_page_number_or_band_id():

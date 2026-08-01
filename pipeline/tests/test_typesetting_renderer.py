@@ -50,6 +50,7 @@ from ownership.model import (
     owner_style_raster_segment_sha256,
     validate_owner_style_raster_contract,
 )
+from ownership.render_geometry import build_owner_render_geometry
 
 from main import (
     _apply_dark_panel_style_groups,
@@ -461,7 +462,7 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreater(float(rendered[changed].mean()), 150.0)
         self.assertEqual(block["estilo"]["cor"], "#FFFFFF")
 
-    def test_render_band_image_owner_mode_returns_page_space_glyph_patch(self):
+    def test_render_band_image_owner_mode_returns_logical_page_glyph_patch(self):
         canvas = np.full((120, 180, 3), 235, dtype=np.uint8)
         action_mask_ref = (
             "owner_masks/owner_body--"
@@ -525,6 +526,22 @@ class TypesettingRendererTests(unittest.TestCase):
             ],
         )
         graph.require_valid()
+        protected_sha256 = renderer_mod._owner_array_sha256(
+            np.zeros(canvas.shape[:2], dtype=np.uint8)
+        )
+        render_geometry = build_owner_render_geometry(
+            graph,
+            owner.owner_id,
+            page_width=canvas.shape[1],
+            page_height=canvas.shape[0],
+            container_evidence={
+                "evidence_id": "balloon_fixture",
+                "source": "balloon_inner_polygon",
+                "bbox_page": component.bbox_page,
+                "confidence": 1.0,
+            },
+            protected_art_mask_sha256=protected_sha256,
+        )
         page = {
             "page_id": "page_001",
             "width": 180,
@@ -534,7 +551,7 @@ class TypesettingRendererTests(unittest.TestCase):
                     "id": "owner_body",
                     "owner_id": "owner_body",
                     "page_id": "page_001",
-                    "coordinate_space": "page",
+                    "coordinate_space": "logical_page",
                     "translated": "CORPO TRADUZIDO",
                     "route_action": "translate_inpaint_render",
                     "action_mask_ref": owner.action_mask_ref,
@@ -556,6 +573,8 @@ class TypesettingRendererTests(unittest.TestCase):
                         "text_color_confidence": 0.95,
                     },
                     "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 22},
+                    "owner_render_geometry": render_geometry.to_dict(),
+                    "owner_render_geometry_sha256": render_geometry.geometry_sha256,
                 }
             ],
         }
@@ -600,7 +619,7 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIsInstance(glyph_patch, OwnerGlyphPatch)
         self.assertEqual(glyph_patch.owner_id, "owner_body")
         self.assertEqual(glyph_patch.page_id, "page_001")
-        self.assertEqual(glyph_patch.coordinate_space, "page")
+        self.assertEqual(glyph_patch.coordinate_space, "logical_page")
         self.assertEqual(glyph_patch.execution_tile_id, "tile_executor")
         self.assertEqual(glyph_patch.projection_role, "executor")
         self.assertTrue(glyph_patch.render_completed)

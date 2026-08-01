@@ -35,8 +35,8 @@ class UnsafeOwnerMaskError(ValueError):
     """Raised when an owner has no safe pixel evidence for automatic cleanup."""
 
 
-OWNER_MASK_COORDINATE_SPACE = "page"
-OWNER_MASK_SCHEMA_VERSION = 4
+OWNER_MASK_COORDINATE_SPACE = "logical_page"
+OWNER_MASK_SCHEMA_VERSION = 5
 OWNER_RESIDUAL_THRESHOLD = 0.01
 OWNER_RESIDUAL_METHOD = "detect_residual_text.v1"
 
@@ -75,6 +75,7 @@ class OwnerMaskPlan:
     component_bboxes_page: tuple[tuple[str, tuple[int, int, int, int]], ...] = ()
     owner_bbox_page: tuple[int, int, int, int] = (0, 0, 0, 0)
     component_geometry_sha256: str = ""
+    owner_render_geometry_sha256: str = ""
     component_geometry_verified: bool = False
     expected_line_ids: tuple[tuple[str, int], ...] = ()
     covered_line_ids: tuple[tuple[str, int], ...] = ()
@@ -699,6 +700,7 @@ def build_owner_mask_plan(
     *,
     owner_component_bboxes_page: Mapping[str, Sequence[int]] | None = None,
     expected_line_ids: Sequence[tuple[str, int]] | None = None,
+    owner_render_geometry_sha256: str | None = None,
 ) -> OwnerMaskPlan:
     """Build a mask only from explicit owned glyph/line evidence, never a bbox."""
 
@@ -1044,6 +1046,25 @@ def build_owner_mask_plan(
         component_geometry_sha256 = _component_geometry_sha256(
             component_bboxes_page
         )
+        render_geometry_sha256 = (
+            _canonical_identity(
+                owner_render_geometry_sha256,
+                label="owner render geometry SHA-256",
+            )
+            if owner_render_geometry_sha256 is not None
+            else sha256(
+                (
+                    "traduzai.owner_render_geometry.compat.v1\0"
+                    + page_id
+                    + "\0"
+                    + owner_id
+                    + "\0"
+                    + component_geometry_sha256
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", render_geometry_sha256):
+            raise UnsafeOwnerMaskError("owner render geometry hash is not canonical")
         if component_geometry_verified:
             (
                 component_action_bboxes_page,
@@ -1096,6 +1117,7 @@ def build_owner_mask_plan(
             component_bboxes_page=component_bboxes_page,
             owner_bbox_page=owner_bbox_page,
             component_geometry_sha256=component_geometry_sha256,
+            owner_render_geometry_sha256=render_geometry_sha256,
             component_geometry_verified=component_geometry_verified,
             expected_line_ids=canonical_expected_line_ids,
             covered_line_ids=canonical_covered_line_ids,
@@ -1166,6 +1188,7 @@ def _mask_manifest(plan: OwnerMaskPlan) -> dict[str, Any]:
         ],
         "owner_bbox_page": list(plan.owner_bbox_page),
         "component_geometry_sha256": plan.component_geometry_sha256,
+        "owner_render_geometry_sha256": plan.owner_render_geometry_sha256,
         "component_geometry_verified": plan.component_geometry_verified,
     }
 
@@ -1229,6 +1252,7 @@ def _validate_persisted_mask_pair(plan: OwnerMaskPlan, directory: Path) -> None:
         "component_bboxes_page",
         "owner_bbox_page",
         "component_geometry_sha256",
+        "owner_render_geometry_sha256",
         "component_geometry_verified",
     ):
         if manifest.get(key) != expected.get(key):
@@ -1378,6 +1402,7 @@ def load_owner_action_mask(
     expected_source_sha256: str,
     expected_execution_tile_id: str,
     expected_component_geometry_sha256: str,
+    expected_owner_render_geometry_sha256: str | None = None,
 ) -> np.ndarray:
     """Load an addressable lossless owner action mask."""
 
@@ -1554,6 +1579,17 @@ def load_owner_action_mask(
         raise UnsafeOwnerMaskError(
             "owner action mask belongs to another component geometry revision"
         )
+    manifest_render_geometry_sha256 = _canonical_identity(
+        manifest.get("owner_render_geometry_sha256"),
+        label="owner mask manifest render geometry SHA-256",
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest_render_geometry_sha256):
+        raise UnsafeOwnerMaskError("owner mask manifest render geometry hash is not canonical")
+    if (
+        expected_owner_render_geometry_sha256 is not None
+        and manifest_render_geometry_sha256 != expected_owner_render_geometry_sha256
+    ):
+        raise UnsafeOwnerMaskError("owner action mask belongs to another render geometry revision")
     expected_action_ref, expected_protected_ref = _safe_owner_ref(
         manifest_owner_id,
         manifest_page_id,
@@ -1791,6 +1827,7 @@ def execute_owner_inpaint(
         engine_crop_bbox_page=(crop_x1, crop_y1, crop_x2, crop_y2),
         owner_bbox_page=plan.owner_bbox_page,
         component_geometry_sha256=plan.component_geometry_sha256,
+        owner_render_geometry_sha256=plan.owner_render_geometry_sha256,
         component_geometry_verified=plan.component_geometry_verified,
         protected_art_mask_sha256=protected_art_mask_sha256,
         residual_score=residual_score,

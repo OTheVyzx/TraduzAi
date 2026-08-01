@@ -20,6 +20,7 @@ try:
         OwnerMutation,
         PageCompositionResult,
     )
+    from ownership.render_geometry import OwnerRenderGeometry
 except ImportError:  # pragma: no cover - supports package imports
     from ..ownership.model import (
         OwnerCompositionConflict,
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - supports package imports
         OwnerMutation,
         PageCompositionResult,
     )
+    from ..ownership.render_geometry import OwnerRenderGeometry
 
 
 class OwnerCompositionError(ValueError):
@@ -256,8 +258,8 @@ def _validate_mutation(
         raise OwnerCompositionError("mutation must be an OwnerMutation")
     owner_id = _canonical_identity(mutation.owner_id, label="mutation owner_id")
     page_id = _canonical_identity(mutation.page_id, label="mutation page_id")
-    if mutation.coordinate_space != "page":
-        raise OwnerCompositionError("mutation coordinate space must be page")
+    if mutation.coordinate_space != "logical_page":
+        raise OwnerCompositionError("mutation uses legacy coordinate space; logical_page required")
     if mutation.color_space != "RGB":
         raise OwnerCompositionError("mutation color space must be RGB")
     if mutation.projection_role != "executor":
@@ -276,6 +278,10 @@ def _validate_mutation(
     component_hash = _canonical_hash(
         mutation.component_geometry_sha256,
         label="mutation component_geometry_sha256",
+    )
+    render_geometry_hash = _canonical_hash(
+        mutation.owner_render_geometry_sha256,
+        label="mutation owner_render_geometry_sha256",
     )
 
     result = _canonical_rgb(
@@ -385,6 +391,7 @@ def _validate_mutation(
             "engine_crop_bbox_page": crop_bbox,
             "owner_bbox_page": owner_bbox,
             "component_geometry_sha256": component_hash,
+            "owner_render_geometry_sha256": render_geometry_hash,
             "before_sha256": mutation.before_sha256,
             "after_sha256": mutation.after_sha256,
             "action_mask_sha256": mutation.action_mask_sha256,
@@ -419,8 +426,8 @@ def _validate_glyph_patch(
         raise OwnerCompositionError("glyph patch must be an OwnerGlyphPatch")
     owner_id = _canonical_identity(glyph_patch.owner_id, label="glyph owner_id")
     page_id = _canonical_identity(glyph_patch.page_id, label="glyph page_id")
-    if glyph_patch.coordinate_space != "page":
-        raise OwnerCompositionError("glyph coordinate space must be page")
+    if glyph_patch.coordinate_space != "logical_page":
+        raise OwnerCompositionError("glyph uses legacy coordinate space; logical_page required")
     if glyph_patch.color_space != "RGB":
         raise OwnerCompositionError("glyph color space must be RGB")
     if glyph_patch.projection_role != "executor":
@@ -444,10 +451,39 @@ def _validate_glyph_patch(
             != mutation.value.component_geometry_sha256
         ):
             raise OwnerCompositionError("glyph component geometry revision mismatch")
+        if (
+            glyph_patch.owner_render_geometry_sha256
+            != mutation.value.owner_render_geometry_sha256
+        ):
+            raise OwnerCompositionError("glyph owner render geometry revision mismatch")
     component_hash = _canonical_hash(
         glyph_patch.component_geometry_sha256,
         label="glyph component_geometry_sha256",
     )
+    render_geometry_hash = _canonical_hash(
+        glyph_patch.owner_render_geometry_sha256,
+        label="glyph owner_render_geometry_sha256",
+    )
+    try:
+        render_geometry = (
+            glyph_patch.owner_render_geometry
+            if isinstance(glyph_patch.owner_render_geometry, OwnerRenderGeometry)
+            else OwnerRenderGeometry.from_dict(glyph_patch.owner_render_geometry)
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise OwnerCompositionError("glyph owner render geometry is invalid") from exc
+    if (
+        render_geometry.geometry_sha256 != render_geometry_hash
+        or render_geometry.owner_id != owner_id
+        or render_geometry.page_id != page_id
+    ):
+        raise OwnerCompositionError("glyph owner render geometry binding mismatch")
+    if (
+        mutation is not None
+        and render_geometry.protected_art_mask_sha256
+        != mutation.value.protected_art_mask_sha256
+    ):
+        raise OwnerCompositionError("owner render geometry protected-art hash mismatch")
 
     result = _canonical_rgb(
         glyph_patch.result_rgb,
@@ -523,6 +559,7 @@ def _validate_glyph_patch(
             "render_safe_polygon_page": safe_polygon,
             "render_safe_polygon_sha256": polygon_hash,
             "component_geometry_sha256": component_hash,
+            "owner_render_geometry_sha256": render_geometry_hash,
             "changed_outside_glyph_mask_pixels": outside_count,
         },
     )

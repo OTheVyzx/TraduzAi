@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from dataclasses import replace
+import importlib.util
+
+import pytest
+
+from ownership.model import (
+    OwnerGraph,
+    OwnerProjection,
+    SourceTextComponent,
+    TextObservation,
+    TextOwner,
+)
+
+
+def _polygon(bbox: tuple[int, int, int, int]):
+    x1, y1, x2, y2 = bbox
+    return ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+
+
+def _graph(*, role: str = "dialogue", reverse: bool = False) -> OwnerGraph:
+    components = [
+        SourceTextComponent("component_a", "page_1", (20, 30, 70, 55), _polygon((20, 30, 70, 55)), ("detector",), evidence_ids=("det_a",)),
+        SourceTextComponent("component_b", "page_1", (22, 58, 82, 86), _polygon((22, 58, 82, 86)), ("detector",), evidence_ids=("det_b",)),
+    ]
+    observations = [
+        TextObservation(
+            "observation_a", "page_1", ("component_a", "component_b"),
+            "SOURCE BODY", 0.94, "paddle", (24, 32, 78, 83),
+            polygons_page=(_polygon((24, 32, 68, 53)), _polygon((26, 60, 78, 83))),
+            tile_provenance=("tile_002", "tile_001"),
+            projection_ids=("projection_b", "projection_a"),
+        )
+    ]
+    projections = [
+        OwnerProjection("owner_a", "tile_002", "support", (0, 40, 100, 100), (0, 0, 100, 60), (0, 40)),
+        OwnerProjection("owner_a", "tile_001", "executor", (0, 0, 100, 60), (0, 0, 100, 60), (0, 0)),
+    ]
+    if reverse:
+        components.reverse()
+        observations.reverse()
+        projections.reverse()
+    return OwnerGraph(
+        schema_version=2,
+        page_id="page_1",
+        components=components,
+        observations=observations,
+        owners=[TextOwner("owner_a", "page_1", ["component_b", "component_a"], ["observation_a"], ["observation_a"], role, "SOURCE BODY", "CORPO COMPLETO", "owned", "translated", "translate", "tile_001")],
+        projections=projections,
+    )
+
+
+def _container():
+    return {
+        "evidence_id": "balloon_7",
+        "source": "balloon_inner_polygon",
+        "bbox_page": (10, 15, 95, 100),
+        "polygon_page": _polygon((10, 15, 95, 100)),
+        "confidence": 0.91,
+    }
+
+
+def test_owner_render_geometry_contract_is_importable_before_behavioral_checks():
+    assert importlib.util.find_spec("ownership.render_geometry") is not None
+
+
+def test_owner_render_geometry_contains_complete_page_space_owner_evidence():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    geometry = build_owner_render_geometry(
+        _graph(), "owner_a", page_width=100, page_height=120,
+        container_evidence=_container(), protected_art_mask_sha256="a" * 64,
+    )
+
+    assert geometry.logical_space == "logical_page"
+    assert geometry.component_ids == ("component_a", "component_b")
+    assert all(component.geometry_sha256 for component in geometry.components)
+    assert all(observation.polygon_page for observation in geometry.selected_observations)
+    assert all(projection.projection_sha256 for projection in geometry.projections)
+    assert geometry.semantic_body_bbox_page == (20, 30, 82, 86)
+    assert geometry.source_replacement_bbox_page == (24, 32, 78, 83)
+    assert geometry.layout_container_source == "balloon_inner_polygon"
+    assert geometry.layout_container_bbox_page == (10, 15, 95, 100)
+    assert geometry.container_evidence_ids == ("balloon_7",)
+    assert geometry.container_evidence_confidence == 0.91
+    assert len(geometry.geometry_sha256) == 64
+
+
+def test_source_replacement_never_becomes_dialogue_layout_container_without_evidence():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    geometry = build_owner_render_geometry(_graph(), "owner_a", page_width=100, page_height=120)
+
+    assert geometry.source_replacement_bbox_page == (24, 32, 78, 83)
+    assert geometry.layout_container_bbox_page is None
+    assert geometry.status == "review_required"
+    assert geometry.reason == "missing_independent_dialogue_container"
+
+
+def test_freeform_sfx_may_use_typed_component_union_not_cleanup_footprint():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    geometry = build_owner_render_geometry(_graph(role="freeform_sfx"), "owner_a", page_width=100, page_height=120)
+
+    assert geometry.layout_container_source == "freeform_component_union"
+    assert geometry.layout_container_bbox_page == geometry.semantic_body_bbox_page
+    assert geometry.layout_container_bbox_page != geometry.source_replacement_bbox_page
+    assert geometry.status == "ready"
+
+
+def test_geometry_hash_covers_polygons_not_only_ids_and_union_bbox():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    first_graph = _graph(role="freeform_sfx")
+    second_graph = _graph(role="freeform_sfx")
+    second_graph.components[0] = replace(
+        second_graph.components[0],
+        polygon_page=((20, 30), (70, 30), (65, 55), (20, 55)),
+    )
+
+    first = build_owner_render_geometry(first_graph, "owner_a", page_width=100, page_height=120)
+    second = build_owner_render_geometry(second_graph, "owner_a", page_width=100, page_height=120)
+
+    assert first.component_ids == second.component_ids
+    assert first.semantic_body_bbox_page == second.semantic_body_bbox_page
+    assert first.component_geometry_sha256 != second.component_geometry_sha256
+    assert first.geometry_sha256 != second.geometry_sha256
+
+
+def test_geometry_is_invariant_to_graph_and_executor_order():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    first = build_owner_render_geometry(_graph(), "owner_a", page_width=100, page_height=120, container_evidence=_container(), protected_art_mask_sha256="a" * 64)
+    second = build_owner_render_geometry(_graph(reverse=True), "owner_a", page_width=100, page_height=120, container_evidence=_container(), protected_art_mask_sha256="a" * 64)
+
+    assert first.to_dict() == second.to_dict()
+
+
+def test_round_trip_rejects_tampered_geometry_or_nested_hash():
+    from ownership.render_geometry import OwnerRenderGeometry, build_owner_render_geometry
+
+    geometry = build_owner_render_geometry(_graph(), "owner_a", page_width=100, page_height=120, container_evidence=_container(), protected_art_mask_sha256="a" * 64)
+    payload = geometry.to_dict()
+    assert OwnerRenderGeometry.from_dict(payload) == geometry
+
+    with pytest.raises(ValueError, match="geometry hash"):
+        OwnerRenderGeometry.from_dict({**payload, "geometry_sha256": "0" * 64})
+    payload["components"][0]["geometry_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="component geometry hash"):
+        OwnerRenderGeometry.from_dict(payload)
+
+
+def test_connected_subregions_and_projection_offsets_are_typed_and_bound():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    geometry = build_owner_render_geometry(_graph(role="freeform_sfx"), "owner_a", page_width=100, page_height=120)
+
+    assert tuple(region.component_ids for region in geometry.connected_subregions) == (("component_a",), ("component_b",))
+    assert tuple(region.order for region in geometry.connected_subregions) == (0, 1)
+    assert geometry.projections[0].tile_to_page_offset_xy == (0, 0)
+    assert geometry.projections[0].role == "executor"
+    assert geometry.projections[1].tile_to_page_offset_xy == (0, 40)

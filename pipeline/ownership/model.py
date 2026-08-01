@@ -280,6 +280,7 @@ class OwnerMutation:
     engine_crop_bbox_page: BBox
     owner_bbox_page: BBox
     component_geometry_sha256: str
+    owner_render_geometry_sha256: str = ""
     protected_art_mask_sha256: str | None = None
     residual_score: float | None = None
     residual_verified: bool = False
@@ -1063,6 +1064,8 @@ class OwnerGlyphPatch:
     component_geometry_sha256: str
     render_quality_contract: OwnerRenderQuality
     style_raster_contract: OwnerStyleRasterContract | OwnerStyleRasterContractV2
+    owner_render_geometry_sha256: str = ""
+    owner_render_geometry: Any = None
     execution_tile_id: str | None = None
     projection_role: str = "executor"
     color_space: str = "RGB"
@@ -1087,6 +1090,22 @@ class OwnerGlyphPatch:
             raise ValueError(
                 "owner glyph patch style raster contract geometry mismatch"
             )
+        if self.owner_render_geometry is not None:
+            try:
+                from .render_geometry import OwnerRenderGeometry
+
+                geometry = (
+                    self.owner_render_geometry
+                    if isinstance(self.owner_render_geometry, OwnerRenderGeometry)
+                    else OwnerRenderGeometry.from_dict(self.owner_render_geometry)
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                raise ValueError("owner glyph patch render geometry is invalid") from exc
+            if geometry.owner_id != self.owner_id or geometry.page_id != self.page_id:
+                raise ValueError("owner glyph patch render geometry identity mismatch")
+            if geometry.geometry_sha256 != self.owner_render_geometry_sha256:
+                raise ValueError("owner glyph patch render geometry hash mismatch")
+            object.__setattr__(self, "owner_render_geometry", geometry)
         if self.style_raster_contract.rendered_after_sha256 != self.after_sha256:
             raise ValueError(
                 "owner glyph patch style raster contract after hash mismatch"
@@ -1129,7 +1148,7 @@ class PageCompositionResult:
     write_counts: dict[str, int]
     sha256: str
     page_id: str | None = None
-    coordinate_space: str = "page"
+    coordinate_space: str = "logical_page"
     committed: bool = True
     page_surface_geometry_sha256: str | None = None
 

@@ -16,7 +16,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ownership import model as owner_model  # noqa: E402
-from ownership.model import OwnerMutation, owner_residual_evidence_sha256  # noqa: E402
+from ownership.model import (  # noqa: E402
+    OwnerGraph,
+    OwnerMutation,
+    OwnerProjection,
+    SourceTextComponent,
+    TextObservation,
+    TextOwner,
+    owner_residual_evidence_sha256,
+)
+from ownership.render_geometry import build_owner_render_geometry  # noqa: E402
 from strip import process_bands  # noqa: E402
 from style_v2_fixtures import (  # noqa: E402
     valid_owner_style_raster_contract,
@@ -86,6 +95,35 @@ def _render_quality(glyph_mask: np.ndarray) -> OwnerRenderQuality:
     )
 
 
+def _render_geometry(
+    *,
+    owner_id: str,
+    bbox: tuple[int, int, int, int],
+    shape: tuple[int, int],
+    protected_art_mask_sha256: str,
+):
+    height, width = shape
+    component_id = f"component_{owner_id}"
+    observation_id = f"observation_{owner_id}"
+    x1, y1, x2, y2 = bbox
+    polygon = ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+    graph = OwnerGraph(
+        2,
+        "page_001",
+        [SourceTextComponent(component_id, "page_001", bbox, polygon, ("fixture",))],
+        [TextObservation(observation_id, "page_001", (component_id,), "SOURCE", 1.0, "fixture", bbox, polygons_page=(polygon,))],
+        [TextOwner(owner_id, "page_001", [component_id], [observation_id], [observation_id], "freeform_sfx", "SOURCE", "ALVO", "owned", "translated", "translate_inpaint_render", "tile_executor")],
+        [OwnerProjection(owner_id, "tile_executor", "executor", (0, 0, width, height), (0, 0, width, height), (0, 0))],
+    )
+    return build_owner_render_geometry(
+        graph,
+        owner_id,
+        page_width=width,
+        page_height=height,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+    )
+
+
 def _atomic_api() -> tuple[Any, type[Any], type[Any]]:
     """Resolve the wished-for Task 11 API inside each test for six useful REDs."""
 
@@ -117,6 +155,12 @@ def _mutation(
     action_mask_sha256 = _array_sha256(action_mask)
     protected_art_mask_sha256 = _array_sha256(protected_art_mask)
     component_geometry_sha256 = sha256(b"component-geometry").hexdigest()
+    render_geometry = _render_geometry(
+        owner_id=owner_id,
+        bbox=owner_bbox_page,
+        shape=original_rgb.shape[:2],
+        protected_art_mask_sha256=protected_art_mask_sha256,
+    )
     residual_evidence_sha256 = owner_residual_evidence_sha256(
         owner_id=owner_id,
         page_id="page_001",
@@ -133,7 +177,7 @@ def _mutation(
     return OwnerMutation(
         owner_id=owner_id,
         page_id="page_001",
-        coordinate_space="page",
+        coordinate_space="logical_page",
         action_mask_ref=_action_mask_ref(owner_id, execution_tile_id or "context_only"),
         result_rgb=result_rgb,
         action_mask=action_mask,
@@ -151,6 +195,7 @@ def _mutation(
         engine_crop_bbox_page=(0, 0, original_rgb.shape[1], original_rgb.shape[0]),
         owner_bbox_page=owner_bbox_page,
         component_geometry_sha256=component_geometry_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
         protected_art_mask_sha256=protected_art_mask_sha256,
         residual_score=0.0,
         residual_verified=True,
@@ -269,10 +314,16 @@ def _glyph_patch(
     safe_polygon = render_safe_polygon_page or _safe_polygon_for_bbox(
         mutation.owner_bbox_page
     )
+    render_geometry = _render_geometry(
+        owner_id=mutation.owner_id,
+        bbox=mutation.owner_bbox_page,
+        shape=rendered_rgb.shape[:2],
+        protected_art_mask_sha256=str(mutation.protected_art_mask_sha256),
+    )
     return glyph_patch_type(
         owner_id=mutation.owner_id,
         page_id=mutation.page_id,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=rendered_rgb,
         glyph_mask=glyph_mask,
         glyph_bbox_page=(5, 5, 7, 7) if render_completed else None,
@@ -297,6 +348,8 @@ def _glyph_patch(
                 component_geometry_sha256=mutation.component_geometry_sha256,
             )
         ),
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
         execution_tile_id=mutation.execution_tile_id,
         projection_role=projection_role,
     )
@@ -571,10 +624,16 @@ def _glyph_patch_for_mask(
     safe_polygon = render_safe_polygon_page or _safe_polygon_for_bbox(
         mutation.owner_bbox_page
     )
+    render_geometry = _render_geometry(
+        owner_id=mutation.owner_id,
+        bbox=mutation.owner_bbox_page,
+        shape=rendered_rgb.shape[:2],
+        protected_art_mask_sha256=str(mutation.protected_art_mask_sha256),
+    )
     return glyph_patch_type(
         owner_id=mutation.owner_id,
         page_id=mutation.page_id,
-        coordinate_space="page",
+        coordinate_space="logical_page",
         result_rgb=rendered_rgb,
         glyph_mask=glyph_mask,
         glyph_bbox_page=glyph_bbox,
@@ -596,6 +655,8 @@ def _glyph_patch_for_mask(
             glyph_mask=glyph_mask,
             component_geometry_sha256=mutation.component_geometry_sha256,
         ),
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
         execution_tile_id=mutation.execution_tile_id,
         projection_role="executor",
     )
