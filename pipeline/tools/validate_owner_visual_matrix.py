@@ -41,6 +41,13 @@ REQUIRED_VISUAL_CATEGORIES = frozenset(
         "primary_ocr_omission",
     }
 )
+REQUIRED_HOLDOUT_CATEGORIES = (
+    "white_balloon",
+    "burst",
+    "cross_tile_owner",
+    "dark_panel",
+    "text_over_art",
+)
 
 REQUIRED_FINAL_PIXEL_CONTRACTS = frozenset(
     {
@@ -102,6 +109,8 @@ def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
         if str(source_crop.get("coordinate_space") or ""):
             crop_valid = crop_valid and source_crop.get("coordinate_space") == "logical_page"
             crop_valid = crop_valid and target.get("expected_artifact_space") == "framed_page"
+            crop_valid = crop_valid and bool(str(target.get("semantic_role") or "").strip())
+            crop_valid = crop_valid and isinstance(target.get("is_speech"), bool)
         if missing_target or not isinstance(component_ids, list) or not component_ids or not crop_valid:
             raise MatrixContractError(f"matrix entry {index} target {target_index} is incomplete")
         normalized_target = dict(target)
@@ -1165,11 +1174,18 @@ def _write_contact_sheets(
 
 
 def build_inspection_template(
-    sheets: dict[str, list[str]], output_root: Path
+    sheets: dict[str, list[str]], output_root: Path,
+    entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     artifacts: list[dict[str, Any]] = []
     by_hash: dict[str, dict[str, Any]] = {}
     root = output_root.resolve()
+    targets = {
+        (str(entry.get("entry_id") or ""), str(target.get("page_id") or ""), str(target.get("owner_id") or "")): target
+        for entry in entries or []
+        for target in entry.get("targets") or []
+        if isinstance(entry, dict) and isinstance(target, dict)
+    }
     for category, paths in sorted(sheets.items()):
         for raw_path in paths:
             artifact = Path(raw_path).resolve()
@@ -1207,6 +1223,24 @@ def build_inspection_template(
                     "safe_geometry",
                 ],
             }
+            metadata_path = artifact.with_suffix(".metadata.json")
+            if metadata_path.is_file():
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                identity = (
+                    str(metadata.get("entry_id") or ""),
+                    str(metadata.get("page_id") or ""),
+                    str(metadata.get("owner_id") or ""),
+                )
+                target = targets.get(identity, {})
+                row.update({
+                    "entry_id": identity[0], "page_id": identity[1], "owner_id": identity[2],
+                    "split": str(target.get("split") or ""),
+                    "semantic_role": str(target.get("semantic_role") or ""),
+                    "is_speech": bool(target.get("is_speech")),
+                    "source_sha256": str((target.get("source_crop") or {}).get("sha256") or ""),
+                    "final_sha256": str((((metadata.get("panels") or {}).get("final") or {}).get("source_sha256") or "")),
+                    "page_surface_geometry_sha256": str(metadata.get("page_surface_geometry_sha256") or ""),
+                })
             artifacts.append(row)
             by_hash[digest] = row
     return {"schema_version": 2, "artifacts": artifacts}
@@ -1273,7 +1307,7 @@ def validate_inspection_manifest(
         if functional not in {"GO", "NO-GO"} or style not in {"GO", "NO-GO"}:
             raise MatrixContractError(f"inspection verdict invalid: {raw_path}")
         overall = "GO" if functional == style == "GO" else "NO-GO"
-        verified.append({**row, "artifact_path": raw_path, "sha256": claimed_hash, "overall_verdict": overall})
+        verified.append({**expected_row, **row, "artifact_path": raw_path, "sha256": claimed_hash, "overall_verdict": overall})
     missing = sorted(set(expected) - seen)
     for raw_path in missing:
         expected_row = expected[raw_path]
@@ -1288,9 +1322,215 @@ def validate_inspection_manifest(
                 "style_verdict": "PENDING",
                 "functional_note": "inspection pending",
                 "style_note": "inspection pending",
+                **{
+                    key: expected_row.get(key)
+                    for key in (
+                        "entry_id", "page_id", "owner_id", "split", "semantic_role", "is_speech",
+                        "source_sha256", "final_sha256", "page_surface_geometry_sha256",
+                    )
+                },
             }
         )
     return verified
+
+
+def _matrix_targets(matrix: dict[str, Any]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in matrix.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("entry_id") or "").strip()
+        for target in entry.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            row = {
+                **target,
+                "entry_id": entry_id,
+                "split": str(target.get("split") or entry.get("split") or ""),
+            }
+            key = (entry_id, str(row.get("page_id") or ""), str(row.get("owner_id") or ""))
+            if not all(key) or key in seen:
+                raise MatrixContractError(f"duplicate or invalid matrix target: {key}")
+            seen.add(key)
+            targets.append(row)
+    return targets
+
+
+def build_style_holdout_summary(
+    *,
+    matrix: dict[str, Any],
+    inspection: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build GO rates from authenticated holdout owner targets only."""
+
+    findings: list[dict[str, Any]] = []
+    try:
+        targets = _matrix_targets(matrix)
+    except MatrixContractError as exc:
+        targets = []
+        findings.append({"code": "matrix_target_invalid", "detail": str(exc)})
+    target_by_key = {
+        (str(row["entry_id"]), str(row["page_id"]), str(row["owner_id"])): row
+        for row in targets
+    }
+    rows_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    seen_artifacts: set[tuple[tuple[str, str, str], str]] = set()
+    for row in inspection if isinstance(inspection, list) else []:
+        if not isinstance(row, dict):
+            findings.append({"code": "inspection_row_invalid"})
+            continue
+        key = (str(row.get("entry_id") or ""), str(row.get("page_id") or ""), str(row.get("owner_id") or ""))
+        target = target_by_key.get(key)
+        if target is None:
+            findings.append({"code": "inspection_target_unbound", "target_key": ":".join(key)})
+            continue
+        artifact_key = (key, str(row.get("artifact_path") or ""))
+        if not artifact_key[1] or artifact_key in seen_artifacts:
+            findings.append({"code": "inspection_target_duplicate", "target_key": ":".join(key)})
+            continue
+        seen_artifacts.add(artifact_key)
+        expected_source = str((target.get("source_crop") or {}).get("sha256") or "").lower()
+        bindings = {
+            "category": str(target.get("category") or ""),
+            "split": str(target.get("split") or ""),
+            "source_sha256": expected_source,
+        }
+        mismatch = [name for name, expected in bindings.items() if str(row.get(name) or "").lower() != expected.lower()]
+        if mismatch or len(str(row.get("final_sha256") or "")) != 64 or len(str(row.get("page_surface_geometry_sha256") or "")) != 64:
+            findings.append({"code": "inspection_binding_mismatch", "target_key": ":".join(key), "fields": mismatch})
+            continue
+        rows_by_key.setdefault(key, []).append(row)
+
+    holdout = [row for row in targets if row.get("split") == "holdout"]
+    categories: dict[str, dict[str, Any]] = {}
+    owner_go = 0
+    speech_evaluated = speech_go = 0
+    inspected_count = 0
+    for target in holdout:
+        key = (str(target["entry_id"]), str(target["page_id"]), str(target["owner_id"]))
+        rows = rows_by_key.get(key, [])
+        complete = bool(rows)
+        go = complete and all(
+            str(row.get("overall_verdict") or "PENDING").upper() == "GO"
+            and str(row.get("functional_verdict") or "PENDING").upper() == "GO"
+            and str(row.get("style_verdict") or "PENDING").upper() == "GO"
+            for row in rows
+        )
+        inspected_count += int(complete)
+        owner_go += int(go)
+        if not complete:
+            findings.append({"code": "inspection_target_missing", "target_key": ":".join(key)})
+        elif not go:
+            findings.append({"code": "inspection_target_not_go", "target_key": ":".join(key)})
+        if bool(target.get("is_speech")):
+            speech_evaluated += 1
+            speech_go += int(go)
+        category = str(target.get("category") or "")
+        metric = categories.setdefault(category, {"evaluated": 0, "go": 0, "go_rate": 0.0})
+        metric["evaluated"] += 1
+        metric["go"] += int(go)
+    for metric in categories.values():
+        metric["go_rate"] = metric["go"] / metric["evaluated"] if metric["evaluated"] else 0.0
+    for category in REQUIRED_HOLDOUT_CATEGORIES:
+        metric = categories.setdefault(category, {"evaluated": 0, "go": 0, "go_rate": 0.0})
+        if metric["evaluated"] == 0:
+            findings.append({"code": "required_holdout_category_empty", "category": category})
+    owners_evaluated = len(holdout)
+    summary = {
+        "schema_version": 1,
+        "status": "BLOCK" if findings else "PASS",
+        "required_holdout_categories": list(REQUIRED_HOLDOUT_CATEGORIES),
+        "calibration_owner_count": sum(row.get("split") == "calibration" for row in targets),
+        "owners": {"evaluated": owners_evaluated, "go": owner_go, "go_rate": owner_go / owners_evaluated if owners_evaluated else 0.0},
+        "speech": {"evaluated": speech_evaluated, "go": speech_go, "go_rate": speech_go / speech_evaluated if speech_evaluated else 0.0},
+        "categories": categories,
+        "inspection_coverage": {"evaluated": owners_evaluated, "inspected": inspected_count, "rate": inspected_count / owners_evaluated if owners_evaluated else 0.0},
+        "matrix_sha256": _canonical_payload_sha256(matrix),
+        "inspection_sha256": _canonical_payload_sha256(inspection),
+        "findings": findings,
+    }
+    return summary
+
+
+def _verified_report(report: dict[str, Any]) -> bool:
+    if int(report.get("schema_version") or 0) != 3:
+        return False
+    claimed = str(report.get("report_sha256") or "")
+    return len(claimed) == 64 and claimed == _canonical_payload_sha256(report, omit="report_sha256")
+
+
+def build_owner_qa_summary(
+    *,
+    matrix: dict[str, Any],
+    entry_reports: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate only self-hashed style QA reports bound to matrix entries."""
+
+    findings: list[dict[str, Any]] = []
+    targets = _matrix_targets(matrix)
+    expected_entries = {str(entry.get("entry_id") or "") for entry in matrix.get("entries") or [] if isinstance(entry, dict)}
+    if set(entry_reports) != expected_entries:
+        findings.append({"code": "entry_style_report_set_mismatch"})
+    eligible = rendered = observation_count = 0
+    safe_evaluated = safe_contained = 0
+    effect_evaluated = effect_contained = 0
+    catastrophic_evaluated = catastrophic_count = 0
+    seen_owner_keys: set[tuple[str, str, str]] = set()
+    seen_run_ids: set[str] = set()
+    embedded: list[dict[str, Any]] = []
+    for entry_id in sorted(expected_entries):
+        report = entry_reports.get(entry_id)
+        if not isinstance(report, dict) or not _verified_report(report):
+            findings.append({"code": "style_report_hash_mismatch", "entry_id": entry_id})
+            continue
+        embedded.append({"entry_id": entry_id, "report": report})
+        run_id = str(report.get("run_id") or "").strip()
+        if not run_id or run_id in seen_run_ids:
+            findings.append({"code": "style_report_run_identity_invalid", "entry_id": entry_id})
+        seen_run_ids.add(run_id)
+        if str((report.get("gate") or {}).get("status") or "BLOCK").upper() != "PASS":
+            findings.append({"code": "style_report_blocked", "entry_id": entry_id})
+        summary = report.get("summary") or {}
+        eligible += int(summary.get("eligible_owner_count") or 0)
+        rendered += int(summary.get("rendered_owner_count") or 0)
+        owners = report.get("owners") or []
+        if len(owners) != int(summary.get("eligible_owner_count") or 0):
+            findings.append({"code": "style_report_owner_denominator_mismatch", "entry_id": entry_id})
+        for owner in owners:
+            if not isinstance(owner, dict):
+                continue
+            key = (entry_id, str(owner.get("page_id") or ""), str(owner.get("owner_id") or ""))
+            if key in seen_owner_keys:
+                findings.append({"code": "duplicate_owner_style_report", "target_key": ":".join(key)})
+            seen_owner_keys.add(key)
+            observation_count += int(len(str(owner.get("materialization_observation_sha256") or "")) == 64)
+        metrics = report.get("metrics") or {}
+        safe = metrics.get("safe_containment") or {}
+        effect = metrics.get("effect_containment") or {}
+        catastrophic = metrics.get("catastrophic_mismatches") or {}
+        safe_evaluated += int(safe.get("evaluated") or 0); safe_contained += int(safe.get("contained") or 0)
+        effect_evaluated += int(effect.get("evaluated") or 0); effect_contained += int(effect.get("contained") or 0)
+        catastrophic_evaluated += int(catastrophic.get("evaluated") or 0); catastrophic_count += int(catastrophic.get("count") or 0)
+    expected_target_keys = {(str(row["entry_id"]), str(row["page_id"]), str(row["owner_id"])) for row in targets}
+    if not expected_target_keys.issubset(seen_owner_keys):
+        findings.append({"code": "matrix_target_missing_from_style_reports"})
+    coverage = observation_count / eligible if eligible else 0.0
+    if not eligible or coverage < 1.0:
+        findings.append({"code": "materialization_observation_coverage_incomplete"})
+    return {
+        "schema_version": 1,
+        "status": "BLOCK" if findings else "PASS",
+        "eligible_owner_count": eligible,
+        "rendered_owner_count": rendered,
+        "materialization_observation_coverage": coverage,
+        "safe_containment": {"evaluated": safe_evaluated, "contained": safe_contained, "rate": safe_contained / safe_evaluated if safe_evaluated else 0.0},
+        "effect_containment": {"evaluated": effect_evaluated, "contained": effect_contained, "rate": effect_contained / effect_evaluated if effect_evaluated else 0.0},
+        "catastrophic_mismatches": {"evaluated": catastrophic_evaluated, "count": catastrophic_count},
+        "source_reports": embedded,
+        "source_reports_sha256": _canonical_payload_sha256(embedded),
+        "findings": findings,
+    }
 
 
 def _write_report(
@@ -1429,7 +1669,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
     results = [validate_entry_result(entry, output_root) for entry in entries]
     sheets = _write_contact_sheets(entries, output_root)
-    inspection_template = build_inspection_template(sheets, output_root)
+    inspection_template = build_inspection_template(sheets, output_root, entries)
     if args.inspection_template:
         args.inspection_template.resolve().parent.mkdir(parents=True, exist_ok=True)
         args.inspection_template.resolve().write_text(
@@ -1440,12 +1680,51 @@ def main(argv: list[str] | None = None) -> int:
     if args.inspection_manifest:
         inspection_manifest = json.loads(args.inspection_manifest.resolve().read_text(encoding="utf-8-sig"))
         inspected = validate_inspection_manifest(inspection_template, inspection_manifest, output_root)
+    entry_reports: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        work_dir = Path(entry["work_dir"])
+        if not work_dir.is_absolute():
+            work_dir = output_root / work_dir
+        try:
+            project = json.loads((work_dir / "project.json").read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+        report = qa.get("style_fidelity") if isinstance(qa.get("style_fidelity"), dict) else None
+        if report is not None:
+            entry_reports[str(entry["entry_id"])] = report
+    owner_qa_summary = build_owner_qa_summary(matrix=manifest, entry_reports=entry_reports)
+    holdout_summary = build_style_holdout_summary(matrix=manifest, inspection=inspected or [])
+    (output_root / "style_owner_qa_summary.json").write_text(
+        json.dumps(owner_qa_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    (output_root / "style_holdout_summary.json").write_text(
+        json.dumps(holdout_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    functional_go = bool(results) and all(item.get("functional_status", item["status"]) == "PASS" for item in results)
+    execution_findings = [
+        {"code": "functional_matrix_blocked"} for _ in [0] if not functional_go
+    ] + [
+        {"code": "owner_style_qa_blocked"} for _ in [0] if owner_qa_summary["status"] != "PASS"
+    ] + list(holdout_summary["findings"])
+    execution_summary = {
+        "schema_version": 1,
+        "functional_status": "GO" if functional_go else "BLOCK",
+        "style_status": "GO" if owner_qa_summary["status"] == "PASS" else "BLOCK",
+        "inspection_status": "GO" if holdout_summary["status"] == "PASS" else "PENDING" if all(
+            row.get("code") in {"inspection_target_missing", "inspection_target_not_go"}
+            for row in holdout_summary["findings"]
+        ) else "BLOCK",
+        "findings": execution_findings,
+    }
+    (output_root / "matrix_execution_summary.json").write_text(
+        json.dumps(execution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     _write_report(args.report.resolve(), results, run_results, sheets, inspected=inspected)
-    functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
     inspection_go = bool(inspected) and all(
         str(item.get("overall_verdict") or "PENDING").upper() == "GO" for item in inspected
     )
-    return 0 if functional_go and inspection_go else 2
+    return 0 if functional_go and owner_qa_summary["status"] == "PASS" and holdout_summary["status"] == "PASS" and inspection_go else 2
 
 
 if __name__ == "__main__":

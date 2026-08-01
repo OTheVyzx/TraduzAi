@@ -488,6 +488,7 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
     status = "BLOCK" if rollout == "enforce" and would_block else "PASS"
     report = {
         "schema_version": 3,
+        "run_id": Path(run_dir).resolve().name,
         "mode": rollout,
         "owners": owners,
         "coverage": coverage,

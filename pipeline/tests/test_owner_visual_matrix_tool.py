@@ -906,3 +906,130 @@ def test_runner_manifest_hash_tampering_is_rejected():
 
     with pytest.raises(MatrixContractError, match="runner manifest hash mismatch"):
         validate_runner_evidence(evidence)
+
+
+def _summary_matrix() -> dict:
+    required = ("white_balloon", "burst", "cross_tile_owner", "dark_panel", "text_over_art")
+    entries = [{
+        "entry_id": "calibration", "split": "calibration",
+        "targets": [{
+            "page_id": "page_001", "owner_id": "owner_cal", "category": "colored_card",
+            "split": "calibration", "semantic_role": "card_body", "is_speech": False,
+            "source_crop": {"sha256": "1" * 64},
+        }],
+    }]
+    for index, category in enumerate(required):
+        entries.append({
+            "entry_id": f"holdout_{index}", "split": "holdout",
+            "targets": [{
+                "page_id": "page_001", "owner_id": f"owner_{index}", "category": category,
+                "split": "holdout", "semantic_role": "dialogue_body" if index < 2 else "card_body",
+                "is_speech": index < 2, "source_crop": {"sha256": f"{index + 2:x}" * 64},
+            }],
+        })
+    return {"schema_version": 3, "entries": entries}
+
+
+def _complete_inspection_rows(matrix: dict) -> list[dict]:
+    rows = []
+    for entry in matrix["entries"]:
+        for target in entry["targets"]:
+            rows.append({
+                "entry_id": entry["entry_id"], "page_id": target["page_id"],
+                "owner_id": target["owner_id"], "category": target["category"],
+                "split": target["split"], "source_sha256": target["source_crop"]["sha256"],
+                "final_sha256": "a" * 64, "page_surface_geometry_sha256": "b" * 64,
+                "artifact_path": f"{entry['entry_id']}.png", "overall_verdict": "GO",
+                "functional_verdict": "GO", "style_verdict": "GO",
+            })
+    return rows
+
+
+def test_inspection_summary_uses_exact_holdout_targets_not_filenames():
+    from tools.validate_owner_visual_matrix import build_style_holdout_summary
+
+    matrix = _summary_matrix()
+    summary = build_style_holdout_summary(matrix=matrix, inspection=_complete_inspection_rows(matrix))
+
+    assert summary["owners"]["evaluated"] == 5
+    assert summary["calibration_owner_count"] == 1
+    assert summary["owners"]["evaluated"] + summary["calibration_owner_count"] == 6
+
+
+def test_inspection_summary_emits_owner_speech_and_category_go_rates():
+    from tools.validate_owner_visual_matrix import build_style_holdout_summary
+
+    matrix = _summary_matrix()
+    summary = build_style_holdout_summary(matrix=matrix, inspection=_complete_inspection_rows(matrix))
+
+    assert summary["owners"]["go_rate"] == 1.0
+    assert summary["speech"]["evaluated"] == 2
+    assert summary["speech"]["go_rate"] == 1.0
+    assert set(summary["required_holdout_categories"]) == {
+        "white_balloon", "burst", "cross_tile_owner", "dark_panel", "text_over_art",
+    }
+    assert all(summary["categories"][name]["evaluated"] > 0 for name in summary["required_holdout_categories"])
+
+
+def _sealed_style_report(owner_id: str) -> dict:
+    report = {
+        "schema_version": 3, "run_id": f"run-{owner_id}",
+        "summary": {"eligible_owner_count": 1, "rendered_owner_count": 1},
+        "coverage": {"profile": 1.0, "contract": 1.0, "metrics": 1.0},
+        "metrics": {
+            "safe_containment": {"evaluated": 1, "contained": 1, "rate": 1.0},
+            "effect_containment": {"evaluated": 1, "contained": 1, "rate": 1.0},
+            "catastrophic_mismatches": {"evaluated": 1, "count": 0},
+        },
+        "owners": [{
+            "page_id": "page_001", "owner_id": owner_id,
+            "visual_profile_sha256": "c" * 64, "raster_contract_sha256": "d" * 64,
+            "materialization_plan_sha256": "e" * 64,
+            "materialization_observation_sha256": "f" * 64,
+            "delivery_contract_sha256": "9" * 64,
+            "owner_render_geometry_sha256": "8" * 64,
+        }],
+        "gate": {"status": "PASS"}, "findings": [],
+    }
+    report["report_sha256"] = sha256(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return report
+
+
+def test_matrix_aggregates_bound_owner_qa_reports():
+    from tools.validate_owner_visual_matrix import build_owner_qa_summary
+
+    matrix = _summary_matrix()
+    reports = {
+        entry["entry_id"]: _sealed_style_report(entry["targets"][0]["owner_id"])
+        for entry in matrix["entries"]
+    }
+    summary = build_owner_qa_summary(matrix=matrix, entry_reports=reports)
+
+    assert summary["eligible_owner_count"] == 6
+    assert summary["materialization_observation_coverage"] == 1.0
+    assert summary["safe_containment"]["evaluated"] == 6
+    assert summary["source_reports_sha256"]
+
+
+@pytest.mark.parametrize("problem", ["pending", "missing", "duplicate", "hash_mismatch", "zero_category"])
+def test_inspection_summary_blocks_incomplete_or_unauthenticated_denominator(problem):
+    from tools.validate_owner_visual_matrix import build_style_holdout_summary
+
+    matrix = _summary_matrix()
+    rows = _complete_inspection_rows(matrix)
+    if problem == "pending":
+        rows[1]["overall_verdict"] = rows[1]["style_verdict"] = "PENDING"
+    elif problem == "missing":
+        rows.pop()
+    elif problem == "duplicate":
+        rows.append(dict(rows[-1]))
+    elif problem == "hash_mismatch":
+        rows[1]["source_sha256"] = "f" * 64
+    else:
+        matrix["entries"] = [entry for entry in matrix["entries"] if entry["targets"][0]["category"] != "burst"]
+        rows = _complete_inspection_rows(matrix)
+
+    summary = build_style_holdout_summary(matrix=matrix, inspection=rows)
+
+    assert summary["status"] == "BLOCK"
+    assert summary["findings"]

@@ -167,6 +167,7 @@ def test_complete_owner_coverage_passes_enforce(tmp_path):
 
     assert report["coverage"] == {"profile": 1.0, "contract": 1.0, "metrics": 1.0}
     assert report["gate"]["status"] == "PASS"
+    assert report["run_id"] == tmp_path.resolve().name
     assert len(report["owners"][0]["raster_contract_sha256"]) == 64
 
 
