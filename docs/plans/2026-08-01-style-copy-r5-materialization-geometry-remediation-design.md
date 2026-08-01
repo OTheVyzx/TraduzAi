@@ -15,7 +15,8 @@ The failure is systemic:
 - eight of nine exact owners retained English because their cleanup/render attempt rolled back;
 - colored-card owners produced no render ink and failed with `render_contract_invalid:render was not completed`;
 - other owners drew pixels but failed with `render_contract_invalid:style raster contract applied decision mismatch`;
-- the only committed PT-BR owner used incomplete cross-tile geometry and visually changed typography class;
+- the only committed PT-BR owner changed typography class; its final page contains the complete payload, but the inspection crop falsely clipped it by applying logical-page coordinates directly to a centered output frame;
+- the same owner still used an over-constrained layout region because the source-replacement footprint was allowed to stand in for independent container evidence;
 - the benchmark blocked with font top-1 `0.40`, top-3 `0.00`, and required category, owner, speech, Delta E, containment, and catastrophic-mismatch metrics absent.
 
 R5 must correct pixel production without weakening any gate, accepting English silently, or adding page/work/chapter exceptions.
@@ -32,17 +33,21 @@ R5 must correct pixel production without weakening any gate, accepting English s
 
 `_rasterize_v2_layers_from_render_plan()` asks the glyph compositor to report the entire mixed decision. Attributes that the compositor cannot observe are classified as unmaterialized before layout/font evidence can be merged. The renderer then returns an empty review raster, so the atomic commit sees `render_completed=False`.
 
+There is also pre-raster drift: contextual group resolution may choose one effect class and remove competing effects from `applied_style` without recording that resolution against the approved decision. Verified V2 owners can then pass through the generic automatic-style normalizer again and lose approved values. The rasterizer receives a different intent from the one the commit later validates.
+
 ### 2. Intent and observation are compared without attribute canonicalization
 
 For owners that draw pixels, the raster contract compares raw decision values with runtime values. Font file names versus font identities, color encodings, enum aliases, and numeric representations can describe the same materialized result but compare unequal. Conversely, copying the requested value into the observed contract would falsely claim application. R5 therefore needs attribute-specific observation and canonical comparison, not relaxed equality and not request echoing.
 
-### 3. Owner geometry is not always page-space complete
+### 3. Logical-page, framed-output, cleanup, and layout geometry are conflated
 
-Cross-tile and connected owners can retain component/tile geometry as their render-safe region. A complete translated payload is then fit into an incomplete spatial owner, producing clipping or a false `ok` fit. The complete owner body must remain one semantic payload and render against one authoritative page-space geometry contract.
+Owner execution correctly uses logical page space, but reassembly may center a narrower logical page inside a wider output frame. The output contract currently does not carry that origin/transform, so inspection crops and overlays can apply a logical bbox directly to framed pixels and report a false clip.
 
-### 4. Benchmark enforcement expects metrics the producer does not emit
+Separately, the source-replacement footprint can become a fallback layout container. Cleanup geometry answers where source glyphs may be removed; it is not evidence of where a complete translated body may be placed. That promotion compresses capacity and can create a misleading `ok` fit even when the semantic payload remains intact. The complete owner body must remain one semantic payload, and rendering must use an independent authoritative page-space layout geometry contract.
 
-The scorer correctly fails closed when mandatory metrics are absent. The generator/report pipeline still needs deterministic production of per-attribute, per-category, per-owner, speech, color-distance, containment, and catastrophic-mismatch evidence with nonzero denominators.
+### 4. Acceptance enforcement asks one producer for metrics owned by three evidence sources
+
+The scorer correctly fails closed when mandatory metrics are absent, but the synthetic runner currently measures only the legacy extractor on source images. It has no rendered owner, final pixels, semantic-role denominator, safe region, or native inspection verdict, so it cannot legitimately produce every required metric. R5 must make each producer emit the metrics it can prove and combine the bound artifacts in one final acceptance report.
 
 ## Considered approaches
 
@@ -62,7 +67,7 @@ Build a typed observation from layout, selected font, and raster pixels; canonic
 
 ### Materialization intent
 
-The existing immutable visual profile remains the authority for approved and abstained attributes. R5 does not mutate the approved decision during rendering.
+The existing immutable visual profile remains the authority for approved and abstained attributes. R5 does not mutate the approved decision during rendering. Contextual group resolution and backend capability selection instead produce a separate immutable materialization plan that records, for every approved attribute, the resolved value or an explicit pre-render abstention/review reason. Generic automatic-style normalization may fill only attributes absent from that plan; it may not overwrite resolved V2 values.
 
 Each applied attribute is assigned exactly one materialization domain:
 
@@ -97,9 +102,11 @@ Comparison is attribute-specific:
 - enums use a versioned alias map;
 - containers compare page-space geometry identity and safe-region hash.
 
-The raster contract records both the approved canonical intent and canonical observation. A mismatch remains fail closed and names the attribute/domain/evidence instead of returning the generic `applied decision mismatch`.
+The raster contract records the approved canonical intent, the resolved materialization plan, and the canonical observation. A mismatch remains fail closed and names the attribute/domain/evidence instead of returning the generic `applied decision mismatch`.
 
-### Page-space owner geometry
+### Page surfaces and page-space owner geometry
+
+Every published page carries one immutable `PageSurfaceGeometry` containing logical size, framed size, content origin in the frame, content bbox, and a deterministic hash. All logical-page-to-frame conversions for bboxes, polygons, masks, crops, overlays, and contact sheets use this contract. A framed artifact without the matching geometry is not inspectable and fails closed.
 
 Every renderable owner receives one `OwnerRenderGeometry` derived before inpaint from:
 
@@ -109,7 +116,7 @@ Every renderable owner receives one `OwnerRenderGeometry` derived before inpaint
 4. all executor/context projections, converted to page space;
 5. foreign-owner protection masks.
 
-The contract contains the semantic body bbox, source-replacement region, safe polygon(s), connected subregions, component/projection IDs, and a deterministic hash. Tile projections may transport evidence, but may not reduce the page-space owner geometry. Connected and cross-tile text remains one semantic payload; layout may wrap it but may not split, duplicate, truncate, or independently translate fragments.
+The contract contains the semantic body bbox, source-replacement region, independently evidenced layout container and safe polygon(s), connected subregions, component/projection IDs, and a deterministic hash. The source-replacement region may never become the layout container merely because no container was found. Tile projections may transport evidence, but may not reduce the page-space owner geometry. Connected and cross-tile text remains one semantic payload; layout may wrap it but may not split, duplicate, truncate, or independently translate fragments.
 
 ### Atomic commit
 
@@ -138,17 +145,13 @@ An owner may abstain from style attributes while still rendering conservatively 
 
 ## Benchmark and QA
 
-The synthetic benchmark and real owner matrix share canonical metric names and versioned formulas. The generator must emit:
+The synthetic benchmark, owner raster QA, and real owner matrix share canonical metric names, identities, hashes, and versioned formulas, but each retains a clear evidence boundary:
 
-- font top-1/top-3 with known denominators;
-- per-category GO rate and sample counts;
-- speech and total-owner GO rates;
-- fill/stroke/effect Delta E and geometry errors;
-- safe containment and decorative false-positive rate;
-- catastrophic high-confidence mismatch count;
-- abstention correctness and round-trip integrity.
+- the mask-backed synthetic benchmark owns font top-1/top-3, fill/stroke/effect color and geometry errors, abstention correctness, and round-trip integrity;
+- owner raster QA owns safe containment, effect-envelope containment, and catastrophic high-confidence decision-to-final mismatches;
+- the exact holdout inspection owns total-owner, speech, and per-category visual GO rates and their sample counts.
 
-Missing metrics, missing required categories, zero denominators, hash mismatch, or incomplete native inspection remain `BLOCK`.
+A final acceptance aggregator validates schema versions, run identities, input/tool hashes, split provenance, and denominators before applying thresholds. It never manufactures human verdicts from the synthetic atlas or treats the legacy score as authoritative. Missing metrics, missing required categories, zero denominators, hash mismatch, or incomplete native inspection remain `BLOCK`.
 
 ## Validation strategy
 
@@ -157,7 +160,7 @@ Validation proceeds from narrow to broad:
 1. pure unit tests for domain ownership and canonicalization;
 2. renderer tests proving each domain reports only observed values;
 3. atomic-commit tests for equivalent, mismatched, absent, and unavailable attributes;
-4. cross-tile/connected-owner geometry and whole-body layout tests;
+4. logical-page-to-frame transform, cross-tile/connected-owner geometry, and whole-body layout tests;
 5. functional-language tests proving rollback cannot pass with English;
 6. benchmark producer/scorer tests for every mandatory metric and denominator;
 7. the exact nine-owner sentinel across three works;
