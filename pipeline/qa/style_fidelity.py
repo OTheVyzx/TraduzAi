@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import math
 from pathlib import Path
 from typing import Any
 
@@ -17,56 +16,10 @@ from qa.style_fidelity_policy import (
     required_style_categories,
 )
 from typesetter.owner_style import validate_owner_visual_profile
+from typesetter.style_materialization import delta_e_2000
 
 
 STYLE_MODES = frozenset({"shadow", "render", "enforce"})
-
-
-def _hex_rgb(value: Any) -> tuple[int, int, int] | None:
-    text = str(value or "").strip().lstrip("#")
-    if len(text) != 6:
-        return None
-    try:
-        return tuple(int(text[index:index + 2], 16) for index in (0, 2, 4))
-    except ValueError:
-        return None
-
-
-def _rgb_lab(rgb: tuple[int, int, int]) -> tuple[float, float, float]:
-    values = []
-    for channel in rgb:
-        value = channel / 255.0
-        values.append(((value + 0.055) / 1.055) ** 2.4 if value > 0.04045 else value / 12.92)
-    r, g, b = values
-    x, y, z = (r * .4124 + g * .3576 + b * .1805) / .95047, (r * .2126 + g * .7152 + b * .0722), (r * .0193 + g * .1192 + b * .9505) / 1.08883
-    f = lambda value: value ** (1 / 3) if value > .008856 else 7.787 * value + 16 / 116
-    fx, fy, fz = f(x), f(y), f(z)
-    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
-
-
-def delta_e_2000(first: Any, second: Any) -> float | None:
-    """Return CIEDE2000 distance for two #RRGGBB values."""
-    rgb1, rgb2 = _hex_rgb(first), _hex_rgb(second)
-    if rgb1 is None or rgb2 is None:
-        return None
-    l1, a1, b1 = _rgb_lab(rgb1); l2, a2, b2 = _rgb_lab(rgb2)
-    c1, c2 = math.hypot(a1, b1), math.hypot(a2, b2)
-    mean_c = (c1 + c2) / 2; g = .5 * (1 - math.sqrt(mean_c ** 7 / (mean_c ** 7 + 25 ** 7)))
-    ap1, ap2 = (1 + g) * a1, (1 + g) * a2
-    cp1, cp2 = math.hypot(ap1, b1), math.hypot(ap2, b2)
-    hp = lambda a, b: (math.degrees(math.atan2(b, a)) + 360) % 360 if a or b else 0.0
-    hp1, hp2 = hp(ap1, b1), hp(ap2, b2)
-    dl, dc = l2 - l1, cp2 - cp1
-    dh_raw = hp2 - hp1
-    dh = dh_raw - 360 if dh_raw > 180 else dh_raw + 360 if dh_raw < -180 else dh_raw
-    dh_term = 2 * math.sqrt(cp1 * cp2) * math.sin(math.radians(dh / 2))
-    mean_l, mean_cp = (l1 + l2) / 2, (cp1 + cp2) / 2
-    mean_h = hp1 + hp2 if cp1 * cp2 == 0 else (hp1 + hp2 + (360 if abs(hp1 - hp2) > 180 and hp1 + hp2 < 360 else -360 if abs(hp1 - hp2) > 180 else 0)) / 2
-    t = 1 - .17 * math.cos(math.radians(mean_h - 30)) + .24 * math.cos(math.radians(2 * mean_h)) + .32 * math.cos(math.radians(3 * mean_h + 6)) - .20 * math.cos(math.radians(4 * mean_h - 63))
-    sl = 1 + .015 * (mean_l - 50) ** 2 / math.sqrt(20 + (mean_l - 50) ** 2)
-    sc, sh = 1 + .045 * mean_cp, 1 + .015 * mean_cp * t
-    rt = -2 * math.sqrt(mean_cp ** 7 / (mean_cp ** 7 + 25 ** 7)) * math.sin(math.radians(60 * math.exp(-((mean_h - 275) / 25) ** 2)))
-    return round(math.sqrt((dl / sl) ** 2 + (dc / sc) ** 2 + (dh_term / sh) ** 2 + rt * (dc / sc) * (dh_term / sh)), 4)
 
 
 def resolve_original_path(run_dir: Path, page: dict[str, Any], page_number: int) -> Path | None:

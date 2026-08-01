@@ -43,6 +43,10 @@ def test_v2_contract_exposes_tracking_slant_width_and_vertical_scale():
     )
 
 
+def test_v2_contract_versions_multistroke_as_a_raster_attribute():
+    assert "multistroke" in STYLE_V2_ATTRIBUTE_NAMES
+
+
 def test_owner_style_raster_contract_is_canonical_hash_bound_and_immutable():
     contract = valid_owner_style_raster_contract()
 
