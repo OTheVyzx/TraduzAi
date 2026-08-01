@@ -158,6 +158,41 @@ def test_verified_owner_layout_uses_explicit_regions_without_mask_grouping(monke
     assert enriched["texts"][0]["safe_text_box"] == [80, 50, 280, 190]
 
 
+def test_verified_owner_layout_preserves_sealed_style_v2_envelope():
+    graph = _verified_owner_graph()
+    page = {
+        "page_id": "page_001",
+        "width": 320,
+        "height": 240,
+        "texts": [
+            {
+                "owner_id": "owner_body",
+                "visual_profile_v2": {"profile": "sealed"},
+                "visual_profile_sha256": "a" * 64,
+                "style_copy_status": "applied",
+                "style_group_resolution_v3": {"resolution": "sealed"},
+                "style_resolved_intent_v1": {"intent": "sealed"},
+            }
+        ],
+    }
+    region = {
+        "layout_region_id": "region_body",
+        "owner_id": "owner_body",
+        "order": 0,
+        "bbox_page": [80, 50, 280, 190],
+        "safe_polygon_page": [[80, 50], [280, 50], [280, 190], [80, 190]],
+    }
+
+    record = enrich_page_layout(
+        page,
+        owner_graph=graph,
+        layout_regions=[region],
+    )["texts"][0]
+
+    assert record["style_group_resolution_v3"] == {"resolution": "sealed"}
+    assert record["style_resolved_intent_v1"] == {"intent": "sealed"}
+
+
 def test_verified_owner_layout_rejects_unvalidated_graph_object():
     class ForgedGraph:
         page_id = "page_001"

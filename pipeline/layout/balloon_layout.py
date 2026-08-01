@@ -71,6 +71,8 @@ _OWNER_LAYOUT_VISUAL_INPUT_FIELDS = frozenset(
         "visual_profile_v2",
         "visual_profile_sha256",
         "style_copy_status",
+        "style_group_resolution_v3",
+        "style_resolved_intent_v1",
         "page_width",
         "page_height",
         "source_font_bounds_px",
