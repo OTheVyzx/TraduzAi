@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ def _sha256(path: Path) -> str:
 def collect_execution_source_ledger(bundle: Mapping[str, Any]) -> dict[str, Any]:
     repo = Path(str(bundle.get("repo_root") or "")).resolve()
     sources = bundle.get("execution_sources") if isinstance(bundle.get("execution_sources"), Mapping) else {}
+    exclusions = tuple(str(item) for item in bundle.get("source_exclusions") or ())
     loaded: dict[str, str] = {}
     for module in list(sys.modules.values()):
         raw = getattr(module, "__file__", None)
@@ -36,6 +38,8 @@ def collect_execution_source_ledger(bundle: Mapping[str, Any]) -> dict[str, Any]
         if relative.startswith("pipeline/tests/") or "/__pycache__/" in relative:
             continue
         if relative not in sources:
+            if any(fnmatch.fnmatchcase(relative, pattern) for pattern in exclusions):
+                continue
             raise ExecutionSourceError(f"unmanifested_loaded_source:{relative}")
         loaded[relative] = _sha256(path)
     return {"schema_version": 1, "loaded_sources": dict(sorted(loaded.items()))}

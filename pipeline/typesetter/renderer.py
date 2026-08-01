@@ -1437,8 +1437,9 @@ def _seal_owner_materialization_plan(
     layout_sha256 = _canonical_runtime_sha256(layout_contract)
     x_height = max(1.0, float(font.size) * 0.70)
     identity = resolve_font_identity(font.font_path)
-    approved = dict(intent.approved_attributes)
-    abstentions = dict(intent.approved_abstentions)
+    intent_payload = intent.to_dict()
+    approved = dict(intent_payload["approved_attributes"])
+    abstentions = dict(intent_payload["approved_abstentions"])
     targets: dict[str, Any] = {}
     kinds: dict[str, str] = {}
     reasons: dict[str, str] = {}

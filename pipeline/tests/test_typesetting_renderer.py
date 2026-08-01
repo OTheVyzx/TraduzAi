@@ -307,7 +307,11 @@ class TypesettingRendererTests(unittest.TestCase):
             visual_profile_sha256=profile_sha,
             decision_sha256="b" * 64,
             group_resolution_sha256="c" * 64,
-            approved={"font_size_px": 48, "fill": "#FFFFFF"},
+            approved={
+                "font_size_px": 48,
+                "fill": "#FFFFFF",
+                "stroke": {"color": "#000000", "width_xh": 0.1},
+            },
             approved_abstentions={},
         )
         block = {
@@ -346,6 +350,10 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(font_size["intent_value"], 48)
         self.assertEqual(font_size["target_value"], 36)
         self.assertEqual(font_size["resolution_kind"], "policy_adjusted")
+        self.assertEqual(
+            sealed["attribute_plans"]["stroke"]["target_value"],
+            {"color": "#000000", "width_px": 2.52},
+        )
         self.assertEqual(intent.to_dict()["approved_attributes"]["font_size_px"], 48)
 
     def test_font_observation_comes_from_faces_used_by_text_raster(self):
