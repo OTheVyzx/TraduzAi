@@ -12,7 +12,10 @@ KOHARU_RUST_CAPABILITIES = frozenset(
 )
 PYTHON_V2_CAPABILITIES = frozenset(
     set(KOHARU_RUST_CAPABILITIES)
-    | {"tracking", "slant", "scale_x", "scale_y", "multistroke", "shadow", "glow", "gradient", "curve"}
+    | {
+        "tracking", "slant", "scale_x", "scale_y", "multistroke", "shadow",
+        "glow", "gradient", "curve", "materialization_observation_v2",
+    }
 )
 
 _CANONICAL_CAPABILITY = {
@@ -102,18 +105,29 @@ def required_style_capabilities(profile: dict[str, Any] | None) -> frozenset[str
 def select_backend_for_style(
     requested_backend: str,
     profile: dict[str, Any] | None,
+    *,
+    enforce_observation: bool = False,
 ) -> BackendSelection:
     requested = str(requested_backend or "python_v2").strip().lower()
     required = required_style_capabilities(profile)
+    if enforce_observation:
+        required = frozenset(set(required) | {"materialization_observation_v2"})
     requested_caps = KOHARU_RUST_CAPABILITIES if requested == "koharu_rust" else PYTHON_V2_CAPABILITIES
     unsupported = tuple(sorted(required - requested_caps))
     if not unsupported:
         return BackendSelection(requested, requested, "supported", tuple(sorted(required)), (), "all_capabilities_supported")
     python_unsupported = tuple(sorted(required - PYTHON_V2_CAPABILITIES))
     if not python_unsupported:
+        reason = (
+            "rust_missing_materialization_observation_v2"
+            if enforce_observation
+            and requested == "koharu_rust"
+            and "materialization_observation_v2" in unsupported
+            else "unsupported_v2_capabilities:" + ",".join(unsupported)
+        )
         return BackendSelection(
             requested, "python_v2", "fallback", tuple(sorted(required)), unsupported,
-            "unsupported_v2_capabilities:" + ",".join(unsupported),
+            reason,
         )
     return BackendSelection(
         requested, "review_required", "review_required", tuple(sorted(required)),

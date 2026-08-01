@@ -112,6 +112,7 @@ def test_every_renderable_owner_receives_explicit_style_status() -> None:
         "applied", "fallback", "not_applicable", "review_required"
     }
     assert profiles["owner_a"]["source_capture_phase"] == "pre_inpaint"
+    assert profiles["owner_a"]["page_id"] == "page_001"
 
 
 def test_owner_profile_is_captured_before_inpaint_mutates_pixels() -> None:

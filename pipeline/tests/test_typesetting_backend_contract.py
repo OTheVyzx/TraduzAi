@@ -124,3 +124,16 @@ def test_backend_cannot_silently_drop_requested_tracking_or_slant():
             requested={"tracking_xh", "slant_tangent"},
             backends=[limited],
         )
+
+
+def test_style_v2_enforce_selects_only_backend_with_observation_contract():
+    selection = select_backend_for_style(
+        "koharu_rust",
+        {"applied_style": {"fill": "#FFFFFF"}},
+        enforce_observation=True,
+    )
+
+    assert selection.selected_backend == "python_v2"
+    assert selection.reason == "rust_missing_materialization_observation_v2"
+    assert "materialization_observation_v2" in PYTHON_V2_CAPABILITIES
+    assert "materialization_observation_v2" not in KOHARU_RUST_CAPABILITIES

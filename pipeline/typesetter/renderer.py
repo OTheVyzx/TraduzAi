@@ -13,11 +13,12 @@ import sys
 import unicodedata
 import json
 import copy
+from dataclasses import dataclass
 from hashlib import sha256
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import cv2
 import numpy as np
@@ -35,12 +36,22 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from typesetter.glyph_rasterizer import GlyphRasterResult, rasterize_v2_glyph_layers
 from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
 from typesetter.owner_style import validate_owner_visual_profile
+from typesetter.font_identity import resolve_font_identity
+from typesetter.style_materialization import (
+    OwnerStyleResolvedIntent,
+    build_materialization_observation,
+    build_materialization_plan,
+    build_resolved_style_intent,
+    compare_materialization,
+    materialization_plan_from_dict,
+)
 
 try:
     from ownership.model import (
         OwnerGlyphPatch,
         OwnerGraph,
         OwnerStyleRasterContract,
+        OwnerStyleRasterContractV2,
         owner_style_raster_contract_sha256,
         owner_style_raster_segment_sha256,
         validate_owner_style_raster_segment,
@@ -50,6 +61,7 @@ except ImportError:  # pragma: no cover - supports package imports
         OwnerGlyphPatch,
         OwnerGraph,
         OwnerStyleRasterContract,
+        OwnerStyleRasterContractV2,
         owner_style_raster_contract_sha256,
         owner_style_raster_segment_sha256,
         validate_owner_style_raster_segment,
@@ -74,6 +86,212 @@ except ImportError:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_runtime_sha256(value: Any) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
+class RenderedGlyphPose:
+    codepoint: int
+    glyph_id: int
+    origin_x: float
+    origin_y: float
+    advance_px: float
+    bbox: tuple[int, int, int, int]
+    angle_deg: float = 0.0
+    line_index: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "codepoint": self.codepoint,
+            "glyph_id": self.glyph_id,
+            "origin": [self.origin_x, self.origin_y],
+            "advance_px": self.advance_px,
+            "bbox": list(self.bbox),
+            "angle_deg": self.angle_deg,
+            "line_index": self.line_index,
+        }
+
+
+@dataclass(frozen=True)
+class RenderedGlyphRun:
+    text: str
+    font_spans: tuple[tuple[int, int, str], ...]
+    glyphs: tuple[RenderedGlyphPose, ...]
+    rendered_x_height_px: float
+    nominal_advances: tuple[float, ...]
+    glyph_poses_sha256: str
+    run_sha256: str
+    curve_direction: str = ""
+    curve_amount: float | None = None
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        text: str,
+        font_spans: tuple[tuple[int, int, str], ...],
+        glyphs: tuple[RenderedGlyphPose, ...],
+        rendered_x_height_px: float,
+        nominal_advances: tuple[float, ...],
+        curve_direction: str = "",
+        curve_amount: float | None = None,
+    ) -> "RenderedGlyphRun":
+        if not text or not glyphs or rendered_x_height_px <= 0:
+            raise ValueError("rendered glyph run requires text, glyphs and x-height")
+        if len(nominal_advances) not in {0, max(0, len(glyphs) - 1)}:
+            raise ValueError("rendered glyph run nominal advances are incomplete")
+        glyph_payload = [glyph.to_dict() for glyph in glyphs]
+        poses_sha256 = _canonical_runtime_sha256(glyph_payload)
+        payload = {
+            "text": text,
+            "font_spans": [list(span) for span in font_spans],
+            "glyphs": glyph_payload,
+            "rendered_x_height_px": float(rendered_x_height_px),
+            "nominal_advances": list(nominal_advances),
+            "glyph_poses_sha256": poses_sha256,
+            "curve_direction": str(curve_direction or ""),
+            "curve_amount": curve_amount,
+        }
+        return cls(
+            text=text,
+            font_spans=font_spans,
+            glyphs=glyphs,
+            rendered_x_height_px=float(rendered_x_height_px),
+            nominal_advances=nominal_advances,
+            glyph_poses_sha256=poses_sha256,
+            run_sha256=_canonical_runtime_sha256(payload),
+            curve_direction=str(curve_direction or ""),
+            curve_amount=curve_amount,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "font_spans": [list(span) for span in self.font_spans],
+            "glyphs": [glyph.to_dict() for glyph in self.glyphs],
+            "rendered_x_height_px": self.rendered_x_height_px,
+            "nominal_advances": list(self.nominal_advances),
+            "glyph_poses_sha256": self.glyph_poses_sha256,
+            "run_sha256": self.run_sha256,
+            "curve_direction": self.curve_direction,
+            "curve_amount": self.curve_amount,
+        }
+
+
+def _materialization_observation_row(
+    value: Any,
+    *,
+    evidence_kind: str,
+    evidence_payload: Mapping[str, Any],
+    metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "materialized",
+        "canonical_value": copy.deepcopy(value),
+        "evidence_kind": evidence_kind,
+        "evidence_sha256": _canonical_runtime_sha256(evidence_payload),
+        "metrics": copy.deepcopy(dict(metrics or {})),
+    }
+
+
+def _observe_layout_materialization(
+    text_data: Mapping[str, Any],
+    *,
+    attribute_names: set[str] | frozenset[str],
+) -> dict[str, dict[str, Any]]:
+    """Observe layout facts only from the final fit and glyph placement."""
+
+    names = set(attribute_names)
+    observed: dict[str, dict[str, Any]] = {}
+    layout = text_data.get("render_layout_contract")
+    layout = layout if isinstance(layout, Mapping) else {}
+    if "font_size_px" in names:
+        font_size = int(text_data.get("font_size_final") or layout.get("font_size") or 0)
+        if font_size > 0:
+            observed["font_size_px"] = _materialization_observation_row(
+                font_size,
+                evidence_kind="final_fit",
+                evidence_payload={"font_size_px": font_size, "layout": layout},
+            )
+    if "alignment" in names:
+        safe = _layout_bbox(text_data.get("safe_text_box") or layout.get("safe_text_box"))
+        block = _layout_bbox(layout.get("block_bbox"))
+        if safe is not None and block is not None:
+            left_margin = block[0] - safe[0]
+            right_margin = safe[2] - block[2]
+            tolerance = max(2.0, (safe[2] - safe[0]) * 0.05)
+            alignment = (
+                "center"
+                if abs(left_margin - right_margin) <= tolerance
+                else "left"
+                if left_margin < right_margin
+                else "right"
+            )
+            evidence = {
+                "positions": layout.get("positions") or [],
+                "line_widths": layout.get("line_widths") or [],
+                "block_bbox": list(block),
+                "safe_text_box": list(safe),
+            }
+            observed["alignment"] = _materialization_observation_row(
+                alignment,
+                evidence_kind="final_glyph_positions",
+                evidence_payload=evidence,
+                metrics={
+                    "left_margin_px": left_margin,
+                    "right_margin_px": right_margin,
+                    "center_tolerance_px": tolerance,
+                },
+            )
+    raw_run = text_data.get("_rendered_glyph_run")
+    if isinstance(raw_run, Mapping):
+        run_hash = str(raw_run.get("run_sha256") or "")
+        poses_hash = str(raw_run.get("glyph_poses_sha256") or "")
+        glyphs = list(raw_run.get("glyphs") or [])
+        x_height = float(raw_run.get("rendered_x_height_px") or 0.0)
+        nominal = [float(value) for value in raw_run.get("nominal_advances") or []]
+        if "tracking_xh" in names and x_height > 0 and len(glyphs) >= 2 and len(nominal) == len(glyphs) - 1:
+            gaps = [
+                float(glyphs[index + 1]["origin"][0])
+                - float(glyphs[index]["origin"][0])
+                - nominal[index]
+                for index in range(len(nominal))
+                if int(glyphs[index + 1].get("line_index") or 0)
+                == int(glyphs[index].get("line_index") or 0)
+            ]
+            if gaps:
+                tracking = sum(gaps) / len(gaps) / x_height
+                observed["tracking_xh"] = _materialization_observation_row(
+                    tracking,
+                    evidence_kind="glyph_run",
+                    evidence_payload={"run_sha256": run_hash, "gaps_px": gaps},
+                    metrics={"glyph_poses_sha256": poses_hash, "gaps_px": gaps},
+                )
+        if "curve" in names and glyphs:
+            angles = [float(glyph.get("angle_deg") or 0.0) for glyph in glyphs]
+            amount = max(angles) - min(angles) if angles else 0.0
+            observed_amount = raw_run.get("curve_amount")
+            observed_amount = float(observed_amount) if observed_amount is not None else amount
+            direction = str(raw_run.get("curve_direction") or "")
+            if not direction:
+                direction = "arc_up" if angles and angles[-1] >= angles[0] else "arc_down"
+            observed["curve"] = _materialization_observation_row(
+                {"direction": direction, "amount": observed_amount},
+                evidence_kind="glyph_run",
+                evidence_payload={"run_sha256": run_hash, "angles_deg": angles},
+                metrics={"glyph_poses_sha256": poses_hash},
+            )
+    return observed
 
 try:
     from debug_tools import get_recorder
@@ -718,6 +936,28 @@ def _apply_false_dark_white_neutral_style(text_data: dict) -> None:
 
 
 def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
+    profile = text_data.get("visual_profile_v2")
+    intent = text_data.get("style_resolved_intent_v1")
+    if isinstance(profile, Mapping) and isinstance(intent, Mapping):
+        owner_id = str(text_data.get("owner_id") or profile.get("owner_id") or "")
+        normalized = validate_owner_visual_profile(
+            profile,
+            expected_owner_id=owner_id,
+            expected_sha256=str(text_data.get("visual_profile_sha256") or ""),
+        )
+        if (
+            str(intent.get("owner_id") or "") != owner_id
+            or str(intent.get("visual_profile_sha256") or "")
+            != normalized["visual_profile_sha256"]
+            or len(str(intent.get("intent_sha256") or "")) != 64
+        ):
+            raise ValueError("owner Style V2 intent is not bound to its visual profile")
+        text_data["style_origin"] = "owner_style_v2"
+        style = dict(text_data.get("estilo") or text_data.get("style") or {})
+        style["style_origin"] = "owner_style_v2"
+        text_data["estilo"] = style
+        text_data["style"] = style
+        return
     image_rgb = np.array(img.convert("RGB"))
     profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
     background_rgb = (
@@ -789,6 +1029,7 @@ class SafeTextPathFont:
         self.size = int(size)
         self._bbox_cache: dict[str, tuple[int, int, int, int]] = {}
         self._mask_cache: dict[tuple[str, int], np.ndarray] = {}
+        self._font_run_observation_cache: dict[str, dict[str, Any]] = {}
 
     def getbbox(self, text: str) -> tuple[int, int, int, int]:
         """Retorna o bounding box visual real dos pixels (detecta acentos perfeitamente)."""
@@ -848,6 +1089,45 @@ def _find_fallback_font_path(char: str, original_path: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=256)
+def _resolved_font_identity_payload(font_path: str) -> dict[str, Any]:
+    return resolve_font_identity(Path(font_path).resolve()).to_dict()
+
+
+def _record_rendered_font_run(
+    font: SafeTextPathFont,
+    text: str,
+    font_paths: list[str],
+) -> None:
+    if len(font_paths) != len(text):
+        raise ValueError("rendered font run path cardinality mismatch")
+    spans: list[dict[str, Any]] = []
+    start = 0
+    for index in range(1, len(text) + 1):
+        if index < len(text) and font_paths[index] == font_paths[start]:
+            continue
+        path = str(Path(font_paths[start]).resolve())
+        spans.append(
+            {
+                "text_start": start,
+                "text_end": index,
+                "font_identity": _resolved_font_identity_payload(path),
+                "font_path": path,
+                "fallback": path != str(font.font_path.resolve()),
+            }
+        )
+        start = index
+    payload = {
+        "text": text,
+        "primary_identity": _resolved_font_identity_payload(
+            str(font.font_path.resolve())
+        ),
+        "spans": spans,
+    }
+    payload["observation_sha256"] = _canonical_runtime_sha256(payload)
+    font._font_run_observation_cache[text] = payload
+
+
 def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
     """Renderiza texto com fallback automÃ¡tico para caracteres sem glyph na fonte principal.
 
@@ -870,11 +1150,13 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
         ft2.set_size(font.size, 72)
         ft2.set_text(text, 0.0)
         ft2.draw_glyphs_to_bitmap()
+        _record_rendered_font_run(font, text, [font_path] * len(text))
         return ft2.get_image()
 
     # Renderiza caractere a caractere, usando fallback quando necessÃ¡rio
     fallback_cache: dict[str, str | None] = {}
     char_bitmaps: list[tuple[np.ndarray, int]] = []  # (bitmap, y_offset)
+    used_paths: list[str] = []
 
     for ch in text:
         if ch == " ":
@@ -892,6 +1174,7 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
             space_w = max(1, space_bitmap.shape[1] - single_bitmap.shape[1])
             space_img = np.zeros((max(1, int(font.size)), space_w), dtype=np.uint8)
             char_bitmaps.append((space_img, 0))
+            used_paths.append(font_path)
             continue
 
         # Determinar qual fonte usar
@@ -911,11 +1194,13 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
         ft2.set_text(ch, 0.0)
         ft2.draw_glyphs_to_bitmap()
         bmp = ft2.get_image()
+        used_paths.append(use_path)
         if bmp.size == 0:
             continue
         char_bitmaps.append((bmp, 0))
 
     if not char_bitmaps:
+        _record_rendered_font_run(font, text, used_paths)
         return np.zeros((1, 1), dtype=np.uint8)
 
     # Combinar todos os bitmaps lado a lado
@@ -931,6 +1216,7 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
         )
         x_cursor += w
 
+    _record_rendered_font_run(font, text, used_paths)
     return combined
 
 
@@ -1029,6 +1315,258 @@ def _render_safe_text_layer(
         _blend_mask_into_image(image_np, mask, lx - max(0, outline_px), ly - max(0, outline_px), fill_color)
 
 
+def _resolved_owner_style_intent(text_data: Mapping[str, Any]) -> OwnerStyleResolvedIntent | None:
+    raw = text_data.get("style_resolved_intent_v1")
+    if not isinstance(raw, Mapping):
+        return None
+    required = {
+        "owner_id", "page_id", "visual_profile_sha256", "decision_sha256",
+        "group_resolution_sha256", "approved_attributes",
+        "approved_abstentions", "attribute_provenance", "intent_sha256",
+    }
+    if not required <= set(raw):
+        raise ValueError("owner Style V2 resolved intent is incomplete")
+    rebuilt = build_resolved_style_intent(
+        owner_id=str(raw["owner_id"]),
+        page_id=str(raw["page_id"]),
+        visual_profile_sha256=str(raw["visual_profile_sha256"]),
+        decision_sha256=str(raw["decision_sha256"]),
+        group_resolution_sha256=str(raw["group_resolution_sha256"]),
+        approved=dict(raw.get("approved_attributes") or {}),
+        approved_abstentions=dict(raw.get("approved_abstentions") or {}),
+        attribute_provenance=dict(raw.get("attribute_provenance") or {}),
+    )
+    if rebuilt.intent_sha256 != str(raw.get("intent_sha256") or ""):
+        raise ValueError("owner Style V2 resolved intent hash mismatch")
+    return rebuilt
+
+
+def _build_linear_rendered_glyph_run(
+    lines: list[str],
+    positions: list[tuple[int, int]],
+    font: SafeTextPathFont,
+    *,
+    tracking_xh: float = 0.0,
+    alignment: str = "center",
+) -> RenderedGlyphRun | None:
+    glyphs: list[RenderedGlyphPose] = []
+    nominal_advances: list[float] = []
+    ft2 = _get_ft2_font(str(font.font_path))
+    tracking_px = float(tracking_xh) * max(1.0, float(font.size) * 0.70)
+    for line_index, (line, position) in enumerate(zip(lines, positions, strict=True)):
+        extra_width = max(0, len(line) - 1) * tracking_px
+        cursor_x = float(position[0])
+        if alignment == "center":
+            cursor_x -= extra_width / 2.0
+        elif alignment == "right":
+            cursor_x -= extra_width
+        for character in line:
+            advance = float(max(1, measure_text_width(font, character, font.size)))
+            bbox = font.getbbox(character)
+            if glyphs:
+                nominal_advances.append(
+                    glyphs[-1].advance_px
+                    if glyphs[-1].line_index == line_index
+                    else cursor_x - glyphs[-1].origin_x
+                )
+            glyphs.append(
+                RenderedGlyphPose(
+                    codepoint=ord(character),
+                    glyph_id=int(ft2.get_char_index(ord(character))),
+                    origin_x=cursor_x,
+                    origin_y=float(position[1]),
+                    advance_px=advance,
+                    bbox=(
+                        int(round(cursor_x + bbox[0])),
+                        int(round(position[1] + bbox[1])),
+                        int(round(cursor_x + bbox[2])),
+                        int(round(position[1] + bbox[3])),
+                    ),
+                    angle_deg=0.0,
+                    line_index=line_index,
+                )
+            )
+            cursor_x += advance + tracking_px
+    if not glyphs:
+        return None
+    identity = resolve_font_identity(font.font_path)
+    return RenderedGlyphRun.build(
+        text="\n".join(lines),
+        font_spans=((0, len(glyphs), identity.file_sha256),),
+        glyphs=tuple(glyphs),
+        rendered_x_height_px=max(1.0, float(font.size) * 0.70),
+        nominal_advances=tuple(nominal_advances),
+    )
+
+
+def _seal_owner_materialization_plan(
+    text_data: dict[str, Any],
+    layout_plan: Mapping[str, Any],
+    font: SafeTextPathFont,
+    lines: list[str],
+    positions: list[tuple[int, int]],
+) -> None:
+    intent = _resolved_owner_style_intent(text_data)
+    if intent is None:
+        return
+    profile = validate_owner_visual_profile(
+        text_data.get("visual_profile_v2") or {},
+        expected_owner_id=str(text_data.get("owner_id") or ""),
+        expected_sha256=str(text_data.get("visual_profile_sha256") or ""),
+    )
+    if (
+        intent.visual_profile_sha256 != profile["visual_profile_sha256"]
+        or intent.page_id != str(text_data.get("page_id") or "")
+    ):
+        raise ValueError("owner Style V2 intent owner/page/profile binding mismatch")
+    layout_contract = text_data.get("render_layout_contract")
+    if not isinstance(layout_contract, Mapping):
+        raise ValueError("owner Style V2 requires a final render layout contract")
+    layout_sha256 = _canonical_runtime_sha256(layout_contract)
+    x_height = max(1.0, float(font.size) * 0.70)
+    identity = resolve_font_identity(font.font_path)
+    approved = dict(intent.approved_attributes)
+    abstentions = dict(intent.approved_abstentions)
+    targets: dict[str, Any] = {}
+    kinds: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    final_font_size = int(text_data.get("font_size_final") or font.size)
+    for name, value in approved.items():
+        if name == "fill" and "gradient" in approved:
+            kinds[name] = "superseded"
+            continue
+        if name == "stroke" and "multistroke" in approved:
+            kinds[name] = "superseded"
+            continue
+        if name == "font_name":
+            targets[name] = identity.to_dict()
+        elif name == "font_weight":
+            targets[name] = identity.weight_class
+        elif name == "font_width":
+            targets[name] = identity.width_class
+        elif name == "font_size_px":
+            requested = float(value)
+            ratio = final_font_size / requested if requested > 0 else 0.0
+            if not 0.70 <= ratio <= 1.10:
+                kinds[name] = "review_required"
+                reasons[name] = "font_size_adjustment_outside_policy"
+                continue
+            targets[name] = final_font_size
+            kinds[name] = "exact" if final_font_size == int(round(requested)) else "policy_adjusted"
+            reasons[name] = "final_fit_within_policy" if kinds[name] == "policy_adjusted" else ""
+            continue
+        elif name == "alignment":
+            targets[name] = str(layout_plan.get("alignment") or value)
+        elif name == "container":
+            kinds[name] = "review_required"
+            reasons[name] = "owner_render_geometry_not_bound"
+            continue
+        else:
+            targets[name] = copy.deepcopy(value)
+        kinds[name] = "exact"
+    for name, reason in abstentions.items():
+        kinds[name] = "abstained"
+        reasons[name] = str(reason)
+    plan = build_materialization_plan(
+        intent=intent,
+        render_layout_contract_sha256=layout_sha256,
+        targets=targets,
+        resolution_kinds=kinds,
+        resolution_reasons=reasons,
+        rendered_x_height_px=x_height,
+    )
+    # Seal the expected contract before any glyph mask or paint operation.
+    text_data["_sealed_materialization_plan_v1"] = plan.to_dict()
+    run = _build_linear_rendered_glyph_run(
+        lines,
+        positions,
+        font,
+        tracking_xh=float(approved.get("tracking_xh") or 0.0),
+        alignment=str(layout_plan.get("alignment") or "center"),
+    )
+    if run is not None:
+        text_data["_rendered_glyph_run"] = run.to_dict()
+    font_rows: dict[str, dict[str, Any]] = {}
+    identity_payload = identity.to_dict()
+    rendered_font_runs = [
+        copy.deepcopy(font._font_run_observation_cache[line])
+        for line in lines
+        if line in font._font_run_observation_cache
+    ]
+    evidence = {
+        "resolved_font": identity_payload,
+        "font_path": str(font.font_path.resolve()),
+        "rendered_font_runs": rendered_font_runs,
+    }
+    evidence_sha256 = _canonical_runtime_sha256(evidence)
+    if "font_name" in plan.attribute_plans:
+        font_rows["font_name"] = {
+            "value": identity_payload,
+            "evidence_kind": "resolved_font_file",
+            "evidence_sha256": evidence_sha256,
+        }
+    if "font_weight" in plan.attribute_plans:
+        font_rows["font_weight"] = {
+            "value": identity.weight_class,
+            "evidence_kind": "opentype_os2",
+            "evidence_sha256": evidence_sha256,
+        }
+    if "font_width" in plan.attribute_plans:
+        font_rows["font_width"] = {
+            "value": identity.width_class,
+            "evidence_kind": "opentype_os2",
+            "evidence_sha256": evidence_sha256,
+        }
+    text_data["_style_v2_font_observation"] = font_rows
+
+
+def _render_v2_owner_core_mask(
+    shape: tuple[int, int],
+    lines: list[str],
+    font: SafeTextPathFont,
+    positions: list[tuple[int, int]],
+    *,
+    tracking_xh: float,
+    alignment: str,
+) -> np.ndarray:
+    core = np.zeros(shape, dtype=np.uint8)
+    tracking_px = float(tracking_xh) * max(1.0, float(font.size) * 0.70)
+    if abs(tracking_px) <= 1e-6:
+        core_rgb = np.zeros((*shape, 3), dtype=np.uint8)
+        _render_safe_text_layer(
+            core_rgb,
+            lines,
+            font,
+            positions,
+            fill_color="#FFFFFF",
+        )
+        return np.where(np.max(core_rgb, axis=2) > 0, 255, 0).astype(np.uint8)
+    for line, (origin_x, origin_y) in zip(lines, positions, strict=True):
+        extra_width = max(0, len(line) - 1) * tracking_px
+        cursor_x = float(origin_x)
+        if alignment == "center":
+            cursor_x -= extra_width / 2.0
+        elif alignment == "right":
+            cursor_x -= extra_width
+        for character in line:
+            advance = float(max(1, measure_text_width(font, character, font.size)))
+            if character.strip():
+                mask = _build_textpath_mask(font, character, padding=0)
+                x1 = int(round(cursor_x))
+                y1 = int(round(origin_y))
+                tx1, ty1 = max(0, x1), max(0, y1)
+                tx2 = min(shape[1], x1 + mask.shape[1])
+                ty2 = min(shape[0], y1 + mask.shape[0])
+                if tx2 > tx1 and ty2 > ty1:
+                    mx1, my1 = tx1 - x1, ty1 - y1
+                    core[ty1:ty2, tx1:tx2] = np.maximum(
+                        core[ty1:ty2, tx1:tx2],
+                        mask[my1:my1 + ty2 - ty1, mx1:mx1 + tx2 - tx1],
+                    )
+            cursor_x += advance + tracking_px
+    return np.where(core > 0, 255, 0).astype(np.uint8)
+
+
 def _render_v2_owner_text_layer(
     image_np: np.ndarray,
     text_data: dict,
@@ -1036,21 +1574,32 @@ def _render_v2_owner_text_layer(
     lines: list[str],
     font: SafeTextPathFont,
     positions: list[tuple[int, int]],
+    *,
+    core_override: np.ndarray | None = None,
+    glyph_run_override: RenderedGlyphRun | None = None,
 ) -> GlyphRasterResult | None:
     """Compose verified owner typography through the shared text/SFX rasterizer."""
 
     profile = text_data.get("visual_profile_v2")
     if not isinstance(profile, dict):
         return None
-    core_rgb = np.zeros_like(image_np)
-    _render_safe_text_layer(
-        core_rgb,
-        lines,
-        font,
-        positions,
-        fill_color="#FFFFFF",
+    _seal_owner_materialization_plan(text_data, plan, font, lines, positions)
+    applied_style = profile.get("applied_style")
+    applied_style = applied_style if isinstance(applied_style, dict) else {}
+    core = (
+        np.where(np.asarray(core_override) > 0, 255, 0).astype(np.uint8)
+        if core_override is not None
+        else _render_v2_owner_core_mask(
+            image_np.shape[:2],
+            lines,
+            font,
+            positions,
+            tracking_xh=float(applied_style.get("tracking_xh") or 0.0),
+            alignment=str(plan.get("alignment") or "center"),
+        )
     )
-    core = np.where(np.max(core_rgb, axis=2) > 0, 255, 0).astype(np.uint8)
+    if glyph_run_override is not None:
+        text_data["_rendered_glyph_run"] = glyph_run_override.to_dict()
     if not np.any(core):
         return None
     safe = np.zeros(core.shape, dtype=np.uint8)
@@ -1074,8 +1623,6 @@ def _render_v2_owner_text_layer(
         x1, y1, x2, y2 = bbox
         safe[max(0, y1) : min(safe.shape[0], y2), max(0, x1) : min(safe.shape[1], x2)] = 255
 
-    applied_style = profile.get("applied_style")
-    applied_style = applied_style if isinstance(applied_style, dict) else {}
     raster_style: dict[str, Any] = {
         "fill": plan.get("text_color") or applied_style.get("cor") or "#000000",
         "slant_tangent": float(applied_style.get("slant_tangent") or 0.0),
@@ -1160,6 +1707,83 @@ def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
     if abs(_normalize_rotation_deg(plan.get("rotation_deg", 0))) > 0.01:
         return False
     return True
+
+
+def _build_safe_arc_core_and_run(
+    shape: tuple[int, int],
+    line: str,
+    font: SafeTextPathFont,
+    origin: tuple[int, int],
+    plan: Mapping[str, Any],
+    *,
+    tracking_xh: float = 0.0,
+) -> tuple[np.ndarray, RenderedGlyphRun]:
+    glyph_text = list(str(line or ""))
+    if not glyph_text:
+        raise ValueError("arc glyph run requires text")
+    masks = [_build_textpath_mask(font, glyph, padding=0) for glyph in glyph_text]
+    widths = [max(1, measure_text_width(font, glyph, font.size)) for glyph in glyph_text]
+    max_h = max((int(mask.shape[0]) for mask in masks), default=1)
+    intensity = max(0.0, min(1.0, abs(float(plan.get("curva_intensidade") or 0.0))))
+    direction = str(plan.get("curva_direcao") or "arc_up")
+    sign = -1.0 if direction == "arc_up" else 1.0
+    x_height = max(1.0, float(font.size) * 0.70)
+    tracking_px = float(tracking_xh) * x_height
+    total_w = max(1.0, float(sum(widths) + max(0, len(widths) - 1) * tracking_px))
+    curve_px = max(4.0, intensity * max_h * 2.2)
+    x0, y0 = [float(value) for value in origin]
+    cursor = 0.0
+    core = np.zeros(shape, dtype=np.uint8)
+    poses: list[RenderedGlyphPose] = []
+    nominal_advances: list[float] = []
+    ft2 = _get_ft2_font(str(font.font_path))
+    for index, (glyph, mask, width) in enumerate(zip(glyph_text, masks, widths, strict=True)):
+        center = cursor + width / 2.0
+        t = ((center / total_w) * 2.0) - 1.0
+        y_offset = sign * curve_px * (1.0 - t * t)
+        slope = sign * curve_px * (-2.0 * t) * (2.0 / total_w)
+        angle = float(np.degrees(np.arctan(slope)))
+        render_mask = mask
+        if abs(angle) >= 0.5 and mask.shape[0] > 1 and mask.shape[1] > 1:
+            center_pt = (mask.shape[1] / 2.0, mask.shape[0] / 2.0)
+            matrix = cv2.getRotationMatrix2D(center_pt, angle, 1.0)
+            cos_a, sin_a = abs(matrix[0, 0]), abs(matrix[0, 1])
+            new_w = max(1, int(mask.shape[0] * sin_a + mask.shape[1] * cos_a))
+            new_h = max(1, int(mask.shape[0] * cos_a + mask.shape[1] * sin_a))
+            matrix[0, 2] += new_w / 2.0 - center_pt[0]
+            matrix[1, 2] += new_h / 2.0 - center_pt[1]
+            render_mask = cv2.warpAffine(mask, matrix, (new_w, new_h), flags=cv2.INTER_LINEAR)
+        gx, gy = int(round(x0 + cursor)), int(round(y0 + y_offset))
+        if glyph.strip():
+            tx1, ty1 = max(0, gx), max(0, gy)
+            tx2, ty2 = min(shape[1], gx + render_mask.shape[1]), min(shape[0], gy + render_mask.shape[0])
+            if tx2 > tx1 and ty2 > ty1:
+                mx1, my1 = tx1 - gx, ty1 - gy
+                core[ty1:ty2, tx1:tx2] = np.maximum(
+                    core[ty1:ty2, tx1:tx2],
+                    render_mask[my1:my1 + ty2 - ty1, mx1:mx1 + tx2 - tx1],
+                )
+        bbox = (gx, gy, gx + int(render_mask.shape[1]), gy + int(render_mask.shape[0]))
+        poses.append(
+            RenderedGlyphPose(
+                ord(glyph), int(ft2.get_char_index(ord(glyph))),
+                float(gx), float(gy), float(width), bbox, angle, 0,
+            )
+        )
+        if index > 0:
+            nominal_advances.append(float(widths[index - 1]))
+        cursor += width + tracking_px
+    identity = resolve_font_identity(font.font_path)
+    run = RenderedGlyphRun.build(
+        text=line,
+        font_spans=((0, len(poses), identity.file_sha256),),
+        glyphs=tuple(poses),
+        rendered_x_height_px=x_height,
+        nominal_advances=tuple(nominal_advances),
+        curve_direction=direction,
+        curve_amount=intensity,
+    )
+    return np.where(core > 0, 255, 0).astype(np.uint8), run
 
 
 def _render_safe_arc_text_layer(
@@ -16719,7 +17343,11 @@ def _try_render_single_text_block_with_rust(
                 "rotation_deg": plan.get("rotation_deg") or 0,
             }
         }
-    selection = backend_contract.select_backend_for_style("koharu_rust", profile)
+    selection = backend_contract.select_backend_for_style(
+        "koharu_rust",
+        profile,
+        enforce_observation=isinstance(text_data.get("style_resolved_intent_v1"), Mapping),
+    )
     selection_debug = dict(text_data.get("_render_debug") or {})
     selection_debug["renderer_backend_requested"] = "koharu_rust"
     selection_debug["renderer_backend_selected"] = selection.selected_backend
@@ -17094,39 +17722,30 @@ def _render_single_text_block_unrotated(
 
         if _should_render_safe_arc_text(plan, best_lines):
             if isinstance(text_data.get("visual_profile_v2"), dict):
-                core_rgb = np.zeros_like(image_np)
-                _render_safe_text_layer(
-                    core_rgb,
+                applied_style = text_data["visual_profile_v2"].get("applied_style")
+                applied_style = applied_style if isinstance(applied_style, dict) else {}
+                core, glyph_run = _build_safe_arc_core_and_run(
+                    image_np.shape[:2],
+                    best_lines[0],
+                    best_font,
+                    positions[0],
+                    plan,
+                    tracking_xh=float(applied_style.get("tracking_xh") or 0.0),
+                )
+                raster_result = _render_v2_owner_text_layer(
+                    image_np,
+                    text_data,
+                    plan,
                     best_lines,
                     best_font,
                     positions,
-                    fill_color="#FFFFFF",
+                    core_override=core,
+                    glyph_run_override=glyph_run,
                 )
-                core = np.where(
-                    np.max(core_rgb, axis=2) > 0,
-                    255,
-                    0,
-                ).astype(np.uint8)
-                text_data["fit_status"] = "style_curve_backend_unsupported"
-                text_data["render_completed"] = False
-                text_data["route_action"] = "review_required"
-                _merge_qa_flags(
-                    text_data,
-                    ["style_curve_backend_unsupported"],
-                )
-                return GlyphRasterResult(
-                    status="review_required",
-                    rgba=np.zeros((*core.shape, 4), dtype=np.uint8),
-                    glyph_core_mask=core,
-                    effect_mask=np.zeros_like(core),
-                    glyph_core_envelope=_owner_mask_bbox(core),
-                    effect_envelope=None,
-                    observed_attributes={},
-                    abstained_attributes={
-                        "curve": "backend_capability_not_supported"
-                    },
-                    metrics={"curve_contract_supported": False},
-                )
+                img.paste(Image.fromarray(image_np))
+                if not plan.get("_suppress_render_qa"):
+                    _run_render_qa(text_data, plan, background_image=pre_render_np)
+                return raster_result
             if plan["sombra"] and plan["sombra_cor"]:
                 dx, dy = plan["sombra_offset"]
                 _render_safe_arc_text_layer(
@@ -20005,8 +20624,9 @@ def _build_owner_style_raster_contract(
     render_completed: bool,
     raster_result: GlyphRasterResult | None,
     render_quality_contract: object,
+    text_data: Mapping[str, Any] | None = None,
     segments: list[dict[str, Any]] | None = None,
-) -> OwnerStyleRasterContract:
+) -> OwnerStyleRasterContract | OwnerStyleRasterContractV2:
     normalized_profile = validate_owner_visual_profile(
         profile,
         expected_owner_id=owner_id,
@@ -20082,8 +20702,143 @@ def _build_owner_style_raster_contract(
         ),
         "rendered_after_sha256": _owner_array_sha256(rendered),
     }
+    sealed_payload = (
+        text_data.get("_sealed_materialization_plan_v1")
+        if isinstance(text_data, Mapping)
+        else None
+    )
+    if not isinstance(sealed_payload, Mapping):
+        raw["contract_sha256"] = owner_style_raster_contract_sha256(raw)
+        return OwnerStyleRasterContract(**raw)
+
+    plan_v2 = materialization_plan_from_dict(sealed_payload)
+    if (
+        plan_v2.owner_id != owner_id
+        or plan_v2.page_id != page_id
+        or plan_v2.visual_profile_sha256 != normalized_profile["visual_profile_sha256"]
+    ):
+        raise ValueError("sealed materialization plan binding mismatch")
+    materializable = {
+        name
+        for name, item in plan_v2.attribute_plans.items()
+        if item.resolution_kind in {"exact", "policy_adjusted", "derived"}
+    }
+    domain_observations: dict[str, dict[str, dict[str, Any]]] = {
+        "layout": _observe_layout_materialization(
+            text_data or {},
+            attribute_names={
+                name for name in materializable
+                if plan_v2.attribute_plans[name].domain == "layout"
+            },
+        ),
+        "font": {},
+        "raster": {},
+    }
+    raw_font_rows = (
+        text_data.get("_style_v2_font_observation")
+        if isinstance(text_data, Mapping)
+        else None
+    )
+    if isinstance(raw_font_rows, Mapping):
+        domain_observations["font"] = {
+            str(name): copy.deepcopy(dict(row))
+            for name, row in raw_font_rows.items()
+            if name in materializable
+            and plan_v2.attribute_plans[name].domain == "font"
+            and isinstance(row, Mapping)
+        }
+    if raster_result is not None:
+        for name in sorted(materializable):
+            if plan_v2.attribute_plans[name].domain != "raster":
+                continue
+            if name in raster_result.observed_attributes:
+                evidence = copy.deepcopy(
+                    raster_result.attribute_evidence.get(name) or {}
+                )
+                evidence_sha256 = str(
+                    raster_result.attribute_evidence_sha256.get(name) or ""
+                )
+                if len(evidence_sha256) != 64:
+                    evidence_sha256 = _canonical_runtime_sha256(
+                        {"attribute": name, "evidence": evidence}
+                    )
+                domain_observations["raster"][name] = {
+                    "value": copy.deepcopy(raster_result.observed_attributes[name]),
+                    "evidence_kind": str(
+                        evidence.get("evidence_kind") or "raster_pixels_and_mask"
+                    ),
+                    "evidence_sha256": evidence_sha256,
+                    "metrics": evidence,
+                }
+            elif name in raster_result.unavailable_attributes:
+                domain_observations["raster"][name] = {
+                    "status": "unavailable",
+                    "reason": raster_result.unavailable_attributes[name],
+                }
+    observation = build_materialization_observation(
+        plan=plan_v2,
+        domain_observations=domain_observations,
+        render_completed=render_completed,
+    )
+    comparison = compare_materialization(plan_v2, observation)
+    requested_v2 = {
+        name: copy.deepcopy(item.to_dict()["intent_value"])
+        for name, item in plan_v2.attribute_plans.items()
+    }
+    applied_v2: dict[str, Any] = {}
+    abstained_v2: dict[str, str] = {}
+    mismatch_by_name = {
+        str(item.get("attribute")): str(item.get("reason") or "materialization_mismatch")
+        for item in comparison.mismatches
+    }
+    for name, item in plan_v2.attribute_plans.items():
+        if comparison.status == "match" and item.resolution_kind in {
+            "exact", "policy_adjusted", "derived"
+        }:
+            applied_v2[name] = copy.deepcopy(item.to_dict()["target_value"])
+        elif item.resolution_kind == "abstained":
+            abstained_v2[name] = item.reason or "approved_abstention"
+        elif item.resolution_kind == "superseded":
+            abstained_v2[name] = f"superseded_by:{item.superseded_by}"
+        else:
+            abstained_v2[name] = mismatch_by_name.get(
+                name,
+                item.reason or "materialization_not_match",
+            )
+    raw.update(
+        {
+            "schema_version": 2,
+            "status": (
+                "applied"
+                if render_completed and comparison.status == "match"
+                else "review_required"
+            ),
+            "render_status": "completed" if render_completed else "failed",
+            "materialization_status": comparison.status,
+            "style_intent_sha256": plan_v2.intent_sha256,
+            "materialization_plan_sha256": plan_v2.plan_sha256,
+            "materialization_observation_sha256": observation.observation_sha256,
+            "materialization_plan": plan_v2.to_dict(),
+            "materialization_observation": observation.to_dict(),
+            "materialization_comparison": comparison.to_dict(),
+            "backend_selection_reason": str(
+                (text_data or {}).get("_render_debug", {}).get(
+                    "renderer_backend_selection_reason",
+                    "python_v2_materialization_observation",
+                )
+                if isinstance((text_data or {}).get("_render_debug"), Mapping)
+                else "python_v2_materialization_observation"
+            ),
+            "capabilities": tuple(
+                sorted(set(raw["capabilities"]) | {"materialization_observation_v2"})
+            ),
+            "requested_attributes": requested_v2,
+            "applied_attributes": applied_v2,
+            "abstained_attributes": abstained_v2,
+        }
+    )
     raw["contract_sha256"] = owner_style_raster_contract_sha256(raw)
-    return OwnerStyleRasterContract(**raw)
+    return OwnerStyleRasterContractV2(**raw)
 
 
 def _owner_component_geometry_sha256(
@@ -20316,6 +21071,7 @@ def _render_owner_band_image(
             raster_result if isinstance(raster_result, GlyphRasterResult) else None
         ),
         render_quality_contract=render_quality_contract,
+        text_data=block,
         segments=(
             block.get("_style_raster_segments")
             if isinstance(block.get("_style_raster_segments"), list)

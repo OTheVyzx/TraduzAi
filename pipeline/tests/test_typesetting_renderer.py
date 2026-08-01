@@ -3,7 +3,7 @@ import tempfile
 import json
 from hashlib import sha256
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -13,6 +13,10 @@ from layout import balloon_layout as balloon_layout_mod
 from qa.export_gate import evaluate_export_gate
 from typesetter import renderer as renderer_mod
 from typesetter.owner_style import attach_owner_visual_profile, build_owner_visual_profile
+from typesetter.style_materialization import (
+    build_materialization_plan,
+    build_resolved_style_intent,
+)
 from typesetter.renderer import (
     SafeTextPathFont,
     _MIN_FONT_SIZE,
@@ -44,6 +48,7 @@ from ownership.model import (
     TextObservation,
     TextOwner,
     owner_style_raster_segment_sha256,
+    validate_owner_style_raster_contract,
 )
 
 from main import (
@@ -57,6 +62,302 @@ from main import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_verified_v2_owner_style_is_not_renormalized_as_auto(self):
+        image = Image.new("RGB", (80, 60), "white")
+        profile = {
+            "owner_id": "owner_v2",
+            "visual_profile_sha256": "a" * 64,
+            "applied_style": {"cor": "#F8F8F8", "fonte": "ComicNeue-Bold.ttf"},
+        }
+        intent = {
+            "owner_id": "owner_v2",
+            "page_id": "page_001",
+            "visual_profile_sha256": "a" * 64,
+            "intent_sha256": "b" * 64,
+            "approved_attributes": {"fill": "#F8F8F8"},
+            "approved_abstentions": {},
+        }
+        block = {
+            "owner_id": "owner_v2",
+            "visual_profile_v2": profile,
+            "visual_profile_sha256": "a" * 64,
+            "style_resolved_intent_v1": intent,
+            "estilo": dict(profile["applied_style"]),
+            "bbox": [5, 5, 70, 50],
+        }
+        profile_before = json.loads(json.dumps(profile))
+        intent_before = json.loads(json.dumps(intent))
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value=profile,
+        ):
+            renderer_mod._apply_auto_style_policy_if_needed(image, block)
+
+        self.assertEqual(block["visual_profile_v2"], profile_before)
+        self.assertEqual(block["style_resolved_intent_v1"], intent_before)
+        self.assertEqual(block["style_origin"], "owner_style_v2")
+        self.assertEqual(block["estilo"]["cor"], "#F8F8F8")
+
+    def test_layout_observation_uses_final_fit_and_positions_not_request_echo(self):
+        observed = renderer_mod._observe_layout_materialization(
+            {
+                "font_size_final": 36,
+                "safe_text_box": [0, 0, 200, 80],
+                "render_layout_contract": {
+                    "lines": ["TESTE"],
+                    "positions": [[24, 20]],
+                    "line_widths": [80],
+                    "line_height": 40,
+                    "block_bbox": [24, 20, 104, 60],
+                },
+            },
+            attribute_names={"font_size_px", "alignment"},
+        )
+
+        self.assertEqual(observed["font_size_px"]["canonical_value"], 36)
+        self.assertEqual(observed["alignment"]["canonical_value"], "left")
+        self.assertEqual(observed["alignment"]["evidence_kind"], "final_glyph_positions")
+        self.assertEqual(len(observed["alignment"]["evidence_sha256"]), 64)
+
+    def test_tracking_and_curve_are_observed_from_final_glyph_run(self):
+        run = renderer_mod.RenderedGlyphRun.build(
+            text="AB",
+            font_spans=((0, 2, "font-sha"),),
+            glyphs=(
+                renderer_mod.RenderedGlyphPose(65, 1, 10.0, 20.0, 12.0, (10, 10, 20, 30), -8.0),
+                renderer_mod.RenderedGlyphPose(66, 2, 25.0, 18.0, 12.0, (25, 8, 35, 28), 8.0),
+            ),
+            rendered_x_height_px=20.0,
+            nominal_advances=(10.0,),
+        )
+
+        observed = renderer_mod._observe_layout_materialization(
+            {"_rendered_glyph_run": run.to_dict()},
+            attribute_names={"tracking_xh", "curve"},
+        )
+
+        self.assertEqual(observed["tracking_xh"]["evidence_kind"], "glyph_run")
+        self.assertEqual(observed["curve"]["evidence_kind"], "glyph_run")
+        self.assertEqual(
+            observed["curve"]["metrics"]["glyph_poses_sha256"],
+            run.glyph_poses_sha256,
+        )
+
+    def test_owner_tracking_changes_glyph_advances_and_raster_width_once(self):
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 30)
+        plain = renderer_mod._render_v2_owner_core_mask(
+            (100, 240), ["TESTE"], font, [(60, 30)], tracking_xh=0.0, alignment="left"
+        )
+        tracked = renderer_mod._render_v2_owner_core_mask(
+            (100, 240), ["TESTE"], font, [(60, 30)], tracking_xh=0.15, alignment="left"
+        )
+        run = renderer_mod._build_linear_rendered_glyph_run(
+            ["TESTE"], [(60, 30)], font, tracking_xh=0.15, alignment="left"
+        )
+        observed = renderer_mod._observe_layout_materialization(
+            {"_rendered_glyph_run": run.to_dict()},
+            attribute_names={"tracking_xh"},
+        )
+
+        plain_bbox = cv2.boundingRect(cv2.findNonZero(plain))
+        tracked_bbox = cv2.boundingRect(cv2.findNonZero(tracked))
+        self.assertGreater(tracked_bbox[2], plain_bbox[2])
+        self.assertAlmostEqual(observed["tracking_xh"]["canonical_value"], 0.15, places=6)
+
+    def test_complete_materialization_observation_merges_disjoint_domains(self):
+        owner_id = "owner_domains"
+        page_id = "page_001"
+        profile_sha = "a" * 64
+        identity = {
+            "filename": "ComicNeue-Bold.ttf",
+            "file_sha256": "b" * 64,
+            "family": "Comic Neue",
+            "subfamily": "Bold",
+            "postscript_name": "ComicNeue-Bold",
+            "weight_class": 700,
+            "width_class": 5,
+            "variation_axes": [],
+        }
+        intent = build_resolved_style_intent(
+            owner_id=owner_id,
+            page_id=page_id,
+            visual_profile_sha256=profile_sha,
+            decision_sha256="c" * 64,
+            group_resolution_sha256="d" * 64,
+            approved={
+                "font_size_px": 36,
+                "alignment": "left",
+                "font_name": "ComicNeue-Bold.ttf",
+                "fill": "#FFFFFF",
+            },
+            approved_abstentions={},
+        )
+        plan = build_materialization_plan(
+            intent=intent,
+            render_layout_contract_sha256="e" * 64,
+            targets={
+                "font_size_px": 36,
+                "alignment": "left",
+                "font_name": identity,
+                "fill": "#FFFFFF",
+            },
+            resolution_kinds={
+                "font_size_px": "exact",
+                "alignment": "exact",
+                "font_name": "exact",
+                "fill": "exact",
+            },
+            rendered_x_height_px=25.2,
+        )
+        text_data = {
+            "_sealed_materialization_plan_v1": plan.to_dict(),
+            "font_size_final": 36,
+            "safe_text_box": [0, 0, 200, 80],
+            "render_layout_contract": {
+                "lines": ["TESTE"],
+                "positions": [[10, 20]],
+                "line_widths": [80],
+                "line_height": 40,
+                "block_bbox": [10, 20, 90, 60],
+            },
+            "_style_v2_font_observation": {
+                "font_name": {
+                    "value": identity,
+                    "evidence_kind": "resolved_font_file",
+                    "evidence_sha256": "f" * 64,
+                }
+            },
+        }
+        before = np.zeros((80, 200, 3), dtype=np.uint8)
+        rendered = before.copy()
+        glyph = np.zeros((80, 200), dtype=np.uint8)
+        glyph[20:60, 10:90] = 255
+        rendered[glyph > 0] = 255
+        rgba = np.zeros((80, 200, 4), dtype=np.uint8)
+        rgba[glyph > 0] = (255, 255, 255, 255)
+        raster = renderer_mod.GlyphRasterResult(
+            status="applied",
+            rgba=rgba,
+            glyph_core_mask=glyph,
+            effect_mask=np.zeros_like(glyph),
+            glyph_core_envelope=(10, 20, 90, 60),
+            effect_envelope=None,
+            observed_attributes={"fill": "#FFFFFF"},
+            abstained_attributes={},
+            metrics={},
+            attribute_evidence={"fill": {"evidence_kind": "layer_pixels_and_mask"}},
+            attribute_evidence_sha256={"fill": "1" * 64},
+        )
+        profile = {
+            "visual_profile_sha256": profile_sha,
+            "component_geometry_sha256": "2" * 64,
+            "source_sha256": "3" * 64,
+            "glyph_mask_sha256": "4" * 64,
+            "status": "applied",
+        }
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value=profile,
+        ):
+            contract = renderer_mod._build_owner_style_raster_contract(
+                owner_id=owner_id,
+                page_id=page_id,
+                profile=profile,
+                execution_component_geometry_sha256="5" * 64,
+                before=before,
+                rendered=rendered,
+                glyph_mask=glyph,
+                render_completed=True,
+                raster_result=raster,
+                render_quality_contract=Mock(to_dict=lambda: {"status": "ok"}),
+                text_data=text_data,
+            )
+
+        payload = contract.to_dict()
+        validate_owner_style_raster_contract(
+            contract,
+            expected_owner_id=owner_id,
+            expected_page_id=page_id,
+        )
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["materialization_status"], "match")
+        domains = {
+            row["domain"]
+            for row in payload["materialization_observation"]["attributes"].values()
+        }
+        self.assertEqual(domains, {"layout", "font", "raster"})
+        self.assertTrue(
+            all(
+                row["evidence_sha256"]
+                for row in payload["materialization_observation"]["attributes"].values()
+            )
+        )
+
+    def test_materialization_plan_seals_final_fit_without_rewriting_intent(self):
+        owner_id = "owner_fit"
+        page_id = "page_001"
+        profile_sha = "a" * 64
+        intent = build_resolved_style_intent(
+            owner_id=owner_id,
+            page_id=page_id,
+            visual_profile_sha256=profile_sha,
+            decision_sha256="b" * 64,
+            group_resolution_sha256="c" * 64,
+            approved={"font_size_px": 48, "fill": "#FFFFFF"},
+            approved_abstentions={},
+        )
+        block = {
+            "owner_id": owner_id,
+            "page_id": page_id,
+            "visual_profile_sha256": profile_sha,
+            "visual_profile_v2": {"visual_profile_sha256": profile_sha},
+            "style_resolved_intent_v1": intent.to_dict(),
+            "font_size_final": 36,
+            "render_layout_contract": {
+                "font_size": 36,
+                "lines": ["TESTE"],
+                "positions": [[20, 20]],
+                "line_widths": [80],
+                "line_height": 40,
+                "block_bbox": [20, 20, 100, 60],
+                "safe_text_box": [0, 0, 160, 80],
+            },
+        }
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 36)
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value={"visual_profile_sha256": profile_sha},
+        ):
+            renderer_mod._seal_owner_materialization_plan(
+                block,
+                {"alignment": "center"},
+                font,
+                ["TESTE"],
+                [(20, 20)],
+            )
+
+        sealed = block["_sealed_materialization_plan_v1"]
+        font_size = sealed["attribute_plans"]["font_size_px"]
+        self.assertEqual(font_size["intent_value"], 48)
+        self.assertEqual(font_size["target_value"], 36)
+        self.assertEqual(font_size["resolution_kind"], "policy_adjusted")
+        self.assertEqual(intent.to_dict()["approved_attributes"]["font_size_px"], 48)
+
+    def test_font_observation_comes_from_faces_used_by_text_raster(self):
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+
+        mask = _build_textpath_mask(font, "AÇÃO", padding=0)
+
+        observation = font._font_run_observation_cache["AÇÃO"]
+        self.assertGreater(np.count_nonzero(mask), 0)
+        self.assertEqual(observation["text"], "AÇÃO")
+        self.assertTrue(observation["spans"])
+        self.assertEqual(len(observation["primary_identity"]["file_sha256"]), 64)
+        self.assertEqual(len(observation["observation_sha256"]), 64)
+
     def test_v2_owner_fill_stroke_and_glow_produce_nonempty_raster(self):
         canvas = np.zeros((120, 240, 3), dtype=np.uint8)
         font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
@@ -513,7 +814,7 @@ class TypesettingRendererTests(unittest.TestCase):
             {"fill": "#f4f4f4"},
         )
 
-    def test_curved_owner_cannot_claim_v2_applied_without_supported_contract(self):
+    def test_curved_owner_uses_shared_raster_and_reports_glyph_run(self):
         canvas = np.full((160, 360, 3), 245, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")
         text = {
@@ -548,15 +849,12 @@ class TypesettingRendererTests(unittest.TestCase):
         )
 
         self.assertIsInstance(result, renderer_mod.GlyphRasterResult)
-        self.assertEqual(result.status, "review_required")
-        self.assertEqual(result.applied_attributes, {})
-        self.assertEqual(
-            result.abstained_attributes,
-            {"curve": "backend_capability_not_supported"},
-        )
-        self.assertEqual(text["route_action"], "review_required")
-        self.assertFalse(text["render_completed"])
-        self.assertTrue(np.array_equal(np.asarray(image), canvas))
+        self.assertEqual(result.status, "applied")
+        self.assertGreater(np.count_nonzero(result.rgba[:, :, 3]), 0)
+        self.assertIn("_rendered_glyph_run", text)
+        self.assertEqual(text["_rendered_glyph_run"]["curve_direction"], "arc_up")
+        self.assertAlmostEqual(text["_rendered_glyph_run"]["curve_amount"], 0.42)
+        self.assertFalse(np.array_equal(np.asarray(image), canvas))
 
     def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
         text = {

@@ -339,6 +339,7 @@ def build_owner_visual_profile(
     profile: dict[str, Any] = {
         "schema_version": OWNER_VISUAL_PROFILE_SCHEMA_VERSION,
         "owner_id": owner_id,
+        "page_id": str(_field(owner, "page_id") or ""),
         "style_group_id": group_id,
         "style_group_kind": group_kind,
         "style_group_role": group_role,
