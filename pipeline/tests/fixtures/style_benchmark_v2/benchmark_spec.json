@@ -303,11 +303,25 @@
     }
   ],
   "validation_thresholds": {
-    "font_top1_min": 0.9,
-    "font_top3_min": 0.98,
-    "fill_delta_e_2000_median_max": 8.0,
-    "fill_delta_e_2000_p95_max": 12.0,
-    "hard_negative_abstention_min": 1.0,
-    "round_trip_min": 1.0
+    "schema_version": 2,
+    "synthetic": {
+      "font_top1_min": 0.9,
+      "font_top3_min": 0.98,
+      "fill_delta_e_2000_median_max": 8.0,
+      "fill_delta_e_2000_p95_max": 12.0,
+      "hard_negative_abstention_min": 1.0,
+      "round_trip_min": 1.0
+    },
+    "owner_qa": {
+      "safe_containment_min": 1.0,
+      "effect_containment_min": 1.0,
+      "catastrophic_mismatch_max": 0
+    },
+    "inspection": {
+      "owner_go_rate_min": 0.9,
+      "speech_go_rate_min": 0.95,
+      "category_go_rate_min": 0.85,
+      "coverage_min": 1.0
+    }
   }
 }

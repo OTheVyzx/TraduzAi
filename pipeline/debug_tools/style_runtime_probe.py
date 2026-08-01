@@ -275,10 +275,17 @@ def probe_projects(
     projects: Mapping[str, Path | Mapping[str, Any]],
     *,
     matrix: Path | Mapping[str, Any],
+    acceptance_bundle: Path | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Probe only the exact entry/page/owner targets authenticated by a matrix."""
 
     matrix_payload, matrix_path = _load_mapping(matrix, label="matrix")
+    matrix_sha256 = _canonical_sha256(matrix_payload)
+    bundle_payload: Mapping[str, Any] | None = None
+    if acceptance_bundle is not None:
+        bundle_payload, _bundle_path = _load_mapping(acceptance_bundle, label="acceptance bundle")
+        if str(bundle_payload.get("matrix_sha256") or "") != matrix_sha256:
+            raise RuntimeProbeError("matrix hash does not match acceptance bundle")
     entries = matrix_payload.get("entries")
     if int(matrix_payload.get("schema_version") or 0) < 3 or not isinstance(entries, list):
         raise RuntimeProbeError("matrix schema/entries are invalid")
@@ -363,7 +370,11 @@ def probe_projects(
         "status": "BLOCK" if contracts else "PASS",
         "contracts": sorted(contracts),
         "matrix_path": str(matrix_path) if matrix_path else None,
-        "matrix_sha256": _canonical_sha256(matrix_payload),
+        "matrix_sha256": matrix_sha256,
+        "producer_run_id": f"runtime-probe:{matrix_sha256[:12]}",
+        "acceptance_bundle_id": bundle_payload.get("acceptance_bundle_id") if bundle_payload else None,
+        "revision_sha256": bundle_payload.get("revision_sha256") if bundle_payload else None,
+        "source_manifest_sha256": bundle_payload.get("source_manifest_sha256") if bundle_payload else None,
         "target_count": target_count,
         "target_keys": target_keys,
         "rendered_owner_count": rendered_count,
@@ -388,6 +399,7 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Schema v3 matrix selecting exact entry/page/owner targets.",
     )
+    parser.add_argument("--acceptance-bundle", type=Path)
     parser.add_argument(
         "--output",
         type=Path,
@@ -418,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         if entry_id in projects:
             raise RuntimeProbeError(f"entry_project_duplicate:{entry_id}")
         projects[entry_id] = path
-    report = probe_projects(projects, matrix=args.matrix)
+    report = probe_projects(projects, matrix=args.matrix, acceptance_bundle=args.acceptance_bundle)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",

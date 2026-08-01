@@ -248,6 +248,22 @@ def test_runtime_probe_uses_exact_matrix_target_keys_not_all_renderable_owners(t
     assert report["rendered_owner_count"] == 9
 
 
+def test_runtime_probe_requires_matrix_hash_bound_by_acceptance_bundle(tmp_path):
+    matrix, projects, _expected = _matrix_project_fixture(tmp_path)
+    matrix_sha256 = style_runtime_probe._canonical_sha256(matrix)
+    bundle = {
+        "matrix_sha256": matrix_sha256, "acceptance_bundle_id": "b" * 64,
+        "revision_sha256": "r" * 64, "source_manifest_sha256": "s" * 64,
+    }
+
+    report = style_runtime_probe.probe_projects(projects, matrix=matrix, acceptance_bundle=bundle)
+
+    assert report["matrix_sha256"] == matrix_sha256
+    assert report["acceptance_bundle_id"] == "b" * 64
+    with pytest.raises(style_runtime_probe.RuntimeProbeError, match="matrix.*bundle"):
+        style_runtime_probe.probe_projects(projects, matrix={**matrix, "schema_version": 4}, acceptance_bundle=bundle)
+
+
 @pytest.mark.parametrize("problem", ["target_missing", "target_duplicate", "entry_project_missing"])
 def test_runtime_probe_blocks_incomplete_or_ambiguous_matrix_resolution(tmp_path, problem):
     matrix, projects, _expected = _matrix_project_fixture(tmp_path)

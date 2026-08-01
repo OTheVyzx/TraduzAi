@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -167,6 +169,7 @@ def run_benchmark(
     run_id: str,
     seed: int,
     runtime_lock_path: Path = generate_style_benchmark_v2.DEFAULT_RUNTIME_LOCK,
+    acceptance_bundle_path: Path | None = None,
 ) -> Path:
     """Generate a run and measure the current engine without changing its behavior."""
     run_dir = generate_style_benchmark_v2.generate_benchmark(
@@ -181,13 +184,29 @@ def run_benchmark(
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8-sig"))
     records = _measure_mask_backed_v2(run_dir, manifest)
     legacy_records = _measure_current_engine(run_dir, manifest)
-    style_benchmark_report.write_run_reports(
+    summary = style_benchmark_report.write_run_reports(
         run_dir,
         manifest,
         records,
         legacy_records=legacy_records,
-        validation_thresholds=spec.get("validation_thresholds"),
+        validation_thresholds=(spec.get("validation_thresholds") or {}).get("synthetic", spec.get("validation_thresholds")),
     )
+    bundle_path = acceptance_bundle_path or (
+        Path(str(os.environ["TRADUZAI_ACCEPTANCE_BUNDLE"]))
+        if os.environ.get("TRADUZAI_ACCEPTANCE_BUNDLE") else None
+    )
+    if bundle_path is not None:
+        bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8-sig"))
+        summary.update({
+            "producer_run_id": run_id,
+            "acceptance_bundle_id": bundle.get("acceptance_bundle_id"),
+            "revision_sha256": bundle.get("revision_sha256"),
+            "source_manifest_sha256": bundle.get("source_manifest_sha256"),
+            "acceptance_bundle_sha256": hashlib.sha256(Path(bundle_path).read_bytes()).hexdigest(),
+        })
+        (run_dir / "style_benchmark_summary.json").write_text(
+            json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     return run_dir
 
 
@@ -200,6 +219,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--runtime-lock", type=Path, default=generate_style_benchmark_v2.DEFAULT_RUNTIME_LOCK)
     parser.add_argument("--mode", choices=("shadow", "enforce"), default="shadow")
+    parser.add_argument("--acceptance-bundle", type=Path)
     return parser
 
 
@@ -212,6 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=args.run_id,
             seed=args.seed,
             runtime_lock_path=args.runtime_lock,
+            acceptance_bundle_path=args.acceptance_bundle,
         )
     print(run_dir)
     summary = json.loads((run_dir / "style_benchmark_summary.json").read_text(encoding="utf-8"))

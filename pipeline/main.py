@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import faulthandler
+import hashlib
 import logging
 import contextlib
 import importlib.util
@@ -10010,6 +10011,7 @@ def _run_pipeline(config_path: str):
         },
     )
     project_data.setdefault("qa", {})["timing"] = project_data["performance"]
+    _publish_acceptance_execution_ledger(project_data, work_dir)
     with pipeline_timing.measure("save_project_json"):
         _save_project_json(work_dir / "project.json", project_data)
     with pipeline_timing.measure("finalize_decision_trace"):
@@ -14224,6 +14226,45 @@ def _refresh_project_qa_summary(project: dict) -> None:
     }
     qa["summary"] = {**summarize_flags(regions), **preserved_audits}
     _synchronize_qa_summary_with_export_gate(project)
+
+
+def _publish_acceptance_execution_ledger(
+    project: dict,
+    work_dir: Path,
+    *,
+    environ: dict[str, str] | None = None,
+) -> dict | None:
+    """Publish the pipeline child ledger when an authenticated bundle is active."""
+
+    active_env = environ if environ is not None else os.environ
+    raw_bundle = str(active_env.get("TRADUZAI_ACCEPTANCE_BUNDLE") or "").strip()
+    if not raw_bundle:
+        return None
+    bundle_path = Path(raw_bundle).resolve()
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8-sig"))
+    from qa.execution_source_guard import finalize_execution_source_ledger
+
+    ledger = finalize_execution_source_ledger(bundle)
+    ledger.update(
+        {
+            "producer": "pipeline",
+            "producer_run_id": f"pipeline:{Path(work_dir).resolve().name}",
+            "acceptance_bundle_id": bundle.get("acceptance_bundle_id"),
+            "revision_sha256": bundle.get("revision_sha256"),
+            "source_manifest_sha256": bundle.get("source_manifest_sha256"),
+        }
+    )
+    ledger_path = Path(work_dir).resolve() / "execution_source_ledger.json"
+    temporary = ledger_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, ledger_path)
+    project.setdefault("qa", {})["acceptance_execution"] = {
+        "ledger_path": str(ledger_path),
+        "ledger_sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+        "acceptance_bundle_id": bundle.get("acceptance_bundle_id"),
+        "producer_run_id": ledger["producer_run_id"],
+    }
+    return ledger
 
 
 def _save_project_json(project_json_path: Path, project: dict) -> None:

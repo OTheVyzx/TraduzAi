@@ -692,6 +692,7 @@ def _run_entry(
     manifest_path: Path,
     output_root: Path,
     runtime: dict[str, Any],
+    acceptance_bundle_path: Path | None = None,
 ) -> dict[str, Any]:
     target = Path(entry["work_dir"])
     if not target.is_absolute():
@@ -723,12 +724,16 @@ def _run_entry(
     pipeline_main = Path(__file__).resolve().parents[1] / "main.py"
     command = [sys.executable, str(pipeline_main), str(effective_config)]
     started_at = datetime.now(timezone.utc).isoformat()
+    child_env = dict(os.environ)
+    if acceptance_bundle_path is not None:
+        child_env["TRADUZAI_ACCEPTANCE_BUNDLE"] = str(acceptance_bundle_path.resolve())
     completed = subprocess.run(
         command,
         cwd=str(pipeline_main.parent),
         check=False,
         text=True,
         capture_output=True,
+        env=child_env,
     )
     finished_at = datetime.now(timezone.utc).isoformat()
     log_paths = _persist_runner_logs(
@@ -1617,10 +1622,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--inspection-template", type=Path)
     parser.add_argument("--inspection-manifest", type=Path)
+    parser.add_argument("--acceptance-bundle", type=Path)
     args = parser.parse_args(argv)
     manifest_path = args.manifest.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     entries = validate_manifest(manifest)
+    acceptance_bundle: dict[str, Any] | None = None
+    if args.acceptance_bundle:
+        acceptance_bundle = json.loads(args.acceptance_bundle.resolve().read_text(encoding="utf-8-sig"))
+        if str(acceptance_bundle.get("matrix_sha256") or "") != _canonical_payload_sha256(manifest):
+            raise MatrixContractError("matrix hash does not match acceptance bundle")
     raw_inputs_path = Path(str(manifest.get("inputs_path") or "inputs.json"))
     if raw_inputs_path.is_absolute():
         raise MatrixContractError("inputs_path must be relative to the matrix fixture")
@@ -1648,7 +1659,7 @@ def main(argv: list[str] | None = None) -> int:
             if runtime is None:
                 run_results.append({"entry_id": entry["entry_id"], "returncode": 2})
                 continue
-            run_results.append(_run_entry(entry, manifest_path, output_root, runtime))
+            run_results.append(_run_entry(entry, manifest_path, output_root, runtime, args.acceptance_bundle))
     else:
         for entry in entries:
             work_dir = Path(entry["work_dir"])
@@ -1695,6 +1706,13 @@ def main(argv: list[str] | None = None) -> int:
             entry_reports[str(entry["entry_id"])] = report
     owner_qa_summary = build_owner_qa_summary(matrix=manifest, entry_reports=entry_reports)
     holdout_summary = build_style_holdout_summary(matrix=manifest, inspection=inspected or [])
+    binding = {
+        "acceptance_bundle_id": acceptance_bundle.get("acceptance_bundle_id") if acceptance_bundle else None,
+        "revision_sha256": acceptance_bundle.get("revision_sha256") if acceptance_bundle else None,
+        "source_manifest_sha256": acceptance_bundle.get("source_manifest_sha256") if acceptance_bundle else None,
+    }
+    owner_qa_summary.update({**binding, "producer_run_id": f"owner-qa:{output_root.name}"})
+    holdout_summary.update({**binding, "producer_run_id": f"inspection:{output_root.name}"})
     (output_root / "style_owner_qa_summary.json").write_text(
         json.dumps(owner_qa_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -1707,8 +1725,47 @@ def main(argv: list[str] | None = None) -> int:
     ] + [
         {"code": "owner_style_qa_blocked"} for _ in [0] if owner_qa_summary["status"] != "PASS"
     ] + list(holdout_summary["findings"])
+    execution_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        work_dir = Path(entry["work_dir"])
+        if not work_dir.is_absolute():
+            work_dir = output_root / work_dir
+        project_path = work_dir / "project.json"
+        project = json.loads(project_path.read_text(encoding="utf-8-sig")) if project_path.is_file() else {}
+        qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+        gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
+        reports = [row for row in qa.get("final_pixel_reports") or [] if isinstance(row, dict)]
+        contract_status = lambda name: "PASS" if reports and all(str((row.get("contracts") or {}).get(name) or "BLOCK") == "PASS" for row in reports) else "BLOCK"
+        ledger_path = work_dir / "execution_source_ledger.json"
+        execution_entries.append({
+            "entry_id": entry["entry_id"],
+            "project_json_path": str(project_path.resolve()),
+            "project_json_sha256": _sha256_file(project_path) if project_path.is_file() else None,
+            "export_gate_path": f"{project_path.resolve()}#qa.export_gate",
+            "export_gate_sha256": _canonical_payload_sha256(gate) if gate else None,
+            "export_gate_status": str(gate.get("status") or "BLOCK"),
+            "route_gate_status": contract_status("route_state_contract"),
+            "final_language_gate_status": contract_status("final_language_contract"),
+            "inpaint_residual_gate_status": contract_status("residual_cleanup_contract"),
+            "pipeline_child_ledger_path": str(ledger_path.resolve()),
+            "pipeline_child_ledger_sha256": _sha256_file(ledger_path) if ledger_path.is_file() else None,
+            "acceptance_bundle_id": binding["acceptance_bundle_id"],
+        })
+    if any(
+        row["export_gate_status"] != "PASS"
+        or row["route_gate_status"] != "PASS"
+        or row["final_language_gate_status"] != "PASS"
+        or row["inpaint_residual_gate_status"] != "PASS"
+        or (acceptance_bundle is not None and not row["pipeline_child_ledger_sha256"])
+        for row in execution_entries
+    ):
+        functional_go = False
+    if not functional_go and not any(row.get("code") == "functional_matrix_blocked" for row in execution_findings):
+        execution_findings.append({"code": "functional_matrix_blocked"})
     execution_summary = {
         "schema_version": 1,
+        **binding,
+        "producer_run_id": f"matrix:{output_root.name}",
         "functional_status": "GO" if functional_go else "BLOCK",
         "style_status": "GO" if owner_qa_summary["status"] == "PASS" else "BLOCK",
         "inspection_status": "GO" if holdout_summary["status"] == "PASS" else "PENDING" if all(
@@ -1716,6 +1773,7 @@ def main(argv: list[str] | None = None) -> int:
             for row in holdout_summary["findings"]
         ) else "BLOCK",
         "findings": execution_findings,
+        "entries": execution_entries,
     }
     (output_root / "matrix_execution_summary.json").write_text(
         json.dumps(execution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

@@ -19,6 +19,27 @@ from typesetter.renderer import build_render_blocks  # noqa: E402
 
 
 class MainEmitTests(unittest.TestCase):
+    def test_acceptance_bundle_publishes_pipeline_execution_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bundle_path = root / "acceptance_bundle.json"
+            bundle_path.write_text(json.dumps({
+                "acceptance_bundle_id": "b" * 64,
+                "revision_sha256": "r" * 64,
+                "source_manifest_sha256": "s" * 64,
+            }), encoding="utf-8")
+            project = {"qa": {}}
+            verified = {"schema_version": 1, "status": "PASS", "loaded_sources": {}}
+
+            with patch("qa.execution_source_guard.finalize_execution_source_ledger", return_value=verified):
+                ledger = main._publish_acceptance_execution_ledger(
+                    project, root, environ={"TRADUZAI_ACCEPTANCE_BUNDLE": str(bundle_path)}
+                )
+
+            self.assertEqual(ledger["acceptance_bundle_id"], "b" * 64)
+            self.assertTrue((root / "execution_source_ledger.json").is_file())
+            self.assertEqual(project["qa"]["acceptance_execution"]["producer_run_id"], f"pipeline:{root.name}")
+
     def test_project_json_publishes_logical_and_frame_dimensions(self) -> None:
         from strip.page_surface_geometry import PageSurfaceGeometry
 
