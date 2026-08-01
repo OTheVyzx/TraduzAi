@@ -183,12 +183,21 @@ def _canonicalize_effect(value: Any, *, name: str) -> Any:
     return _canonicalize_mapping(value, parent=name)
 
 
-def canonicalize_style_attribute(name: str, value: Any) -> Any:
+def canonicalize_style_attribute(
+    name: str,
+    value: Any,
+    *,
+    font_catalog: Any | None = None,
+) -> Any:
     validate_attribute_domain_registry(ATTRIBUTE_DOMAIN)
     if name not in ATTRIBUTE_DOMAIN:
         raise ValueError(f"unknown style attribute: {name}")
     if name == "font_name":
-        raise ValueError("font_name requires resolved font identity")
+        if font_catalog is None:
+            raise ValueError("font_name requires resolved font identity")
+        from typesetter.font_identity import canonicalize_font_intent
+
+        return canonicalize_font_intent(value, font_catalog).to_dict()
     if name in {"fill"}:
         return canonicalize_srgb_color(value)
     if name in _NUMERIC_ATTRIBUTES:
