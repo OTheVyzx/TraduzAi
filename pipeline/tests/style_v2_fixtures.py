@@ -9,6 +9,7 @@ import numpy as np
 from ownership.model import (
     OwnerStyleRasterContract,
     owner_style_raster_contract_sha256,
+    owner_style_raster_segment_sha256,
 )
 
 
@@ -146,3 +147,50 @@ def _mask_bbox(mask: np.ndarray) -> list[int]:
         int(xs.max()) + 1,
         int(ys.max()) + 1,
     ]
+
+
+def valid_owner_style_raster_segment(
+    *,
+    owner_id: str = "owner_p001_fixture",
+    visual_profile_sha256: str,
+    segment_id: str = "region_0",
+    order: int = 0,
+    bbox_page: tuple[int, int, int, int] = (0, 0, 2, 2),
+) -> dict[str, Any]:
+    mask = np.zeros((4, 8), dtype=np.uint8)
+    x1, y1, x2, y2 = bbox_page
+    mask[y1:y2, x1:x2] = 255
+    empty = np.zeros_like(mask)
+    segment = {
+        "segment_id": segment_id,
+        "order": order,
+        "owner_id": owner_id,
+        "visual_profile_sha256": visual_profile_sha256,
+        "bbox_page": list(bbox_page),
+        "status": "fallback",
+        "applied_attributes": {},
+        "abstained_attributes": {
+            "fill": "fixture_has_no_renderer_evidence"
+        },
+        "glyph_core_envelope": {
+            "bbox_page": list(bbox_page),
+            "mask_sha256": _array_sha256(mask),
+            "pixel_count": int(np.count_nonzero(mask)),
+        },
+        "effect_envelope": {
+            "bbox_page": [],
+            "mask_sha256": _array_sha256(empty),
+            "pixel_count": 0,
+        },
+        "rendered_before_sha256": _json_sha256(
+            {"segment_id": segment_id, "phase": "before"}
+        ),
+        "rendered_patch_sha256": _json_sha256(
+            {"segment_id": segment_id, "phase": "patch"}
+        ),
+        "rendered_after_sha256": _json_sha256(
+            {"segment_id": segment_id, "phase": "after"}
+        ),
+    }
+    segment["segment_sha256"] = owner_style_raster_segment_sha256(segment)
+    return segment

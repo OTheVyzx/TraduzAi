@@ -43,6 +43,7 @@ from ownership.model import (
     SourceTextComponent,
     TextObservation,
     TextOwner,
+    owner_style_raster_segment_sha256,
 )
 
 from main import (
@@ -365,6 +366,162 @@ class TypesettingRendererTests(unittest.TestCase):
                     resolved[3],
                     {"fill": "attribute_confidence_below_threshold"},
                 )
+
+    def test_split_owner_fails_closed_when_one_child_has_no_raster_contract(self):
+        children = [
+            {
+                "owner_id": "owner_split",
+                "visual_profile_sha256": "a" * 64,
+                "_owner_render_mode": True,
+                "render_bbox": [2, 2, 10, 8],
+                "safe_text_box": [1, 1, 11, 9],
+                "fit_status": "ok",
+                "_style_raster_segment": {
+                    "segment_id": "region_0",
+                },
+            },
+            {
+                "owner_id": "owner_split",
+                "visual_profile_sha256": "a" * 64,
+                "_owner_render_mode": True,
+                "render_bbox": [14, 2, 22, 8],
+                "safe_text_box": [13, 1, 23, 9],
+                "fit_status": "ok",
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "child raster contract"):
+            renderer_mod._aggregate_split_render_blocks(children)
+
+    def test_split_owner_aggregates_child_contracts_in_canonical_order(self):
+        owner_id = "owner_split"
+        profile_sha256 = "a" * 64
+
+        def child(segment_id, order, bbox):
+            core = np.zeros((12, 28), dtype=np.uint8)
+            core[bbox[1] : bbox[3], bbox[0] : bbox[2]] = 255
+            rgba = np.zeros((12, 28, 4), dtype=np.uint8)
+            rgba[core > 0] = (244, 244, 244, 255)
+            envelope = {
+                "bbox_page": list(bbox),
+                "mask_sha256": renderer_mod._owner_array_sha256(core),
+                "pixel_count": int(np.count_nonzero(core)),
+            }
+            empty = np.zeros_like(core)
+            segment = {
+                "segment_id": segment_id,
+                "order": order,
+                "owner_id": owner_id,
+                "visual_profile_sha256": profile_sha256,
+                "bbox_page": list(bbox),
+                "status": "applied",
+                "applied_attributes": {"fill": "#f4f4f4"},
+                "abstained_attributes": {},
+                "glyph_core_envelope": envelope,
+                "effect_envelope": {
+                    "bbox_page": [],
+                    "mask_sha256": renderer_mod._owner_array_sha256(empty),
+                    "pixel_count": 0,
+                },
+                "rendered_before_sha256": sha256(
+                    f"before:{segment_id}".encode()
+                ).hexdigest(),
+                "rendered_patch_sha256": sha256(
+                    f"patch:{segment_id}".encode()
+                ).hexdigest(),
+                "rendered_after_sha256": sha256(
+                    f"after:{segment_id}".encode()
+                ).hexdigest(),
+            }
+            segment["segment_sha256"] = owner_style_raster_segment_sha256(segment)
+            return {
+                "owner_id": owner_id,
+                "visual_profile_sha256": profile_sha256,
+                "_owner_render_mode": True,
+                "render_bbox": list(bbox),
+                "safe_text_box": list(bbox),
+                "fit_status": "ok",
+                "_style_raster_segment": segment,
+                "_style_v2_raster_result": renderer_mod.GlyphRasterResult(
+                    status="applied",
+                    rgba=rgba,
+                    glyph_core_mask=core,
+                    effect_mask=empty,
+                    glyph_core_envelope=bbox,
+                    effect_envelope=None,
+                    applied_attributes={"fill": "#f4f4f4"},
+                    abstained_attributes={},
+                    metrics={},
+                ),
+            }
+
+        region_0 = child("region_0", 0, (2, 2, 10, 8))
+        region_1 = child("region_1", 1, (14, 2, 22, 8))
+
+        forward = renderer_mod._aggregate_split_render_blocks(
+            [region_0, region_1]
+        )
+        reversed_input = renderer_mod._aggregate_split_render_blocks(
+            [region_1, region_0]
+        )
+
+        self.assertEqual(
+            [row["segment_id"] for row in forward["_style_raster_segments"]],
+            ["region_0", "region_1"],
+        )
+        self.assertEqual(
+            forward["_style_raster_segments"],
+            reversed_input["_style_raster_segments"],
+        )
+        self.assertEqual(
+            forward["_style_v2_raster_result"].applied_attributes,
+            {"fill": "#f4f4f4"},
+        )
+
+    def test_curved_owner_cannot_claim_v2_applied_without_supported_contract(self):
+        canvas = np.full((160, 360, 3), 245, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        text = {
+            "owner_id": "owner_curve",
+            "translated": "OLA TUDO BEM",
+            "translated_payload": "OLA TUDO BEM",
+            "bbox": [40, 35, 320, 125],
+            "safe_text_box": [40, 35, 320, 125],
+            "balloon_bbox": [30, 25, 330, 135],
+            "render_safe_polygon_page": [
+                [30, 25],
+                [330, 25],
+                [330, 135],
+                [30, 135],
+            ],
+            "visual_profile_v2": {},
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 34,
+                "cor": "#111111",
+                "curva": True,
+                "curva_direcao": "arc_up",
+                "curva_intensidade": 0.42,
+            },
+        }
+        plan = plan_text_layout(text)
+
+        result = renderer_mod._render_single_text_block_unrotated(
+            image,
+            text,
+            plan,
+        )
+
+        self.assertIsInstance(result, renderer_mod.GlyphRasterResult)
+        self.assertEqual(result.status, "review_required")
+        self.assertEqual(result.applied_attributes, {})
+        self.assertEqual(
+            result.abstained_attributes,
+            {"curve": "backend_capability_not_supported"},
+        )
+        self.assertEqual(text["route_action"], "review_required")
+        self.assertFalse(text["render_completed"])
+        self.assertTrue(np.array_equal(np.asarray(image), canvas))
 
     def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
         text = {

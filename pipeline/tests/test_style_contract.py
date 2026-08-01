@@ -17,7 +17,10 @@ from typesetter.style_contract import (
     style_evidence_v2_from_v1,
 )
 from ownership import model as ownership_model
-from style_v2_fixtures import valid_owner_style_raster_contract
+from style_v2_fixtures import (
+    valid_owner_style_raster_contract,
+    valid_owner_style_raster_segment,
+)
 
 
 def test_owner_style_raster_contract_api_is_defined_at_ownership_boundary():
@@ -108,13 +111,67 @@ def test_owner_style_raster_contract_rejects_noncanonical_attribute():
 
 def test_owner_style_raster_contract_rejects_duplicate_segment_ids():
     payload = valid_owner_style_raster_contract().to_dict()
+    profile_sha256 = payload["visual_profile_sha256"]
+    first = valid_owner_style_raster_segment(
+        visual_profile_sha256=profile_sha256,
+    )
+    duplicate = valid_owner_style_raster_segment(
+        visual_profile_sha256=profile_sha256,
+    )
     payload["segments"] = [
-        {"segment_id": "region_0"},
-        {"segment_id": "region_0"},
+        first,
+        duplicate,
     ]
     payload = _rehash_raster_contract(payload)
 
     with pytest.raises(ValueError, match="duplicate segment_id"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_style_raster_contract_rejects_noncanonical_or_overlapping_segments():
+    payload = valid_owner_style_raster_contract().to_dict()
+    profile_sha256 = payload["visual_profile_sha256"]
+    first = valid_owner_style_raster_segment(
+        visual_profile_sha256=profile_sha256,
+        segment_id="region_0",
+        order=0,
+        bbox_page=(0, 0, 3, 3),
+    )
+    second = valid_owner_style_raster_segment(
+        visual_profile_sha256=profile_sha256,
+        segment_id="region_1",
+        order=1,
+        bbox_page=(2, 2, 5, 4),
+    )
+    payload["segments"] = [first, second]
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="segments overlap"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+    second = valid_owner_style_raster_segment(
+        visual_profile_sha256=profile_sha256,
+        segment_id="region_1",
+        order=1,
+        bbox_page=(4, 0, 6, 2),
+    )
+    payload["segments"] = [second, first]
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="not canonical"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_style_raster_contract_rejects_tampered_child_hash():
+    payload = valid_owner_style_raster_contract().to_dict()
+    segment = valid_owner_style_raster_segment(
+        visual_profile_sha256=payload["visual_profile_sha256"],
+    )
+    segment["rendered_patch_sha256"] = "f" * 64
+    payload["segments"] = [segment]
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="child raster contract hash mismatch"):
         ownership_model.validate_owner_style_raster_contract(payload)
 
 

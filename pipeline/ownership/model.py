@@ -541,6 +541,24 @@ OWNER_STYLE_RASTER_HASH_FIELDS = (
     "rendered_after_sha256",
 )
 _OWNER_STYLE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+OWNER_STYLE_RASTER_SEGMENT_FIELDS = frozenset(
+    {
+        "segment_id",
+        "order",
+        "owner_id",
+        "visual_profile_sha256",
+        "bbox_page",
+        "status",
+        "applied_attributes",
+        "abstained_attributes",
+        "glyph_core_envelope",
+        "effect_envelope",
+        "rendered_before_sha256",
+        "rendered_patch_sha256",
+        "rendered_after_sha256",
+        "segment_sha256",
+    }
+)
 
 
 def owner_style_raster_contract_sha256(
@@ -564,6 +582,92 @@ def owner_style_raster_contract_sha256(
         allow_nan=False,
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def owner_style_raster_segment_sha256(value: Mapping[str, Any]) -> str:
+    """Return the canonical self-hash for one child raster segment."""
+
+    payload = _thaw_owner_style_json(value)
+    if not isinstance(payload, dict):
+        raise TypeError("owner style raster segment must be a mapping")
+    payload.pop("segment_sha256", None)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def validate_owner_style_raster_segment(
+    value: Mapping[str, Any],
+    *,
+    expected_owner_id: str,
+    expected_visual_profile_sha256: str,
+) -> dict[str, Any]:
+    """Validate one child segment before it can enter a parent contract."""
+
+    payload = _thaw_owner_style_json(value)
+    if not isinstance(payload, dict):
+        raise ValueError("child raster contract must be a mapping")
+    fields = set(payload)
+    if fields != OWNER_STYLE_RASTER_SEGMENT_FIELDS:
+        missing = sorted(OWNER_STYLE_RASTER_SEGMENT_FIELDS - fields)
+        unknown = sorted(fields - OWNER_STYLE_RASTER_SEGMENT_FIELDS)
+        details = ", ".join(missing or unknown)
+        raise ValueError(f"child raster contract fields are invalid: {details}")
+    segment_id = str(payload.get("segment_id") or "").strip()
+    if not segment_id:
+        raise ValueError("child raster contract segment_id is missing")
+    order = payload.get("order")
+    if not isinstance(order, int) or isinstance(order, bool) or order < 0:
+        raise ValueError("child raster contract order is invalid")
+    if payload.get("owner_id") != expected_owner_id:
+        raise ValueError("child raster contract owner mismatch")
+    if payload.get("visual_profile_sha256") != expected_visual_profile_sha256:
+        raise ValueError("child raster contract visual profile mismatch")
+    bbox = payload.get("bbox_page")
+    if (
+        not isinstance(bbox, list)
+        or len(bbox) != 4
+        or any(isinstance(item, bool) or not isinstance(item, int) for item in bbox)
+        or bbox[2] <= bbox[0]
+        or bbox[3] <= bbox[1]
+    ):
+        raise ValueError("child raster contract bbox_page is invalid")
+    status = str(payload.get("status") or "")
+    if status not in OWNER_STYLE_RASTER_CONTRACT_STATUSES:
+        raise ValueError("child raster contract status is unsupported")
+    for field_name in ("applied_attributes", "abstained_attributes"):
+        attributes = payload.get(field_name)
+        if not isinstance(attributes, dict):
+            raise ValueError(f"child raster contract {field_name} must be a mapping")
+        unsupported = sorted(set(attributes) - STYLE_V2_ATTRIBUTE_NAME_SET)
+        if unsupported:
+            raise ValueError("child raster contract has unsupported style attribute")
+    if set(payload["applied_attributes"]) & set(payload["abstained_attributes"]):
+        raise ValueError("child raster contract attribute resolution overlaps")
+    if status != "applied" and payload["applied_attributes"]:
+        raise ValueError("non-applied child raster contract claims applied attributes")
+    for field_name in ("glyph_core_envelope", "effect_envelope"):
+        if not isinstance(payload.get(field_name), dict):
+            raise ValueError(f"child raster contract {field_name} must be a mapping")
+    for field_name in (
+        "visual_profile_sha256",
+        "rendered_before_sha256",
+        "rendered_patch_sha256",
+        "rendered_after_sha256",
+        "segment_sha256",
+    ):
+        if not isinstance(payload.get(field_name), str) or not _OWNER_STYLE_SHA256_RE.fullmatch(
+            payload[field_name]
+        ):
+            raise ValueError(f"child raster contract malformed sha256: {field_name}")
+    if payload["segment_sha256"] != owner_style_raster_segment_sha256(payload):
+        raise ValueError("child raster contract hash mismatch")
+    return payload
 
 
 def validate_owner_style_raster_contract(
@@ -677,20 +781,36 @@ def validate_owner_style_raster_contract(
     segments = payload.get("segments")
     if not isinstance(segments, list):
         raise ValueError("owner style raster contract segments must be a list")
+    normalized_segments: list[dict[str, Any]] = []
     segment_ids: list[str] = []
     for segment in segments:
         if not isinstance(segment, dict):
             raise ValueError("owner style raster contract segment must be a mapping")
-        segment_id = str(segment.get("segment_id") or "").strip()
-        if not segment_id:
-            raise ValueError("owner style raster contract segment_id is missing")
-        segment_ids.append(segment_id)
+        normalized_segment = validate_owner_style_raster_segment(
+            segment,
+            expected_owner_id=owner_id,
+            expected_visual_profile_sha256=payload["visual_profile_sha256"],
+        )
+        normalized_segments.append(normalized_segment)
+        segment_ids.append(normalized_segment["segment_id"])
     duplicate_segment_ids = _duplicate_values(segment_ids)
     if duplicate_segment_ids:
         raise ValueError(
             "owner style raster contract duplicate segment_id: "
             + ", ".join(duplicate_segment_ids)
         )
+    canonical_segments = sorted(
+        normalized_segments,
+        key=lambda item: (item["order"], item["segment_id"]),
+    )
+    if normalized_segments != canonical_segments:
+        raise ValueError("owner style raster contract segments are not canonical")
+    for index, left in enumerate(normalized_segments):
+        lx1, ly1, lx2, ly2 = left["bbox_page"]
+        for right in normalized_segments[index + 1 :]:
+            rx1, ry1, rx2, ry2 = right["bbox_page"]
+            if min(lx2, rx2) > max(lx1, rx1) and min(ly2, ry2) > max(ly1, ry1):
+                raise ValueError("owner style raster contract segments overlap")
     actual_hash = owner_style_raster_contract_sha256(payload)
     if str(payload.get("contract_sha256") or "") != actual_hash:
         raise ValueError("owner style raster contract hash mismatch")

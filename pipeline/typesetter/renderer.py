@@ -42,6 +42,8 @@ try:
         OwnerGraph,
         OwnerStyleRasterContract,
         owner_style_raster_contract_sha256,
+        owner_style_raster_segment_sha256,
+        validate_owner_style_raster_segment,
     )
 except ImportError:  # pragma: no cover - supports package imports
     from ..ownership.model import (
@@ -49,6 +51,8 @@ except ImportError:  # pragma: no cover - supports package imports
         OwnerGraph,
         OwnerStyleRasterContract,
         owner_style_raster_contract_sha256,
+        owner_style_raster_segment_sha256,
+        validate_owner_style_raster_segment,
     )
 
 try:
@@ -17084,6 +17088,40 @@ def _render_single_text_block_unrotated(
         _persist_render_layout_contract(text_data, plan, resolved, positions)
 
         if _should_render_safe_arc_text(plan, best_lines):
+            if isinstance(text_data.get("visual_profile_v2"), dict):
+                core_rgb = np.zeros_like(image_np)
+                _render_safe_text_layer(
+                    core_rgb,
+                    best_lines,
+                    best_font,
+                    positions,
+                    fill_color="#FFFFFF",
+                )
+                core = np.where(
+                    np.max(core_rgb, axis=2) > 0,
+                    255,
+                    0,
+                ).astype(np.uint8)
+                text_data["fit_status"] = "style_curve_backend_unsupported"
+                text_data["render_completed"] = False
+                text_data["route_action"] = "review_required"
+                _merge_qa_flags(
+                    text_data,
+                    ["style_curve_backend_unsupported"],
+                )
+                return GlyphRasterResult(
+                    status="review_required",
+                    rgba=np.zeros((*core.shape, 4), dtype=np.uint8),
+                    glyph_core_mask=core,
+                    effect_mask=np.zeros_like(core),
+                    glyph_core_envelope=_owner_mask_bbox(core),
+                    effect_envelope=None,
+                    applied_attributes={},
+                    abstained_attributes={
+                        "curve": "backend_capability_not_supported"
+                    },
+                    metrics={"curve_contract_supported": False},
+                )
             if plan["sombra"] and plan["sombra_cor"]:
                 dx, dy = plan["sombra_offset"]
                 _render_safe_arc_text_layer(
@@ -18140,7 +18178,7 @@ def _render_owner_text_block(
                 break
 
             before_child = np.asarray(trial_image.convert("RGB"), dtype=np.uint8).copy()
-            _render_single_text_block(
+            raster_result = _render_single_text_block(
                 trial_image,
                 child,
                 child_plan,
@@ -18174,6 +18212,18 @@ def _render_owner_text_block(
             if not child_is_valid:
                 candidate_reason = "render_outside_layout_region"
                 break
+            if not isinstance(raster_result, GlyphRasterResult):
+                candidate_reason = "child_raster_contract_missing"
+                break
+            child["_style_v2_raster_result"] = raster_result
+            child["_style_raster_segment"] = _build_owner_child_raster_segment(
+                child=child,
+                region=region,
+                order=index,
+                before=before_child,
+                rendered=after_child,
+                raster_result=raster_result,
+            )
             trial_children.append(child)
 
         candidate_valid = len(trial_children) == len(regions)
@@ -18260,6 +18310,12 @@ def _render_owner_text_block(
     ]
     text_data["translated"] = payload
     text_data["translated_payload"] = payload
+    aggregate_result = text_data.get("_style_v2_raster_result")
+    return (
+        aggregate_result
+        if isinstance(aggregate_result, GlyphRasterResult)
+        else None
+    )
 
 
 def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None, pre_render_np=None):
@@ -18634,6 +18690,8 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         "_render_debug",
         "_render_debug_candidates",
         "_render_debug_skipped",
+        "_style_raster_segments",
+        "_style_v2_raster_result",
     ):
         value = rendered.get(key)
         if value is not None:
@@ -18667,6 +18725,164 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
     _drop_stale_render_geometry_flags(source)
 
 
+def _build_owner_child_raster_segment(
+    *,
+    child: dict,
+    region: dict,
+    order: int,
+    before: np.ndarray,
+    rendered: np.ndarray,
+    raster_result: GlyphRasterResult,
+) -> dict[str, Any]:
+    owner_id = _owner_identity(child.get("owner_id"), label="child owner_id")
+    raw_profile = child.get("visual_profile_v2")
+    if not isinstance(raw_profile, dict):
+        raise ValueError("child raster contract is missing visual profile")
+    profile = validate_owner_visual_profile(
+        raw_profile,
+        expected_owner_id=owner_id,
+        expected_sha256=str(child.get("visual_profile_sha256") or ""),
+    )
+    bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+    if bbox is None:
+        raise ValueError("child raster contract is missing bbox_page")
+    changed_mask = np.where(
+        np.any(np.asarray(rendered) != np.asarray(before), axis=2),
+        255,
+        0,
+    ).astype(np.uint8)
+    if not np.any(changed_mask):
+        raise ValueError("child raster contract has no rendered pixels")
+    status, _requested, applied, abstained = _owner_style_contract_attributes(
+        profile,
+        raster_result,
+        render_completed=True,
+    )
+    segment: dict[str, Any] = {
+        "segment_id": str(region.get("layout_region_id") or f"region_{order}"),
+        "order": int(order),
+        "owner_id": owner_id,
+        "visual_profile_sha256": profile["visual_profile_sha256"],
+        "bbox_page": [int(value) for value in bbox],
+        "status": status,
+        "applied_attributes": applied,
+        "abstained_attributes": abstained,
+        "glyph_core_envelope": _owner_style_mask_envelope(
+            raster_result.glyph_core_mask
+        ),
+        "effect_envelope": _owner_style_mask_envelope(raster_result.effect_mask),
+        "rendered_before_sha256": _owner_array_sha256(before),
+        "rendered_patch_sha256": _owner_masked_pixels_sha256(
+            rendered,
+            changed_mask,
+        ),
+        "rendered_after_sha256": _owner_array_sha256(rendered),
+    }
+    segment["segment_sha256"] = owner_style_raster_segment_sha256(segment)
+    return validate_owner_style_raster_segment(
+        segment,
+        expected_owner_id=owner_id,
+        expected_visual_profile_sha256=profile["visual_profile_sha256"],
+    )
+
+
+def _aggregate_owner_style_raster_segments(blocks: list[dict]) -> list[dict[str, Any]]:
+    owner_blocks = [
+        block
+        for block in blocks
+        if isinstance(block, dict) and bool(block.get("_owner_render_mode"))
+    ]
+    if not owner_blocks:
+        return []
+    owner_ids = {str(block.get("owner_id") or "") for block in owner_blocks}
+    profile_hashes = {
+        str(block.get("visual_profile_sha256") or "") for block in owner_blocks
+    }
+    if len(owner_ids) != 1:
+        raise ValueError("child raster contract owner mismatch")
+    if len(profile_hashes) != 1:
+        raise ValueError("child raster contract visual profile mismatch")
+    owner_id = next(iter(owner_ids))
+    profile_hash = next(iter(profile_hashes))
+    segments: list[dict[str, Any]] = []
+    for block in owner_blocks:
+        raw_segment = block.get("_style_raster_segment")
+        if not isinstance(raw_segment, dict):
+            raise ValueError("child raster contract is missing")
+        segments.append(
+            validate_owner_style_raster_segment(
+                raw_segment,
+                expected_owner_id=owner_id,
+                expected_visual_profile_sha256=profile_hash,
+            )
+        )
+    segments.sort(key=lambda item: (item["order"], item["segment_id"]))
+    if len({item["segment_id"] for item in segments}) != len(segments):
+        raise ValueError("child raster contract has duplicate segment_id")
+    for index, left in enumerate(segments):
+        lx1, ly1, lx2, ly2 = left["bbox_page"]
+        for right in segments[index + 1 :]:
+            rx1, ry1, rx2, ry2 = right["bbox_page"]
+            if min(lx2, rx2) > max(lx1, rx1) and min(ly2, ry2) > max(ly1, ry1):
+                raise ValueError("child raster contracts overlap")
+    return segments
+
+
+def _aggregate_child_glyph_raster_results(blocks: list[dict]) -> GlyphRasterResult:
+    results = [block.get("_style_v2_raster_result") for block in blocks]
+    if not results or any(not isinstance(item, GlyphRasterResult) for item in results):
+        raise ValueError("child raster contract is missing renderer result")
+    typed_results = [item for item in results if isinstance(item, GlyphRasterResult)]
+    shape = typed_results[0].glyph_core_mask.shape
+    if any(item.glyph_core_mask.shape != shape for item in typed_results):
+        raise ValueError("child raster contracts use divergent canvas shapes")
+    core = np.zeros(shape, dtype=np.uint8)
+    effect = np.zeros(shape, dtype=np.uint8)
+    rgba = np.zeros((*shape, 4), dtype=np.uint8)
+    for item in typed_results:
+        core = np.maximum(core, item.glyph_core_mask)
+        effect = np.maximum(effect, item.effect_mask)
+        alpha = item.rgba[:, :, 3] > rgba[:, :, 3]
+        rgba[alpha] = item.rgba[alpha]
+    applied: dict[str, Any] = {}
+    abstained: dict[str, str] = {}
+    attribute_names = set().union(
+        *(set(item.applied_attributes) | set(item.abstained_attributes) for item in typed_results)
+    )
+    for name in attribute_names:
+        values = [item.applied_attributes.get(name) for item in typed_results]
+        if all(name in item.applied_attributes for item in typed_results) and all(
+            value == values[0] for value in values[1:]
+        ):
+            applied[name] = copy.deepcopy(values[0])
+        else:
+            reason = next(
+                (
+                    str(item.abstained_attributes[name])
+                    for item in typed_results
+                    if name in item.abstained_attributes
+                ),
+                "child_attribute_not_consistent",
+            )
+            abstained[name] = reason
+    status = (
+        "review_required"
+        if any(item.status == "review_required" for item in typed_results)
+        else ("applied" if applied else "fallback")
+    )
+    return GlyphRasterResult(
+        status=status,
+        rgba=rgba,
+        glyph_core_mask=core,
+        effect_mask=effect,
+        glyph_core_envelope=_owner_mask_bbox(core),
+        effect_envelope=_owner_mask_bbox(effect),
+        applied_attributes=applied,
+        abstained_attributes=abstained,
+        metrics={"segment_count": len(typed_results)},
+    )
+
+
 def _aggregate_split_render_blocks(blocks: list[dict]) -> dict | None:
     rendered_blocks = [
         block
@@ -18679,6 +18895,8 @@ def _aggregate_split_render_blocks(blocks: list[dict]) -> dict | None:
     ]
     if not rendered_blocks:
         return None
+
+    raster_segments = _aggregate_owner_style_raster_segments(rendered_blocks)
 
     aggregate = dict(rendered_blocks[0])
     qa_metrics = dict(aggregate.get("qa_metrics") or {})
@@ -18741,6 +18959,11 @@ def _aggregate_split_render_blocks(blocks: list[dict]) -> dict | None:
     if child_safe_boxes:
         render_debug["child_safe_text_boxes"] = child_safe_boxes
     aggregate["_render_debug"] = render_debug
+    if raster_segments:
+        aggregate["_style_raster_segments"] = raster_segments
+        aggregate["_style_v2_raster_result"] = (
+            _aggregate_child_glyph_raster_results(rendered_blocks)
+        )
     return aggregate
 
 
@@ -19777,6 +20000,7 @@ def _build_owner_style_raster_contract(
     render_completed: bool,
     raster_result: GlyphRasterResult | None,
     render_quality_contract: object,
+    segments: list[dict[str, Any]] | None = None,
 ) -> OwnerStyleRasterContract:
     normalized_profile = validate_owner_visual_profile(
         profile,
@@ -19845,7 +20069,7 @@ def _build_owner_style_raster_contract(
         "glyph_core_envelope": _owner_style_mask_envelope(core_mask),
         "effect_envelope": _owner_style_mask_envelope(effect_mask),
         "render_metrics": raster_metrics,
-        "segments": (),
+        "segments": tuple(copy.deepcopy(segments or [])),
         "rendered_before_sha256": _owner_array_sha256(before),
         "rendered_patch_sha256": _owner_masked_pixels_sha256(
             rendered,
@@ -20087,6 +20311,11 @@ def _render_owner_band_image(
             raster_result if isinstance(raster_result, GlyphRasterResult) else None
         ),
         render_quality_contract=render_quality_contract,
+        segments=(
+            block.get("_style_raster_segments")
+            if isinstance(block.get("_style_raster_segments"), list)
+            else []
+        ),
     )
 
     return OwnerGlyphPatch(
