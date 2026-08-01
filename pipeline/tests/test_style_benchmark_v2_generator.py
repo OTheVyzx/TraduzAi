@@ -54,6 +54,60 @@ def test_style_specs_are_seeded_and_cover_all_required_levels():
     assert all("container" in case and "rotation_deg" in case for case in first)
 
 
+def test_benchmark_cases_have_owner_category_role_work_and_split():
+    spec = generate_style_benchmark_v2.load_benchmark_spec(FIXTURE_SPEC)
+
+    for case in spec["cases"]:
+        assert case["owner_id"]
+        assert case["category"]
+        assert case["semantic_role"]
+        assert case["work_id"] and case["chapter_id"]
+        assert case["split"] in {"calibration", "holdout"}
+
+
+def test_generator_emits_core_effect_safe_masks_and_expected_contract(tmp_path: Path):
+    run_dir = generate_style_benchmark_v2.generate_benchmark(
+        spec_path=FIXTURE_SPEC,
+        level="smoke",
+        output_root=tmp_path / "runs",
+        run_id="ground-truth",
+        seed=1729,
+        runtime_lock_path=_runtime_lock_for_current_process(tmp_path),
+    )
+    manifest = json.loads((run_dir / "benchmark_manifest.json").read_text(encoding="utf-8"))
+
+    for case in manifest["cases"]:
+        for key in (
+            "glyph_core_mask_a", "glyph_core_mask_b", "effect_mask_a", "effect_mask_b",
+            "safe_mask", "expected_materialization",
+        ):
+            assert (run_dir / case[key]).is_file()
+
+
+def test_spec_rejects_owner_reused_across_calibration_and_holdout(tmp_path: Path):
+    payload = json.loads(FIXTURE_SPEC.read_text(encoding="utf-8"))
+    payload["cases"][1]["owner_id"] = payload["cases"][0]["owner_id"]
+    payload["cases"][1]["split"] = "holdout" if payload["cases"][0]["split"] == "calibration" else "calibration"
+    path = tmp_path / "duplicate-owner.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="owner.*split"):
+        generate_style_benchmark_v2.load_benchmark_spec(path)
+
+
+def test_spec_rejects_required_category_without_holdout_owner(tmp_path: Path):
+    payload = json.loads(FIXTURE_SPEC.read_text(encoding="utf-8"))
+    required = payload["required_categories"][0]
+    for case in payload["cases"]:
+        if case["category"] == required:
+            case["split"] = "calibration"
+    path = tmp_path / "missing-holdout.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="holdout.*category"):
+        generate_style_benchmark_v2.load_benchmark_spec(path)
+
+
 def test_generation_rejects_runtime_mismatch_before_creating_a_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

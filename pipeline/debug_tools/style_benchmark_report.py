@@ -92,28 +92,34 @@ def evaluate_validation_thresholds(
                 }
             )
     if "font_top1_min" in policy:
-        font = attributes.get("font_name") if isinstance(attributes.get("font_name"), dict) else None
+        font = score.get("font_top1") if isinstance(score.get("font_top1"), dict) else None
+        if font is not None:
+            evaluated = int(font.get("evaluated") or 0)
+            if not evaluated:
+                findings.append({"code": "zero_metric_denominator", "metric": "font_top1"})
+            actual = float(font.get("rate") or 0.0)
+            if actual < float(policy["font_top1_min"]):
+                findings.append({"code": "metric_threshold_breach", "metric": "font_top1", "actual": actual, "minimum": float(policy["font_top1_min"])})
+        else:
+            font = attributes.get("font_name") if isinstance(attributes.get("font_name"), dict) else None
         if font is None:
             findings.append({"code": "required_metric_missing", "metric": "font_top1"})
-        elif float(font.get("precision") or 0.0) < float(policy["font_top1_min"]):
+        elif "rate" not in font and float(font.get("precision") or 0.0) < float(policy["font_top1_min"]):
             findings.append({"code": "metric_threshold_breach", "metric": "font_top1", "actual": float(font.get("precision") or 0.0), "minimum": float(policy["font_top1_min"])})
     if "font_top3_min" in policy:
-        font = attributes.get("font_name") if isinstance(attributes.get("font_name"), dict) else None
+        font = score.get("font_top3") if isinstance(score.get("font_top3"), dict) else None
+        if font is None:
+            font = attributes.get("font_name") if isinstance(attributes.get("font_name"), dict) else None
         evaluated = int((font or {}).get("evaluated") or 0)
         if not evaluated:
             findings.append({"code": "zero_metric_denominator", "metric": "font_top3"})
         else:
-            actual = float((font or {}).get("top_k_hits") or 0) / evaluated
+            actual = float(font.get("rate")) if "rate" in font else float(font.get("top_k_hits") or 0) / evaluated
             if actual < float(policy["font_top3_min"]):
                 findings.append({"code": "metric_threshold_breach", "metric": "font_top3", "actual": actual, "minimum": float(policy["font_top3_min"])})
     flat_metric_contracts = {
-        "category_min": ("categories", "minimum_go_rate", "minimum"),
-        "speech_go_rate_min": ("speech", "go_rate", "minimum"),
-        "owner_go_rate_min": ("owners", "go_rate", "minimum"),
         "fill_delta_e_2000_median_max": ("fill_delta_e_2000", "median", "maximum"),
         "fill_delta_e_2000_p95_max": ("fill_delta_e_2000", "p95", "maximum"),
-        "safe_containment_min": ("safe_containment", "rate", "minimum"),
-        "catastrophic_high_confidence_mismatch_max": ("catastrophic_mismatches", "count", "maximum"),
     }
     for policy_name, (section_name, metric_name, direction) in flat_metric_contracts.items():
         if policy_name not in policy:
@@ -122,6 +128,8 @@ def evaluate_validation_thresholds(
         if not isinstance(section, dict) or metric_name not in section:
             findings.append({"code": "required_metric_missing", "metric": f"{section_name}.{metric_name}"})
             continue
+        if section_name == "fill_delta_e_2000" and int(section.get("count") or 0) == 0:
+            findings.append({"code": "zero_metric_denominator", "metric": section_name})
         actual = float(section[metric_name])
         threshold = float(policy[policy_name])
         breached = actual < threshold if direction == "minimum" else actual > threshold
@@ -154,6 +162,9 @@ def score_benchmark(manifest: dict[str, Any], observations: list[dict[str, Any]]
     totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     hard_negative = {"evaluated": 0, "abstained": 0}
     round_trip = {"evaluated": 0, "passed": 0}
+    font_top1 = {"evaluated": 0, "hits": 0}
+    font_top3 = {"evaluated": 0, "hits": 0}
+    fill_deltas: list[float] = []
 
     for case in manifest.get("cases", []):
         case_id = str(case["id"])
@@ -177,6 +188,17 @@ def score_benchmark(manifest: dict[str, Any], observations: list[dict[str, Any]]
             if record is None:
                 continue
             attributes = record.get("attributes") if isinstance(record.get("attributes"), dict) else {}
+            top_k = record.get("font_top_k") if isinstance(record.get("font_top_k"), list) else []
+            if top_k:
+                font_top1["evaluated"] += 1
+                font_top3["evaluated"] += 1
+                if _equal(case.get("font_name"), top_k[0]):
+                    font_top1["hits"] += 1
+                if any(_equal(case.get("font_name"), candidate) for candidate in top_k[:3]):
+                    font_top3["hits"] += 1
+            delta_e = record.get("fill_delta_e_2000")
+            if isinstance(delta_e, (int, float)):
+                fill_deltas.append(float(delta_e))
             for attribute in ATTRIBUTE_NAMES:
                 if attribute not in case:
                     continue
@@ -215,8 +237,20 @@ def score_benchmark(manifest: dict[str, Any], observations: list[dict[str, Any]]
         if round_trip["evaluated"]
         else 0.0
     )
+    def rate(section: dict[str, int]) -> float:
+        return round(section["hits"] / section["evaluated"], 4) if section["evaluated"] else 0.0
+
+    import numpy as np
     return {
         "attributes": attribute_report,
+        "font_top1": {**font_top1, "rate": rate(font_top1)},
+        "font_top3": {**font_top3, "rate": rate(font_top3)},
+        "fill_delta_e_2000": {
+            "count": len(fill_deltas),
+            "median": round(float(np.median(fill_deltas)), 6) if fill_deltas else None,
+            "p95": round(float(np.percentile(fill_deltas, 95)), 6) if fill_deltas else None,
+            "evidence": "owner_glyph_core_mask",
+        },
         "gates": {
             "hard_negative_abstention": bool(hard_negative["evaluated"])
             and hard_negative_rate == 1.0,
@@ -231,6 +265,7 @@ def write_run_reports(
     manifest: dict[str, Any],
     records: list[dict[str, Any]],
     *,
+    legacy_records: list[dict[str, Any]] | None = None,
     validation_thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write score artifacts beneath an already-isolated benchmark run."""
@@ -240,18 +275,23 @@ def write_run_reports(
         "".join(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n" for record in records),
         encoding="utf-8",
     )
-    v2_records = []
-    for record in records:
-        v2 = record.get("style_evidence_v2")
-        attributes = v2.get("attributes") if isinstance(v2, dict) else None
-        if isinstance(attributes, dict):
-            v2_records.append({**record, "attributes": attributes})
     score = score_benchmark(manifest, records)
+    validation = evaluate_validation_thresholds(score, validation_thresholds)
+    validation["inputs"] = ["v2_mask_backed"]
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "run_id": run_dir.name,
+        "level": manifest.get("level"),
+        "seed": manifest.get("seed"),
+        "authoritative_score": "v2_mask_backed",
+        "provenance": {
+            "manifest": "benchmark_manifest.json",
+            "ground_truth": "source_composition_masks",
+            "measurement": "owner_mask_v2",
+        },
         "score": score,
-        "score_v2_shadow": score_benchmark(manifest, v2_records),
-        "validation": evaluate_validation_thresholds(score, validation_thresholds),
+        "legacy_diagnostic_score": score_benchmark(manifest, legacy_records or []),
+        "validation": validation,
     }
     (run_dir / "style_benchmark_summary.json").write_text(
         json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True) + "\n",

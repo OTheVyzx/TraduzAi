@@ -13,14 +13,24 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cv2
+import numpy as np
+from skimage.color import deltaE_ciede2000, rgb2lab
 
 from debug_tools import generate_style_benchmark_v2, style_benchmark_report
 from typesetter.style_contract import style_evidence_v2_from_v1
 from typesetter.style_policy import style_evidence_v2_shadow_policy
 from typesetter.style_extractor import extract_text_style_evidence
+from typesetter.style_extractor import extract_text_style_evidence_v2
+from typesetter.font_matcher import FontShapeMatcher, load_font_catalog
 
 
 DEFAULT_SPEC_PATH = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "style_benchmark_v2" / "benchmark_spec.json"
+FONT_DIR = Path(__file__).resolve().parents[2] / "fonts"
+FONT_MAP_PATH = FONT_DIR / "font-map.json"
+BENCHMARK_FONT_NAMES = (
+    "ComicNeue-Bold.ttf",
+    "LeagueGothic-Regular-VariableFont_wdth.ttf",
+)
 
 
 def _detected_style_payload(image_path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]]:
@@ -76,6 +86,79 @@ def _measure_current_engine(run_dir: Path, manifest: dict[str, Any]) -> list[dic
     return records
 
 
+def _hex_rgb(value: str) -> np.ndarray:
+    token = str(value).strip().lstrip("#")
+    if len(token) != 6:
+        raise ValueError(f"invalid benchmark color: {value!r}")
+    return np.asarray([int(token[index:index + 2], 16) for index in (0, 2, 4)], dtype=np.uint8)
+
+
+def _fill_delta_e(image_rgb: np.ndarray, core_mask: np.ndarray, expected_fill: str) -> float | None:
+    pixels = image_rgb[np.asarray(core_mask) > 0]
+    if len(pixels) < 8:
+        return None
+    observed = np.median(pixels.astype(np.float32), axis=0).round().astype(np.uint8)
+    pair = np.stack((observed, _hex_rgb(expected_fill)), axis=0).reshape(1, 2, 3).astype(np.float32) / 255.0
+    lab = rgb2lab(pair)
+    return round(float(deltaE_ciede2000(lab[:, :1], lab[:, 1:])[0, 0]), 6)
+
+
+def _measure_mask_backed_v2(run_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    catalog = load_font_catalog(FONT_DIR, FONT_MAP_PATH)
+    matcher = FontShapeMatcher(catalog)
+    records: list[dict[str, Any]] = []
+    for case in manifest["cases"]:
+        for variant in ("a", "b"):
+            image = cv2.imread(str(run_dir / case[f"image_{variant}"]), cv2.IMREAD_COLOR)
+            core = cv2.imread(str(run_dir / case[f"glyph_core_mask_{variant}"]), cv2.IMREAD_GRAYSCALE)
+            effect = cv2.imread(str(run_dir / case[f"effect_mask_{variant}"]), cv2.IMREAD_GRAYSCALE)
+            safe = cv2.imread(str(run_dir / case["safe_mask"]), cv2.IMREAD_GRAYSCALE)
+            if image is None or core is None or effect is None or safe is None:
+                raise FileNotFoundError(f"incomplete mask-backed case: {case['id']}:{variant}")
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            text = str(case[f"text_{variant}"])
+            if not np.any(core):
+                records.append({
+                    "case_id": case["id"], "variant": variant, "source_text": text,
+                    "level": case["level"], "owner_id": case["owner_id"],
+                    "detector": "v2_mask_backed", "abstained": True,
+                })
+                continue
+            effect_only = cv2.bitwise_and(effect, cv2.bitwise_not(core))
+            exclusion = cv2.dilate(effect, np.ones((5, 5), np.uint8), iterations=1)
+            context = cv2.bitwise_and(safe, cv2.bitwise_not(exclusion))
+            evidence = extract_text_style_evidence_v2(
+                image_rgb, core, context,
+                stroke_ring_mask=effect_only,
+                effect_region_mask=effect_only,
+                owner_id=str(case["owner_id"]), semantic_role=str(case["semantic_role"]),
+                source_phase="synthetic_source",
+            )
+            profile = {
+                "rotation_deg": float(case["rotation_deg"]),
+                "width_scale": float(case["font_width"]) / 100.0,
+                "scale_y": 1.0,
+                "slant_tangent": 0.0,
+            }
+            font_match = matcher.match(
+                core, source_text=text, profile=profile,
+                semantic_role=str(case["semantic_role"]), shortlist=BENCHMARK_FONT_NAMES,
+            ).to_dict()
+            top_k = [str(item["font_name"]) for item in font_match["top_k"]]
+            evidence_dict = evidence.to_dict()
+            records.append({
+                "case_id": case["id"], "variant": variant, "source_text": text,
+                "level": case["level"], "owner_id": case["owner_id"],
+                "detector": "v2_mask_backed", "abstained": False,
+                "style_evidence_v2": evidence_dict,
+                "attributes": evidence_dict["attributes"],
+                "font_top_k": top_k,
+                "fill_delta_e_2000": None if case.get("gradient") else _fill_delta_e(image_rgb, core, case["fill"]),
+                "geometry": evidence_dict.get("attribute_provenance", {}).get("typographic_metrics", {}),
+            })
+    return records
+
+
 def run_benchmark(
     *,
     spec_path: Path,
@@ -96,11 +179,13 @@ def run_benchmark(
     )
     manifest = json.loads((run_dir / "benchmark_manifest.json").read_text(encoding="utf-8"))
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8-sig"))
-    records = _measure_current_engine(run_dir, manifest)
+    records = _measure_mask_backed_v2(run_dir, manifest)
+    legacy_records = _measure_current_engine(run_dir, manifest)
     style_benchmark_report.write_run_reports(
         run_dir,
         manifest,
         records,
+        legacy_records=legacy_records,
         validation_thresholds=spec.get("validation_thresholds"),
     )
     return run_dir

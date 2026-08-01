@@ -165,3 +165,24 @@ def test_matcher_records_catalog_version_and_is_catalog_order_invariant() -> Non
     assert first == second
     assert len(first.catalog_version) == 64
     assert first.normalization["canvas"] == [192, 512]
+
+
+def test_benchmark_shortlist_still_publishes_real_ranked_top_k() -> None:
+    source_text = "MASK BACKED SOURCE"
+    profile = {"width_scale": 1.0, "rotation_deg": 0.0}
+    source = render_source_text_mask(
+        source_text, FONTS_DIR / "ComicNeue-Bold.ttf", profile=profile
+    )
+
+    result = FontShapeMatcher(_catalog()).match(
+        source,
+        source_text=source_text,
+        profile=profile,
+        semantic_role="dialogue_body",
+        shortlist=("ComicNeue-Bold.ttf", "LeagueGothic-Regular-VariableFont_wdth.ttf"),
+    )
+
+    assert [entry["font_name"] for entry in result.top_k] == [
+        "ComicNeue-Bold.ttf",
+        "LeagueGothic-Regular-VariableFont_wdth.ttf",
+    ]

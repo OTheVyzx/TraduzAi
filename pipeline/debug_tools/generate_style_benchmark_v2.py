@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -43,13 +44,21 @@ REQUIRED_STYLE_FIELDS = (
     "text_a",
     "text_b",
 )
+REQUIRED_IDENTITY_FIELDS = (
+    "owner_id",
+    "category",
+    "semantic_role",
+    "work_id",
+    "chapter_id",
+    "split",
+)
 
 
 def load_benchmark_spec(path: Path) -> dict[str, Any]:
     """Load a versioned specification and reject unavailable font fixtures."""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
-        raise ValueError("style benchmark v2 spec must use schema_version 2")
+    if not isinstance(payload, dict) or payload.get("schema_version") != 3:
+        raise ValueError("style benchmark v2 spec must use schema_version 3")
     cases = payload.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ValueError("style benchmark v2 spec must contain non-empty cases")
@@ -57,13 +66,27 @@ def load_benchmark_spec(path: Path) -> dict[str, Any]:
     if levels != set(REQUIRED_LEVELS):
         raise ValueError(f"style benchmark v2 spec levels must be {REQUIRED_LEVELS}")
     for case in cases:
-        if not isinstance(case, dict) or not set(REQUIRED_STYLE_FIELDS) <= set(case):
+        if not isinstance(case, dict) or not set(REQUIRED_STYLE_FIELDS + REQUIRED_IDENTITY_FIELDS) <= set(case):
             raise ValueError("style benchmark v2 case is missing required StyleSpec fields")
+        if case["split"] not in {"calibration", "holdout"}:
+            raise ValueError("style benchmark owner split must be calibration or holdout")
         font_name = case["font_name"]
         if not isinstance(font_name, str) or not (FONT_DIR / font_name).is_file():
             raise ValueError(f"style benchmark v2 font does not exist: {font_name!r}")
         if case["text_a"] == case["text_b"]:
             raise ValueError("style benchmark v2 round-trip texts must differ")
+    owner_splits: dict[str, set[str]] = {}
+    for case in cases:
+        owner_splits.setdefault(str(case["owner_id"]), set()).add(str(case["split"]))
+    if any(len(splits) > 1 for splits in owner_splits.values()):
+        raise ValueError("style benchmark owner cannot be reused across split boundaries")
+    required_categories = payload.get("required_categories")
+    if not isinstance(required_categories, list) or not required_categories:
+        raise ValueError("style benchmark required_categories must be non-empty")
+    holdout_categories = {str(case["category"]) for case in cases if case["split"] == "holdout"}
+    missing_holdout = sorted(set(map(str, required_categories)) - holdout_categories)
+    if missing_holdout:
+        raise ValueError(f"holdout owner missing for required category: {missing_holdout}")
     return payload
 
 
@@ -74,7 +97,7 @@ def build_style_specs(spec: dict[str, Any], *, seed: int) -> list[dict[str, Any]
     for index, case in enumerate(cases):
         case["id"] = str(case.get("id") or f"{case['level']}-{index:03d}")
         case["seed"] = int(seed)
-        case["schema_version"] = 2
+        case["schema_version"] = 3
     return cases
 
 
@@ -100,7 +123,7 @@ def _rgba(hex_color: str) -> tuple[int, int, int, int]:
     return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4)) + (255,)
 
 
-def _render_style_image(style: dict[str, Any], text: str, output_path: Path) -> None:
+def _render_style_image(style: dict[str, Any], text: str, output_path: Path) -> dict[str, Any]:
     """Render one case through Agg, avoiding Pillow's broken Windows glyph path."""
     import cv2
     import matplotlib
@@ -162,27 +185,23 @@ def _render_style_image(style: dict[str, Any], text: str, output_path: Path) -> 
     )
     figure.canvas.draw()
     rgba = np.asarray(figure.canvas.buffer_rgba()).copy()
+    # The ground truth comes from the same composition, never from redetection.
+    mask_figure = Figure(figsize=(size[0] / 100, size[1] / 100), dpi=100)
+    FigureCanvasAgg(mask_figure)
+    mask_figure.patch.set_alpha(0.0)
+    mask_axis = mask_figure.add_axes((0, 0, 1, 1))
+    mask_axis.patch.set_alpha(0.0)
+    mask_axis.set_xlim(0, size[0])
+    mask_axis.set_ylim(size[1], 0)
+    mask_axis.set_axis_off()
+    mask_axis.text(
+        x, y, text, color="#FFFFFF", fontproperties=font,
+        horizontalalignment=horizontal_alignment, rotation=float(style["rotation_deg"]),
+        verticalalignment="center",
+    )
+    mask_figure.canvas.draw()
+    alpha = np.asarray(mask_figure.canvas.buffer_rgba())[:, :, 3].astype(np.float32) / 255.0
     if gradient:
-        # Render the glyph alpha separately so the declared gradient is inside the letters,
-        # while the primary canvas keeps the stroke and glow/shadow layers intact.
-        mask_figure = Figure(figsize=(size[0] / 100, size[1] / 100), dpi=100)
-        FigureCanvasAgg(mask_figure)
-        mask_figure.patch.set_alpha(0.0)
-        mask_axis = mask_figure.add_axes((0, 0, 1, 1))
-        mask_axis.patch.set_alpha(0.0)
-        mask_axis.set_xlim(0, size[0])
-        mask_axis.set_ylim(size[1], 0)
-        mask_axis.set_axis_off()
-        mask_axis.text(
-            x, y, text,
-            color="#FFFFFF",
-            fontproperties=font,
-            horizontalalignment=horizontal_alignment,
-            rotation=float(style["rotation_deg"]),
-            verticalalignment="center",
-        )
-        mask_figure.canvas.draw()
-        alpha = np.asarray(mask_figure.canvas.buffer_rgba())[:, :, 3].astype(np.float32) / 255.0
         start = np.array(_rgba(gradient["colors"][0])[:3], dtype=np.float32)
         end = np.array(_rgba(gradient["colors"][-1])[:3], dtype=np.float32)
         ratios = np.linspace(0.0, 1.0, size[1], dtype=np.float32)[:, None, None]
@@ -192,6 +211,18 @@ def _render_style_image(style: dict[str, Any], text: str, output_path: Path) -> 
         ).round().astype(np.uint8)
     if not cv2.imwrite(str(output_path), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)):
         raise RuntimeError(f"failed to write benchmark image: {output_path}")
+    core_mask = np.where(alpha >= (1.0 / 255.0), 255, 0).astype(np.uint8)
+    background_rgb = np.asarray(_rgba(container["background"])[:3], dtype=np.uint8)
+    effect_mask = np.where(np.any(rgba[:, :, :3] != background_rgb[None, None, :], axis=2), 255, 0).astype(np.uint8)
+    safe_mask = np.full(core_mask.shape, 255, dtype=np.uint8)
+    ys, xs = np.where(core_mask > 0)
+    bbox = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)] if len(xs) else [0, 0, 0, 0]
+    return {
+        "glyph_core_mask": core_mask,
+        "effect_mask": effect_mask,
+        "safe_mask": safe_mask,
+        "geometry": {"glyph_bbox": bbox, "canvas": [size[0], size[1]]},
+    }
 
 
 def _select_cases(spec: dict[str, Any], *, level: str, seed: int) -> list[dict[str, Any]]:
@@ -203,33 +234,106 @@ def _select_cases(spec: dict[str, Any], *, level: str, seed: int) -> list[dict[s
     return cases
 
 
+def _mask_sha256(mask: Any) -> str:
+    import numpy as np
+    return hashlib.sha256(np.ascontiguousarray(mask, dtype=np.uint8).tobytes()).hexdigest()
+
+
+def _font_sha256(font_name: str) -> str:
+    digest = hashlib.sha256()
+    with (FONT_DIR / font_name).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _write_child_run(*, staging_run: Path, cases: list[dict[str, Any]], level: str, seed: int) -> None:
     """Render the benchmark payload inside the disposable child-process directory."""
+    import cv2
+    import numpy as np
+
     images_dir = staging_run / "images"
     images_dir.mkdir(parents=True, exist_ok=False)
+    masks_dir = staging_run / "masks"
+    masks_dir.mkdir(exist_ok=False)
+    expected_dir = staging_run / "expected"
+    expected_dir.mkdir(exist_ok=False)
     manifest_cases = []
     for case in cases:
         case_id = _single_component(case["id"], label="case id")
         image_a = Path("images") / f"{case_id}-a.png"
         image_b = Path("images") / f"{case_id}-b.png"
+        artifact_paths = {
+            "glyph_core_mask_a": Path("masks") / f"{case_id}-core-a.png",
+            "glyph_core_mask_b": Path("masks") / f"{case_id}-core-b.png",
+            "effect_mask_a": Path("masks") / f"{case_id}-effect-a.png",
+            "effect_mask_b": Path("masks") / f"{case_id}-effect-b.png",
+            "safe_mask": Path("masks") / f"{case_id}-safe.png",
+            "expected_materialization": Path("expected") / f"{case_id}.json",
+        }
         if case["container"].get("render_text", True):
-            _render_style_image(case, case["text_a"], staging_run / image_a)
-            _render_style_image(case, case["text_b"], staging_run / image_b)
+            rendered_a = _render_style_image(case, case["text_a"], staging_run / image_a)
+            rendered_b = _render_style_image(case, case["text_b"], staging_run / image_b)
         else:
-            import cv2
-            import numpy as np
             background = _rgba(case["container"]["background"])
             size = int(case["container"]["width"]), int(case["container"]["height"])
             image = np.full((size[1], size[0], 3), background[:3][::-1], dtype=np.uint8)
             for image_path in (staging_run / image_a, staging_run / image_b):
                 if not cv2.imwrite(str(image_path), image):
                     raise RuntimeError(f"failed to write hard-negative benchmark image: {image_path}")
-        manifest_cases.append({**case, "image_a": image_a.as_posix(), "image_b": image_b.as_posix()})
+            zero = np.zeros((size[1], size[0]), dtype=np.uint8)
+            rendered_a = rendered_b = {
+                "glyph_core_mask": zero,
+                "effect_mask": zero,
+                "safe_mask": np.full_like(zero, 255),
+                "geometry": {"glyph_bbox": [0, 0, 0, 0], "canvas": [size[0], size[1]]},
+            }
+        for key, mask in (
+            ("glyph_core_mask_a", rendered_a["glyph_core_mask"]),
+            ("glyph_core_mask_b", rendered_b["glyph_core_mask"]),
+            ("effect_mask_a", rendered_a["effect_mask"]),
+            ("effect_mask_b", rendered_b["effect_mask"]),
+            ("safe_mask", rendered_a["safe_mask"]),
+        ):
+            if not cv2.imwrite(str(staging_run / artifact_paths[key]), mask):
+                raise RuntimeError(f"failed to write benchmark mask: {artifact_paths[key]}")
+        expected = {
+            "schema_version": 3,
+            "owner_id": case["owner_id"],
+            "font": {"name": case["font_name"], "sha256": _font_sha256(case["font_name"])},
+            "attributes": {
+                key: case[key] for key in (
+                    "font_weight", "font_width", "font_size_px", "alignment", "fill", "stroke",
+                    "shadow", "gradient", "rotation_deg", "container",
+                )
+            },
+            "variants": {
+                "a": {
+                    "text": case["text_a"], "geometry": rendered_a["geometry"],
+                    "glyph_core_mask_sha256": _mask_sha256(rendered_a["glyph_core_mask"]),
+                    "effect_mask_sha256": _mask_sha256(rendered_a["effect_mask"]),
+                },
+                "b": {
+                    "text": case["text_b"], "geometry": rendered_b["geometry"],
+                    "glyph_core_mask_sha256": _mask_sha256(rendered_b["glyph_core_mask"]),
+                    "effect_mask_sha256": _mask_sha256(rendered_b["effect_mask"]),
+                },
+            },
+            "safe_mask_sha256": _mask_sha256(rendered_a["safe_mask"]),
+        }
+        (staging_run / artifact_paths["expected_materialization"]).write_text(
+            json.dumps(expected, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        manifest_cases.append({
+            **case,
+            "image_a": image_a.as_posix(), "image_b": image_b.as_posix(),
+            **{key: value.as_posix() for key, value in artifact_paths.items()},
+        })
 
     manifest = {
         "cases": manifest_cases,
         "level": level,
-        "schema_version": 2,
+        "schema_version": 3,
         "seed": int(seed),
     }
     (staging_run / "benchmark_manifest.json").write_text(
@@ -247,11 +351,21 @@ def _validate_child_output(staging_run: Path, cases: list[dict[str, Any]], *, le
         raise RuntimeError("child generator manifest does not match the requested benchmark")
     if len(manifest.get("cases", [])) != len(cases):
         raise RuntimeError("child generator wrote an incomplete benchmark manifest")
+    if manifest.get("schema_version") != 3:
+        raise RuntimeError("child generator manifest schema mismatch")
+    artifact_keys = (
+        "image_a", "image_b", "glyph_core_mask_a", "glyph_core_mask_b",
+        "effect_mask_a", "effect_mask_b", "safe_mask", "expected_materialization",
+    )
+    root = staging_run.resolve()
     for case in manifest["cases"]:
-        for image_key in ("image_a", "image_b"):
-            image_path = staging_run / str(case.get(image_key, ""))
-            if not image_path.is_file() or image_path.stat().st_size == 0:
-                raise RuntimeError(f"child generator did not create {image_key}")
+        for artifact_key in artifact_keys:
+            relative = Path(str(case.get(artifact_key, "")))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError(f"child generator path escapes run: {artifact_key}")
+            artifact_path = (staging_run / relative).resolve()
+            if root not in artifact_path.parents or not artifact_path.is_file() or artifact_path.stat().st_size == 0:
+                raise RuntimeError(f"child generator did not create {artifact_key}")
 
 
 def _write_child_failure_warning(

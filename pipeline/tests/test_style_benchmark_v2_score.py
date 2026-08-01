@@ -13,6 +13,41 @@ from debug_tools import style_benchmark_report
 from debug_tools import generate_style_benchmark_v2, run_style_benchmark_v2
 
 
+def _run_all(tmp_path: Path) -> dict:
+    spec_path = Path(__file__).resolve().parent / "fixtures" / "style_benchmark_v2" / "benchmark_spec.json"
+    lock_path = tmp_path / "runtime.lock.json"
+    lock_path.write_text(
+        json.dumps({"schema_version": 1, "runtime": generate_style_benchmark_v2._runtime_metadata()}),
+        encoding="utf-8",
+    )
+    run_dir = run_style_benchmark_v2.run_benchmark(
+        spec_path=spec_path, level="all", output_root=tmp_path / "runs",
+        run_id="authoritative-all", seed=1729, runtime_lock_path=lock_path,
+    )
+    return json.loads((run_dir / "style_benchmark_summary.json").read_text(encoding="utf-8"))
+
+
+def test_authoritative_score_uses_mask_backed_v2_and_real_font_top_k(tmp_path: Path):
+    summary = _run_all(tmp_path)
+    assert summary["authoritative_score"] == "v2_mask_backed"
+    assert summary["score"]["font_top1"]["evaluated"] > 0
+    assert summary["score"]["font_top3"]["evaluated"] == summary["score"]["font_top1"]["evaluated"]
+    assert summary["score"]["font_top3"]["hits"] >= summary["score"]["font_top1"]["hits"]
+
+
+def test_synthetic_score_emits_fill_delta_e_with_nonzero_denominator(tmp_path: Path):
+    metrics = _run_all(tmp_path)["score"]["fill_delta_e_2000"]
+    assert metrics["count"] > 0
+    assert metrics["median"] is not None
+    assert metrics["p95"] is not None
+
+
+def test_legacy_detector_score_is_diagnostic_not_authoritative(tmp_path: Path):
+    summary = _run_all(tmp_path)
+    assert "legacy_diagnostic_score" in summary
+    assert summary["validation"]["inputs"] == ["v2_mask_backed"]
+
+
 def test_validation_thresholds_block_breach_and_missing_denominator():
     thresholds = {
         "attributes": {
@@ -214,9 +249,9 @@ def test_runner_writes_jsonl_summary_html_and_contact_sheet_inside_the_run(tmp_p
     records = (run_dir / "style_benchmark_records.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(records) == 6
     first_record = json.loads(records[0])
-    assert first_record["style_evidence_v1"]["source"]
     assert first_record["style_evidence_v2"]["schema_version"] == 2
-    assert first_record["style_evidence_v2_shadow_policy"]["apply_to_renderer"] is False
+    assert first_record["style_evidence_v2"]["source"] == "owner_mask_v2"
+    assert first_record["detector"] == "v2_mask_backed"
 
 
 def test_v2_shadow_score_abstains_for_empty_hard_negative_cases(tmp_path: Path):
@@ -237,5 +272,5 @@ def test_v2_shadow_score_abstains_for_empty_hard_negative_cases(tmp_path: Path):
     )
     summary = json.loads((run_dir / "style_benchmark_summary.json").read_text(encoding="utf-8"))
 
-    assert summary["score"]["gates"]["hard_negative_abstention"] is False
-    assert summary["score_v2_shadow"]["gates"]["hard_negative_abstention"] is True
+    assert summary["score"]["gates"]["hard_negative_abstention"] is True
+    assert summary["legacy_diagnostic_score"]["gates"]["hard_negative_abstention"] is False
