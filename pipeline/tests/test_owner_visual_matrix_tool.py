@@ -25,6 +25,19 @@ def test_direct_matrix_cli_can_load_owner_target_tool():
     assert result.returncode == 0, result.stderr
 
 
+def test_matrix_cli_exposes_explicit_producer_run_id():
+    result = subprocess.run(
+        [sys.executable, str(PIPELINE / "tools" / "validate_owner_visual_matrix.py"), "--help"],
+        cwd=PIPELINE.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--run-id RUN_ID" in result.stdout
+
+
 def _entry(work_id: str, work_dir: str, categories: list[str]) -> dict:
     return {
         "entry_id": f"entry_{work_id}",

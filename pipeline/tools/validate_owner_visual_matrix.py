@@ -1623,7 +1623,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inspection-template", type=Path)
     parser.add_argument("--inspection-manifest", type=Path)
     parser.add_argument("--acceptance-bundle", type=Path)
+    parser.add_argument("--run-id", required=True)
     args = parser.parse_args(argv)
+    run_id = str(args.run_id or "").strip()
+    if not run_id or any(character.isspace() for character in run_id):
+        raise MatrixContractError("run_id must be a non-empty token")
     manifest_path = args.manifest.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     entries = validate_manifest(manifest)
@@ -1711,8 +1715,8 @@ def main(argv: list[str] | None = None) -> int:
         "revision_sha256": acceptance_bundle.get("revision_sha256") if acceptance_bundle else None,
         "source_manifest_sha256": acceptance_bundle.get("source_manifest_sha256") if acceptance_bundle else None,
     }
-    owner_qa_summary.update({**binding, "producer_run_id": f"owner-qa:{output_root.name}"})
-    holdout_summary.update({**binding, "producer_run_id": f"inspection:{output_root.name}"})
+    owner_qa_summary.update({**binding, "producer_run_id": f"owner-qa:{run_id}"})
+    holdout_summary.update({**binding, "producer_run_id": f"inspection:{run_id}"})
     (output_root / "style_owner_qa_summary.json").write_text(
         json.dumps(owner_qa_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -1765,7 +1769,7 @@ def main(argv: list[str] | None = None) -> int:
     execution_summary = {
         "schema_version": 1,
         **binding,
-        "producer_run_id": f"matrix:{output_root.name}",
+        "producer_run_id": run_id,
         "functional_status": "GO" if functional_go else "BLOCK",
         "style_status": "GO" if owner_qa_summary["status"] == "PASS" else "BLOCK",
         "inspection_status": "GO" if holdout_summary["status"] == "PASS" else "PENDING" if all(
