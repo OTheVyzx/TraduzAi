@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         TextObservation,
     )
     from ownership.ocr_adapter import TileProjection
+    from strip.page_surface_geometry import PageSurfaceGeometry
 
 
 @dataclass
@@ -141,3 +142,4 @@ class OutputPage:
     inpaint_blocks: Optional[list] = None
     owner_graph: Optional["OwnerGraph"] = None
     owner_composition: Optional["PageCompositionResult"] = None
+    page_surface_geometry: Optional["PageSurfaceGeometry"] = None

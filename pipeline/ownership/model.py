@@ -1131,6 +1131,7 @@ class PageCompositionResult:
     page_id: str | None = None
     coordinate_space: str = "page"
     committed: bool = True
+    page_surface_geometry_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
