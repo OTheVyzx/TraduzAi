@@ -316,6 +316,7 @@ class TypesettingRendererTests(unittest.TestCase):
                     "width_px": 3,
                     "width_xh": 0.19,
                 },
+                "shadow": {"color": "#202030", "offset": [2.6, 1.4]},
             },
             approved_abstentions={},
         )
@@ -351,6 +352,9 @@ class TypesettingRendererTests(unittest.TestCase):
                     "glow": True,
                     "glow_cor": "#FFCC00",
                     "glow_px": 3,
+                    "sombra": True,
+                    "sombra_cor": "#202030",
+                    "sombra_offset": [2.6, 1.4],
                 },
                 font,
                 ["TESTE"],
@@ -369,6 +373,10 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(
             sealed["attribute_plans"]["glow"]["target_value"],
             {"color": "#FFCC00", "width_px": 3},
+        )
+        self.assertEqual(
+            sealed["attribute_plans"]["shadow"]["target_value"],
+            {"color": "#202030", "offset": [3, 1]},
         )
         self.assertEqual(intent.to_dict()["approved_attributes"]["font_size_px"], 48)
 

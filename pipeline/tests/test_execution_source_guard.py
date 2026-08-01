@@ -49,6 +49,30 @@ def test_execution_guard_ignores_loaded_sources_covered_by_bundle_exclusions(
     assert "pipeline/venv/Lib/site-packages/dependency.py" not in ledger["loaded_sources"]
 
 
+def test_execution_guard_resolves_synthetic_relative_module_file_from_spec_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo, _source, bundle, _ledger = _fixture(tmp_path)
+    dependency = repo / "pipeline" / "venv" / "Lib" / "site-packages" / "torch" / "_ops.py"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text("VALUE = 1\n", encoding="utf-8")
+    bundle["source_exclusions"] = ["pipeline/venv/**"]
+    monkeypatch.chdir(repo / "pipeline")
+    monkeypatch.setitem(
+        sys.modules,
+        "traduzai_test_synthetic_file",
+        SimpleNamespace(
+            __file__="_ops.py",
+            __spec__=SimpleNamespace(origin=str(dependency)),
+        ),
+    )
+
+    ledger = collect_execution_source_ledger(bundle)
+
+    assert "pipeline/_ops.py" not in ledger["loaded_sources"]
+
+
 def test_execution_guard_blocks_loaded_hash_mismatch(tmp_path: Path):
     _repo, _source, bundle, ledger = _fixture(tmp_path); ledger["loaded_sources"]["pipeline/module.py"] = "0" * 64
     with pytest.raises(ExecutionSourceError, match="loaded_hash_mismatch"):

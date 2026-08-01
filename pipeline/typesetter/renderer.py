@@ -1487,9 +1487,12 @@ def _seal_owner_materialization_plan(
                 "width_px": int(layout_plan.get("glow_px") or 0),
             }
         elif name == "shadow" and isinstance(value, Mapping):
+            executed_offset = list(
+                layout_plan.get("sombra_offset") or value.get("offset") or [2, 2]
+            )[:2]
             targets[name] = {
                 "color": str(layout_plan.get("sombra_cor") or value.get("color") or ""),
-                "offset": list(layout_plan.get("sombra_offset") or value.get("offset") or [2, 2])[:2],
+                "offset": [int(round(float(item))) for item in executed_offset],
             }
         elif name == "gradient":
             targets[name] = copy.deepcopy(

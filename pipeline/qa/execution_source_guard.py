@@ -26,7 +26,13 @@ def collect_execution_source_ledger(bundle: Mapping[str, Any]) -> dict[str, Any]
         raw = getattr(module, "__file__", None)
         if not raw:
             continue
-        path = Path(str(raw)).resolve()
+        raw_path = Path(str(raw))
+        if not raw_path.is_absolute():
+            spec_origin = getattr(getattr(module, "__spec__", None), "origin", None)
+            origin_path = Path(str(spec_origin)) if spec_origin else None
+            if origin_path is not None and origin_path.is_absolute():
+                raw_path = origin_path
+        path = raw_path.resolve()
         try:
             relative = path.relative_to(repo).as_posix()
         except ValueError:
