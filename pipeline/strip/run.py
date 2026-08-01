@@ -5656,6 +5656,66 @@ def _resolve_owner_graph_from_evidence(page_id: str, evidence: list) -> OwnerGra
     )
 
 
+def _owner_style_promotions_from_evidence(
+    graph: OwnerGraph,
+    evidence: list,
+) -> dict[str, dict[str, object]]:
+    """Preserve explicit SFX promotion facts outside the semantic owner graph."""
+
+    records_by_id: dict[str, dict] = {}
+    for item in evidence:
+        ocr_page = getattr(item, "ocr_page", None)
+        if not isinstance(ocr_page, dict):
+            continue
+        for record in ocr_page.get("texts") or []:
+            if not isinstance(record, dict):
+                continue
+            record_id = record.get("provider_record_id") or record.get("record_id") or record.get("id")
+            if record_id not in (None, ""):
+                records_by_id[str(record_id)] = record
+
+    observations_by_id = {
+        observation.observation_id: observation for observation in graph.observations
+    }
+    result: dict[str, dict[str, object]] = {}
+    for owner in sorted(graph.owners, key=lambda item: item.owner_id):
+        if owner.route_action != "translate_sfx_inpaint_render":
+            continue
+        scores: list[float] = []
+        provenance: set[str] = set()
+        for observation_id in owner.selected_observation_ids:
+            observation = observations_by_id.get(observation_id)
+            if observation is None or not observation.provider_record_id:
+                continue
+            record = records_by_id.get(str(observation.provider_record_id))
+            if record is None:
+                continue
+            sfx = record.get("sfx") if isinstance(record.get("sfx"), dict) else {}
+            explicitly_promoted = (
+                record.get("route_action") == "translate_sfx_inpaint_render"
+                and sfx.get("visual_promotion") is True
+            )
+            raw_score = record.get("sfx_promotion_score", sfx.get("promotion_score"))
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not explicitly_promoted or not np.isfinite(score):
+                continue
+            scores.append(score)
+            provenance.add(
+                f"{str(record.get('detector') or observation.provider)}:"
+                f"{observation.provider_record_id}"
+            )
+        if scores and provenance:
+            result[owner.owner_id] = {
+                "promotion_status": "promoted",
+                "promotion_confidence": max(scores),
+                "promotion_provenance": sorted(provenance),
+            }
+    return result
+
+
 def _resolve_page_owner_graphs_once(
     evidence_results,
     *,
@@ -6196,6 +6256,10 @@ def run_chapter(
                         ollama_host=ollama_host,
                         ollama_model=ollama_model,
                         translation_context=translation_context,
+                        style_promotions_by_owner=_owner_style_promotions_from_evidence(
+                            graph,
+                            page_evidence,
+                        ),
                     )
                     owner_graphs[page_id] = execution.graph
                     owner_execution_records_by_page[page_id] = [

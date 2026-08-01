@@ -44,6 +44,7 @@ from typesetter.owner_style import (
     attach_owner_visual_profile,
     build_owner_visual_profiles,
 )
+from typesetter.style_capture import build_owner_style_captures
 from typesetter.owner_render_quality import OwnerRenderQuality
 from typesetter.style_groups import resolve_contextual_style_groups
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
@@ -10378,6 +10379,7 @@ def execute_owner_page_graph(
     ollama_host: str = "http://localhost:11434",
     ollama_model: str = "traduzai-translator",
     translation_context: dict | None = None,
+    style_promotions_by_owner: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> OwnerPageExecution:
     """Execute every page owner once against canonical page pixels."""
 
@@ -10390,6 +10392,11 @@ def execute_owner_page_graph(
 
     graph.require_valid()
     source = np.ascontiguousarray(page_rgb, dtype=np.uint8)
+    captures_by_owner = build_owner_style_captures(
+        graph,
+        source,
+        promotions_by_owner=style_promotions_by_owner,
+    )
     translated_stage = _run_translate_stage(
         {"page_id": graph.page_id, "texts": []},
         translator=translator,
@@ -10411,6 +10418,9 @@ def execute_owner_page_graph(
         for record in translated_page.get("texts") or []
         if isinstance(record, dict) and record.get("owner_id")
     }
+    for owner_id, capture in captures_by_owner.items():
+        if owner_id in records_by_owner:
+            records_by_owner[owner_id]["owner_style_capture"] = capture.to_dict()
     components = {
         component.component_id: component for component in executed_graph.components
     }
@@ -10427,7 +10437,20 @@ def execute_owner_page_graph(
             executed_graph,
             source,
             glyph_masks_by_owner=captured_glyph_masks,
-            candidates_by_owner=records_by_owner,
+            candidates_by_owner={
+                owner_id: {
+                    **record,
+                    "confidence": captures_by_owner[owner_id].candidate_confidence,
+                    "route_action": captures_by_owner[owner_id].route_action,
+                    "sfx_promotion_score": (
+                        captures_by_owner[owner_id].candidate_confidence
+                        if captures_by_owner[owner_id].candidate_kind == "promoted_sfx"
+                        else None
+                    ),
+                }
+                for owner_id, record in records_by_owner.items()
+                if owner_id in captures_by_owner
+            },
         )
     )
     commits: list[OwnerExecutionCommit] = []
@@ -10727,6 +10750,9 @@ def execute_owner_page_graph(
                 page_width=int(source.shape[1]),
                 page_height=int(source.shape[0]),
             ),
+        )
+        layout_page["texts"][0]["owner_style_capture"] = copy.deepcopy(
+            record["owner_style_capture"]
         )
         glyph_patch = typesetter.render_band_image(
             mutation.result_rgb,

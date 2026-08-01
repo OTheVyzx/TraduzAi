@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -270,6 +271,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
         @staticmethod
         def translate_pages(pages, **_kwargs):
             calls.append(("translate", len(pages[0]["texts"])))
+            state["translation_payload"] = copy.deepcopy(pages[0])
             return [{"texts": [{"owner_id": "owner_a", "translated": "DESTINO"}]}]
 
     class Engine:
@@ -382,6 +384,9 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     assert execution.commits[0].committed is True
     assert execution.records[0]["owner_id"] == "owner_a"
     assert execution.records[0]["translated"] == "DESTINO"
+    assert "owner_style_capture" not in state["translation_payload"]
+    assert execution.records[0]["owner_style_capture"]["owner_id"] == "owner_a"
+    assert execution.records[0]["owner_style_capture"]["eligible"] is True
     assert execution.records[0]["band_id"] == "tile_executor"
     assert execution.records[0]["render_bbox"] == [16, 12, 25, 15]
     assert execution.records[0]["fit_status"] == "ok"

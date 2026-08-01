@@ -723,6 +723,40 @@ def test_shadow_telemetry_counts_graph_violations_by_code() -> None:
     assert counts == {"owner_executor_full_coverage_missing": 1}
 
 
+def test_owner_style_sfx_promotion_provenance_survives_graph_construction() -> None:
+    from strip.run import _owner_style_promotions_from_evidence
+
+    graph = _graph()
+    graph.owners[0].route_action = "translate_sfx_inpaint_render"
+    graph.owners[0].semantic_role = "sfx"
+    graph.observations[0] = replace(
+        graph.observations[0],
+        provider="sfx_visual",
+        provider_record_id="record_7",
+    )
+    evidence = SimpleNamespace(
+        ocr_page={
+            "texts": [
+                {
+                    "id": "record_7",
+                    "detector": "sfx_visual",
+                    "route_action": "translate_sfx_inpaint_render",
+                    "sfx_promotion_score": 0.88,
+                    "sfx": {"visual_promotion": True},
+                }
+            ]
+        }
+    )
+
+    assert _owner_style_promotions_from_evidence(graph, [evidence]) == {
+        "owner_a": {
+            "promotion_status": "promoted",
+            "promotion_confidence": 0.88,
+            "promotion_provenance": ["sfx_visual:record_7"],
+        }
+    }
+
+
 def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
     tmp_path, monkeypatch
 ) -> None:

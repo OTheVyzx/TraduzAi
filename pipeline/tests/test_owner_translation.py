@@ -382,7 +382,16 @@ def test_translation_page_never_serializes_visual_profile_fields() -> None:
 
     translation_page = owners_to_translation_page(graph)
 
-    forbidden = {"visual_profile_v2", "visual_profile_sha256", "style_copy_status"}
+    forbidden = {
+        "visual_profile_v2",
+        "visual_profile_sha256",
+        "style_copy_status",
+        "owner_style_capture",
+        "style_evidence_v2",
+        "candidate_confidence",
+        "glyph_mask_sha256",
+        "font_match_evidence",
+    }
     assert forbidden.isdisjoint(translation_page)
     assert all(forbidden.isdisjoint(record) for record in translation_page["texts"])
 
