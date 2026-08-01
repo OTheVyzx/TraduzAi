@@ -1412,6 +1412,12 @@ def test_owner_mask_and_mutation_bind_logical_page_render_geometry(tmp_path):
         )
 
 
+def test_owner_mask_and_mutation_declare_page_coordinate_space(tmp_path):
+    """Preserve the historical nodeid for canonical logical-page geometry."""
+
+    test_owner_mask_and_mutation_bind_logical_page_render_geometry(tmp_path)
+
+
 def test_owner_engine_receives_bounded_crop_but_mutation_remains_page_space():
     from inpainter.owner_mask import (
         OwnerMaskEvidence,

@@ -671,6 +671,11 @@ class TypesettingRendererTests(unittest.TestCase):
         )
         self.assertNotIn("style_v2_raster_contract", page["texts"][0])
 
+    def test_render_band_image_owner_mode_returns_page_space_glyph_patch(self):
+        """Preserve the historical nodeid for the logical-page contract."""
+
+        self.test_render_band_image_owner_mode_returns_logical_page_glyph_patch()
+
     def test_owner_renderer_rejects_unvalidated_graph_object(self):
         class ForgedGraph:
             page_id = "page_001"
@@ -884,6 +889,11 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(text["_rendered_glyph_run"]["curve_direction"], "arc_up")
         self.assertAlmostEqual(text["_rendered_glyph_run"]["curve_amount"], 0.42)
         self.assertFalse(np.array_equal(np.asarray(image), canvas))
+
+    def test_curved_owner_cannot_claim_v2_applied_without_supported_contract(self):
+        """Preserve the old nodeid after curved rendering gained observable support."""
+
+        self.test_curved_owner_uses_shared_raster_and_reports_glyph_run()
 
     def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
         text = {

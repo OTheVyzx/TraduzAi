@@ -845,6 +845,16 @@ def test_only_source_replacement_is_released_before_positive_evidence_sanitizati
     assert int(sanitizer_inputs[0][18, 32]) == 255
 
 
+def test_source_replacement_is_released_before_positive_evidence_sanitization(
+    monkeypatch,
+):
+    """Keep the pre-R5 nodeid while enforcing the narrowed release contract."""
+
+    test_only_source_replacement_is_released_before_positive_evidence_sanitization(
+        monkeypatch
+    )
+
+
 def test_semantic_modules_do_not_branch_on_work_chapter_page_number_or_band_id():
     roots = [
         PIPELINE / "ownership",

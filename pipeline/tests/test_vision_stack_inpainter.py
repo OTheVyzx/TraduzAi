@@ -8988,7 +8988,7 @@ class VisionStackInpainterTests(unittest.TestCase):
                 ],
                 "_page_id": "page_001",
                 "_band_id": "tile_executor",
-                "_owner_coordinate_space": "page",
+                "_owner_coordinate_space": "logical_page",
                 "_page_shape": [30, 44],
                 "_owner_component_bboxes_page": {
                     "cmp_body": [12, 9, 31, 19]
@@ -9100,7 +9100,7 @@ class VisionStackInpainterTests(unittest.TestCase):
                 ],
                 "_page_id": "page_001",
                 "_band_id": "tile_executor",
-                "_owner_coordinate_space": "page",
+                "_owner_coordinate_space": "logical_page",
                 "_page_shape": [34, 48],
                 "_owner_component_bboxes_page": {
                     "cmp_body": [10, 9, 35, 23]
@@ -9203,7 +9203,7 @@ class VisionStackInpainterTests(unittest.TestCase):
                 },
             }
 
-        for coordinate_space in (None, "tile", " page "):
+        for coordinate_space in (None, "tile", " page ", "page"):
             with self.subTest(coordinate_space=coordinate_space):
                 page = context(coordinate_space)
                 with self.assertRaisesRegex(UnsafeOwnerMaskError, "coordinate|page"):
@@ -9214,7 +9214,7 @@ class VisionStackInpainterTests(unittest.TestCase):
                         owner_inpainter=FixtureInpainter(),
                     )
 
-        page = context("page")
+        page = context("logical_page")
         with self.assertRaisesRegex(UnsafeOwnerMaskError, "shape|source|page"):
             inpaint_band_image(
                 image[20:40],
@@ -9223,7 +9223,7 @@ class VisionStackInpainterTests(unittest.TestCase):
                 owner_inpainter=FixtureInpainter(),
             )
 
-        valid_page = context("page")
+        valid_page = context("logical_page")
         valid_page["_owner_execution_projection"]["bbox_tile"] = [20, 5, 32, 10]
         valid_page["_owner_execution_projection"]["offset_xy"] = [-8, 20]
         mutation = inpaint_band_image(
@@ -9232,12 +9232,12 @@ class VisionStackInpainterTests(unittest.TestCase):
             owner_mask_plan=plan,
             owner_inpainter=FixtureInpainter(),
         )
-        self.assertEqual(mutation.coordinate_space, "page")
+        self.assertEqual(mutation.coordinate_space, "logical_page")
         self.assertEqual(mutation.result_rgb.shape, image.shape)
         self.assertTrue(np.any(mutation.changed_mask[25:30, 12:24]))
 
         malformed_records = []
-        duplicate = context("page")
+        duplicate = context("logical_page")
         duplicate_record = dict(duplicate["texts"][0])
         duplicate_record["translated_payload"] = "OUTRA TRADUCAO"
         duplicate["texts"].append(duplicate_record)
@@ -9248,7 +9248,7 @@ class VisionStackInpainterTests(unittest.TestCase):
             ("source_payload", ""),
             ("translated_payload", None),
         ):
-            invalid = context("page")
+            invalid = context("logical_page")
             invalid["texts"][0][field] = invalid_value
             malformed_records.append(invalid)
 

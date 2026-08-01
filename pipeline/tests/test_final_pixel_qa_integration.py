@@ -77,6 +77,7 @@ def test_explicit_preserve_policy_excludes_source_challenge(tmp_path):
                 coverage_complete=True,
             )
 
+    composition = _composition(glyph=False)
     main._observe_verified_owner_final_pages(
         project_data={
             "_work_dir": str(tmp_path),
@@ -87,7 +88,11 @@ def test_explicit_preserve_policy_excludes_source_challenge(tmp_path):
                 "image_layers": {"rendered": {"path": "translated/001.png"}},
             }],
         },
-        output_pages=[SimpleNamespace(owner_graph=graph, owner_composition=_composition(glyph=False))],
+        output_pages=[SimpleNamespace(
+            owner_graph=graph,
+            owner_composition=composition,
+            page_surface_geometry=composition.page_surface_geometry,
+        )],
         observer=Observer(),
         source_language="en",
     )
