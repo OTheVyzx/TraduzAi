@@ -259,7 +259,7 @@ def _measured_expansion_px(core: np.ndarray, layer: np.ndarray) -> float:
         cv2.DIST_L2,
         5,
     )
-    return round(float(np.max(distance[outside])), 3)
+    return float(round(float(np.max(distance[outside]))))
 
 
 def _gradient_endpoints(pixels: np.ndarray, core: np.ndarray) -> list[str]:

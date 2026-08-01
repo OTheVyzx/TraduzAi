@@ -151,7 +151,7 @@ def test_raster_observation_contains_actual_transforms_effects_and_evidence() ->
     assert result.observed_attributes["slant_tangent"] == 0.25
     assert result.observed_attributes["fill"] == "#FFFFFF"
     assert result.observed_attributes["stroke"]["width_px"] == pytest.approx(2, abs=0.5)
-    assert result.observed_attributes["glow"]["width_px"] == pytest.approx(3, abs=1.0)
+    assert result.observed_attributes["glow"]["width_px"] == 3
     assert result.attribute_evidence_sha256["fill"]
 
 

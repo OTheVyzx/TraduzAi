@@ -1474,6 +1474,29 @@ def _seal_owner_materialization_plan(
             kinds[name] = "review_required"
             reasons[name] = "owner_render_geometry_not_bound"
             continue
+        elif name == "fill":
+            targets[name] = str(layout_plan.get("text_color") or value)
+        elif name == "stroke" and isinstance(value, Mapping):
+            targets[name] = {
+                "color": str(layout_plan.get("outline_color") or value.get("color") or ""),
+                "width_px": int(layout_plan.get("outline_px") or 0),
+            }
+        elif name == "glow" and isinstance(value, Mapping):
+            targets[name] = {
+                "color": str(layout_plan.get("glow_cor") or value.get("color") or ""),
+                "width_px": int(layout_plan.get("glow_px") or 0),
+            }
+        elif name == "shadow" and isinstance(value, Mapping):
+            targets[name] = {
+                "color": str(layout_plan.get("sombra_cor") or value.get("color") or ""),
+                "offset": list(layout_plan.get("sombra_offset") or value.get("offset") or [2, 2])[:2],
+            }
+        elif name == "gradient":
+            targets[name] = copy.deepcopy(
+                layout_plan.get("cor_gradiente") or value
+            )
+        elif name == "rotation_deg":
+            targets[name] = float(layout_plan.get("rotation_deg") or value or 0.0)
         else:
             targets[name] = copy.deepcopy(value)
         kinds[name] = "exact"

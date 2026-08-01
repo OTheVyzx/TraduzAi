@@ -311,6 +311,11 @@ class TypesettingRendererTests(unittest.TestCase):
                 "font_size_px": 48,
                 "fill": "#FFFFFF",
                 "stroke": {"color": "#000000", "width_xh": 0.1},
+                "glow": {
+                    "color": "#FFCC00",
+                    "width_px": 3,
+                    "width_xh": 0.19,
+                },
             },
             approved_abstentions={},
         )
@@ -339,7 +344,14 @@ class TypesettingRendererTests(unittest.TestCase):
         ):
             renderer_mod._seal_owner_materialization_plan(
                 block,
-                {"alignment": "center"},
+                {
+                    "alignment": "center",
+                    "outline_color": "#000000",
+                    "outline_px": 3,
+                    "glow": True,
+                    "glow_cor": "#FFCC00",
+                    "glow_px": 3,
+                },
                 font,
                 ["TESTE"],
                 [(20, 20)],
@@ -352,7 +364,11 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(font_size["resolution_kind"], "policy_adjusted")
         self.assertEqual(
             sealed["attribute_plans"]["stroke"]["target_value"],
-            {"color": "#000000", "width_px": 2.52},
+            {"color": "#000000", "width_px": 3},
+        )
+        self.assertEqual(
+            sealed["attribute_plans"]["glow"]["target_value"],
+            {"color": "#FFCC00", "width_px": 3},
         )
         self.assertEqual(intent.to_dict()["approved_attributes"]["font_size_px"], 48)
 
