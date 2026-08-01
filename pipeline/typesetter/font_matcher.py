@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -38,6 +38,30 @@ class FontMatchResult:
     top_k: tuple[dict[str, Any], ...]
     abstention_reason: str
     cache_key: str
+    catalog_version: str = ""
+    normalization: Mapping[str, Any] = field(default_factory=dict)
+    source_text_sha256: str = ""
+    glyph_mask_sha256: str = ""
+
+    @property
+    def selected_font(self) -> str | None:
+        return self.value if self.value != "unknown" else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_font": self.selected_font,
+            "value": self.value,
+            "status": self.status,
+            "confidence": self.confidence,
+            "margin": self.margin,
+            "top_k": [dict(item) for item in self.top_k],
+            "abstention_reason": self.abstention_reason,
+            "cache_key": self.cache_key,
+            "catalog_version": self.catalog_version,
+            "normalization": dict(self.normalization),
+            "source_text_sha256": self.source_text_sha256,
+            "glyph_mask_sha256": self.glyph_mask_sha256,
+        }
 
 
 def _canonical_json(value: object) -> bytes:
@@ -100,6 +124,7 @@ def _profile_transform(profile: Mapping[str, Any]) -> dict[str, float]:
         "rotation_deg": max(-45.0, min(45.0, finite("rotation_deg", 0.0))),
         "slant_tangent": max(-0.75, min(0.75, finite("slant_tangent", 0.0))),
         "width_scale": max(0.45, min(1.65, finite("width_scale", 1.0))),
+        "scale_y": max(0.45, min(1.65, finite("scale_y", 1.0))),
     }
 
 
@@ -187,6 +212,12 @@ def render_source_text_mask(
             (max(1, int(round(mask.shape[1] * transform["width_scale"]))), mask.shape[0]),
             interpolation=cv2.INTER_NEAREST,
         )
+    if abs(transform["scale_y"] - 1.0) > 1e-6:
+        mask = cv2.resize(
+            mask,
+            (mask.shape[1], max(1, int(round(mask.shape[0] * transform["scale_y"])))),
+            interpolation=cv2.INTER_NEAREST,
+        )
     if abs(transform["rotation_deg"]) > 1e-6:
         center = (mask.shape[1] / 2.0, mask.shape[0] / 2.0)
         matrix = cv2.getRotationMatrix2D(center, transform["rotation_deg"], 1.0)
@@ -241,6 +272,9 @@ class FontShapeMatcher:
         if not catalog:
             raise ValueError("font matcher requires a non-empty catalog")
         self.catalog = tuple(catalog)
+        self.catalog_version = hashlib.sha256(
+            _canonical_json(_catalog_contract(self.catalog))
+        ).hexdigest()
         self._cache: dict[str, FontMatchResult] = {}
 
     def match(
@@ -260,6 +294,20 @@ class FontShapeMatcher:
         key = hashlib.sha256(
             _canonical_json({"base": base_key, "role": semantic_role, "source_mask": source_hash})
         ).hexdigest()
+        result_metadata = {
+            "catalog_version": self.catalog_version,
+            "normalization": {
+                "canvas": list(NORMALIZED_CANVAS),
+                "glyph_height": NORMALIZED_GLYPH_HEIGHT,
+                "profile": _profile_transform(profile),
+            },
+            "source_text_sha256": hashlib.sha256(
+                str(source_text).encode("utf-8")
+            ).hexdigest(),
+            "glyph_mask_sha256": hashlib.sha256(
+                np.ascontiguousarray(np.where(np.asarray(source_mask) > 0, 255, 0), dtype=np.uint8).tobytes()
+            ).hexdigest(),
+        }
         cached = self._cache.get(key)
         if cached is not None:
             return copy.deepcopy(cached)
@@ -284,7 +332,7 @@ class FontShapeMatcher:
             )
         ranked.sort(key=lambda item: (-item["score"], item["font_name"].casefold()))
         if not ranked:
-            result = FontMatchResult("unknown", "unknown", 0.0, 0.0, (), "empty_shortlist", key)
+            result = FontMatchResult("unknown", "unknown", 0.0, 0.0, (), "empty_shortlist", key, **result_metadata)
         else:
             best = ranked[0]
             runner_up = ranked[1]["score"] if len(ranked) > 1 else 0.0
@@ -292,18 +340,18 @@ class FontShapeMatcher:
             if float(best["score"]) < MATCH_SCORE_THRESHOLD:
                 result = FontMatchResult(
                     "unknown", "unknown", 0.0, round(margin, 6), tuple(ranked[:5]),
-                    "shape_score_below_threshold", key,
+                    "shape_score_below_threshold", key, **result_metadata,
                 )
             elif margin < MATCH_MARGIN_THRESHOLD:
                 result = FontMatchResult(
                     "unknown", "unknown", 0.0, round(margin, 6), tuple(ranked[:5]),
-                    "top_two_margin_ambiguous", key,
+                    "insufficient_margin", key, **result_metadata,
                 )
             else:
                 confidence = min(1.0, float(best["score"]) * (0.75 + min(0.25, margin * 4.0)))
                 result = FontMatchResult(
                     str(best["font_name"]), "exact", round(confidence, 6),
-                    round(margin, 6), tuple(ranked[:5]), "", key,
+                    round(margin, 6), tuple(ranked[:5]), "", key, **result_metadata,
                 )
         self._cache[key] = result
         return copy.deepcopy(result)

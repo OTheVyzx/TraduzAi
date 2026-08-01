@@ -49,6 +49,10 @@ def test_v2_metrics_are_mask_backed_and_x_height_normalized():
     assert metrics["normalization_unit"] == "source_x_height"
     assert metrics["bbox_width_xh"] > metrics["bbox_height_xh"]
     assert "tracking_xh" in metrics and "slant_tangent" in metrics
+    assert evidence.attributes["tracking_xh"].value != "unknown"
+    assert evidence.attributes["slant_tangent"].value != "unknown"
+    assert evidence.attributes["width_scale"].value != "unknown"
+    assert evidence.attributes["scale_y"].value != "unknown"
 
 
 def test_v2_explicit_masks_exclude_neighboring_art_from_effect_evidence():

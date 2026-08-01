@@ -41,6 +41,10 @@ SOURCE_STYLE_SAFE_FIELDS = {
     "curva_direcao",
     "curva_intensidade",
     "rotacao",
+    "tracking_xh",
+    "slant_tangent",
+    "width_scale",
+    "scale_y",
 }
 OWNER_STYLE_FORBIDDEN_FIELDS = frozenset(
     {

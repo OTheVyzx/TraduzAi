@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,6 +20,7 @@ from typesetter.style_capture import (
     build_style_capture_masks,
     validate_owner_style_capture,
 )
+from typesetter.font_matcher import render_source_text_mask
 
 
 SOURCE = np.full((32, 48, 3), 240, dtype=np.uint8)
@@ -181,6 +183,45 @@ def test_context_mask_excludes_foreign_owner_and_protected_art() -> None:
     assert not np.any((masks.context_mask > 0) & (protected > 0))
     assert not np.any((masks.context_mask > 0) & (masks.glyph_core_mask > 0))
     assert not np.any((masks.effect_region_mask > 0) & (foreign > 0))
+
+
+def test_owner_capture_matches_font_using_frozen_source_text_and_glyph_mask() -> None:
+    fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
+    glyph = render_source_text_mask(
+        "DING",
+        fonts_dir / "KOMIKAX_.ttf",
+        profile={},
+    )
+    height, width = glyph.shape
+    graph = _graph(0.94)
+    polygon = ((0, 0), (width - 1, 0), (width - 1, height - 1), (0, height - 1))
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=(0, 0, width, height),
+        polygon_page=polygon,
+    )
+    graph.observations[0] = replace(
+        graph.observations[0],
+        text="DING",
+        bbox_page=(0, 0, width, height),
+        polygons_page=(polygon,),
+    )
+    graph.owners[0].source_payload = "DING"
+    source = np.full((height, width, 3), 245, dtype=np.uint8)
+    source[glyph > 0] = 15
+
+    capture = build_owner_style_capture(
+        graph,
+        "owner_a",
+        source,
+        glyph_mask=glyph,
+    )
+
+    result = capture.font_match_evidence
+    assert result["top_k"]
+    assert result["selected_font"] == "KOMIKAX_.ttf"
+    assert result["source_text_sha256"] == capture.source_text_sha256
+    assert result["glyph_mask_sha256"] == capture.glyph_mask_sha256
 
 
 @pytest.mark.parametrize("pixel_count", [0, 4])

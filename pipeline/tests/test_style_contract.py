@@ -12,6 +12,7 @@ if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
 from typesetter.style_contract import (
+    STYLE_V2_ATTRIBUTE_NAMES,
     StyleEvidenceV2,
     style_evidence_v2_from_dict,
     style_evidence_v2_from_v1,
@@ -28,6 +29,15 @@ def test_owner_style_raster_contract_api_is_defined_at_ownership_boundary():
     assert callable(
         getattr(ownership_model, "owner_style_raster_contract_sha256", None)
     )
+
+
+def test_v2_contract_exposes_tracking_slant_width_and_vertical_scale():
+    assert {
+        "tracking_xh",
+        "slant_tangent",
+        "width_scale",
+        "scale_y",
+    }.issubset(STYLE_V2_ATTRIBUTE_NAMES)
     assert callable(
         getattr(ownership_model, "validate_owner_style_raster_contract", None)
     )

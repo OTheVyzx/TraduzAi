@@ -185,6 +185,21 @@ def extract_text_style_evidence_v2(
     weight_ratio = float(metrics["weight_xh"])
     weight_class = "bold" if weight_ratio >= 0.19 else "regular"
     attributes["font_weight"] = _v2_observed(weight_class, 0.72)
+    component_count = max(1, int(metrics.get("foreground_pixels", 0)) // 24)
+    geometry_confidence = min(0.9, 0.58 + component_count * 0.025)
+    attributes["tracking_xh"] = _v2_observed(
+        float(metrics["tracking_xh"]),
+        geometry_confidence,
+    )
+    attributes["slant_tangent"] = _v2_observed(
+        float(metrics["slant_tangent"]),
+        min(0.6, geometry_confidence),
+    )
+    attributes["width_scale"] = _v2_observed(
+        round(max(0.45, min(1.65, aspect / 0.60)), 6),
+        min(0.6, geometry_confidence),
+    )
+    attributes["scale_y"] = _v2_observed(1.0, 0.6)
     attributes["font_size_px"] = _v2_unknown("functional_layout_owned")
     attributes["alignment"] = _v2_unknown("functional_layout_owned")
     attributes["container"] = _v2_unknown("functional_layout_owned")

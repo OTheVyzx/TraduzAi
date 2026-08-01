@@ -67,8 +67,9 @@ def test_matcher_abstains_when_top_two_margin_is_ambiguous() -> None:
     )
 
     assert result.value == "unknown"
+    assert result.selected_font is None
     assert result.status == "unknown"
-    assert result.abstention_reason == "top_two_margin_ambiguous"
+    assert result.abstention_reason == "insufficient_margin"
 
 
 def test_matcher_uses_frozen_source_text_not_translation() -> None:
@@ -138,3 +139,29 @@ def test_matcher_cache_key_includes_catalog_and_profile_hashes() -> None:
 
     assert base != changed_profile
     assert base != changed_catalog
+
+
+def test_matcher_records_catalog_version_and_is_catalog_order_invariant() -> None:
+    catalog = _catalog()
+    source = render_source_text_mask(
+        "ORDER",
+        FONTS_DIR / "ComicNeue-Bold.ttf",
+        profile={},
+    )
+
+    first = FontShapeMatcher(catalog).match(
+        source,
+        source_text="ORDER",
+        profile={},
+        semantic_role="dialogue_body",
+    )
+    second = FontShapeMatcher(tuple(reversed(catalog))).match(
+        source,
+        source_text="ORDER",
+        profile={},
+        semantic_role="dialogue_body",
+    )
+
+    assert first == second
+    assert len(first.catalog_version) == 64
+    assert first.normalization["canvas"] == [192, 512]

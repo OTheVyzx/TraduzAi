@@ -197,6 +197,14 @@ def _materialize_style(
         )
     if "rotation_deg" in applied:
         style["rotacao"] = float(applied["rotation_deg"])
+    for geometry_name in (
+        "tracking_xh",
+        "slant_tangent",
+        "width_scale",
+        "scale_y",
+    ):
+        if geometry_name in applied:
+            style[geometry_name] = float(applied[geometry_name])
     return {
         str(key): copy.deepcopy(value)
         for key, value in style.items()

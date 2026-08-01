@@ -5,15 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import cv2
 import numpy as np
 
 from sfx.promotion import VISUAL_PROMOTION_THRESHOLD
-from typesetter.style_contract import StyleEvidenceV2, style_evidence_v2_from_dict
+from typesetter.style_contract import (
+    StyleAttributeEvidenceV2,
+    StyleEvidenceV2,
+    style_evidence_v2_from_dict,
+)
 from typesetter.style_extractor import extract_text_style_evidence_v2
+from typesetter.font_matcher import FontShapeMatcher, load_font_catalog
 from typesetter.style_policy import SOURCE_STYLE_CONFIDENCE_THRESHOLD
 
 
@@ -72,6 +79,15 @@ def _mask_sha256(mask: np.ndarray) -> str:
     canonical = np.ascontiguousarray(mask, dtype=np.uint8)
     header = _canonical_json({"shape": list(canonical.shape), "dtype": str(canonical.dtype)})
     return _sha256(header + b"\0" + canonical.tobytes(order="C"))
+
+
+@lru_cache(maxsize=1)
+def _runtime_font_matcher() -> FontShapeMatcher:
+    repo_root = Path(__file__).resolve().parents[2]
+    fonts_dir = repo_root / "fonts"
+    return FontShapeMatcher(
+        load_font_catalog(fonts_dir, fonts_dir / "font-map.json")
+    )
 
 
 @dataclass(frozen=True)
@@ -255,7 +271,7 @@ def validate_owner_style_capture(
     confidence = _finite_confidence(payload.get("candidate_confidence"))
     if payload.get("candidate_confidence") is not None and confidence is None:
         raise ValueError("owner style capture confidence is invalid")
-    return OwnerStyleCapture(
+    capture = OwnerStyleCapture(
         schema_version=OWNER_STYLE_CAPTURE_SCHEMA_VERSION,
         page_id=page_id,
         owner_id=owner_id,
@@ -284,6 +300,8 @@ def validate_owner_style_capture(
         font_match_evidence=payload.get("font_match_evidence"),
         capture_sha256=serialized_hash,
     )
+    canonical_hash = _capture_sha256(capture.to_dict())
+    return replace(capture, capture_sha256=canonical_hash)
 
 
 def build_owner_style_capture(
@@ -343,6 +361,7 @@ def build_owner_style_capture(
         )
     masks = None
     style_evidence = None
+    font_match_evidence = None
     if glyph_mask is not None:
         masks = build_style_capture_masks(
             graph,
@@ -362,6 +381,67 @@ def build_owner_style_capture(
             semantic_role=str(_field(owner, "semantic_role") or "text"),
             source_phase="pre_inpaint",
         )
+        geometry_profile = {
+            name: style_evidence.attributes[name].value
+            for name in (
+                "rotation_deg",
+                "slant_tangent",
+                "width_scale",
+                "scale_y",
+            )
+            if name in style_evidence.attributes
+            and style_evidence.attributes[name].value != "unknown"
+            and style_evidence.attributes[name].confidence >= 0.7
+        }
+        font_result = _runtime_font_matcher().match(
+            masks.glyph_core_mask,
+            source_text=str(_field(owner, "source_payload") or ""),
+            profile=geometry_profile,
+            semantic_role=str(_field(owner, "semantic_role") or "text"),
+        )
+        font_match_evidence = font_result.to_dict()
+        font_match_evidence["source_text_sha256"] = _sha256(
+            str(_field(owner, "source_payload") or "").encode("utf-8")
+        )
+        font_match_evidence["glyph_mask_sha256"] = _mask_sha256(
+            masks.glyph_core_mask
+        )
+        attributes = dict(style_evidence.attributes)
+        if font_result.selected_font is not None:
+            attributes["font_name"] = StyleAttributeEvidenceV2(
+                value=font_result.selected_font,
+                confidence=font_result.confidence,
+                top_k=tuple(
+                    str(item["font_name"])
+                    for item in font_result.top_k
+                    if item.get("font_name")
+                ),
+                margin=font_result.margin,
+            )
+        else:
+            attributes["font_name"] = StyleAttributeEvidenceV2(
+                value="unknown",
+                confidence=0.0,
+                top_k=tuple(
+                    str(item["font_name"])
+                    for item in font_result.top_k
+                    if item.get("font_name")
+                ),
+                margin=font_result.margin,
+                abstention_reason=font_result.abstention_reason,
+            )
+        provenance = dict(style_evidence.attribute_provenance)
+        provenance["font_name"] = {
+            "catalog_version": font_result.catalog_version,
+            "cache_key": font_result.cache_key,
+            "source": "frozen_source_text_and_owner_glyph_mask",
+        }
+        style_evidence = replace(
+            style_evidence,
+            attributes=attributes,
+            attribute_provenance=provenance,
+        )
+        style_evidence = style_evidence_v2_from_dict(style_evidence.to_dict())
     payload: dict[str, Any] = {
         "schema_version": OWNER_STYLE_CAPTURE_SCHEMA_VERSION,
         "page_id": str(_field(owner, "page_id") or _field(graph, "page_id") or ""),
@@ -386,7 +466,7 @@ def build_owner_style_capture(
         "promotion_provenance": list(provenance),
         "eligible": eligible,
         "style_evidence_v2": style_evidence.to_dict() if style_evidence is not None else None,
-        "font_match_evidence": None,
+        "font_match_evidence": font_match_evidence,
     }
     payload["capture_sha256"] = _capture_sha256(payload)
     return validate_owner_style_capture(payload, expected_owner_id=owner_id)
