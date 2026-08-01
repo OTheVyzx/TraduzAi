@@ -9246,6 +9246,7 @@ def _run_pipeline(config_path: str):
                 page_id,
                 page_number,
                 source_language,
+                page_surface_geometry,
             ):
                 return run_final_pixel_ocr_probe(
                     img,
@@ -9254,6 +9255,7 @@ def _run_pipeline(config_path: str):
                     page_id=page_id,
                     page_number=page_number,
                     source_language=source_language,
+                    page_surface_geometry=page_surface_geometry,
                 )
 
             def run_ocr_stage(

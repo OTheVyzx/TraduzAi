@@ -120,9 +120,10 @@ def _finite_number(value: Any, *, field: str) -> int | float:
     number = float(value)
     if not math.isfinite(number):
         raise ValueError(f"{field} must be a finite number")
-    if number == 0:
+    canonical = round(number, 9)
+    if canonical == 0:
         return 0.0
-    return int(number) if isinstance(value, int) else number
+    return int(canonical) if isinstance(value, int) else canonical
 
 
 def canonicalize_srgb_color(value: Any) -> str:

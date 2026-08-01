@@ -220,9 +220,11 @@ class MainEmitTests(unittest.TestCase):
         import inspect
 
         source = inspect.getsource(main._run_pipeline)
+        start = source.index("def run_final_pixel_ocr_probe")
+        bridge = source[start:source.index("def run_ocr_stage", start)]
 
-        self.assertIn("def run_final_pixel_ocr_probe", source)
-        self.assertIn("return run_final_pixel_ocr_probe(", source)
+        self.assertIn("page_surface_geometry,", bridge)
+        self.assertIn("page_surface_geometry=page_surface_geometry", bridge)
 
     def test_automatic_owner_mode_rejects_implicit_legacy(self) -> None:
         self.assertEqual(main._automatic_owner_graph_mode({}), "enforce")

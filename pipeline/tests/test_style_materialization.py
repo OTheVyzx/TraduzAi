@@ -54,6 +54,16 @@ def test_canonicalization_normalizes_equivalent_values():
     ) == {"color": "#FFFFFF", "width_xh": 0.1}
 
 
+def test_numeric_canonicalization_removes_sub_precision_pixel_arithmetic_noise():
+    module = _materialization_module()
+    observed = (0.15 * 21.0 + 2.0e-14) / 21.0
+
+    comparison = module.compare_style_attribute("tracking_xh", 0.15, observed)
+
+    assert comparison.matches is True
+    assert comparison.expected == comparison.observed == 0.15
+
+
 def test_material_difference_is_not_normalized_away():
     module = _materialization_module()
 
