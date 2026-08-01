@@ -8713,12 +8713,27 @@ def _owner_paint_mask_is_overbroad(
         4.0,
         min(core_width, core_height) * 0.75,
     )
+    effect_margin = int(math.ceil(maximum_local_effect_px))
+    crop_y0 = max(0, int(core_y.min()) - effect_margin)
+    crop_y1 = min(core.shape[0], int(core_y.max()) + effect_margin + 1)
+    crop_x0 = max(0, int(core_x.min()) - effect_margin)
+    crop_x1 = min(core.shape[1], int(core_x.max()) + effect_margin + 1)
+    paint_y, paint_x = np.nonzero(paint_only)
+    if (
+        int(paint_y.min()) < crop_y0
+        or int(paint_y.max()) >= crop_y1
+        or int(paint_x.min()) < crop_x0
+        or int(paint_x.max()) >= crop_x1
+    ):
+        return True
+    local_core = core[crop_y0:crop_y1, crop_x0:crop_x1]
+    local_paint_only = paint_only[crop_y0:crop_y1, crop_x0:crop_x1]
     distance_from_core = cv2.distanceTransform(
-        np.where(core, 0, 255).astype(np.uint8),
+        np.where(local_core, 0, 255).astype(np.uint8),
         cv2.DIST_L2,
         5,
     )
-    return float(np.max(distance_from_core[paint_only])) > maximum_local_effect_px
+    return float(np.max(distance_from_core[local_paint_only])) > maximum_local_effect_px
 
 
 def _owner_polygon_sha256(points: Any) -> str:

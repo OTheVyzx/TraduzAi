@@ -1286,6 +1286,31 @@ def test_dense_effect_envelope_is_allowed_only_when_locally_supported_by_glyph_c
     assert process_bands._owner_paint_mask_is_overbroad(forged_fill, core)
 
 
+def test_dense_effect_support_distance_is_measured_in_a_local_owner_crop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = np.zeros((2400, 1200), dtype=np.uint8)
+    core[1100:1130, 580:582] = 255
+    core[1100:1130, 598:600] = 255
+    local_effect = cv2.dilate(core, np.ones((9, 9), dtype=np.uint8))
+    observed_shapes: list[tuple[int, int]] = []
+    original_distance_transform = cv2.distanceTransform
+
+    def _recording_distance_transform(
+        src: np.ndarray,
+        distance_type: int,
+        mask_size: int,
+    ) -> np.ndarray:
+        observed_shapes.append(tuple(src.shape))
+        return original_distance_transform(src, distance_type, mask_size)
+
+    monkeypatch.setattr(cv2, "distanceTransform", _recording_distance_transform)
+
+    assert not process_bands._owner_paint_mask_is_overbroad(local_effect, core)
+    assert observed_shapes
+    assert observed_shapes == [(60, 50)]
+
+
 def test_atomic_owner_execution_accepts_dense_mask_from_verified_component_geometry() -> None:
     apply_atomic, glyph_patch_type, _ = _atomic_api()
     original = np.full((100, 100, 3), 210, dtype=np.uint8)
