@@ -1078,7 +1078,6 @@ def _render_v2_owner_text_layer(
     applied_style = applied_style if isinstance(applied_style, dict) else {}
     raster_style: dict[str, Any] = {
         "fill": plan.get("text_color") or applied_style.get("cor") or "#000000",
-        "tracking_xh": float(applied_style.get("tracking_xh") or 0.0),
         "slant_tangent": float(applied_style.get("slant_tangent") or 0.0),
         "width_scale": float(applied_style.get("width_scale") or applied_style.get("scale_x") or 1.0),
         "scale_y": float(applied_style.get("scale_y") or 1.0),
@@ -1113,56 +1112,21 @@ def _render_v2_owner_text_layer(
         raster_style,
         source_x_height_px=max(1.0, float(font.size) * 0.70),
     )
-    decision = profile.get("style_application_decision_v2")
-    decision = decision if isinstance(decision, dict) else {}
-    decision_applied = dict(decision.get("applied_attributes") or {})
-    if "font_name" in decision_applied:
-        result.applied_attributes["font_name"] = font.font_path.name
-    if "font_weight" in decision_applied:
-        result.applied_attributes["font_weight"] = copy.deepcopy(
-            decision_applied["font_weight"]
+    if result.status == "review_required":
+        text_data["fit_status"] = (
+            "style_core_outside_safe"
+            if int(result.metrics.get("core_pixels_outside_safe") or 0) > 0
+            else "style_materialization_unavailable"
         )
-    if "font_width" in decision_applied and "width_scale" in result.applied_attributes:
-        result.applied_attributes["font_width"] = copy.deepcopy(
-            decision_applied["font_width"]
-        )
-    if "gradient" in result.applied_attributes and "fill" in decision_applied:
-        result.applied_attributes["fill"] = copy.deepcopy(decision_applied["fill"])
-    unresolved = sorted(
-        set(decision_applied)
-        - set(result.applied_attributes)
-        - set(result.abstained_attributes)
-    )
-    if unresolved:
-        blocked_rgba = np.zeros_like(result.rgba)
-        for name in unresolved:
-            result.abstained_attributes[name] = "backend_capability_not_materialized"
-        result = GlyphRasterResult(
-            status="review_required",
-            rgba=blocked_rgba,
-            glyph_core_mask=result.glyph_core_mask,
-            effect_mask=result.effect_mask,
-            glyph_core_envelope=result.glyph_core_envelope,
-            effect_envelope=result.effect_envelope,
-            applied_attributes=result.applied_attributes,
-            abstained_attributes=result.abstained_attributes,
-            metrics={
-                **result.metrics,
-                "unmaterialized_attributes": unresolved,
-            },
-        )
-        text_data["fit_status"] = "style_attribute_not_materialized"
         text_data["route_action"] = "review_required"
         _merge_qa_flags(
             text_data,
-            [f"style_{name}_not_materialized" for name in unresolved],
+            [
+                "style_core_outside_safe"
+                if int(result.metrics.get("core_pixels_outside_safe") or 0) > 0
+                else "style_materialization_unavailable"
+            ],
         )
-        return result
-    if result.status == "review_required":
-        text_data["fit_status"] = "style_core_outside_safe"
-        text_data["route_action"] = "review_required"
-        _merge_qa_flags(text_data, ["style_core_outside_safe"])
-        return result
     alpha = result.rgba[:, :, 3:4].astype(np.float32) / 255.0
     image_np[:] = np.clip(
         result.rgba[:, :, :3].astype(np.float32) * alpha
@@ -17157,7 +17121,7 @@ def _render_single_text_block_unrotated(
                     effect_mask=np.zeros_like(core),
                     glyph_core_envelope=_owner_mask_bbox(core),
                     effect_envelope=None,
-                    applied_attributes={},
+                    observed_attributes={},
                     abstained_attributes={
                         "curve": "backend_capability_not_supported"
                     },
@@ -18918,7 +18882,7 @@ def _aggregate_child_glyph_raster_results(blocks: list[dict]) -> GlyphRasterResu
         effect_mask=effect,
         glyph_core_envelope=_owner_mask_bbox(core),
         effect_envelope=_owner_mask_bbox(effect),
-        applied_attributes=applied,
+        observed_attributes=applied,
         abstained_attributes=abstained,
         metrics={"segment_count": len(typed_results)},
     )

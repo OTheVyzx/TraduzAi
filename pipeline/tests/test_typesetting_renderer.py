@@ -57,6 +57,41 @@ from main import (
 
 
 class TypesettingRendererTests(unittest.TestCase):
+    def test_v2_owner_fill_stroke_and_glow_produce_nonempty_raster(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        block = {
+            "visual_profile_v2": {
+                "applied_style": {
+                    "cor": "#FFFFFF",
+                    "contorno": "#161616",
+                    "contorno_px": 2,
+                    "glow": True,
+                    "glow_cor": "#FFD34D",
+                    "glow_px": 3,
+                }
+            },
+            "render_safe_polygon_page": [[0, 0], [240, 0], [240, 120], [0, 120]],
+        }
+        plan = {
+            "safe_text_box": [0, 0, 240, 120],
+            "text_color": "#FFFFFF",
+            "outline_color": "#161616",
+            "outline_px": 2,
+            "glow": True,
+            "glow_cor": "#FFD34D",
+            "glow_px": 3,
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas, block, plan, ["TESTE"], font, [(40, 35)]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "applied")
+        self.assertGreater(np.count_nonzero(result.rgba[:, :, 3]), 0)
+        self.assertNotEqual(block.get("fit_status"), "style_attribute_not_materialized")
+
     def test_owner_renderer_rejects_underfilled_fit_inside_safe_box(self):
         canvas = np.full((220, 320, 3), 235, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")
@@ -253,7 +288,7 @@ class TypesettingRendererTests(unittest.TestCase):
                 effect_mask=np.zeros_like(core),
                 glyph_core_envelope=(70, 52, 109, 69),
                 effect_envelope=None,
-                applied_attributes={"fill": "#f4f4f4"},
+                observed_attributes={"fill": "#f4f4f4"},
                 abstained_attributes={},
                 metrics={"core_pixels_outside_safe": 0},
             )
@@ -348,7 +383,7 @@ class TypesettingRendererTests(unittest.TestCase):
                     effect_mask=np.zeros((4, 4), dtype=np.uint8),
                     glyph_core_envelope=None,
                     effect_envelope=None,
-                    applied_attributes={"fill": "#f4f4f4"},
+                    observed_attributes={"fill": "#f4f4f4"},
                     abstained_attributes={},
                     metrics={},
                 )
@@ -449,7 +484,7 @@ class TypesettingRendererTests(unittest.TestCase):
                     effect_mask=empty,
                     glyph_core_envelope=bbox,
                     effect_envelope=None,
-                    applied_attributes={"fill": "#f4f4f4"},
+                    observed_attributes={"fill": "#f4f4f4"},
                     abstained_attributes={},
                     metrics={},
                 ),
