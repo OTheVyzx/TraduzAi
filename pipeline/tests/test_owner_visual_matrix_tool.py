@@ -24,6 +24,18 @@ def _entry(work_id: str, work_dir: str, categories: list[str]) -> dict:
         "expected_input_sha256": "1" * 64,
         "work_dir": work_dir,
         "categories": categories,
+        "targets": [
+            {
+                "page_id": "page_001",
+                "owner_id": f"owner_{index}",
+                "component_ids": [f"component_{index}"],
+                "category": category,
+                "split": "calibration" if work_id == "work_a" else "holdout",
+                "minimum_count": 1,
+                "source_crop": {"bbox_page": [0, 0, 1, 1], "width": 1, "height": 1, "sha256": "2" * 64},
+            }
+            for index, category in enumerate(categories)
+        ],
     }
 
 
@@ -155,7 +167,21 @@ def test_contact_sheet_category_selects_declared_page(tmp_path):
     second = translated / "002.jpg"
     first.write_bytes(b"first")
     second.write_bytes(b"second")
-    entry = {"category_pages": {"colored_card": 2}}
+    (tmp_path / "project.json").write_text(
+        json.dumps(
+            {
+                "paginas": [
+                    {"numero": 1, "image_layers": {"rendered": {"path": "translated/001.jpg"}}},
+                    {"numero": 2, "image_layers": {"rendered": {"path": "translated/002.jpg"}}},
+                ],
+                "page_owner_graphs": [
+                    {"page_id": "page_002", "owners": [{"owner_id": "owner_b", "component_ids": ["component_b"]}]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    entry = {"targets": [{"page_id": "page_002", "owner_id": "owner_b", "component_ids": ["component_b"], "category": "colored_card"}]}
 
     assert _selected_final_path(entry, "colored_card", tmp_path) == second
 
@@ -169,8 +195,33 @@ def test_contact_sheet_category_selects_all_declared_pages(tmp_path):
     for path in files:
         path.write_bytes(path.name.encode("ascii"))
 
+    (tmp_path / "project.json").write_text(
+        json.dumps(
+            {
+                "paginas": [
+                    {"numero": index, "image_layers": {"rendered": {"path": f"translated/{index:03d}.jpg"}}}
+                    for index in range(1, 4)
+                ],
+                "page_owner_graphs": [
+                    {"page_id": page_id, "owners": [{"owner_id": owner_id, "component_ids": [component_id]}]}
+                    for page_id, owner_id, component_id in (
+                        ("page_001", "owner_a", "component_a"),
+                        ("page_003", "owner_c", "component_c"),
+                    )
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     assert _selected_final_paths(
-        {"category_pages": {"burst": [1, 3]}}, "burst", tmp_path
+        {
+            "targets": [
+                {"page_id": "page_001", "owner_id": "owner_a", "component_ids": ["component_a"], "category": "burst"},
+                {"page_id": "page_003", "owner_id": "owner_c", "component_ids": ["component_c"], "category": "burst"},
+            ]
+        },
+        "burst",
+        tmp_path,
     ) == [files[0], files[2]]
 
 
@@ -184,12 +235,21 @@ def test_contact_sheets_segment_tall_pages_at_readable_scale(tmp_path):
     for folder in ("originals", "images", "translated"):
         (work_dir / folder).mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (100, 1000), "white").save(work_dir / folder / "001.png")
+    (work_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "paginas": [{"numero": 1, "image_layers": {"rendered": {"path": "translated/001.png"}}}],
+                "page_owner_graphs": [{"page_id": "page_001", "owners": [{"owner_id": "owner_a", "component_ids": ["component_a"]}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
     entries = [
         {
             "entry_id": "entry_a",
             "work_dir": "entry_a",
             "categories": ["white_balloon"],
-            "category_pages": {"white_balloon": 1},
+            "targets": [{"page_id": "page_001", "owner_id": "owner_a", "component_ids": ["component_a"], "category": "white_balloon"}],
         }
     ]
 
@@ -197,7 +257,7 @@ def test_contact_sheets_segment_tall_pages_at_readable_scale(tmp_path):
 
     assert len(sheets["white_balloon"]) >= 2
     with Image.open(sheets["white_balloon"][0]) as sheet:
-        assert sheet.width == 500
+        assert sheet.width == 600
         assert sheet.height > 100
 
 
@@ -211,12 +271,24 @@ def test_contact_sheets_include_every_declared_visual_category(tmp_path):
     for folder in ("originals", "images", "translated"):
         (work_dir / folder).mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (100, 100), "white").save(work_dir / folder / "001.png")
+    (work_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "paginas": [{"numero": 1, "image_layers": {"rendered": {"path": "translated/001.png"}}}],
+                "page_owner_graphs": [{"page_id": "page_001", "owners": [{"owner_id": "owner_a", "component_ids": ["component_a"]}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
     entries = [
         {
             "entry_id": "entry_a",
             "work_dir": "entry_a",
             "categories": ["white_balloon", "sfx", "hard_negative"],
-            "category_pages": {"white_balloon": 1, "sfx": 1, "hard_negative": 1},
+            "targets": [
+                {"page_id": "page_001", "owner_id": "owner_a", "component_ids": ["component_a"], "category": category}
+                for category in ("white_balloon", "sfx", "hard_negative")
+            ],
         }
     ]
 
@@ -227,10 +299,12 @@ def test_contact_sheets_include_every_declared_visual_category(tmp_path):
 
 
 def test_inspection_template_deduplicates_identical_pixels_and_keeps_categories(tmp_path):
+    from PIL import Image
+
     from tools.validate_owner_visual_matrix import build_inspection_template
 
     artifact = tmp_path / "same.png"
-    artifact.write_bytes(b"same pixels")
+    Image.new("RGB", (12, 8), "white").save(artifact)
 
     template = build_inspection_template(
         {"speech": [str(artifact)], "white_balloon": [str(artifact)]},
@@ -267,6 +341,8 @@ def test_runner_injects_runtime_models_dir_without_polluting_versioned_config(tm
     captured = {}
 
     def fake_run(command, **_kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="a" * 40 if "rev-parse" in command else "", stderr="")
         effective = Path(command[-1])
         captured.update(json.loads(effective.read_text(encoding="utf-8")))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -391,6 +467,32 @@ def test_style_matrix_requires_owner_paired_source_and_final(tmp_path):
     assert "style_owner_pair_mismatch" in validate_entry_result(entry, tmp_path)["contracts"]
 
 
+def test_matrix_rejects_missing_owner_or_zero_owner_category(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_entry_result
+
+    artifact = tmp_path / "final.png"
+    artifact.write_bytes(b"pixels")
+    project = _passing_owner_project(artifact)
+    entry, work_dir = _write_owner_project(tmp_path, project)
+    entry["categories"] = ["sfx"]
+    entry["targets"] = [
+        {
+            "page_id": "page_001",
+            "owner_id": "missing",
+            "component_ids": ["component_missing"],
+            "category": "sfx",
+            "minimum_count": 1,
+            "source_crop": {"bbox_page": [0, 0, 1, 1], "width": 1, "height": 1, "sha256": "a" * 64},
+        }
+    ]
+
+    result = validate_entry_result(entry, tmp_path)
+
+    assert result["status"] == "BLOCK"
+    assert "owner_target_not_found" in result["contracts"]
+    assert result["category_metrics"]["sfx"]["owner_count"] == 0
+
+
 def test_style_matrix_reports_explicit_fallbacks(tmp_path):
     from tools.validate_owner_visual_matrix import validate_entry_result
     artifact = tmp_path / "final.png"; artifact.write_bytes(b"pixels")
@@ -491,6 +593,8 @@ def test_matrix_requires_calibration_and_holdout_entries():
     entries = [_entry(f"work_{suffix}", f"run_{suffix}", categories) for suffix in ("a", "b", "c")]
     for entry in entries:
         entry["split"] = "holdout"
+        for target in entry["targets"]:
+            target["split"] = "holdout"
     with pytest.raises(MatrixContractError, match="calibration and holdout"):
         validate_manifest({"entries": entries})
 
@@ -569,8 +673,8 @@ def test_inspection_manifest_requires_artifact_hash_scale_and_verdict(tmp_path):
 
     artifact = tmp_path / "sheet.png"
     artifact.write_bytes(b"sheet")
-    template = {"artifacts": [{"artifact_path": "sheet.png", "sha256": sha256(b"sheet").hexdigest(), "category": "burst", "segment": "entry:1"}]}
-    incomplete = {"inspections": [{"artifact_path": "sheet.png"}]}
+    template = {"schema_version": 2, "artifacts": [{"artifact_path": "sheet.png", "sha256": sha256(b"sheet").hexdigest(), "category": "burst", "segment": "entry:1"}]}
+    incomplete = {"schema_version": 2, "inspections": [{"artifact_path": "sheet.png"}]}
     with pytest.raises(MatrixContractError, match="inspection fields"):
         validate_inspection_manifest(template, incomplete, tmp_path)
 
@@ -582,6 +686,7 @@ def test_inspection_manifest_uses_plan_go_no_go_vocabulary(tmp_path):
     artifact.write_bytes(b"sheet")
     digest = sha256(b"sheet").hexdigest()
     template = {
+        "schema_version": 2,
         "artifacts": [
             {
                 "artifact_path": "sheet.png",
@@ -593,6 +698,7 @@ def test_inspection_manifest_uses_plan_go_no_go_vocabulary(tmp_path):
     }
     for verdict in ("GO", "NO-GO"):
         manifest = {
+            "schema_version": 2,
             "inspections": [
                 {
                     "artifact_path": "sheet.png",
@@ -601,13 +707,15 @@ def test_inspection_manifest_uses_plan_go_no_go_vocabulary(tmp_path):
                     "timestamp": "2026-07-30T23:30:00-03:00",
                     "category": "burst",
                     "owner_or_segment": "entry:1",
-                    "verdict": verdict,
-                    "note": "inspecionado em pixels nativos",
+                    "functional_verdict": verdict,
+                    "style_verdict": verdict,
+                    "functional_note": "funcional inspecionado em pixels nativos",
+                    "style_note": "estilo inspecionado em pixels nativos",
                 }
             ]
         }
         assert validate_inspection_manifest(template, manifest, tmp_path)[0][
-            "verdict"
+            "overall_verdict"
         ] == verdict
 
 
@@ -616,8 +724,8 @@ def test_report_rejects_unverified_inspection_claims(tmp_path):
 
     artifact = tmp_path / "sheet.png"
     artifact.write_bytes(b"sheet")
-    template = {"artifacts": [{"artifact_path": "sheet.png", "sha256": sha256(b"sheet").hexdigest(), "category": "burst", "segment": "entry:1"}]}
-    manifest = {"inspections": [{"artifact_path": "sheet.png", "sha256": "0" * 64, "scale": "native", "timestamp": "2026-07-30T12:00:00Z", "category": "burst", "owner_or_segment": "entry:1", "verdict": "PASS", "note": "clean"}]}
+    template = {"schema_version": 2, "artifacts": [{"artifact_path": "sheet.png", "sha256": sha256(b"sheet").hexdigest(), "category": "burst", "segment": "entry:1"}]}
+    manifest = {"schema_version": 2, "inspections": [{"artifact_path": "sheet.png", "sha256": "0" * 64, "scale": "native", "timestamp": "2026-07-30T12:00:00Z", "category": "burst", "owner_or_segment": "entry:1", "functional_verdict": "GO", "style_verdict": "GO", "functional_note": "clean", "style_note": "clean"}]}
     with pytest.raises(MatrixContractError, match="inspection hash"):
         validate_inspection_manifest(template, manifest, tmp_path)
 
@@ -635,8 +743,47 @@ def test_report_lists_only_artifacts_actually_inspected(tmp_path):
         [{"entry_id": "a", "categories": ["burst"], "page_count": 1, "export_gate": "PASS", "status": "PASS", "contracts": []}],
         [],
         {"burst": [str(checked), str(unchecked)]},
-        inspected=[{"artifact_path": str(checked), "sha256": sha256(b"a").hexdigest(), "verdict": "GO", "note": "native check"}],
+        inspected=[{"artifact_path": str(checked), "sha256": sha256(b"a").hexdigest(), "functional_verdict": "GO", "style_verdict": "GO", "overall_verdict": "GO", "functional_note": "native check", "style_note": "native check"}],
     )
     visual_section = report.read_text(encoding="utf-8").split("## Visually inspected", 1)[1]
     assert str(checked) in visual_section
     assert str(unchecked) not in visual_section
+
+
+def test_incomplete_inspection_is_pending_not_go(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_inspection_manifest
+
+    artifact = tmp_path / "sheet.png"
+    artifact.write_bytes(b"sheet")
+    template = {
+        "schema_version": 2,
+        "artifacts": [
+            {
+                "artifact_path": "sheet.png",
+                "sha256": sha256(b"sheet").hexdigest(),
+                "category": "burst",
+                "segment": "owner_a",
+            }
+        ],
+    }
+
+    inspected = validate_inspection_manifest(
+        template,
+        {"schema_version": 2, "inspections": []},
+        tmp_path,
+    )
+
+    assert inspected[0]["overall_verdict"] == "PENDING"
+
+
+def test_runner_manifest_hash_tampering_is_rejected():
+    from tools.validate_owner_visual_matrix import MatrixContractError, validate_runner_evidence
+
+    evidence = {"schema_version": 1, "entry_id": "entry_a", "returncode": 0}
+    canonical = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    evidence["runner_evidence_sha256"] = sha256(canonical).hexdigest()
+    validate_runner_evidence(evidence)
+    evidence["returncode"] = 2
+
+    with pytest.raises(MatrixContractError, match="runner manifest hash mismatch"):
+        validate_runner_evidence(evidence)

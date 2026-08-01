@@ -7,6 +7,7 @@ failures by invariant/contract, never by title, chapter, page, or band.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
@@ -15,6 +16,13 @@ import re
 import subprocess
 import sys
 from typing import Any, Iterable
+
+from tools.build_style_owner_target_manifest import (
+    OwnerTargetError,
+    build_effective_style_config,
+    selected_owner_target,
+    source_crop_contract,
+)
 
 
 REQUIRED_VISUAL_CATEGORIES = frozenset(
@@ -69,13 +77,39 @@ def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
         raise MatrixContractError(
             f"matrix entry {index} is missing fields: {', '.join(missing)}"
         )
-    categories = entry.get("categories")
-    if not isinstance(categories, list) or not all(
-        isinstance(value, str) and value.strip() for value in categories
-    ):
-        raise MatrixContractError(f"matrix entry {index} has invalid categories")
+    targets = entry.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise MatrixContractError(f"matrix entry {index} requires exact owner targets")
+    normalized_targets: list[dict[str, Any]] = []
+    for target_index, target in enumerate(targets):
+        if not isinstance(target, dict):
+            raise MatrixContractError(f"matrix entry {index} target {target_index} must be an object")
+        target_required = ("page_id", "owner_id", "category")
+        missing_target = [key for key in target_required if not str(target.get(key) or "").strip()]
+        component_ids = target.get("component_ids")
+        source_crop = target.get("source_crop")
+        crop_valid = (
+            isinstance(source_crop, dict)
+            and isinstance(source_crop.get("bbox_page"), list)
+            and len(source_crop["bbox_page"]) == 4
+            and int(source_crop.get("width") or 0) > 0
+            and int(source_crop.get("height") or 0) > 0
+            and len(str(source_crop.get("sha256") or "")) == 64
+        )
+        if missing_target or not isinstance(component_ids, list) or not component_ids or not crop_valid:
+            raise MatrixContractError(f"matrix entry {index} target {target_index} is incomplete")
+        normalized_target = dict(target)
+        if str(target.get("split") or "") != str(entry.get("split") or ""):
+            raise MatrixContractError(f"matrix entry {index} target {target_index} split mismatch")
+        normalized_target["component_ids"] = sorted(set(str(value) for value in component_ids))
+        normalized_targets.append(normalized_target)
+    categories = sorted({str(target["category"]) for target in normalized_targets})
     normalized = dict(entry)
-    normalized["categories"] = sorted(set(categories))
+    normalized["categories"] = categories
+    normalized["targets"] = sorted(
+        normalized_targets,
+        key=lambda row: (str(row["category"]), str(row["page_id"]), str(row["owner_id"])),
+    )
     if normalized["split"] not in {"calibration", "holdout"}:
         raise MatrixContractError(f"matrix entry {index} has invalid split")
     return normalized
@@ -241,6 +275,41 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
         project = {}
     if project.get("owner_graph_status") != "verified":
         contracts.add("owner_graph_unverified")
+    category_metrics: dict[str, dict[str, int]] = {
+        str(category): {"owner_count": 0, "minimum_count": 0}
+        for category in entry.get("categories") or []
+    }
+    for target in entry.get("targets") or []:
+        category = str(target.get("category") or "")
+        metrics = category_metrics.setdefault(category, {"owner_count": 0, "minimum_count": 0})
+        metrics["minimum_count"] = max(metrics["minimum_count"], int(target.get("minimum_count") or 1))
+        try:
+            resolved_target = selected_owner_target(target, project)
+        except OwnerTargetError as exc:
+            detail = str(exc)
+            if "page target not found" in detail:
+                contracts.add("page_target_not_found")
+            elif "component target mismatch" in detail:
+                contracts.add("owner_component_target_mismatch")
+            else:
+                contracts.add("owner_target_not_found")
+            details.append(detail)
+        else:
+            metrics["owner_count"] += 1
+            base_path = ((resolved_target["page"].get("image_layers") or {}).get("base") or {}).get("path")
+            try:
+                actual_crop = source_crop_contract(
+                    (work_dir / str(base_path)).resolve(),
+                    list(target["source_crop"]["bbox_page"]),
+                )
+            except (OSError, ValueError, TypeError):
+                contracts.add("source_crop_missing_or_invalid")
+            else:
+                if actual_crop != target["source_crop"]:
+                    contracts.add("source_crop_hash_or_dimension_mismatch")
+    for category, metrics in category_metrics.items():
+        if metrics["owner_count"] < metrics["minimum_count"]:
+            contracts.add(f"style_category_zero_or_below_minimum:{category}")
     expected_pages: set[str] = set()
     for page_index, page in enumerate(project.get("paginas") or [], start=1):
         if not isinstance(page, dict):
@@ -317,8 +386,13 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
         ):
             contracts.add(_contract_name(issue))
     style_fidelity = qa.get("style_fidelity") if isinstance(qa.get("style_fidelity"), dict) else None
-    if style_fidelity is not None:
+    style_status = "PASS" if not entry.get("targets") else "BLOCK"
+    if style_fidelity is None:
+        if entry.get("targets"):
+            contracts.add("style_fidelity_report_missing")
+    else:
         style_gate = style_fidelity.get("gate") if isinstance(style_fidelity.get("gate"), dict) else {}
+        style_status = str(style_gate.get("status") or "BLOCK").upper()
         if str(style_gate.get("status") or "MISSING").upper() == "BLOCK":
             contracts.add("style_fidelity_gate_blocked")
         audited_owner_ids = {
@@ -393,6 +467,8 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
             contracts.add(_contract_name(issue))
     if expected_pages and seen_pages != expected_pages:
         contracts.add("final_pixel_page_coverage_invalid")
+    functional_gate = qa.get("functional_export_gate") if isinstance(qa.get("functional_export_gate"), dict) else gate
+    functional_status = str(functional_gate.get("status") or "BLOCK").upper()
     return {
         "entry_id": entry["entry_id"],
         "work_id": entry.get("work_id"),
@@ -401,11 +477,14 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
         "work_dir": str(work_dir.resolve()),
         "project_path": str(project_path.resolve()),
         "status": "PASS" if not contracts else "BLOCK",
+        "functional_status": "PASS" if functional_status in {"PASS", "REVIEW"} else "BLOCK",
+        "style_status": "PASS" if style_status == "PASS" else "BLOCK",
         "contracts": sorted(contracts),
         "details": details,
         "page_count": len(seen_pages),
         "export_gate": gate.get("status") or "MISSING",
         "style_fallback_owner_ids": sorted(style_fallback_owner_ids),
+        "category_metrics": category_metrics,
     }
 
 
@@ -445,6 +524,84 @@ def _persist_runner_logs(
     }
 
 
+def _canonical_payload_sha256(payload: Any, *, omit: str | None = None) -> str:
+    canonical = {
+        str(key): value for key, value in dict(payload).items() if key != omit
+    } if isinstance(payload, dict) else payload
+    encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def build_runner_evidence(
+    *,
+    entry: dict[str, Any],
+    command: list[str],
+    completed: Any,
+    runtime: dict[str, Any],
+    effective_config_path: Path,
+    started_at: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    """Build a self-hashed provenance record for fresh-run and validate-only parity."""
+
+    pipeline_root = Path(__file__).resolve().parents[2]
+    git_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=pipeline_root, capture_output=True, text=True, check=False
+    ).stdout.strip()
+    scoped_diff = subprocess.run(
+        ["git", "diff", "--binary", "--", "pipeline"],
+        cwd=pipeline_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.encode("utf-8")
+    stdout = str(getattr(completed, "stdout", "") or "")
+    stderr = str(getattr(completed, "stderr", "") or "")
+    target = Path(entry["work_dir"])
+    project_path = target / "project.json"
+    final_hashes = {
+        path.relative_to(target).as_posix(): _sha256_file(path)
+        for path in sorted((target / "translated").glob("*"))
+        if path.is_file()
+    } if target.is_absolute() else {}
+    evidence = {
+        "schema_version": 1,
+        "entry_id": entry["entry_id"],
+        "git_head": git_head,
+        "scoped_diff_sha256": sha256(scoped_diff).hexdigest(),
+        "matrix_entry_sha256": _canonical_payload_sha256(entry),
+        "input_sha256": runtime.get("input_sha256"),
+        "config_sha256": _canonical_json_sha256(Path(runtime["config_path"])),
+        "effective_config_sha256": _canonical_json_sha256(effective_config_path),
+        "tool_sha256": _sha256_file(Path(__file__)),
+        "python_executable": sys.executable,
+        "python_version": sys.version,
+        "seed": int(entry.get("seed") or 0),
+        "command": list(command),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "returncode": int(getattr(completed, "returncode", 2)),
+        "stdout_sha256": sha256(stdout.encode("utf-8")).hexdigest(),
+        "stderr_sha256": sha256(stderr.encode("utf-8")).hexdigest(),
+        "project_sha256": _sha256_file(project_path) if project_path.is_file() else None,
+        "final_artifact_sha256": final_hashes,
+    }
+    evidence["runner_evidence_sha256"] = _canonical_payload_sha256(evidence, omit="runner_evidence_sha256")
+    return evidence
+
+
+def validate_runner_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Reject any changed run-manifest field before validate-only reuse."""
+
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        raise MatrixContractError("runner manifest schema is invalid")
+    expected = str(evidence.get("runner_evidence_sha256") or "")
+    actual = _canonical_payload_sha256(evidence, omit="runner_evidence_sha256")
+    if expected != actual:
+        raise MatrixContractError("runner manifest hash mismatch")
+    return dict(evidence)
+
+
 def _run_entry(
     entry: dict[str, Any],
     manifest_path: Path,
@@ -457,7 +614,11 @@ def _run_entry(
     if target.exists():
         raise MatrixContractError(f"fresh matrix work_dir already exists: {target}")
     config_path = Path(runtime["config_path"])
-    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    shared_config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    config = build_effective_style_config(
+        shared_config,
+        required_categories=list(entry.get("categories") or []),
+    )
     config.update(
         {
             "work_dir": str(target.resolve()),
@@ -475,18 +636,38 @@ def _run_entry(
         encoding="utf-8",
     )
     pipeline_main = Path(__file__).resolve().parents[1] / "main.py"
+    command = [sys.executable, str(pipeline_main), str(effective_config)]
+    started_at = datetime.now(timezone.utc).isoformat()
     completed = subprocess.run(
-        [sys.executable, str(pipeline_main), str(effective_config)],
+        command,
         cwd=str(pipeline_main.parent),
         check=False,
         text=True,
         capture_output=True,
     )
+    finished_at = datetime.now(timezone.utc).isoformat()
     log_paths = _persist_runner_logs(
         output_root,
         entry["entry_id"],
         stdout=completed.stdout,
         stderr=completed.stderr,
+    )
+    evidence_entry = dict(entry)
+    evidence_entry["work_dir"] = str(target.resolve())
+    runner_evidence = build_runner_evidence(
+        entry=evidence_entry,
+        command=command,
+        completed=completed,
+        runtime=runtime,
+        effective_config_path=effective_config,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+    runner_manifest_path = target / "run_manifest.json"
+    runner_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    runner_manifest_path.write_text(
+        json.dumps(runner_evidence, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
     return {
         "entry_id": entry["entry_id"],
@@ -494,6 +675,8 @@ def _run_entry(
         "stdout_tail": completed.stdout[-4000:],
         "stderr_tail": completed.stderr[-4000:],
         **log_paths,
+        "runner_manifest_path": str(runner_manifest_path.resolve()),
+        "runner_evidence": runner_evidence,
     }
 
 
@@ -502,20 +685,45 @@ def _selected_final_paths(
     category: str,
     work_dir: Path,
 ) -> list[Path]:
-    final_files = sorted((work_dir / "translated").glob("*"))
-    if not final_files:
+    project_path = work_dir / "project.json"
+    if not project_path.is_file():
         return []
-    raw_page = (entry.get("category_pages") or {}).get(category, 1)
-    raw_pages = raw_page if isinstance(raw_page, list) else [raw_page]
+    project = json.loads(project_path.read_text(encoding="utf-8-sig"))
     selected: list[Path] = []
-    for value in raw_pages:
-        try:
-            page_index = max(1, int(value)) - 1
-        except (TypeError, ValueError):
-            page_index = 0
-        candidate = final_files[min(page_index, len(final_files) - 1)]
+    for target in entry.get("targets") or []:
+        if str(target.get("category") or "") != category:
+            continue
+        resolved = selected_owner_target(target, project)
+        rendered = ((resolved["page"].get("image_layers") or {}).get("rendered") or {}).get("path")
+        if not isinstance(rendered, str) or not rendered.strip():
+            raise MatrixContractError(f"final artifact missing for target: {target.get('page_id')}")
+        candidate = (work_dir / rendered).resolve()
+        if not candidate.is_file():
+            raise MatrixContractError(f"final artifact missing for target: {candidate}")
         if candidate not in selected:
             selected.append(candidate)
+    return selected
+
+
+def _selected_target_finals(
+    entry: dict[str, Any], category: str, work_dir: Path
+) -> list[tuple[dict[str, Any], Path]]:
+    project_path = work_dir / "project.json"
+    if not project_path.is_file():
+        return []
+    project = json.loads(project_path.read_text(encoding="utf-8-sig"))
+    selected: list[tuple[dict[str, Any], Path]] = []
+    for target in entry.get("targets") or []:
+        if str(target.get("category") or "") != category:
+            continue
+        resolved = selected_owner_target(target, project)
+        rendered = ((resolved["page"].get("image_layers") or {}).get("rendered") or {}).get("path")
+        if not isinstance(rendered, str) or not rendered.strip():
+            raise MatrixContractError(f"final artifact missing for target: {target.get('page_id')}")
+        final_path = (work_dir / rendered).resolve()
+        if not final_path.is_file():
+            raise MatrixContractError(f"final artifact missing for target: {final_path}")
+        selected.append((target, final_path))
     return selected
 
 
@@ -622,8 +830,8 @@ def _write_contact_sheets(
             work_dir = Path(entry["work_dir"])
             if not work_dir.is_absolute():
                 work_dir = output_root / work_dir
-            for final_path in _selected_final_paths(entry, category, work_dir):
-                cache_key = (str(entry["entry_id"]), str(final_path.resolve()))
+            for target, final_path in _selected_target_finals(entry, category, work_dir):
+                cache_key = (str(entry["entry_id"]), str(target.get("owner_id") or ""))
                 if cache_key in cached_pages:
                     category_paths.extend(cached_pages[cache_key])
                     continue
@@ -633,28 +841,45 @@ def _write_contact_sheets(
                     work_dir / "images" / final_path.name,
                     final_path,
                 ]
-                panels = []
+                base_panels = []
                 for candidate in candidates:
                     try:
                         panel = Image.open(candidate).convert("RGB")
                     except OSError:
                         panel = Image.new("RGB", (320, 180), "#20252a")
-                    panels.append(panel)
-                canonical_size = panels[0].size
-                panels = [
+                    base_panels.append(panel)
+                canonical_size = base_panels[0].size
+                base_panels = [
                     panel if panel.size == canonical_size else panel.resize(canonical_size)
-                    for panel in panels
+                    for panel in base_panels
                 ]
-                mask_panel = _difference_mask_panel(panels[0], panels[1])
-                owner_panel = _owner_map_panel(work_dir, final_path, panels[0])
+                owner_panel = _owner_map_panel(work_dir, final_path, base_panels[0])
                 if owner_panel.size != canonical_size:
                     owner_panel = owner_panel.resize(canonical_size)
-                panels.extend((mask_panel, owner_panel))
-                labels = ("before", "inpaint", "final", "masks", "owner map")
+                raw_bbox = ((target.get("source_crop") or {}).get("bbox_page"))
+                if isinstance(raw_bbox, list) and len(raw_bbox) == 4:
+                    bbox = tuple(int(value) for value in raw_bbox)
+                    base_panels = [panel.crop(bbox) for panel in base_panels]
+                    owner_panel = owner_panel.crop(bbox)
+                evidence_panel = _difference_mask_panel(base_panels[0], base_panels[1])
+                panels = [
+                    base_panels[0],
+                    evidence_panel,
+                    base_panels[0].copy(),
+                    base_panels[1],
+                    base_panels[2],
+                    owner_panel,
+                ]
+                labels = ("source", "masks/evidence", "requested", "raster", "final", "safe-region")
+                canonical_size = panels[0].size
                 panel_width, page_height = canonical_size
                 segment_height = 900
                 safe_entry_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(entry["entry_id"]))
-                safe_page_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", final_path.stem)
+                safe_page_id = re.sub(
+                    r"[^a-zA-Z0-9_.-]+",
+                    "_",
+                    f"{target.get('page_id')}__{target.get('owner_id')}",
+                )
                 for segment_index, y_top in enumerate(
                     range(0, page_height, segment_height),
                     start=1,
@@ -705,6 +930,10 @@ def build_inspection_template(
             if not artifact.is_file():
                 raise MatrixContractError(f"inspection artifact missing: {relative}")
             digest = _sha256_file(artifact)
+            from PIL import Image
+
+            with Image.open(artifact) as image:
+                width, height = image.size
             if digest in by_hash:
                 categories = by_hash[digest]["categories"]
                 if category not in categories:
@@ -717,10 +946,13 @@ def build_inspection_template(
                 "category": category,
                 "categories": [category],
                 "segment": artifact.stem,
+                "width": width,
+                "height": height,
+                "panels": ["source", "masks/evidence", "requested", "raster", "final", "safe-region"],
             }
             artifacts.append(row)
             by_hash[digest] = row
-    return {"schema_version": 1, "artifacts": artifacts}
+    return {"schema_version": 2, "artifacts": artifacts}
 
 
 def validate_inspection_manifest(
@@ -728,6 +960,8 @@ def validate_inspection_manifest(
     manifest: dict[str, Any],
     output_root: Path,
 ) -> list[dict[str, Any]]:
+    if template.get("schema_version") != 2 or manifest.get("schema_version") != 2:
+        raise MatrixContractError("inspection schema v2 is required")
     template_rows = template.get("artifacts") if isinstance(template, dict) else None
     inspection_rows = manifest.get("inspections") if isinstance(manifest, dict) else None
     if not isinstance(template_rows, list) or not isinstance(inspection_rows, list):
@@ -745,8 +979,10 @@ def validate_inspection_manifest(
         "timestamp",
         "category",
         "owner_or_segment",
-        "verdict",
-        "note",
+        "functional_verdict",
+        "style_verdict",
+        "functional_note",
+        "style_note",
     }
     seen: set[str] = set()
     for index, row in enumerate(inspection_rows):
@@ -775,13 +1011,27 @@ def validate_inspection_manifest(
             raise MatrixContractError(f"inspection category mismatch: {raw_path}")
         if str(row.get("owner_or_segment")) != str(expected_row.get("segment")):
             raise MatrixContractError(f"inspection segment mismatch: {raw_path}")
-        if str(row.get("verdict")).upper() not in {"GO", "NO-GO"}:
+        functional = str(row.get("functional_verdict")).upper()
+        style = str(row.get("style_verdict")).upper()
+        if functional not in {"GO", "NO-GO"} or style not in {"GO", "NO-GO"}:
             raise MatrixContractError(f"inspection verdict invalid: {raw_path}")
-        verified.append({**row, "artifact_path": raw_path, "sha256": claimed_hash})
+        overall = "GO" if functional == style == "GO" else "NO-GO"
+        verified.append({**row, "artifact_path": raw_path, "sha256": claimed_hash, "overall_verdict": overall})
     missing = sorted(set(expected) - seen)
-    if missing:
-        raise MatrixContractError(
-            "inspection manifest missing required artifacts: " + ", ".join(missing)
+    for raw_path in missing:
+        expected_row = expected[raw_path]
+        verified.append(
+            {
+                "artifact_path": raw_path,
+                "sha256": expected_row.get("sha256"),
+                "category": expected_row.get("category"),
+                "owner_or_segment": expected_row.get("segment"),
+                "overall_verdict": "PENDING",
+                "functional_verdict": "PENDING",
+                "style_verdict": "PENDING",
+                "functional_note": "inspection pending",
+                "style_note": "inspection pending",
+            }
         )
     return verified
 
@@ -795,15 +1045,19 @@ def _write_report(
     inspected: list[dict[str, Any]] | None = None,
 ) -> None:
     grouped = group_failures_by_contract(results)
-    functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
-    inspection_go = inspected is None or (
-        bool(inspected) and all(str(item.get("verdict")).upper() == "GO" for item in inspected)
-    )
-    overall = "GO" if functional_go and inspection_go else "NO-GO"
+    functional_go = bool(results) and all(item.get("functional_status", item["status"]) == "PASS" for item in results)
+    style_go = bool(results) and all(item.get("style_status", item["status"]) == "PASS" for item in results)
+    inspection_status = "PENDING" if inspected is None or any(
+        str(item.get("overall_verdict") or "PENDING").upper() == "PENDING" for item in inspected
+    ) else "GO" if inspected and all(str(item.get("overall_verdict")).upper() == "GO" for item in inspected) else "NO-GO"
+    overall = "NO-GO" if not functional_go or not style_go or inspection_status == "NO-GO" else "PENDING" if inspection_status == "PENDING" else "GO"
     lines = [
         "# Page-owner systemic validation",
         "",
         f"Verdict: **{overall}**",
+        f"Functional: **{'GO' if functional_go else 'NO-GO'}**",
+        f"Style: **{'GO' if style_go else 'NO-GO'}**",
+        f"Inspection: **{inspection_status}**",
         "",
         "## Matrix results",
         "",
@@ -841,7 +1095,9 @@ def _write_report(
         for row in inspected:
             lines.append(
                 f"- {row['artifact_path']}: sha256={row['sha256']}; "
-                f"verdict={row['verdict']}; note={row['note']}"
+                f"functional={row.get('functional_verdict')}; style={row.get('style_verdict')}; "
+                f"overall={row.get('overall_verdict')}; functional_note={row.get('functional_note')}; "
+                f"style_note={row.get('style_note')}"
             )
     else:
         lines.append("- None verified.")
@@ -896,6 +1152,24 @@ def main(argv: list[str] | None = None) -> int:
                 run_results.append({"entry_id": entry["entry_id"], "returncode": 2})
                 continue
             run_results.append(_run_entry(entry, manifest_path, output_root, runtime))
+    else:
+        for entry in entries:
+            work_dir = Path(entry["work_dir"])
+            if not work_dir.is_absolute():
+                work_dir = output_root / work_dir
+            runner_path = work_dir / "run_manifest.json"
+            try:
+                runner_evidence = validate_runner_evidence(
+                    json.loads(runner_path.read_text(encoding="utf-8-sig"))
+                )
+            except (OSError, json.JSONDecodeError, MatrixContractError) as exc:
+                entry.setdefault("_preflight_contracts", []).append("runner_manifest_invalid")
+                entry.setdefault("_preflight_details", []).append(str(exc))
+                run_results.append({"entry_id": entry["entry_id"], "returncode": 2})
+            else:
+                run_results.append(
+                    {"entry_id": entry["entry_id"], "returncode": runner_evidence["returncode"], "runner_evidence": runner_evidence}
+                )
     results = [validate_entry_result(entry, output_root) for entry in entries]
     sheets = _write_contact_sheets(entries, output_root)
     inspection_template = build_inspection_template(sheets, output_root)
@@ -911,8 +1185,8 @@ def main(argv: list[str] | None = None) -> int:
         inspected = validate_inspection_manifest(inspection_template, inspection_manifest, output_root)
     _write_report(args.report.resolve(), results, run_results, sheets, inspected=inspected)
     functional_go = bool(results) and all(item["status"] == "PASS" for item in results)
-    inspection_go = inspected is None or (
-        bool(inspected) and all(str(item.get("verdict")).upper() == "GO" for item in inspected)
+    inspection_go = bool(inspected) and all(
+        str(item.get("overall_verdict") or "PENDING").upper() == "GO" for item in inspected
     )
     return 0 if functional_go and inspection_go else 2
 

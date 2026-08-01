@@ -13,6 +13,50 @@ from debug_tools import style_benchmark_report
 from debug_tools import generate_style_benchmark_v2, run_style_benchmark_v2
 
 
+def test_validation_thresholds_block_breach_and_missing_denominator():
+    thresholds = {
+        "attributes": {
+            "font_name": {"minimum_evaluated": 2, "precision_min": 0.80},
+            "fill": {"minimum_evaluated": 1, "coverage_min": 0.90},
+        },
+        "round_trip_min": 1.0,
+    }
+    score = {
+        "attributes": {
+            "font_name": {"evaluated": 2, "precision": 0.50, "coverage": 1.0},
+        },
+        "round_trip": {"evaluated": 0, "rate": 0.0},
+    }
+
+    result = style_benchmark_report.evaluate_validation_thresholds(score, thresholds)
+
+    assert result["status"] == "BLOCK"
+    assert {item["code"] for item in result["findings"]} == {
+        "metric_threshold_breach",
+        "required_metric_missing",
+        "zero_metric_denominator",
+    }
+
+
+def test_benchmark_enforce_returns_two_when_threshold_fails(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "style_benchmark_summary.json").write_text(
+        json.dumps({"validation": {"status": "BLOCK"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_style_benchmark_v2, "run_benchmark", lambda **_kwargs: run_dir)
+
+    result = run_style_benchmark_v2.main(
+        [
+            "--output-root", str(tmp_path), "--run-id", "blocked", "--seed", "1",
+            "--mode", "enforce",
+        ]
+    )
+
+    assert result == 2
+
+
 def test_score_reports_attribute_precision_top_k_round_trip_and_hard_negative_abstention():
     manifest = {
         "cases": [

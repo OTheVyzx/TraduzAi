@@ -26,6 +26,74 @@ ATTRIBUTE_NAMES = (
 )
 
 
+def evaluate_validation_thresholds(
+    score: dict[str, Any], thresholds: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Evaluate versioned benchmark thresholds without allowing missing data to pass."""
+
+    policy = thresholds if isinstance(thresholds, dict) else {}
+    findings: list[dict[str, Any]] = []
+    attributes = score.get("attributes") if isinstance(score.get("attributes"), dict) else {}
+    required_attributes = policy.get("attributes") if isinstance(policy.get("attributes"), dict) else {}
+    for attribute, raw_rules in sorted(required_attributes.items()):
+        rules = raw_rules if isinstance(raw_rules, dict) else {}
+        metrics = attributes.get(attribute)
+        if not isinstance(metrics, dict):
+            findings.append({"code": "required_metric_missing", "metric": f"attributes.{attribute}"})
+            continue
+        evaluated = int(metrics.get("evaluated") or 0)
+        minimum_evaluated = int(rules.get("minimum_evaluated") or 1)
+        if evaluated < minimum_evaluated:
+            findings.append(
+                {
+                    "code": "zero_metric_denominator" if evaluated == 0 else "metric_denominator_below_minimum",
+                    "metric": f"attributes.{attribute}",
+                    "actual": evaluated,
+                    "minimum": minimum_evaluated,
+                }
+            )
+        for rule_name, metric_name in (("precision_min", "precision"), ("coverage_min", "coverage")):
+            if rule_name not in rules:
+                continue
+            if metric_name not in metrics:
+                findings.append({"code": "required_metric_missing", "metric": f"attributes.{attribute}.{metric_name}"})
+                continue
+            actual = float(metrics[metric_name])
+            minimum = float(rules[rule_name])
+            if actual < minimum:
+                findings.append(
+                    {
+                        "code": "metric_threshold_breach",
+                        "metric": f"attributes.{attribute}.{metric_name}",
+                        "actual": actual,
+                        "minimum": minimum,
+                    }
+                )
+    for policy_name, report_name in (
+        ("round_trip_min", "round_trip"),
+        ("hard_negative_abstention_min", "hard_negative"),
+    ):
+        if policy_name not in policy:
+            continue
+        metrics = score.get(report_name)
+        if not isinstance(metrics, dict):
+            findings.append({"code": "required_metric_missing", "metric": report_name})
+            continue
+        evaluated = int(metrics.get("evaluated") or 0)
+        if evaluated == 0:
+            findings.append({"code": "zero_metric_denominator", "metric": report_name})
+        if float(metrics.get("rate") or 0.0) < float(policy[policy_name]):
+            findings.append(
+                {
+                    "code": "metric_threshold_breach",
+                    "metric": f"{report_name}.rate",
+                    "actual": float(metrics.get("rate") or 0.0),
+                    "minimum": float(policy[policy_name]),
+                }
+            )
+    return {"status": "BLOCK" if findings else "PASS", "findings": findings}
+
+
 def _observation_index(observations: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     return {(str(item["case_id"]), str(item["variant"])): item for item in observations}
 
@@ -122,7 +190,13 @@ def score_benchmark(manifest: dict[str, Any], observations: list[dict[str, Any]]
     }
 
 
-def write_run_reports(run_dir: Path, manifest: dict[str, Any], records: list[dict[str, Any]]) -> dict[str, Any]:
+def write_run_reports(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    records: list[dict[str, Any]],
+    *,
+    validation_thresholds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Write score artifacts beneath an already-isolated benchmark run."""
     run_dir = Path(run_dir)
     records_path = run_dir / "style_benchmark_records.jsonl"
@@ -136,10 +210,12 @@ def write_run_reports(run_dir: Path, manifest: dict[str, Any], records: list[dic
         attributes = v2.get("attributes") if isinstance(v2, dict) else None
         if isinstance(attributes, dict):
             v2_records.append({**record, "attributes": attributes})
+    score = score_benchmark(manifest, records)
     summary = {
         "schema_version": 2,
-        "score": score_benchmark(manifest, records),
+        "score": score,
         "score_v2_shadow": score_benchmark(manifest, v2_records),
+        "validation": evaluate_validation_thresholds(score, validation_thresholds),
     }
     (run_dir / "style_benchmark_summary.json").write_text(
         json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True) + "\n",

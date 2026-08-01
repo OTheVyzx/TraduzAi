@@ -95,8 +95,14 @@ def run_benchmark(
         runtime_lock_path=runtime_lock_path,
     )
     manifest = json.loads((run_dir / "benchmark_manifest.json").read_text(encoding="utf-8"))
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8-sig"))
     records = _measure_current_engine(run_dir, manifest)
-    style_benchmark_report.write_run_reports(run_dir, manifest, records)
+    style_benchmark_report.write_run_reports(
+        run_dir,
+        manifest,
+        records,
+        validation_thresholds=spec.get("validation_thresholds"),
+    )
     return run_dir
 
 
@@ -108,13 +114,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--runtime-lock", type=Path, default=generate_style_benchmark_v2.DEFAULT_RUNTIME_LOCK)
+    parser.add_argument("--mode", choices=("shadow", "enforce"), default="shadow")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    print(
-        run_benchmark(
+    run_dir = run_benchmark(
             spec_path=args.spec,
             level=args.level,
             output_root=args.output_root,
@@ -122,8 +128,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
             runtime_lock_path=args.runtime_lock,
         )
-    )
-    return 0
+    print(run_dir)
+    summary = json.loads((run_dir / "style_benchmark_summary.json").read_text(encoding="utf-8"))
+    blocked = str((summary.get("validation") or {}).get("status") or "BLOCK").upper() == "BLOCK"
+    return 2 if args.mode == "enforce" and blocked else 0
 
 
 if __name__ == "__main__":
