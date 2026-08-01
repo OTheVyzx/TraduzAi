@@ -7,8 +7,11 @@ observers may only claim attributes registered to their own domain.
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import Any, Final, Literal, Mapping
+from types import MappingProxyType
+from typing import Any, Final, Literal, Mapping, Sequence
 
 from typesetter.style_contract import STYLE_V2_ATTRIBUTE_NAME_SET
 
@@ -342,3 +345,572 @@ def compare_style_attribute(name: str, expected: Any, observed: Any) -> Attribut
 
 
 validate_attribute_domain_registry(ATTRIBUTE_DOMAIN)
+
+
+AttributeStatus = Literal["materialized", "abstained", "mismatch", "unavailable"]
+ResolutionKind = Literal[
+    "exact",
+    "policy_adjusted",
+    "derived",
+    "superseded",
+    "abstained",
+    "review_required",
+]
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _deep_freeze(value[key]) for key in sorted(value, key=lambda item: str(item))}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, float) and value == 0:
+        return 0.0
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _contract_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _thaw(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_sha256(value: str, *, field: str) -> str:
+    text = str(value or "").strip().lower()
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ValueError(f"{field} must be a SHA-256 hex digest")
+    return text
+
+
+@dataclass(frozen=True)
+class OwnerStyleResolvedIntent:
+    schema_version: int
+    owner_id: str
+    page_id: str
+    visual_profile_sha256: str
+    decision_sha256: str
+    group_resolution_sha256: str
+    approved_attributes: Mapping[str, Any]
+    approved_abstentions: Mapping[str, str]
+    attribute_provenance: Mapping[str, Any]
+    intent_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "owner_id": self.owner_id,
+            "page_id": self.page_id,
+            "visual_profile_sha256": self.visual_profile_sha256,
+            "decision_sha256": self.decision_sha256,
+            "group_resolution_sha256": self.group_resolution_sha256,
+            "approved_attributes": _thaw(self.approved_attributes),
+            "approved_abstentions": _thaw(self.approved_abstentions),
+            "attribute_provenance": _thaw(self.attribute_provenance),
+            "intent_sha256": self.intent_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class MaterializationAttributePlan:
+    name: str
+    domain: MaterializationDomain
+    intent_value: Any
+    target_value: Any
+    resolution_kind: ResolutionKind
+    reason: str
+    superseded_by: str
+    evidence_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "domain": self.domain,
+            "intent_value": _thaw(self.intent_value),
+            "target_value": _thaw(self.target_value),
+            "resolution_kind": self.resolution_kind,
+            "reason": self.reason,
+            "superseded_by": self.superseded_by,
+            "evidence_ids": list(self.evidence_ids),
+        }
+
+
+@dataclass(frozen=True)
+class OwnerStyleMaterializationPlan:
+    schema_version: int
+    owner_id: str
+    page_id: str
+    visual_profile_sha256: str
+    intent_sha256: str
+    render_layout_contract_sha256: str
+    rendered_x_height_px: float
+    unit_resolution_sha256: str
+    attribute_plans: Mapping[str, MaterializationAttributePlan]
+    plan_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "owner_id": self.owner_id,
+            "page_id": self.page_id,
+            "visual_profile_sha256": self.visual_profile_sha256,
+            "intent_sha256": self.intent_sha256,
+            "render_layout_contract_sha256": self.render_layout_contract_sha256,
+            "rendered_x_height_px": self.rendered_x_height_px,
+            "unit_resolution_sha256": self.unit_resolution_sha256,
+            "attribute_plans": {
+                name: plan.to_dict() for name, plan in self.attribute_plans.items()
+            },
+            "plan_sha256": self.plan_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class OwnerStyleMaterializationObservation:
+    schema_version: int
+    owner_id: str
+    page_id: str
+    visual_profile_sha256: str
+    plan_sha256: str
+    attributes: Mapping[str, Mapping[str, Any]]
+    render_completed: bool
+    observation_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "owner_id": self.owner_id,
+            "page_id": self.page_id,
+            "visual_profile_sha256": self.visual_profile_sha256,
+            "plan_sha256": self.plan_sha256,
+            "attributes": _thaw(self.attributes),
+            "render_completed": self.render_completed,
+            "observation_sha256": self.observation_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class MaterializationComparison:
+    status: Literal["match", "mismatch", "review_required"]
+    mismatches: tuple[Mapping[str, Any], ...]
+    compared_attributes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "mismatches": [_thaw(item) for item in self.mismatches],
+            "compared_attributes": list(self.compared_attributes),
+        }
+
+
+def build_resolved_style_intent(
+    *,
+    owner_id: str,
+    page_id: str,
+    visual_profile_sha256: str,
+    decision_sha256: str,
+    group_resolution_sha256: str,
+    approved: Mapping[str, Any],
+    approved_abstentions: Mapping[str, str],
+    attribute_provenance: Mapping[str, Any] | None = None,
+) -> OwnerStyleResolvedIntent:
+    approved_names = set(approved)
+    abstained_names = set(approved_abstentions)
+    unknown = (approved_names | abstained_names) - STYLE_V2_ATTRIBUTE_NAME_SET
+    if unknown:
+        raise ValueError(f"resolved style intent contains unknown attributes: {sorted(unknown)}")
+    overlap = approved_names & abstained_names
+    if overlap:
+        raise ValueError(f"resolved style intent duplicates approved and abstained attributes: {sorted(overlap)}")
+    if not owner_id or not page_id:
+        raise ValueError("resolved style intent requires owner_id and page_id")
+    contract = {
+        "schema_version": 1,
+        "owner_id": owner_id,
+        "page_id": page_id,
+        "visual_profile_sha256": _require_sha256(
+            visual_profile_sha256, field="visual_profile_sha256"
+        ),
+        "decision_sha256": _require_sha256(decision_sha256, field="decision_sha256"),
+        "group_resolution_sha256": _require_sha256(
+            group_resolution_sha256, field="group_resolution_sha256"
+        ),
+        "approved_attributes": _thaw(_deep_freeze(approved)),
+        "approved_abstentions": {
+            str(name): str(reason) for name, reason in sorted(approved_abstentions.items())
+        },
+        "attribute_provenance": _thaw(_deep_freeze(attribute_provenance or {})),
+    }
+    intent_sha256 = _contract_sha256(contract)
+    return OwnerStyleResolvedIntent(
+        schema_version=1,
+        owner_id=owner_id,
+        page_id=page_id,
+        visual_profile_sha256=contract["visual_profile_sha256"],
+        decision_sha256=contract["decision_sha256"],
+        group_resolution_sha256=contract["group_resolution_sha256"],
+        approved_attributes=_deep_freeze(approved),
+        approved_abstentions=_deep_freeze(contract["approved_abstentions"]),
+        attribute_provenance=_deep_freeze(attribute_provenance or {}),
+        intent_sha256=intent_sha256,
+    )
+
+
+def _resolve_execution_units(value: Any, *, rendered_x_height_px: float) -> Any:
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key.endswith("_xh"):
+                px_key = f"{key[:-3]}_px"
+                pixels = float(item) * rendered_x_height_px
+                result[px_key] = int(round(pixels)) if round(pixels) == pixels else pixels
+            else:
+                result[str(key)] = _resolve_execution_units(
+                    item, rendered_x_height_px=rendered_x_height_px
+                )
+        return result
+    if isinstance(value, (list, tuple)):
+        return [
+            _resolve_execution_units(item, rendered_x_height_px=rendered_x_height_px)
+            for item in value
+        ]
+    return value
+
+
+def _canonical_plan_target(name: str, value: Any, *, rendered_x_height_px: float) -> Any:
+    if name == "font_name":
+        if not isinstance(value, Mapping):
+            raise ValueError("font_name target must be a resolved file-backed identity")
+        file_sha256 = _require_sha256(str(value.get("file_sha256") or ""), field="font file_sha256")
+        return _deep_freeze(dict(value) | {"file_sha256": file_sha256})
+    canonical = canonicalize_style_attribute(name, value)
+    return _deep_freeze(
+        _resolve_execution_units(canonical, rendered_x_height_px=rendered_x_height_px)
+    )
+
+
+def _superseding_attribute(name: str, intent: OwnerStyleResolvedIntent) -> str:
+    approved = set(intent.approved_attributes)
+    if name == "fill" and "gradient" in approved:
+        return "gradient"
+    if name == "stroke" and "multistroke" in approved:
+        return "multistroke"
+    return ""
+
+
+def build_materialization_plan(
+    *,
+    intent: OwnerStyleResolvedIntent,
+    render_layout_contract_sha256: str,
+    targets: Mapping[str, Any],
+    resolution_kinds: Mapping[str, ResolutionKind],
+    resolution_reasons: Mapping[str, str] | None = None,
+    rendered_x_height_px: float,
+) -> OwnerStyleMaterializationPlan:
+    if not math.isfinite(float(rendered_x_height_px)) or float(rendered_x_height_px) <= 0:
+        raise ValueError("rendered_x_height_px must be finite and positive")
+    names = set(intent.approved_attributes) | set(intent.approved_abstentions)
+    if set(resolution_kinds) != names:
+        raise ValueError("materialization plan must resolve every intent attribute exactly once")
+    unknown_targets = set(targets) - names
+    if unknown_targets:
+        raise ValueError(f"materialization plan contains unknown targets: {sorted(unknown_targets)}")
+    reasons = dict(resolution_reasons or {})
+    plans: dict[str, MaterializationAttributePlan] = {}
+    unit_resolution: dict[str, Any] = {}
+    for name in sorted(names):
+        kind = resolution_kinds[name]
+        if kind not in {
+            "exact",
+            "policy_adjusted",
+            "derived",
+            "superseded",
+            "abstained",
+            "review_required",
+        }:
+            raise ValueError(f"invalid resolution kind for {name}: {kind}")
+        intent_value = (
+            intent.approved_attributes[name]
+            if name in intent.approved_attributes
+            else intent.approved_abstentions[name]
+        )
+        superseded_by = _superseding_attribute(name, intent) if kind == "superseded" else ""
+        if kind == "superseded" and not superseded_by:
+            raise ValueError(f"attribute {name} is superseded without an explicit winner")
+        if kind in {"abstained", "superseded", "review_required"}:
+            target_value = None
+        else:
+            if name not in targets:
+                raise ValueError(f"materialization target missing for {name}")
+            target_value = _canonical_plan_target(
+                name, targets[name], rendered_x_height_px=float(rendered_x_height_px)
+            )
+            if target_value != _deep_freeze(targets[name]):
+                unit_resolution[name] = _thaw(target_value)
+        provenance = intent.attribute_provenance.get(name, {})
+        evidence_ids: Sequence[str]
+        if isinstance(provenance, Mapping):
+            raw_ids = provenance.get("evidence_ids")
+            if isinstance(raw_ids, (list, tuple)):
+                evidence_ids = [str(item) for item in raw_ids if str(item)]
+            else:
+                evidence_id = str(provenance.get("evidence_id") or "")
+                evidence_ids = [evidence_id] if evidence_id else []
+        else:
+            evidence_ids = []
+        reason = str(reasons.get(name) or "")
+        if kind == "abstained" and not reason:
+            reason = str(intent.approved_abstentions.get(name) or "")
+        plans[name] = MaterializationAttributePlan(
+            name=name,
+            domain=ATTRIBUTE_DOMAIN[name],
+            intent_value=_deep_freeze(intent_value),
+            target_value=target_value,
+            resolution_kind=kind,
+            reason=reason,
+            superseded_by=superseded_by,
+            evidence_ids=tuple(sorted(set(evidence_ids))),
+        )
+    unit_contract = {
+        "rendered_x_height_px": float(rendered_x_height_px),
+        "resolved": unit_resolution,
+    }
+    unit_resolution_sha256 = _contract_sha256(unit_contract)
+    contract = {
+        "schema_version": 1,
+        "owner_id": intent.owner_id,
+        "page_id": intent.page_id,
+        "visual_profile_sha256": intent.visual_profile_sha256,
+        "intent_sha256": intent.intent_sha256,
+        "render_layout_contract_sha256": _require_sha256(
+            render_layout_contract_sha256, field="render_layout_contract_sha256"
+        ),
+        "rendered_x_height_px": float(rendered_x_height_px),
+        "unit_resolution_sha256": unit_resolution_sha256,
+        "attribute_plans": {name: plan.to_dict() for name, plan in plans.items()},
+    }
+    return OwnerStyleMaterializationPlan(
+        schema_version=1,
+        owner_id=intent.owner_id,
+        page_id=intent.page_id,
+        visual_profile_sha256=intent.visual_profile_sha256,
+        intent_sha256=intent.intent_sha256,
+        render_layout_contract_sha256=contract["render_layout_contract_sha256"],
+        rendered_x_height_px=float(rendered_x_height_px),
+        unit_resolution_sha256=unit_resolution_sha256,
+        attribute_plans=MappingProxyType(plans),
+        plan_sha256=_contract_sha256(contract),
+    )
+
+
+def _canonical_observed_value(name: str, value: Any) -> Any:
+    if name == "font_name":
+        if not isinstance(value, Mapping):
+            raise ValueError("font observation must contain a resolved identity")
+        return _deep_freeze(value)
+    return _deep_freeze(canonicalize_style_attribute(name, value))
+
+
+def build_materialization_observation(
+    *,
+    plan: OwnerStyleMaterializationPlan,
+    domain_observations: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    render_completed: bool,
+) -> OwnerStyleMaterializationObservation:
+    attributes: dict[str, Mapping[str, Any]] = {}
+    for raw_domain, rows in domain_observations.items():
+        domain = str(raw_domain)
+        if domain not in {"layout", "font", "raster"}:
+            raise ValueError(f"unsupported observation domain: {domain}")
+        if not isinstance(rows, Mapping):
+            raise ValueError("domain observations must be mappings")
+        for name, raw_row in rows.items():
+            if name not in plan.attribute_plans:
+                raise ValueError(f"observation contains attribute absent from plan: {name}")
+            if plan.attribute_plans[name].domain != domain:
+                raise ValueError(f"observation domain mismatch for {name}")
+            if name in attributes:
+                raise ValueError(f"attribute observed more than once: {name}")
+            row = dict(raw_row)
+            status = str(row.get("status") or "materialized")
+            if status == "unavailable":
+                reason = str(row.get("reason") or "")
+                if not reason:
+                    raise ValueError(f"unavailable observation requires reason: {name}")
+                attributes[name] = _deep_freeze(
+                    {"status": status, "domain": domain, "reason": reason}
+                )
+                continue
+            evidence_kind = str(row.get("evidence_kind") or "")
+            evidence_sha256 = str(row.get("evidence_sha256") or "")
+            if not evidence_kind or not evidence_sha256:
+                raise ValueError(f"materialized observation requires evidence for {name}")
+            _require_sha256(evidence_sha256, field=f"{name}.evidence_sha256")
+            value = row.get("canonical_value", row.get("value"))
+            canonical_value = _canonical_observed_value(name, value)
+            attributes[name] = _deep_freeze(
+                {
+                    "status": "materialized",
+                    "domain": domain,
+                    "canonical_value": _thaw(canonical_value),
+                    "evidence_kind": evidence_kind,
+                    "evidence_sha256": evidence_sha256.lower(),
+                    "metrics": row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {},
+                }
+            )
+    contract = {
+        "schema_version": 1,
+        "owner_id": plan.owner_id,
+        "page_id": plan.page_id,
+        "visual_profile_sha256": plan.visual_profile_sha256,
+        "plan_sha256": plan.plan_sha256,
+        "attributes": _thaw(_deep_freeze(attributes)),
+        "render_completed": bool(render_completed),
+    }
+    return OwnerStyleMaterializationObservation(
+        schema_version=1,
+        owner_id=plan.owner_id,
+        page_id=plan.page_id,
+        visual_profile_sha256=plan.visual_profile_sha256,
+        plan_sha256=plan.plan_sha256,
+        attributes=_deep_freeze(attributes),
+        render_completed=bool(render_completed),
+        observation_sha256=_contract_sha256(contract),
+    )
+
+
+def validate_materialization_observation(
+    observation: OwnerStyleMaterializationObservation | Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = observation.to_dict() if isinstance(observation, OwnerStyleMaterializationObservation) else _thaw(observation)
+    required = {
+        "schema_version",
+        "owner_id",
+        "page_id",
+        "visual_profile_sha256",
+        "plan_sha256",
+        "attributes",
+        "render_completed",
+        "observation_sha256",
+    }
+    if set(payload) != required:
+        raise ValueError("materialization observation has incomplete schema")
+    expected_hash = str(payload["observation_sha256"])
+    contract = {key: value for key, value in payload.items() if key != "observation_sha256"}
+    if _contract_sha256(contract) != expected_hash:
+        raise ValueError("materialization observation hash mismatch")
+    return payload
+
+
+def _compare_target(name: str, expected: Any, observed: Any) -> AttributeComparison:
+    if name == "font_name":
+        expected_payload = _thaw(expected)
+        observed_payload = _thaw(observed)
+        expected_sha = str(expected_payload.get("file_sha256") or "") if isinstance(expected_payload, Mapping) else ""
+        observed_sha = str(observed_payload.get("file_sha256") or "") if isinstance(observed_payload, Mapping) else ""
+        matches = bool(expected_sha) and expected_sha == observed_sha
+        return AttributeComparison(
+            name=name,
+            domain="font",
+            expected=expected_payload,
+            observed=observed_payload,
+            matches=matches,
+            tolerance={"kind": "resolved_file_sha256"},
+            reason="" if matches else "resolved_font_identity_mismatch",
+        )
+    return compare_style_attribute(name, _thaw(expected), _thaw(observed))
+
+
+def compare_materialization(
+    plan: OwnerStyleMaterializationPlan,
+    observation: OwnerStyleMaterializationObservation,
+) -> MaterializationComparison:
+    validate_materialization_observation(observation)
+    mismatches: list[Mapping[str, Any]] = []
+    compared: list[str] = []
+    review_required = not observation.render_completed
+    if observation.plan_sha256 != plan.plan_sha256:
+        mismatches.append(
+            _deep_freeze(
+                {
+                    "attribute": "*",
+                    "domain": "raster",
+                    "reason": "materialization_plan_hash_mismatch",
+                }
+            )
+        )
+    for name, attribute_plan in plan.attribute_plans.items():
+        row = observation.attributes.get(name)
+        if attribute_plan.resolution_kind in {"abstained", "superseded"}:
+            if row is not None:
+                mismatches.append(
+                    _deep_freeze(
+                        {
+                            "attribute": name,
+                            "domain": attribute_plan.domain,
+                            "reason": "unexpected_observation_for_non_materialized_attribute",
+                        }
+                    )
+                )
+            continue
+        if attribute_plan.resolution_kind == "review_required":
+            review_required = True
+            continue
+        compared.append(name)
+        if row is None:
+            mismatches.append(
+                _deep_freeze(
+                    {
+                        "attribute": name,
+                        "domain": attribute_plan.domain,
+                        "reason": "missing_domain_observation",
+                    }
+                )
+            )
+            continue
+        if row.get("status") == "unavailable":
+            mismatches.append(
+                _deep_freeze(
+                    {
+                        "attribute": name,
+                        "domain": attribute_plan.domain,
+                        "reason": str(row.get("reason") or "unavailable"),
+                    }
+                )
+            )
+            continue
+        comparison = _compare_target(
+            name, attribute_plan.target_value, row.get("canonical_value")
+        )
+        if not comparison.matches:
+            mismatches.append(
+                _deep_freeze(
+                    {
+                        "attribute": name,
+                        "domain": attribute_plan.domain,
+                        "reason": comparison.reason or "canonical_value_mismatch",
+                        "expected": comparison.expected,
+                        "observed": comparison.observed,
+                    }
+                )
+            )
+    status: Literal["match", "mismatch", "review_required"]
+    status = "mismatch" if mismatches else "review_required" if review_required else "match"
+    return MaterializationComparison(
+        status=status,
+        mismatches=tuple(mismatches),
+        compared_attributes=tuple(compared),
+    )
