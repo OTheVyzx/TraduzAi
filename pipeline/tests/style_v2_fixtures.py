@@ -164,6 +164,10 @@ def valid_owner_style_raster_contract_v2(
     *,
     owner_id: str = "owner_p001_fixture",
     page_id: str = "page_001",
+    before: np.ndarray | None = None,
+    result: np.ndarray | None = None,
+    glyph_mask: np.ndarray | None = None,
+    component_geometry_sha256: str | None = None,
 ):
     from ownership import model as ownership_model
     from typesetter.style_materialization import (
@@ -177,6 +181,10 @@ def valid_owner_style_raster_contract_v2(
     base = valid_owner_style_raster_contract(
         owner_id=owner_id,
         page_id=page_id,
+        before=before,
+        result=result,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=component_geometry_sha256,
     ).to_dict()
     intent = build_resolved_style_intent(
         owner_id=owner_id,

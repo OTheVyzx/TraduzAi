@@ -18,7 +18,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ownership import model as owner_model  # noqa: E402
 from ownership.model import OwnerMutation, owner_residual_evidence_sha256  # noqa: E402
 from strip import process_bands  # noqa: E402
-from style_v2_fixtures import valid_owner_style_raster_contract  # noqa: E402
+from style_v2_fixtures import (  # noqa: E402
+    valid_owner_style_raster_contract,
+    valid_owner_style_raster_contract_v2,
+)
+from typesetter.style_materialization import (  # noqa: E402
+    build_materialization_observation,
+    build_materialization_plan,
+    build_resolved_style_intent,
+    compare_materialization,
+)
 from typesetter.owner_render_quality import OwnerRenderQuality  # noqa: E402
 
 
@@ -250,6 +259,7 @@ def _glyph_patch(
     projection_role: str = "executor",
     before_sha256: str | None = None,
     render_safe_polygon_page: tuple[tuple[int, int], ...] | None = None,
+    style_raster_contract: Any | None = None,
 ) -> Any:
     rendered_rgb = np.array(mutation.result_rgb, copy=True)
     glyph_mask = np.zeros(rendered_rgb.shape[:2], dtype=np.uint8)
@@ -276,17 +286,270 @@ def _glyph_patch(
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
         render_quality_contract=_render_quality(glyph_mask),
-        style_raster_contract=valid_owner_style_raster_contract(
-            owner_id=mutation.owner_id,
-            page_id=mutation.page_id,
-            before=np.asarray(mutation.result_rgb),
-            result=rendered_rgb,
-            glyph_mask=glyph_mask,
-            component_geometry_sha256=mutation.component_geometry_sha256,
+        style_raster_contract=(
+            style_raster_contract
+            or valid_owner_style_raster_contract(
+                owner_id=mutation.owner_id,
+                page_id=mutation.page_id,
+                before=np.asarray(mutation.result_rgb),
+                result=rendered_rgb,
+                glyph_mask=glyph_mask,
+                component_geometry_sha256=mutation.component_geometry_sha256,
+            )
         ),
         execution_tile_id=mutation.execution_tile_id,
         projection_role=projection_role,
     )
+
+
+def test_atomic_commit_accepts_canonically_equivalent_v2_observation() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    rendered = np.array(mutation.result_rgb, copy=True)
+    glyph_mask = np.zeros(rendered.shape[:2], dtype=np.uint8)
+    glyph_mask[5:7, 5:7] = 255
+    rendered[glyph_mask > 0] = (7, 9, 11)
+    contract = valid_owner_style_raster_contract_v2(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        before=np.asarray(mutation.result_rgb),
+        result=rendered,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+    )
+    glyph = _glyph_patch(
+        mutation,
+        glyph_patch_type,
+        render_completed=True,
+        fit_status="ok",
+        style_raster_contract=contract,
+    )
+    intent = build_resolved_style_intent(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        visual_profile_sha256=contract.visual_profile_sha256,
+        decision_sha256="a" * 64,
+        group_resolution_sha256="b" * 64,
+        approved={"fill": "#fff"},
+        approved_abstentions={},
+        attribute_provenance={"fill": {"evidence_id": "fixture-fill"}},
+    )
+
+    commit = apply_atomic(
+        original,
+        mutation,
+        glyph,
+        expected_style_intent=intent.to_dict(),
+        expected_materialization_plan_sha256=contract.materialization_plan_sha256,
+    )
+
+    assert commit.committed is True
+
+
+def _v2_contract_with_fill(
+    mutation: OwnerMutation,
+    *,
+    rendered: np.ndarray,
+    glyph_mask: np.ndarray,
+    target_fill: Any,
+    observed_fill: Any,
+    attribute_name: str = "fill",
+    intent_value: Any = "#fff",
+    domain: str = "raster",
+) -> tuple[Any, Any]:
+    base = valid_owner_style_raster_contract_v2(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        before=np.asarray(mutation.result_rgb),
+        result=rendered,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+    ).to_dict()
+    intent = build_resolved_style_intent(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        visual_profile_sha256=base["visual_profile_sha256"],
+        decision_sha256="a" * 64,
+        group_resolution_sha256="b" * 64,
+        approved={attribute_name: intent_value},
+        approved_abstentions={},
+        attribute_provenance={
+            attribute_name: {"evidence_id": f"fixture-{attribute_name}"}
+        },
+    )
+    plan = build_materialization_plan(
+        intent=intent,
+        render_layout_contract_sha256="c" * 64,
+        targets={attribute_name: target_fill},
+        resolution_kinds={
+            attribute_name: (
+                "policy_adjusted"
+                if attribute_name == "font_size_px" and target_fill != intent_value
+                else "exact"
+            )
+        },
+        rendered_x_height_px=20,
+    )
+    observation = build_materialization_observation(
+        plan=plan,
+        domain_observations={
+            domain: {
+                attribute_name: {
+                    "value": observed_fill,
+                    "evidence_kind": "layer_pixels_and_mask",
+                    "evidence_sha256": "d" * 64,
+                }
+            }
+        },
+        render_completed=True,
+    )
+    comparison = compare_materialization(plan, observation)
+    mismatch_reason = (
+        str(comparison.mismatches[0]["reason"])
+        if comparison.mismatches
+        else ""
+    )
+    base.update(
+        {
+            "schema_version": 2,
+            "status": "applied" if comparison.status == "match" else "review_required",
+            "render_status": "completed",
+            "materialization_status": comparison.status,
+            "style_intent_sha256": intent.intent_sha256,
+            "materialization_plan_sha256": plan.plan_sha256,
+            "materialization_observation_sha256": observation.observation_sha256,
+            "materialization_plan": plan.to_dict(),
+            "materialization_observation": observation.to_dict(),
+            "materialization_comparison": comparison.to_dict(),
+            "backend_selection_reason": "fixture_observable_backend",
+            "requested_attributes": {attribute_name: intent_value},
+            "applied_attributes": (
+                {
+                    attribute_name: plan.to_dict()["attribute_plans"]
+                    [attribute_name]["target_value"]
+                }
+                if comparison.status == "match"
+                else {}
+            ),
+            "abstained_attributes": (
+                {}
+                if comparison.status == "match"
+                else {attribute_name: mismatch_reason}
+            ),
+        }
+    )
+    base["contract_sha256"] = owner_model.owner_style_raster_contract_sha256(base)
+    return owner_model.OwnerStyleRasterContractV2(**base), intent
+
+
+def test_atomic_commit_does_not_compare_functional_layout_to_style_decision() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    rendered = np.array(mutation.result_rgb, copy=True)
+    glyph_mask = np.zeros(rendered.shape[:2], dtype=np.uint8)
+    glyph_mask[5:7, 5:7] = 255
+    rendered[glyph_mask > 0] = (7, 9, 11)
+    contract, intent = _v2_contract_with_fill(
+        mutation,
+        rendered=rendered,
+        glyph_mask=glyph_mask,
+        target_fill=36,
+        observed_fill=36,
+        attribute_name="font_size_px",
+        intent_value=48,
+        domain="layout",
+    )
+    glyph = _glyph_patch(
+        mutation, glyph_patch_type, render_completed=True, fit_status="ok",
+        style_raster_contract=contract,
+    )
+
+    commit = apply_atomic(
+        original,
+        mutation,
+        glyph,
+        expected_style_decision={
+            "applied_attributes": {"font_size_px": 48},
+            "abstained_attributes": {},
+        },
+        expected_style_intent=intent.to_dict(),
+        expected_materialization_plan_sha256=contract.materialization_plan_sha256,
+    )
+
+    assert commit.committed is True
+
+
+def test_atomic_commit_rolls_back_true_material_divergence_with_precise_reason() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    rendered = np.array(mutation.result_rgb, copy=True)
+    glyph_mask = np.zeros(rendered.shape[:2], dtype=np.uint8)
+    glyph_mask[5:7, 5:7] = 255
+    rendered[glyph_mask > 0] = (7, 9, 11)
+    contract, intent = _v2_contract_with_fill(
+        mutation,
+        rendered=rendered,
+        glyph_mask=glyph_mask,
+        target_fill="#FFFFFF",
+        observed_fill="#FF0000",
+    )
+    glyph = _glyph_patch(
+        mutation, glyph_patch_type, render_completed=True, fit_status="ok",
+        style_raster_contract=contract,
+    )
+
+    commit = apply_atomic(
+        original,
+        mutation,
+        glyph,
+        expected_style_intent=intent.to_dict(),
+        expected_materialization_plan_sha256=contract.materialization_plan_sha256,
+    )
+
+    assert commit.committed is False
+    assert commit.reason == (
+        "render_contract_invalid:materialization_mismatch:"
+        "raster:fill:canonical_value_mismatch"
+    )
+    assert np.array_equal(commit.result_rgb, original)
+
+
+def test_atomic_commit_rejects_self_consistent_patch_diverging_from_sealed_plan() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    rendered = np.array(mutation.result_rgb, copy=True)
+    glyph_mask = np.zeros(rendered.shape[:2], dtype=np.uint8)
+    glyph_mask[5:7, 5:7] = 255
+    rendered[glyph_mask > 0] = (7, 9, 11)
+    sealed_contract, intent = _v2_contract_with_fill(
+        mutation, rendered=rendered, glyph_mask=glyph_mask,
+        target_fill="#FFFFFF", observed_fill="#FFFFFF",
+    )
+    forged_contract, _ = _v2_contract_with_fill(
+        mutation, rendered=rendered, glyph_mask=glyph_mask,
+        target_fill="#FF0000", observed_fill="#FF0000",
+    )
+    glyph = _glyph_patch(
+        mutation, glyph_patch_type, render_completed=True, fit_status="ok",
+        style_raster_contract=forged_contract,
+    )
+
+    commit = apply_atomic(
+        original,
+        mutation,
+        glyph,
+        expected_style_intent=intent.to_dict(),
+        expected_materialization_plan_sha256=(
+            sealed_contract.materialization_plan_sha256
+        ),
+    )
+
+    assert commit.committed is False
+    assert commit.reason == "render_contract_invalid:sealed_materialization_plan_mismatch"
 
 
 def _glyph_patch_for_mask(

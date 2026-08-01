@@ -47,6 +47,12 @@ from typesetter.owner_style import (
 from typesetter.style_capture import build_owner_style_captures
 from typesetter.owner_render_quality import OwnerRenderQuality
 from typesetter.style_groups import resolve_contextual_style_groups
+from typesetter.style_materialization import (
+    build_resolved_style_intent,
+    compare_materialization_payloads,
+    validate_materialization_observation,
+    validate_materialization_plan,
+)
 from strip.types import Band, BandEvidenceResult, BBox, OwnerExecutionResult
 from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
@@ -8715,6 +8721,8 @@ def apply_atomic_owner_execution(
     expected_visual_profile_sha256: str | None = None,
     expected_profile_component_geometry_sha256: str | None = None,
     expected_style_decision: Mapping[str, Any] | None = None,
+    expected_style_intent: Mapping[str, Any] | None = None,
+    expected_materialization_plan_sha256: str | None = None,
 ) -> OwnerExecutionCommit:
     """Commit cleanup and glyph rendering as one fail-closed owner transaction."""
 
@@ -9018,7 +9026,77 @@ def apply_atomic_owner_execution(
             expected_owner_id=owner_id,
             expected_page_id=page_id,
         )
-        if style_contract["status"] == "review_required":
+        style_schema_version = int(style_contract.get("schema_version") or 0)
+        if style_schema_version == 2:
+            plan_payload = validate_materialization_plan(
+                style_contract.get("materialization_plan") or {}
+            )
+            observation_payload = validate_materialization_observation(
+                style_contract.get("materialization_observation") or {}
+            )
+            if expected_materialization_plan_sha256 is not None:
+                expected_plan_sha256 = _canonical_owner_hash(
+                    expected_materialization_plan_sha256,
+                    label="expected materialization plan hash",
+                )
+                if plan_payload["plan_sha256"] != expected_plan_sha256:
+                    raise ValueError("sealed_materialization_plan_mismatch")
+            if expected_style_intent is not None:
+                raw_intent = dict(expected_style_intent)
+                rebuilt_intent = build_resolved_style_intent(
+                    owner_id=str(raw_intent.get("owner_id") or ""),
+                    page_id=str(raw_intent.get("page_id") or ""),
+                    visual_profile_sha256=str(
+                        raw_intent.get("visual_profile_sha256") or ""
+                    ),
+                    decision_sha256=str(raw_intent.get("decision_sha256") or ""),
+                    group_resolution_sha256=str(
+                        raw_intent.get("group_resolution_sha256") or ""
+                    ),
+                    approved=dict(raw_intent.get("approved_attributes") or {}),
+                    approved_abstentions=dict(
+                        raw_intent.get("approved_abstentions") or {}
+                    ),
+                    attribute_provenance=dict(
+                        raw_intent.get("attribute_provenance") or {}
+                    ),
+                )
+                if rebuilt_intent.intent_sha256 != str(
+                    raw_intent.get("intent_sha256") or ""
+                ):
+                    raise ValueError("sealed_style_intent_hash_mismatch")
+                if (
+                    rebuilt_intent.owner_id != owner_id
+                    or rebuilt_intent.page_id != page_id
+                    or rebuilt_intent.visual_profile_sha256
+                    != style_contract["visual_profile_sha256"]
+                    or rebuilt_intent.intent_sha256
+                    != plan_payload["intent_sha256"]
+                ):
+                    raise ValueError("sealed_style_intent_mismatch")
+            recomputed_materialization = compare_materialization_payloads(
+                plan_payload,
+                observation_payload,
+            )
+            if recomputed_materialization.status != "match":
+                mismatch = (
+                    recomputed_materialization.mismatches[0]
+                    if recomputed_materialization.mismatches
+                    else {
+                        "domain": "raster",
+                        "attribute": "*",
+                        "reason": "review_required",
+                    }
+                )
+                raise ValueError(
+                    "materialization_mismatch:"
+                    f"{mismatch.get('domain', 'raster')}:"
+                    f"{mismatch.get('attribute', '*')}:"
+                    f"{mismatch.get('reason', 'unknown')}"
+                )
+        elif expected_style_intent is not None or expected_materialization_plan_sha256 is not None:
+            raise ValueError("owner-enforce requires style raster contract v2")
+        if style_schema_version != 2 and style_contract["status"] == "review_required":
             raise ValueError("style raster contract requires review")
         if expected_visual_profile_sha256 is not None:
             expected_profile_hash = _canonical_owner_hash(
@@ -9085,7 +9163,7 @@ def apply_atomic_owner_execution(
                 raise ValueError(
                     f"style raster contract {envelope_name} escapes safe polygon"
                 )
-        if expected_style_decision is not None:
+        if expected_style_decision is not None and style_schema_version != 2:
             decision_applied = dict(
                 expected_style_decision.get("applied_attributes") or {}
             )
@@ -10805,6 +10883,8 @@ def execute_owner_page_graph(
         visual_profile = layout_record.get("visual_profile_v2")
         visual_profile = visual_profile if isinstance(visual_profile, dict) else {}
         style_decision = visual_profile.get("style_application_decision_v2")
+        style_intent = layout_record.get("style_resolved_intent_v1")
+        materialization_plan = layout_record.get("_sealed_materialization_plan_v1")
         commit = apply_atomic_owner_execution(
             source,
             mutation,
@@ -10817,6 +10897,14 @@ def execute_owner_page_graph(
             ),
             expected_style_decision=(
                 style_decision if isinstance(style_decision, dict) else None
+            ),
+            expected_style_intent=(
+                style_intent if isinstance(style_intent, dict) else None
+            ),
+            expected_materialization_plan_sha256=(
+                str(materialization_plan.get("plan_sha256") or "")
+                if isinstance(materialization_plan, dict)
+                else None
             ),
         )
         commits.append(commit)
