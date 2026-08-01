@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
-from types import SimpleNamespace
+from types import ModuleType
 
 import pytest
 
@@ -38,34 +38,31 @@ def test_execution_guard_ignores_loaded_sources_covered_by_bundle_exclusions(
     excluded.parent.mkdir(parents=True)
     excluded.write_text("VALUE = 1\n", encoding="utf-8")
     bundle["source_exclusions"] = ["pipeline/venv/**"]
-    monkeypatch.setitem(
-        sys.modules,
-        "traduzai_test_excluded_dependency",
-        SimpleNamespace(__file__=str(excluded)),
-    )
+    loaded_dependency = ModuleType("traduzai_test_excluded_dependency")
+    loaded_dependency.__file__ = str(excluded)
+    monkeypatch.setitem(sys.modules, loaded_dependency.__name__, loaded_dependency)
 
     ledger = collect_execution_source_ledger(bundle)
 
     assert "pipeline/venv/Lib/site-packages/dependency.py" not in ledger["loaded_sources"]
 
 
-def test_execution_guard_resolves_synthetic_relative_module_file_from_spec_origin(
+def test_execution_guard_ignores_non_module_sys_modules_sentinel_with_relative_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     repo, _source, bundle, _ledger = _fixture(tmp_path)
-    dependency = repo / "pipeline" / "venv" / "Lib" / "site-packages" / "torch" / "_ops.py"
-    dependency.parent.mkdir(parents=True)
-    dependency.write_text("VALUE = 1\n", encoding="utf-8")
-    bundle["source_exclusions"] = ["pipeline/venv/**"]
     monkeypatch.chdir(repo / "pipeline")
+    class _ModuleProxy(ModuleType):
+        pass
+
+    sentinel = _ModuleProxy("torch.ops")
+    sentinel.__file__ = "_ops.py"
+    sentinel.__spec__ = None
     monkeypatch.setitem(
         sys.modules,
-        "traduzai_test_synthetic_file",
-        SimpleNamespace(
-            __file__="_ops.py",
-            __spec__=SimpleNamespace(origin=str(dependency)),
-        ),
+        "torch.ops",
+        sentinel,
     )
 
     ledger = collect_execution_source_ledger(bundle)

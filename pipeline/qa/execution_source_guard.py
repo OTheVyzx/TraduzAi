@@ -6,6 +6,7 @@ import fnmatch
 import hashlib
 from pathlib import Path
 import sys
+from types import ModuleType
 from typing import Any, Mapping
 
 
@@ -23,15 +24,20 @@ def collect_execution_source_ledger(bundle: Mapping[str, Any]) -> dict[str, Any]
     exclusions = tuple(str(item) for item in bundle.get("source_exclusions") or ())
     loaded: dict[str, str] = {}
     for module in list(sys.modules.values()):
+        if not isinstance(module, ModuleType):
+            continue
         raw = getattr(module, "__file__", None)
         if not raw:
             continue
         raw_path = Path(str(raw))
         if not raw_path.is_absolute():
-            spec_origin = getattr(getattr(module, "__spec__", None), "origin", None)
+            module_spec = getattr(module, "__spec__", None)
+            spec_origin = getattr(module_spec, "origin", None)
             origin_path = Path(str(spec_origin)) if spec_origin else None
             if origin_path is not None and origin_path.is_absolute():
                 raw_path = origin_path
+            elif type(module) is not ModuleType and module_spec is None:
+                continue
         path = raw_path.resolve()
         try:
             relative = path.relative_to(repo).as_posix()
