@@ -7,7 +7,18 @@ from typing import Any
 
 HIGH_CONFIDENCE_THRESHOLD = 0.80
 RENDERED_OWNER_STATES = frozenset({"rendered"})
-REQUIRED_RENDER_METRICS = frozenset({"core_pixel_count", "effect_pixel_count"})
+REQUIRED_RENDER_METRICS = frozenset(
+    {
+        "core_pixel_count",
+        "effect_pixel_count",
+        "core_pixels_outside_safe",
+        "effect_pixels_outside_safe",
+    }
+)
+POLICY_ADJUSTMENT_WHITELIST = frozenset(
+    {"font_size_px", "tracking_xh", "alignment", "scale_y", "width_scale"}
+)
+MINIMUM_LEGIBLE_FONT_SIZE_PX = 8.0
 CATASTROPHIC_STYLE_ATTRIBUTES = frozenset(
     {
         "font_name",

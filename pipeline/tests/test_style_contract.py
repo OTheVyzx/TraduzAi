@@ -18,6 +18,7 @@ from typesetter.style_contract import (
     style_evidence_v2_from_v1,
 )
 from ownership import model as ownership_model
+from typesetter.style_materialization import compare_materialization_payloads
 from style_v2_fixtures import (
     valid_owner_style_raster_contract,
     valid_owner_style_raster_contract_v2,
@@ -42,6 +43,17 @@ def test_owner_raster_contract_v2_binds_plan_observation_and_comparison():
     assert payload["materialization_plan_sha256"] == payload["materialization_plan"]["plan_sha256"]
     assert payload["materialization_observation_sha256"] == payload["materialization_observation"]["observation_sha256"]
     assert payload["materialization_comparison"]["status"] == "match"
+
+
+def test_materialization_comparison_uses_canonical_observation_value():
+    payload = valid_owner_style_raster_contract_v2().to_dict()
+
+    comparison = compare_materialization_payloads(
+        payload["materialization_plan"], payload["materialization_observation"]
+    )
+
+    assert comparison.status == "match"
+    assert comparison.compared_attributes == ("fill",)
 
 
 @pytest.mark.parametrize(

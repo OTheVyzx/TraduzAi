@@ -72,6 +72,8 @@ def _project(*, confidence: float = 0.95, with_contract: bool = True) -> dict:
         decision = profile["style_application_decision_v2"]
         contract["applied_attributes"] = copy.deepcopy(decision["applied_attributes"])
         contract["abstained_attributes"] = copy.deepcopy(decision["abstained_attributes"])
+        contract["render_metrics"]["core_pixels_outside_safe"] = 0
+        contract["render_metrics"]["effect_pixels_outside_safe"] = 0
         contract["status"] = "applied" if contract["applied_attributes"] else "fallback"
         contract["contract_sha256"] = owner_style_raster_contract_sha256(contract)
         layer["style_v2_raster_contract"] = contract
@@ -249,3 +251,56 @@ def test_style_gate_cannot_override_blocked_functional_gate():
 def test_color_fidelity_reports_delta_e_2000():
     assert delta_e_2000("#FFFFFF", "#FFFFFF") == 0.0
     assert delta_e_2000("#FFFFFF", "#000000") > 90.0
+
+
+def test_owner_qa_emits_safe_containment_with_explicit_denominator(tmp_path):
+    report = audit_style_fidelity(_project(), tmp_path, mode="enforce")
+
+    assert report["metrics"]["safe_containment"] == {
+        "evaluated": 1, "contained": 1, "rate": 1.0,
+    }
+    assert report["metrics"]["effect_containment"] == {
+        "evaluated": 1, "contained": 1, "rate": 1.0,
+    }
+
+
+def test_missing_outside_safe_measurement_blocks_instead_of_assuming_zero(tmp_path):
+    project = _project()
+    contract = project["paginas"][0]["text_layers"][0]["style_v2_raster_contract"]
+    del contract["render_metrics"]["core_pixels_outside_safe"]
+    contract["contract_sha256"] = owner_style_raster_contract_sha256(contract)
+
+    report = audit_style_fidelity(project, tmp_path, mode="enforce")
+
+    assert report["gate"]["status"] == "BLOCK"
+    assert any(row["code"] == "required_metric_missing" for row in report["findings"])
+
+
+def test_catastrophic_count_requires_high_confidence_and_true_mismatch(tmp_path):
+    project = _project()
+    contract = project["paginas"][0]["text_layers"][0]["style_v2_raster_contract"]
+    contract["applied_attributes"]["fill"] = "#FFFFFF"
+    contract["contract_sha256"] = owner_style_raster_contract_sha256(contract)
+
+    report = audit_style_fidelity(project, tmp_path, mode="enforce")
+
+    assert report["metrics"]["catastrophic_mismatches"]["count"] == 1
+    assert report["metrics"]["catastrophic_mismatches"]["evaluated"] >= 1
+
+
+def test_style_eligible_owner_remains_in_denominator_after_execution_rollback(tmp_path):
+    project = _project(with_contract=False)
+    rolled_back = _graph(state="review_required").to_dict()
+    rolled_back["owners"][0]["execution_tile_id"] = None
+    rolled_back["projections"] = []
+    project["page_owner_graphs"] = [rolled_back]
+    project["paginas"][0]["text_layers"][0]["owner_style_capture"] = {
+        "owner_id": "owner_a", "page_id": "page_001", "eligible": True,
+    }
+
+    report = audit_style_fidelity(project, tmp_path, mode="enforce")
+
+    assert report["summary"]["eligible_owner_count"] == 1
+    assert report["summary"]["rendered_owner_count"] == 0
+    assert report["gate"]["status"] == "BLOCK"
+    assert report["owners"][0]["findings"][0]["code"] == "owner_materialization_not_committed"

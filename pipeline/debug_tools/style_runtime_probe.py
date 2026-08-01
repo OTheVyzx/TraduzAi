@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -16,6 +17,10 @@ _RENDERABLE_ROUTES = frozenset(
         "translate_sfx_inpaint_render",
     }
 )
+
+
+class RuntimeProbeError(ValueError):
+    """Raised when a matrix target cannot be resolved exactly once."""
 
 
 def _mapping_rows(value: Any) -> list[Mapping[str, Any]]:
@@ -132,14 +137,14 @@ def probe_style_runtime(
     for owner in rendered.values():
         category_counts.update(_owner_categories(owner))
     all_categories = sorted(set(category_counts) | set(requirements))
-    category_metrics: dict[str, dict[str, Any]] = {}
+    categories: dict[str, dict[str, Any]] = {}
     for category in all_categories:
         owner_count = int(category_counts[category])
         required_minimum = int(requirements.get(category, 0))
         complete = owner_count >= required_minimum
         if not complete:
             contracts.add("category_coverage_incomplete")
-        category_metrics[category] = {
+        categories[category] = {
             "owner_count": owner_count,
             "required_minimum": required_minimum,
             "complete": complete,
@@ -165,7 +170,7 @@ def probe_style_runtime(
         "abstained_attribute_count": abstained_attribute_count,
         "profile_status_counts": dict(sorted(status_counts.items())),
         "abstention_reasons": dict(sorted(abstention_reasons.items())),
-        "category_metrics": category_metrics,
+        "categories": categories,
     }
 
 
@@ -186,7 +191,7 @@ def _aggregate_reports(
         contracts.update(str(code) for code in report.get("contracts") or [])
         status_counts.update(dict(report.get("profile_status_counts") or {}))
         abstention_reasons.update(dict(report.get("abstention_reasons") or {}))
-        for category, metrics in dict(report.get("category_metrics") or {}).items():
+        for category, metrics in dict(report.get("categories") or {}).items():
             if isinstance(metrics, Mapping):
                 category_counts[str(category)] += int(metrics.get("owner_count") or 0)
         rendered_owner_count += int(report.get("rendered_owner_count") or 0)
@@ -224,7 +229,7 @@ def _aggregate_reports(
         "abstained_attribute_count": abstained_attribute_count,
         "profile_status_counts": dict(sorted(status_counts.items())),
         "abstention_reasons": dict(sorted(abstention_reasons.items())),
-        "category_metrics": {
+        "categories": {
             category: {"owner_count": count}
             for category, count in sorted(category_counts.items())
         },
@@ -232,9 +237,156 @@ def _aggregate_reports(
     }
 
 
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _load_mapping(value: Path | Mapping[str, Any], *, label: str) -> tuple[Mapping[str, Any], Path | None]:
+    if isinstance(value, Mapping):
+        return value, None
+    path = Path(value)
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, Mapping):
+        raise RuntimeProbeError(f"{label} root must be an object")
+    return payload, path.resolve()
+
+
+def _project_indexes(project: Mapping[str, Any]) -> tuple[dict[tuple[str, str], list[Mapping[str, Any]]], dict[tuple[str, str], list[Mapping[str, Any]]]]:
+    owners: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    layers: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for graph in _mapping_rows(project.get("page_owner_graphs") or []):
+        page_id = str(graph.get("page_id") or "").strip()
+        for owner in _mapping_rows(graph.get("owners")):
+            owner_id = str(owner.get("owner_id") or "").strip()
+            if page_id and owner_id:
+                owners.setdefault((page_id, owner_id), []).append(owner)
+    for index, page in enumerate(_mapping_rows(project.get("paginas") or project.get("pages") or []), start=1):
+        page_id = str(page.get("page_id") or f"page_{int(page.get('numero') or index):03d}").strip()
+        for layer in _mapping_rows(page.get("text_layers") or page.get("texts")):
+            owner_id = str(layer.get("owner_id") or "").strip()
+            if owner_id:
+                layers.setdefault((page_id, owner_id), []).append(layer)
+    return owners, layers
+
+
+def probe_projects(
+    projects: Mapping[str, Path | Mapping[str, Any]],
+    *,
+    matrix: Path | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Probe only the exact entry/page/owner targets authenticated by a matrix."""
+
+    matrix_payload, matrix_path = _load_mapping(matrix, label="matrix")
+    entries = matrix_payload.get("entries")
+    if int(matrix_payload.get("schema_version") or 0) < 3 or not isinstance(entries, list):
+        raise RuntimeProbeError("matrix schema/entries are invalid")
+    normalized_projects: dict[str, tuple[Mapping[str, Any], Path | None]] = {}
+    for entry_id, value in projects.items():
+        key = str(entry_id).strip()
+        if not key or key in normalized_projects:
+            raise RuntimeProbeError("entry project mapping is ambiguous")
+        normalized_projects[key] = _load_mapping(value, label=f"project:{key}")
+
+    target_keys: list[str] = []
+    seen_targets: set[str] = set()
+    contracts: set[str] = set()
+    categories: Counter[str] = Counter()
+    profile_count = raster_count = rendered_count = 0
+    plan_count = observation_count = delivery_count = geometry_count = 0
+    project_rows: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise RuntimeProbeError("matrix entry is invalid")
+        entry_id = str(entry.get("entry_id") or "").strip()
+        if not entry_id or entry_id not in normalized_projects:
+            raise RuntimeProbeError(f"entry_project_missing:{entry_id}")
+        project, project_path = normalized_projects[entry_id]
+        owners, layers = _project_indexes(project)
+        entry_target_count = 0
+        for target in entry.get("targets") or []:
+            if not isinstance(target, Mapping):
+                raise RuntimeProbeError(f"target_invalid:{entry_id}")
+            page_id = str(target.get("page_id") or "").strip()
+            owner_id = str(target.get("owner_id") or "").strip()
+            key = f"{entry_id}:{page_id}:{owner_id}"
+            if not page_id or not owner_id or key in seen_targets:
+                raise RuntimeProbeError(f"target_duplicate_or_invalid:{key}")
+            seen_targets.add(key)
+            target_keys.append(key)
+            entry_target_count += 1
+            categories[str(target.get("category") or "uncategorized")] += 1
+            owner_rows = owners.get((page_id, owner_id), [])
+            layer_rows = layers.get((page_id, owner_id), [])
+            if len(owner_rows) != 1 or len(layer_rows) != 1:
+                raise RuntimeProbeError(f"target_missing_or_ambiguous:{key}")
+            owner, layer = owner_rows[0], layer_rows[0]
+            state = str(owner.get("state") or "").lower()
+            route = str(owner.get("route_action") or "").lower()
+            if state == "rendered" or route in _RENDERABLE_ROUTES:
+                rendered_count += 1
+            else:
+                contracts.add("target_not_renderable")
+            profile = layer.get("visual_profile_v2")
+            if isinstance(profile, Mapping) and str(profile.get("owner_id") or "") == owner_id:
+                profile_count += 1
+            else:
+                contracts.add("missing_visual_profile")
+            raster = layer.get("style_v2_raster_contract")
+            if not isinstance(raster, Mapping) or str(raster.get("owner_id") or owner_id) != owner_id:
+                contracts.add("missing_raster_contract")
+                continue
+            raster_count += 1
+            plan_count += int(isinstance(raster.get("materialization_plan"), Mapping))
+            observation_count += int(isinstance(raster.get("materialization_observation"), Mapping))
+            delivery_count += int(isinstance(layer.get("owner_text_delivery_contract") or raster.get("delivery_contract"), Mapping))
+            geometry_count += int(isinstance(
+                layer.get("owner_render_geometry")
+                or layer.get("render_geometry")
+                or raster.get("render_geometry"),
+                Mapping,
+            ))
+        project_rows.append({
+            "entry_id": entry_id,
+            "project_path": str(project_path) if project_path else None,
+            "target_count": entry_target_count,
+        })
+    extra_projects = sorted(set(normalized_projects) - {str(entry.get("entry_id") or "") for entry in entries if isinstance(entry, Mapping)})
+    if extra_projects:
+        raise RuntimeProbeError(f"project_without_matrix_entry:{extra_projects}")
+    target_count = len(target_keys)
+    if target_count == 0:
+        raise RuntimeProbeError("matrix has no targets")
+    return {
+        "schema_version": 2,
+        "status": "BLOCK" if contracts else "PASS",
+        "contracts": sorted(contracts),
+        "matrix_path": str(matrix_path) if matrix_path else None,
+        "matrix_sha256": _canonical_sha256(matrix_payload),
+        "target_count": target_count,
+        "target_keys": target_keys,
+        "rendered_owner_count": rendered_count,
+        "profile_count": profile_count,
+        "raster_contract_count": raster_count,
+        "materialization_plan_count": plan_count,
+        "materialization_observation_count": observation_count,
+        "delivery_contract_count": delivery_count,
+        "render_geometry_count": geometry_count,
+        "categories": {name: {"owner_count": count} for name, count in sorted(categories.items())},
+        "projects": project_rows,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Audit owner style runtime contracts in project.json files."
+    )
+    parser.add_argument(
+        "--matrix",
+        type=Path,
+        required=True,
+        help="Schema v3 matrix selecting exact entry/page/owner targets.",
     )
     parser.add_argument(
         "--output",
@@ -253,13 +405,20 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    rows: list[tuple[Path, Mapping[str, Any]]] = []
+    matrix_payload = json.loads(args.matrix.read_text(encoding="utf-8-sig"))
+    work_to_entry = {
+        str(entry.get("work_dir") or ""): str(entry.get("entry_id") or "")
+        for entry in matrix_payload.get("entries") or [] if isinstance(entry, Mapping)
+    }
+    projects: dict[str, Path] = {}
     for path in args.projects:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(payload, Mapping):
-            raise ValueError(f"project JSON root must be an object: {path}")
-        rows.append((path, probe_style_runtime(payload)))
-    report = _aggregate_reports(rows)
+        entry_id = work_to_entry.get(path.parent.name)
+        if not entry_id:
+            raise RuntimeProbeError(f"entry_project_missing_for_path:{path}")
+        if entry_id in projects:
+            raise RuntimeProbeError(f"entry_project_duplicate:{entry_id}")
+        projects[entry_id] = path
+    report = probe_projects(projects, matrix=args.matrix)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",

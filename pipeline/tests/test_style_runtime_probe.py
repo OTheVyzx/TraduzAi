@@ -3,6 +3,8 @@ import json
 from importlib.util import find_spec
 from pathlib import Path
 
+import pytest
+
 from debug_tools import style_runtime_probe
 
 
@@ -110,7 +112,7 @@ def test_probe_does_not_claim_category_coverage_without_matching_owner():
         required_categories={"sfx": 1},
     )
 
-    assert report["category_metrics"]["sfx"]["owner_count"] == 0
+    assert report["categories"]["sfx"]["owner_count"] == 0
     assert report["status"] == "BLOCK"
 
 
@@ -151,9 +153,11 @@ def test_probe_blocks_raster_bound_to_different_owner():
 
 
 def test_probe_cli_aggregates_projects_and_exits_two_for_block(tmp_path):
-    first = tmp_path / "first.json"
-    second = tmp_path / "second.json"
+    first = tmp_path / "entry_first" / "project.json"
+    second = tmp_path / "entry_second" / "project.json"
     output = tmp_path / "report.json"
+    first.parent.mkdir()
+    second.parent.mkdir()
     first.write_text(
         json.dumps(_project_with_one_rendered_owner()),
         encoding="utf-8",
@@ -169,14 +173,26 @@ def test_probe_cli_aggregates_projects_and_exits_two_for_block(tmp_path):
         "owner_id"
     ] = "owner_p001_second"
     second.write_text(json.dumps(second_project), encoding="utf-8")
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(json.dumps({
+        "schema_version": 3,
+        "entries": [
+            {"entry_id": "first", "work_dir": "entry_first", "targets": [
+                {"page_id": "page_001", "owner_id": "owner_p001_fixture"}
+            ]},
+            {"entry_id": "second", "work_dir": "entry_second", "targets": [
+                {"page_id": "page_001", "owner_id": "owner_p001_second"}
+            ]},
+        ],
+    }), encoding="utf-8")
 
     exit_code = _run_probe_cli(
-        ["--output", str(output), str(first), str(second)]
+        ["--output", str(output), "--matrix", str(matrix), str(first), str(second)]
     )
 
     report = json.loads(output.read_text(encoding="utf-8"))
     assert exit_code == 2
-    assert report["project_count"] == 2
+    assert len(report["projects"]) == 2
     assert report["rendered_owner_count"] == 2
     assert report["raster_contract_count"] == 0
 
@@ -191,3 +207,56 @@ def test_no_go_summary_fixture_is_portable_and_pins_observed_counts():
     assert payload["expected"]["abstained_attribute_count"] == 559
     assert payload["expected"]["raster_contract_count"] == 0
     assert all(":" not in row["project_id"] for row in payload["projects"])
+
+
+def _matrix_project_fixture(tmp_path: Path):
+    entries = []
+    projects = {}
+    expected = set()
+    for index in range(9):
+        entry_id = f"entry_{index}"
+        page_id = "page_001"
+        owner_id = f"owner_{index}"
+        project = _project_with_one_rendered_owner(
+            raster_contract={"owner_id": owner_id, "materialization_plan": {},
+                             "materialization_observation": {}, "delivery_contract": {},
+                             "render_geometry": {}},
+        )
+        project["page_owner_graphs"][0]["owners"][0]["owner_id"] = owner_id
+        project["paginas"][0]["text_layers"][0]["owner_id"] = owner_id
+        project["paginas"][0]["text_layers"][0]["visual_profile_v2"]["owner_id"] = owner_id
+        project["page_owner_graphs"][0]["owners"].append({
+            "owner_id": f"extra_{index}", "page_id": page_id, "state": "rendered",
+            "route_action": "translate_inpaint_render",
+        })
+        entries.append({
+            "entry_id": entry_id, "work_dir": entry_id,
+            "targets": [{"page_id": page_id, "owner_id": owner_id}],
+        })
+        projects[entry_id] = project
+        expected.add(f"{entry_id}:{page_id}:{owner_id}")
+    return {"schema_version": 3, "entries": entries}, projects, expected
+
+
+def test_runtime_probe_uses_exact_matrix_target_keys_not_all_renderable_owners(tmp_path):
+    matrix, projects, expected = _matrix_project_fixture(tmp_path)
+
+    report = style_runtime_probe.probe_projects(projects, matrix=matrix)
+
+    assert report["target_count"] == 9
+    assert set(report["target_keys"]) == expected
+    assert report["rendered_owner_count"] == 9
+
+
+@pytest.mark.parametrize("problem", ["target_missing", "target_duplicate", "entry_project_missing"])
+def test_runtime_probe_blocks_incomplete_or_ambiguous_matrix_resolution(tmp_path, problem):
+    matrix, projects, _expected = _matrix_project_fixture(tmp_path)
+    if problem == "target_missing":
+        projects["entry_0"]["page_owner_graphs"][0]["owners"][0]["owner_id"] = "missing"
+    elif problem == "target_duplicate":
+        matrix["entries"][0]["targets"].append(copy.deepcopy(matrix["entries"][0]["targets"][0]))
+    else:
+        del projects["entry_0"]
+
+    with pytest.raises(style_runtime_probe.RuntimeProbeError):
+        style_runtime_probe.probe_projects(projects, matrix=matrix)

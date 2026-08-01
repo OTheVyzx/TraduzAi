@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+import statistics
 from typing import Any
 
 from ownership.model import validate_owner_style_raster_contract
@@ -11,12 +12,14 @@ from ownership.project import validate_serialized_owner_graph
 from qa.style_fidelity_policy import (
     CATASTROPHIC_STYLE_ATTRIBUTES,
     HIGH_CONFIDENCE_THRESHOLD,
+    MINIMUM_LEGIBLE_FONT_SIZE_PX,
+    POLICY_ADJUSTMENT_WHITELIST,
     REQUIRED_RENDER_METRICS,
     is_rendered_owner,
     required_style_categories,
 )
 from typesetter.owner_style import validate_owner_visual_profile
-from typesetter.style_materialization import delta_e_2000
+from typesetter.style_materialization import compare_style_attribute, delta_e_2000
 
 
 STYLE_MODES = frozenset({"shadow", "render", "enforce"})
@@ -39,14 +42,6 @@ def resolve_original_path(run_dir: Path, page: dict[str, Any], page_number: int)
                 if candidate.is_file():
                     return candidate.resolve()
     return None
-
-
-def _same_value(expected: Any, observed: Any) -> bool:
-    if isinstance(expected, str) and isinstance(observed, str):
-        return expected.strip().upper() == observed.strip().upper()
-    if isinstance(expected, (int, float)) and isinstance(observed, (int, float)):
-        return abs(float(expected) - float(observed)) <= max(0.05, abs(float(expected)) * 0.08)
-    return expected == observed
 
 
 def _attribute_confidence(profile: dict[str, Any], name: str) -> float:
@@ -150,6 +145,67 @@ def _binding_errors(profile: dict[str, Any], contract: dict[str, Any]) -> list[s
 
 
 def _attribute_results(profile: dict[str, Any], contract: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    if int(contract.get("schema_version") or 0) == 2:
+        plan = contract.get("materialization_plan")
+        observation = contract.get("materialization_observation")
+        comparison = contract.get("materialization_comparison")
+        if isinstance(plan, dict) and isinstance(observation, dict) and isinstance(comparison, dict):
+            plan_rows = plan.get("attribute_plans") if isinstance(plan.get("attribute_plans"), dict) else {}
+            observed_rows = observation.get("attributes") if isinstance(observation.get("attributes"), dict) else {}
+            mismatch_names = {
+                str(row.get("attribute")) for row in comparison.get("mismatches") or []
+                if isinstance(row, dict) and row.get("attribute")
+            }
+            attributes: dict[str, Any] = {}
+            catastrophic: list[str] = []
+            for name, row in sorted(plan_rows.items()):
+                if not isinstance(row, dict):
+                    continue
+                kind = str(row.get("resolution_kind") or "")
+                observed_row = observed_rows.get(name) if isinstance(observed_rows.get(name), dict) else None
+                observed_value = (
+                    observed_row.get("canonical_value", observed_row.get("value"))
+                    if observed_row else None
+                )
+                expected_value = row.get("target_value")
+                confidence = _attribute_confidence(profile, name)
+                if kind in {"abstained", "superseded"}:
+                    status = "abstained"
+                    matches = observed_row is None
+                elif kind == "review_required" or observed_row is None:
+                    status = "mismatch"
+                    matches = False
+                else:
+                    compared = compare_style_attribute(name, expected_value, observed_value)
+                    matches = compared.matches and name not in mismatch_names
+                    status = "applied" if matches else "mismatch"
+                    expected_value = compared.expected
+                    observed_value = compared.observed
+                catastrophic_failure = (
+                    status == "mismatch"
+                    and name in CATASTROPHIC_STYLE_ATTRIBUTES
+                    and kind in {"exact", "policy_adjusted", "derived"}
+                    and confidence >= HIGH_CONFIDENCE_THRESHOLD
+                )
+                if catastrophic_failure:
+                    catastrophic.append(name)
+                result = {
+                    "status": status,
+                    "expected": copy.deepcopy(expected_value),
+                    "observed": copy.deepcopy(observed_value),
+                    "confidence": confidence,
+                    "high_confidence_failure": catastrophic_failure,
+                    "resolution_kind": kind,
+                    "reason": str(row.get("reason") or ""),
+                    "superseded_by": str(row.get("superseded_by") or ""),
+                    "evidence_kind": str((observed_row or {}).get("evidence_kind") or ""),
+                }
+                color_distance = delta_e_2000(expected_value, observed_value)
+                if color_distance is not None:
+                    result["delta_e_2000"] = color_distance
+                attributes[name] = result
+            return attributes, catastrophic
+
     decision = profile.get("style_application_decision_v2")
     decision = decision if isinstance(decision, dict) else {}
     expected_applied = decision.get("applied_attributes")
@@ -172,15 +228,12 @@ def _attribute_results(profile: dict[str, Any], contract: dict[str, Any]) -> tup
             observed_value = observed_reason
         else:
             observed_value = observed_applied.get(name)
-            matches = name not in observed_abstained and name in observed_applied and _same_value(
-                expected_applied[name], observed_value
-            )
+            comparison = compare_style_attribute(name, expected_applied[name], observed_value)
+            matches = name not in observed_abstained and name in observed_applied and comparison.matches
             status = "applied" if matches else "mismatch"
             expected_value = expected_applied[name]
-        high_confidence_failure = status == "mismatch" and (
-            confidence >= HIGH_CONFIDENCE_THRESHOLD or name in CATASTROPHIC_STYLE_ATTRIBUTES
-        )
-        if status == "mismatch" and name in CATASTROPHIC_STYLE_ATTRIBUTES:
+        high_confidence_failure = status == "mismatch" and confidence >= HIGH_CONFIDENCE_THRESHOLD
+        if high_confidence_failure and name in CATASTROPHIC_STYLE_ATTRIBUTES and name in expected_applied:
             catastrophic.append(name)
         attributes[name] = {
             "status": status,
@@ -193,6 +246,26 @@ def _attribute_results(profile: dict[str, Any], contract: dict[str, Any]) -> tup
         if color_distance is not None:
             attributes[name]["delta_e_2000"] = color_distance
     return attributes, catastrophic
+
+
+def _distribution(values: list[float], *, evidence: str) -> dict[str, Any]:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return {"count": 0, "median": None, "p95": None, "evidence": evidence}
+    position = (len(ordered) - 1) * 0.95
+    lower = int(position)
+    upper = min(len(ordered) - 1, lower + 1)
+    p95 = ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+    return {
+        "count": len(ordered),
+        "median": round(float(statistics.median(ordered)), 6),
+        "p95": round(float(p95), 6),
+        "evidence": evidence,
+    }
+
+
+def _nested_color(value: Any) -> Any:
+    return value.get("color") if isinstance(value, dict) else value
 
 
 def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = "shadow") -> dict[str, Any]:
@@ -214,11 +287,16 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
         except (TypeError, ValueError) as exc:
             global_findings.append({"code": "invalid_owner_graph", "detail": str(exc)})
             continue
-        eligible.extend(
-            (graph.page_id, owner, _owner_bounds(graph, owner))
-            for owner in graph.owners
-            if is_rendered_owner(owner)
-        )
+        for owner in graph.owners:
+            candidates = layer_index.get((graph.page_id, owner.owner_id), [])
+            capture = candidates[0].get("owner_style_capture") if len(candidates) == 1 else None
+            capture_eligible = (
+                bool(capture.get("eligible"))
+                if isinstance(capture, dict)
+                else is_rendered_owner(owner)
+            )
+            if capture_eligible:
+                eligible.append((graph.page_id, owner, _owner_bounds(graph, owner)))
 
     denominator = len(eligible)
     profile_count = contract_count = metrics_count = 0
@@ -227,6 +305,17 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
     attribute_metrics: dict[str, dict[str, int]] = {}
     fallback_reason_counts: dict[str, int] = {}
     backend_counts: dict[str, int] = {}
+    rendered_owner_count = 0
+    safe_evaluated = safe_contained = 0
+    effect_evaluated = effect_contained = 0
+    catastrophic_evaluated = catastrophic_count = 0
+    color_errors: dict[str, list[float]] = {"fill": [], "stroke": [], "effect": []}
+    geometry_errors: dict[str, list[float]] = {}
+    resolution_kind_counts: dict[str, int] = {}
+    font_size_ratios: list[float] = []
+    below_legibility_count = 0
+    unauthorized_policy_adjustments = 0
+    invalid_superseded_relations = 0
     for page_id, owner, owner_bounds in eligible:
         owner_id = owner.owner_id
         semantic_role = str(owner.semantic_role or "unknown")
@@ -241,6 +330,8 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
             layer: dict[str, Any] = {}
         else:
             layer = candidates[0]
+        if not is_rendered_owner(owner):
+            findings.append({"code": "owner_materialization_not_committed"})
         raw_profile = layer.get("visual_profile_v2")
         profile: dict[str, Any] | None = None
         if not isinstance(raw_profile, dict):
@@ -267,6 +358,11 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                     expected_page_id=page_id,
                 )
                 contract_count += 1
+                if is_rendered_owner(owner) and (
+                    int(contract.get("schema_version") or 0) < 2
+                    or contract.get("render_status") == "completed"
+                ):
+                    rendered_owner_count += 1
             except (TypeError, ValueError) as exc:
                 findings.append({"code": "invalid_raster_contract", "detail": str(exc)})
         attributes: dict[str, Any] = {}
@@ -286,6 +382,28 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                 elif result["status"] == "abstained":
                     reason = str(result["expected"])
                     fallback_reason_counts[reason] = fallback_reason_counts.get(reason, 0) + 1
+                kind = str(result.get("resolution_kind") or "legacy")
+                resolution_kind_counts[kind] = resolution_kind_counts.get(kind, 0) + 1
+                if name in CATASTROPHIC_STYLE_ATTRIBUTES and result.get("confidence", 0.0) >= HIGH_CONFIDENCE_THRESHOLD and kind not in {"abstained", "superseded", "review_required"}:
+                    catastrophic_evaluated += 1
+                    if result.get("high_confidence_failure"):
+                        catastrophic_count += 1
+                expected_color = _nested_color(result.get("expected"))
+                observed_color = _nested_color(result.get("observed"))
+                color_distance = delta_e_2000(expected_color, observed_color)
+                color_bucket = "fill" if name == "fill" else "stroke" if name in {"stroke", "outline"} else "effect" if name in {"shadow", "glow", "gradient"} else None
+                if color_bucket and color_distance is not None:
+                    color_errors[color_bucket].append(color_distance)
+                if isinstance(result.get("expected"), (int, float)) and isinstance(result.get("observed"), (int, float)):
+                    geometry_errors.setdefault(name, []).append(abs(float(result["observed"]) - float(result["expected"])))
+                if kind == "policy_adjusted" and name not in POLICY_ADJUSTMENT_WHITELIST:
+                    unauthorized_policy_adjustments += 1
+                if kind == "superseded" and not str(result.get("superseded_by") or ""):
+                    invalid_superseded_relations += 1
+                if name == "font_size_px" and isinstance(result.get("expected"), (int, float)) and isinstance(result.get("observed"), (int, float)) and float(result["expected"]) > 0:
+                    font_size_ratios.append(float(result["observed"]) / float(result["expected"]))
+                    if float(result["observed"]) < MINIMUM_LEGIBLE_FONT_SIZE_PX:
+                        below_legibility_count += 1
             metric_errors = _metric_contract_errors(contract, owner_bounds)
             if not metric_errors:
                 metrics_count += 1
@@ -294,6 +412,18 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                     {"code": "invalid_render_metric", "metric": name}
                     for name in metric_errors
                 )
+                for name in metric_errors:
+                    if name in REQUIRED_RENDER_METRICS:
+                        global_findings.append({"code": "required_metric_missing", "owner_id": owner_id, "metric": name})
+            render_metrics = contract.get("render_metrics") if isinstance(contract.get("render_metrics"), dict) else {}
+            core_outside = render_metrics.get("core_pixels_outside_safe")
+            effect_outside = render_metrics.get("effect_pixels_outside_safe")
+            if isinstance(core_outside, int) and not isinstance(core_outside, bool) and core_outside >= 0:
+                safe_evaluated += 1
+                safe_contained += int(core_outside == 0)
+            if isinstance(effect_outside, int) and not isinstance(effect_outside, bool) and effect_outside >= 0:
+                effect_evaluated += 1
+                effect_contained += int(effect_outside == 0)
         owner_blocking = bool(findings)
         if owner_blocking:
             blocking.add(owner_id)
@@ -320,6 +450,10 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
 
     if denominator == 0:
         global_findings.append({"code": "empty_style_fidelity_denominator"})
+    if safe_evaluated == 0:
+        global_findings.append({"code": "zero_metric_denominator", "metric": "safe_containment"})
+    if effect_evaluated == 0:
+        global_findings.append({"code": "zero_metric_denominator", "metric": "effect_containment"})
     required_categories = required_style_categories(project)
     categories: dict[str, Any] = {}
     for name in sorted(set(category_totals) | set(required_categories)):
@@ -343,7 +477,7 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
     would_block = bool(blocking or global_findings)
     status = "BLOCK" if rollout == "enforce" and would_block else "PASS"
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": rollout,
         "owners": owners,
         "coverage": coverage,
@@ -351,10 +485,38 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
         "attribute_metrics": attribute_metrics,
         "fallback_reason_counts": fallback_reason_counts,
         "backend_counts": backend_counts,
+        "metrics": {
+            "safe_containment": {
+                "evaluated": safe_evaluated, "contained": safe_contained,
+                "rate": safe_contained / safe_evaluated if safe_evaluated else 0.0,
+            },
+            "effect_containment": {
+                "evaluated": effect_evaluated, "contained": effect_contained,
+                "rate": effect_contained / effect_evaluated if effect_evaluated else 0.0,
+            },
+            "catastrophic_mismatches": {
+                "evaluated": catastrophic_evaluated, "count": catastrophic_count,
+            },
+            "fill_delta_e_2000": _distribution(color_errors["fill"], evidence="decision_to_observation"),
+            "stroke_delta_e_2000": _distribution(color_errors["stroke"], evidence="decision_to_observation"),
+            "effect_delta_e_2000": _distribution(color_errors["effect"], evidence="decision_to_observation"),
+            "geometry_errors": {
+                name: _distribution(values, evidence="decision_to_observation")
+                for name, values in sorted(geometry_errors.items())
+            },
+            "intent_to_target_deviation": {
+                "resolution_kind_counts": dict(sorted(resolution_kind_counts.items())),
+                "font_size_ratio": _distribution(font_size_ratios, evidence="intent_to_target"),
+                "below_minimum_legibility_count": below_legibility_count,
+                "unauthorized_policy_adjustment_count": unauthorized_policy_adjustments,
+                "invalid_superseded_relation_count": invalid_superseded_relations,
+            },
+        },
         "findings": global_findings,
         "summary": {
             "owner_count": len(owners),
             "eligible_owner_count": denominator,
+            "rendered_owner_count": rendered_owner_count,
             "blocking_owner_count": len(blocking),
             "catastrophic_mismatch_count": sum(
                 len(owner["catastrophic_mismatches"]) for owner in owners
