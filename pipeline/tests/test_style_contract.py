@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
+
+import pytest
 
 
 PIPELINE_DIR = Path(__file__).resolve().parents[1]
@@ -13,6 +16,114 @@ from typesetter.style_contract import (
     style_evidence_v2_from_dict,
     style_evidence_v2_from_v1,
 )
+from ownership import model as ownership_model
+from style_v2_fixtures import valid_owner_style_raster_contract
+
+
+def test_owner_style_raster_contract_api_is_defined_at_ownership_boundary():
+    assert hasattr(ownership_model, "OwnerStyleRasterContract")
+    assert callable(
+        getattr(ownership_model, "owner_style_raster_contract_sha256", None)
+    )
+    assert callable(
+        getattr(ownership_model, "validate_owner_style_raster_contract", None)
+    )
+
+
+def test_owner_style_raster_contract_is_canonical_hash_bound_and_immutable():
+    contract = valid_owner_style_raster_contract()
+
+    normalized = ownership_model.validate_owner_style_raster_contract(contract)
+
+    assert normalized["contract_sha256"] == (
+        ownership_model.owner_style_raster_contract_sha256(normalized)
+    )
+    assert normalized["owner_id"] == "owner_p001_fixture"
+    with pytest.raises(TypeError):
+        contract.applied_attributes["fill"] = "#FFFFFF"
+
+
+def _rehash_raster_contract(payload: dict) -> dict:
+    normalized = copy.deepcopy(payload)
+    normalized["contract_sha256"] = (
+        ownership_model.owner_style_raster_contract_sha256(normalized)
+    )
+    return normalized
+
+
+def test_owner_style_raster_contract_requires_complete_schema():
+    payload = valid_owner_style_raster_contract().to_dict()
+    payload.pop("schema_version")
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_style_raster_contract_binds_expected_owner_and_page():
+    contract = valid_owner_style_raster_contract()
+
+    with pytest.raises(ValueError, match="owner identity mismatch"):
+        ownership_model.validate_owner_style_raster_contract(
+            contract,
+            expected_owner_id="owner_other",
+        )
+    with pytest.raises(ValueError, match="page identity mismatch"):
+        ownership_model.validate_owner_style_raster_contract(
+            contract,
+            expected_page_id="page_999",
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "visual_profile_sha256",
+        "profile_component_geometry_sha256",
+        "execution_component_geometry_sha256",
+        "source_artifact_sha256",
+        "source_glyph_mask_sha256",
+        "rendered_before_sha256",
+        "rendered_patch_sha256",
+        "rendered_after_sha256",
+    ],
+)
+def test_owner_style_raster_contract_rejects_malformed_hashes(field_name):
+    payload = valid_owner_style_raster_contract().to_dict()
+    payload[field_name] = "not-a-sha256"
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="malformed sha256"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_style_raster_contract_rejects_noncanonical_attribute():
+    payload = valid_owner_style_raster_contract().to_dict()
+    payload["requested_attributes"]["not_supported"] = "value"
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="unsupported style attribute"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_style_raster_contract_rejects_duplicate_segment_ids():
+    payload = valid_owner_style_raster_contract().to_dict()
+    payload["segments"] = [
+        {"segment_id": "region_0"},
+        {"segment_id": "region_0"},
+    ]
+    payload = _rehash_raster_contract(payload)
+
+    with pytest.raises(ValueError, match="duplicate segment_id"):
+        ownership_model.validate_owner_style_raster_contract(payload)
+
+
+def test_owner_style_raster_contract_rejects_self_hash_tampering():
+    payload = valid_owner_style_raster_contract().to_dict()
+    payload["render_metrics"]["core_pixel_count"] = 99
+
+    with pytest.raises(ValueError, match="hash mismatch"):
+        ownership_model.validate_owner_style_raster_contract(payload)
 
 
 def test_v2_marks_every_attribute_unknown_when_v1_has_no_text_evidence():

@@ -28,6 +28,7 @@ STYLE_V2_ATTRIBUTE_NAMES = (
     "rotation_deg",
     "container",
 )
+STYLE_V2_ATTRIBUTE_NAME_SET = frozenset(STYLE_V2_ATTRIBUTE_NAMES)
 
 
 @dataclass(frozen=True)

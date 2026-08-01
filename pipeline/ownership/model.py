@@ -5,17 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
+import math
 from pathlib import PurePosixPath
 import re
 from types import MappingProxyType
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
 try:
     from typesetter.owner_render_quality import OwnerRenderQuality
+    from typesetter.style_contract import STYLE_V2_ATTRIBUTE_NAME_SET
 except ImportError:  # pragma: no cover - supports package imports
     from ..typesetter.owner_render_quality import OwnerRenderQuality
+    from ..typesetter.style_contract import STYLE_V2_ATTRIBUTE_NAME_SET
 
 
 BBox = tuple[int, int, int, int]
@@ -369,6 +372,330 @@ def owner_residual_evidence_sha256(
         allow_nan=False,
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class OwnerStyleRasterContract:
+    """Immutable evidence binding one owner style decision to raster pixels."""
+
+    schema_version: int
+    page_id: str
+    owner_id: str
+    visual_profile_sha256: str
+    profile_component_geometry_sha256: str
+    execution_component_geometry_sha256: str
+    source_artifact_sha256: str
+    source_glyph_mask_sha256: str
+    status: str
+    backend: str
+    backend_version: str
+    capabilities: tuple[str, ...]
+    requested_attributes: Mapping[str, Any]
+    applied_attributes: Mapping[str, Any]
+    abstained_attributes: Mapping[str, Any]
+    glyph_core_envelope: Mapping[str, Any]
+    effect_envelope: Mapping[str, Any]
+    render_metrics: Mapping[str, Any]
+    segments: tuple[Mapping[str, Any], ...]
+    rendered_before_sha256: str
+    rendered_patch_sha256: str
+    rendered_after_sha256: str
+    contract_sha256: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "capabilities",
+            tuple(sorted(set(str(value) for value in self.capabilities))),
+        )
+        for field_name in (
+            "requested_attributes",
+            "applied_attributes",
+            "abstained_attributes",
+            "glyph_core_envelope",
+            "effect_envelope",
+            "render_metrics",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _freeze_owner_style_json(getattr(self, field_name)),
+            )
+        object.__setattr__(
+            self,
+            "segments",
+            tuple(_freeze_owner_style_json(segment) for segment in self.segments),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": int(self.schema_version),
+            "page_id": self.page_id,
+            "owner_id": self.owner_id,
+            "visual_profile_sha256": self.visual_profile_sha256,
+            "profile_component_geometry_sha256": (
+                self.profile_component_geometry_sha256
+            ),
+            "execution_component_geometry_sha256": (
+                self.execution_component_geometry_sha256
+            ),
+            "source_artifact_sha256": self.source_artifact_sha256,
+            "source_glyph_mask_sha256": self.source_glyph_mask_sha256,
+            "status": self.status,
+            "backend": self.backend,
+            "backend_version": self.backend_version,
+            "capabilities": list(self.capabilities),
+            "requested_attributes": _thaw_owner_style_json(
+                self.requested_attributes
+            ),
+            "applied_attributes": _thaw_owner_style_json(self.applied_attributes),
+            "abstained_attributes": _thaw_owner_style_json(
+                self.abstained_attributes
+            ),
+            "glyph_core_envelope": _thaw_owner_style_json(
+                self.glyph_core_envelope
+            ),
+            "effect_envelope": _thaw_owner_style_json(self.effect_envelope),
+            "render_metrics": _thaw_owner_style_json(self.render_metrics),
+            "segments": [
+                _thaw_owner_style_json(segment) for segment in self.segments
+            ],
+            "rendered_before_sha256": self.rendered_before_sha256,
+            "rendered_patch_sha256": self.rendered_patch_sha256,
+            "rendered_after_sha256": self.rendered_after_sha256,
+            "contract_sha256": self.contract_sha256,
+        }
+
+
+def _freeze_owner_style_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                str(key): _freeze_owner_style_json(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_owner_style_json(item) for item in value)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("owner style raster contract contains non-finite value")
+        return value
+    raise TypeError(
+        f"owner style raster contract contains non-JSON value: {type(value).__name__}"
+    )
+
+
+def _thaw_owner_style_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _thaw_owner_style_json(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_thaw_owner_style_json(item) for item in value]
+    return value
+
+
+OWNER_STYLE_RASTER_CONTRACT_SCHEMA_VERSION = 1
+OWNER_STYLE_RASTER_CONTRACT_STATUSES = frozenset(
+    {"applied", "fallback", "review_required"}
+)
+OWNER_STYLE_RASTER_CONTRACT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "page_id",
+        "owner_id",
+        "visual_profile_sha256",
+        "profile_component_geometry_sha256",
+        "execution_component_geometry_sha256",
+        "source_artifact_sha256",
+        "source_glyph_mask_sha256",
+        "status",
+        "backend",
+        "backend_version",
+        "capabilities",
+        "requested_attributes",
+        "applied_attributes",
+        "abstained_attributes",
+        "glyph_core_envelope",
+        "effect_envelope",
+        "render_metrics",
+        "segments",
+        "rendered_before_sha256",
+        "rendered_patch_sha256",
+        "rendered_after_sha256",
+        "contract_sha256",
+    }
+)
+OWNER_STYLE_RASTER_HASH_FIELDS = (
+    "visual_profile_sha256",
+    "profile_component_geometry_sha256",
+    "execution_component_geometry_sha256",
+    "source_artifact_sha256",
+    "source_glyph_mask_sha256",
+    "rendered_before_sha256",
+    "rendered_patch_sha256",
+    "rendered_after_sha256",
+)
+_OWNER_STYLE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def owner_style_raster_contract_sha256(
+    value: OwnerStyleRasterContract | Mapping[str, Any],
+) -> str:
+    """Return the canonical self-hash for an owner style raster contract."""
+
+    payload = (
+        value.to_dict()
+        if isinstance(value, OwnerStyleRasterContract)
+        else _thaw_owner_style_json(value)
+    )
+    if not isinstance(payload, dict):
+        raise TypeError("owner style raster contract must be a mapping")
+    payload.pop("contract_sha256", None)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def validate_owner_style_raster_contract(
+    value: OwnerStyleRasterContract | Mapping[str, Any],
+    *,
+    expected_owner_id: str | None = None,
+    expected_page_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate and normalize one owner style raster contract."""
+
+    payload = (
+        value.to_dict()
+        if isinstance(value, OwnerStyleRasterContract)
+        else _thaw_owner_style_json(value)
+    )
+    if not isinstance(payload, dict):
+        raise TypeError("owner style raster contract must be a mapping")
+    payload_fields = set(payload)
+    missing_fields = sorted(OWNER_STYLE_RASTER_CONTRACT_FIELDS - payload_fields)
+    if missing_fields:
+        raise ValueError(
+            "owner style raster contract missing required fields: "
+            + ", ".join(missing_fields)
+        )
+    unknown_fields = sorted(payload_fields - OWNER_STYLE_RASTER_CONTRACT_FIELDS)
+    if unknown_fields:
+        raise ValueError(
+            "owner style raster contract contains unknown fields: "
+            + ", ".join(unknown_fields)
+        )
+    schema_version = payload.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != OWNER_STYLE_RASTER_CONTRACT_SCHEMA_VERSION
+    ):
+        raise ValueError("owner style raster contract schema_version is unsupported")
+    owner_id = str(payload.get("owner_id") or "").strip()
+    page_id = str(payload.get("page_id") or "").strip()
+    if not owner_id or not page_id:
+        raise ValueError("owner style raster contract identity is missing")
+    if expected_owner_id is not None and owner_id != expected_owner_id:
+        raise ValueError("owner style raster contract owner identity mismatch")
+    if expected_page_id is not None and page_id != expected_page_id:
+        raise ValueError("owner style raster contract page identity mismatch")
+    for field_name in OWNER_STYLE_RASTER_HASH_FIELDS:
+        field_value = payload.get(field_name)
+        if not isinstance(field_value, str) or not _OWNER_STYLE_SHA256_RE.fullmatch(
+            field_value
+        ):
+            raise ValueError(
+                f"owner style raster contract malformed sha256: {field_name}"
+            )
+    status = str(payload.get("status") or "").strip()
+    if status not in OWNER_STYLE_RASTER_CONTRACT_STATUSES:
+        raise ValueError("owner style raster contract status is unsupported")
+    for field_name in ("backend", "backend_version"):
+        if not isinstance(payload.get(field_name), str) or not str(
+            payload[field_name]
+        ).strip():
+            raise ValueError(
+                f"owner style raster contract {field_name} is missing"
+            )
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list) or capabilities != sorted(
+        set(str(value) for value in capabilities)
+    ):
+        raise ValueError("owner style raster contract capabilities are not canonical")
+    for field_name in (
+        "requested_attributes",
+        "applied_attributes",
+        "abstained_attributes",
+    ):
+        attributes = payload.get(field_name)
+        if not isinstance(attributes, dict):
+            raise ValueError(
+                f"owner style raster contract {field_name} must be a mapping"
+            )
+        unsupported = sorted(set(attributes) - STYLE_V2_ATTRIBUTE_NAME_SET)
+        if unsupported:
+            raise ValueError(
+                "owner style raster contract unsupported style attribute: "
+                + ", ".join(unsupported)
+            )
+    requested_names = set(payload["requested_attributes"])
+    applied_names = set(payload["applied_attributes"])
+    abstained_names = set(payload["abstained_attributes"])
+    if applied_names & abstained_names:
+        raise ValueError(
+            "owner style raster contract attribute cannot be applied and abstained"
+        )
+    if requested_names != applied_names | abstained_names:
+        raise ValueError(
+            "owner style raster contract requested attributes are not fully resolved"
+        )
+    if status == "applied" and not applied_names:
+        raise ValueError("applied owner style raster contract has no applied attributes")
+    if status != "applied" and applied_names:
+        raise ValueError(
+            "non-applied owner style raster contract contains applied attributes"
+        )
+    for field_name in (
+        "glyph_core_envelope",
+        "effect_envelope",
+        "render_metrics",
+    ):
+        if not isinstance(payload.get(field_name), dict):
+            raise ValueError(
+                f"owner style raster contract {field_name} must be a mapping"
+            )
+    segments = payload.get("segments")
+    if not isinstance(segments, list):
+        raise ValueError("owner style raster contract segments must be a list")
+    segment_ids: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise ValueError("owner style raster contract segment must be a mapping")
+        segment_id = str(segment.get("segment_id") or "").strip()
+        if not segment_id:
+            raise ValueError("owner style raster contract segment_id is missing")
+        segment_ids.append(segment_id)
+    duplicate_segment_ids = _duplicate_values(segment_ids)
+    if duplicate_segment_ids:
+        raise ValueError(
+            "owner style raster contract duplicate segment_id: "
+            + ", ".join(duplicate_segment_ids)
+        )
+    actual_hash = owner_style_raster_contract_sha256(payload)
+    if str(payload.get("contract_sha256") or "") != actual_hash:
+        raise ValueError("owner style raster contract hash mismatch")
+    return payload
+
 
 @dataclass(frozen=True)
 class OwnerGlyphPatch:
