@@ -37,6 +37,7 @@ from ownership.model import (
     TextObservation,
     TRANSLATION_ROUTE_ACTIONS,
     owner_residual_evidence_sha256,
+    validate_owner_style_raster_contract,
 )
 from ownership.translation import merge_owner_translations, owners_to_translation_page
 from typesetter.owner_style import (
@@ -8509,6 +8510,24 @@ def _owner_array_sha256(value: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def _owner_masked_pixels_sha256(
+    image_rgb: np.ndarray,
+    mask: np.ndarray,
+) -> str:
+    image = np.ascontiguousarray(image_rgb, dtype=np.uint8)
+    binary_mask = np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("owner masked pixel hash requires an RGB image")
+    if binary_mask.shape != image.shape[:2]:
+        raise ValueError("owner masked pixel hash shape mismatch")
+    digest = sha256()
+    digest.update(b"traduzai.masked-rgb.v1\0")
+    digest.update(_owner_array_sha256(binary_mask).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(image[binary_mask > 0].tobytes(order="C"))
+    return digest.hexdigest()
+
+
 def _canonical_owner_identity(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError(f"{label} must be a canonical non-empty string")
@@ -8691,6 +8710,10 @@ def apply_atomic_owner_execution(
     original_rgb: np.ndarray,
     mutation: OwnerMutation,
     glyph_patch: OwnerGlyphPatch | None,
+    *,
+    expected_visual_profile_sha256: str | None = None,
+    expected_profile_component_geometry_sha256: str | None = None,
+    expected_style_decision: Mapping[str, Any] | None = None,
 ) -> OwnerExecutionCommit:
     """Commit cleanup and glyph rendering as one fail-closed owner transaction."""
 
@@ -8989,6 +9012,100 @@ def apply_atomic_owner_execution(
             raise ValueError("glyph patch after hash does not match result")
         if glyph_patch.glyph_mask_sha256 != _owner_array_sha256(glyph_mask):
             raise ValueError("glyph patch mask hash mismatch")
+        style_contract = validate_owner_style_raster_contract(
+            glyph_patch.style_raster_contract,
+            expected_owner_id=owner_id,
+            expected_page_id=page_id,
+        )
+        if style_contract["status"] == "review_required":
+            raise ValueError("style raster contract requires review")
+        if expected_visual_profile_sha256 is not None:
+            expected_profile_hash = _canonical_owner_hash(
+                expected_visual_profile_sha256,
+                label="expected visual profile hash",
+            )
+            if style_contract["visual_profile_sha256"] != expected_profile_hash:
+                raise ValueError("style raster contract visual profile mismatch")
+        if expected_profile_component_geometry_sha256 is not None:
+            expected_profile_geometry_hash = _canonical_owner_hash(
+                expected_profile_component_geometry_sha256,
+                label="expected profile component geometry hash",
+            )
+            if (
+                style_contract["profile_component_geometry_sha256"]
+                != expected_profile_geometry_hash
+            ):
+                raise ValueError("style raster contract profile geometry mismatch")
+        if (
+            style_contract["execution_component_geometry_sha256"]
+            != glyph_component_geometry_sha256
+        ):
+            raise ValueError("style raster contract execution geometry mismatch")
+        if style_contract["rendered_before_sha256"] != mutation.after_sha256:
+            raise ValueError("style raster contract before hash mismatch")
+        if style_contract["rendered_after_sha256"] != glyph_patch.after_sha256:
+            raise ValueError("style raster contract after hash mismatch")
+        expected_patch_sha256 = _owner_masked_pixels_sha256(
+            rendered_result,
+            glyph_mask,
+        )
+        if style_contract["rendered_patch_sha256"] != expected_patch_sha256:
+            raise ValueError("style raster contract patch hash mismatch")
+        for envelope_name in ("glyph_core_envelope", "effect_envelope"):
+            envelope = style_contract[envelope_name]
+            pixel_count = envelope.get("pixel_count")
+            if (
+                not isinstance(pixel_count, int)
+                or isinstance(pixel_count, bool)
+                or pixel_count < 0
+                or pixel_count > int(np.count_nonzero(glyph_mask))
+            ):
+                raise ValueError(
+                    f"style raster contract {envelope_name} pixel count mismatch"
+                )
+            envelope_bbox = envelope.get("bbox_page")
+            if pixel_count == 0:
+                if envelope_bbox not in ([], None):
+                    raise ValueError(
+                        f"style raster contract {envelope_name} empty bbox mismatch"
+                    )
+                continue
+            canonical_envelope_bbox = _canonical_owner_bbox(
+                envelope_bbox,
+                shape=tuple(original.shape[:2]),
+                label=f"style raster contract {envelope_name} bbox",
+            )
+            ex1, ey1, ex2, ey2 = canonical_envelope_bbox
+            safe_bbox = _owner_mask_bbox(safe_polygon_mask)
+            if not (
+                safe_bbox[0] <= ex1 < ex2 <= safe_bbox[2]
+                and safe_bbox[1] <= ey1 < ey2 <= safe_bbox[3]
+            ):
+                raise ValueError(
+                    f"style raster contract {envelope_name} escapes safe polygon"
+                )
+        if expected_style_decision is not None:
+            decision_applied = dict(
+                expected_style_decision.get("applied_attributes") or {}
+            )
+            decision_abstained = dict(
+                expected_style_decision.get("abstained_attributes") or {}
+            )
+            decision_names = set(decision_applied) | set(decision_abstained)
+            if set(style_contract["requested_attributes"]) != decision_names:
+                raise ValueError(
+                    "style raster contract requested decision mismatch"
+                )
+            for name, value in style_contract["applied_attributes"].items():
+                if name not in decision_applied or decision_applied[name] != value:
+                    raise ValueError(
+                        "style raster contract applied decision mismatch"
+                    )
+            for name in decision_abstained:
+                if name not in style_contract["abstained_attributes"]:
+                    raise ValueError(
+                        "style raster contract abstained decision mismatch"
+                    )
         render_changed = np.any(rendered_result != mutation_result, axis=2)
         changed_outside_glyph = render_changed & (glyph_mask == 0)
         if not np.any(render_changed):
@@ -10616,7 +10733,24 @@ def execute_owner_page_graph(
             layout_page,
             owner_graph=single,
         )
-        commit = apply_atomic_owner_execution(source, mutation, glyph_patch)
+        layout_record = layout_page["texts"][0]
+        visual_profile = layout_record.get("visual_profile_v2")
+        visual_profile = visual_profile if isinstance(visual_profile, dict) else {}
+        style_decision = visual_profile.get("style_application_decision_v2")
+        commit = apply_atomic_owner_execution(
+            source,
+            mutation,
+            glyph_patch,
+            expected_visual_profile_sha256=str(
+                layout_record.get("visual_profile_sha256") or ""
+            ),
+            expected_profile_component_geometry_sha256=str(
+                visual_profile.get("component_geometry_sha256") or ""
+            ),
+            expected_style_decision=(
+                style_decision if isinstance(style_decision, dict) else None
+            ),
+        )
         commits.append(commit)
         if commit.committed:
             owner.state = "rendered"
@@ -10642,6 +10776,9 @@ def execute_owner_page_graph(
                     "render_completed": bool(glyph_patch.render_completed),
                     "fit_status": str(glyph_patch.fit_status),
                     "owner_render_quality": glyph_patch.render_quality_contract.to_dict(),
+                    "style_v2_raster_contract": (
+                        glyph_patch.style_raster_contract.to_dict()
+                    ),
                     "residual_cleanup_contract": {
                         "residual_verified": bool(mutation.residual_verified),
                         "residual_score": float(mutation.residual_score),

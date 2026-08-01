@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -335,6 +336,67 @@ def _glyph_patch_for_mask(
         execution_tile_id=mutation.execution_tile_id,
         projection_role="executor",
     )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "owner_id",
+        "visual_profile_sha256",
+        "execution_geometry",
+        "patch_sha256",
+        "after_sha256",
+        "contract_sha256",
+    ],
+)
+def test_atomic_commit_rolls_back_tampered_style_contract(tamper: str) -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((18, 24, 3), 230, dtype=np.uint8)
+    mutation = _mutation(original)
+    glyph_patch = _glyph_patch(
+        mutation,
+        glyph_patch_type,
+        render_completed=True,
+        fit_status="ok",
+    )
+    payload = glyph_patch.style_raster_contract.to_dict()
+    if tamper == "owner_id":
+        payload["owner_id"] = "owner_other"
+    elif tamper == "visual_profile_sha256":
+        payload["visual_profile_sha256"] = "b" * 64
+    elif tamper == "execution_geometry":
+        payload["execution_component_geometry_sha256"] = "c" * 64
+    elif tamper == "patch_sha256":
+        payload["rendered_patch_sha256"] = "d" * 64
+    elif tamper == "after_sha256":
+        payload["rendered_after_sha256"] = "e" * 64
+    if tamper == "contract_sha256":
+        payload["contract_sha256"] = "f" * 64
+    else:
+        payload["contract_sha256"] = owner_model.owner_style_raster_contract_sha256(
+            payload
+        )
+    forged = owner_model.OwnerStyleRasterContract(**payload)
+    object.__setattr__(glyph_patch, "style_raster_contract", forged)
+
+    commit = apply_atomic(
+        original,
+        mutation,
+        glyph_patch,
+        expected_visual_profile_sha256=(
+            glyph_patch.style_raster_contract.visual_profile_sha256
+            if tamper != "visual_profile_sha256"
+            else "a" * 64
+        ),
+        expected_profile_component_geometry_sha256=(
+            valid_owner_style_raster_contract().profile_component_geometry_sha256
+        ),
+    )
+
+    assert commit.committed is False
+    assert commit.review_required is True
+    assert np.array_equal(commit.result_rgb, original)
+    assert commit.reason.startswith("render_contract_invalid:")
 
 
 def test_missing_second_line_mask_revokes_entire_owner() -> None:

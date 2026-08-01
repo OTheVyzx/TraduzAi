@@ -56,6 +56,11 @@ def valid_owner_style_raster_contract(
     result: np.ndarray | None = None,
     glyph_mask: np.ndarray | None = None,
     component_geometry_sha256: str | None = None,
+    visual_profile_sha256: str | None = None,
+    profile_component_geometry_sha256: str | None = None,
+    source_artifact_sha256: str | None = None,
+    source_glyph_mask_sha256: str | None = None,
+    style_decision: dict[str, Any] | None = None,
 ) -> OwnerStyleRasterContract:
     source = np.arange(48, dtype=np.uint8).reshape(4, 4, 3)
     canonical_before = np.ascontiguousarray(
@@ -82,28 +87,46 @@ def valid_owner_style_raster_contract(
     execution_geometry_sha256 = component_geometry_sha256 or _json_sha256(
         {"bbox_page": [0, 0, canonical_before.shape[1], canonical_before.shape[0]]}
     )
-    requested_attributes = {
-        "fill": "#F0F0F0",
-        "font_name": "ComicNeue-Bold.ttf",
-    }
+    decision_applied = dict((style_decision or {}).get("applied_attributes") or {})
+    decision_abstained = dict(
+        (style_decision or {}).get("abstained_attributes") or {}
+    )
+    requested_attributes = (
+        {
+            name: decision_applied.get(name, "unknown")
+            for name in sorted(set(decision_applied) | set(decision_abstained))
+        }
+        if style_decision is not None
+        else {
+            "fill": "#F0F0F0",
+            "font_name": "ComicNeue-Bold.ttf",
+        }
+    )
     applied_attributes: dict[str, Any] = {}
     abstained_attributes = {
-        "fill": "fixture_has_no_renderer_evidence",
-        "font_name": "fixture_has_no_renderer_evidence",
+        name: str(
+            decision_abstained.get(name) or "fixture_has_no_renderer_evidence"
+        )
+        for name in requested_attributes
     }
     raw = {
         "schema_version": 1,
         "page_id": page_id,
         "owner_id": owner_id,
-        "visual_profile_sha256": _json_sha256(
+        "visual_profile_sha256": visual_profile_sha256 or _json_sha256(
             {"owner_id": owner_id, "status": "applied"}
         ),
-        "profile_component_geometry_sha256": _json_sha256(
-            {"component_ids": ["component_fixture"]}
+        "profile_component_geometry_sha256": (
+            profile_component_geometry_sha256
+            or _json_sha256({"component_ids": ["component_fixture"]})
         ),
         "execution_component_geometry_sha256": execution_geometry_sha256,
-        "source_artifact_sha256": _array_sha256(canonical_before),
-        "source_glyph_mask_sha256": _array_sha256(canonical_mask),
+        "source_artifact_sha256": (
+            source_artifact_sha256 or _array_sha256(canonical_before)
+        ),
+        "source_glyph_mask_sha256": (
+            source_glyph_mask_sha256 or _array_sha256(canonical_mask)
+        ),
         "status": "fallback",
         "backend": "python_ft2font",
         "backend_version": "fixture-v1",

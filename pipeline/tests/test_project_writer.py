@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from main import _save_project_json
 from project_writer import validate_project_consistency, write_project_json_atomic
+from style_v2_fixtures import valid_owner_style_raster_contract
 
 
 def _project():
@@ -116,6 +117,22 @@ def test_atomic_write_creates_project_json(tmp_path):
         == 1
     )
     assert not (tmp_path / "project.json.tmp").exists()
+
+
+def test_project_writer_round_trips_style_raster_contract(tmp_path):
+    path = tmp_path / "project.json"
+    project = _project()
+    contract = valid_owner_style_raster_contract().to_dict()
+    project["paginas"][0]["text_layers"][0][
+        "style_v2_raster_contract"
+    ] = contract
+
+    write_project_json_atomic(path, project)
+
+    layer = json.loads(path.read_text(encoding="utf-8"))["paginas"][0][
+        "text_layers"
+    ][0]
+    assert layer["style_v2_raster_contract"] == contract
 
 
 def test_backup_created_before_overwrite(tmp_path):

@@ -296,6 +296,8 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
             from typesetter.owner_render_quality import OwnerRenderQuality
 
             owner = owner_graph.owners[0]
+            profile_record = _record["texts"][0]
+            visual_profile = profile_record["visual_profile_v2"]
             calls.append(("typeset", owner.owner_id))
             result = image.copy()
             result[12:15, 16:25] = 3
@@ -350,6 +352,19 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
                     component_geometry_sha256=(
                         state["mutation"].component_geometry_sha256
                     ),
+                    visual_profile_sha256=visual_profile[
+                        "visual_profile_sha256"
+                    ],
+                    profile_component_geometry_sha256=visual_profile[
+                        "component_geometry_sha256"
+                    ],
+                    source_artifact_sha256=visual_profile["source_sha256"],
+                    source_glyph_mask_sha256=visual_profile[
+                        "glyph_mask_sha256"
+                    ],
+                    style_decision=visual_profile[
+                        "style_application_decision_v2"
+                    ],
                 ),
                 execution_tile_id=owner.execution_tile_id,
             )
@@ -370,6 +385,9 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner():
     assert execution.records[0]["band_id"] == "tile_executor"
     assert execution.records[0]["render_bbox"] == [16, 12, 25, 15]
     assert execution.records[0]["fit_status"] == "ok"
+    assert execution.records[0]["style_v2_raster_contract"] == (
+        execution.commits[0].glyph_patch.style_raster_contract.to_dict()
+    )
     assert execution.records[0]["safe_text_box"] == [8, 7, 42, 27]
     assert execution.records[0]["target_bbox"] == [8, 7, 42, 27]
     assert execution.records[0]["owner_mask_coverage"] == {
