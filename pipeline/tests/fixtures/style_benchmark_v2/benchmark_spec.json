@@ -1,14 +1,5 @@
 {
   "schema_version": 2,
-  "validation_thresholds": {
-    "attributes": {
-      "fill": {"minimum_evaluated": 2, "coverage_min": 0.95, "precision_min": 0.90},
-      "font_name": {"minimum_evaluated": 2, "coverage_min": 0.80, "precision_min": 0.80},
-      "stroke": {"minimum_evaluated": 2, "coverage_min": 0.90, "precision_min": 0.85}
-    },
-    "hard_negative_abstention_min": 1.0,
-    "round_trip_min": 1.0
-  },
   "cases": [
     {
       "id": "smoke-solid-outline",

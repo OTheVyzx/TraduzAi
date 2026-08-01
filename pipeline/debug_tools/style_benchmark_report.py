@@ -91,6 +91,42 @@ def evaluate_validation_thresholds(
                     "minimum": float(policy[policy_name]),
                 }
             )
+    if "font_top1_min" in policy:
+        font = attributes.get("font_name") if isinstance(attributes.get("font_name"), dict) else None
+        if font is None:
+            findings.append({"code": "required_metric_missing", "metric": "font_top1"})
+        elif float(font.get("precision") or 0.0) < float(policy["font_top1_min"]):
+            findings.append({"code": "metric_threshold_breach", "metric": "font_top1", "actual": float(font.get("precision") or 0.0), "minimum": float(policy["font_top1_min"])})
+    if "font_top3_min" in policy:
+        font = attributes.get("font_name") if isinstance(attributes.get("font_name"), dict) else None
+        evaluated = int((font or {}).get("evaluated") or 0)
+        if not evaluated:
+            findings.append({"code": "zero_metric_denominator", "metric": "font_top3"})
+        else:
+            actual = float((font or {}).get("top_k_hits") or 0) / evaluated
+            if actual < float(policy["font_top3_min"]):
+                findings.append({"code": "metric_threshold_breach", "metric": "font_top3", "actual": actual, "minimum": float(policy["font_top3_min"])})
+    flat_metric_contracts = {
+        "category_min": ("categories", "minimum_go_rate", "minimum"),
+        "speech_go_rate_min": ("speech", "go_rate", "minimum"),
+        "owner_go_rate_min": ("owners", "go_rate", "minimum"),
+        "fill_delta_e_2000_median_max": ("fill_delta_e_2000", "median", "maximum"),
+        "fill_delta_e_2000_p95_max": ("fill_delta_e_2000", "p95", "maximum"),
+        "safe_containment_min": ("safe_containment", "rate", "minimum"),
+        "catastrophic_high_confidence_mismatch_max": ("catastrophic_mismatches", "count", "maximum"),
+    }
+    for policy_name, (section_name, metric_name, direction) in flat_metric_contracts.items():
+        if policy_name not in policy:
+            continue
+        section = score.get(section_name)
+        if not isinstance(section, dict) or metric_name not in section:
+            findings.append({"code": "required_metric_missing", "metric": f"{section_name}.{metric_name}"})
+            continue
+        actual = float(section[metric_name])
+        threshold = float(policy[policy_name])
+        breached = actual < threshold if direction == "minimum" else actual > threshold
+        if breached:
+            findings.append({"code": "metric_threshold_breach", "metric": f"{section_name}.{metric_name}", "actual": actual, direction: threshold})
     return {"status": "BLOCK" if findings else "PASS", "findings": findings}
 
 

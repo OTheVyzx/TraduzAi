@@ -38,6 +38,32 @@ def test_validation_thresholds_block_breach_and_missing_denominator():
     }
 
 
+def test_flat_versioned_threshold_schema_never_passes_missing_metrics():
+    score = {
+        "attributes": {
+            "font_name": {"evaluated": 10, "precision": 0.40, "top_k_hits": 4},
+            "fill": {"evaluated": 10, "precision": 0.55},
+        },
+    }
+    thresholds = {
+        "font_top1_min": 0.90,
+        "font_top3_min": 0.98,
+        "category_min": 0.85,
+        "speech_go_rate_min": 0.95,
+        "owner_go_rate_min": 0.90,
+        "fill_delta_e_2000_median_max": 8.0,
+        "fill_delta_e_2000_p95_max": 12.0,
+        "safe_containment_min": 1.0,
+        "catastrophic_high_confidence_mismatch_max": 0,
+    }
+
+    result = style_benchmark_report.evaluate_validation_thresholds(score, thresholds)
+
+    assert result["status"] == "BLOCK"
+    assert "metric_threshold_breach" in {row["code"] for row in result["findings"]}
+    assert "required_metric_missing" in {row["code"] for row in result["findings"]}
+
+
 def test_benchmark_enforce_returns_two_when_threshold_fails(tmp_path, monkeypatch):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
