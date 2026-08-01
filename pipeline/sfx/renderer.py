@@ -233,7 +233,11 @@ def _render_project_font_latin_sfx(
     layer["render_font_name"] = font_path.name
     layer["style_v2_raster_contract"] = {
         "status": result.status,
-        "applied_attributes": copy.deepcopy(result.applied_attributes),
+        "backend": "project_font_textpath",
+        "applied_attributes": {
+            **copy.deepcopy(result.applied_attributes),
+            "font_name": font_path.name,
+        },
         "abstained_attributes": copy.deepcopy(result.abstained_attributes),
         "glyph_core_envelope": list(result.glyph_core_envelope or ()),
         "effect_envelope": list(result.effect_envelope or ()),

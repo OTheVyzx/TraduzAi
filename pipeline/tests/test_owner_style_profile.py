@@ -23,6 +23,7 @@ from ownership.model import (  # noqa: E402
 from ownership.translation import owners_to_translation_page  # noqa: E402
 from typesetter import renderer as renderer_mod  # noqa: E402
 from typesetter.owner_style import (  # noqa: E402
+    _materialize_style,
     attach_owner_visual_profile,
     build_owner_visual_profile,
     build_owner_visual_profiles,
@@ -175,6 +176,32 @@ def test_owner_profile_consumes_masked_capture_instead_of_legacy_empty_evidence(
 
     assert profile["style_evidence_v2"] == capture.style_evidence_v2.to_dict()
     assert profile["style_evidence_v2"]["source"] == "owner_mask_v2"
+
+
+def test_materialization_maps_every_applied_canonical_attribute() -> None:
+    applied = {
+        "font_name": "KOMIKAX_.ttf",
+        "font_weight": "bold",
+        "font_width": "condensed",
+        "fill": "#F4F4F4",
+        "stroke": {"color": "#111111", "width_px": 2},
+        "shadow": {"color": "#222222", "offset": [2, 3]},
+        "glow": {"color": "#66AAFF", "width_px": 4},
+        "gradient": ["#FFFFFF", "#88AAFF"],
+        "rotation_deg": -8.0,
+        "tracking_xh": 0.12,
+        "slant_tangent": 0.18,
+        "width_scale": 0.82,
+        "scale_y": 1.1,
+    }
+
+    style = _materialize_style(
+        {"background_rgb": [20, 20, 20]},
+        {"applied_attributes": applied},
+    )
+
+    assert set(style["canonical_applied_attributes"]) == set(applied)
+    assert style["canonical_applied_attributes"] == applied
 
 
 def test_style_profile_cannot_change_owner_semantic_signature() -> None:

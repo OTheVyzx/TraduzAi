@@ -166,6 +166,23 @@ def _materialize_style(
         style["cor"] = applied["fill"]
     if "font_name" in applied:
         style["fonte"] = applied["font_name"]
+    if "font_weight" in applied:
+        style["bold"] = str(applied["font_weight"]).strip().lower() in {
+            "bold",
+            "semibold",
+            "black",
+            "heavy",
+        }
+    if "font_width" in applied and "width_scale" not in applied:
+        style["width_scale"] = {
+            "condensed": 0.82,
+            "regular": 1.0,
+            "expanded": 1.18,
+        }.get(str(applied["font_width"]).strip().lower(), 1.0)
+    if "font_size_px" in applied:
+        style["tamanho"] = int(round(float(applied["font_size_px"])))
+    if "alignment" in applied:
+        style["alinhamento"] = str(applied["alignment"])
     stroke = applied.get("stroke")
     if isinstance(stroke, Mapping):
         style["contorno"] = stroke.get("color") or ""
@@ -197,6 +214,10 @@ def _materialize_style(
         )
     if "rotation_deg" in applied:
         style["rotacao"] = float(applied["rotation_deg"])
+    if "container" in applied:
+        style["container"] = copy.deepcopy(applied["container"])
+    if "multistroke" in applied:
+        style["multistroke"] = copy.deepcopy(applied["multistroke"])
     for geometry_name in (
         "tracking_xh",
         "slant_tangent",
@@ -205,6 +226,7 @@ def _materialize_style(
     ):
         if geometry_name in applied:
             style[geometry_name] = float(applied[geometry_name])
+    style["canonical_applied_attributes"] = copy.deepcopy(dict(applied))
     return {
         str(key): copy.deepcopy(value)
         for key, value in style.items()

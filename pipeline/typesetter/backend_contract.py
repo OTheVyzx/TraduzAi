@@ -8,12 +8,61 @@ DEFAULT_FONT_FAMILY = "ComicNeue-Bold.ttf"
 DEFAULT_FONT_WEIGHT = "bold"
 
 KOHARU_RUST_CAPABILITIES = frozenset(
-    {"fill", "stroke", "font_family", "font_size", "alignment", "rotation", "layout"}
+    {"fill", "stroke", "font_family", "font_weight", "font_size", "alignment", "rotation", "layout"}
 )
 PYTHON_V2_CAPABILITIES = frozenset(
     set(KOHARU_RUST_CAPABILITIES)
-    | {"tracking", "slant", "scale_x", "scale_y", "multistroke", "shadow", "glow", "gradient"}
+    | {"tracking", "slant", "scale_x", "scale_y", "multistroke", "shadow", "glow", "gradient", "curve"}
 )
+
+_CANONICAL_CAPABILITY = {
+    "font_name": "font_family",
+    "font_weight": "font_weight",
+    "font_width": "scale_x",
+    "font_size_px": "font_size",
+    "alignment": "alignment",
+    "fill": "fill",
+    "stroke": "stroke",
+    "multistroke": "multistroke",
+    "shadow": "shadow",
+    "glow": "glow",
+    "gradient": "gradient",
+    "curve": "curve",
+    "rotation_deg": "rotation",
+    "tracking_xh": "tracking",
+    "slant_tangent": "slant",
+    "width_scale": "scale_x",
+    "scale_y": "scale_y",
+    "container": "layout",
+}
+
+
+class UnsupportedStyleCapability(RuntimeError):
+    """Raised before drawing when no backend can honor the requested style."""
+
+
+@dataclass(frozen=True)
+class StyleBackend:
+    name: str
+    capabilities: frozenset[str]
+
+
+def choose_backend(
+    *,
+    requested: set[str] | frozenset[str],
+    backends: list[StyleBackend] | tuple[StyleBackend, ...],
+) -> StyleBackend:
+    """Choose a backend only when it supports every canonical request."""
+
+    capabilities = frozenset(
+        _CANONICAL_CAPABILITY.get(str(name), str(name)) for name in requested
+    )
+    for backend in backends:
+        if capabilities <= backend.capabilities:
+            return backend
+    raise UnsupportedStyleCapability(
+        "unsupported style capabilities: " + ",".join(sorted(capabilities))
+    )
 
 
 @dataclass(frozen=True)
@@ -30,6 +79,12 @@ def required_style_capabilities(profile: dict[str, Any] | None) -> frozenset[str
     payload = profile if isinstance(profile, dict) else {}
     style = payload.get("applied_style") if isinstance(payload.get("applied_style"), dict) else payload
     required = {"fill", "font_family", "font_size", "alignment", "layout"}
+    canonical = style.get("canonical_applied_attributes")
+    if isinstance(canonical, dict):
+        required.update(
+            _CANONICAL_CAPABILITY.get(str(name), str(name))
+            for name in canonical
+        )
     mappings = {
         "stroke": "stroke", "contorno": "stroke", "multistroke": "multistroke",
         "shadow": "shadow", "sombra": "shadow", "glow": "glow",

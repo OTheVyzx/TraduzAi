@@ -1,3 +1,5 @@
+import pytest
+
 from typesetter.backend_contract import (
     KOHARU_RUST_CAPABILITIES,
     PYTHON_V2_CAPABILITIES,
@@ -5,7 +7,10 @@ from typesetter.backend_contract import (
     TypesettingRenderRequest,
     TypesettingRenderResult,
     build_rust_render_request,
+    choose_backend,
     select_backend_for_style,
+    StyleBackend,
+    UnsupportedStyleCapability,
 )
 
 
@@ -109,3 +114,13 @@ def test_profile_with_unsupported_glow_falls_back_to_python():
     assert selection.selected_backend == "python_v2"
     assert selection.status == "fallback"
     assert selection.unsupported_capabilities == ("glow",)
+
+
+def test_backend_cannot_silently_drop_requested_tracking_or_slant():
+    limited = StyleBackend("limited", frozenset({"fill", "font_family"}))
+
+    with pytest.raises(UnsupportedStyleCapability, match="slant,tracking"):
+        choose_backend(
+            requested={"tracking_xh", "slant_tangent"},
+            backends=[limited],
+        )

@@ -76,6 +76,12 @@ def test_latin_sfx_uses_selected_project_font_not_hershey():
 
     assert layer["sfx_font_backend"] == "project_font_textpath"
     assert layer["render_font_name"] == "KOMIKAX_.ttf"
+    assert layer["style_v2_raster_contract"]["applied_attributes"]["font_name"] == (
+        "KOMIKAX_.ttf"
+    )
+    assert layer["style_v2_raster_contract"]["backend"] != (
+        "opencv_hershey_override"
+    )
 
 
 def test_sfx_applies_scale_x_and_scale_y():
