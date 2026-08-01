@@ -84,6 +84,8 @@ _OWNER_LAYOUT_VISUAL_INPUT_FIELDS = frozenset(
         "source_scale_evidence_ids",
         "owner_render_geometry",
         "owner_render_geometry_sha256",
+        "owner_text_execution_authority",
+        "text_execution_authority_sha256",
     }
 )
 _OWNER_RENDER_ROUTES = frozenset(

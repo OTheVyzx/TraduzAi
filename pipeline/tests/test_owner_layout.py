@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from layout import balloon_layout as balloon_layout_mod  # noqa: E402
+from ownership.delivery import seal_owner_text_execution_authority  # noqa: E402
 from ownership.model import (  # noqa: E402
     ComponentDisposition,
     OwnerGraph,
@@ -221,6 +222,13 @@ def _owner_page(
                 np.zeros((PAGE_HEIGHT, PAGE_WIDTH), dtype=np.uint8)
             ),
         )
+        execution_authority = seal_owner_text_execution_authority(
+            owner_id=owner.owner_id,
+            page_id=owner.page_id,
+            source_payload=owner.source_payload,
+            translated_payload=str(owner.translated_payload or ""),
+            normalized_chunks=[str(owner.translated_payload or "")],
+        )
         for region in owner_regions:
             region["owner_render_geometry_sha256"] = render_geometry.geometry_sha256
         record = {
@@ -247,6 +255,8 @@ def _owner_page(
             "layout_profile": "white_balloon",
             "owner_render_geometry": render_geometry.to_dict(),
             "owner_render_geometry_sha256": render_geometry.geometry_sha256,
+            "owner_text_execution_authority": execution_authority.to_dict(),
+            "text_execution_authority_sha256": execution_authority.authority_sha256,
             "estilo": {
                 "fonte": "ComicNeue-Bold.ttf",
                 "tamanho": 26,

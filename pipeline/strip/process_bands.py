@@ -24,6 +24,11 @@ from ownership.ocr_adapter import (
     collect_page_observations,
     observation_to_dict,
 )
+from ownership.delivery import (
+    OwnerTextExecutionAuthority,
+    seal_owner_text_execution_authority,
+    validate_owner_text_delivery_evidence,
+)
 from ownership.model import (
     _action_mask_ref_matches_owner,
     INPAINT_ROUTE_ACTIONS,
@@ -8802,6 +8807,19 @@ def apply_atomic_owner_execution(
             mutation.owner_render_geometry_sha256,
             label="mutation owner render geometry hash",
         )
+        raw_authority = mutation.text_execution_authority
+        execution_authority = (
+            raw_authority
+            if isinstance(raw_authority, OwnerTextExecutionAuthority)
+            else OwnerTextExecutionAuthority.from_dict(raw_authority)
+        )
+        if (
+            execution_authority.owner_id != owner_id
+            or execution_authority.page_id != page_id
+            or execution_authority.authority_sha256
+            != mutation.text_execution_authority_sha256
+        ):
+            raise ValueError("mutation text execution authority mismatch")
         mutation_result = _canonical_owner_rgb(
             mutation.result_rgb,
             shape=tuple(original.shape),
@@ -8999,6 +9017,11 @@ def apply_atomic_owner_execution(
         )
         if glyph_render_geometry_sha256 != mutation_render_geometry_sha256:
             raise ValueError("glyph patch owner render geometry revision mismatch")
+        if (
+            glyph_patch.text_execution_authority_sha256
+            != execution_authority.authority_sha256
+        ):
+            raise ValueError("translated_execution_authority_mismatch")
         owner_render_geometry = (
             glyph_patch.owner_render_geometry
             if isinstance(glyph_patch.owner_render_geometry, OwnerRenderGeometry)
@@ -9017,22 +9040,36 @@ def apply_atomic_owner_execution(
             shape=tuple(original.shape),
             label="glyph patch result_rgb",
         )
+        glyph_core_mask = _canonical_owner_mask(
+            glyph_patch.glyph_core_mask,
+            shape=tuple(original.shape[:2]),
+            label="glyph patch core mask",
+        )
+        paint_mask = _canonical_owner_mask(
+            glyph_patch.paint_mask,
+            shape=tuple(original.shape[:2]),
+            label="glyph patch paint mask",
+        )
         glyph_mask = _canonical_owner_mask(
             glyph_patch.glyph_mask,
             shape=tuple(original.shape[:2]),
-            label="glyph patch mask",
+            label="legacy glyph patch mask",
         )
-        if not np.any(glyph_mask):
-            raise ValueError("glyph patch mask is empty")
-        if _owner_mask_is_overbroad(glyph_mask):
-            raise ValueError("glyph patch mask is overbroad")
+        if not np.array_equal(glyph_mask, paint_mask):
+            raise ValueError("legacy glyph patch mask diverges from paint mask")
+        if not np.any(glyph_core_mask) or not np.any(paint_mask):
+            raise ValueError("glyph patch core/paint mask is empty")
+        if np.any((glyph_core_mask > 0) & (paint_mask == 0)):
+            raise ValueError("glyph core mask escapes paint mask")
+        if _owner_mask_is_overbroad(paint_mask):
+            raise ValueError("glyph patch paint mask is overbroad")
         glyph_bbox = _canonical_owner_bbox(
             glyph_patch.glyph_bbox_page,
             shape=tuple(original.shape[:2]),
             label="glyph patch bbox_page",
         )
-        if glyph_bbox != _owner_mask_bbox(glyph_mask):
-            raise ValueError("glyph patch bbox does not match its glyph mask")
+        if glyph_bbox != _owner_mask_bbox(paint_mask):
+            raise ValueError("glyph patch bbox does not match its paint mask")
         safe_polygon, safe_polygon_mask = _canonical_owner_safe_polygon(
             glyph_patch.render_safe_polygon_page,
             shape=tuple(original.shape[:2]),
@@ -9043,14 +9080,34 @@ def apply_atomic_owner_execution(
         )
         if safe_polygon_sha256 != _owner_polygon_sha256(safe_polygon):
             raise ValueError("glyph patch render safe polygon hash mismatch")
-        if np.any((glyph_mask > 0) & (safe_polygon_mask == 0)):
+        if np.any((paint_mask > 0) & (safe_polygon_mask == 0)):
             raise ValueError("glyph patch escapes render safe polygon")
         if glyph_patch.before_sha256 != mutation.after_sha256:
             raise ValueError("glyph patch hash chain does not match cleanup result")
         if glyph_patch.after_sha256 != _owner_array_sha256(rendered_result):
             raise ValueError("glyph patch after hash does not match result")
-        if glyph_patch.glyph_mask_sha256 != _owner_array_sha256(glyph_mask):
-            raise ValueError("glyph patch mask hash mismatch")
+        if glyph_patch.glyph_mask_sha256 != _owner_array_sha256(paint_mask):
+            raise ValueError("legacy glyph patch mask hash mismatch")
+        if glyph_patch.glyph_core_mask_sha256 != _owner_array_sha256(glyph_core_mask):
+            raise ValueError("glyph core mask hash mismatch")
+        if glyph_patch.paint_mask_sha256 != _owner_array_sha256(paint_mask):
+            raise ValueError("glyph paint mask hash mismatch")
+        patch_authority = (
+            glyph_patch.text_execution_authority
+            if isinstance(glyph_patch.text_execution_authority, OwnerTextExecutionAuthority)
+            else OwnerTextExecutionAuthority.from_dict(
+                glyph_patch.text_execution_authority
+            )
+        )
+        if patch_authority != execution_authority:
+            raise ValueError("translated_execution_authority_mismatch")
+        validate_owner_text_delivery_evidence(
+            glyph_patch.delivery_contract,
+            execution_authority=execution_authority,
+            glyph_core_mask=glyph_core_mask,
+            glyph_span_core_masks=glyph_patch.glyph_span_core_masks,
+            glyph_span_runs=glyph_patch.glyph_span_runs,
+        )
         style_contract = validate_owner_style_raster_contract(
             glyph_patch.style_raster_contract,
             expected_owner_id=owner_id,
@@ -9156,10 +9213,15 @@ def apply_atomic_owner_execution(
             raise ValueError("style raster contract after hash mismatch")
         expected_patch_sha256 = _owner_masked_pixels_sha256(
             rendered_result,
-            glyph_mask,
+            paint_mask,
         )
         if style_contract["rendered_patch_sha256"] != expected_patch_sha256:
             raise ValueError("style raster contract patch hash mismatch")
+        if (
+            glyph_patch.delivery_contract.rendered_patch_sha256
+            != style_contract["rendered_patch_sha256"]
+        ):
+            raise ValueError("delivery_rendered_patch_hash_mismatch")
         for envelope_name in ("glyph_core_envelope", "effect_envelope"):
             envelope = style_contract[envelope_name]
             pixel_count = envelope.get("pixel_count")
@@ -9167,7 +9229,7 @@ def apply_atomic_owner_execution(
                 not isinstance(pixel_count, int)
                 or isinstance(pixel_count, bool)
                 or pixel_count < 0
-                or pixel_count > int(np.count_nonzero(glyph_mask))
+                or pixel_count > int(np.count_nonzero(paint_mask))
             ):
                 raise ValueError(
                     f"style raster contract {envelope_name} pixel count mismatch"
@@ -9216,12 +9278,12 @@ def apply_atomic_owner_execution(
                         "style raster contract abstained decision mismatch"
                     )
         render_changed = np.any(rendered_result != mutation_result, axis=2)
-        changed_outside_glyph = render_changed & (glyph_mask == 0)
+        changed_outside_glyph = render_changed & (paint_mask == 0)
         if not np.any(render_changed):
             raise ValueError("glyph render changed no pixels")
         if np.any(changed_outside_glyph):
             raise ValueError("glyph render changed pixels outside its mask")
-        if np.any((glyph_mask > 0) & (protected_art_mask > 0)):
+        if np.any((paint_mask > 0) & (protected_art_mask > 0)):
             raise ValueError("glyph patch overlaps protected art")
         changed_outside_glyph_count = _canonical_owner_counter(
             glyph_patch.changed_outside_glyph_mask_pixels,
@@ -9234,7 +9296,7 @@ def apply_atomic_owner_execution(
 
     final = original.copy()
     final[action_mask > 0] = mutation_result[action_mask > 0]
-    final[glyph_mask > 0] = rendered_result[glyph_mask > 0]
+    final[paint_mask > 0] = rendered_result[paint_mask > 0]
     if _owner_array_sha256(final) != glyph_patch.after_sha256:
         return _review("render_contract_invalid:composed result hash mismatch")
     return OwnerExecutionCommit(
@@ -10944,10 +11006,19 @@ def execute_owner_page_graph(
         single_owner.action_mask_ref = plan.action_mask_ref
         owner.state = "mask_ready"
         owner.action_mask_ref = plan.action_mask_ref
+        execution_authority = seal_owner_text_execution_authority(
+            owner_id=owner.owner_id,
+            page_id=owner.page_id,
+            source_payload=str(owner.source_payload or ""),
+            translated_payload=str(owner.translated_payload or ""),
+            normalized_chunks=[str(owner.translated_payload or "")],
+        )
         record.update(
             {
                 "state": "mask_ready",
                 "action_mask_ref": plan.action_mask_ref,
+                "owner_text_execution_authority": execution_authority.to_dict(),
+                "text_execution_authority_sha256": execution_authority.authority_sha256,
                 "bbox": list(plan.owner_bbox_page),
                 "source_bbox": list(plan.owner_bbox_page),
                 "text_pixel_bbox": list(plan.owner_bbox_page),
@@ -10991,6 +11062,11 @@ def execute_owner_page_graph(
         )
         if not isinstance(mutation, OwnerMutation):
             raise ValueError("owner inpainter did not return an OwnerMutation")
+        mutation = replace(
+            mutation,
+            text_execution_authority_sha256=execution_authority.authority_sha256,
+            text_execution_authority=execution_authority,
+        )
         single_owner.state = "inpainted"
         owner.state = "inpainted"
         record.update({"state": "inpainted", "action_mask_ref": plan.action_mask_ref})
@@ -11072,6 +11148,10 @@ def execute_owner_page_graph(
                     "style_v2_raster_contract": (
                         glyph_patch.style_raster_contract.to_dict()
                     ),
+                    "owner_text_execution_authority": execution_authority.to_dict(),
+                    "owner_text_delivery_contract": glyph_patch.delivery_contract.to_dict(),
+                    "glyph_core_mask_sha256": glyph_patch.glyph_core_mask_sha256,
+                    "paint_mask_sha256": glyph_patch.paint_mask_sha256,
                     "residual_cleanup_contract": {
                         "residual_verified": bool(mutation.residual_verified),
                         "residual_score": float(mutation.residual_score),

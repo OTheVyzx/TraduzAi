@@ -47,6 +47,11 @@ from typesetter.style_materialization import (
 )
 
 try:
+    from ownership.delivery import (
+        GlyphRunObservation,
+        OwnerTextExecutionAuthority,
+        build_owner_text_delivery_contract,
+    )
     from ownership.model import (
         OwnerGlyphPatch,
         OwnerGraph,
@@ -58,6 +63,11 @@ try:
     )
     from ownership.render_geometry import OwnerRenderGeometry
 except ImportError:  # pragma: no cover - supports package imports
+    from ..ownership.delivery import (
+        GlyphRunObservation,
+        OwnerTextExecutionAuthority,
+        build_owner_text_delivery_contract,
+    )
     from ..ownership.model import (
         OwnerGlyphPatch,
         OwnerGraph,
@@ -7322,6 +7332,8 @@ def _owner_record_contract(record: dict) -> str:
         "style_copy_status",
         "owner_render_geometry",
         "owner_render_geometry_sha256",
+        "owner_text_execution_authority",
+        "text_execution_authority_sha256",
     )
     payload = {key: record.get(key) for key in keys if key in record}
     return json.dumps(
@@ -20990,6 +21002,19 @@ def _render_owner_band_image(
     if len(blocks) != 1 or blocks[0].get("owner_id") != owner_id:
         raise ValueError("owner renderer did not resolve exactly one owner render block")
     block = blocks[0]
+    raw_authority = block.get("owner_text_execution_authority")
+    if not isinstance(raw_authority, Mapping):
+        raise ValueError("owner renderer requires sealed text execution authority")
+    execution_authority = OwnerTextExecutionAuthority.from_dict(raw_authority)
+    if (
+        execution_authority.owner_id != owner_id
+        or execution_authority.page_id != graph_page_id
+        or execution_authority.translated_payload
+        != str(block.get("translated_payload") or "").strip()
+        or execution_authority.authority_sha256
+        != str(block.get("text_execution_authority_sha256") or "")
+    ):
+        raise ValueError("owner renderer text execution authority mismatch")
     raw_render_geometry = block.get("owner_render_geometry")
     if not isinstance(raw_render_geometry, dict):
         raise ValueError("owner renderer requires authenticated render geometry")
@@ -21020,8 +21045,23 @@ def _render_owner_band_image(
         _finalize_render_completion_contract(block)
     rendered = np.ascontiguousarray(np.asarray(image.convert("RGB"), dtype=np.uint8))
     changed = np.any(rendered != before, axis=2)
-    glyph_mask = np.where(changed, 255, 0).astype(np.uint8)
-    glyph_bbox = _owner_mask_bbox(glyph_mask)
+    changed_mask = np.where(changed, 255, 0).astype(np.uint8)
+    if isinstance(raster_result, GlyphRasterResult):
+        glyph_core_mask = np.where(
+            np.asarray(raster_result.glyph_core_mask) > 0, 255, 0
+        ).astype(np.uint8)
+        effect_mask = np.where(
+            np.asarray(raster_result.effect_mask) > 0, 255, 0
+        ).astype(np.uint8)
+    else:
+        # Preserve a reviewable failed patch without fabricating glyph-core proof.
+        glyph_core_mask = np.zeros((height, width), dtype=np.uint8)
+        effect_mask = np.zeros((height, width), dtype=np.uint8)
+    if glyph_core_mask.shape != (height, width) or effect_mask.shape != (height, width):
+        raise ValueError("owner renderer glyph raster evidence shape mismatch")
+    paint_mask = np.maximum(np.maximum(glyph_core_mask, effect_mask), changed_mask)
+    glyph_mask = paint_mask  # temporary compatibility alias for non-enforce readers
+    glyph_bbox = _owner_mask_bbox(paint_mask)
     fit_status = str(block.get("fit_status") or "render_incomplete").strip().lower()
     render_completed = bool(block.get("render_completed"))
     if glyph_bbox is None:
@@ -21095,6 +21135,34 @@ def _render_owner_band_image(
             else []
         ),
     )
+    rendered_lines = [
+        str(line)
+        for line in list((block.get("_render_debug") or {}).get("wrapped_lines") or [])
+        if str(line).strip()
+    ]
+    if not rendered_lines:
+        rendered_lines = [execution_authority.translated_payload]
+    glyph_span_runs = (
+        GlyphRunObservation.build(
+            text=execution_authority.translated_payload,
+            font_identity=str(block.get("font_name") or "python_ft2font"),
+            span_index=0,
+        ),
+    )
+    glyph_span_core_masks = (glyph_core_mask,)
+    delivery_contract = build_owner_text_delivery_contract(
+        execution_authority=execution_authority,
+        layout_payload=str(block.get("translated_payload") or ""),
+        rendered_lines=rendered_lines,
+        rendered_glyph_runs=glyph_span_runs,
+        glyph_core_mask=glyph_core_mask,
+        glyph_span_core_masks=glyph_span_core_masks,
+        rendered_patch_sha256=style_raster_contract.rendered_patch_sha256,
+    )
+    if delivery_contract.status != "delivered":
+        if render_completed:
+            fit_status = f"delivery_{delivery_contract.reason}"
+        render_completed = False
 
     return OwnerGlyphPatch(
         owner_id=owner_id,
@@ -21120,6 +21188,15 @@ def _render_owner_band_image(
         owner_render_geometry=owner_render_geometry,
         execution_tile_id=execution_tile_id,
         projection_role="executor",
+        glyph_core_mask=glyph_core_mask,
+        paint_mask=paint_mask,
+        glyph_span_core_masks=glyph_span_core_masks,
+        glyph_span_runs=glyph_span_runs,
+        glyph_core_mask_sha256=_owner_array_sha256(glyph_core_mask),
+        paint_mask_sha256=_owner_array_sha256(paint_mask),
+        text_execution_authority_sha256=execution_authority.authority_sha256,
+        text_execution_authority=execution_authority,
+        delivery_contract=delivery_contract,
     )
 
 

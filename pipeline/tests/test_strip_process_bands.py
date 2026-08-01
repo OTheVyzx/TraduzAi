@@ -6123,6 +6123,11 @@ def _owner_atomic_copyback_fixture():
         OwnerMutation,
         owner_residual_evidence_sha256,
     )
+    from ownership.delivery import (
+        GlyphRunObservation,
+        build_owner_text_delivery_contract,
+        seal_owner_text_execution_authority,
+    )
     from style_v2_fixtures import valid_owner_style_raster_contract
     from strip import process_bands
     from strip.types import Band
@@ -6171,6 +6176,10 @@ def _owner_atomic_copyback_fixture():
         residual_method="fixture_residual_v1",
         residual_flags=(),
     )
+    authority = seal_owner_text_execution_authority(
+        owner_id="owner_a", page_id="page_001", source_payload="SOURCE",
+        translated_payload="ALVO", normalized_chunks=["ALVO"],
+    )
     mutation = OwnerMutation(
         owner_id="owner_a",
         page_id="page_001",
@@ -6202,11 +6211,28 @@ def _owner_atomic_copyback_fixture():
         residual_flags=(),
         execution_tile_id="tile_executor",
         component_geometry_verified=True,
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
     )
     glyph_mask = np.zeros(original.shape[:2], dtype=np.uint8)
     glyph_mask[9:11, 9:13] = 255
     rendered = cleaned.copy()
     rendered[glyph_mask > 0] = (5, 10, 15)
+    style_contract = valid_owner_style_raster_contract(
+        owner_id="owner_a",
+        page_id="page_001",
+        before=cleaned,
+        result=rendered,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+    )
+    run = GlyphRunObservation.build(text="ALVO", font_identity="fixture-font", span_index=0)
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=authority, layout_payload="ALVO",
+        rendered_lines=["ALVO"], rendered_glyph_runs=[run],
+        glyph_core_mask=glyph_mask, glyph_span_core_masks=[glyph_mask],
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
     glyph_patch = OwnerGlyphPatch(
         owner_id="owner_a",
         page_id="page_001",
@@ -6248,16 +6274,18 @@ def _owner_atomic_copyback_fixture():
             page_height=original.shape[0],
             reasons=(),
         ),
-        style_raster_contract=valid_owner_style_raster_contract(
-            owner_id="owner_a",
-            page_id="page_001",
-            before=cleaned,
-            result=rendered,
-            glyph_mask=glyph_mask,
-            component_geometry_sha256=mutation.component_geometry_sha256,
-        ),
+        style_raster_contract=style_contract,
         execution_tile_id="tile_executor",
         projection_role="executor",
+        glyph_core_mask=glyph_mask,
+        paint_mask=glyph_mask,
+        glyph_span_core_masks=(glyph_mask,),
+        glyph_span_runs=(run,),
+        glyph_core_mask_sha256=process_bands._owner_array_sha256(glyph_mask),
+        paint_mask_sha256=process_bands._owner_array_sha256(glyph_mask),
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
     )
     commit = process_bands.apply_atomic_owner_execution(
         original,

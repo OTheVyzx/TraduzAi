@@ -293,6 +293,8 @@ class OwnerMutation:
     projection_role: str = "executor"
     color_space: str = "RGB"
     component_geometry_verified: bool = False
+    text_execution_authority_sha256: str = ""
+    text_execution_authority: Any = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -1069,6 +1071,15 @@ class OwnerGlyphPatch:
     execution_tile_id: str | None = None
     projection_role: str = "executor"
     color_space: str = "RGB"
+    glyph_core_mask: Any = None
+    paint_mask: Any = None
+    glyph_span_core_masks: tuple[Any, ...] = ()
+    glyph_span_runs: tuple[Any, ...] = ()
+    glyph_core_mask_sha256: str = ""
+    paint_mask_sha256: str = ""
+    text_execution_authority_sha256: str = ""
+    text_execution_authority: Any = None
+    delivery_contract: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.render_quality_contract, OwnerRenderQuality):
@@ -1114,8 +1125,10 @@ class OwnerGlyphPatch:
             raise ValueError(
                 "completed owner glyph patch requires render quality status=ok"
             )
-        for field_name in ("result_rgb", "glyph_mask"):
+        for field_name in ("result_rgb", "glyph_mask", "glyph_core_mask", "paint_mask"):
             value = getattr(self, field_name)
+            if value is None:
+                continue
             copy_value = getattr(value, "copy", None)
             if not callable(copy_value):
                 continue
@@ -1124,6 +1137,16 @@ class OwnerGlyphPatch:
             if callable(setflags):
                 setflags(write=False)
             object.__setattr__(self, field_name, frozen_value)
+        frozen_span_masks: list[Any] = []
+        for value in self.glyph_span_core_masks:
+            copy_value = getattr(value, "copy", None)
+            frozen_value = copy_value() if callable(copy_value) else value
+            setflags = getattr(frozen_value, "setflags", None)
+            if callable(setflags):
+                setflags(write=False)
+            frozen_span_masks.append(frozen_value)
+        object.__setattr__(self, "glyph_span_core_masks", tuple(frozen_span_masks))
+        object.__setattr__(self, "glyph_span_runs", tuple(self.glyph_span_runs))
 
 
 @dataclass(frozen=True)
@@ -1152,6 +1175,8 @@ class PageCompositionResult:
     committed: bool = True
     page_surface_geometry_sha256: str | None = None
     page_surface_geometry: Any = None
+    owner_text_execution_authorities: dict[str, Any] = field(default_factory=dict)
+    owner_text_delivery_contracts: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -1172,6 +1197,15 @@ class PageCompositionResult:
                 }
             ),
         )
+        for field_name in (
+            "owner_text_execution_authorities",
+            "owner_text_delivery_contracts",
+        ):
+            values = {}
+            for owner_id, value in dict(getattr(self, field_name)).items():
+                to_dict = getattr(value, "to_dict", None)
+                values[str(owner_id)] = to_dict() if callable(to_dict) else dict(value)
+            object.__setattr__(self, field_name, MappingProxyType(values))
         if self.coordinate_space == "framed_page" and self.page_surface_geometry is None:
             raise ValueError("framed page composition requires page surface geometry")
         if self.page_surface_geometry is None and self.page_surface_geometry_sha256:
@@ -1218,6 +1252,12 @@ class PageCompositionResult:
                 if self.page_surface_geometry is not None
                 else None
             ),
+            "owner_text_execution_authorities": dict(
+                self.owner_text_execution_authorities
+            ),
+            "owner_text_delivery_contracts": dict(
+                self.owner_text_delivery_contracts
+            ),
         }
 
     @classmethod
@@ -1242,6 +1282,12 @@ class PageCompositionResult:
             coordinate_space=coordinate_space, committed=bool(data.get("committed", True)),
             page_surface_geometry_sha256=data.get("page_surface_geometry_sha256"),
             page_surface_geometry=geometry_payload,
+            owner_text_execution_authorities=dict(
+                data.get("owner_text_execution_authorities") or {}
+            ),
+            owner_text_delivery_contracts=dict(
+                data.get("owner_text_delivery_contracts") or {}
+            ),
         )
 
 

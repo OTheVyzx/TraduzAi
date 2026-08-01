@@ -606,6 +606,12 @@ def _compose_owner_output_pages(
             committed=final_result.committed,
             page_surface_geometry_sha256=surface_geometry.geometry_sha256,
             page_surface_geometry=surface_geometry,
+            owner_text_execution_authorities=dict(
+                final_result.owner_text_execution_authorities
+            ),
+            owner_text_delivery_contracts=dict(
+                final_result.owner_text_delivery_contracts
+            ),
         )
 
     final_strip_view = VerticalStrip(

@@ -14,6 +14,10 @@ import cv2
 import numpy as np
 
 try:
+    from ownership.delivery import (
+        OwnerTextExecutionAuthority,
+        validate_owner_text_delivery_evidence,
+    )
     from ownership.model import (
         OwnerCompositionConflict,
         OwnerGlyphPatch,
@@ -22,6 +26,10 @@ try:
     )
     from ownership.render_geometry import OwnerRenderGeometry
 except ImportError:  # pragma: no cover - supports package imports
+    from ..ownership.delivery import (
+        OwnerTextExecutionAuthority,
+        validate_owner_text_delivery_evidence,
+    )
     from ..ownership.model import (
         OwnerCompositionConflict,
         OwnerGlyphPatch,
@@ -63,6 +71,7 @@ class _ValidatedGlyphPatch:
     page_id: str
     result_rgb: np.ndarray
     glyph_mask: np.ndarray
+    glyph_core_mask: np.ndarray
     changed: np.ndarray
     fingerprint: str
 
@@ -283,6 +292,22 @@ def _validate_mutation(
         mutation.owner_render_geometry_sha256,
         label="mutation owner_render_geometry_sha256",
     )
+    raw_authority = mutation.text_execution_authority
+    try:
+        execution_authority = (
+            raw_authority
+            if isinstance(raw_authority, OwnerTextExecutionAuthority)
+            else OwnerTextExecutionAuthority.from_dict(raw_authority)
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise OwnerCompositionError("mutation text execution authority is invalid") from exc
+    if (
+        execution_authority.owner_id != owner_id
+        or execution_authority.page_id != page_id
+        or execution_authority.authority_sha256
+        != mutation.text_execution_authority_sha256
+    ):
+        raise OwnerCompositionError("mutation text execution authority mismatch")
 
     result = _canonical_rgb(
         mutation.result_rgb,
@@ -392,6 +417,7 @@ def _validate_mutation(
             "owner_bbox_page": owner_bbox,
             "component_geometry_sha256": component_hash,
             "owner_render_geometry_sha256": render_geometry_hash,
+            "text_execution_authority_sha256": execution_authority.authority_sha256,
             "before_sha256": mutation.before_sha256,
             "after_sha256": mutation.after_sha256,
             "action_mask_sha256": mutation.action_mask_sha256,
@@ -456,6 +482,11 @@ def _validate_glyph_patch(
             != mutation.value.owner_render_geometry_sha256
         ):
             raise OwnerCompositionError("glyph owner render geometry revision mismatch")
+        if (
+            glyph_patch.text_execution_authority_sha256
+            != mutation.value.text_execution_authority_sha256
+        ):
+            raise OwnerCompositionError("glyph mutation text execution authority mismatch")
     component_hash = _canonical_hash(
         glyph_patch.component_geometry_sha256,
         label="glyph component_geometry_sha256",
@@ -491,18 +522,32 @@ def _validate_glyph_patch(
         shape=tuple(original.shape),
     )
     page_shape = tuple(original.shape[:2])
-    glyph_mask = _canonical_mask(
-        glyph_patch.glyph_mask,
-        label="glyph mask",
+    glyph_core_mask = _canonical_mask(
+        glyph_patch.glyph_core_mask,
+        label="glyph core mask",
         shape=page_shape,
     )
+    paint_mask = _canonical_mask(
+        glyph_patch.paint_mask,
+        label="glyph paint mask",
+        shape=page_shape,
+    )
+    legacy_glyph_mask = _canonical_mask(
+        glyph_patch.glyph_mask,
+        label="legacy glyph mask",
+        shape=page_shape,
+    )
+    if not np.array_equal(legacy_glyph_mask, paint_mask):
+        raise OwnerCompositionError("legacy glyph mask diverges from paint mask")
+    if np.any((glyph_core_mask > 0) & (paint_mask == 0)):
+        raise OwnerCompositionError("glyph core mask escapes paint mask")
     glyph_bbox = _canonical_bbox(
         glyph_patch.glyph_bbox_page,
         label="glyph bbox_page",
         shape=page_shape,
     )
-    if glyph_bbox != _mask_bbox(glyph_mask, label="glyph mask"):
-        raise OwnerCompositionError("glyph bbox does not match glyph mask")
+    if glyph_bbox != _mask_bbox(paint_mask, label="glyph paint mask"):
+        raise OwnerCompositionError("glyph bbox does not match paint mask")
     safe_polygon, safe_polygon_mask = _canonical_safe_polygon(
         glyph_patch.render_safe_polygon_page,
         shape=page_shape,
@@ -513,33 +558,61 @@ def _validate_glyph_patch(
     )
     if polygon_hash != _polygon_sha256(safe_polygon):
         raise OwnerCompositionError("glyph render safe polygon hash mismatch")
-    if np.any((glyph_mask > 0) & (safe_polygon_mask == 0)):
-        raise OwnerCompositionError("glyph mask escapes render safe polygon")
+    if np.any((paint_mask > 0) & (safe_polygon_mask == 0)):
+        raise OwnerCompositionError("glyph paint mask escapes render safe polygon")
 
     if glyph_patch.before_sha256 != baseline_sha256:
         raise OwnerCompositionError("glyph before hash does not match owner baseline")
     if glyph_patch.after_sha256 != _array_sha256(result):
         raise OwnerCompositionError("glyph result hash mismatch")
-    if glyph_patch.glyph_mask_sha256 != _array_sha256(glyph_mask):
-        raise OwnerCompositionError("glyph mask hash mismatch")
+    if glyph_patch.glyph_mask_sha256 != _array_sha256(paint_mask):
+        raise OwnerCompositionError("legacy glyph mask hash mismatch")
+    if glyph_patch.glyph_core_mask_sha256 != _array_sha256(glyph_core_mask):
+        raise OwnerCompositionError("glyph core mask hash mismatch")
+    if glyph_patch.paint_mask_sha256 != _array_sha256(paint_mask):
+        raise OwnerCompositionError("glyph paint mask hash mismatch")
     actual_changed = np.any(result != baseline, axis=2)
     if not np.any(actual_changed):
         raise OwnerCompositionError("glyph render changed no pixels")
-    if not np.array_equal(actual_changed, glyph_mask > 0):
-        raise OwnerCompositionError("glyph mask does not match render pixel delta")
-    changed_outside = actual_changed & (glyph_mask == 0)
+    changed_outside = actual_changed & (paint_mask == 0)
+    if np.any(changed_outside):
+        raise OwnerCompositionError("glyph changed pixels outside paint mask")
     outside_count = _canonical_counter(
         glyph_patch.changed_outside_glyph_mask_pixels,
         label="glyph changed_outside_glyph_mask_pixels",
     )
     if outside_count != int(np.count_nonzero(changed_outside)):
         raise OwnerCompositionError("glyph outside-mask counter mismatch")
-    if np.any((glyph_mask > 0) & (global_protected > 0)):
-        raise OwnerCompositionError("glyph mask touches global protected art")
+    if np.any((paint_mask > 0) & (global_protected > 0)):
+        raise OwnerCompositionError("glyph paint mask touches global protected art")
     if mutation is not None and np.any(
-        (glyph_mask > 0) & (mutation.protected_art_mask > 0)
+        (paint_mask > 0) & (mutation.protected_art_mask > 0)
     ):
-        raise OwnerCompositionError("glyph mask touches owner protected art")
+        raise OwnerCompositionError("glyph paint mask touches owner protected art")
+
+    raw_authority = glyph_patch.text_execution_authority
+    try:
+        authority = (
+            raw_authority
+            if isinstance(raw_authority, OwnerTextExecutionAuthority)
+            else OwnerTextExecutionAuthority.from_dict(raw_authority)
+        )
+        if authority.authority_sha256 != glyph_patch.text_execution_authority_sha256:
+            raise ValueError("translated_execution_authority_mismatch")
+        validate_owner_text_delivery_evidence(
+            glyph_patch.delivery_contract,
+            execution_authority=authority,
+            glyph_core_mask=glyph_core_mask,
+            glyph_span_core_masks=glyph_patch.glyph_span_core_masks,
+            glyph_span_runs=glyph_patch.glyph_span_runs,
+        )
+        if (
+            glyph_patch.delivery_contract.rendered_patch_sha256
+            != glyph_patch.style_raster_contract.rendered_patch_sha256
+        ):
+            raise ValueError("delivery_rendered_patch_hash_mismatch")
+    except (TypeError, ValueError, KeyError) as exc:
+        raise OwnerCompositionError(f"render contract invalid:{exc}") from exc
 
     fingerprint = _fingerprint(
         "glyph",
@@ -555,6 +628,10 @@ def _validate_glyph_patch(
             "before_sha256": glyph_patch.before_sha256,
             "after_sha256": glyph_patch.after_sha256,
             "glyph_mask_sha256": glyph_patch.glyph_mask_sha256,
+            "glyph_core_mask_sha256": glyph_patch.glyph_core_mask_sha256,
+            "paint_mask_sha256": glyph_patch.paint_mask_sha256,
+            "text_execution_authority_sha256": glyph_patch.text_execution_authority_sha256,
+            "delivery_contract_sha256": glyph_patch.delivery_contract.contract_sha256,
             "glyph_bbox_page": glyph_bbox,
             "render_safe_polygon_page": safe_polygon,
             "render_safe_polygon_sha256": polygon_hash,
@@ -568,7 +645,8 @@ def _validate_glyph_patch(
         owner_id=owner_id,
         page_id=page_id,
         result_rgb=result,
-        glyph_mask=glyph_mask,
+        glyph_mask=paint_mask,
+        glyph_core_mask=glyph_core_mask,
         changed=actual_changed,
         fingerprint=fingerprint,
     )
@@ -864,4 +942,12 @@ def compose_page(
         sha256=_array_sha256(canvas),
         page_id=page_id,
         committed=True,
+        owner_text_execution_authorities={
+            glyph.owner_id: glyph.value.text_execution_authority
+            for glyph in unique_glyphs
+        },
+        owner_text_delivery_contracts={
+            glyph.owner_id: glyph.value.delivery_contract
+            for glyph in unique_glyphs
+        },
     )

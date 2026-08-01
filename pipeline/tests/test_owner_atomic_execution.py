@@ -16,6 +16,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ownership import model as owner_model  # noqa: E402
+from ownership.delivery import (  # noqa: E402
+    GlyphRunObservation,
+    build_owner_text_delivery_contract,
+    seal_owner_text_execution_authority,
+)
 from ownership.model import (  # noqa: E402
     OwnerGraph,
     OwnerMutation,
@@ -161,6 +166,13 @@ def _mutation(
         shape=original_rgb.shape[:2],
         protected_art_mask_sha256=protected_art_mask_sha256,
     )
+    authority = seal_owner_text_execution_authority(
+        owner_id=owner_id,
+        page_id="page_001",
+        source_payload="SOURCE",
+        translated_payload="ALVO",
+        normalized_chunks=["ALVO"],
+    )
     residual_evidence_sha256 = owner_residual_evidence_sha256(
         owner_id=owner_id,
         page_id="page_001",
@@ -205,6 +217,8 @@ def _mutation(
         residual_flags=(),
         execution_tile_id=execution_tile_id,
         component_geometry_verified=True,
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
     )
 
 
@@ -320,6 +334,32 @@ def _glyph_patch(
         shape=rendered_rgb.shape[:2],
         protected_art_mask_sha256=str(mutation.protected_art_mask_sha256),
     )
+    style_contract = (
+        style_raster_contract
+        or valid_owner_style_raster_contract(
+            owner_id=mutation.owner_id,
+            page_id=mutation.page_id,
+            before=np.asarray(mutation.result_rgb),
+            result=rendered_rgb,
+            glyph_mask=glyph_mask,
+            component_geometry_sha256=mutation.component_geometry_sha256,
+        )
+    )
+    authority = mutation.text_execution_authority
+    run = GlyphRunObservation.build(
+        text=authority.translated_payload,
+        font_identity="fixture-font",
+        span_index=0,
+    )
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=authority,
+        layout_payload=authority.translated_payload,
+        rendered_lines=[authority.translated_payload],
+        rendered_glyph_runs=[run],
+        glyph_core_mask=glyph_mask,
+        glyph_span_core_masks=[glyph_mask],
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
     return glyph_patch_type(
         owner_id=mutation.owner_id,
         page_id=mutation.page_id,
@@ -337,21 +377,20 @@ def _glyph_patch(
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
         render_quality_contract=_render_quality(glyph_mask),
-        style_raster_contract=(
-            style_raster_contract
-            or valid_owner_style_raster_contract(
-                owner_id=mutation.owner_id,
-                page_id=mutation.page_id,
-                before=np.asarray(mutation.result_rgb),
-                result=rendered_rgb,
-                glyph_mask=glyph_mask,
-                component_geometry_sha256=mutation.component_geometry_sha256,
-            )
-        ),
+        style_raster_contract=style_contract,
         owner_render_geometry_sha256=render_geometry.geometry_sha256,
         owner_render_geometry=render_geometry,
         execution_tile_id=mutation.execution_tile_id,
         projection_role=projection_role,
+        glyph_core_mask=glyph_mask,
+        paint_mask=glyph_mask,
+        glyph_span_core_masks=(glyph_mask,),
+        glyph_span_runs=(run,),
+        glyph_core_mask_sha256=_array_sha256(glyph_mask),
+        paint_mask_sha256=_array_sha256(glyph_mask),
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
     )
 
 
@@ -398,6 +437,91 @@ def test_atomic_commit_accepts_canonically_equivalent_v2_observation() -> None:
     )
 
     assert commit.committed is True
+
+
+def test_atomic_commit_rejects_tampered_text_delivery_contract_hash() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    glyph = _glyph_patch(
+        mutation, glyph_patch_type, render_completed=True, fit_status="ok"
+    )
+    object.__setattr__(
+        glyph.delivery_contract,
+        "rendered_payload_sha256",
+        "f" * 64,
+    )
+
+    commit = apply_atomic(original, mutation, glyph)
+
+    assert commit.committed is False
+    assert commit.reason == (
+        "render_contract_invalid:text delivery contract hash mismatch"
+    )
+
+
+def test_atomic_commit_rejects_rehashed_truncation_against_sealed_authority() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    glyph = _glyph_patch(
+        mutation, glyph_patch_type, render_completed=True, fit_status="ok"
+    )
+    truncated_authority = seal_owner_text_execution_authority(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        source_payload="SOURCE",
+        translated_payload="AL",
+        normalized_chunks=["AL"],
+    )
+    truncated_run = GlyphRunObservation.build(
+        text="AL", font_identity="fixture-font", span_index=0
+    )
+    truncated_delivery = build_owner_text_delivery_contract(
+        execution_authority=truncated_authority,
+        layout_payload="AL",
+        rendered_lines=["AL"],
+        rendered_glyph_runs=[truncated_run],
+        glyph_core_mask=glyph.glyph_core_mask,
+        glyph_span_core_masks=glyph.glyph_span_core_masks,
+        rendered_patch_sha256=glyph.style_raster_contract.rendered_patch_sha256,
+    )
+    object.__setattr__(glyph, "text_execution_authority", truncated_authority)
+    object.__setattr__(
+        glyph,
+        "text_execution_authority_sha256",
+        truncated_authority.authority_sha256,
+    )
+    object.__setattr__(glyph, "glyph_span_runs", (truncated_run,))
+    object.__setattr__(glyph, "delivery_contract", truncated_delivery)
+
+    commit = apply_atomic(original, mutation, glyph)
+
+    assert commit.committed is False
+    assert commit.reason == (
+        "render_contract_invalid:translated_execution_authority_mismatch"
+    )
+
+
+def test_atomic_commit_recomputes_each_delivery_span_mask() -> None:
+    apply_atomic, glyph_patch_type, _ = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    mutation = _mutation(original)
+    glyph = _glyph_patch(
+        mutation, glyph_patch_type, render_completed=True, fit_status="ok"
+    )
+    object.__setattr__(
+        glyph,
+        "glyph_span_core_masks",
+        (np.zeros_like(glyph.glyph_core_mask),),
+    )
+
+    commit = apply_atomic(original, mutation, glyph)
+
+    assert commit.committed is False
+    assert commit.reason == (
+        "render_contract_invalid:glyph_span_core_mask_hash_mismatch"
+    )
 
 
 def _v2_contract_with_fill(
@@ -630,6 +754,25 @@ def _glyph_patch_for_mask(
         shape=rendered_rgb.shape[:2],
         protected_art_mask_sha256=str(mutation.protected_art_mask_sha256),
     )
+    style_contract = valid_owner_style_raster_contract(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        before=np.asarray(mutation.result_rgb),
+        result=rendered_rgb,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+    )
+    authority = mutation.text_execution_authority
+    run = GlyphRunObservation.build(text=authority.translated_payload, font_identity="fixture-font", span_index=0)
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=authority,
+        layout_payload=authority.translated_payload,
+        rendered_lines=[authority.translated_payload],
+        rendered_glyph_runs=[run],
+        glyph_core_mask=glyph_mask,
+        glyph_span_core_masks=[glyph_mask],
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
     return glyph_patch_type(
         owner_id=mutation.owner_id,
         page_id=mutation.page_id,
@@ -647,18 +790,20 @@ def _glyph_patch_for_mask(
         render_safe_polygon_sha256=_polygon_sha256(safe_polygon),
         component_geometry_sha256=mutation.component_geometry_sha256,
         render_quality_contract=_render_quality(glyph_mask),
-        style_raster_contract=valid_owner_style_raster_contract(
-            owner_id=mutation.owner_id,
-            page_id=mutation.page_id,
-            before=np.asarray(mutation.result_rgb),
-            result=rendered_rgb,
-            glyph_mask=glyph_mask,
-            component_geometry_sha256=mutation.component_geometry_sha256,
-        ),
+        style_raster_contract=style_contract,
         owner_render_geometry_sha256=render_geometry.geometry_sha256,
         owner_render_geometry=render_geometry,
         execution_tile_id=mutation.execution_tile_id,
         projection_role="executor",
+        glyph_core_mask=glyph_mask,
+        paint_mask=glyph_mask,
+        glyph_span_core_masks=(glyph_mask,),
+        glyph_span_runs=(run,),
+        glyph_core_mask_sha256=_array_sha256(glyph_mask),
+        paint_mask_sha256=_array_sha256(glyph_mask),
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
     )
 
 

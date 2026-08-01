@@ -55,6 +55,7 @@ def _mutation(
     bbox: tuple[int, int, int, int],
     color: tuple[int, int, int],
 ):
+    from ownership.delivery import seal_owner_text_execution_authority
     from ownership.model import OwnerMutation, owner_residual_evidence_sha256
 
     x1, y1, x2, y2 = bbox
@@ -82,6 +83,10 @@ def _mutation(
         residual_threshold=0.01,
         residual_method="fixture_residual_v1",
         residual_flags=(),
+    )
+    authority = seal_owner_text_execution_authority(
+        owner_id=owner_id, page_id=page_id, source_payload="SOURCE",
+        translated_payload="ALVO", normalized_chunks=["ALVO"],
     )
     return OwnerMutation(
         owner_id=owner_id,
@@ -113,6 +118,8 @@ def _mutation(
         residual_evidence_sha256=residual_evidence_sha256,
         component_geometry_verified=True,
         execution_tile_id=f"tile-{owner_id}",
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
     )
 
 
@@ -163,6 +170,7 @@ def _chapter_fixture():
 def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
     import json
     from ownership.model import OwnerGlyphPatch
+    from ownership.delivery import GlyphRunObservation, build_owner_text_delivery_contract
     from style_v2_fixtures import valid_owner_style_raster_contract
     from typesetter.owner_render_quality import OwnerRenderQuality
 
@@ -184,6 +192,22 @@ def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
         mutation.owner_bbox_page,
         before.shape[:2],
         str(mutation.protected_art_mask_sha256),
+    )
+    style_contract = valid_owner_style_raster_contract(
+        owner_id=mutation.owner_id,
+        page_id=mutation.page_id,
+        before=before,
+        result=result,
+        glyph_mask=mask,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+    )
+    authority = mutation.text_execution_authority
+    run = GlyphRunObservation.build(text=authority.translated_payload, font_identity="fixture-font", span_index=0)
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=authority, layout_payload=authority.translated_payload,
+        rendered_lines=[authority.translated_payload], rendered_glyph_runs=[run],
+        glyph_core_mask=mask, glyph_span_core_masks=[mask],
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
     )
     return OwnerGlyphPatch(
         owner_id=mutation.owner_id,
@@ -224,17 +248,19 @@ def _glyph_patch(mutation, *, bbox=(16, 21, 28, 27)):
             page_height=result.shape[0],
             reasons=(),
         ),
-        style_raster_contract=valid_owner_style_raster_contract(
-            owner_id=mutation.owner_id,
-            page_id=mutation.page_id,
-            before=before,
-            result=result,
-            glyph_mask=mask,
-            component_geometry_sha256=mutation.component_geometry_sha256,
-        ),
+        style_raster_contract=style_contract,
         owner_render_geometry_sha256=render_geometry.geometry_sha256,
         owner_render_geometry=render_geometry,
         execution_tile_id=mutation.execution_tile_id,
+        glyph_core_mask=mask,
+        paint_mask=mask,
+        glyph_span_core_masks=(mask,),
+        glyph_span_runs=(run,),
+        glyph_core_mask_sha256=_array_sha256(mask),
+        paint_mask_sha256=_array_sha256(mask),
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
     )
 
 

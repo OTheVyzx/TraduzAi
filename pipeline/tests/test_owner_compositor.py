@@ -19,6 +19,11 @@ from compositor.owner_compositor import (  # noqa: E402
     OwnerCompositionError,
     compose_page,
 )
+from ownership.delivery import (  # noqa: E402
+    GlyphRunObservation,
+    build_owner_text_delivery_contract,
+    seal_owner_text_execution_authority,
+)
 from ownership.model import (  # noqa: E402
     OwnerGlyphPatch,
     OwnerGraph,
@@ -139,6 +144,13 @@ def _mutation(
         residual_method="fixture_residual_v1",
         residual_flags=(),
     )
+    authority = seal_owner_text_execution_authority(
+        owner_id=owner_id,
+        page_id=PAGE_ID,
+        source_payload="SOURCE",
+        translated_payload="ALVO",
+        normalized_chunks=["ALVO"],
+    )
     return OwnerMutation(
         owner_id=owner_id,
         page_id=PAGE_ID,
@@ -173,6 +185,8 @@ def _mutation(
         execution_tile_id=f"tile_{owner_id}",
         projection_role=projection_role,
         color_space=color_space,
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
     )
 
 
@@ -203,6 +217,43 @@ def _glyph_patch(
         else _array_sha256(np.zeros(original.shape[:2], dtype=np.uint8))
     )
     render_geometry = _render_geometry(owner_id, protected_sha256)
+    authority = (
+        mutation.text_execution_authority
+        if mutation is not None
+        else seal_owner_text_execution_authority(
+            owner_id=owner_id,
+            page_id=PAGE_ID,
+            source_payload="SOURCE",
+            translated_payload="ALVO",
+            normalized_chunks=["ALVO"],
+        )
+    )
+    style_contract = valid_owner_style_raster_contract(
+        owner_id=owner_id,
+        page_id=PAGE_ID,
+        before=baseline,
+        result=result,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=(
+            mutation.component_geometry_sha256
+            if mutation is not None
+            else _component_hash(owner_id)
+        ),
+    )
+    run = GlyphRunObservation.build(
+        text=authority.translated_payload,
+        font_identity="fixture-font",
+        span_index=0,
+    )
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=authority,
+        layout_payload=authority.translated_payload,
+        rendered_lines=[authority.translated_payload],
+        rendered_glyph_runs=[run],
+        glyph_core_mask=glyph_mask,
+        glyph_span_core_masks=[glyph_mask],
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=PAGE_ID,
@@ -244,23 +295,21 @@ def _glyph_patch(
             page_height=original.shape[0],
             reasons=(),
         ),
-        style_raster_contract=valid_owner_style_raster_contract(
-            owner_id=owner_id,
-            page_id=PAGE_ID,
-            before=baseline,
-            result=result,
-            glyph_mask=glyph_mask,
-            component_geometry_sha256=(
-                mutation.component_geometry_sha256
-                if mutation is not None
-                else _component_hash(owner_id)
-            ),
-        ),
+        style_raster_contract=style_contract,
         owner_render_geometry_sha256=render_geometry.geometry_sha256,
         owner_render_geometry=render_geometry,
         execution_tile_id=f"tile_{owner_id}",
         projection_role=projection_role,
         color_space=color_space,
+        glyph_core_mask=glyph_mask,
+        paint_mask=glyph_mask,
+        glyph_span_core_masks=(glyph_mask,),
+        glyph_span_runs=(run,),
+        glyph_core_mask_sha256=_array_sha256(glyph_mask),
+        paint_mask_sha256=_array_sha256(glyph_mask),
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
     )
 
 
@@ -550,6 +599,48 @@ def test_diff_from_original_is_subset_of_owned_masks() -> None:
 
     assert result.committed is True
     assert not np.any(changed & ~owned)
+
+
+def test_changed_pixels_may_be_strict_subset_of_effect_paint_mask() -> None:
+    original = _original()
+    mutation = _mutation(original)
+    patch = _glyph_patch(original, mutation=mutation, box=(5, 5, 8, 8))
+    paint = _box_mask((4, 4, 9, 9), shape=original.shape[:2])
+    style_contract = valid_owner_style_raster_contract(
+        owner_id=patch.owner_id,
+        page_id=patch.page_id,
+        before=np.asarray(mutation.result_rgb),
+        result=np.asarray(patch.result_rgb),
+        glyph_mask=paint,
+        component_geometry_sha256=patch.component_geometry_sha256,
+    )
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=patch.text_execution_authority,
+        layout_payload="ALVO",
+        rendered_lines=["ALVO"],
+        rendered_glyph_runs=patch.glyph_span_runs,
+        glyph_core_mask=patch.glyph_core_mask,
+        glyph_span_core_masks=patch.glyph_span_core_masks,
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
+    patch = replace(
+        patch,
+        glyph_mask=paint,
+        paint_mask=paint,
+        glyph_bbox_page=(4, 4, 9, 9),
+        glyph_mask_sha256=_array_sha256(paint),
+        paint_mask_sha256=_array_sha256(paint),
+        style_raster_contract=style_contract,
+        delivery_contract=delivery,
+    )
+
+    result = compose_page(original, [mutation], [patch], _empty_protected(original))
+
+    assert result.committed is True
+    actual_changed = np.any(
+        np.asarray(patch.result_rgb) != np.asarray(mutation.result_rgb), axis=2
+    )
+    assert np.count_nonzero(actual_changed) < np.count_nonzero(paint)
 
 
 def test_color_space_mismatch_is_rejected() -> None:

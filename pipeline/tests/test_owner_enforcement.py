@@ -308,6 +308,11 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     class Typesetter:
         @staticmethod
         def render_band_image(image, _record, *, owner_graph):
+            from ownership.delivery import (
+                GlyphRunObservation,
+                OwnerTextExecutionAuthority,
+                build_owner_text_delivery_contract,
+            )
             from style_v2_fixtures import valid_owner_style_raster_contract
             from typesetter.owner_render_quality import OwnerRenderQuality
 
@@ -323,6 +328,46 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
             polygon_hash = sha256(
                 json.dumps(polygon, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
+            authority = OwnerTextExecutionAuthority.from_dict(
+                profile_record["owner_text_execution_authority"]
+            )
+            style_contract = valid_owner_style_raster_contract(
+                owner_id=owner.owner_id,
+                page_id=owner.page_id,
+                before=image,
+                result=result,
+                glyph_mask=glyph,
+                component_geometry_sha256=(
+                    state["mutation"].component_geometry_sha256
+                ),
+                visual_profile_sha256=visual_profile[
+                    "visual_profile_sha256"
+                ],
+                profile_component_geometry_sha256=visual_profile[
+                    "component_geometry_sha256"
+                ],
+                source_artifact_sha256=visual_profile["source_sha256"],
+                source_glyph_mask_sha256=visual_profile[
+                    "glyph_mask_sha256"
+                ],
+                style_decision=visual_profile[
+                    "style_application_decision_v2"
+                ],
+            )
+            run = GlyphRunObservation.build(
+                text=authority.translated_payload,
+                font_identity="fixture-font",
+                span_index=0,
+            )
+            delivery = build_owner_text_delivery_contract(
+                execution_authority=authority,
+                layout_payload=authority.translated_payload,
+                rendered_lines=[authority.translated_payload],
+                rendered_glyph_runs=[run],
+                glyph_core_mask=glyph,
+                glyph_span_core_masks=[glyph],
+                rendered_patch_sha256=style_contract.rendered_patch_sha256,
+            )
             return OwnerGlyphPatch(
                 owner_id=owner.owner_id,
                 page_id=owner.page_id,
@@ -360,32 +405,19 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                     page_height=image.shape[0],
                     reasons=(),
                 ),
-                style_raster_contract=valid_owner_style_raster_contract(
-                    owner_id=owner.owner_id,
-                    page_id=owner.page_id,
-                    before=image,
-                    result=result,
-                    glyph_mask=glyph,
-                    component_geometry_sha256=(
-                        state["mutation"].component_geometry_sha256
-                    ),
-                    visual_profile_sha256=visual_profile[
-                        "visual_profile_sha256"
-                    ],
-                    profile_component_geometry_sha256=visual_profile[
-                        "component_geometry_sha256"
-                    ],
-                    source_artifact_sha256=visual_profile["source_sha256"],
-                    source_glyph_mask_sha256=visual_profile[
-                        "glyph_mask_sha256"
-                    ],
-                    style_decision=visual_profile[
-                        "style_application_decision_v2"
-                    ],
-                ),
+                style_raster_contract=style_contract,
                 owner_render_geometry_sha256=render_geometry["geometry_sha256"],
                 owner_render_geometry=render_geometry,
                 execution_tile_id=owner.execution_tile_id,
+                glyph_core_mask=glyph,
+                paint_mask=glyph,
+                glyph_span_core_masks=(glyph,),
+                glyph_span_runs=(run,),
+                glyph_core_mask_sha256=array_hash(glyph),
+                paint_mask_sha256=array_hash(glyph),
+                text_execution_authority_sha256=authority.authority_sha256,
+                text_execution_authority=authority,
+                delivery_contract=delivery,
             )
 
     execution = execute_owner_page_graph(

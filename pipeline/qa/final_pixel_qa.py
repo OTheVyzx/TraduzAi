@@ -12,6 +12,11 @@ import unicodedata
 import cv2
 import numpy as np
 
+from ownership.delivery import (
+    OwnerTextDeliveryContract,
+    OwnerTextExecutionAuthority,
+    validate_owner_text_delivery_contract,
+)
 from ownership.model import OwnerGraph, PageCompositionResult
 from qa.final_pixel_observer import FinalPixelObservation, FinalPixelObserver
 
@@ -338,6 +343,50 @@ def evaluate_final_pixel_observation(
                 component_ids=tuple(owner.component_ids),
                 offenders=(owner.state,),
             )
+        if owner.route_action in _RENDER_ROUTES and owner.state in {
+            "rendered",
+            "verified",
+        }:
+            try:
+                authority = OwnerTextExecutionAuthority.from_dict(
+                    composition.owner_text_execution_authorities[owner.owner_id]
+                )
+                delivery = OwnerTextDeliveryContract.from_dict(
+                    composition.owner_text_delivery_contracts[owner.owner_id]
+                )
+                if (
+                    authority.source_payload
+                    != " ".join(
+                        unicodedata.normalize(
+                            "NFC", str(owner.source_payload or "")
+                        ).split()
+                    )
+                    or authority.translated_payload
+                    != " ".join(
+                        unicodedata.normalize(
+                            "NFC", str(owner.translated_payload or "")
+                        ).split()
+                    )
+                ):
+                    raise ValueError("translated_execution_authority_mismatch")
+                validate_owner_text_delivery_contract(
+                    delivery,
+                    execution_authority=authority,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                reason = f"owner_text_delivery_invalid:{exc}"
+                add(
+                    reason,
+                    "route_state_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                )
+                add(
+                    reason,
+                    "final_language_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                )
         if owner.route_action in _RENDER_ROUTES and not np.any(glyph_map == owner.owner_id):
             add(
                 "missing_owner_glyphs",
