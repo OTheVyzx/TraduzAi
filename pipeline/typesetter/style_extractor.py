@@ -177,6 +177,37 @@ def _contrast_refined_fill_sampling_mask(
     return refined
 
 
+def _coarse_mask_global_contrast_sampling_mask(
+    image_rgb: np.ndarray,
+    sampling_mask: np.ndarray,
+    background_rgb: np.ndarray,
+) -> np.ndarray:
+    """Keep only globally exceptional contrast inside a filled OCR region.
+
+    Row-local refinement deliberately preserves real vertical gradients, but
+    rows without glyph ink can then contribute ordinary card background.  A
+    mask already classified as coarse cannot support gradient measurement, so
+    its fill is sampled from the strongest global contrast tail instead.
+    """
+
+    rgb = np.asarray(image_rgb, dtype=np.uint8)[:, :, :3]
+    binary = np.asarray(sampling_mask) > 0
+    ys, xs = np.where(binary)
+    if len(xs) < 24:
+        return np.where(binary, 255, 0).astype(np.uint8)
+    pixels = rgb[ys, xs].astype(np.float32)
+    contrast = np.linalg.norm(pixels - background_rgb.astype(np.float32), axis=1)
+    if float(np.percentile(contrast, 95) - np.percentile(contrast, 10)) < 24.0:
+        return np.where(binary, 255, 0).astype(np.uint8)
+    threshold = max(32.0, float(np.percentile(contrast, 90)))
+    keep = contrast >= threshold
+    if int(np.count_nonzero(keep)) < 24:
+        return np.where(binary, 255, 0).astype(np.uint8)
+    refined = np.zeros(binary.shape, dtype=np.uint8)
+    refined[ys[keep], xs[keep]] = 255
+    return refined
+
+
 def extract_text_style_evidence_v2(
     image_rgb: np.ndarray,
     glyph_mask: np.ndarray,
@@ -233,12 +264,23 @@ def extract_text_style_evidence_v2(
     glyph = np.asarray(layers["core_mask"], dtype=np.uint8)
     metrics = dict(layers["metrics"])
     metrics.update(_component_typography_metrics(glyph))
+    coarse_mask_geometry = bool(
+        float(metrics.get("glyph_occupancy", 0.0)) >= 0.50
+        and float(metrics.get("bbox_height_xh", 0.0)) >= 2.50
+    )
+    metrics["coarse_mask_geometry"] = coarse_mask_geometry
     fill_sampling_mask = _interior_fill_sampling_mask(glyph)
     fill_sampling_mask = _contrast_refined_fill_sampling_mask(
         image_rgb,
         fill_sampling_mask,
         np.asarray(metrics["background_rgb"], dtype=np.float32),
     )
+    if coarse_mask_geometry:
+        fill_sampling_mask = _coarse_mask_global_contrast_sampling_mask(
+            image_rgb,
+            fill_sampling_mask,
+            np.asarray(metrics["background_rgb"], dtype=np.float32),
+        )
     color_layers = dict(layers)
     color_layers["core_mask"] = fill_sampling_mask
     color = measure_masked_color_evidence(image_rgb, color_layers)
@@ -251,25 +293,35 @@ def extract_text_style_evidence_v2(
     }
     attributes["font_name"] = _v2_unknown("font_matching_required")
     aspect = float(metrics["component_aspect_median"])
-    width_class = "condensed" if aspect < 0.47 else "expanded" if aspect > 0.82 else "regular"
-    attributes["font_width"] = _v2_observed(width_class, 0.76)
     weight_ratio = float(metrics["weight_xh"])
-    weight_class = "bold" if weight_ratio >= 0.19 else "regular"
-    attributes["font_weight"] = _v2_observed(weight_class, 0.72)
     component_count = max(1, int(metrics.get("foreground_pixels", 0)) // 24)
     geometry_confidence = min(0.9, 0.58 + component_count * 0.025)
-    attributes["tracking_xh"] = _v2_observed(
-        float(metrics["tracking_xh"]),
-        geometry_confidence,
-    )
-    attributes["slant_tangent"] = _v2_observed(
-        float(metrics["slant_tangent"]),
-        min(0.6, geometry_confidence),
-    )
-    attributes["width_scale"] = _v2_observed(
-        round(max(0.45, min(1.65, aspect / 0.60)), 6),
-        min(0.6, geometry_confidence),
-    )
+    if coarse_mask_geometry:
+        for name in (
+            "font_width",
+            "font_weight",
+            "tracking_xh",
+            "slant_tangent",
+            "width_scale",
+        ):
+            attributes[name] = _v2_unknown("coarse_owner_mask_geometry")
+    else:
+        width_class = "condensed" if aspect < 0.47 else "expanded" if aspect > 0.82 else "regular"
+        attributes["font_width"] = _v2_observed(width_class, 0.76)
+        weight_class = "bold" if weight_ratio >= 0.19 else "regular"
+        attributes["font_weight"] = _v2_observed(weight_class, 0.72)
+        attributes["tracking_xh"] = _v2_observed(
+            float(metrics["tracking_xh"]),
+            geometry_confidence,
+        )
+        attributes["slant_tangent"] = _v2_observed(
+            float(metrics["slant_tangent"]),
+            min(0.6, geometry_confidence),
+        )
+        attributes["width_scale"] = _v2_observed(
+            round(max(0.45, min(1.65, aspect / 0.60)), 6),
+            min(0.6, geometry_confidence),
+        )
     attributes["scale_y"] = _v2_observed(1.0, 0.6)
     attributes["font_size_px"] = _v2_unknown("functional_layout_owned")
     attributes["alignment"] = _v2_unknown("functional_layout_owned")
@@ -297,7 +349,9 @@ def extract_text_style_evidence_v2(
     rgb = np.asarray(image_rgb, dtype=np.uint8)[:, :, :3]
     glyph_pixels = rgb[fill_sampling_mask > 0]
     y_coords = np.where(fill_sampling_mask > 0)[0]
-    if len(glyph_pixels) >= 24 and len(set(int(value) for value in y_coords)) >= 4:
+    if coarse_mask_geometry:
+        attributes["gradient"] = _v2_unknown("coarse_owner_mask_color_geometry")
+    elif len(glyph_pixels) >= 24 and len(set(int(value) for value in y_coords)) >= 4:
         midpoint = float(np.median(y_coords))
         top = glyph_pixels[y_coords <= midpoint]
         bottom = glyph_pixels[y_coords > midpoint]
@@ -312,7 +366,7 @@ def extract_text_style_evidence_v2(
             else:
                 attributes["gradient"] = _v2_unknown("solid_fill_no_gradient")
     points = np.column_stack(np.where(glyph > 0)[::-1]).astype(np.float32)
-    if len(points) >= 8:
+    if len(points) >= 8 and not coarse_mask_geometry:
         _mean, eigenvectors, eigenvalues = cv2.PCACompute2(points, mean=None)
         vector = eigenvectors[0]
         angle = float(np.degrees(np.arctan2(vector[1], vector[0])))
@@ -336,7 +390,11 @@ def extract_text_style_evidence_v2(
         offset_xh = offset / max(1.0, x_height)
         background_luma = float(np.mean(metrics["background_rgb"]))
         effect_luma = float(np.mean(effect_rgb))
-        if float(np.linalg.norm(offset_xh)) >= 0.08 and effect_luma < background_luma - 12.0:
+        offset_magnitude_xh = float(np.linalg.norm(offset_xh))
+        if offset_magnitude_xh > 0.75:
+            attributes["shadow"] = _v2_unknown("implausible_effect_offset")
+            attributes["glow"] = _v2_unknown("implausible_effect_offset")
+        elif offset_magnitude_xh >= 0.08 and effect_luma < background_luma - 12.0:
             attributes["shadow"] = _v2_observed(
                 {
                     "color": effect_hex,

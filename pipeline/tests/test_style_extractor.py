@@ -140,6 +140,81 @@ def test_v2_fill_sampling_preserves_a_real_vertical_gradient():
     assert evidence.attributes["gradient"].value[0] != evidence.attributes["gradient"].value[1]
 
 
+def test_v2_coarse_multiline_owner_mask_abstains_from_glyph_geometry_style():
+    image = np.full((100, 240, 3), (30, 120, 180), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[18:28, 30:205] = 255
+    glyph[31:41, 30:205] = 255
+    glyph[44:54, 30:205] = 255
+    image[glyph > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_coarse_lines",
+        semantic_role="dialogue_body",
+    )
+
+    assert evidence.attributes["tracking_xh"].value == "unknown"
+    assert evidence.attributes["tracking_xh"].abstention_reason == "coarse_owner_mask_geometry"
+    assert evidence.attributes["font_width"].value == "unknown"
+    assert evidence.attributes["font_weight"].value == "unknown"
+    assert evidence.attributes["gradient"].value == "unknown"
+    assert (
+        evidence.attributes["gradient"].abstention_reason
+        == "coarse_owner_mask_color_geometry"
+    )
+
+
+def test_v2_coarse_owner_mask_recovers_high_contrast_fill_without_false_gradient():
+    image = np.full((100, 260, 3), (92, 196, 238), dtype=np.uint8)
+    coarse = np.zeros(image.shape[:2], dtype=np.uint8)
+    coarse[18:28, 25:235] = 255
+    coarse[31:41, 25:235] = 255
+    coarse[44:54, 25:235] = 255
+    actual_glyphs = np.zeros_like(coarse)
+    cv2.putText(
+        actual_glyphs,
+        "DIAMOND",
+        (42, 27),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        255,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        actual_glyphs,
+        "ELIXIR",
+        (70, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        255,
+        1,
+        cv2.LINE_AA,
+    )
+    image[actual_glyphs > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        coarse,
+        context,
+        owner_id="owner_coarse_card_title",
+        semantic_role="system_card",
+    )
+
+    assert evidence.attributes["fill"].value == "#F8F8F8"
+    assert evidence.attributes["fill"].confidence >= 0.70
+    assert evidence.attributes["gradient"].value == "unknown"
+    assert (
+        evidence.attributes["gradient"].abstention_reason
+        == "coarse_owner_mask_color_geometry"
+    )
+
+
 def test_extracts_black_fill_from_dark_text_on_white_crop():
     crop = np.full((80, 160, 3), 255, dtype=np.uint8)
     crop[25:55, 40:120] = 0

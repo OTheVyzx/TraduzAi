@@ -221,6 +221,85 @@ def test_preserved_foreign_component_uses_accepted_ocr_geometry_not_rejected_coa
     assert "foreign_component:component_ding" in geometry.container_evidence_ids
 
 
+def test_foreign_component_may_overlap_component_padding_without_source_ink_overlap():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components.append(
+        SourceTextComponent(
+            "component_ding",
+            "page_1",
+            (60, 15, 90, 31),
+            _polygon((60, 15, 90, 31)),
+            ("detector",),
+        )
+    )
+    graph.observations.append(
+        TextObservation(
+            "observation_ding",
+            "page_1",
+            ("component_ding",),
+            "DING",
+            0.9,
+            "paddle_full_page",
+            (60, 15, 90, 31),
+            polygons_page=(_polygon((60, 15, 90, 31)),),
+        )
+    )
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask_sha256="a" * 64,
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.layout_container_bbox_page == (10, 31, 95, 100)
+    assert geometry.source_replacement_bbox_page == (24, 32, 78, 83)
+
+
+def test_foreign_component_overlapping_source_replacement_still_requires_review():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components.append(
+        SourceTextComponent(
+            "component_foreign",
+            "page_1",
+            (60, 15, 90, 40),
+            _polygon((60, 15, 90, 40)),
+            ("detector",),
+        )
+    )
+    graph.observations.append(
+        TextObservation(
+            "observation_foreign",
+            "page_1",
+            ("component_foreign",),
+            "FOREIGN",
+            0.9,
+            "paddle_full_page",
+            (60, 15, 90, 40),
+            polygons_page=(_polygon((60, 15, 90, 40)),),
+        )
+    )
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask_sha256="a" * 64,
+    )
+
+    assert geometry.status == "review_required"
+    assert geometry.reason == "foreign_owner_geometry_overlaps_semantic_body"
+
+
 def test_verified_container_expands_only_through_protected_mask_safe_pixels():
     from ownership.render_geometry import build_owner_render_geometry
 

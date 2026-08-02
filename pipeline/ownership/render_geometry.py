@@ -453,10 +453,15 @@ def _partition_container_from_foreign_components(
     graph: OwnerGraph,
     *,
     owner_component_ids: set[str],
-    semantic_bbox: BBox,
+    source_bbox: BBox,
     container_bbox: BBox,
 ) -> tuple[BBox, tuple[str, ...], bool]:
-    """Clip a verified container at adjacent foreign OCR geometry boundaries."""
+    """Clip a verified container at foreign boundaries outside source ink.
+
+    Detector components include padding around their observed text.  A foreign
+    component may touch that padding without competing for any source glyph;
+    only overlap with the selected source-replacement bbox is ambiguous.
+    """
 
     suppressed = {
         disposition.component_id
@@ -489,7 +494,7 @@ def _partition_container_from_foreign_components(
         )
     ]
     left, top, right, bottom = container_bbox
-    sx1, sy1, sx2, sy2 = semantic_bbox
+    sx1, sy1, sx2, sy2 = source_bbox
     exclusions: list[str] = []
     conflict = False
     for component in foreign:
@@ -527,7 +532,7 @@ def _partition_container_from_foreign_components(
         if clipped:
             exclusions.append(f"foreign_component:{component.component_id}")
     result = (left, top, right, bottom)
-    if not _contains(result, semantic_bbox):
+    if not _contains(result, source_bbox):
         conflict = True
     return result, tuple(sorted(set(exclusions))), conflict
 
@@ -670,7 +675,7 @@ def build_owner_render_geometry(
             _partition_container_from_foreign_components(
                 graph,
                 owner_component_ids=component_set,
-                semantic_bbox=semantic_bbox,
+                source_bbox=source_bbox,
                 container_bbox=layout_bbox,
             )
         )
