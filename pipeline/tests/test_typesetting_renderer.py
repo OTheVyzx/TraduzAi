@@ -84,7 +84,11 @@ class TypesettingRendererTests(unittest.TestCase):
             "visual_profile_v2": profile,
             "visual_profile_sha256": "a" * 64,
             "style_resolved_intent_v1": intent,
-            "estilo": dict(profile["applied_style"]),
+            "estilo": {
+                "cor": "#000000",
+                "fonte": "Legacy.ttf",
+                "glow": False,
+            },
             "bbox": [5, 5, 70, 50],
         }
         profile_before = json.loads(json.dumps(profile))
@@ -100,6 +104,7 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(block["style_resolved_intent_v1"], intent_before)
         self.assertEqual(block["style_origin"], "owner_style_v2")
         self.assertEqual(block["estilo"]["cor"], "#F8F8F8")
+        self.assertEqual(block["estilo"]["fonte"], "ComicNeue-Bold.ttf")
 
     def test_layout_observation_uses_final_fit_and_positions_not_request_echo(self):
         observed = renderer_mod._observe_layout_materialization(

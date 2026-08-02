@@ -965,7 +965,7 @@ def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> Non
         ):
             raise ValueError("owner Style V2 intent is not bound to its visual profile")
         text_data["style_origin"] = "owner_style_v2"
-        style = dict(text_data.get("estilo") or text_data.get("style") or {})
+        style = dict(normalized.get("applied_style") or {})
         style["style_origin"] = "owner_style_v2"
         text_data["estilo"] = style
         text_data["style"] = style
@@ -18712,7 +18712,7 @@ def _render_single_owner_proportionally(
             and quality.get("status") == "ok"
             and (
                 not isinstance(raster_result, GlyphRasterResult)
-                or raster_result.status == "applied"
+                or raster_result.status in {"applied", "fallback"}
             )
             and _owner_bbox_is_within(core_bbox, child_plan.get("safe_text_box"))
         )
@@ -18748,7 +18748,13 @@ def _render_single_owner_proportionally(
 
     _score, selected_image, selected_child, raster_result = min(
         accepted,
-        key=lambda item: item[0],
+        key=lambda item: (
+            0
+            if isinstance(item[3], GlyphRasterResult)
+            and item[3].status == "applied"
+            else 1,
+            *item[0],
+        ),
     )
     img.paste(selected_image)
     text_data.update(selected_child)

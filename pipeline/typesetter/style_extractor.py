@@ -116,6 +116,67 @@ def _component_typography_metrics(glyph: np.ndarray) -> dict[str, float]:
     }
 
 
+def _interior_fill_sampling_mask(glyph: np.ndarray) -> np.ndarray:
+    """Keep authoritative geometry while sampling colour from glyph interiors.
+
+    Source glyph masks can legitimately include antialiasing, an outline, or a
+    glow.  Their complete extent remains authoritative for typography metrics,
+    but using every covered pixel for fill colour turns those edge effects into
+    a false fill or vertical gradient.  Distance-to-edge sampling removes that
+    contamination without rediscovering text from image pixels.
+    """
+
+    binary = np.where(np.asarray(glyph) > 0, 255, 0).astype(np.uint8)
+    distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    positive = distance[distance > 0]
+    if len(positive) < 24:
+        return binary
+    threshold = max(1.0, float(np.percentile(positive, 45)))
+    interior = np.where(distance >= threshold, 255, 0).astype(np.uint8)
+    interior_pixels = int(np.count_nonzero(interior))
+    glyph_pixels = int(np.count_nonzero(binary))
+    if interior_pixels < 24 or interior_pixels < int(round(glyph_pixels * 0.18)):
+        return binary
+    return interior
+
+
+def _contrast_refined_fill_sampling_mask(
+    image_rgb: np.ndarray,
+    sampling_mask: np.ndarray,
+    background_rgb: np.ndarray,
+) -> np.ndarray:
+    """Reject background/halo pixels inside coarse OCR line polygons.
+
+    Refinement is row-local so a genuine vertical gradient is preserved: a
+    uniform text colour on each row keeps all of its samples, while a coarse
+    polygon containing background, halo, and glyph pixels keeps only the
+    strongest local contrast mode.
+    """
+
+    rgb = np.asarray(image_rgb, dtype=np.uint8)[:, :, :3]
+    binary = np.asarray(sampling_mask) > 0
+    refined = np.zeros(binary.shape, dtype=np.uint8)
+    for y in np.where(np.any(binary, axis=1))[0]:
+        xs = np.where(binary[y])[0]
+        if len(xs) < 12:
+            refined[y, xs] = 255
+            continue
+        pixels = rgb[y, xs].astype(np.float32)
+        contrast = np.linalg.norm(pixels - background_rgb.astype(np.float32), axis=1)
+        if float(np.percentile(contrast, 90) - np.percentile(contrast, 10)) < 24.0:
+            refined[y, xs] = 255
+            continue
+        threshold = float(np.percentile(contrast, 90))
+        selected = xs[contrast >= threshold]
+        if len(selected) >= 2:
+            refined[y, selected] = 255
+        else:
+            refined[y, xs] = 255
+    if int(np.count_nonzero(refined)) < 24:
+        return np.where(binary, 255, 0).astype(np.uint8)
+    return refined
+
+
 def extract_text_style_evidence_v2(
     image_rgb: np.ndarray,
     glyph_mask: np.ndarray,
@@ -172,7 +233,17 @@ def extract_text_style_evidence_v2(
     glyph = np.asarray(layers["core_mask"], dtype=np.uint8)
     metrics = dict(layers["metrics"])
     metrics.update(_component_typography_metrics(glyph))
-    color = measure_masked_color_evidence(image_rgb, layers)
+    fill_sampling_mask = _interior_fill_sampling_mask(glyph)
+    fill_sampling_mask = _contrast_refined_fill_sampling_mask(
+        image_rgb,
+        fill_sampling_mask,
+        np.asarray(metrics["background_rgb"], dtype=np.float32),
+    )
+    color_layers = dict(layers)
+    color_layers["core_mask"] = fill_sampling_mask
+    color = measure_masked_color_evidence(image_rgb, color_layers)
+    metrics["fill_sampling_pixels"] = int(np.count_nonzero(fill_sampling_mask))
+    metrics["fill_sampling_method"] = "authoritative_glyph_interior_local_contrast"
 
     attributes = {
         name: _v2_unknown("attribute_not_measured")
@@ -224,8 +295,8 @@ def extract_text_style_evidence_v2(
         )
 
     rgb = np.asarray(image_rgb, dtype=np.uint8)[:, :, :3]
-    glyph_pixels = rgb[glyph > 0]
-    y_coords = np.where(glyph > 0)[0]
+    glyph_pixels = rgb[fill_sampling_mask > 0]
+    y_coords = np.where(fill_sampling_mask > 0)[0]
     if len(glyph_pixels) >= 24 and len(set(int(value) for value in y_coords)) >= 4:
         midpoint = float(np.median(y_coords))
         top = glyph_pixels[y_coords <= midpoint]

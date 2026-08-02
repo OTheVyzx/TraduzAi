@@ -9340,6 +9340,8 @@ def apply_atomic_owner_execution(
         if np.any(changed_outside_glyph):
             raise ValueError("glyph render changed pixels outside its mask")
         protected_paint_overlap = (paint_mask > 0) & (protected_art_mask > 0)
+        effect_only_mask = (paint_mask > 0) & (glyph_core_mask == 0)
+        protected_paint_overlap[effect_only_mask] = False
         source_x1, source_y1, source_x2, source_y2 = _canonical_owner_bbox(
             owner_render_geometry.source_replacement_bbox_page,
             shape=page_shape,
@@ -10299,10 +10301,20 @@ def _owner_layout_regions(
         and owner_render_geometry.layout_container_source
         not in {"", "none", "freeform_component_union"}
     )
+    authenticated_source_typography_slot = bool(
+        owner_render_geometry is not None
+        and layout_container_bbox is not None
+        and tuple(owner_render_geometry.source_replacement_bbox_page)
+        == tuple(layout_container_bbox)
+        and str(owner_render_geometry.layout_container_source).endswith(
+            ":protected_mask_safe"
+        )
+    )
     layout_safe_bbox = (
         _owner_dialogue_container_safe_bbox(layout_container_bbox)
         if layout_container_bbox is not None
         and verified_visual_container
+        and not authenticated_source_typography_slot
         and not visual_card_owner
         and any(
             token in semantic_role
@@ -10442,6 +10454,14 @@ def _owner_layout_regions(
             for point in polygon
         )
         paint_polygon = (
+            (
+                (component.bbox_page[0], component.bbox_page[1]),
+                (component.bbox_page[2] - 1, component.bbox_page[1]),
+                (component.bbox_page[2] - 1, component.bbox_page[3] - 1),
+                (component.bbox_page[0], component.bbox_page[3] - 1),
+            )
+            if authenticated_source_typography_slot
+            else
             tuple(
                 (
                     int(point[0]) - 1

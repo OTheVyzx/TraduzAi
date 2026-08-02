@@ -88,6 +88,58 @@ def test_v2_explicit_masks_exclude_neighboring_art_from_effect_evidence():
     assert evidence.attributes["glow"].value == "unknown"
 
 
+def test_v2_fill_sampling_excludes_halo_contamination_from_authoritative_glyph_mask():
+    image = np.full((120, 260, 3), (61, 3, 4), dtype=np.uint8)
+    core = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(core, "OPPA", (38, 78), cv2.FONT_HERSHEY_SIMPLEX, 1.6, 255, 3, cv2.LINE_AA)
+    halo = cv2.dilate(core, np.ones((11, 11), dtype=np.uint8))
+    halo_only = (halo > 0) & (core == 0)
+    image[halo_only] = (86, 2, 2)
+    image[core > 0] = (248, 248, 248)
+    authoritative_region = np.zeros_like(core)
+    authoritative_region[25:86, 28:225] = 255
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        authoritative_region,
+        context,
+        owner_id="owner_halo",
+        semantic_role="dialogue_body",
+    )
+
+    assert evidence.attributes["fill"].value == "#F8F8F8"
+    assert evidence.attributes["gradient"].value == "unknown"
+    assert evidence.attributes["gradient"].abstention_reason == "solid_fill_no_gradient"
+
+
+def test_v2_fill_sampling_preserves_a_real_vertical_gradient():
+    image = np.full((120, 260, 3), (18, 18, 18), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(glyph, "CARD", (30, 82), cv2.FONT_HERSHEY_SIMPLEX, 1.7, 255, 5, cv2.LINE_8)
+    ys = np.where(glyph > 0)[0]
+    for y in np.unique(ys):
+        t = (float(y) - float(ys.min())) / max(1.0, float(ys.max() - ys.min()))
+        image[y, glyph[y] > 0] = (
+            int(round(70 + 120 * t)),
+            int(round(220 - 120 * t)),
+            int(round(255 - 40 * t)),
+        )
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_gradient",
+        semantic_role="system_card",
+    )
+
+    assert evidence.attributes["gradient"].value != "unknown"
+    assert len(evidence.attributes["gradient"].value) == 2
+    assert evidence.attributes["gradient"].value[0] != evidence.attributes["gradient"].value[1]
+
+
 def test_extracts_black_fill_from_dark_text_on_white_crop():
     crop = np.full((80, 160, 3), 255, dtype=np.uint8)
     crop[25:55, 40:120] = 0

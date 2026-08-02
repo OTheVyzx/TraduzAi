@@ -589,7 +589,9 @@ def _validate_glyph_patch(
         shape=page_shape,
     )
     source_x1, source_y1, source_x2, source_y2 = source_bbox
+    effect_only_mask = (paint_mask > 0) & (glyph_core_mask == 0)
     global_protected_overlap = (paint_mask > 0) & (global_protected > 0)
+    global_protected_overlap[effect_only_mask] = False
     global_protected_overlap[
         source_y1:source_y2,
         source_x1:source_x2,
@@ -601,6 +603,7 @@ def _validate_glyph_patch(
         if mutation is not None
         else np.zeros(page_shape, dtype=bool)
     )
+    owner_protected_overlap[effect_only_mask] = False
     owner_protected_overlap[
         source_y1:source_y2,
         source_x1:source_x2,

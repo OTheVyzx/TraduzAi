@@ -422,6 +422,60 @@ def test_typography_cannot_repaint_protected_art_outside_authenticated_source_sl
         compose_page(original, [mutation], [patch], protected)
 
 
+def test_local_style_effect_may_overlay_protected_art_outside_source_cleanup_slot():
+    from strip.process_bands import apply_atomic_owner_execution
+
+    original = _original()
+    protected = _box_mask((13, 8, 15, 10))
+    mutation = _mutation(
+        original,
+        box=(2, 2, 4, 4),
+        protected_art_mask=protected,
+    )
+    patch = _glyph_patch(original, mutation=mutation, box=(8, 8, 10, 10))
+    core = np.asarray(patch.glyph_core_mask).copy()
+    paint = core.copy()
+    paint[8:10, 13:15] = 255
+    result_rgb = np.asarray(patch.result_rgb).copy()
+    result_rgb[8:10, 13:15] = (24, 28, 36)
+    style_contract = valid_owner_style_raster_contract(
+        owner_id=patch.owner_id,
+        page_id=patch.page_id,
+        before=np.asarray(mutation.result_rgb),
+        result=result_rgb,
+        glyph_mask=paint,
+        component_geometry_sha256=patch.component_geometry_sha256,
+    )
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=patch.text_execution_authority,
+        layout_payload="ALVO",
+        rendered_lines=["ALVO"],
+        rendered_glyph_runs=patch.glyph_span_runs,
+        glyph_core_mask=core,
+        glyph_span_core_masks=patch.glyph_span_core_masks,
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
+    effect_patch = replace(
+        patch,
+        result_rgb=result_rgb,
+        glyph_mask=paint,
+        paint_mask=paint,
+        glyph_bbox_page=(8, 8, 15, 10),
+        after_sha256=_array_sha256(result_rgb),
+        glyph_mask_sha256=_array_sha256(paint),
+        paint_mask_sha256=_array_sha256(paint),
+        style_raster_contract=style_contract,
+        delivery_contract=delivery,
+    )
+
+    commit = apply_atomic_owner_execution(original, mutation, effect_patch)
+    composition = compose_page(original, [mutation], [effect_patch], protected)
+
+    assert commit.committed is True
+    assert composition.committed is True
+    assert np.all(composition.final_rgb[8:10, 13:15] == (24, 28, 36))
+
+
 def test_changed_pixels_must_be_subset_of_owner_action_mask() -> None:
     original = _original()
     mutation = _mutation(original)
