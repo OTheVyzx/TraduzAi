@@ -1017,6 +1017,34 @@ def test_owner_layout_source_evidence_is_permutation_stable() -> None:
     }
 
 
+def test_edge_backed_dialogue_container_uses_central_safe_chord() -> None:
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _owner_graph([("owner_edge", "SOURCE", "DESTINO")])
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_edge",
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        container_evidence={
+            "evidence_id": "owner_edge:full_page_visual_container:test",
+            "source": "full_page_visual_container",
+            "bbox_page": (10, 10, 200, 120),
+            "confidence": 0.8,
+        },
+    )
+
+    region = _owner_layout_regions(
+        graph,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        owner_render_geometry=geometry,
+    )[0]
+
+    assert region["bbox_page"] == [10, 10, 200, 120]
+    assert region["safe_bbox_page"] == [39, 27, 171, 103]
+
+
 def test_same_body_lines_share_font_size_and_safe_polygon() -> None:
     safe_polygon = ((120, 42), (320, 42), (320, 218), (120, 218))
     line_records = [
