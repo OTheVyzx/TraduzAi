@@ -92,6 +92,9 @@ def test_high_glow_confidence_cannot_authorize_low_confidence_fill():
             glow_color="#4A7FFF",
             glow_px=5,
             glow_confidence=0.96,
+            gradient=True,
+            gradient_colors=["#FFFFFF", "#78D7FF"],
+            gradient_confidence=0.95,
         ),
     )
 
@@ -128,7 +131,13 @@ def test_review_required_candidate_abstains():
 def test_each_attribute_requires_its_own_confidence():
     decision = decide_style_copy_v2(
         _candidate(),
-        _evidence(font_confidence=0.99, stroke_confidence=0.42),
+        _evidence(
+            font_confidence=0.99,
+            stroke_confidence=0.42,
+            gradient=True,
+            gradient_colors=["#FFFFFF", "#78D7FF"],
+            gradient_confidence=0.95,
+        ),
     )
 
     assert decision.applied_attributes["font_name"] == "ComicNeue-Bold.ttf"
@@ -146,3 +155,26 @@ def test_low_confidence_evidence_is_preserved_but_not_applied():
     assert decision.status == "fallback"
     assert decision.applied_attributes == {}
     assert set(decision.abstained_attributes) >= {"fill", "font_name", "stroke"}
+
+
+def test_v2_source_style_copy_requires_authenticated_gradient():
+    decision = decide_style_copy_v2(
+        _candidate(),
+        _evidence(
+            text_color_confidence=0.99,
+            font_confidence=0.99,
+            stroke_confidence=0.99,
+            glow=True,
+            glow_color="#4A7FFF",
+            glow_px=5,
+            glow_confidence=0.99,
+            gradient=False,
+            gradient_confidence=0.0,
+        ),
+    )
+
+    assert decision.status == "fallback"
+    assert decision.applied_attributes == {}
+    assert set(decision.abstained_attributes.values()) == {
+        "authenticated_gradient_required"
+    }

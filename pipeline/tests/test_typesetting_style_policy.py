@@ -93,6 +93,33 @@ def test_auto_style_preserves_confident_detected_source_style():
     assert style["rotacao"] == -8
 
 
+def test_auto_style_uses_normal_font_when_detected_source_has_no_gradient():
+    style = normalize_auto_typesetting_style(
+        {
+            "fonte": "KOMIKAX_.ttf",
+            "cor": "#FFFFFF",
+            "contorno": "#000000",
+            "contorno_px": 3,
+            "glow": True,
+            "glow_cor": "#FFD36A",
+            "glow_px": 4,
+            "sombra": True,
+            "sombra_cor": "#333333",
+            "sombra_offset": [2, 3],
+            "style_origin": "source_detected",
+            "style_confidence": 0.96,
+        },
+        (240, 240, 240),
+    )
+
+    assert style["fonte"] == CANONICAL_AUTO_FONT
+    assert style["cor"] == "#000000"
+    assert style["contorno"] == ""
+    assert style["contorno_px"] == 0
+    assert style["glow"] is False
+    assert style["sombra"] is False
+
+
 def test_auto_style_reverts_low_confidence_detected_style_to_conservative_default():
     style = normalize_auto_typesetting_style(
         {
@@ -112,7 +139,7 @@ def test_auto_style_reverts_low_confidence_detected_style_to_conservative_defaul
     assert style["contorno_px"] == 0
 
 
-def test_force_black_text_overrides_confident_source_style_for_white_balloon():
+def test_force_black_text_uses_normal_font_without_gradient_for_white_balloon():
     style = normalize_auto_typesetting_style(
         {
             "tipo": "dialogue",
@@ -126,11 +153,11 @@ def test_force_black_text_overrides_confident_source_style_for_white_balloon():
         force_black_text=True,
     )
 
-    assert style["fonte"] == "KOMIKAX_.ttf"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#000000"
 
 
-def test_force_black_text_preserves_confident_source_color_when_effects_are_detected():
+def test_force_black_text_discards_detected_effects_without_gradient():
     style = normalize_auto_typesetting_style(
         {
             "tipo": "dialogue",
@@ -147,13 +174,13 @@ def test_force_black_text_preserves_confident_source_color_when_effects_are_dete
         force_black_text=True,
     )
 
-    assert style["fonte"] == "KOMIKAX_.ttf"
-    assert style["cor"] == "#E7FFFF"
-    assert style["glow"] is True
-    assert style["glow_cor"] == "#E7FFFF"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
+    assert style["cor"] == "#000000"
+    assert style["glow"] is False
+    assert style["glow_cor"] == ""
 
 
-def test_force_black_text_allows_confident_source_style_for_sfx():
+def test_force_black_text_uses_normal_style_for_sfx_without_gradient():
     style = normalize_auto_typesetting_style(
         {
             "tipo": "sfx",
@@ -167,8 +194,8 @@ def test_force_black_text_allows_confident_source_style_for_sfx():
         force_black_text=True,
     )
 
-    assert style["fonte"] == "KOMIKAX_.ttf"
-    assert style["cor"] == "#FFFFFF"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
+    assert style["cor"] == "#000000"
 
 
 def test_auto_style_uses_white_only_when_dark_background_needs_it():
@@ -228,6 +255,7 @@ def test_normalized_visual_style_cannot_carry_owner_semantics():
             "style_confidence": 0.96,
             "fonte": "KOMIKAX_.ttf",
             "cor": "#FFFFFF",
+            "cor_gradiente": ["#FFFFFF", "#78D7FF"],
             **reserved,
         },
         (18, 18, 24),

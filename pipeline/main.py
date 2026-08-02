@@ -33,6 +33,7 @@ from typesetter.style_policy import (
     SOURCE_STYLE_CONFIDENCE_THRESHOLD,
     decide_style_copy_v2,
     normalize_auto_typesetting_style,
+    source_style_copy_allowed,
     style_candidate_copy_allowed,
 )
 from layout.simple_text_geometry import normalize_text_geometry, resolve_text_anchor_bbox, sanitize_simple_text_geometry
@@ -10388,12 +10389,10 @@ def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = 
         style_confidence = 0.0
     if str(layer.get("style_origin") or "").strip().lower() in {"auto_dark_panel_glow", "inferred_visual_card"}:
         return layer
-    if (
-        str(layer.get("style_origin") or "").strip().lower() == "source_detected"
-        and style_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
-    ):
-        return layer
-    if _style_copy_allowed_for_text(layer, layer.get("translated")):
+    source_style = dict(layer.get("estilo") or layer.get("style") or {})
+    source_style.setdefault("style_origin", layer.get("style_origin"))
+    source_style.setdefault("style_confidence", style_confidence)
+    if source_style_copy_allowed(source_style):
         return layer
     evidence = _style_evidence_to_dict(layer.get("style_evidence"))
     if _style_evidence_allows_visual_text_without_ocr(layer, evidence):

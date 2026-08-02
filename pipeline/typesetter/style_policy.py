@@ -233,6 +233,23 @@ def decide_style_copy_v2(
             evidence_sha256=evidence_sha256,
         )
 
+    gradient_evidence = evidence.attributes.get("gradient")
+    gradient_allowed = False
+    if gradient_evidence is not None:
+        allowed, value, _ = evaluate_style_attribute("gradient", gradient_evidence)
+        if allowed and isinstance(value, (list, tuple)) and len(value) >= 2:
+            colors = [str(item or "").strip().upper() for item in value[:2]]
+            gradient_allowed = bool(colors[0] and colors[1] and colors[0] != colors[1])
+    if not gradient_allowed:
+        return StyleApplicationDecisionV2(
+            status="fallback",
+            applied_attributes={},
+            abstained_attributes={
+                name: "authenticated_gradient_required" for name in evidence.attributes
+            },
+            evidence_sha256=evidence_sha256,
+        )
+
     applied: dict[str, Any] = {}
     abstained: dict[str, str] = {}
     for name, attribute in evidence.attributes.items():
@@ -263,6 +280,14 @@ def auto_text_color_for_background(background_rgb: tuple[int, int, int]) -> str:
     return "#000000" if relative_luminance(background_rgb) >= 0.25 else "#FFFFFF"
 
 
+def _has_authenticated_source_gradient(style: Mapping[str, object]) -> bool:
+    gradient = style.get("cor_gradiente")
+    if not isinstance(gradient, (list, tuple)) or len(gradient) < 2:
+        return False
+    colors = [str(item or "").strip().upper() for item in gradient[:2]]
+    return bool(colors[0] and colors[1] and colors[0] != colors[1])
+
+
 def source_style_copy_allowed(
     origin_or_mapping: str | Mapping[str, object] | None,
     confidence: object | None = None,
@@ -288,14 +313,19 @@ def source_style_copy_allowed(
         confidence_number = float(confidence_value)
     except (TypeError, ValueError):
         return False
-    return (
+    confidence_allowed = (
         math.isfinite(confidence_number)
         and SOURCE_STYLE_CONFIDENCE_THRESHOLD <= confidence_number <= 1.0
     )
+    if not confidence_allowed:
+        return False
+    if isinstance(origin_or_mapping, Mapping):
+        return _has_authenticated_source_gradient(origin_or_mapping)
+    return True
 
 
 def _has_confident_source_style(style: dict) -> bool:
-    return source_style_copy_allowed(style)
+    return source_style_copy_allowed(style) and _has_authenticated_source_gradient(style)
 
 
 def _force_black_overrides_source_style(style: dict, force_black_text: bool) -> bool:

@@ -3920,7 +3920,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertFalse(layer["estilo"]["glow"])
         self.assertFalse(layer["estilo"]["sombra"])
 
-    def test_build_text_layer_applies_high_confidence_source_style_evidence(self) -> None:
+    def test_build_text_layer_uses_normal_style_without_gradient_evidence(self) -> None:
         evidence = {
             "source": "pixel_analysis",
             "text_color": "#FFFFFF",
@@ -3953,17 +3953,40 @@ class MainEmitTests(unittest.TestCase):
             corpus_textual_benchmark={},
         )
 
-        self.assertEqual(layer["style_origin"], "source_detected")
+        self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_confidence"], 0.82)
         self.assertEqual(layer["style_source"], "pixel_analysis")
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertIs(layer["style"], layer["estilo"])
-        self.assertEqual(layer["estilo"]["style_origin"], "source_detected")
+        self.assertEqual(layer["estilo"]["style_origin"], "auto")
         self.assertEqual(layer["estilo"]["style_source"], "pixel_analysis")
-        self.assertEqual(layer["estilo"]["fonte"], "KOMIKAX_.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#FFFFFF")
-        self.assertEqual(layer["estilo"]["contorno"], "#000000")
-        self.assertEqual(layer["estilo"]["contorno_px"], 3)
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
+
+    def test_neutralize_rejects_preexisting_source_style_without_gradient(self) -> None:
+        layer = {
+            "style_origin": "source_detected",
+            "style_confidence": 0.96,
+            "background_rgb": [245, 245, 245],
+            "estilo": {
+                "style_origin": "source_detected",
+                "style_confidence": 0.96,
+                "fonte": "KOMIKAX_.ttf",
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 3,
+                "glow": True,
+            },
+        }
+
+        normalized = main._neutralize_unallowed_source_style(layer)
+
+        self.assertEqual(normalized["style_origin"], "auto")
+        self.assertEqual(normalized["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(normalized["estilo"]["contorno_px"], 0)
+        self.assertFalse(normalized["estilo"]["glow"])
 
     def test_build_text_layer_extracts_source_style_evidence_from_image_crop(self) -> None:
         import numpy as np
@@ -3977,6 +4000,9 @@ class MainEmitTests(unittest.TestCase):
             "stroke_color": "#000000",
             "stroke_width_px": 2,
             "stroke_confidence": 0.78,
+            "gradient": True,
+            "gradient_colors": ["#FFFFFF", "#78D7FF"],
+            "gradient_confidence": 0.91,
         }
         crop_shapes = []
 
@@ -4033,6 +4059,9 @@ class MainEmitTests(unittest.TestCase):
                 "stroke_confidence": 0.78,
                 "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
                 "font_confidence": 0.88,
+                "gradient": True,
+                "gradient_colors": ["#FFFFFF", "#78D7FF"],
+                "gradient_confidence": 0.91,
             }
 
         with patch("typesetter.style_extractor.extract_text_style_evidence", side_effect=fake_extract):
@@ -4112,6 +4141,9 @@ class MainEmitTests(unittest.TestCase):
             "glow": True,
             "glow_confidence": 0.76,
             "glow_px": 4,
+            "gradient": True,
+            "gradient_colors": ["#F8E8FF", "#8A5CFF"],
+            "gradient_confidence": 0.91,
         }
 
         layer = main.build_text_layer(
@@ -4136,7 +4168,7 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.76)
+        self.assertEqual(layer["style_confidence"], 0.91)
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertTrue(layer["estilo"]["sombra"])
         self.assertEqual(layer["estilo"]["sombra_cor"], "#111111")
@@ -4388,6 +4420,9 @@ class MainEmitTests(unittest.TestCase):
             "stroke_confidence": 0.82,
             "font_name": "KOMIKAX_.ttf",
             "font_confidence": 0.5,
+            "gradient": True,
+            "gradient_colors": ["#010100", "#404040"],
+            "gradient_confidence": 0.99,
         }
 
         layer = main.build_text_layer(
@@ -4408,12 +4443,12 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "auto")
-        self.assertEqual(layer["style_confidence"], 0.86)
+        self.assertEqual(layer["style_confidence"], 0.99)
         self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
-    def test_build_text_layer_allows_large_dark_text_with_light_outline_without_ocr(self) -> None:
+    def test_build_text_layer_does_not_copy_large_outline_style_without_ocr_or_gradient(self) -> None:
         evidence = {
             "source": "pixel_analysis",
             "text_color": "#010100",
@@ -4450,11 +4485,10 @@ class MainEmitTests(unittest.TestCase):
             corpus_textual_benchmark={},
         )
 
-        self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["estilo"]["fonte"], "KOMIKAX_.ttf")
-        self.assertEqual(layer["estilo"]["cor"], "#010100")
-        self.assertEqual(layer["estilo"]["contorno"], "#FFFFFE")
-        self.assertEqual(layer["estilo"]["contorno_px"], 2)
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
     def test_build_text_layer_does_not_extract_evidence_for_large_review_sfx_visual(self) -> None:
         import numpy as np
@@ -4577,6 +4611,9 @@ class MainEmitTests(unittest.TestCase):
             "stroke_confidence": 0.92,
             "font_name": "KOMIKAX_.ttf",
             "font_confidence": 0.74,
+            "gradient": True,
+            "gradient_colors": ["#010100", "#404040"],
+            "gradient_confidence": 0.92,
         }
         crop_shapes = []
 
@@ -4747,6 +4784,9 @@ class MainEmitTests(unittest.TestCase):
             "shadow_confidence": 0.7,
             "glow": True,
             "glow_confidence": 0.7,
+            "gradient": True,
+            "gradient_colors": ["#FFFFFF", "#78D7FF"],
+            "gradient_confidence": 0.91,
         }
 
         layer = main.build_text_layer(
@@ -4771,7 +4811,7 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.7)
+        self.assertEqual(layer["style_confidence"], 0.91)
         self.assertTrue(layer["estilo"]["sombra"])
         self.assertEqual(layer["estilo"]["sombra_cor"], "#000000")
         self.assertEqual(layer["estilo"]["sombra_offset"], [2, 2])
@@ -4788,6 +4828,9 @@ class MainEmitTests(unittest.TestCase):
             "curve_direction": "arc_up",
             "curve_amount": 0.36,
             "curve_confidence": 0.82,
+            "gradient": True,
+            "gradient_colors": ["#111111", "#666666"],
+            "gradient_confidence": 0.91,
         }
 
         layer = main.build_text_layer(
@@ -4812,7 +4855,7 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.82)
+        self.assertEqual(layer["style_confidence"], 0.91)
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertTrue(layer["estilo"]["curva"])
         self.assertEqual(layer["estilo"]["curva_direcao"], "arc_up")
