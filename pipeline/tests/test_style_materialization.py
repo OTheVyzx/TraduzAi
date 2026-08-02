@@ -73,6 +73,36 @@ def test_material_difference_is_not_normalized_away():
     assert result.delta_e_2000 is not None and result.delta_e_2000 > 12
 
 
+def test_glow_raster_quantization_within_two_pixels_matches() -> None:
+    module = _materialization_module()
+
+    result = module.compare_style_attribute(
+        "glow",
+        {"color": "#100100", "width_px": 10},
+        {"color": "#100100", "width_px": 11.0},
+    )
+
+    assert result.matches is True
+    assert result.tolerance == {
+        "kind": "effect_raster",
+        "color_delta_e_max": 12.0,
+        "numeric_error_max_px": 2.5,
+    }
+
+
+def test_glow_raster_difference_outside_tolerance_is_material() -> None:
+    module = _materialization_module()
+
+    result = module.compare_style_attribute(
+        "glow",
+        {"color": "#100100", "width_px": 10},
+        {"color": "#100100", "width_px": 13.0},
+    )
+
+    assert result.matches is False
+    assert result.reason == "canonical_value_mismatch"
+
+
 def test_unknown_or_incomplete_domain_registry_is_rejected():
     module = _materialization_module()
 

@@ -8,6 +8,7 @@ merge, suppress, or reroute semantic payloads.
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 import re
@@ -1052,6 +1053,86 @@ def test_edge_backed_dialogue_container_uses_central_safe_chord() -> None:
     assert region["paint_safe_polygon_page"] == [
         [10, 10], [199, 10], [199, 119], [10, 119]
     ]
+
+
+def test_edge_backed_system_card_uses_full_rectangular_capacity() -> None:
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _owner_graph([("owner_card", "MOONSTONE ELIXIR", "ELIXIR DA PEDRA DA LUA")])
+    graph.owners[0] = replace(graph.owners[0], semantic_role="system_card")
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_card",
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        container_evidence={
+            "evidence_id": "owner_card:full_page_visual_container:test",
+            "source": "full_page_visual_container",
+            "bbox_page": (10, 10, 299, 102),
+            "confidence": 0.85,
+        },
+    )
+
+    region = _owner_layout_regions(
+        graph,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        owner_render_geometry=geometry,
+    )[0]
+
+    assert region["bbox_page"] == [10, 10, 299, 102]
+    assert region["safe_bbox_page"] == [10, 10, 299, 102]
+    assert region["safe_polygon_page"] == [
+        [10, 10], [299, 10], [299, 102], [10, 102]
+    ]
+
+
+def test_system_card_title_renders_in_verified_full_capacity() -> None:
+    safe_bbox = (10, 10, 299, 102)
+    payload = "ELIXIR DA PEDRA DA LUA"
+    block = {
+        "owner_id": "owner_card_title",
+        "translated": payload,
+        "translated_payload": payload,
+        "render_safe_polygon_page": [
+            [10, 10], [299, 10], [299, 102], [10, 102]
+        ],
+        "layout_regions": [],
+        "bbox": list(safe_bbox),
+        "safe_text_box": list(safe_bbox),
+        "layout_safe_bbox": list(safe_bbox),
+        "layout_bbox": list(safe_bbox),
+        "balloon_bbox": list(safe_bbox),
+        "page_width": PAGE_WIDTH,
+        "page_height": PAGE_HEIGHT,
+        "semantic_role": "system_card",
+        "layout_profile": "system_card",
+        "source_ink_heights_px": [28],
+        "source_x_heights_px": [19.6],
+        "source_scale_evidence_confidence": 0.96,
+        "estilo": {
+            "fonte": "ComicNeue-Bold.ttf",
+            "tamanho": 24,
+            "cor": "#000000",
+            "glow": True,
+            "glow_cor": "#56C2EA",
+            "glow_px": 1,
+            "bold": True,
+            "width_scale": 0.82,
+            "tracking_xh": 1.75,
+        },
+        "_owner_render_mode": True,
+    }
+    canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), (235, 190, 82))
+
+    renderer_mod.render_text_block(canvas, block)
+
+    assert block["render_completed"] is True
+    assert block["fit_status"] == "ok"
+    assert block["translated_payload"] == payload
+    assert block["owner_render_quality"]["status"] == "ok"
+    assert safe_bbox[0] <= block["render_bbox"][0] < block["render_bbox"][2] <= safe_bbox[2]
+    assert safe_bbox[1] <= block["render_bbox"][1] < block["render_bbox"][3] <= safe_bbox[3]
 
 
 def test_same_body_lines_share_font_size_and_safe_polygon() -> None:

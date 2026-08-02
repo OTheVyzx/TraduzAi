@@ -314,6 +314,63 @@ def delta_e_2000(first: Any, second: Any) -> float | None:
     )
 
 
+def _compare_effect_raster(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+) -> tuple[bool, dict[str, Any], float | None]:
+    """Compare discrete effect measurements using the R5 raster budget."""
+
+    if set(expected) != set(observed):
+        return False, {"kind": "effect_raster"}, None
+    numeric_error_max = 2.0
+    color_distances: list[float] = []
+    matches = True
+    for key in expected:
+        left = expected[key]
+        right = observed[key]
+        if key.lower() in _COLOR_FIELDS:
+            distance = delta_e_2000(left, right)
+            if distance is None:
+                matches = False
+            else:
+                color_distances.append(distance)
+                matches = matches and distance <= 12.0
+            continue
+        if key.endswith("_px") or key in {"offset_x", "offset_y"}:
+            if not all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in (left, right)
+            ):
+                matches = False
+                continue
+            allowed = max(2.0, abs(float(left)) * 0.25)
+            numeric_error_max = max(numeric_error_max, allowed)
+            matches = matches and abs(float(left) - float(right)) <= allowed
+            continue
+        if key == "offset" and isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right) or not all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in [*left, *right]
+            ):
+                matches = False
+                continue
+            for expected_item, observed_item in zip(left, right, strict=True):
+                allowed = max(2.0, abs(float(expected_item)) * 0.25)
+                numeric_error_max = max(numeric_error_max, allowed)
+                matches = matches and abs(float(expected_item) - float(observed_item)) <= allowed
+            continue
+        matches = matches and left == right
+    return (
+        matches,
+        {
+            "kind": "effect_raster",
+            "color_delta_e_max": 12.0,
+            "numeric_error_max_px": numeric_error_max,
+        },
+        max(color_distances) if color_distances else None,
+    )
+
+
 def compare_style_attribute(name: str, expected: Any, observed: Any) -> AttributeComparison:
     domain = ATTRIBUTE_DOMAIN.get(name)
     if domain is None:
@@ -332,14 +389,25 @@ def compare_style_attribute(name: str, expected: Any, observed: Any) -> Attribut
             reason=f"canonicalization_error:{exc}",
         )
     color_distance = delta_e_2000(canonical_expected, canonical_observed) if name == "fill" else None
-    matches = canonical_expected == canonical_observed
+    tolerance: dict[str, Any] = {"kind": "canonical_exact"}
+    if (
+        name in {"glow", "shadow"}
+        and isinstance(canonical_expected, Mapping)
+        and isinstance(canonical_observed, Mapping)
+    ):
+        matches, tolerance, color_distance = _compare_effect_raster(
+            canonical_expected,
+            canonical_observed,
+        )
+    else:
+        matches = canonical_expected == canonical_observed
     return AttributeComparison(
         name=name,
         domain=domain,
         expected=canonical_expected,
         observed=canonical_observed,
         matches=matches,
-        tolerance={"kind": "canonical_exact"},
+        tolerance=tolerance,
         delta_e_2000=color_distance,
         reason="" if matches else "canonical_value_mismatch",
     )

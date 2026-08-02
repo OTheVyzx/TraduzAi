@@ -43,6 +43,36 @@ def test_missing_container_is_deferred_to_evidence_reconciliation():
     assert region.reason == "semantic_container_missing"
 
 
+def test_visual_card_provider_promotes_system_card_semantic_role() -> None:
+    from ownership.model import SourceTextComponent, TextObservation
+    from strip.run import _semantic_regions_for_components
+
+    component = SourceTextComponent(
+        component_id="card_title",
+        page_id="page_001",
+        bbox_page=(100, 100, 320, 158),
+        polygon_page=((100, 100), (320, 100), (320, 158), (100, 158)),
+        detector_sources=("primary_region_detector",),
+        evidence_ids=("card_container",),
+    )
+    observation = TextObservation(
+        observation_id="card_title_visual",
+        page_id="page_001",
+        component_ids=("card_title",),
+        text="MOONSTONE ELIXIR",
+        confidence=0.96,
+        provider="visual_card_full_page_raw",
+        bbox_page=(110, 112, 310, 146),
+    )
+
+    region = _semantic_regions_for_components(
+        [component],
+        observations=[observation],
+    )[0]
+
+    assert region.semantic_role == "system_card"
+
+
 def test_numeric_footer_and_header_reach_translator_as_one_payload():
     from ownership.model import SourceTextComponent, TextObservation
     from ownership.reconcile import SemanticRegion, build_page_owner_graph
