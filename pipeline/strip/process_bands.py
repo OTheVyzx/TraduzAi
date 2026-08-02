@@ -10187,6 +10187,22 @@ def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
     return graph
 
 
+def _owner_dialogue_container_safe_bbox(
+    bbox: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Return a central chord-safe rectangle for a curved dialogue container."""
+
+    x1, y1, x2, y2 = bbox
+    width = x2 - x1
+    height = y2 - y1
+    inset_x = int(math.ceil(width * 0.15))
+    inset_y = int(math.ceil(height * 0.15))
+    safe = (x1 + inset_x, y1 + inset_y, x2 - inset_x, y2 - inset_y)
+    if safe[2] - safe[0] < 4 or safe[3] - safe[1] < 4:
+        return bbox
+    return safe
+
+
 def _owner_layout_regions(
     graph: OwnerGraph,
     *,
@@ -10270,14 +10286,26 @@ def _owner_layout_regions(
         )
     )
     owner_safe_bbox = (
-        layout_container_bbox
-        if layout_container_bbox is not None
+        layout_safe_bbox
+        if layout_safe_bbox is not None
         else owner_component_bbox
         if selected_covers_connected_owner
         else None
     )
+    use_inset_safe_polygon = bool(
+        layout_safe_bbox is not None
+        and layout_container_bbox is not None
+        and tuple(layout_safe_bbox) != tuple(layout_container_bbox)
+    )
     owner_safe_polygon = (
-        tuple(layout_container_polygon)
+        (
+            (layout_safe_bbox[0], layout_safe_bbox[1]),
+            (layout_safe_bbox[2] - 1, layout_safe_bbox[1]),
+            (layout_safe_bbox[2] - 1, layout_safe_bbox[3] - 1),
+            (layout_safe_bbox[0], layout_safe_bbox[3] - 1),
+        )
+        if use_inset_safe_polygon
+        else tuple(layout_container_polygon)
         if layout_container_polygon is not None
         else
         (
@@ -10348,15 +10376,23 @@ def _owner_layout_regions(
             else 0.0
         )
         region_bbox = layout_container_bbox or tuple(component.bbox_page)
+        region_safe_bbox = layout_safe_bbox or region_bbox
         polygon = (
-            tuple(layout_container_polygon)
+            (
+                (layout_safe_bbox[0], layout_safe_bbox[1]),
+                (layout_safe_bbox[2] - 1, layout_safe_bbox[1]),
+                (layout_safe_bbox[2] - 1, layout_safe_bbox[3] - 1),
+                (layout_safe_bbox[0], layout_safe_bbox[3] - 1),
+            )
+            if use_inset_safe_polygon
+            else tuple(layout_container_polygon)
             if layout_container_polygon is not None
             else
             (
-                (region_bbox[0], region_bbox[1]),
-                (region_bbox[2] - 1, region_bbox[1]),
-                (region_bbox[2] - 1, region_bbox[3] - 1),
-                (region_bbox[0], region_bbox[3] - 1),
+                (region_safe_bbox[0], region_safe_bbox[1]),
+                (region_safe_bbox[2] - 1, region_safe_bbox[1]),
+                (region_safe_bbox[2] - 1, region_safe_bbox[3] - 1),
+                (region_safe_bbox[0], region_safe_bbox[3] - 1),
             )
             if layout_container_bbox is not None
             else component.polygon_page or (
@@ -10379,6 +10415,7 @@ def _owner_layout_regions(
                 "owner_id": owner.owner_id,
                 "order": order,
                 "bbox_page": list(region_bbox),
+                "safe_bbox_page": list(region_safe_bbox),
                 "safe_polygon_page": [list(point) for point in raster_polygon],
                 "owner_render_geometry_sha256": (
                     owner_render_geometry.geometry_sha256
