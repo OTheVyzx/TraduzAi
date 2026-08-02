@@ -105,6 +105,28 @@ def _union_bbox(boxes: Sequence[BBox]) -> BBox:
     )
 
 
+def _consensus_bbox(boxes: Sequence[BBox]) -> BBox:
+    """Return the majority OCR envelope without one coarse crop dominating it."""
+
+    if len(boxes) < 3:
+        return _union_bbox(boxes)
+    ordered = [sorted(box[index] for box in boxes) for index in range(4)]
+    median = tuple(values[len(values) // 2] for values in ordered)
+    median_area = max(1, (median[2] - median[0]) * (median[3] - median[1]))
+    inliers: list[BBox] = []
+    for box in boxes:
+        ix1, iy1 = max(box[0], median[0]), max(box[1], median[1])
+        ix2, iy2 = min(box[2], median[2]), min(box[3], median[3])
+        intersection_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        box_area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+        union_area = box_area + median_area - intersection_area
+        if intersection_area / max(1, union_area) >= 0.6:
+            inliers.append(box)
+    if len(inliers) * 2 <= len(boxes):
+        return _union_bbox(boxes)
+    return _union_bbox(inliers)
+
+
 def _polygon_bbox(points: Sequence[Point]) -> BBox:
     return (
         min(point[0] for point in points),
@@ -508,7 +530,7 @@ def _partition_container_from_foreign_components(
                 and observation.polygons_page
             )
             if accepted_observation_boxes:
-                foreign_bbox = _union_bbox(accepted_observation_boxes)
+                foreign_bbox = _consensus_bbox(accepted_observation_boxes)
         fx1, fy1, fx2, fy2 = foreign_bbox
         horizontal_overlap = min(fx2, sx2) > max(fx1, sx1)
         vertical_overlap = min(fy2, sy2) > max(fy1, sy1)

@@ -221,6 +221,62 @@ def test_preserved_foreign_component_uses_accepted_ocr_geometry_not_rejected_coa
     assert "foreign_component:component_ding" in geometry.container_evidence_ids
 
 
+def test_preserved_foreign_component_ignores_minority_accepted_bbox_outliers():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components.append(
+        SourceTextComponent(
+            "component_credit",
+            "page_1",
+            (10, 12, 95, 45),
+            _polygon((10, 12, 95, 45)),
+            ("detector",),
+        )
+    )
+    for index, bbox in enumerate(
+        (
+            (12, 14, 92, 27),
+            (13, 14, 91, 27),
+            (12, 15, 92, 28),
+            (13, 14, 92, 27),
+            (12, 14, 93, 44),
+        )
+    ):
+        graph.observations.append(
+            TextObservation(
+                f"observation_credit_{index}",
+                "page_1",
+                ("component_credit",),
+                "READ AT EXAMPLE.COM",
+                0.9,
+                "paddle_full_page",
+                bbox,
+                polygons_page=(_polygon(bbox),),
+            )
+        )
+    graph.component_dispositions.append(
+        ComponentDisposition(
+            component_id="component_credit",
+            decision="preserve",
+            reason="policy:nontranslatable_external_identifier",
+        )
+    )
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask_sha256="a" * 64,
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.layout_container_bbox_page == (10, 28, 95, 100)
+    assert "foreign_component:component_credit" in geometry.container_evidence_ids
+
+
 def test_foreign_component_may_overlap_component_padding_without_source_ink_overlap():
     from ownership.render_geometry import build_owner_render_geometry
 
