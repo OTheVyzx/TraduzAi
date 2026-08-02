@@ -1055,11 +1055,15 @@ def test_edge_backed_dialogue_container_uses_central_safe_chord() -> None:
     ]
 
 
-def test_edge_backed_system_card_uses_full_rectangular_capacity() -> None:
+def test_visual_card_evidence_uses_full_capacity_without_changing_owner_role() -> None:
     from strip.process_bands import _owner_layout_regions
 
     graph = _owner_graph([("owner_card", "MOONSTONE ELIXIR", "ELIXIR DA PEDRA DA LUA")])
-    graph.owners[0] = replace(graph.owners[0], semantic_role="system_card")
+    original_owner_id = graph.owners[0].owner_id
+    graph.observations[0] = replace(
+        graph.observations[0],
+        provider="visual_card_full_page_raw",
+    )
     geometry = build_owner_render_geometry(
         graph,
         "owner_card",
@@ -1085,6 +1089,8 @@ def test_edge_backed_system_card_uses_full_rectangular_capacity() -> None:
     assert region["safe_polygon_page"] == [
         [10, 10], [299, 10], [299, 102], [10, 102]
     ]
+    assert graph.owners[0].owner_id == original_owner_id
+    assert graph.owners[0].semantic_role == "dialogue_body"
 
 
 def test_system_card_title_renders_in_verified_full_capacity() -> None:
@@ -1105,8 +1111,8 @@ def test_system_card_title_renders_in_verified_full_capacity() -> None:
         "balloon_bbox": list(safe_bbox),
         "page_width": PAGE_WIDTH,
         "page_height": PAGE_HEIGHT,
-        "semantic_role": "system_card",
-        "layout_profile": "system_card",
+        "semantic_role": "dialogue_body",
+        "layout_profile": "standard",
         "source_ink_heights_px": [28],
         "source_x_heights_px": [19.6],
         "source_scale_evidence_confidence": 0.96,

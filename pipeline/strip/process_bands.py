@@ -10262,6 +10262,10 @@ def _owner_layout_regions(
         )
         layout_container_polygon = None
     semantic_role = str(owner.semantic_role or "").strip().casefold()
+    visual_card_owner = any(
+        str(observation.provider or "").casefold().startswith("visual_card")
+        for observation in selected_observations
+    )
     verified_visual_container = bool(layout_container_candidates) or bool(
         owner_render_geometry is not None
         and owner_render_geometry.status == "ready"
@@ -10272,6 +10276,7 @@ def _owner_layout_regions(
         _owner_dialogue_container_safe_bbox(layout_container_bbox)
         if layout_container_bbox is not None
         and verified_visual_container
+        and not visual_card_owner
         and any(
             token in semantic_role
             for token in ("dialogue", "speech", "thought")

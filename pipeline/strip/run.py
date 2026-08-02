@@ -5639,30 +5639,7 @@ def _associate_page_observations(observations, components) -> list[TextObservati
     return associated
 
 
-def _semantic_regions_for_components(
-    components,
-    *,
-    observations=(),
-) -> list[SemanticRegion]:
-    visual_card_component_ids = {
-        str(component_id)
-        for observation in observations
-        if str(getattr(observation, "provider", "") or "").casefold().startswith(
-            "visual_card"
-        )
-        for component_id in tuple(getattr(observation, "component_ids", ()) or ())
-    }
-
-    def _semantic_role(region_components) -> str:
-        return (
-            "system_card"
-            if any(
-                str(component.component_id) in visual_card_component_ids
-                for component in region_components
-            )
-            else "dialogue_body"
-        )
-
+def _semantic_regions_for_components(components) -> list[SemanticRegion]:
     grouped: dict[str, list] = {}
     missing_container: list = []
     for component in components:
@@ -5675,7 +5652,7 @@ def _semantic_regions_for_components(
         SemanticRegion(
             region_id=str(region_id),
             component_ids=tuple(sorted(item.component_id for item in region_components)),
-            semantic_role=_semantic_role(region_components),
+            semantic_role="dialogue_body",
         )
         for region_id, region_components in sorted(grouped.items())
     ]
@@ -5683,7 +5660,7 @@ def _semantic_regions_for_components(
         SemanticRegion(
             region_id=f"review_{component.component_id}",
             component_ids=(component.component_id,),
-            semantic_role=_semantic_role((component,)),
+            semantic_role="dialogue_body",
             disposition="owned",
             reason="semantic_container_missing",
         )
@@ -5719,10 +5696,7 @@ def _resolve_owner_graph_from_evidence(page_id: str, evidence: list) -> OwnerGra
         page_id=page_id,
         components=components,
         observations=observations,
-        semantic_regions=_semantic_regions_for_components(
-            components,
-            observations=observations,
-        ),
+        semantic_regions=_semantic_regions_for_components(components),
     )
 
 
